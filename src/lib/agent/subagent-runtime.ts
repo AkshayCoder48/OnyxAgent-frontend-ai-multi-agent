@@ -34,9 +34,20 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   const providers = await aiProviderService.list(userId);
   if (providers.length === 0) throw new Error("No AI providers configured. Add one in Settings → Config.");
 
+  // Read the main chat's selected provider + model from the chat store.
+  // This is set by the ChatControls component when the user picks a model.
+  const { selectedProviderId, selectedModel } = await import("@/stores/chat-store").then(m => {
+    const store = m.useChatStore.getState();
+    return { selectedProviderId: store.selectedProviderId, selectedModel: store.selectedModel };
+  });
+
+  // Provider resolution: subagent override → main chat's selected provider →
+  // first active provider → first provider.
   let provider = subagent.providerId
     ? providers.find((p) => p.id === subagent.providerId)
-    : providers.find((p) => p.is_active) || providers[0];
+    : selectedProviderId
+      ? providers.find((p) => p.id === selectedProviderId)
+      : providers.find((p) => p.is_active) || providers[0];
   if (!provider) provider = providers[0];
   if (!provider) throw new Error("No provider available");
 
@@ -46,7 +57,9 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   }
   if (!apiKey) throw new Error(`No API key for provider "${provider.name}"`);
 
-  const model = subagent.model || provider.models[0] || "gpt-4o-mini";
+  // Model resolution: subagent override → main chat's selected model →
+  // provider's first model.
+  const model = subagent.model || selectedModel || provider.models[0] || "gpt-4o-mini";
   const baseUrl = subagent.baseUrl || provider.base_url;
   const noPrefix = (provider as { no_prefix?: boolean }).no_prefix ?? false;
 
@@ -117,7 +130,9 @@ export async function executeSubagentTurn(
         }))),
     ];
 
-    const url = config.noPrefix ? config.baseUrl : `${config.baseUrl}/chat/completions`;
+    // Build the target URL — same logic as the main runtime.
+    const base = config.baseUrl.replace(/\/$/, "");
+    const targetUrl = config.noPrefix ? base : `${base}/chat/completions`;
     let fullResponse = "";
     let maxIterations = 10;
 
@@ -133,11 +148,14 @@ export async function executeSubagentTurn(
         body.tool_choice = "auto";
       }
 
-      // Stream the response via SSE.
-      const res = await fetch(url, {
+      // Use the SAME /api/chat-proxy as the main chat to avoid CORS errors.
+      // The browser can't fetch external API URLs directly — the proxy
+      // forwards the request server-side with the x-target-url header.
+      const res = await fetch("/api/chat-proxy", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-target-url": targetUrl,
           Authorization: `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(body),

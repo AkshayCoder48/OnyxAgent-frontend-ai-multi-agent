@@ -984,9 +984,11 @@ export function useChat(options: UseChatOptions = {}) {
   // subscribers re-render → new setter refs → effect fires again → React #185.
   const setModel = useCallback((model: string | null) => {
     modelRef.current = model;
+    useChatStore.getState().setSelectedModel(model);
   }, []);
   const setProviderId = useCallback((providerId: string | null) => {
     providerIdRef.current = providerId;
+    useChatStore.getState().setSelectedProviderId(providerId);
   }, []);
   const setTemperature = useCallback((temperature: number | null) => {
     temperatureRef.current = temperature;

@@ -34,21 +34,28 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function hexToHex(hex: string, delta: number): string {
+  // Lighten (positive delta) or darken (negative delta) a hex color.
+  const r = Math.max(0, Math.min(255, parseInt(hex.slice(1, 3), 16) + delta));
+  const g = Math.max(0, Math.min(255, parseInt(hex.slice(3, 5), 16) + delta));
+  const b = Math.max(0, Math.min(255, parseInt(hex.slice(5, 7), 16) + delta));
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
 function deriveScheme(name: string, primary: string, bg: string, fg: string): ColorScheme {
   const isDark = parseInt(bg.slice(1, 3), 16) < 128;
-  const muted = isDark
-    ? hexToRgba(fg, 0.08)
-    : hexToRgba(fg, 0.04);
-  const card = isDark
-    ? hexToRgba(fg, 0.06)
-    : bg;
-  const border = isDark
-    ? hexToRgba(fg, 0.12)
-    : hexToRgba(fg, 0.10);
+  // For dark schemes: card = background +15 (slightly lighter), muted = background +8
+  // For light schemes: card = background, muted = background -4 (slightly darker)
+  const card = isDark ? hexToHex(bg, 15) : bg;
+  const muted = isDark ? hexToHex(bg, 8) : hexToHex(bg, -4);
+  const popover = card;
+  const border = isDark ? hexToHex(bg, 30) : hexToHex(bg, -10);
+  const accent = isDark ? hexToHex(bg, 12) : hexToRgba(primary, 0.08);
+  const secondary = muted;
   return {
     name,
     primary,
-    primaryForeground: isDark ? "#ffffff" : "#ffffff",
+    primaryForeground: "#ffffff",
     background: bg,
     foreground: fg,
     card,
