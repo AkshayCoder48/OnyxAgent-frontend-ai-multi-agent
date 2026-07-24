@@ -7,7 +7,6 @@ import { ToolCallCard } from "./tool-call-card";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
-import { WritingCursor } from "./writing-cursor";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
 import { Bot, FileText, Globe, Paperclip, RefreshCw, User } from "lucide-react";
@@ -107,13 +106,6 @@ function TextBubble({
         // Assistant message: render via MarkdownContent so markdown formatting
         // shows during both streaming and after completion. The text is
         // sanitized to strip raw function-call XML tags.
-        //
-        // During streaming, the writing cursor is APPENDED to the markdown
-        // content as an inline HTML element (via a raw HTML pass-through)
-        // so it appears at the END of the last line of text, not below it.
-        // We use a special marker that the markdown renderer passes through
-        // as raw HTML (react-markdown allows raw HTML by default with
-        // remark-gfm).
         <div
           className={cn(
             "prose-sm max-w-none break-words text-sm",
@@ -121,14 +113,12 @@ function TextBubble({
           )}
         >
           <MarkdownContent
-            content={
-              showCursor
-                ? `${stripFunctionCallTags(text)}<span class="writing-cursor-inline" data-cursor="1"></span>`
-                : stripFunctionCallTags(text)
-            }
+            content={stripFunctionCallTags(text)}
             onCiteClick={onCiteClick}
           />
-          {showCursor && <WritingCursor size="0.95em" className="sr-only" />}
+          {showCursor && (
+            <span className="writing-cursor-inline" aria-hidden="true" />
+          )}
         </div>
       )}
     </div>
