@@ -108,11 +108,12 @@ function TextBubble({
         // shows during both streaming and after completion. The text is
         // sanitized to strip raw function-call XML tags.
         //
-        // IMPORTANT: NO `key` prop during streaming — a key like
-        // `stream-${text.length}` would force React to FULLY remount the
-        // MarkdownContent on every character, re-parsing the entire markdown
-        // each time → massive lag. Without the key, React efficiently updates
-        // only the changed content.
+        // During streaming, the writing cursor is APPENDED to the markdown
+        // content as an inline HTML element (via a raw HTML pass-through)
+        // so it appears at the END of the last line of text, not below it.
+        // We use a special marker that the markdown renderer passes through
+        // as raw HTML (react-markdown allows raw HTML by default with
+        // remark-gfm).
         <div
           className={cn(
             "prose-sm max-w-none break-words text-sm",
@@ -120,14 +121,14 @@ function TextBubble({
           )}
         >
           <MarkdownContent
-            content={stripFunctionCallTags(text)}
+            content={
+              showCursor
+                ? `${stripFunctionCallTags(text)}<span class="writing-cursor-inline" data-cursor="1"></span>`
+                : stripFunctionCallTags(text)
+            }
             onCiteClick={onCiteClick}
           />
-          {showCursor && (
-            <span className="inline-block">
-              <WritingCursor size="0.95em" />
-            </span>
-          )}
+          {showCursor && <WritingCursor size="0.95em" className="sr-only" />}
         </div>
       )}
     </div>

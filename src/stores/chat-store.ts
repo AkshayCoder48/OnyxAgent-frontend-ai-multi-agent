@@ -65,6 +65,13 @@ function flushPersisted(): void {
 interface ChatState {
   messages: ChatMessage[];
   isStreaming: boolean;
+  /** Currently selected provider ID (set by ChatControls, read by subagents). */
+  selectedProviderId: string | null;
+  /** Currently selected model (set by ChatControls, read by subagents). */
+  selectedModel: string | null;
+
+  setSelectedProviderId: (id: string | null) => void;
+  setSelectedModel: (model: string | null) => void;
 
   addMessage: (message: ChatMessage) => void;
   updateMessage: (id: string, updater: (msg: ChatMessage) => ChatMessage) => void;
@@ -93,6 +100,11 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set) => ({
   messages: loadPersisted(),
   isStreaming: false,
+  selectedProviderId: null,
+  selectedModel: null,
+
+  setSelectedProviderId: (id) => set({ selectedProviderId: id }),
+  setSelectedModel: (model) => set({ selectedModel: model }),
 
   addMessage: (message) =>
     set((state) => {

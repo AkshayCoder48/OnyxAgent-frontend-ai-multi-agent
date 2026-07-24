@@ -2179,6 +2179,44 @@ body.sidebar-open {
   transform: translateZ(0);
 }
 
+/* --- Inline writing cursor (appended to markdown text during streaming) --- */
+.writing-cursor-inline {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  vertical-align: -0.15em;
+  margin-left: 0.1em;
+  line-height: 0;
+}
+/* The inline cursor renders the same morphing shape as the WritingCursor
+   component, but via pure CSS animation (no React state needed). It cycles
+   through shapes using a CSS @property animation. */
+.writing-cursor-inline::after {
+  content: "";
+  display: inline-block;
+  width: 100%;
+  height: 100%;
+  background: var(--color-primary, currentColor);
+  opacity: 0.85;
+  border-radius: 50%;
+  animation: cursor-shape-morph 5.4s ease-in-out infinite,
+             cursor-pulse 1.6s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes cursor-shape-morph {
+  0%, 14% { border-radius: 50%; } /* circle */
+  14.1%, 28% { border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); } /* triangle */
+  28.1%, 42% { border-radius: 20%; clip-path: none; } /* square */
+  42.1%, 57% { clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); border-radius: 0; } /* diamond */
+  57.1%, 71% { clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%); border-radius: 0; } /* pentagon */
+  71.1%, 85% { clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); border-radius: 0; } /* hexagon */
+  85.1%, 100% { clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); border-radius: 0; } /* star */
+}
+@keyframes cursor-pulse {
+  0%, 100% { opacity: 0.85; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
 /* --- Reduce repaint: disable transitions during streaming --- */
 .streaming-active * {
   transition: none !important;
