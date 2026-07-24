@@ -795,6 +795,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 ### Datetime & Utilities
 - **datetime**: Get the current date/time. Use when the user asks "what time is it" or when timestamps are needed.
 - **chart**: Create data visualizations (bar, line, pie, scatter, etc). Use when the user wants to "visualize" or "plot" data.
+- **preview_image**: Display an image inline in the chat from a URL or base64. Use when you want to show the user a visual — a generated image, a screenshot, a diagram URL, etc.
 - **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
 - **todos**: Create and manage a live task checklist. Use for multi-step tasks to show progress.
 - **workflow**: Create, run, and manage multi-step workflow pipelines. Use when the user wants to automate a sequence of AI/tool steps.

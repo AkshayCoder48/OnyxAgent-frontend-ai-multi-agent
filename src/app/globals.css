@@ -2112,20 +2112,77 @@ body.sidebar-open {
 }
 
 /* --- Streaming text throttle animation (batched fade) --- */
-/* When streaming text arrives in batches, this gives each batch a gentle
-   blur-to-sharp fade so the text doesn't "jump" in chunks. */
 .stream-batch-fade {
-  animation: stream-batch-fade 0.2s ease-out both;
+  animation: stream-batch-fade 0.15s ease-out both;
 }
 @keyframes stream-batch-fade {
   from {
-    opacity: 0.4;
-    filter: blur(1.5px);
-    transform: translateY(1px);
+    opacity: 0.5;
+    filter: blur(1px);
   }
   to {
     opacity: 1;
     filter: blur(0);
-    transform: translateY(0);
   }
+}
+
+/* --- Streaming shape morph trail (left behind the cursor) --- */
+.stream-morph-trail {
+  position: relative;
+}
+.stream-morph-trail::before {
+  content: "";
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  width: 20px;
+  height: 2px;
+  background: linear-gradient(to left, var(--color-primary, currentColor), transparent);
+  transform: translateY(-50%);
+  opacity: 0.4;
+  animation: trail-fade 0.6s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes trail-fade {
+  from { opacity: 0.4; width: 20px; }
+  to { opacity: 0; width: 0; }
+}
+
+/* --- Streaming glow ring (pulses around the streaming bubble) --- */
+.stream-glow-ring {
+  position: relative;
+}
+.stream-glow-ring::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+  animation: glow-ring-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes glow-ring-pulse {
+  0%, 100% { opacity: 0; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.01); }
+}
+
+/* --- Optimized streaming: use will-change + content-visibility --- */
+.prose-sm {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 500px;
+}
+
+/* --- GPU-accelerated streaming text container --- */
+.stream-reveal {
+  will-change: opacity;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+/* --- Reduce repaint: disable transitions during streaming --- */
+.streaming-active * {
+  transition: none !important;
+}
+.streaming-active .prose-sm {
+  contain: layout style paint;
 }
