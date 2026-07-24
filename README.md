@@ -1,6 +1,6 @@
 <div align="center">
 
-# <span style="font-weight:900; color:#1ec677;">O</span>nyx<span style="font-weight:600; opacity:0.75;">Agent</span>
+<img src="screenshots/logo.svg" alt="OnyxAgent" width="300">
 
 ### Frontend-Only AI Multi-Agent Chat Application
 

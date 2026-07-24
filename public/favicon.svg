@@ -1,4 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <rect width="64" height="64" rx="14" fill="#000000"/>
-  <text x="32" y="46" font-family="Bricolage Grotesque, system-ui, sans-serif" font-size="42" font-weight="900" text-anchor="middle" fill="#ffffff">O</text>
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1ec677"/>
+      <stop offset="100%" stop-color="#18a85f"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#ffffff"/>
+  <text x="32" y="46" font-family="'Bricolage Grotesque', system-ui, sans-serif" font-size="42" font-weight="900" text-anchor="middle" fill="url(#grad)" filter="url(#glow)">O</text>
 </svg>

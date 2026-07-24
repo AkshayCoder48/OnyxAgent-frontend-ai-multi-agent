@@ -23,10 +23,10 @@ import { useEffect, useState } from "react";
  *   - className: optional extra classes
  */
 
-const SHAPES = ["circle", "triangle", "square"] as const;
+const SHAPES = ["circle", "triangle", "square", "diamond", "pentagon", "hexagon", "star"] as const;
 type Shape = (typeof SHAPES)[number];
 
-const SHAPE_DURATION_MS = 1100;
+const SHAPE_DURATION_MS = 900;
 
 export function WritingCursor({
   size = "0.95em",
@@ -92,6 +92,18 @@ function ShapeSVG({ shape, size }: { shape: Shape; size: string }) {
       )}
       {shape === "square" && (
         <rect x="4" y="4" width="16" height="16" rx="3" fill={color} opacity="0.85" />
+      )}
+      {shape === "diamond" && (
+        <polygon points="12,2 22,12 12,22 2,12" fill={color} opacity="0.85" />
+      )}
+      {shape === "pentagon" && (
+        <polygon points="12,2 22,9 18,21 6,21 2,9" fill={color} opacity="0.85" />
+      )}
+      {shape === "hexagon" && (
+        <polygon points="12,2 21,7 21,17 12,22 3,17 3,7" fill={color} opacity="0.85" />
+      )}
+      {shape === "star" && (
+        <polygon points="12,2 14.9,8.6 22,9.3 16.5,14 18.2,21 12,17.3 5.8,21 7.5,14 2,9.3 9.1,8.6" fill={color} opacity="0.85" />
       )}
     </svg>
   );
