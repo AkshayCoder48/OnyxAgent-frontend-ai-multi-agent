@@ -157,10 +157,13 @@ function SourcesButton({ sources, onClick }: { sources: SourceItem[]; onClick: (
 interface MessageItemProps {
   message: ChatMessage;
   groupPosition?: "first" | "middle" | "last" | "single";
+  /** When false, hides the footer (copy/timestamp/regenerate). Used for
+   *  grouped messages where only the last message should show the footer. */
+  showFooter?: boolean;
   onRegenerate?: () => void;
 }
 
-export function MessageItem({ message, groupPosition, onRegenerate }: MessageItemProps) {
+export function MessageItem({ message, groupPosition, showFooter = true, onRegenerate }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
   const openSources = useSourcesPanelStore((s) => s.open);
@@ -385,9 +388,9 @@ export function MessageItem({ message, groupPosition, onRegenerate }: MessageIte
         )}
 
         {/* Footer (copy/timestamp/regenerate) — only shown ONCE for the entire
-            multi-round response, after all parts are complete. Uses the full
-            text content from both message.content and parts for the copy button. */}
-        {!message.isStreaming && (message.content || (message.parts ?? []).some((p) => p.type === "text" && p.content)) && (
+            multi-round response, after all parts are complete. Hidden for
+            non-last grouped messages (showFooter=false from MessageList). */}
+        {showFooter && !message.isStreaming && (message.content || (message.parts ?? []).some((p) => p.type === "text" && p.content)) && (
           <div className={cn("flex flex-wrap items-center gap-1.5", isUser && "flex-row-reverse")}>
             {message.timestamp && (
               <span className="text-muted-foreground text-[10px]">
