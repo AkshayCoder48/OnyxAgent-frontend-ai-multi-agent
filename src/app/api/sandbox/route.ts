@@ -218,24 +218,21 @@ async function getSandbox(
   // 2. If the client provided a sandbox ID, try to reconnect to it.
   //    This is critical for Vercel serverless — the server-side cache is
   //    empty on each cold start, so without reconnecting, every request
-  //    creates a new sandbox (which takes ~5-10 seconds).
+  //    creates a new sandbox. We TRUST the client's sandboxId (skip the
+  //    liveness check) to avoid the 3s ping delay — if the sandbox is dead,
+  //    the actual operation will fail and the dead-sandbox recovery will
+  //    handle it.
   if (clientSandboxId) {
     try {
       const sandbox = await Sandbox.connect(clientSandboxId, { apiKey });
-      // Verify the reconnected sandbox is actually alive — Sandbox.connect
-      // can succeed for a dead sandbox (it only hits E2B's metadata API).
-      if (await isAlive(sandbox)) {
-        const entry: CacheEntry = {
-          sandbox,
-          createdAt: Date.now(),
-          key,
-          verifiedAliveAt: Date.now(),
-        };
-        getCache(mode).set(key, entry);
-        return sandbox;
-      }
-      // Reconnected but dead — kill it and fall through to create.
-      void sandbox.kill().catch(() => {});
+      const entry: CacheEntry = {
+        sandbox,
+        createdAt: Date.now(),
+        key,
+        verifiedAliveAt: Date.now(), // trust it's alive
+      };
+      getCache(mode).set(key, entry);
+      return sandbox;
     } catch {
       // Sandbox is dead or doesn't exist — fall through to create a new one.
     }

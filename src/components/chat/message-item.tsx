@@ -384,7 +384,10 @@ export function MessageItem({ message, groupPosition, onRegenerate }: MessageIte
           </div>
         )}
 
-        {!message.isStreaming && message.content && (
+        {/* Footer (copy/timestamp/regenerate) — only shown ONCE for the entire
+            multi-round response, after all parts are complete. Uses the full
+            text content from both message.content and parts for the copy button. */}
+        {!message.isStreaming && (message.content || (message.parts ?? []).some((p) => p.type === "text" && p.content)) && (
           <div className={cn("flex flex-wrap items-center gap-1.5", isUser && "flex-row-reverse")}>
             {message.timestamp && (
               <span className="text-muted-foreground text-[10px]">
@@ -395,7 +398,13 @@ export function MessageItem({ message, groupPosition, onRegenerate }: MessageIte
               </span>
             )}
             <CopyButton
-              text={message.content}
+              text={
+                message.content ||
+                (message.parts ?? [])
+                  .filter((p) => p.type === "text" && p.content)
+                  .map((p) => p.content)
+                  .join("\n\n")
+              }
               className={cn(
                 "h-7 w-7 rounded-md",
                 isUser ? "bg-secondary hover:bg-secondary/80" : "bg-muted hover:bg-muted/80",
