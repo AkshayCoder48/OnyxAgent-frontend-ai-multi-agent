@@ -34,22 +34,27 @@ export function MessageList({ messages, onRegenerate }: MessageListProps) {
 
   return (
     <div className="space-y-0">
-      {messages.map((message, index) => (
-        /* `animate-message-in` plays on mount only — existing messages
-         * keep their keys so React doesn't remount them, which means the
-         * slide-up + fade only fires for newly-appended messages. */
-        <div key={message.id} className="animate-message-in">
-          <MessageItem
-            message={message}
-            groupPosition={getGroupPosition(message)}
-            onRegenerate={
-              onRegenerate && index === lastAssistantIndex && !message.isStreaming
-                ? () => onRegenerate(message.id)
-                : undefined
-            }
-          />
-        </div>
-      ))}
+      {messages.map((message, index) => {
+        // Determine if this message is the LAST in its group — only the last
+        // message in a group should show the footer (copy/timestamp/regenerate).
+        const groupPos = getGroupPosition(message);
+        const isLastInGroup = !groupPos || groupPos === "last" || groupPos === "single";
+
+        return (
+          <div key={message.id} className="animate-message-in">
+            <MessageItem
+              message={message}
+              groupPosition={groupPos}
+              showFooter={isLastInGroup}
+              onRegenerate={
+                onRegenerate && index === lastAssistantIndex && !message.isStreaming
+                  ? () => onRegenerate(message.id)
+                  : undefined
+              }
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

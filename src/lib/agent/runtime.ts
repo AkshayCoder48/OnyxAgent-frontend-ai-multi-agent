@@ -891,11 +891,12 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
       }));
       return {
         role: "assistant",
-        // Don't send empty content — some providers error on it.
-        // Also strip any "_(stopped)_" markers from aborted turns.
+        // Strip any "_(stopped)_" markers from aborted turns.
+        // Use empty string (not null) for content — some providers reject
+        // null content with "invalid message content type: <nil>".
         content: m.content
-          ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim() || null
-          : null,
+          ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
+          : "",
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
       };
     }),
