@@ -382,6 +382,11 @@ async function streamRound(
 
   emit({ type: "llm_started", timestamp: nowISO() });
 
+  // Pass the target URL BOTH as a header AND in the body — some Vercel
+  // deployments strip custom headers, so the body fallback ensures the
+  // proxy always knows where to forward the request.
+  body._targetUrl = targetUrl;
+
   const response = await fetch(CHAT_PROXY_URL, {
     method: "POST",
     headers: {

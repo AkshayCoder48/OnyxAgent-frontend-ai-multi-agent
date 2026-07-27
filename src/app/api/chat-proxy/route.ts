@@ -141,17 +141,6 @@ export async function GET(
 export async function POST(
   request: Request,
 ): Promise<NextResponse | Response> {
-  const targetUrl = safeParseTargetUrl(request.headers.get("x-target-url"));
-  if (!targetUrl) {
-    return NextResponse.json(
-      {
-        error:
-          "Missing or invalid `x-target-url` header. Must be an http(s) URL.",
-      },
-      { status: 400, headers: corsHeaders() },
-    );
-  }
-
   // Read the raw body as text — we never inspect or log it.
   let body: string;
   try {
@@ -159,6 +148,33 @@ export async function POST(
   } catch {
     return NextResponse.json(
       { error: "Failed to read request body." },
+      { status: 400, headers: corsHeaders() },
+    );
+  }
+
+  // Try the header first, then fall back to a `_targetUrl` field in the body.
+  // Some Vercel deployments strip custom headers, so the body fallback ensures
+  // the proxy always knows where to forward the request.
+  let targetUrl = safeParseTargetUrl(request.headers.get("x-target-url"));
+  if (!targetUrl) {
+    try {
+      const parsed = JSON.parse(body) as { _targetUrl?: string };
+      if (parsed._targetUrl) {
+        targetUrl = safeParseTargetUrl(parsed._targetUrl);
+        // Remove the _targetUrl field from the body before forwarding.
+        delete parsed._targetUrl;
+        body = JSON.stringify(parsed);
+      }
+    } catch {
+      // body is not JSON — skip
+    }
+  }
+  if (!targetUrl) {
+    return NextResponse.json(
+      {
+        error:
+          "Missing or invalid target URL. Must be an http(s) URL passed via x-target-url header or _targetUrl body field.",
+      },
       { status: 400, headers: corsHeaders() },
     );
   }
