@@ -153,8 +153,10 @@ export async function executeSubagentTurn(
       }
 
       // Use the SAME /api/chat-proxy as the main chat to avoid CORS errors.
-      // The browser can't fetch external API URLs directly — the proxy
-      // forwards the request server-side with the x-target-url header.
+      // Pass _targetUrl in the body as a fallback (some Vercel deployments
+      // strip custom headers).
+      body._targetUrl = targetUrl;
+
       const res = await fetch("/api/chat-proxy", {
         method: "POST",
         headers: {
