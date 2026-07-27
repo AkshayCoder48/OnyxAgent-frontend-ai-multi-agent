@@ -152,12 +152,10 @@ export async function executeSubagentTurn(
         body.chat_template_kwargs = { enable_thinking: true };
       }
 
-      // Use the SAME /api/chat-proxy as the main chat to avoid CORS errors.
-      // Pass _targetUrl in the body as a fallback (some Vercel deployments
-      // strip custom headers).
+      // Use ?url= query param (primary), header (secondary), body (tertiary).
       body._targetUrl = targetUrl;
 
-      const res = await fetch("/api/chat-proxy", {
+      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
