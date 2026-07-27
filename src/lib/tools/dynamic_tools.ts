@@ -50,7 +50,7 @@ function buildHandler(
             "x-target-url": httpUrl,
             ...(httpHeaders || {}),
           },
-          body: JSON.stringify(args),
+          body: JSON.stringify({ ...args, _targetUrl: httpUrl }),
         });
         const text = await res.text();
         let output: unknown = text;

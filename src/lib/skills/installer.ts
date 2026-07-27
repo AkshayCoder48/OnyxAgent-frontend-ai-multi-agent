@@ -587,7 +587,7 @@ async function fetchSkillsMPSearch(
   url: string,
   opts: { signal?: AbortSignal; apiKey?: string | null } = {},
 ): Promise<unknown> {
-  const res = await fetch("/api/chat-proxy", {
+  const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(url)}`, {
     method: "GET",
     headers: {
       "x-target-url": url,
@@ -785,7 +785,7 @@ async function fetchSkillFileBytes(
     // 2. Retry through the CORS proxy. The proxy GET handler forwards the
     //    Authorization header.
     try {
-      const res = await fetch("/api/chat-proxy", {
+      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(downloadUrl)}`, {
         method: "GET",
         headers: {
           "x-target-url": downloadUrl,
