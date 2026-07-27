@@ -159,33 +159,33 @@ export async function POST(
     );
   }
 
-  // Try in order: ?url= query param → x-target-url header → _targetUrl body field.
-  // Vercel strips custom headers, so we need multiple fallbacks.
+  // Try in order: ?url= query param → x-target-url header.
+  // (?url= is primary — Vercel can't strip query params)
   const urlObj = new URL(request.url);
   let targetUrl = safeParseTargetUrl(urlObj.searchParams.get("url"));
   if (!targetUrl) {
     targetUrl = safeParseTargetUrl(request.headers.get("x-target-url"));
   }
   if (!targetUrl) {
-    try {
-      const parsed = JSON.parse(body) as { _targetUrl?: string };
-      if (parsed._targetUrl) {
-        targetUrl = safeParseTargetUrl(parsed._targetUrl);
-        delete parsed._targetUrl;
-        body = JSON.stringify(parsed);
-      }
-    } catch {
-      // body is not JSON — skip
-    }
-  }
-  if (!targetUrl) {
     return NextResponse.json(
       {
         error:
-          "Missing or invalid target URL. Must be an http(s) URL passed via ?url= query param, x-target-url header, or _targetUrl body field.",
+          "Missing or invalid target URL. Must be an http(s) URL passed via ?url= query param or x-target-url header.",
       },
       { status: 400, headers: corsHeaders() },
     );
+  }
+
+  // ALWAYS strip _targetUrl from the body if present — it's an internal field
+  // that must never reach the upstream AI provider (causes "Unsupported parameter" errors).
+  try {
+    const parsed = JSON.parse(body) as { _targetUrl?: string };
+    if (parsed._targetUrl) {
+      delete parsed._targetUrl;
+      body = JSON.stringify(parsed);
+    }
+  } catch {
+    // body is not JSON — skip
   }
 
   // Build the forward headers. We only forward what's explicitly allow-listed
