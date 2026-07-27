@@ -63,7 +63,7 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   const baseUrl = subagent.baseUrl || provider.base_url;
   const noPrefix = (provider as { no_prefix?: boolean }).no_prefix ?? false;
 
-  return { provider, apiKey, model, baseUrl, noPrefix, toolsEnabled: provider.tools_enabled };
+  return { provider, apiKey, model, baseUrl, noPrefix, toolsEnabled: provider.tools_enabled, thinkingEnabled: (provider as { thinking_enabled?: boolean }).thinking_enabled ?? false };
 }
 
 /**
@@ -146,6 +146,10 @@ export async function executeSubagentTurn(
       if (config.toolsEnabled && toolsSchema.length > 0) {
         body.tools = toolsSchema;
         body.tool_choice = "auto";
+      }
+      // Provider-specific thinking toggle (e.g. Poolside's chat_template_kwargs).
+      if (config.thinkingEnabled) {
+        body.chat_template_kwargs = { enable_thinking: true };
       }
 
       // Use the SAME /api/chat-proxy as the main chat to avoid CORS errors.

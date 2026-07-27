@@ -760,6 +760,7 @@ export function useChat(options: UseChatOptions = {}) {
           modelType: selectedProvider.model_type,
           toolsEnabled: selectedProvider.tools_enabled,
           noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
+          thinkingEnabled: (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
         },
         systemPrompt,
         temperature: temperatureRef.current,

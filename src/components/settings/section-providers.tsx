@@ -64,6 +64,7 @@ interface FormState {
   models: string; // comma-separated
   model_type: AIModelType;
   tools_enabled: boolean;
+  thinking_enabled: boolean;
   is_active: boolean;
 }
 
@@ -74,6 +75,7 @@ const EMPTY_FORM: FormState = {
   models: "",
   model_type: "chat",
   tools_enabled: true,
+  thinking_enabled: false,
   is_active: false,
 };
 
@@ -103,6 +105,7 @@ export function SectionProviders() {
       models: p.models.join(", "),
       model_type: p.model_type,
       tools_enabled: p.tools_enabled,
+      thinking_enabled: (p as { thinking_enabled?: boolean }).thinking_enabled ?? false,
       is_active: p.is_active,
     });
     setShowKey(false);
@@ -132,6 +135,7 @@ export function SectionProviders() {
           models,
           model_type: form.model_type,
           tools_enabled: form.tools_enabled,
+          thinking_enabled: form.thinking_enabled,
           is_active: form.is_active,
         };
         if (form.api_key.trim()) patch.api_key = form.api_key.trim();
@@ -145,6 +149,7 @@ export function SectionProviders() {
           models,
           model_type: form.model_type,
           tools_enabled: form.tools_enabled,
+          thinking_enabled: form.thinking_enabled,
           is_active: form.is_active,
         });
         toast.success("Provider added");
@@ -376,6 +381,19 @@ export function SectionProviders() {
                   id="p-tools"
                   checked={form.tools_enabled}
                   onCheckedChange={(v) => setForm({ ...form, tools_enabled: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <Label htmlFor="p-thinking">Thinking enabled</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Sends <code className="text-[10px]">chat_template_kwargs: {"{enable_thinking: true}"}</code> for providers like Poolside that support native reasoning tokens.
+                  </p>
+                </div>
+                <Switch
+                  id="p-thinking"
+                  checked={form.thinking_enabled}
+                  onCheckedChange={(v) => setForm({ ...form, thinking_enabled: v })}
                 />
               </div>
               <div className="flex items-center justify-between gap-2">
