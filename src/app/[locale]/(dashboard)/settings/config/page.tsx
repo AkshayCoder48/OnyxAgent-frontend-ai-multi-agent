@@ -61,6 +61,8 @@ interface AIProvider {
   tools_enabled: boolean;
   /** When true, use the base URL as-is (no /chat/completions suffix). */
   no_prefix?: boolean;
+  /** When true, sends chat_template_kwargs: {enable_thinking: true} */
+  thinking_enabled?: boolean;
   has_api_key: boolean;
   created_at: string;
   updated_at: string;
@@ -95,6 +97,8 @@ interface ProviderDraft {
   tools_enabled: boolean;
   /** When true, use the base URL as-is (no /chat/completions suffix). */
   no_prefix?: boolean;
+  /** When true, sends chat_template_kwargs: {enable_thinking: true} */
+  thinking_enabled?: boolean;
 }
 
 const EMPTY_DRAFT: ProviderDraft = {
@@ -106,6 +110,7 @@ const EMPTY_DRAFT: ProviderDraft = {
   model_type: "chat",
   tools_enabled: true,
   no_prefix: false,
+  thinking_enabled: false,
 };
 
 function rowToProvider(row: AIProviderRow): AIProvider {
@@ -119,6 +124,7 @@ function rowToProvider(row: AIProviderRow): AIProvider {
     model_type: row.model_type,
     tools_enabled: row.tools_enabled,
     no_prefix: row.no_prefix ?? false,
+    thinking_enabled: row.thinking_enabled ?? false,
     has_api_key: !!row.api_key_encrypted,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -172,6 +178,7 @@ export default function ConfigSettingsPage() {
       model_type: p.model_type ?? "chat",
       tools_enabled: p.tools_enabled ?? true,
       no_prefix: p.no_prefix ?? false,
+      thinking_enabled: p.thinking_enabled ?? false,
     });
   };
 
@@ -203,6 +210,7 @@ export default function ConfigSettingsPage() {
         model_type: draft.model_type,
         tools_enabled: draft.tools_enabled,
         no_prefix: draft.no_prefix ?? false,
+        thinking_enabled: draft.thinking_enabled ?? false,
       };
       if (editingId) {
         // Pass undefined for api_key when blank so the service keeps the
@@ -921,6 +929,23 @@ function ProviderEditor({
         When on, the app calls <code className="font-mono text-xs">{`{base_url}`}</code> directly
         instead of <code className="font-mono text-xs">{`{base_url}/chat/completions`}</code>. Useful
         for providers with non-standard endpoints.
+      </p>
+
+      {/* Thinking toggle — for providers like Poolside that support
+          chat_template_kwargs: {enable_thinking: true} */}
+      <div className="flex items-center gap-2">
+        <Switch
+          id="provider-thinking"
+          checked={draft.thinking_enabled ?? false}
+          onCheckedChange={(v) => onChange({ ...draft, thinking_enabled: v })}
+        />
+        <label htmlFor="provider-thinking" className="text-sm cursor-pointer">
+          Thinking enabled
+        </label>
+      </div>
+      <p className="text-xs text-muted-foreground -mt-2 ml-7">
+        Sends <code className="font-mono text-xs">{"chat_template_kwargs: {enable_thinking: true}"}</code> in the
+        request body. For providers like Poolside that support native reasoning tokens.
       </p>
 
       <FormField
