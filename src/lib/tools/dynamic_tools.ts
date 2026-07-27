@@ -43,7 +43,7 @@ function buildHandler(
         // POST server-side, then returns the upstream response with
         // permissive CORS headers. The target URL is carried in the
         // `x-target-url` header (same convention the AI provider calls use).
-        const res = await fetch("/api/chat-proxy", {
+        const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(httpUrl)}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

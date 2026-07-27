@@ -775,7 +775,7 @@ export const aiProviderService = {
     const base = provider.base_url.replace(/\/$/, "");
     const targetUrl = provider.no_prefix ? base : `${base}/chat/completions`;
     try {
-      const res = await fetch("/api/chat-proxy", {
+      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
