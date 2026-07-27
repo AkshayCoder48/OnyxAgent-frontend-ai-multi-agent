@@ -152,9 +152,7 @@ export async function executeSubagentTurn(
         body.chat_template_kwargs = { enable_thinking: true };
       }
 
-      // Use ?url= query param (primary), header (secondary), body (tertiary).
-      body._targetUrl = targetUrl;
-
+      // Use ?url= query param — Vercel can't strip query params.
       const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
         method: "POST",
         headers: {

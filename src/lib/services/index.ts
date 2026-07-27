@@ -783,7 +783,6 @@ export const aiProviderService = {
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          _targetUrl: targetUrl,
           model: targetModel,
           messages: [{ role: "user", content: "Reply pong" }],
           max_tokens: 16,

@@ -382,10 +382,7 @@ async function streamRound(
 
   emit({ type: "llm_started", timestamp: nowISO() });
 
-  // Pass the target URL via ?url= query param (primary — Vercel can't strip
-  // query params), header (secondary), and body (tertiary fallback).
-  body._targetUrl = targetUrl;
-
+  // Pass the target URL via ?url= query param — Vercel can't strip query params.
   const response = await fetch(`${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`, {
     method: "POST",
     headers: {
