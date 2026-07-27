@@ -94,10 +94,17 @@ export async function OPTIONS(): Promise<NextResponse> {
 export async function GET(
   request: Request,
 ): Promise<NextResponse | Response> {
-  const targetUrl = safeParseTargetUrl(request.headers.get("x-target-url"));
+  // Try header first, then ?url= query param as fallback.
+  let targetUrl = safeParseTargetUrl(request.headers.get("x-target-url"));
+  if (!targetUrl) {
+    const urlParam = new URL(request.url).searchParams.get("url");
+    if (urlParam) {
+      targetUrl = safeParseTargetUrl(urlParam);
+    }
+  }
   if (!targetUrl) {
     return NextResponse.json(
-      { error: "Missing or invalid `x-target-url` header." },
+      { error: "Missing or invalid target URL. Pass via x-target-url header or ?url= query param." },
       { status: 400, headers: corsHeaders() },
     );
   }

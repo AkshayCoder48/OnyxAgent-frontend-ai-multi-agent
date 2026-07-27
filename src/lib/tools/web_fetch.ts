@@ -28,7 +28,7 @@ registerTool(
     }
 
     try {
-      const res = await fetch("/api/chat-proxy", {
+      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(url)}`, {
         method: "GET",
         headers: {
           "x-target-url": url,
