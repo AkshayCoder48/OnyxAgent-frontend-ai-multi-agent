@@ -682,6 +682,7 @@ export interface AIProviderInput {
   model_type?: "chat" | "responses";
   tools_enabled?: boolean;
   no_prefix?: boolean;
+  thinking_enabled?: boolean;
   is_active?: boolean;
 }
 
@@ -693,7 +694,6 @@ export const aiProviderService = {
   },
 
   async create(userId: string, input: AIProviderInput): Promise<AIProviderRow> {
-    // api_key may be empty for local providers (Ollama, vLLM, LM Studio).
     const encryptedKey = input.api_key ? await vaultEncrypt(input.api_key) : "";
     const id = nanoid();
     const ts = nowISO();
@@ -707,6 +707,7 @@ export const aiProviderService = {
       model_type: input.model_type ?? "chat",
       tools_enabled: input.tools_enabled ?? true,
       no_prefix: input.no_prefix ?? false,
+      thinking_enabled: input.thinking_enabled ?? false,
       is_active: input.is_active ?? true,
       created_at: ts,
       updated_at: ts,
@@ -725,6 +726,7 @@ export const aiProviderService = {
     if (patch.model_type !== undefined) update.model_type = patch.model_type;
     if (patch.tools_enabled !== undefined) update.tools_enabled = patch.tools_enabled;
     if (patch.no_prefix !== undefined) update.no_prefix = patch.no_prefix;
+    if (patch.thinking_enabled !== undefined) update.thinking_enabled = patch.thinking_enabled;
     if (patch.is_active !== undefined) update.is_active = patch.is_active;
     // api_key: empty string clears, non-empty rotates.
     if (patch.api_key !== undefined) {

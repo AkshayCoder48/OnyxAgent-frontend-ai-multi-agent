@@ -104,6 +104,10 @@ export interface AIProviderRow {
   tools_enabled: boolean;
   /** When true, use the base URL as-is (no /chat/completions suffix). */
   no_prefix?: boolean;
+  /** When true, sends `chat_template_kwargs: {"enable_thinking": true}` in
+   *  the request body (for providers like Poolside that support native
+   *  thinking/reasoning tokens via this parameter). */
+  thinking_enabled?: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;

@@ -68,6 +68,9 @@ export interface AgentTurnOptions {
     toolsEnabled?: boolean;
     /** When true, use the base URL as-is (no /chat/completions suffix). */
     noPrefix?: boolean;
+    /** When true, sends `chat_template_kwargs: {"enable_thinking": true}` in
+     *  the request body (for providers like Poolside). */
+    thinkingEnabled?: boolean;
   };
   /** System prompt (already includes skills/MCP/custom-tools/env sections). */
   systemPrompt: string;
@@ -365,6 +368,10 @@ async function streamRound(
     body.tool_choice = "auto";
   }
   if (typeof temperature === "number") body.temperature = temperature;
+  // Provider-specific thinking toggle (e.g. Poolside's chat_template_kwargs).
+  if (provider.thinkingEnabled) {
+    body.chat_template_kwargs = { enable_thinking: true };
+  }
   if (thinkingEffort) {
     // OpenAI reasoning effort hint + DeepSeek-style `thinking` flag — the
     // proxy passes both through; the provider ignores whichever it doesn't
