@@ -826,10 +826,14 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 ### File Management (OPFS — local browser storage)
 - **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions.
 - **read_file**: Read the content of a file in the workspace.
+- **edit_file**: Edit a file by finding and replacing text.
 - **delete_file**: Remove a file from the workspace.
+- **move_file**: Move or rename a file (source → destination).
+- **rename_file**: Rename a file (just the filename, keeps the same directory).
 - **list_files**: List all files in a directory. Use this to discover what files exist before reading them.
 - **search_files**: Grep/search for text across files. Use when the user asks "find X in my files".
 - **create_folder**: Create a new directory in the workspace.
+- **delete_folder**: Delete a folder and all its contents.
 
 ### Memory & Knowledge
 - **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
