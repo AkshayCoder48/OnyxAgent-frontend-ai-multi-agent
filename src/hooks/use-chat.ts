@@ -398,7 +398,8 @@ export function useChat(options: UseChatOptions = {}) {
                 existing.args += tc.arguments;
               }
             }
-            // Flush every 50ms — creates/updates the pending tool call
+            // Flush every 30ms — creates/updates the pending tool call
+            // so the user sees streaming args in realtime.
             if (!toolArgTimer.current) {
               toolArgTimer.current = setTimeout(() => {
                 toolArgTimer.current = null;

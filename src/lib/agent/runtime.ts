@@ -516,18 +516,13 @@ async function streamRound(
             if (tc.arguments) existing.args += tc.arguments;
             toolCallAccumulator.set(tc.index, existing);
           }
-          // Emit a streaming tool_call event so the UI can show the tool
-          // card with a "Writing..." status while arguments are streaming.
-          // This prevents the user from thinking the app is stuck when the
-          // AI is generating a large file content argument.
+          // Emit tool_call_delta so the UI can show streaming tool call
+          // arguments in realtime (the user sees the AI "writing" the file
+          // content as it streams, instead of waiting for the full call to
+          // complete before anything appears).
           emit({
-            type: "tool_call",
-            data: {
-              tool_name: toolCallAccumulator.get(delta.toolCalls[0]?.index ?? 0)?.name || "writing",
-              args: {},
-              tool_call_id: toolCallAccumulator.get(delta.toolCalls[0]?.index ?? 0)?.id || nanoid(),
-              streaming: true,
-            },
+            type: "tool_call_delta",
+            data: { tool_calls: delta.toolCalls },
             timestamp: nowISO(),
           });
         }

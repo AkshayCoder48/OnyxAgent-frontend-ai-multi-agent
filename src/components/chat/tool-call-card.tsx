@@ -446,18 +446,12 @@ function RunningToolPanel({
       <div className="flex items-center gap-2 text-sm">
         <Loader2 className="text-brand h-3.5 w-3.5 animate-spin" aria-hidden="true" />
         <span className="text-foreground/80 font-medium">
-          {isStreaming ? "Preparing…" : `${liveCaption}…`}
+          {isStreaming ? `Writing ${toolCall.name}…` : `${liveCaption}…`}
         </span>
       </div>
       {/* Show streaming args while LLM is composing the tool call */}
       {isStreaming && streamingArgs && (
-        <pre
-          key={streamingArgs.length}
-          className="scrollbar-thin max-h-64 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words stream-reveal"
-        >
-          {streamingArgs}
-          <span className="stream-cursor" />
-        </pre>
+        <StreamingArgsDisplay args={streamingArgs} />
       )}
       {/* Show the final args when the tool is running */}
       {!isStreaming && previewArg && (
@@ -525,5 +519,26 @@ function ImagePreviewResult({ spec }: { spec: { url: string; alt?: string; error
         <p className="text-muted-foreground text-xs text-center">{spec.alt}</p>
       )}
     </div>
+  );
+}
+
+/** Streaming args display — shows the LLM writing tool call arguments in
+ *  realtime. Auto-scrolls to the bottom so the user always sees the latest
+ *  text. Only shows the last 2000 characters to prevent DOM bloat. */
+function StreamingArgsDisplay({ args }: { args: string }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (preRef.current) {
+      preRef.current.scrollTop = preRef.current.scrollHeight;
+    }
+  }, [args]);
+  return (
+    <pre
+      ref={preRef}
+      className="scrollbar-thin max-h-48 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words"
+    >
+      {args.slice(-2000)}
+      <span className="writing-cursor-inline" aria-hidden="true" />
+    </pre>
   );
 }
