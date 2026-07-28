@@ -935,47 +935,90 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
   // CONTEXT WINDOW MANAGEMENT: When the conversation is very long, sending
   // the entire history overwhelms the provider's context window. Some
   // providers (like Poolside) mark old tool_call IDs as "DEGRADED" and
-  // refuse to process them. To prevent this, we truncate the history to
-  // the last N messages (keeping the most recent context). Old tool calls
-  // that have been truncated are removed entirely — the AI doesn't need
-  // to see tool calls from 50 messages ago.
-  const MAX_HISTORY_MESSAGES = 30; // Keep last 30 messages
+  // refuse to process them. To prevent this:
+  // 1. Truncate to last 20 messages
+  // 2. STRIP ALL tool_calls from history — only send text content
+  // 3. Skip "tool" role messages entirely (they reference old tool_call IDs)
+  // The AI doesn't need old tool calls to continue — it just needs the
+  // conversation context (what was asked + what was answered).
+  const MAX_HISTORY_MESSAGES = 20;
   const trimmedHistory = history.length > MAX_HISTORY_MESSAGES
     ? history.slice(-MAX_HISTORY_MESSAGES)
     : history;
 
-  // When we truncate, the first message might be an assistant with tool_calls
-  // whose corresponding tool results were cut off. Providers require every
-  // tool_call to have a matching tool result — orphaned tool_calls cause
-  // "DEGRADED function cannot be invoked" errors. Fix: strip tool_calls
-  // from the first message if we truncated.
-  const wasTruncated = history.length > MAX_HISTORY_MESSAGES;
+  // HANDOFF LETTER: If the conversation is long enough that we're truncating,
+  // save the FULL chat to a file in /chats and generate a handoff letter
+  // that summarizes the conversation. This gives the AI full context without
+  // sending the entire history (saves tokens + prevents DEGRADED errors).
+  let handoffContext = "";
+  if (history.length > MAX_HISTORY_MESSAGES) {
+    try {
+      const { writeFileAtPath, ensurePath } = await import("@/lib/storage/opfs");
+      const userId = opts.userId;
+
+      // Save full chat to /chats folder
+      await ensurePath(userId, "chats");
+      const chatFileName = `chat_${conversationId?.slice(0, 8) ?? "unknown"}_${Date.now()}.md`;
+      const fullChatText = history.map((m) => {
+        const role = m.role.toUpperCase();
+        const content = m.content || "(no text — tool calls only)";
+        const toolSummary = m.tool_calls?.length
+          ? `\n\n[Tool calls: ${m.tool_calls.map((tc) => tc.tool_name).join(", ")}]`
+          : "";
+        return `## ${role}\n\n${content}${toolSummary}`;
+      }).join("\n\n---\n\n");
+
+      await writeFileAtPath(`users/${userId}/chats`, chatFileName, fullChatText);
+
+      // Build handoff letter — tells the AI what happened + where to find the full chat
+      const userMessages = history.filter((m) => m.role === "user");
+      const assistantMessages = history.filter((m) => m.role === "assistant");
+      const allToolNames = new Set<string>();
+      history.forEach((m) => m.tool_calls?.forEach((tc) => allToolNames.add(tc.tool_name)));
+
+      handoffContext = `\n\n## CONVERSATION HANDOFF LETTER
+This is a continuation of a long conversation. The full chat history (${history.length} messages) has been saved to a file.
+
+**File path:** \`/home/user/chats/${chatFileName}\` (in the sandbox) or \`chats/${chatFileName}\` (in the workspace)
+**How to read it:** Use the \`read_file\` tool with path \`chats/${chatFileName}\`
+
+### Summary
+- **Total messages:** ${history.length} (showing last ${MAX_HISTORY_MESSAGES})
+- **User messages:** ${userMessages.length}
+- **Assistant messages:** ${assistantMessages.length}
+- **Tools used:** ${Array.from(allToolNames).join(", ") || "none"}
+
+### First user message (original request):
+${userMessages[0]?.content?.slice(0, 500) ?? "(empty)"}
+
+### Key topics discussed:
+${userMessages.slice(0, 5).map((m, i) => `${i + 1}. ${m.content?.slice(0, 200) ?? ""}`).join("\n")}
+
+### Most recent exchanges (what we were working on):
+${trimmedHistory.slice(-6).map((m) => `[${m.role}] ${m.content?.slice(0, 300) ?? "(tool calls)"}`).join("\n")}
+
+If you need more context about what was discussed earlier, read the full chat file at \`chats/${chatFileName}\`.
+`;
+    } catch {
+      // best-effort — if file save fails, continue without handoff
+    }
+  }
 
   const priorMessages: ChatCompletionMessage[] = [
-    { role: "system", content: enhancedSystemPrompt },
-    ...trimmedHistory.map((m, idx): ChatCompletionMessage => {
+    { role: "system", content: enhancedSystemPrompt + handoffContext },
+    ...trimmedHistory
+      .filter((m) => m.role !== "tool") // Skip tool results — they reference old IDs
+      .map((m): ChatCompletionMessage => {
       if (m.role === "user") return { role: "user", content: m.content };
       if (m.role === "system") return { role: "system", content: m.content };
-      // assistant — include tool_calls if any (truncated to save tokens).
-      // If this is the first message after truncation, strip tool_calls
-      // to avoid orphaned references.
-      const shouldStripToolCalls = wasTruncated && idx === 0;
-      const toolCalls = shouldStripToolCalls
-        ? []
-        : (m.tool_calls ?? []).map((tc) => ({
-            id: tc.tool_call_id,
-            type: "function" as const,
-            function: {
-              name: tc.tool_name,
-              arguments: JSON.stringify(truncateToolArgs(tc.tool_name, tc.args ?? {})),
-            },
-          }));
+      // assistant — STRIP ALL tool_calls to prevent DEGRADED errors.
+      // Only send the text content. The AI can continue from text alone.
       return {
         role: "assistant",
         content: m.content
           ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
           : "",
-        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+        // NO tool_calls — this is what prevents the DEGRADED error
       };
     }),
   ];
