@@ -932,25 +932,46 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
 
+  // CONTEXT WINDOW MANAGEMENT: When the conversation is very long, sending
+  // the entire history overwhelms the provider's context window. Some
+  // providers (like Poolside) mark old tool_call IDs as "DEGRADED" and
+  // refuse to process them. To prevent this, we truncate the history to
+  // the last N messages (keeping the most recent context). Old tool calls
+  // that have been truncated are removed entirely — the AI doesn't need
+  // to see tool calls from 50 messages ago.
+  const MAX_HISTORY_MESSAGES = 30; // Keep last 30 messages
+  const trimmedHistory = history.length > MAX_HISTORY_MESSAGES
+    ? history.slice(-MAX_HISTORY_MESSAGES)
+    : history;
+
+  // When we truncate, the first message might be an assistant with tool_calls
+  // whose corresponding tool results were cut off. Providers require every
+  // tool_call to have a matching tool result — orphaned tool_calls cause
+  // "DEGRADED function cannot be invoked" errors. Fix: strip tool_calls
+  // from the first message if we truncated.
+  const wasTruncated = history.length > MAX_HISTORY_MESSAGES;
+
   const priorMessages: ChatCompletionMessage[] = [
     { role: "system", content: enhancedSystemPrompt },
-    ...history.map((m): ChatCompletionMessage => {
+    ...trimmedHistory.map((m, idx): ChatCompletionMessage => {
       if (m.role === "user") return { role: "user", content: m.content };
       if (m.role === "system") return { role: "system", content: m.content };
-      // assistant — include tool_calls if any.
-      const toolCalls = (m.tool_calls ?? []).map((tc) => ({
-        id: tc.tool_call_id,
-        type: "function" as const,
-        function: {
-          name: tc.tool_name,
-          arguments: JSON.stringify(truncateToolArgs(tc.tool_name, tc.args ?? {})),
-        },
-      }));
+      // assistant — include tool_calls if any (truncated to save tokens).
+      // If this is the first message after truncation, strip tool_calls
+      // to avoid orphaned references.
+      const shouldStripToolCalls = wasTruncated && idx === 0;
+      const toolCalls = shouldStripToolCalls
+        ? []
+        : (m.tool_calls ?? []).map((tc) => ({
+            id: tc.tool_call_id,
+            type: "function" as const,
+            function: {
+              name: tc.tool_name,
+              arguments: JSON.stringify(truncateToolArgs(tc.tool_name, tc.args ?? {})),
+            },
+          }));
       return {
         role: "assistant",
-        // Strip any "_(stopped)_" markers from aborted turns.
-        // Use empty string (not null) for content — some providers reject
-        // null content with "invalid message content type: <nil>".
         content: m.content
           ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
           : "",
