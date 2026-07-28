@@ -1,8 +1,19 @@
 // ============================================================================
-// DuckDuckGo Real Browser Search — uses the REAL organic search results
-// from duckduckgo.com/d.js (what you see in Chrome), NOT the AI Answer API.
+// Unified Web Search API — LangSearch (primary, when API key is supplied)
+// with DuckDuckGo organic-scraper fallback.
 //
-// Flow:
+// When the client passes `langsearch_key` (the user's decrypted LangSearch
+// API key, fetched from their encrypted settings on the client), `web` and
+// `news` queries are routed through LangSearch's hybrid keyword+vector search
+// API at https://api.langsearch.com/v1/web-search — which returns enhanced
+// results with long-text summaries, ideal for feeding clean context to an LLM.
+//
+// If no key is supplied, LangSearch returns an error, or the search type is
+// `image` / `video` / `map` (LangSearch only does web search), we transparently
+// fall back to the DuckDuckGo organic scraper below — the same results you'd
+// see in Chrome, zero API key required.
+//
+// DDG flow:
 //   1. GET https://duckduckgo.com/?q=<query>&ia=web → extract vqd token
 //   2. GET https://links.duckduckgo.com/d.js?q=<query>&vqd=<token> → organic results
 //   3. Parse the DDG.pageLayout.load('d', [{t:title, u:url, a:snippet}]) calls
@@ -482,6 +493,96 @@ async function searchImagesFallback(query: string, limit: number): Promise<Searc
   return [];
 }
 
+// ---- LangSearch backend (primary when API key supplied) ----
+
+/**
+ * Call LangSearch's /v1/web-search API. Returns enhanced results with
+ * long-text summaries — better for LLM context than raw snippets.
+ *
+ * API spec: https://github.com/langsearch-ai/langsearch
+ *   POST https://api.langsearch.com/v1/web-search
+ *   Authorization: Bearer <key>
+ *   Body: { query, freshness, summary, count }
+ *
+ * `freshness` values: "noLimit" (default), "day", "week", "month", "year".
+ * We pass "week" for news_search to bias toward recent results, "noLimit"
+ * otherwise. `summary: true` asks LangSearch to return a markdown summary
+ * alongside each result.
+ *
+ * Throws on any non-2xx so the caller can fall back to DDG.
+ */
+async function searchLangSearch(
+  query: string,
+  apiKey: string,
+  freshness: string,
+  limit: number,
+): Promise<SearchResult[]> {
+  const res = await fetch("https://api.langsearch.com/v1/web-search", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      freshness,
+      summary: true,
+      count: Math.min(limit, 20), // LangSearch caps at 20 per request
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(
+      `LangSearch HTTP ${res.status}: ${errText.slice(0, 200) || res.statusText}`,
+    );
+  }
+
+  const data = await res.json();
+  // LangSearch returns { data: { query, summary, search_results: [{ title, url, snippet, summary, site_name, icon, ... }] } }
+  const raw: Array<Record<string, unknown>> =
+    (data?.data?.search_results as Array<Record<string, unknown>> | undefined) ??
+    (data?.search_results as Array<Record<string, unknown>> | undefined) ??
+    [];
+
+  const results: SearchResult[] = [];
+  for (const item of raw) {
+    const url = String(item.url || item.link || "");
+    const title = String(item.title || "");
+    if (!url || !title) continue;
+    const domain = getDomain(url);
+    // Prefer `summary` (long-text, markdown) when present; fall back to snippet.
+    const summary = item.summary ? String(item.summary) : "";
+    const snippet = item.snippet ? String(item.snippet) : "";
+    const description = summary || snippet;
+    results.push({
+      title,
+      url,
+      domain,
+      description,
+      icon: item.icon ? String(item.icon) : getFavicon(domain),
+      source: String(item.site_name || item.source || "LangSearch"),
+      provider: "LangSearch",
+    });
+  }
+
+  // Attach the overall LangSearch summary (if any) as a synthetic top result
+  // so the LLM sees the synthesized answer first.
+  const overallSummary = data?.data?.summary ?? data?.summary;
+  if (typeof overallSummary === "string" && overallSummary.trim()) {
+    results.unshift({
+      title: `LangSearch Summary: ${query}`,
+      url: "",
+      description: overallSummary,
+      source: "LangSearch (summary)",
+      provider: "LangSearch",
+    });
+  }
+
+  return results.slice(0, limit);
+}
+
 // ---- Main handler ----
 
 export async function GET(req: NextRequest) {
@@ -489,6 +590,9 @@ export async function GET(req: NextRequest) {
   const query = searchParams.get("q") || "";
   const type = searchParams.get("type") || "web";
   const limit = Math.min(parseInt(searchParams.get("limit") || "10", 10), 50);
+  // Optional LangSearch API key. When present, `web` and `news` queries are
+  // routed through LangSearch first; anything else falls back to DDG.
+  const langsearchKey = searchParams.get("langsearch_key") || "";
 
   if (!query.trim()) {
     return NextResponse.json({ error: "Query is required" }, { status: 400 });
@@ -496,8 +600,29 @@ export async function GET(req: NextRequest) {
 
   try {
     let results: SearchResult[] = [];
+    let provider: "langsearch" | "duckduckgo" = "duckduckgo";
 
-    if (type === "image") {
+    // Try LangSearch first for web/news when a key is supplied.
+    if (langsearchKey && (type === "web" || type === "news")) {
+      try {
+        const freshness = type === "news" ? "week" : "noLimit";
+        const lsResults = await searchLangSearch(query, langsearchKey, freshness, limit);
+        if (lsResults.length > 0) {
+          results = lsResults;
+          provider = "langsearch";
+        } else {
+          // Empty result set — fall back to DDG.
+          results = await searchWebReal(query, limit);
+        }
+      } catch (err) {
+        // LangSearch failed (bad key, rate limit, network) — log + fall back.
+        console.warn(
+          "[web-search] LangSearch failed, falling back to DuckDuckGo:",
+          err instanceof Error ? err.message : String(err),
+        );
+        results = await searchWebReal(query, limit);
+      }
+    } else if (type === "image") {
       results = await searchImagesReal(query, limit);
     } else if (type === "video") {
       results = await searchVideosReal(query, limit);
@@ -511,6 +636,7 @@ export async function GET(req: NextRequest) {
       type,
       results: results.slice(0, limit),
       count: results.length,
+      provider,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Search failed";

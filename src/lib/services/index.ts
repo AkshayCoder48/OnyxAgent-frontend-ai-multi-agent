@@ -838,6 +838,13 @@ export interface UserSettings {
    *  `extra.skillsmp_api_key_encrypted`). Optional — anonymous access works
    *  for basic search (50 req/day), an API key raises the limit to 500/day. */
   skillsmp_api_key_present: boolean;
+  /** Whether a LangSearch web-search API key is stored (encrypted in
+   *  `extra.langsearch_api_key_encrypted`). When present, the `web_search`
+   *  and `news_search` tools route through LangSearch's hybrid search API
+   *  (https://api.langsearch.com/v1/web-search) instead of the default
+   *  DuckDuckGo scraper — yielding richer summaries and better recall.
+   *  When absent, the tools transparently fall back to DuckDuckGo. */
+  langsearch_api_key_present: boolean;
   env_vars: Array<{ name: string; is_secret: boolean; value_present: boolean }>;
   /** When true, the agent runtime skips HITL approval for tools flagged
    *  `requires_approval` (e.g. `run_terminal`). Stored under `extra`. */
@@ -888,6 +895,7 @@ export const settingsService = {
       tavily_api_key_present: !!row.tavily_api_key_encrypted,
       embeddings_api_key_present: !!row.embeddings_api_key_encrypted,
       skillsmp_api_key_present: !!row.extra?.skillsmp_api_key_encrypted,
+      langsearch_api_key_present: !!row.extra?.langsearch_api_key_encrypted,
       env_vars: Object.entries(row.env_vars ?? {}).map(([name, v]) => ({
         name,
         is_secret: v.is_secret,
@@ -1085,6 +1093,39 @@ export const settingsService = {
     const row = await db.user_settings.where("user_id").equals(userId).first();
     if (!row) return null;
     const encrypted = row.extra?.skillsmp_api_key_encrypted;
+    if (typeof encrypted !== "string" || !encrypted) return null;
+    try {
+      return await vaultDecrypt(encrypted);
+    } catch {
+      return null;
+    }
+  },
+
+  /** Store (or clear, when key is null) the LangSearch web-search API key,
+   *  encrypted with the user's vault key. Stored under
+   *  `extra.langsearch_api_key_encrypted` so we don't need a schema migration.
+   *  When set, `web_search` / `news_search` route through LangSearch's hybrid
+   *  API; when unset, they fall back to the DuckDuckGo scraper. */
+  async setLangSearchKey(userId: string, key: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    const encrypted = key ? await vaultEncrypt(key) : null;
+    const extra = { ...(row.extra ?? {}), langsearch_api_key_encrypted: encrypted };
+    await db.user_settings.update(row.id, {
+      extra,
+      updated_at: nowISO(),
+    });
+  },
+
+  /** Decrypt + return the LangSearch API key, or null if none is stored. */
+  async getDecryptedLangSearchApiKey(userId: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return null;
+    const encrypted = row.extra?.langsearch_api_key_encrypted;
     if (typeof encrypted !== "string" || !encrypted) return null;
     try {
       return await vaultDecrypt(encrypted);
