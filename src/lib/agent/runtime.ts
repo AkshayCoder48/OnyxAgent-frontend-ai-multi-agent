@@ -119,6 +119,48 @@ const MAX_ROUNDS = 50;
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
 // ---------------------------------------------------------------------------
+// Token-saving truncation functions.
+// When the AI writes a large file via create_file/write_file, the full file
+// content is in the tool call arguments. If we send this back in the message
+// history on the next round, the API charges for ALL those tokens again.
+// These functions truncate large args/results before they go into `messages`.
+// The FULL values are preserved in `allToolCalls` for the UI.
+// ---------------------------------------------------------------------------
+
+/** Tools where the args contain large content (files, code, etc). */
+const LARGE_ARG_TOOLS = new Set([
+  "create_file", "write_file", "edit_file", "create_custom_tool",
+  "preview_image", "workflow",
+]);
+
+/** Max length of any single string value in tool args sent to the API. */
+const MAX_ARG_LEN = 500;
+
+/** Max length of tool result content sent to the API. */
+const MAX_RESULT_LEN = 2000;
+
+function truncateToolArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!LARGE_ARG_TOOLS.has(toolName)) return args;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > MAX_ARG_LEN) {
+      out[key] = value.slice(0, MAX_ARG_LEN) + `... [truncated, ${value.length} chars total]`;
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function truncateResult(toolName: string, result: string): string {
+  if (result.length <= MAX_RESULT_LEN) return result;
+  return result.slice(0, MAX_RESULT_LEN) + `... [truncated, ${result.length} chars total]`;
+}
+
+// ---------------------------------------------------------------------------
 // Chat Completions message shape (what we send to the provider).
 // ---------------------------------------------------------------------------
 
@@ -474,9 +516,18 @@ async function streamRound(
             if (tc.arguments) existing.args += tc.arguments;
             toolCallAccumulator.set(tc.index, existing);
           }
+          // Emit a streaming tool_call event so the UI can show the tool
+          // card with a "Writing..." status while arguments are streaming.
+          // This prevents the user from thinking the app is stuck when the
+          // AI is generating a large file content argument.
           emit({
-            type: "tool_call_delta",
-            data: { tool_calls: delta.toolCalls },
+            type: "tool_call",
+            data: {
+              tool_name: toolCallAccumulator.get(delta.toolCalls[0]?.index ?? 0)?.name || "writing",
+              args: {},
+              tool_call_id: toolCallAccumulator.get(delta.toolCalls[0]?.index ?? 0)?.id || nanoid(),
+              streaming: true,
+            },
             timestamp: nowISO(),
           });
         }
@@ -895,7 +946,10 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
       const toolCalls = (m.tool_calls ?? []).map((tc) => ({
         id: tc.tool_call_id,
         type: "function" as const,
-        function: { name: tc.tool_name, arguments: JSON.stringify(tc.args ?? {}) },
+        function: {
+          name: tc.tool_name,
+          arguments: JSON.stringify(truncateToolArgs(tc.tool_name, tc.args ?? {})),
+        },
       }));
       return {
         role: "assistant",
@@ -1078,13 +1132,19 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
     }
 
     // Tool calls requested — append the assistant turn to the message list.
+    // CRITICAL: Truncate large tool call arguments before sending them back
+    // in the message history. The full arguments are stored in allToolCalls
+    // for the UI — the API only needs enough to know what was called.
     messages.push({
       role: "assistant",
-      content: roundResult.content || null,
+      content: roundResult.content || "",
       tool_calls: roundResult.toolCalls.map((tc) => ({
         id: tc.id,
         type: "function",
-        function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(truncateToolArgs(tc.name, tc.args)),
+        },
       })),
     });
 
@@ -1165,11 +1225,14 @@ Each subagent shares the same sandbox + file system as you, so they can read/wri
       // ask_user short-circuit — the tool emitted an ask_user event and
       // returned a sentinel; the answers were already folded into `result`
       // by the tool handler (see tools/ask_user.ts).
-      const resultStr =
+      // Truncate large tool results before sending back to the API.
+      // The full result is stored in allToolCalls for the UI.
+      const fullResultStr =
         typeof result === "string" ? result : JSON.stringify(result);
+      const resultStr = truncateResult(tc.name, fullResultStr);
       emit({
         type: "tool_result",
-        data: { tool_call_id: tc.id, content: resultStr },
+        data: { tool_call_id: tc.id, content: fullResultStr },
         timestamp: nowISO(),
       });
       messages.push({
