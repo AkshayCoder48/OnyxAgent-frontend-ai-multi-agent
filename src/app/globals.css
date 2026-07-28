@@ -2126,6 +2126,76 @@ body.sidebar-open {
   }
 }
 
+/* --- Reasoning / Thinking panel — empty → filled cross-fade ---
+ * The panel has two stacked layers:
+ *   1. A shimmer skeleton placeholder (shown while streaming + empty).
+ *   2. The real reasoning text (fades in once the first token arrives).
+ *
+ * `reasoning-skeleton-in`  — skeleton fades + scales up when it appears.
+ * `reasoning-skeleton-out` — skeleton fades + collapses when text arrives.
+ * `reasoning-panel-fill`   — real content fades + scales in from 98%.
+ *
+ * The two animations overlap for ~200ms so the swap reads as one fluid
+ * motion instead of a hard cut. Easing is cubic-bezier(0.16, 1, 0.3, 1)
+ * (the same "smooth ease-out" used by slide-up-fade) for consistency.
+ */
+.reasoning-skeleton-in {
+  animation: reasoning-skeleton-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes reasoning-skeleton-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.reasoning-skeleton-out {
+  animation: reasoning-skeleton-out 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+  pointer-events: none;
+}
+@keyframes reasoning-skeleton-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+    max-height: 200px;
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+    max-height: 0;
+  }
+}
+.reasoning-panel-fill {
+  animation: reasoning-panel-fill 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes reasoning-panel-fill {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* Reasoning panel — subtle ambient glow while streaming so the panel reads
+ * as "active/thinking" without being distracting. The glow pulses softly
+ * in sync with the streaming dots. */
+.reasoning-panel {
+  transition: box-shadow 0.4s ease, border-color 0.3s ease, background-color 0.3s ease;
+}
+.reasoning-panel:has(.streaming-dots) {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-primary) 8%, transparent),
+    0 1px 12px -4px color-mix(in srgb, var(--color-primary) 15%, transparent);
+}
+
 /* --- Streaming shape morph trail (left behind the cursor) --- */
 .stream-morph-trail {
   position: relative;

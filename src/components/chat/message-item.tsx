@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import type { ChatMessage, ChatMessageFile } from "@/types";
@@ -9,7 +10,7 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { Bot, FileText, Globe, Paperclip, RefreshCw, User } from "lucide-react";
+import { Bot, ChevronDown, FileText, Globe, Paperclip, RefreshCw, User } from "lucide-react";
 import Image from "next/image";
 import { useAuthStore } from "@/stores";
 import { getFileUrl } from "@/lib/file-api";
@@ -17,60 +18,147 @@ import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
 
-function ThinkingBlock({
+/**
+ * ThinkingBlock / ReasoningBlock — collapsible reasoning display.
+ *
+ * Visual design goals:
+ *   - Match the polished "empty-state Thinking bar" look (Bot avatar +
+ *     shimmer skeleton bars + streaming dots) so the filled reasoning
+ *     panel doesn't feel like a step down in quality.
+ *   - When `text` is empty but `isStreaming` is true, render the same
+ *     shimmer-skeleton placeholder the chat shows before the first token.
+ *   - When `text` arrives, seamlessly cross-fade from the shimmer
+ *     placeholder into the real content (no jarring swap).
+ *   - Stronger contrast than the old `text-foreground/55` dull look —
+ *     use `text-foreground/80` for the label and `text-foreground/90`
+ *     for content so the panel reads as a first-class surface, not a
+ *     faded footnote.
+ *
+ * The empty → filled transition is driven by `reasoning-panel-fill` /
+ * `reasoning-skeleton-out` keyframes (defined in globals.css) which
+ * animate opacity + a subtle scale so the swap reads as a single
+ * fluid motion instead of a hard cut.
+ */
+function ReasoningPanel({
   text,
   open,
   isStreaming,
+  variant,
 }: {
   text: string;
   open: boolean;
   isStreaming: boolean;
+  variant: "thinking" | "reasoning";
 }) {
+  const [internalOpen, setInternalOpen] = React.useState(open);
+  React.useEffect(() => {
+    if (isStreaming) setInternalOpen(true);
+  }, [isStreaming]);
+  // Once the user collapses/expands, respect their choice.
+  React.useEffect(() => {
+    setInternalOpen(open);
+  }, [open]);
+
+  const label = variant === "thinking" ? "Thinking" : "Reasoning";
+  const isEmpty = !text || text.trim().length === 0;
+  const showSkeleton = isStreaming && isEmpty;
+
   return (
-    <details
-      className="border-foreground/10 bg-muted/40 group rounded-2xl rounded-tl-sm border px-3 py-2 sm:px-4"
-      open={open}
+    <div
+      className={cn(
+        "reasoning-panel group relative mb-2 overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
+        variant === "thinking"
+          ? "border-foreground/10 bg-muted/50"
+          : "border-foreground/10 border-dashed bg-muted/40",
+        // Subtle elevation when streaming — reads as "active".
+        isStreaming && "ring-1 ring-primary/15",
+      )}
     >
-      <summary className="text-foreground/55 hover:text-foreground/80 flex cursor-pointer items-center gap-2 font-mono text-[10px] tracking-wider uppercase select-none">
-        <span className="bg-foreground/30 inline-block h-1.5 w-1.5 rounded-full" />
-        Thinking
+      {/* Header — always visible. Clicking toggles the body. */}
+      <button
+        type="button"
+        onClick={() => setInternalOpen((o) => !o)}
+        className="flex w-full items-center gap-2.5 px-3 py-2 text-left sm:px-4"
+        aria-expanded={internalOpen}
+      >
+        <span
+          className={cn(
+            "inline-block h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300",
+            isStreaming ? "bg-primary" : "bg-foreground/40",
+            isStreaming && "animate-pulse",
+          )}
+        />
+        <span className="text-foreground/80 font-mono text-[10px] font-medium tracking-wider uppercase">
+          {label}
+        </span>
         {isStreaming && (
-          <span className="bg-foreground/40 inline-block h-1 w-1 animate-pulse rounded-full" />
+          <span className="streaming-dots" aria-hidden="true">
+            <span /> <span /> <span />
+          </span>
         )}
-      </summary>
-      <pre className="text-foreground/65 mt-2 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
-        {text}
-      </pre>
-    </details>
+        <span className="ml-auto flex items-center gap-2">
+          {text && (
+            <span className="text-foreground/45 font-mono text-[10px] tabular-nums">
+              {text.length} chars
+            </span>
+          )}
+          <ChevronDown
+            className={cn(
+              "text-foreground/50 h-3.5 w-3.5 transition-transform duration-300",
+              internalOpen && "rotate-180",
+            )}
+          />
+        </span>
+      </button>
+
+      {/* Body — two layers that cross-fade:
+          1. Skeleton shimmer (only while streaming + empty).
+          2. Real content (fades in once `text` arrives). */}
+      <div className="relative">
+        {/* Skeleton layer */}
+        <div
+          className={cn(
+            "px-3 pb-3 sm:px-4 sm:pb-4",
+            showSkeleton
+              ? "reasoning-skeleton-in"
+              : isEmpty
+                ? "hidden"
+                : "reasoning-skeleton-out",
+          )}
+          aria-hidden={!showSkeleton}
+        >
+          <div className="flex flex-col gap-1.5">
+            <div className="shimmer h-2 w-[90%] rounded-full" />
+            <div className="shimmer h-2 w-[75%] rounded-full" />
+            <div className="shimmer h-2 w-[82%] rounded-full" />
+            <div className="shimmer h-2 w-[60%] rounded-full" />
+          </div>
+        </div>
+
+        {/* Content layer */}
+        {!isEmpty && (
+          <div
+            className={cn(
+              "reasoning-panel-fill border-foreground/8 border-t",
+              internalOpen ? "block" : "hidden",
+            )}
+          >
+            <pre className="text-foreground/85 max-h-80 overflow-y-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap sm:px-4">
+              {text}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
-function ReasoningBlock({
-  text,
-  open,
-  isStreaming,
-}: {
-  text: string;
-  open: boolean;
-  isStreaming: boolean;
-}) {
-  return (
-    <details
-      className="border-foreground/10 bg-muted/30 group rounded-2xl rounded-tl-sm border border-dashed px-3 py-2 sm:px-4"
-      open={open}
-    >
-      <summary className="text-foreground/55 hover:text-foreground/80 flex cursor-pointer items-center gap-2 font-mono text-[10px] tracking-wider uppercase select-none">
-        <span className="bg-foreground/30 inline-block h-1.5 w-1.5 rounded-full" />
-        Reasoning
-        {isStreaming && (
-          <span className="bg-foreground/40 inline-block h-1 w-1 animate-pulse rounded-full" />
-        )}
-      </summary>
-      <pre className="text-foreground/65 mt-2 max-h-72 overflow-y-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
-        {text}
-      </pre>
-    </details>
-  );
+function ThinkingBlock(props: { text: string; open: boolean; isStreaming: boolean }) {
+  return <ReasoningPanel {...props} variant="thinking" />;
+}
+
+function ReasoningBlock(props: { text: string; open: boolean; isStreaming: boolean }) {
+  return <ReasoningPanel {...props} variant="reasoning" />;
 }
 
 function TextBubble({
