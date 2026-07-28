@@ -1254,105 +1254,112 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
       })),
     });
 
-    // Execute each tool.
+    // Execute ALL tools in parallel — every `tool_call` event is emitted
+    // instantly (so the UI renders all cards simultaneously), then every
+    // handler runs concurrently via `Promise.all`. Results are emitted as
+    // each tool finishes (`tool_result` + `tool_output` streaming still
+    // works per-tool) and pushed to `messages` / `allToolCalls` in the
+    // original request order so the assistant's tool_calls array stays
+    // aligned with the tool role replies.
     emit({ type: "call_tools_start", timestamp: nowISO() });
+
+    // 1) Emit every `tool_call` event up front so cards render together.
     for (const tc of roundResult.toolCalls) {
       const toolDef = getTool(tc.name);
-      if (!toolDef) {
-        const errMsg = `Tool '${tc.name}' is not registered`;
-        emit({
-          type: "tool_call",
-          data: { tool_name: tc.name, args: tc.args, tool_call_id: tc.id },
-          timestamp: nowISO(),
-        });
-        emit({
-          type: "tool_result",
-          data: { tool_call_id: tc.id, content: JSON.stringify({ error: errMsg }) },
-          timestamp: nowISO(),
-        });
-        messages.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          name: tc.name,
-          content: JSON.stringify({ error: errMsg }),
-        });
-        allToolCalls.push({
-          id: tc.id,
-          name: tc.name,
-          args: tc.args,
-          result: { error: errMsg },
-          status: "error",
-        });
-        continue;
-      }
-
-      // Tool approval was removed — every tool executes immediately. The
-      // `requires_approval` flag on the tool definition is now metadata-only
-      // (still surfaced in the Settings → Tools catalog for transparency).
-      const effectiveArgs = tc.args;
-
       emit({
         type: "tool_call",
-        data: { tool_name: tc.name, args: effectiveArgs, tool_call_id: tc.id },
+        data: {
+          tool_name: tc.name,
+          args: tc.args,
+          tool_call_id: tc.id,
+          // Surface unknown-tool errors immediately so the card shows the
+          // failure state without waiting for the parallel batch.
+          ...(toolDef ? {} : { __error: `Tool '${tc.name}' is not registered` }),
+        },
         timestamp: nowISO(),
       });
+    }
 
-      // Build the per-call tool context. We inject an `onToolOutput` callback
-      // that streams stdout/stderr chunks back to the UI in real time as
-      // `tool_output` WSEvents. Tools that don't stream simply never call it.
-      const streamingToolCtx: ToolContext = {
-        ...toolCtxForList,
-        onToolOutput: (toolCallId: string, output: string, type: "stdout" | "stderr") => {
-          // The e2b_exec tools pass an empty toolCallId (they don't know it
-          // at construction time) — substitute the real one from this turn.
-          const id = toolCallId || tc.id;
-          emit({
-            type: "tool_output",
-            data: {
-              tool_call_id: id,
-              content: output,
-              type,
-            },
-            timestamp: nowISO(),
-          });
-        },
-      };
+    // 2) Kick off every handler in parallel. Each promise resolves to a
+    //    normalized result record; failures are captured per-tool so one
+    //    slow/broken tool never blocks the others.
+    const parallelResults = await Promise.all(
+      roundResult.toolCalls.map(async (tc) => {
+        const toolDef = getTool(tc.name);
+        if (!toolDef) {
+          const errMsg = `Tool '${tc.name}' is not registered`;
+          return {
+            tc,
+            result: { error: errMsg } as unknown,
+            status: "error" as ToolCall["status"],
+            fullResultStr: JSON.stringify({ error: errMsg }),
+            resultStr: JSON.stringify({ error: errMsg }),
+          };
+        }
 
-      // Execute.
-      let result: unknown;
-      let status: ToolCall["status"] = "completed";
-      try {
-        result = await toolDef.handler(effectiveArgs, streamingToolCtx);
-      } catch (err) {
-        result = { error: err instanceof Error ? err.message : String(err) };
-        status = "error";
-      }
+        const effectiveArgs = tc.args;
 
-      // ask_user short-circuit — the tool emitted an ask_user event and
-      // returned a sentinel; the answers were already folded into `result`
-      // by the tool handler (see tools/ask_user.ts).
-      // Truncate large tool results before sending back to the API.
-      // The full result is stored in allToolCalls for the UI.
-      const fullResultStr =
-        typeof result === "string" ? result : JSON.stringify(result);
-      const resultStr = truncateResult(tc.name, fullResultStr);
+        // Build the per-call tool context. We inject an `onToolOutput`
+        // callback that streams stdout/stderr chunks back to the UI in real
+        // time as `tool_output` WSEvents. Tools that don't stream simply
+        // never call it.
+        const streamingToolCtx: ToolContext = {
+          ...toolCtxForList,
+          onToolOutput: (toolCallId: string, output: string, type: "stdout" | "stderr") => {
+            // The e2b_exec tools pass an empty toolCallId (they don't know
+            // it at construction time) — substitute the real one from this
+            // turn.
+            const id = toolCallId || tc.id;
+            emit({
+              type: "tool_output",
+              data: {
+                tool_call_id: id,
+                content: output,
+                type,
+              },
+              timestamp: nowISO(),
+            });
+          },
+        };
+
+        // Execute.
+        let result: unknown;
+        let status: ToolCall["status"] = "completed";
+        try {
+          result = await toolDef.handler(effectiveArgs, streamingToolCtx);
+        } catch (err) {
+          result = { error: err instanceof Error ? err.message : String(err) };
+          status = "error";
+        }
+
+        const fullResultStr =
+          typeof result === "string" ? result : JSON.stringify(result);
+        const resultStr = truncateResult(tc.name, fullResultStr);
+        return { tc, result, status, fullResultStr, resultStr };
+      }),
+    );
+
+    // 3) Emit `tool_result` events + push to messages/allToolCalls in the
+    //    original request order (Promise.all preserves array order, so the
+    //    tool role replies line up with the assistant's tool_calls array).
+    for (const r of parallelResults) {
       emit({
         type: "tool_result",
-        data: { tool_call_id: tc.id, content: fullResultStr },
+        data: { tool_call_id: r.tc.id, content: r.fullResultStr },
         timestamp: nowISO(),
       });
       messages.push({
         role: "tool",
-        tool_call_id: tc.id,
-        name: tc.name,
-        content: resultStr,
+        tool_call_id: r.tc.id,
+        name: r.tc.name,
+        content: r.resultStr,
       });
       allToolCalls.push({
-        id: tc.id,
-        name: tc.name,
-        args: effectiveArgs,
-        result,
-        status,
+        id: r.tc.id,
+        name: r.tc.name,
+        args: r.tc.args,
+        result: r.result,
+        status: r.status,
       });
     }
 
