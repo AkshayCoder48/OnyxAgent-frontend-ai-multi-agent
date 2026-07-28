@@ -389,6 +389,7 @@ function OtherApiKeysSection() {
   const { user } = useAuth();
   const [tavily, setTavily] = useState("");
   const [embeddings, setEmbeddings] = useState("");
+  const [langsearch, setLangsearch] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -399,6 +400,7 @@ function OtherApiKeysSection() {
         const s = await settingsService.get(user.id);
         setTavily(s.tavily_api_key_present ? "•••••••••••• (saved)" : "");
         setEmbeddings(s.embeddings_api_key_present ? "•••••••••••• (saved)" : "");
+        setLangsearch(s.langsearch_api_key_present ? "•••••••••••• (saved)" : "");
       } catch {
         // ignore
       } finally {
@@ -422,6 +424,10 @@ function OtherApiKeysSection() {
         await settingsService.setEmbeddingsKey(user.id, embeddings.trim());
         changed = true;
       }
+      if (langsearch && !langsearch.startsWith("••••")) {
+        await settingsService.setLangSearchKey(user.id, langsearch.trim());
+        changed = true;
+      }
       if (!changed) {
         toast.info("No changes to save");
         return;
@@ -429,6 +435,7 @@ function OtherApiKeysSection() {
       toast.success("API keys saved");
       setTavily("•••••••••••• (saved)");
       setEmbeddings("•••••••••••• (saved)");
+      setLangsearch("•••••••••••• (saved)");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save");
     } finally {
@@ -440,7 +447,7 @@ function OtherApiKeysSection() {
     return (
       <SectionCard
         title="Other API keys"
-        description="Keys for web search (Tavily) and embeddings. Stored encrypted on the server."
+        description="Keys for web search (Tavily, LangSearch) and embeddings. Stored encrypted on the server."
       >
         <div className="flex items-center justify-center py-8 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading…
@@ -452,9 +459,18 @@ function OtherApiKeysSection() {
   return (
     <SectionCard
       title="Other API keys"
-      description="Keys for web search (Tavily) and embeddings. Stored encrypted locally; leave blank to keep an existing key."
+      description="Keys for web search (Tavily, LangSearch) and embeddings. Stored encrypted locally; leave blank to keep an existing key."
     >
       <div className="space-y-4">
+        <FormField label="LangSearch API key" htmlFor="langsearch-key" description="Optional — when set, web_search & news_search use LangSearch's hybrid API (richer summaries); falls back to DuckDuckGo when blank or on error.">
+          <Input
+            id="langsearch-key"
+            type="password"
+            value={langsearch}
+            onChange={(e) => setLangsearch(e.target.value)}
+            placeholder="sk-…  (get one at langsearch.com/api-keys)"
+          />
+        </FormField>
         <FormField label="Tavily API key" htmlFor="tavily-key">
           <Input
             id="tavily-key"
