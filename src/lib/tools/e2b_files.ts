@@ -32,12 +32,7 @@ import { zipSync, strToU8 } from "fflate";
 // Helpers.
 // ---------------------------------------------------------------------------
 
-/** Always returns null — files ALWAYS use OPFS. The sandbox is code-runner only. */
-function assertE2BKey(_ctx: ToolContext): string | null {
-  return null;
-}
-
-/** Sanitize a sandbox path — strip leading `/`, normalize `.`, refuse `..`. */
+/** Sanitize a path — strip leading `/`, normalize `.`, refuse `..`. */
 function safePath(p: string | undefined | null, fallback = "."): string {
   if (!p || typeof p !== "string") return fallback;
   const cleaned = p.replace(/^\/+/, "").trim();
@@ -83,8 +78,7 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string | undefined, ".");
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const files = await client.listFiles(path);
       return { entries: files, path };
@@ -123,8 +117,7 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     let content: string;
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       content = await client.readFile(path);
     } else {
@@ -167,8 +160,7 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       // Sandbox branch (dead code — key is always null, but kept for safety)
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       if (!overwrite) {
@@ -270,8 +262,7 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       try {
         await client.writeFile(path, content);
@@ -316,8 +307,7 @@ registerTool(
     const replace = args.replace as string;
     const replaceAll = (args.replace_all as boolean) ?? true;
     let original: string;
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       original = await client.readFile(path);
       let updated: string;
@@ -391,8 +381,7 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const recursive = (args.recursive as boolean) ?? false;
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       await client.deleteFile(path, recursive);
     } else {
@@ -421,8 +410,7 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       await client.createFolder(path);
     } else {
@@ -454,28 +442,20 @@ registerTool(
     if (path === "." || path === "" || path === "/") {
       throw new Error("Refusing to delete workspace root");
     }
-    const key = assertE2BKey(ctx);
-    if (key) {
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      await client.deleteFile(path, true);
-    } else {
-      // OPFS doesn't have a direct recursive-delete on a directory handle —
-      // walk it and remove each entry.
-      const dir = await opfs.ensurePath(ctx.userId, `workspace/${path}`);
-      // Best-effort recursive delete via removeEntry (supported in modern browsers).
-      await (dir as unknown as {
-        removeEntry: (name: string, opts?: { recursive?: boolean }) => Promise<void>;
-      })
-        .removeEntry(".", { recursive: true })
-        .catch(() => undefined);
-      // Fallback: list + remove.
+    // OPFS: use removeDir which does recursive delete properly.
+    try {
+      await opfs.removeDir(ctx.userId, `workspace/${path}`);
+    } catch (err) {
+      // If removeDir fails, try listing + deleting each file
       try {
         const entries = await opfs.listDir(ctx.userId, `workspace/${path}`);
         for (const e of entries) {
-          await opfs.deleteFile(e.path);
+          if (e.kind === "file") {
+            await opfs.deleteFile(`users/${ctx.userId}/workspace/${path}/${e.name}`);
+          }
         }
       } catch {
-        // ignore
+        // best-effort
       }
     }
     return { deleted: true, path };
@@ -533,8 +513,7 @@ registerTool(
     let content: string;
     let size: number;
 
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
 
       // Check if the path is a directory. If so, auto-redirect to the folder
@@ -700,8 +679,7 @@ registerTool(
     let totalSize = 0;
     const MAX_TOTAL = 4 * 1024 * 1024;
 
-    const key = assertE2BKey(ctx);
-    if (key) {
+    if (false) { // dead code — OPFS always used
       const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const all = await client.listFiles(path);
       for (const entry of all) {
@@ -762,6 +740,101 @@ registerTool(
       extension: "zip",
       download_url,
     };
+  },
+  false,
+  "files",
+);
+
+// ---------------------------------------------------------------------------
+// Tool: move_file (also handles rename).
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "move_file",
+  "Move or rename a file in the user's workspace. Works like `mv` — the source is removed and the content is written to the destination path.",
+  {
+    type: "object",
+    properties: {
+      source: { type: "string", description: "Current path of the file." },
+      destination: { type: "string", description: "New path for the file." },
+    },
+    required: ["source", "destination"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const source = safePath(args.source as string);
+    const destination = safePath(args.destination as string);
+    if (source === destination) {
+      return { moved: true, source, destination, note: "Source and destination are the same." };
+    }
+    // Read the source file.
+    let content: string;
+    try {
+      content = await opfs.readTextFile(opfsWorkspacePath(ctx.userId, source));
+    } catch {
+      return { error: `Source file not found: ${source}` };
+    }
+    // Write to destination.
+    const parts = destination.split("/");
+    const filename = parts.pop()!;
+    const subdir = parts.join("/");
+    const subPath = subdir ? `workspace/${subdir}` : "workspace";
+    await opfs.writeFile(ctx.userId, subPath, filename, content);
+    // Delete the source.
+    try {
+      await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
+    } catch {
+      // best-effort — the file was already copied
+    }
+    return { moved: true, source, destination, size: content.length };
+  },
+  false,
+  "files",
+);
+
+// ---------------------------------------------------------------------------
+// Tool: rename_file (alias for move_file — some AI models prefer this name).
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "rename_file",
+  "Rename a file in the user's workspace. Same as move_file but specifically for renaming.",
+  {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Current path of the file." },
+      new_name: { type: "string", description: "New name for the file (just the filename, not the full path)." },
+    },
+    required: ["path", "new_name"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const source = safePath(args.path as string);
+    const newName = (args.new_name as string).replace(/[\\/]+/g, "_").trim();
+    if (!newName) return { error: "new_name is required" };
+    // Build destination path: same directory, new filename.
+    const parts = source.split("/");
+    parts.pop(); // remove old filename
+    parts.push(newName); // add new filename
+    const destination = parts.join("/");
+    // Read source.
+    let content: string;
+    try {
+      content = await opfs.readTextFile(opfsWorkspacePath(ctx.userId, source));
+    } catch {
+      return { error: `Source file not found: ${source}` };
+    }
+    // Write to new path.
+    const subdir = parts.slice(0, -1).join("/");
+    const subPath = subdir ? `workspace/${subdir}` : "workspace";
+    await opfs.writeFile(ctx.userId, subPath, newName, content);
+    // Delete old file.
+    try {
+      await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
+    } catch {
+      // best-effort
+    }
+    return { renamed: true, old_path: source, new_path: destination, size: content.length };
   },
   false,
   "files",
