@@ -85,10 +85,12 @@ export function ChatContainer() {
     // Skip initial mount
     if (prevId === undefined) {
       prevConversationIdRef.current = currId;
-      // On mount, reconcile persisted messages: keep them only if they
-      // belong to the active conversation. This is what makes a reload
-      // mid-generation restore the in-flight assistant message.
-      reconcilePersisted(currId);
+      // On mount, if there's a URL ?id= param, the conversation store
+      // might not have it yet (it starts as null). Don't reconcile with
+      // null — wait for fetchConversations to set the real ID.
+      if (currId) {
+        reconcilePersisted(currId);
+      }
       return;
     }
 
@@ -158,11 +160,24 @@ export function ChatContainer() {
     // message is already in the chat store (added by use-chat.ts). Don't
     // clear it — just mark as loaded so we don't try to load again.
     // This flag is set by the clear-effect which runs BEFORE this effect.
+    //
+    // BUT: on page refresh, the conversation store starts with null, then
+    // fetchConversations() sets it to the URL's ?id=. This is ALSO a
+    // null→ID transition, but it's NOT a new chat — it's loading an
+    // existing conversation. We distinguish by checking if the chat store
+    // has any messages (new chat = user message already added; page load
+    // = empty chat store).
     if (wasNewChatTransitionRef.current) {
       wasNewChatTransitionRef.current = false; // consume the flag
-      loadedConvIdRef.current = currentConversationId;
-      setPersistedConversationId(currentConversationId);
-      return;
+      const existingMessages = useChatStore.getState().messages;
+      if (existingMessages.length > 0) {
+        // Real new chat — user's message is in the store. Don't load.
+        loadedConvIdRef.current = currentConversationId;
+        setPersistedConversationId(currentConversationId);
+        return;
+      }
+      // Page refresh — chat store is empty, need to load from DB.
+      // Fall through to the normal loading logic below.
     }
 
     // Mark as loaded BEFORE mutating so a synchronous re-render doesn't double-
