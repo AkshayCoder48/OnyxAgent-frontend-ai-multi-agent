@@ -116,18 +116,22 @@ export async function executeSubagentTurn(
     }));
 
     // Build message history from the session.
+    // Truncate to last 20 messages to avoid context window overflow.
     const updatedSession = useSubagentStore.getState().sessions.find((s) => s.id === sid);
+    const sessionMessages = (updatedSession?.messages ?? [])
+      .filter((m) => m.role !== "system" && !m.isStreaming);
+    const trimmedSessionMessages = sessionMessages.length > 20
+      ? sessionMessages.slice(-20)
+      : sessionMessages;
     const apiMessages: ChatCompletionMessage[] = [
       {
         role: "system",
         content: subagent.systemPrompt || `You are ${subagent.name}, a subagent. ${subagent.description}`,
       },
-      ...((updatedSession?.messages ?? [])
-        .filter((m) => m.role !== "system" && !m.isStreaming)
-        .map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        }))),
+      ...trimmedSessionMessages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })),
     ];
 
     // Build the target URL — same logic as the main runtime.
