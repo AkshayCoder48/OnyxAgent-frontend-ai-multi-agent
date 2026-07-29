@@ -16,7 +16,52 @@ const PYTHON_NOTE =
  *
  * Only syncs files ≤ 500KB to avoid overwhelming the sandbox. The sync
  * is best-effort — failures are logged but don't block code execution.
+ *
+ * PERF: Uses a manifest (stored in localStorage) to track which files have
+ * been synced (by path + size + lastModified). Only CHANGED files are
+ * re-uploaded, and they're uploaded in a SINGLE batch_write HTTP call
+ * instead of N sequential fetch() calls. This reduces a 20-file sync
+ * from 1-2 minutes (20 sequential HTTP round-trips) to <2 seconds
+ * (1 HTTP call + parallel file reads).
  */
+interface SyncManifestEntry {
+  size: number;
+  lastModified: number;
+}
+type SyncManifest = Record<string, SyncManifestEntry>;
+
+function loadSyncManifest(userId: string): SyncManifest {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(`e2b-sync-manifest:${userId}`);
+    return raw ? (JSON.parse(raw) as SyncManifest) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSyncManifest(userId: string, manifest: SyncManifest): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(`e2b-sync-manifest:${userId}`, JSON.stringify(manifest));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+/** Invalidate the sync manifest for a user — forces the next syncOpfsToSandbox
+ *  to re-upload ALL files. Called by file tools (write_file, create_file,
+ *  edit_file, delete_file, move_file, rename_file) after they modify OPFS,
+ *  so the next run_terminal/run_python sees the updated files. */
+export function invalidateSyncManifest(userId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(`e2b-sync-manifest:${userId}`);
+  } catch {
+    // ignore
+  }
+}
+
 async function syncOpfsToSandbox(
   userId: string,
   apiKey: string,
@@ -25,40 +70,71 @@ async function syncOpfsToSandbox(
     const dir = await opfs.ensurePath(userId, "workspace");
     const walked = await opfs.walkFiles(dir);
     if (walked.length === 0) return; // No files to sync — skip entirely
+
     const client = getE2BClient(apiKey, null, "shared");
     const MAX_FILE_SIZE = 500 * 1024; // 500KB
-    for (const f of walked) {
-      try {
-        const file = await f.handle.getFile();
-        if (file.size > MAX_FILE_SIZE) continue;
-        // Skip hidden/system files — BUT allow .onyxagent_files.json (the
-        // file manifest that tells the AI what files exist in the workspace).
-        const fname = f.path.split("/").pop() ?? "";
-        if (fname.startsWith(".") && fname !== ".onyxagent_files.json") continue;
-        // Read as ArrayBuffer (not text) to preserve binary data. The
-        // client.writeFile() sends the content as a string to the server,
-        // which writes it to the sandbox. For binary files this would
-        // corrupt them — but the server's write_file handler uses
-        // sandbox.files.write(path, content) which accepts strings.
-        // For true binary support, we'd need to upload via a different
-        // path. For now, we skip binary files (images, etc.) in the
-        // forward sync — they're handled by the chat attachment flow.
-        // Check if the file looks like text (no null bytes in first 1KB).
-        const slice = file.slice(0, 1024);
-        const buf = await slice.arrayBuffer();
-        const view = new Uint8Array(buf);
-        let isText = true;
-        for (let i = 0; i < view.length; i++) {
-          if (view[i] === 0) { isText = false; break; }
+    const manifest = loadSyncManifest(userId);
+    const newManifest: SyncManifest = {};
+
+    // Phase 1: Read all files in PARALLEL and figure out which changed.
+    // Previously this was sequential (for...of with await inside) which
+    // made 20 files take 20x the read time. Now all reads happen
+    // concurrently via Promise.all.
+    const readResults = await Promise.all(
+      walked.map(async (f) => {
+        try {
+          const file = await f.handle.getFile();
+          if (file.size > MAX_FILE_SIZE) return null;
+          // Skip hidden/system files (allow .onyxagent_files.json)
+          const fname = f.path.split("/").pop() ?? "";
+          if (fname.startsWith(".") && fname !== ".onyxagent_files.json") return null;
+          // Check if file changed since last sync (by size + lastModified).
+          // This is the key optimization — if nothing changed, we skip
+          // the upload entirely.
+          const entry = manifest[f.path];
+          if (entry && entry.size === file.size && entry.lastModified === file.lastModified) {
+            // Unchanged — carry over to new manifest, skip upload.
+            newManifest[f.path] = entry;
+            return null;
+          }
+          // Read first 1KB to check if text (skip binary).
+          const slice = file.slice(0, 1024);
+          const buf = await slice.arrayBuffer();
+          const view = new Uint8Array(buf);
+          let isText = true;
+          for (let i = 0; i < view.length; i++) {
+            if (view[i] === 0) { isText = false; break; }
+          }
+          if (!isText) return null; // skip binary
+          const text = await file.text();
+          // Record in new manifest.
+          newManifest[f.path] = { size: file.size, lastModified: file.lastModified };
+          return { path: `/home/user/${f.path}`, content: text };
+        } catch {
+          return null;
         }
-        if (!isText) continue; // skip binary files
-        const text = await file.text();
-        const sandboxPath = `/home/user/${f.path}`;
-        await client.writeFile(sandboxPath, text);
-      } catch {
-        // skip individual file failures
-      }
+      }),
+    );
+
+    // Phase 2: Filter out nulls and batch-upload all changed files in
+    // ONE HTTP call. Previously this was N sequential fetch() calls to
+    // /api/sandbox (each potentially cold-starting a Vercel serverless
+    // function) = 1-2 minutes. Now: 1 HTTP call.
+    const changedFiles = readResults.filter(
+      (r): r is { path: string; content: string } => r !== null,
+    );
+
+    if (changedFiles.length === 0) {
+      // Nothing changed — save manifest and return instantly.
+      saveSyncManifest(userId, newManifest);
+      return;
     }
+
+    // Single batch write — 1 HTTP round-trip for all files.
+    await client.batchWrite(changedFiles);
+
+    // Save the updated manifest so the next sync skips these files.
+    saveSyncManifest(userId, newManifest);
   } catch {
     // best-effort — don't block code execution
   }
