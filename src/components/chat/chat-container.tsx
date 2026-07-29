@@ -250,10 +250,15 @@ export function ChatContainer() {
     return () => container.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Auto-scroll on every messages update unless user has scrolled up
+  // Auto-scroll on every messages update unless user has scrolled up.
+  // PERF: Use `behavior: "auto"` (instant) instead of "smooth" during
+  // streaming. `smooth` triggers a compositor animation on every 30ms
+  // text-delta flush, which stacks up and causes the browser to jank /
+  // freeze. Instant scroll is invisible to the user because the content
+  // is already at the bottom — there's nothing to animate.
   useEffect(() => {
     if (userScrolledUpRef.current) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
   const { commands: slashCommands } = useSlashCommands();
