@@ -591,14 +591,30 @@ export async function POST(req: NextRequest) {
             };
             try {
               // Try the code-interpreter's runCode with streaming callbacks.
-              // Some E2B templates support onStdout/onStderr on runCode.
+              //
+              // CRITICAL: The E2B code-interpreter SDK's `runCode` method
+              // invokes onStdout/onStderr with an `OutputMessage` OBJECT
+              // ({ line: string, timestamp: string, error: boolean }), NOT
+              // a plain string. Previously the callback was typed as
+              // `(data: string) => void` which lied to TypeScript — at
+              // runtime, `data` was the object, and `send({ type: "stdout",
+              // data })` serialized it as `{"line":"...","timestamp":"..."}`.
+              // The client then did `stdout += chunk.data` which concatenated
+              // the object → became `"[object Object]"`. The actual Python
+              // output only appeared at the very END via trailing logs
+              // (exec.logs.stdout.join), so Python NEVER streamed live — it
+              // all appeared at once at completion. This is the root cause
+              // of "python 3 isn't getting [streaming]".
+              //
+              // FIX: Extract `.line` from the OutputMessage object before
+              // sending it through the SSE stream.
               const exec = await (sandbox as unknown as {
                 runCode: (
                   code: string,
                   opts?: {
                     timeoutMs?: number;
-                    onStdout?: (data: string) => void;
-                    onStderr?: (data: string) => void;
+                    onStdout?: (msg: { line: string; timestamp?: string; error?: boolean }) => void;
+                    onStderr?: (msg: { line: string; timestamp?: string; error?: boolean }) => void;
                   },
                 ) => Promise<{
                   logs: { stdout?: string[]; stderr?: string[] };
@@ -606,8 +622,17 @@ export async function POST(req: NextRequest) {
                 }>;
               }).runCode(code, {
                 timeoutMs: timeout * 1000,
-                onStdout: (data: string) => send({ type: "stdout", data }),
-                onStderr: (data: string) => send({ type: "stderr", data }),
+                onStdout: (msg) => {
+                  // Extract the actual output line from the OutputMessage
+                  // object. The SDK passes { line, timestamp, error }.
+                  // Handle both object and string (for robustness).
+                  const line = typeof msg === "string" ? msg : (msg?.line ?? "");
+                  if (line) send({ type: "stdout", data: line });
+                },
+                onStderr: (msg) => {
+                  const line = typeof msg === "string" ? msg : (msg?.line ?? "");
+                  if (line) send({ type: "stderr", data: line });
+                },
               });
               // Send any remaining buffered logs (some templates only emit
               // logs at the end, not via callbacks).

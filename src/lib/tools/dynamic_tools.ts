@@ -85,11 +85,30 @@ function buildHandler(
         const code = `${pythonSource}\n\nimport json\n_result = run(**json.loads('${JSON.stringify(args).replace(/'/g, "\\'")}'))\nprint(json.dumps(_result if not isinstance(_result, str) else _result))`;
         const { getE2BClient } = await import("@/lib/e2b/client");
         const client = getE2BClient(apiKey, ctx.userId);
-        const r = await client.runPython(code);
+        // Use STREAMING Python execution so custom tool output appears
+        // live in the tool call card (via onToolOutput callback). Previously
+        // used the non-streaming client.runPython() which waited for the
+        // full execution before returning — custom Python tools appeared
+        // "stuck" until completion.
+        const onOutput = ctx.onToolOutput;
+        let stdout = "";
+        let stderr = "";
+        let exitCode = 0;
+        for await (const chunk of client.runPythonStream(code, { timeout: 60 })) {
+          if (chunk.type === "stdout" && chunk.data) {
+            stdout += chunk.data;
+            if (onOutput) onOutput("", chunk.data, "stdout");
+          } else if (chunk.type === "stderr" && chunk.data) {
+            stderr += chunk.data;
+            if (onOutput) onOutput("", chunk.data, "stderr");
+          } else if (chunk.type === "result") {
+            exitCode = chunk.exit_code ?? 0;
+          }
+        }
         return {
-          success: r.exit_code === 0,
-          output: r.stdout || r.stderr,
-          error: r.exit_code !== 0 ? r.stderr : undefined,
+          success: exitCode === 0,
+          output: stdout || stderr,
+          error: exitCode !== 0 ? stderr : undefined,
         };
       } catch (e) {
         return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };

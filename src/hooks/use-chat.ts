@@ -520,6 +520,21 @@ export function useChat(options: UseChatOptions = {}) {
               tool_call_id: string;
               content: string;
             };
+            // Flush any buffered tool_output for THIS tool_call_id before
+            // marking it completed — otherwise the last 50ms of live output
+            // (buffered by the tool_output batcher) is lost when the panel
+            // switches from RunningToolPanel to the completed result view.
+            if (toolOutputBuffer.current.has(tool_call_id)) {
+              const chunks = toolOutputBuffer.current.get(tool_call_id)!;
+              if (chunks.stdout) appendToolStreamingOutput(currentMessageIdRef.current, tool_call_id, chunks.stdout, "stdout");
+              if (chunks.stderr) appendToolStreamingOutput(currentMessageIdRef.current, tool_call_id, chunks.stderr, "stderr");
+              toolOutputBuffer.current.delete(tool_call_id);
+              // If this was the last buffered tool, clear the timer too.
+              if (toolOutputBuffer.current.size === 0 && toolOutputTimer.current) {
+                clearTimeout(toolOutputTimer.current);
+                toolOutputTimer.current = null;
+              }
+            }
             updateToolCallPart(currentMessageIdRef.current, tool_call_id, {
               result: content,
               status: "completed",
