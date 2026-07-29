@@ -446,11 +446,29 @@ export class E2BClient {
               }
             }
             if (msg.type === "stdout" && msg.data) {
-              fullStdout += msg.data;
-              yield { type: "stdout", data: msg.data };
+              // DEFENSIVE: Ensure data is always a string. The server-side
+              // runCode callback now extracts .line, but if any upstream
+              // code passes an object, coerce it to string here so we never
+              // concatenate "[object Object]" into the output.
+              const dataStr = typeof msg.data === "string"
+                ? msg.data
+                : (typeof msg.data === "object" && msg.data && "line" in msg.data
+                    ? String((msg.data as { line: unknown }).line ?? "")
+                    : String(msg.data));
+              if (dataStr) {
+                fullStdout += dataStr;
+                yield { type: "stdout", data: dataStr };
+              }
             } else if (msg.type === "stderr" && msg.data) {
-              fullStderr += msg.data;
-              yield { type: "stderr", data: msg.data };
+              const dataStr = typeof msg.data === "string"
+                ? msg.data
+                : (typeof msg.data === "object" && msg.data && "line" in msg.data
+                    ? String((msg.data as { line: unknown }).line ?? "")
+                    : String(msg.data));
+              if (dataStr) {
+                fullStderr += dataStr;
+                yield { type: "stderr", data: dataStr };
+              }
             } else if (msg.type === "result") {
               yield { type: "result", exit_code: msg.exit_code ?? 0 };
               return;
