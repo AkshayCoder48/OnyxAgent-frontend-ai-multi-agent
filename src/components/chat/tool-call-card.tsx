@@ -441,12 +441,22 @@ function RunningToolPanel({
   const stderr = toolCall.streamingError ?? "";
   const hasLiveOutput = stdout.length > 0 || stderr.length > 0;
 
+  // PERF+UX: Show "Writing tool_name…" for ALL tools (including custom tools)
+  // during BOTH the pending phase (LLM composing args) AND the running phase
+  // (tool executing). Previously only write_file/create_file showed "Writing"
+  // because their large `content` args kept them in "pending" longer. Other
+  // tools flashed through pending too fast to see the label, then showed only
+  // the liveCaption (e.g. "Running a terminal command…") during execution.
+  // Now every tool shows "Writing tool_name…" with the streaming cursor +
+  // spinner, so the user always sees what's being composed/executed.
+  const writingLabel = `Writing ${toolCall.name}…`;
+
   return (
     <div className="space-y-2 py-1">
       <div className="flex items-center gap-2 text-sm">
         <Loader2 className="text-brand h-3.5 w-3.5 animate-spin" aria-hidden="true" />
         <span className="text-foreground/80 font-medium">
-          {isStreaming ? `Writing ${toolCall.name}…` : `${liveCaption}…`}
+          {writingLabel}
         </span>
       </div>
       {/* Show streaming args while LLM is composing the tool call */}
