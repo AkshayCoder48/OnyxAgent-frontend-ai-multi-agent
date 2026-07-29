@@ -32,11 +32,16 @@ export const maxDuration = 300;
 
 const DEFAULT_CWD = "/home/user";
 const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — files persist for a full day
-// E2B free plan allows 20 concurrent sandboxes. We cache up to 18 locally
-// (leaving 2 headroom for sandboxes created by other devices/sessions on the
-// same API key). When we hit the limit, we kill the oldest cached sandbox
-// AND attempt to list+kill orphaned sandboxes on E2B's side.
-const MAX_SANDBOXES = 18;
+// SHARED SANDBOX ARCHITECTURE: one sandbox per API key, reused across ALL
+// conversations. OPFS is the single source of truth for files — the sandbox
+// is only a code runner. When the sandbox quota is exceeded (e.g. "20/20"),
+// we kill ALL sandboxes on the account, create ONE fresh sandbox, and OPFS
+// auto-syncs to it on the next run_python/run_terminal call.
+//
+// We keep MAX_SANDBOXES=3 in the local cache as headroom (the shared one
+// + maybe a stale entry during dead-sandbox recovery). The quota recovery
+// path enforces the "one sandbox" rule on E2B's side by killing orphans.
+const MAX_SANDBOXES = 3;
 
 /**
  * Normalize a file path to an absolute path rooted at /home/user (the
@@ -207,13 +212,42 @@ function isQuotaError(err: unknown): boolean {
   return /quota|limit reached|concurrent|too many|maximum|20\/20|\d+\/\d+/i.test(msg);
 }
 
+/**
+ * Kill ALL running sandboxes on the account (E2B's side). Used when we hit
+ * the quota limit — the shared-sandbox architecture means we only ever need
+ * ONE sandbox per API key, so when quota is exceeded we nuke everything and
+ * start fresh. OPFS is the source of truth, so no files are lost — the next
+ * run_python/run_terminal auto-syncs OPFS to the new sandbox.
+ *
+ * Best-effort — never throws. Returns the count of killed sandboxes.
+ */
+async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
+  try {
+    const paginator = Sandbox.list({ apiKey, limit: 50 });
+    const page = await paginator.nextItems();
+    const running = page.filter((s) => s.state !== "closed");
+    await Promise.all(
+      running.map((s) =>
+        Sandbox.kill(s.sandboxId, { apiKey }).catch(() => {}),
+      ),
+    );
+    if (running.length > 0) {
+      console.log(`[sandbox] killed ${running.length} sandbox(es) on account to free quota`);
+    }
+    return running.length;
+  } catch {
+    return 0;
+  }
+}
+
 /** Create a fresh sandbox and cache it. Used by getSandbox() and the
  *  dead-sandbox recovery path. Creates predefined folders best-effort.
  *
  *  QUOTA RECOVERY: if `Sandbox.create` fails with a quota error (e.g.
- *  "20/20 sandbox limit reached"), we kill ALL orphaned sandboxes on E2B's
- *  side (not in our local cache) and retry once. This handles the case where
- *  sandboxes accumulated from previous sessions / dead serverless instances. */
+ *  "20/20 sandbox limit reached"), we kill ALL sandboxes on the account
+ *  (enforcing the "one shared sandbox" rule), clear our local cache, and
+ *  retry the create. OPFS auto-syncs to the new sandbox on the next
+ *  run_python/run_terminal call — no files are lost. */
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
@@ -225,17 +259,17 @@ async function createAndCacheSandbox(
   try {
     sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 }); // 24 hours
   } catch (createErr) {
-    // QUOTA RECOVERY: kill orphaned sandboxes and retry.
+    // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
+    // The shared-sandbox architecture means we only ever need ONE sandbox
+    // per API key. When quota is exceeded, nuke everything and start fresh.
+    // OPFS is the source of truth — no files are lost.
     if (isQuotaError(createErr)) {
-      console.warn(`[sandbox] quota reached, killing orphaned sandboxes and retrying...`);
-      await killOrphanedSandboxes(apiKey);
-      // Also clear our local caches (in case they hold dead sandboxes that
-      // are still counted on E2B's side).
-      for (const [, entry] of sharedCache) void entry.sandbox.kill().catch(() => {});
-      for (const [, entry] of separateCache) void entry.sandbox.kill().catch(() => {});
+      console.warn(`[sandbox] quota exceeded, killing ALL sandboxes on account and retrying...`);
+      await killAllSandboxesOnAccount(apiKey);
+      // Clear our local caches (the sandboxes we just killed are dead).
       sharedCache.clear();
       separateCache.clear();
-      // Retry the create.
+      // Retry the create — should succeed now that the account has 0 sandboxes.
       sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 });
     } else {
       throw createErr;
