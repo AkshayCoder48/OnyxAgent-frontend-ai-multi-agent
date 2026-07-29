@@ -143,7 +143,7 @@ function ReasoningPanel({
               internalOpen ? "block" : "hidden",
             )}
           >
-            <pre className="text-foreground/85 max-h-80 overflow-y-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap sm:px-4">
+            <pre className="text-foreground/85 m-0 max-h-80 overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap sm:px-4">
               {text}
             </pre>
           </div>
@@ -411,12 +411,17 @@ export const MessageItem = React.memo(function MessageItem({
               )}
 
               {useParts ? (
-                /* Grouped timeline: reasoning/thinking blocks first, then tool calls, then text.
-                 * This prevents reasoning from appearing randomly between tool calls and text. */
+                /* Chronological timeline: reasoning/thinking blocks first (at
+                 * top), then tool calls + text interleaved in their ORIGINAL
+                 * order. This way text that was written BEFORE a tool call
+                 * appears above the tool card (not pushed below it), and text
+                 * written AFTER a tool call appears below it — matching what
+                 * the user saw during streaming. */
                 (() => {
                   const thinkingParts = parts.filter((p) => (p.type === "thinking" || p.type === "reasoning") && p.content);
-                  const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
-                  const textParts = parts.filter((p) => p.type === "text" && p.content);
+                  const chronologicalParts = parts.filter(
+                    (p) => (p.type === "tool" && p.toolCall) || (p.type === "text" && p.content),
+                  );
                   const lastPart = parts[parts.length - 1];
                   const isLastStreaming = Boolean(message.isStreaming);
 
@@ -424,33 +429,34 @@ export const MessageItem = React.memo(function MessageItem({
                     <>
                       {/* Reasoning/Thinking blocks (all at top) */}
                       {thinkingParts.map((part, i) => {
-                        const isLast = i === thinkingParts.length - 1 && toolParts.length === 0 && textParts.length === 0;
+                        const isLast = i === thinkingParts.length - 1 && chronologicalParts.length === 0;
                         if (part.type === "thinking") {
                           return <ThinkingBlock key={part.id} text={part.content} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                         }
                         return <ReasoningBlock key={part.id} text={part.content} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                       })}
 
-                      {/* Tool calls (after reasoning) */}
-                      {toolParts.map((part) => (
-                        <div key={part.id} className="w-full">
-                          <ToolCallCard toolCall={part.toolCall} />
-                        </div>
-                      ))}
-
-                      {/* Text answer (after tools) — each text part is a
-                       * separate TextBubble. Multi-round agent responses
-                       * (text → tool → text) show each round's text as a
-                       * distinct bubble. */}
-                      {textParts.map((part, i) => (
-                        <TextBubble
-                          key={part.id}
-                          text={part.content}
-                          showCursor={isLastStreaming && i === textParts.length - 1 && lastPart?.type === "text"}
-                          isUser={isUser}
-                          onCiteClick={onCiteClick}
-                        />
-                      ))}
+                      {/* Tool calls + text in chronological order */}
+                      {chronologicalParts.map((part, i) => {
+                        const isLastChronological = i === chronologicalParts.length - 1;
+                        if (part.type === "tool" && part.toolCall) {
+                          return (
+                            <div key={part.id} className="w-full">
+                              <ToolCallCard toolCall={part.toolCall} />
+                            </div>
+                          );
+                        }
+                        // Text part
+                        return (
+                          <TextBubble
+                            key={part.id}
+                            text={part.content ?? ""}
+                            showCursor={isLastStreaming && isLastChronological && lastPart?.type === "text"}
+                            isUser={isUser}
+                            onCiteClick={onCiteClick}
+                          />
+                        );
+                      })}
                     </>
                   );
                 })()

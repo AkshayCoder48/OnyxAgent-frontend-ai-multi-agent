@@ -540,16 +540,40 @@ async function searchLangSearch(
   }
 
   const data = await res.json();
-  // LangSearch returns { data: { query, summary, search_results: [{ title, url, snippet, summary, site_name, icon, ... }] } }
+  // ACTUAL LangSearch response structure (verified 2025-01):
+  //   {
+  //     "code": 200,
+  //     "data": {
+  //       "webPages": {
+  //         "value": [
+  //           {
+  //             "name": "Title here",      // ← title (NOT "title")
+  //             "url": "https://...",
+  //             "displayUrl": "https://...",
+  //             "snippet": "short excerpt",
+  //             "summary": "long markdown summary",
+  //             "datePublished": "...",
+  //             "dateLastCrawled": "..."
+  //           }
+  //         ]
+  //       }
+  //     }
+  //   }
+  //
+  // NOTE: There is NO top-level `summary` field and NO `search_results` array.
+  // The previous parser looked for `data.search_results` (wrong) and
+  // `data.summary` (doesn't exist) → always returned empty → always fell back
+  // to DuckDuckGo, making it look like LangSearch was "erroring".
   const raw: Array<Record<string, unknown>> =
-    (data?.data?.search_results as Array<Record<string, unknown>> | undefined) ??
-    (data?.search_results as Array<Record<string, unknown>> | undefined) ??
+    (data?.data?.webPages?.value as Array<Record<string, unknown>> | undefined) ??
+    (data?.data?.search_results as Array<Record<string, unknown>> | undefined) ?? // back-compat
     [];
 
   const results: SearchResult[] = [];
   for (const item of raw) {
+    // `name` is the title in Bing-style API (which LangSearch mirrors).
     const url = String(item.url || item.link || "");
-    const title = String(item.title || "");
+    const title = String(item.name || item.title || "");
     if (!url || !title) continue;
     const domain = getDomain(url);
     // Prefer `summary` (long-text, markdown) when present; fall back to snippet.
@@ -561,22 +585,10 @@ async function searchLangSearch(
       url,
       domain,
       description,
-      icon: item.icon ? String(item.icon) : getFavicon(domain),
-      source: String(item.site_name || item.source || "LangSearch"),
+      icon: getFavicon(domain),
+      source: domain || "LangSearch",
       provider: "LangSearch",
-    });
-  }
-
-  // Attach the overall LangSearch summary (if any) as a synthetic top result
-  // so the LLM sees the synthesized answer first.
-  const overallSummary = data?.data?.summary ?? data?.summary;
-  if (typeof overallSummary === "string" && overallSummary.trim()) {
-    results.unshift({
-      title: `LangSearch Summary: ${query}`,
-      url: "",
-      description: overallSummary,
-      source: "LangSearch (summary)",
-      provider: "LangSearch",
+      ...(item.datePublished ? { date: String(item.datePublished) } : {}),
     });
   }
 

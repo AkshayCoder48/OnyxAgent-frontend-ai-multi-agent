@@ -183,7 +183,13 @@ registerTool(
           if (dynamicKey) {
             // Use the dynamically-loaded key for this call.
             const client = getE2BClient(dynamicKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
-            void syncOpfsToSandbox(ctx.userId, dynamicKey);
+            // AWAIT the sync so the sandbox sees the latest OPFS files
+            // before the code runs. Previously this was fire-and-forget
+            // (`void syncOpfsToSandbox(...)`) which meant the terminal/
+            // Python command ran BEFORE the sync finished, seeing stale
+            // file content (e.g. `cat file.txt` showed old content after
+            // `write_file` had updated it).
+            await syncOpfsToSandbox(ctx.userId, dynamicKey);
             const onOutput = ctx.onToolOutput;
             let stdout = "";
             let stderr = "";
@@ -216,8 +222,10 @@ registerTool(
     }
 
     try {
-      // Auto-sync OPFS workspace files to the sandbox before running code.
-      void syncOpfsToSandbox(ctx.userId, apiKey);
+      // AWAIT the sync so the sandbox sees the latest OPFS files before
+      // the code runs. Previously fire-and-forget (`void ...`) which
+      // caused terminal/Python to see stale file content.
+      await syncOpfsToSandbox(ctx.userId, apiKey);
 
       const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const onOutput = ctx.onToolOutput;
@@ -291,8 +299,11 @@ registerTool(
     }
 
     try {
-      // Auto-sync OPFS workspace files to the sandbox before running code.
-      void syncOpfsToSandbox(ctx.userId, apiKey);
+      // AWAIT the sync so the sandbox sees the latest OPFS files before
+      // the terminal command runs. Previously fire-and-forget (`void ...`)
+      // which caused `cat file.txt` to show old content after `write_file`
+      // had updated it in OPFS — the sync hadn't finished yet.
+      await syncOpfsToSandbox(ctx.userId, apiKey);
 
       const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const onOutput = ctx.onToolOutput;
