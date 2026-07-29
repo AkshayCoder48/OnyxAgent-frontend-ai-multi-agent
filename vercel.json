@@ -1,4 +1,10 @@
 {
   "buildCommand": "next build",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "functions": {
+    "src/app/api/sandbox/route.ts": {
+      "maxDuration": 300,
+      "memory": 1024
+    }
+  }
 }

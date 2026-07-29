@@ -535,6 +535,13 @@ export async function POST(req: NextRequest) {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache, no-transform",
             Connection: "keep-alive",
+            // CRITICAL for Vercel: without `x-vercel-no-buffering: 1`, Vercel's
+            // serverless platform buffers the entire response and only flushes
+            // when the function completes — defeating the point of SSE. This
+            // header tells Vercel's proxy to stream chunks as they arrive.
+            "x-vercel-no-buffering": "1",
+            // Disable Next.js response buffering too.
+            "x-accel-buffering": "no",
           },
         });
       }
@@ -630,6 +637,8 @@ export async function POST(req: NextRequest) {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache, no-transform",
             Connection: "keep-alive",
+            "x-vercel-no-buffering": "1",
+            "x-accel-buffering": "no",
           },
         });
       }
