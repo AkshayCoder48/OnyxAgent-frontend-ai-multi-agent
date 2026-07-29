@@ -158,6 +158,13 @@ export function useChat(options: UseChatOptions = {}) {
   const toolArgBuffer = useRef<Map<number, { id: string; name: string; args: string }>>(new Map());
   const toolArgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Batched tool_output deltas — prevents store update spam when the sandbox
+  // emits stdout/stderr chunks rapidly (e.g. `pip install` with 100s of lines).
+  // Without batching, each chunk triggers a full React re-render. 50ms keeps
+  // output feeling live (~20fps) while batching 5-10 chunks per render.
+  const toolOutputBuffer = useRef<Map<string, { stdout: string; stderr: string }>>(new Map());
+  const toolOutputTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Flush remaining text buffer immediately (called on final_result, error, complete)
   const flushTextDelta = useCallback(() => {
     if (textDeltaTimer.current) { clearTimeout(textDeltaTimer.current); textDeltaTimer.current = null; }
@@ -177,7 +184,16 @@ export function useChat(options: UseChatOptions = {}) {
     }
     if (toolArgTimer.current) { clearTimeout(toolArgTimer.current); toolArgTimer.current = null; }
     toolArgBuffer.current.clear();
-  }, [appendTextDelta, appendThinkingDelta, appendReasoningDelta]);
+    // Flush tool_output buffer immediately so the final chunks show before result.
+    if (toolOutputTimer.current) { clearTimeout(toolOutputTimer.current); toolOutputTimer.current = null; }
+    if (currentMessageIdRef.current && toolOutputBuffer.current.size > 0) {
+      for (const [tcId, chunks] of toolOutputBuffer.current) {
+        if (chunks.stdout) appendToolStreamingOutput(currentMessageIdRef.current, tcId, chunks.stdout, "stdout");
+        if (chunks.stderr) appendToolStreamingOutput(currentMessageIdRef.current, tcId, chunks.stderr, "stderr");
+      }
+      toolOutputBuffer.current.clear();
+    }
+  }, [appendTextDelta, appendThinkingDelta, appendReasoningDelta, appendToolStreamingOutput]);
   // Outbound queue: messages typed while a turn is in flight. Held here (not
   // in the chat history) so the UI can surface them as cancellable "pending"
   // entries above the input. The ref is the source of truth for the drainer
@@ -541,21 +557,30 @@ export function useChat(options: UseChatOptions = {}) {
 
         case "tool_output": {
           // Real-time streaming output from a tool (run_python, run_terminal).
-          // Append the chunk to the tool call's streamingOutput / streamingError
-          // field so the RunningToolPanel renders it live. The final
-          // `tool_result` event later replaces these with the structured result.
+          // Buffer + flush every 50ms to prevent store update spam when the
+          // sandbox emits chunks rapidly (e.g. `pip install` = 100s of lines).
+          // Without batching, each chunk triggers a full React re-render.
           if (currentMessageIdRef.current) {
             const { tool_call_id, content, type } = wsEvent.data as {
               tool_call_id: string;
               content: string;
               type: "stdout" | "stderr";
             };
-            appendToolStreamingOutput(
-              currentMessageIdRef.current,
-              tool_call_id,
-              content,
-              type,
-            );
+            const existing = toolOutputBuffer.current.get(tool_call_id) ?? { stdout: "", stderr: "" };
+            if (type === "stdout") existing.stdout += content;
+            else existing.stderr += content;
+            toolOutputBuffer.current.set(tool_call_id, existing);
+            if (!toolOutputTimer.current) {
+              toolOutputTimer.current = setTimeout(() => {
+                toolOutputTimer.current = null;
+                if (!currentMessageIdRef.current) return;
+                for (const [tcId, chunks] of toolOutputBuffer.current) {
+                  if (chunks.stdout) appendToolStreamingOutput(currentMessageIdRef.current, tcId, chunks.stdout, "stdout");
+                  if (chunks.stderr) appendToolStreamingOutput(currentMessageIdRef.current, tcId, chunks.stderr, "stderr");
+                }
+                toolOutputBuffer.current.clear();
+              }, 50);
+            }
           }
           break;
         }

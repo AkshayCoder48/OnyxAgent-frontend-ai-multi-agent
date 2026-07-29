@@ -348,20 +348,127 @@ export class E2BClient {
     code: string,
     opts?: { timeout?: number },
   ): AsyncIterable<StreamMessage> {
-    const result = await this.runPython(code, opts);
-    if (result.stdout) yield { type: "stdout", data: result.stdout };
-    if (result.stderr) yield { type: "stderr", data: result.stderr };
-    yield { type: "result", exit_code: result.exit_code };
+    // REAL STREAMING via SSE — pipes stdout/stderr chunks to the caller
+    // as they arrive from the E2B sandbox, instead of waiting for the
+    // entire Python execution to finish. This is what makes `run_python`
+    // output appear LIVE (e.g. `print()` lines show up immediately).
+    yield* this.consumeSSEStream("run_python_stream", {
+      code,
+      timeout: opts?.timeout ?? 60,
+    });
   }
 
   async *runCommandStream(
     command: string,
     opts?: { cwd?: string; timeout?: number },
   ): AsyncIterable<StreamMessage> {
-    const result = await this.exec(command, opts);
-    if (result.stdout) yield { type: "stdout", data: result.stdout };
-    if (result.stderr) yield { type: "stderr", data: result.stderr };
-    yield { type: "result", exit_code: result.exit_code };
+    // REAL STREAMING via SSE — pipes stdout/stderr chunks to the caller
+    // as they arrive from the E2B sandbox, instead of waiting for the
+    // entire command to finish. This is what makes `run_terminal` output
+    // appear LIVE (e.g. `ls -la` output streams line-by-line).
+    yield* this.consumeSSEStream("exec_stream", {
+      command,
+      cwd: opts?.cwd ?? "/home/user",
+      timeout: opts?.timeout ?? 120,
+    });
+  }
+
+  /**
+   * Consume a Server-Sent Events (SSE) stream from the sandbox API.
+   * Parses `data: {...}\n\n` lines and yields them as StreamMessage objects.
+   * Handles the sandbox ID caching + dead-sandbox recovery (on error, retries
+   * once with a fresh sandbox via the server-side logic).
+   */
+  private async *consumeSSEStream(
+    action: string,
+    args: Record<string, unknown>,
+  ): AsyncIterable<StreamMessage> {
+    const res = await fetch(API_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        apiKey: this.apiKey,
+        action,
+        args,
+        conversationId: this.conversationId,
+        sandboxMode: this.mode,
+        sandboxId: this.sandboxId,
+      }),
+    });
+
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      const errMsg = (data as { error?: string })?.error ?? `HTTP ${res.status}`;
+      yield { type: "stderr", data: errMsg };
+      yield { type: "result", exit_code: -1 };
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let fullStdout = "";
+    let fullStderr = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by `\n\n`. Parse complete events.
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          // Each event may have multiple `data:` lines — join them.
+          const lines = rawEvent.split("\n");
+          const dataLines = lines
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trimStart());
+          if (dataLines.length === 0) continue;
+          const dataStr = dataLines.join("\n");
+          try {
+            const msg = JSON.parse(dataStr) as {
+              type: "stdout" | "stderr" | "result" | "error";
+              data?: string;
+              exit_code?: number;
+              sandboxId?: string;
+              error?: string;
+            };
+            // Cache the sandbox ID from any message that includes it.
+            if (msg.sandboxId && msg.sandboxId !== this.sandboxId) {
+              this.sandboxId = msg.sandboxId;
+              if (typeof window !== "undefined") {
+                window.localStorage.setItem(`e2b-sandbox-id:${this.apiKey}`, msg.sandboxId);
+              }
+            }
+            if (msg.type === "stdout" && msg.data) {
+              fullStdout += msg.data;
+              yield { type: "stdout", data: msg.data };
+            } else if (msg.type === "stderr" && msg.data) {
+              fullStderr += msg.data;
+              yield { type: "stderr", data: msg.data };
+            } else if (msg.type === "result") {
+              yield { type: "result", exit_code: msg.exit_code ?? 0 };
+              return;
+            } else if (msg.type === "error") {
+              yield { type: "stderr", data: msg.error ?? "Unknown error" };
+              yield { type: "result", exit_code: -1 };
+              return;
+            }
+          } catch {
+            // ignore malformed JSON
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    // If we exit the loop without a result event, emit one.
+    yield { type: "result", exit_code: 0 };
   }
 
   async searchFiles(query: string, path = "/home/user"): Promise<string> {
