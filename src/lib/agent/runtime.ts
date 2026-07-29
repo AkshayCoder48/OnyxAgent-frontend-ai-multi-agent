@@ -1256,11 +1256,12 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
 
     // Execute ALL tools in parallel — every `tool_call` event is emitted
     // instantly (so the UI renders all cards simultaneously), then every
-    // handler runs concurrently via `Promise.all`. Results are emitted as
-    // each tool finishes (`tool_result` + `tool_output` streaming still
-    // works per-tool) and pushed to `messages` / `allToolCalls` in the
-    // original request order so the assistant's tool_calls array stays
-    // aligned with the tool role replies.
+    // handler runs concurrently. CRITICAL: each tool's `tool_result` is
+    // emitted AS IT FINISHES (via per-promise .then()), NOT after all tools
+    // complete. Previously `await Promise.all(...)` blocked until ALL tools
+    // finished before emitting ANY result — making tools feel queued even
+    // though they ran concurrently internally. Now a fast tool completes and
+    // shows its result immediately while a slow tool is still running.
     emit({ type: "call_tools_start", timestamp: nowISO() });
 
     // 1) Emit every `tool_call` event up front so cards render together.
@@ -1281,20 +1282,39 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     }
 
     // 2) Kick off every handler in parallel. Each promise resolves to a
-    //    normalized result record; failures are captured per-tool so one
-    //    slow/broken tool never blocks the others.
-    const parallelResults = await Promise.all(
-      roundResult.toolCalls.map(async (tc) => {
+    //    normalized result record. We attach a `.then()` to each promise that
+    //    emits the `tool_result` + pushes to messages/allToolCalls AS SOON AS
+    //    that tool finishes — no waiting for siblings. Then we `await
+    //    Promise.all` only to know when ALL are done before looping back for
+    //    the next LLM round (the API needs all tool results before the next
+    //    message). This way: tools run concurrently, results appear as each
+    //    finishes, and the next LLM round starts as soon as the slowest tool
+    //    completes.
+    const resultPromises = roundResult.toolCalls.map(
+      async (tc): Promise<void> => {
         const toolDef = getTool(tc.name);
         if (!toolDef) {
           const errMsg = `Tool '${tc.name}' is not registered`;
-          return {
-            tc,
-            result: { error: errMsg } as unknown,
-            status: "error" as ToolCall["status"],
-            fullResultStr: JSON.stringify({ error: errMsg }),
-            resultStr: JSON.stringify({ error: errMsg }),
-          };
+          const fullResultStr = JSON.stringify({ error: errMsg });
+          emit({
+            type: "tool_result",
+            data: { tool_call_id: tc.id, content: fullResultStr },
+            timestamp: nowISO(),
+          });
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            name: tc.name,
+            content: fullResultStr,
+          });
+          allToolCalls.push({
+            id: tc.id,
+            name: tc.name,
+            args: tc.args,
+            result: { error: errMsg },
+            status: "error",
+          });
+          return;
         }
 
         const effectiveArgs = tc.args;
@@ -1332,36 +1352,36 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
           status = "error";
         }
 
+        // Emit result IMMEDIATELY — no waiting for sibling tools.
         const fullResultStr =
           typeof result === "string" ? result : JSON.stringify(result);
         const resultStr = truncateResult(tc.name, fullResultStr);
-        return { tc, result, status, fullResultStr, resultStr };
-      }),
+        emit({
+          type: "tool_result",
+          data: { tool_call_id: tc.id, content: fullResultStr },
+          timestamp: nowISO(),
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          name: tc.name,
+          content: resultStr,
+        });
+        allToolCalls.push({
+          id: tc.id,
+          name: tc.name,
+          args: effectiveArgs,
+          result,
+          status,
+        });
+      },
     );
 
-    // 3) Emit `tool_result` events + push to messages/allToolCalls in the
-    //    original request order (Promise.all preserves array order, so the
-    //    tool role replies line up with the assistant's tool_calls array).
-    for (const r of parallelResults) {
-      emit({
-        type: "tool_result",
-        data: { tool_call_id: r.tc.id, content: r.fullResultStr },
-        timestamp: nowISO(),
-      });
-      messages.push({
-        role: "tool",
-        tool_call_id: r.tc.id,
-        name: r.tc.name,
-        content: r.resultStr,
-      });
-      allToolCalls.push({
-        id: r.tc.id,
-        name: r.tc.name,
-        args: r.tc.args,
-        result: r.result,
-        status: r.status,
-      });
-    }
+    // Wait for ALL tools to finish before looping back for the next LLM round.
+    // The API requires all tool results in the message history before the
+    // next message. But each tool's result was already emitted above as it
+    // completed — so the UI shows results progressively.
+    await Promise.all(resultPromises);
 
     // Loop back for the next round.
   }
