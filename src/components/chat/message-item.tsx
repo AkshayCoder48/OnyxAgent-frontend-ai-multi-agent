@@ -141,12 +141,12 @@ function ReasoningPanel({
           </div>
         </div>
 
-        {/* Content layer */}
+        {/* Content layer — text centered within the box */}
         {!isEmpty && (
           <div
             className={cn(
-              "reasoning-panel-fill border-foreground/8 block w-full border-t",
-              internalOpen ? "block" : "hidden",
+              "reasoning-panel-fill border-foreground/8 flex w-full items-center justify-center border-t",
+              internalOpen ? "flex" : "hidden",
             )}
             style={{ width: "100%" }}
           >

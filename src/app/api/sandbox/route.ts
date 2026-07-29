@@ -497,8 +497,30 @@ export async function POST(req: NextRequest) {
             const send = (obj: Record<string, unknown>) => {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
             };
+            // FORCE LINE-BUFFERING so all commands stream live.
+            // When a command runs without a TTY (which is the case in E2B's
+            // commands.run), most programs use BLOCK buffering (4KB chunks)
+            // for stdout AND stderr. This means `curl`, `wget`, `cat`,
+            // `echo`, `ls`, etc. only emit output in big 4KB bursts —
+            // making them appear "not streaming" even though onStdout/
+            // onStderr are correctly wired. `pip` happens to flush per-line
+            // because Python's logging uses line-buffering internally.
+            //
+            // `stdbuf -oL -eL` forces line-buffering on both stdout (-oL)
+            // and stderr (-eL), so EVERY line is flushed immediately as
+            // it's written. This makes ALL commands stream live, not just
+            // the ones that happen to use line-buffering by default.
+            //
+            // We skip stdbuf for commands that already include shell
+            // operators (|, &&, ;, >) because stdbuf only wraps a single
+            // command, not a pipeline. For those, the user accepts slightly
+            // burstier output (or they can wrap individual commands).
+            const hasShellOperators = /[|&;>]/.test(command);
+            const streamedCommand = hasShellOperators
+              ? command
+              : `stdbuf -oL -eL ${command}`;
             try {
-              await sandbox.commands.run(command, {
+              await sandbox.commands.run(streamedCommand, {
                 cwd,
                 timeoutMs: timeout * 1000,
                 onStdout: (data: string) => send({ type: "stdout", data }),
@@ -511,7 +533,7 @@ export async function POST(req: NextRequest) {
                 evictCacheEntry(sandboxMode, key);
                 try {
                   const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
-                  await fresh.commands.run(command, {
+                  await fresh.commands.run(streamedCommand, {
                     cwd,
                     timeoutMs: timeout * 1000,
                     onStdout: (data: string) => send({ type: "stdout", data }),
@@ -595,10 +617,11 @@ export async function POST(req: NextRequest) {
               if (trailingStderr) send({ type: "stderr", data: trailingStderr });
               send({ type: "result", exit_code: exec.error ? 1 : 0, sandboxId: sandbox.sandboxId });
             } catch (pyErr) {
-              // Fallback: python3 -c with streaming
+              // Fallback: python3 -c with streaming + forced line-buffering
+              // via stdbuf so print() output flushes immediately.
               try {
                 const escaped = code.replace(/'/g, "'\\''");
-                await sandbox.commands.run(`python3 -c '${escaped}'`, {
+                await sandbox.commands.run(`stdbuf -oL -eL python3 -c '${escaped}'`, {
                   cwd: DEFAULT_CWD,
                   timeoutMs: timeout * 1000,
                   onStdout: (data: string) => send({ type: "stdout", data }),
@@ -612,7 +635,7 @@ export async function POST(req: NextRequest) {
                   try {
                     const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
                     const escaped = code.replace(/'/g, "'\\''");
-                    await fresh.commands.run(`python3 -c '${escaped}'`, {
+                    await fresh.commands.run(`stdbuf -oL -eL python3 -c '${escaped}'`, {
                       cwd: DEFAULT_CWD,
                       timeoutMs: timeout * 1000,
                       onStdout: (data: string) => send({ type: "stdout", data }),
