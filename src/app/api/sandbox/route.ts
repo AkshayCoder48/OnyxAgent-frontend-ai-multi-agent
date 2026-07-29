@@ -468,6 +468,172 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      case "exec_stream": {
+        // REAL STREAMING via Server-Sent Events (SSE). The E2B SDK supports
+        // onStdout/onStderr callbacks that fire as output is produced — we
+        // pipe each chunk to the client as an SSE `data:` line. This is what
+        // makes `run_terminal` / `run_python` output appear LIVE instead of
+        // all-at-once after the command finishes.
+        //
+        // SSE format:
+        //   data: {"type":"stdout","data":"hello\n"}\n\n
+        //   data: {"type":"stderr","data":"error!\n"}\n\n
+        //   data: {"type":"result","exit_code":0}\n\n
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(controller) {
+            let sandbox: Sandbox;
+            try {
+              sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", error: errMsg })}\n\n`));
+              controller.close();
+              return;
+            }
+            const command = args.command as string;
+            const cwd = (args.cwd as string) ?? DEFAULT_CWD;
+            const timeout = (args.timeout as number) ?? 120;
+            const send = (obj: Record<string, unknown>) => {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+            };
+            try {
+              await sandbox.commands.run(command, {
+                cwd,
+                timeoutMs: timeout * 1000,
+                onStdout: (data: string) => send({ type: "stdout", data }),
+                onStderr: (data: string) => send({ type: "stderr", data }),
+              });
+              send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
+            } catch (execErr) {
+              if (isDeadSandboxError(execErr)) {
+                const key = cacheKey(apiKey, conversationId, sandboxMode);
+                evictCacheEntry(sandboxMode, key);
+                try {
+                  const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
+                  await fresh.commands.run(command, {
+                    cwd,
+                    timeoutMs: timeout * 1000,
+                    onStdout: (data: string) => send({ type: "stdout", data }),
+                    onStderr: (data: string) => send({ type: "stderr", data }),
+                  });
+                  send({ type: "result", exit_code: 0, sandboxId: fresh.sandboxId });
+                } catch (retryErr) {
+                  const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                  send({ type: "error", error: errMsg });
+                }
+              } else {
+                const errMsg = execErr instanceof Error ? execErr.message : String(execErr);
+                send({ type: "error", error: errMsg });
+              }
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+          },
+        });
+      }
+
+      case "run_python_stream": {
+        // REAL STREAMING for Python via SSE. Uses the code-interpreter's
+        // runCode with onStdout/onStderr (if available) or falls back to
+        // the shell `python3 -c` with streaming.
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(controller) {
+            let sandbox: Sandbox;
+            try {
+              sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", error: errMsg })}\n\n`));
+              controller.close();
+              return;
+            }
+            const code = args.code as string;
+            const timeout = (args.timeout as number) ?? 60;
+            const send = (obj: Record<string, unknown>) => {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+            };
+            try {
+              // Try the code-interpreter's runCode with streaming callbacks.
+              // Some E2B templates support onStdout/onStderr on runCode.
+              const exec = await (sandbox as unknown as {
+                runCode: (
+                  code: string,
+                  opts?: {
+                    timeoutMs?: number;
+                    onStdout?: (data: string) => void;
+                    onStderr?: (data: string) => void;
+                  },
+                ) => Promise<{
+                  logs: { stdout?: string[]; stderr?: string[] };
+                  error?: { value?: string };
+                }>;
+              }).runCode(code, {
+                timeoutMs: timeout * 1000,
+                onStdout: (data: string) => send({ type: "stdout", data }),
+                onStderr: (data: string) => send({ type: "stderr", data }),
+              });
+              // Send any remaining buffered logs (some templates only emit
+              // logs at the end, not via callbacks).
+              const trailingStdout = (exec.logs.stdout ?? []).join("\n");
+              const trailingStderr = exec.error?.value ?? (exec.logs.stderr ?? []).join("\n");
+              if (trailingStdout) send({ type: "stdout", data: trailingStdout });
+              if (trailingStderr) send({ type: "stderr", data: trailingStderr });
+              send({ type: "result", exit_code: exec.error ? 1 : 0, sandboxId: sandbox.sandboxId });
+            } catch (pyErr) {
+              // Fallback: python3 -c with streaming
+              try {
+                const escaped = code.replace(/'/g, "'\\''");
+                await sandbox.commands.run(`python3 -c '${escaped}'`, {
+                  cwd: DEFAULT_CWD,
+                  timeoutMs: timeout * 1000,
+                  onStdout: (data: string) => send({ type: "stdout", data }),
+                  onStderr: (data: string) => send({ type: "stderr", data }),
+                });
+                send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
+              } catch (fallbackErr) {
+                if (isDeadSandboxError(fallbackErr)) {
+                  const key = cacheKey(apiKey, conversationId, sandboxMode);
+                  evictCacheEntry(sandboxMode, key);
+                  try {
+                    const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
+                    const escaped = code.replace(/'/g, "'\\''");
+                    await fresh.commands.run(`python3 -c '${escaped}'`, {
+                      cwd: DEFAULT_CWD,
+                      timeoutMs: timeout * 1000,
+                      onStdout: (data: string) => send({ type: "stdout", data }),
+                      onStderr: (data: string) => send({ type: "stderr", data }),
+                    });
+                    send({ type: "result", exit_code: 0, sandboxId: fresh.sandboxId });
+                  } catch (retryErr) {
+                    const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                    send({ type: "error", error: errMsg });
+                  }
+                } else {
+                  const errMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+                  send({ type: "error", error: errMsg });
+                }
+              }
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+          },
+        });
+      }
+
       case "run_python": {
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         const code = args.code as string;

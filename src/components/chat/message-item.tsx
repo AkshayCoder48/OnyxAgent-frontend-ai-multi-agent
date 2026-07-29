@@ -66,7 +66,7 @@ function ReasoningPanel({
   return (
     <div
       className={cn(
-        "reasoning-panel group relative mb-2 overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
+        "reasoning-panel group relative mb-2 w-full overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
         variant === "thinking"
           ? "border-foreground/10 bg-muted/50"
           : "border-foreground/10 border-dashed bg-muted/40",
@@ -83,11 +83,18 @@ function ReasoningPanel({
       >
         <span
           className={cn(
-            "inline-block h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300",
-            isStreaming ? "bg-primary" : "bg-foreground/40",
-            isStreaming && "animate-pulse",
+            "inline-flex h-3 w-3 shrink-0 items-center justify-center",
           )}
-        />
+          aria-hidden="true"
+        >
+          <span
+            className={cn(
+              "inline-block h-1.5 w-1.5 rounded-full transition-colors duration-300",
+              isStreaming ? "bg-primary" : "bg-foreground/40",
+              isStreaming && "animate-pulse",
+            )}
+          />
+        </span>
         <span className="text-foreground/80 font-mono text-[10px] font-medium tracking-wider uppercase">
           {label}
         </span>
@@ -114,7 +121,7 @@ function ReasoningPanel({
       {/* Body — two layers that cross-fade:
           1. Skeleton shimmer (only while streaming + empty).
           2. Real content (fades in once `text` arrives). */}
-      <div className="relative">
+      <div className="relative w-full">
         {/* Skeleton layer */}
         <div
           className={cn(
@@ -139,11 +146,11 @@ function ReasoningPanel({
         {!isEmpty && (
           <div
             className={cn(
-              "reasoning-panel-fill border-foreground/8 border-t",
+              "reasoning-panel-fill border-foreground/8 w-full border-t",
               internalOpen ? "block" : "hidden",
             )}
           >
-            <pre className="text-foreground/85 m-0 max-h-80 overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap sm:px-4">
+            <pre className="text-foreground/85 m-0 block w-full max-w-full max-h-80 overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words sm:px-4">
               {text}
             </pre>
           </div>
