@@ -133,41 +133,38 @@ export function useChat(options: UseChatOptions = {}) {
   }, []);
   const currentGroupIdRef = useRef<string | null>(null);
 
-  // Character-by-character drip system — buffer AI text deltas, then reveal
-  // them one character at a time for a smooth typewriter effect.
+  // ── STREAMING BUFFERS ──────────────────────────────────────────────
+  // Every delta type is buffered + flushed on a timer so React doesn't
+  // re-render the whole message tree on every single token. Previously
+  // text_delta had NO batching (0ms) which caused "4 lines at once",
+  // stuttering, and full app freezes on long responses. Now every delta
+  // type goes through the same buffer+flush pattern.
+  //
+  //   text_delta      → 30ms  (real-time feel, ~33 updates/sec)
+  //   thinking_delta  → 100ms (less critical, heavier markdown)
+  //   reasoning_delta → 100ms
+  //   tool_call_delta → 30ms  (args streaming)
+  //
+  // 30ms is the sweet spot: feels instant to humans (film is 24fps / 41ms)
+  // but lets React batch 3-5 SSE tokens into a single render pass.
   const textDeltaBuffer = useRef<string>("");
-  const dripTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const textDeltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Batched thinking/reasoning deltas — prevents lag on fast models
   const thinkingBuffer = useRef<string>("");
   const thinkingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reasoningBuffer = useRef<string>("");
   const reasoningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Batched tool call arg deltas — prevents lag and duplicate pending tool calls
   const toolArgBuffer = useRef<Map<number, { id: string; name: string; args: string }>>(new Map());
   const toolArgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Start the drip interval — reveals one character every 10ms for a fast
-  // typewriter effect. Fixed 10ms per the user's request.
-  const ensureDrip = useCallback(() => {
-    if (dripTimer.current) return;
-    dripTimer.current = setInterval(() => {
-      if (!textDeltaBuffer.current || !currentMessageIdRef.current) return;
-      // Reveal exactly 1 character per 10ms tick (≈100 chars/sec).
-      const chunk = textDeltaBuffer.current.slice(0, 1);
-      textDeltaBuffer.current = textDeltaBuffer.current.slice(1);
-      if (chunk) {
-        appendTextDelta(currentMessageIdRef.current, chunk);
-      }
-    }, 10); // Fixed 10ms per character
-  }, [appendTextDelta]);
-
-  // Flush remaining buffers immediately (called on final_result, error, complete)
+  // Flush remaining text buffer immediately (called on final_result, error, complete)
   const flushTextDelta = useCallback(() => {
-    // Drip timer is no longer used — text deltas are appended directly.
-    if (dripTimer.current) { clearInterval(dripTimer.current); dripTimer.current = null; }
-    textDeltaBuffer.current = "";
+    if (textDeltaTimer.current) { clearTimeout(textDeltaTimer.current); textDeltaTimer.current = null; }
+    if (textDeltaBuffer.current && currentMessageIdRef.current) {
+      appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current);
+      textDeltaBuffer.current = "";
+    }
     if (thinkingTimer.current) { clearTimeout(thinkingTimer.current); thinkingTimer.current = null; }
     if (thinkingBuffer.current && currentMessageIdRef.current) {
       appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current);
@@ -298,14 +295,28 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "text_delta": {
-          // Append the delta directly to the current message. No drip timer
-          // — text appears at the same speed the AI outputs it (real-time).
-          // The CSS fade-in animation on each character is handled by the
-          // `stream-char` class in the TextBubble component.
+          // Buffer text deltas and flush every 30ms. This is the hot path —
+          // without batching, every token triggers a full Zustand store
+          // update + React re-render of the entire message list + markdown
+          // re-parse, which causes "4 lines at once", stuttering, and
+          // eventual app freeze on long responses. 30ms batches 3-5 tokens
+          // per render pass while still feeling real-time (24fps = 41ms).
+          if (!currentMessageIdRef.current) {
+            createNewMessage("");
+          }
           if (currentMessageIdRef.current) {
             const content = (wsEvent.data as { index: number; content: string }).content;
             if (content) {
-              appendTextDelta(currentMessageIdRef.current, content);
+              textDeltaBuffer.current += content;
+              if (!textDeltaTimer.current) {
+                textDeltaTimer.current = setTimeout(() => {
+                  if (textDeltaBuffer.current && currentMessageIdRef.current) {
+                    appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current);
+                    textDeltaBuffer.current = "";
+                  }
+                  textDeltaTimer.current = null;
+                }, 30);
+              }
             }
           }
           break;

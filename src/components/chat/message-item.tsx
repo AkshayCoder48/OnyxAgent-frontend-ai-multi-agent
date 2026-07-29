@@ -197,6 +197,10 @@ function TextBubble({
         <div
           className={cn(
             "prose-sm max-w-none break-words text-sm",
+            // PERF: Apply `content-visibility: auto` ONLY to non-streaming
+            // messages. On streaming messages it causes re-layout on every
+            // 30ms text-delta flush (height changes → intrinsic-size recalc).
+            !showCursor && "prose-sm-static",
             showCursor && "stream-reveal stream-batch-fade",
           )}
         >
@@ -251,16 +255,41 @@ interface MessageItemProps {
   onRegenerate?: () => void;
 }
 
-export function MessageItem({ message, groupPosition, showFooter = true, onRegenerate }: MessageItemProps) {
+export const MessageItem = React.memo(function MessageItem({
+  message,
+  groupPosition,
+  showFooter = true,
+  onRegenerate,
+}: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
   const openSources = useSourcesPanelStore((s) => s.open);
   const { user: authUser, avatarVersion } = useAuthStore();
   const isGrouped = groupPosition && groupPosition !== "single";
 
-  const sources = !isUser ? extractSources(message) : [];
+  // PERF: Memoize extractSources + parts filtering so they don't re-run on
+  // every parent re-render. These were previously called inline on every
+  // render, causing O(n) work per message per store update.
+  const sources = React.useMemo(
+    () => (!isUser ? extractSources(message) : []),
+    [isUser, message],
+  );
   const hasSources = sources.length > 0 && !message.isStreaming;
-  const onCiteClick = hasSources ? (index: number) => openSources(sources, index) : undefined;
+  const onCiteClick = React.useMemo(
+    () => (hasSources ? (index: number) => openSources(sources, index) : undefined),
+    [hasSources, sources, openSources],
+  );
+
+  // PERF: Memoize the filtered parts array (removes research/todo tool calls).
+  // Previously this filter ran on every render for every message.
+  const parts = React.useMemo(
+    () =>
+      (message.parts ?? []).filter(
+        (p) => !(p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name)),
+      ),
+    [message.parts],
+  );
+  const useParts = !isUser && parts.length > 0;
 
   return (
     <div
@@ -353,14 +382,8 @@ export function MessageItem({ message, groupPosition, showFooter = true, onRegen
           })()}
 
         {(() => {
-          const rawParts = message.parts ?? [];
-          // Filter out todo-tool calls — they're aggregated in the live
-          // ResearchPanel above the chat input instead of cluttering the
-          // transcript with one card per `read_todos` / `add_todo` / etc.
-          const parts = rawParts.filter(
-            (p) => !(p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name)),
-          );
-          const useParts = !isUser && parts.length > 0;
+          // `parts` is now memoized at the top of the component (above).
+          const usePartsLocal = useParts;
 
           // "Thinking…" placeholder — shown until anything streams in.
           const showPlaceholder =
@@ -517,7 +540,32 @@ export function MessageItem({ message, groupPosition, showFooter = true, onRegen
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  // PERF: Custom comparator — only re-render when the message content or
+  // streaming state actually changed. This is the single biggest win: without
+  // it, every 30ms text-delta flush re-renders ALL messages in the list (even
+  // ones that haven't changed). With it, only the streaming message re-renders.
+  //
+  // We compare the fields that affect rendering:
+  //   - message.content (the text — changes on every delta for the streaming msg)
+  //   - message.isStreaming (toggles once at start/end)
+  //   - message.parts (array — shallow ref check; the store creates a new array
+  //     only for the changed message, so ref equality is sufficient)
+  //   - message.toolCalls (same — new array only when changed)
+  //   - groupPosition / showFooter / onRegenerate (parent props)
+  //
+  // If any of these differ, re-render. Otherwise skip.
+  return (
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.parts === next.message.parts &&
+    prev.message.toolCalls === next.message.toolCalls &&
+    prev.groupPosition === next.groupPosition &&
+    prev.showFooter === next.showFooter &&
+    prev.onRegenerate === next.onRegenerate
+  );
+});
 
 type AttachmentDisplay =
   | { kind: "image"; file: ChatMessageFile }

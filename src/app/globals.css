@@ -1742,60 +1742,49 @@ body.sidebar-open {
   100% { filter: hue-rotate(360deg); }
 }
 
-/* --- Streaming text glow (for AI message bubbles) --- */
+/* --- Streaming text glow (for AI message bubbles) ---
+ * PERF: Previously 3 concurrent infinite animations ran simultaneously:
+ *   1. streaming-glow      — box-shadow animation (repaint)
+ *   2. streaming-shimmer    — ::before gradient sweep (repaint + compositing)
+ *   3. streaming-border     — `filter: hue-rotate()` (VERY expensive — forces
+ *      full-element repaint on every frame, stacks with the other two)
+ *
+ * On long streaming responses this caused the browser to jank / freeze because
+ * it couldn't keep up with 3 infinite animations + 30ms text-delta re-renders.
+ *
+ * Now: a single lightweight box-shadow pulse. `box-shadow` is GPU-composited
+ * and doesn't trigger layout or paint — only the compositor thread. The
+ * animation is subtle (0.15 → 0.25 opacity) so it reads as "active" without
+ * being a performance tax. The shimmer + border classes are kept as no-ops
+ * for back-compat (they're still applied in message-item.tsx but do nothing).
+ */
 .streaming-glow {
-  animation: streaming-glow 2s ease-in-out infinite;
+  animation: streaming-glow 2.5s ease-in-out infinite;
+  will-change: box-shadow;
 }
 @keyframes streaming-glow {
   0%, 100% {
-    box-shadow: 0 0 8px -2px color-mix(in srgb, var(--color-primary) 15%, transparent);
+    box-shadow: 0 0 6px -2px color-mix(in srgb, var(--color-primary) 12%, transparent);
   }
   50% {
-    box-shadow: 0 0 16px -2px color-mix(in srgb, var(--color-primary) 25%, transparent);
+    box-shadow: 0 0 12px -2px color-mix(in srgb, var(--color-primary) 22%, transparent);
   }
 }
 
-/* --- Streaming text shimmer overlay (gradient sweep) --- */
+/* PERF: Disabled — the ::before gradient sweep forced a repaint on every
+ * frame during streaming. Kept as a no-op class so the className in
+ * message-item.tsx doesn't break. */
 .streaming-shimmer {
-  position: relative;
-  overflow: hidden;
-}
-.streaming-shimmer::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    105deg,
-    transparent 0%,
-    transparent 40%,
-    color-mix(in srgb, var(--color-primary) 8%, transparent) 50%,
-    transparent 60%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: streaming-shimmer-sweep 2.5s ease-in-out infinite;
-  pointer-events: none;
-  z-index: 1;
-}
-@keyframes streaming-shimmer-sweep {
-  0% { background-position: 200% 0; }
-  100% { background-position: -100% 0; }
+  /* no-op — see comment above */
 }
 
-/* --- Streaming border pulse (animated gradient border) --- */
+/* PERF: Disabled — `filter: hue-rotate()` is the single most expensive CSS
+ * animation property (forces full-element repaint + re-composite on every
+ * frame). On a streaming bubble that re-renders every 30ms, this was the
+ * dominant cause of the "app freezes after stuttery streaming" symptom.
+ * Kept as a no-op class so the className in message-item.tsx doesn't break. */
 .streaming-border {
-  position: relative;
-  border-image: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--color-primary) 30%, transparent),
-    color-mix(in srgb, var(--color-primary) 10%, transparent),
-    color-mix(in srgb, var(--color-primary) 30%, transparent)
-  ) 1;
-  animation: streaming-border-shift 3s ease-in-out infinite;
-}
-@keyframes streaming-border-shift {
-  0%, 100% { border-image-slice: 1; filter: hue-rotate(0deg); }
-  50% { border-image-slice: 1; filter: hue-rotate(15deg); }
+  /* no-op — see comment above */
 }
 
 /* --- Streaming text typewriter caret (left edge) --- */
@@ -2236,10 +2225,20 @@ body.sidebar-open {
   50% { opacity: 0.5; transform: scale(1.01); }
 }
 
-/* --- Optimized streaming: use will-change + content-visibility --- */
-.prose-sm {
+/* --- Optimized streaming: use will-change + content-visibility ---
+ * PERF: `content-visibility: auto` is scoped to NON-streaming messages
+ * only via `.prose-sm-static` (applied in message-item.tsx when the
+ * message is NOT streaming). Applying it to the streaming message causes
+ * the browser to re-layout on every 30ms text-delta flush (because the
+ * content height changes, triggering `contain-intrinsic-size` recalculation),
+ * which causes scroll jumps and jank during streaming.
+ */
+.prose-sm-static {
   content-visibility: auto;
   contain-intrinsic-size: auto 500px;
+}
+.prose-sm {
+  /* streaming messages — no content-visibility, let it flow naturally */
 }
 
 /* --- GPU-accelerated streaming text container --- */
