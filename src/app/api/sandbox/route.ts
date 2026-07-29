@@ -32,7 +32,11 @@ export const maxDuration = 300;
 
 const DEFAULT_CWD = "/home/user";
 const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — files persist for a full day
-const MAX_SANDBOXES = 10;
+// E2B free plan allows 20 concurrent sandboxes. We cache up to 18 locally
+// (leaving 2 headroom for sandboxes created by other devices/sessions on the
+// same API key). When we hit the limit, we kill the oldest cached sandbox
+// AND attempt to list+kill orphaned sandboxes on E2B's side.
+const MAX_SANDBOXES = 18;
 
 /**
  * Normalize a file path to an absolute path rooted at /home/user (the
@@ -150,17 +154,93 @@ async function enforceLimit(): Promise<void> {
   if (sharedCache.has(oldestKey)) sharedCache.delete(oldestKey);
   else separateCache.delete(oldestKey);
   void oldest.sandbox.kill().catch(() => {});
+  // Also try to kill orphaned sandboxes on E2B's side — these accumulate
+  // when sandboxes die without being evicted from our local cache (e.g.
+  // Vercel serverless cold starts lose the in-memory cache, but the sandbox
+  // keeps running on E2B). This is the root cause of the "20/20 sandbox"
+  // quota error. Best-effort — don't block on it.
+  void killOrphanedSandboxes(oldest.sandbox.apiKey).catch(() => {});
+}
+
+/**
+ * List all running sandboxes on E2B for an API key and kill any that aren't
+ * in our local cache. This prevents the "20/20 sandbox limit reached" error
+ * that happens when sandboxes accumulate from previous sessions / dead
+ * serverless instances. Best-effort — never throws.
+ *
+ * The `knownApiKey` param is the API key of the sandbox that triggered this
+ * call (we need it to list sandboxes — E2B's list endpoint requires a key).
+ */
+async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
+  try {
+    const paginator = Sandbox.list({ apiKey: knownApiKey, limit: 50 });
+    const page = await paginator.nextItems();
+    // Build a set of sandbox IDs we have in our local caches.
+    const localIds = new Set<string>();
+    for (const [, entry] of sharedCache) localIds.add(entry.sandbox.sandboxId);
+    for (const [, entry] of separateCache) localIds.add(entry.sandbox.sandboxId);
+    // Kill any running sandbox that isn't in our cache (orphaned).
+    // Keep the 3 most recent (in case the user has multiple tabs open).
+    const sorted = page
+      .filter((s) => s.state !== "closed" && !localIds.has(s.sandboxId))
+      .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
+    // Kill all but the 3 most recent orphans.
+    const toKill = sorted.slice(3);
+    await Promise.all(
+      toKill.map((s) =>
+        Sandbox.kill(s.sandboxId, { apiKey: knownApiKey }).catch(() => {}),
+      ),
+    );
+    if (toKill.length > 0) {
+      console.log(`[sandbox] killed ${toKill.length} orphaned sandbox(es) to free quota`);
+    }
+  } catch {
+    // best-effort — don't fail the operation if listing/killing fails.
+  }
+}
+
+/** Detect "sandbox quota reached" errors from the E2B SDK. The SDK throws
+ *  when you try to create a sandbox but you've hit the plan's concurrent
+ *  sandbox limit (e.g. "20/20" on the free plan). */
+function isQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /quota|limit reached|concurrent|too many|maximum|20\/20|\d+\/\d+/i.test(msg);
 }
 
 /** Create a fresh sandbox and cache it. Used by getSandbox() and the
- *  dead-sandbox recovery path. Creates predefined folders best-effort. */
+ *  dead-sandbox recovery path. Creates predefined folders best-effort.
+ *
+ *  QUOTA RECOVERY: if `Sandbox.create` fails with a quota error (e.g.
+ *  "20/20 sandbox limit reached"), we kill ALL orphaned sandboxes on E2B's
+ *  side (not in our local cache) and retry once. This handles the case where
+ *  sandboxes accumulated from previous sessions / dead serverless instances. */
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
   mode: "shared" | "separate",
 ): Promise<Sandbox> {
   await enforceLimit();
-  const sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 }); // 24 hours
+
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 }); // 24 hours
+  } catch (createErr) {
+    // QUOTA RECOVERY: kill orphaned sandboxes and retry.
+    if (isQuotaError(createErr)) {
+      console.warn(`[sandbox] quota reached, killing orphaned sandboxes and retrying...`);
+      await killOrphanedSandboxes(apiKey);
+      // Also clear our local caches (in case they hold dead sandboxes that
+      // are still counted on E2B's side).
+      for (const [, entry] of sharedCache) void entry.sandbox.kill().catch(() => {});
+      for (const [, entry] of separateCache) void entry.sandbox.kill().catch(() => {});
+      sharedCache.clear();
+      separateCache.clear();
+      // Retry the create.
+      sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 });
+    } else {
+      throw createErr;
+    }
+  }
 
   // Create predefined folders so the workspace is organized from the start.
   // These folders are created best-effort — if they fail (e.g. sandbox doesn't
@@ -203,8 +283,11 @@ async function getSandbox(
   if (cached) {
     // Liveness check — if the cached sandbox is dead, evict + fall through
     // to create a new one. Skip the ping if we verified alive in the last
-    // 30 seconds (avoids redundant pings on rapid back-to-back calls).
-    if (cached.verifiedAliveAt && Date.now() - cached.verifiedAliveAt < 30_000) {
+    // 2 minutes (avoids redundant 3s pings on rapid back-to-back calls —
+    // the ping was the #2 cause of slow tool execution after the OPFS
+    // getFile() issue). If the sandbox dies between checks, the actual
+    // operation will fail and the dead-sandbox recovery handles it.
+    if (cached.verifiedAliveAt && Date.now() - cached.verifiedAliveAt < 120_000) {
       return cached.sandbox;
     }
     if (await isAlive(cached.sandbox)) {
