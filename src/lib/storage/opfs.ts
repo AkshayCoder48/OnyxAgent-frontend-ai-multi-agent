@@ -213,10 +213,18 @@ export interface OPFSDirEntry {
   lastModified?: number;
 }
 
-/** List entries in `users/<userId>/<subPath>`. Returns empty array if missing. */
+/** List entries in `users/<userId>/<subPath>`. Returns empty array if missing.
+ *
+ * PERF: By default, does NOT call `entry.getFile()` for every file to fetch
+ * size/lastModified — that's an O(n) async op per file which made listing a
+ * folder with 50+ files take 2+ minutes (each getFile = round-trip to the
+ * OPFS internal database). Instead we return entries with `size: undefined`
+ * and `lastModified: undefined`. Pass `withMetadata: true` to opt into the
+ * slow path (used by the file sidebar which shows sizes). */
 export async function listDir(
   userId: string,
   subPath = "",
+  withMetadata = false,
 ): Promise<OPFSDirEntry[]> {
   try {
     // Ensure the directory exists before listing — create it if missing.
@@ -228,16 +236,23 @@ export async function listDir(
     for await (const entry of dir.values()) {
       const path = joinPath(`users/${userId}`, subPath, entry.name);
       if (entry.kind === "file") {
-        let size: number | undefined;
-        let lastModified: number | undefined;
-        try {
-          const file = await entry.getFile();
-          size = file.size;
-          lastModified = file.lastModified;
-        } catch {
-          // ignore — best-effort.
+        if (withMetadata) {
+          // Slow path — fetch size + lastModified (only for the file sidebar).
+          let size: number | undefined;
+          let lastModified: number | undefined;
+          try {
+            const file = await entry.getFile();
+            size = file.size;
+            lastModified = file.lastModified;
+          } catch {
+            // ignore — best-effort.
+          }
+          out.push({ name: entry.name, kind: "file", path, size, lastModified });
+        } else {
+          // Fast path — skip getFile(). The AI's list_folder tool doesn't
+          // need sizes; it just needs names + types.
+          out.push({ name: entry.name, kind: "file", path });
         }
-        out.push({ name: entry.name, kind: "file", path, size, lastModified });
       } else {
         out.push({ name: entry.name, kind: "directory", path });
       }
