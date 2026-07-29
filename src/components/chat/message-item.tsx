@@ -66,13 +66,14 @@ function ReasoningPanel({
   return (
     <div
       className={cn(
-        "reasoning-panel group relative mb-2 w-full overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
+        "reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
         variant === "thinking"
           ? "border-foreground/10 bg-muted/50"
           : "border-foreground/10 border-dashed bg-muted/40",
         // Subtle elevation when streaming — reads as "active".
         isStreaming && "ring-1 ring-primary/15",
       )}
+      style={{ width: "100%" }}
     >
       {/* Header — always visible. Clicking toggles the body. */}
       <button
@@ -82,9 +83,7 @@ function ReasoningPanel({
         aria-expanded={internalOpen}
       >
         <span
-          className={cn(
-            "inline-flex h-3 w-3 shrink-0 items-center justify-center",
-          )}
+          className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
           aria-hidden="true"
         >
           <span
@@ -121,7 +120,7 @@ function ReasoningPanel({
       {/* Body — two layers that cross-fade:
           1. Skeleton shimmer (only while streaming + empty).
           2. Real content (fades in once `text` arrives). */}
-      <div className="relative w-full">
+      <div className="relative block w-full">
         {/* Skeleton layer */}
         <div
           className={cn(
@@ -146,11 +145,20 @@ function ReasoningPanel({
         {!isEmpty && (
           <div
             className={cn(
-              "reasoning-panel-fill border-foreground/8 w-full border-t",
+              "reasoning-panel-fill border-foreground/8 block w-full border-t",
               internalOpen ? "block" : "hidden",
             )}
+            style={{ width: "100%" }}
           >
-            <pre className="text-foreground/85 m-0 block w-full max-w-full max-h-80 overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words sm:px-4">
+            <pre
+              className="text-foreground/85 m-0 block max-h-80 w-full max-w-full overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words sm:px-4"
+              style={{
+                width: "100%",
+                textAlign: "left",
+                margin: 0,
+                maxWidth: "100%",
+              }}
+            >
               {text}
             </pre>
           </div>
