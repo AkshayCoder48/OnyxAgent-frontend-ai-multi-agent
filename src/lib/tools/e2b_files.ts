@@ -2,6 +2,7 @@
 
 import { registerTool, type ToolContext } from "./registry";
 import * as opfs from "@/lib/storage/opfs";
+import { invalidateSyncManifest } from "./e2b_exec";
 import { zipSync, strToU8 } from "fflate";
 
 /**
@@ -222,6 +223,7 @@ registerTool(
         // an empty name, which makes the file appear as a folder.
         const subPath = subdir ? `workspace/${subdir}` : "workspace";
         await opfs.writeFile(ctx.userId, subPath, filename, content);
+      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
         return {
           success: true,
           path,
@@ -276,6 +278,7 @@ registerTool(
       const subdir = parts.join("/");
       const subPath = subdir ? `workspace/${subdir}` : "workspace";
       await opfs.writeFile(ctx.userId, subPath, filename, content);
+      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
     }
     return { path, bytes: content.length };
   },
@@ -351,6 +354,7 @@ registerTool(
       const subdir = parts.join("/");
       const subPath = subdir ? `workspace/${subdir}` : "workspace";
       await opfs.writeFile(ctx.userId, subPath, filename, updated);
+      invalidateSyncManifest(ctx.userId);
       return { path, replacements: count };
     }
   },
@@ -386,6 +390,7 @@ registerTool(
       await client.deleteFile(path, recursive);
     } else {
       await opfs.deleteFile(opfsWorkspacePath(ctx.userId, path));
+    invalidateSyncManifest(ctx.userId);
     }
     return { deleted: true, path };
   },
@@ -445,6 +450,7 @@ registerTool(
     // OPFS: use removeDir which does recursive delete properly.
     try {
       await opfs.removeDir(ctx.userId, `workspace/${path}`);
+    invalidateSyncManifest(ctx.userId);
     } catch (err) {
       // If removeDir fails, try listing + deleting each file
       try {
@@ -780,9 +786,11 @@ registerTool(
     const subdir = parts.join("/");
     const subPath = subdir ? `workspace/${subdir}` : "workspace";
     await opfs.writeFile(ctx.userId, subPath, filename, content);
+      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
     // Delete the source.
     try {
       await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
+    invalidateSyncManifest(ctx.userId);
     } catch {
       // best-effort — the file was already copied
     }
@@ -828,9 +836,11 @@ registerTool(
     const subdir = parts.slice(0, -1).join("/");
     const subPath = subdir ? `workspace/${subdir}` : "workspace";
     await opfs.writeFile(ctx.userId, subPath, newName, content);
+    invalidateSyncManifest(ctx.userId);
     // Delete old file.
     try {
       await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
+    invalidateSyncManifest(ctx.userId);
     } catch {
       // best-effort
     }

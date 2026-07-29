@@ -256,6 +256,14 @@ export class E2BClient {
     await this.call("write_file", { path, content });
   }
 
+  /** Write N files in ONE HTTP call. Critical for syncOpfsToSandbox —
+   *  previously each file was a separate fetch() (20 files = 20 sequential
+   *  HTTP round-trips = 1-2 min blocking). Now: 1 HTTP call. */
+  async batchWrite(files: Array<{ path: string; content: string }>): Promise<{ written: number; errors: Array<{ path: string; error: string }> }> {
+    const r = await this.call<{ written: number; errors: Array<{ path: string; error: string }> }>("batch_write", { files });
+    return { written: r.written ?? 0, errors: r.errors ?? [] };
+  }
+
   async uploadFile(path: string, file: Blob): Promise<void> {
     const text = await file.text();
     await this.writeFile(path, text);

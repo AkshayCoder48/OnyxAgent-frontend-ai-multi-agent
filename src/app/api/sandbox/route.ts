@@ -648,6 +648,40 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      case "batch_write": {
+        // PERF: Write N files in ONE HTTP call instead of N separate calls.
+        // This is the critical optimization for syncOpfsToSandbox —
+        // previously each file was a separate fetch() to /api/sandbox,
+        // and with 20 files that was 20 sequential HTTP round-trips
+        // (each potentially cold-starting a Vercel serverless function)
+        // = 1-2 minutes of blocking before every run_terminal/run_python.
+        // Now: 1 HTTP call, sandbox looked up once, all files written
+        // sequentially on the server (the E2B SDK doesn't support parallel
+        // writes, but the single HTTP round-trip is the big win).
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const files = (args.files as Array<{ path: string; content: string }>) ?? [];
+        const written: string[] = [];
+        const errors: Array<{ path: string; error: string }> = [];
+        for (const f of files) {
+          try {
+            const path = normalizePath(f.path);
+            await sandbox.files.write(path, f.content);
+            written.push(f.path);
+          } catch (err) {
+            errors.push({
+              path: f.path,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          ok: true,
+          written: written.length,
+          errors,
+        });
+      }
+
       case "delete_file": {
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         try {
