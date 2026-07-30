@@ -470,6 +470,9 @@ async function streamRound(
     number,
     { id: string; name: string; args: string }
   >();
+  // Track which tool call indices we've already pre-emitted (so we don't
+  // emit duplicate tool_call events during streaming).
+  const preEmittedToolCalls = new Set<number>();
   let finishReason: string | null = null;
   let usage: RoundResult["usage"];
   let aborted = false;
@@ -525,6 +528,28 @@ async function streamRound(
             data: { tool_calls: delta.toolCalls },
             timestamp: nowISO(),
           });
+          // ALSO: Pre-emit a tool_call event as soon as we know the tool
+          // name — even before the stream ends. Many LLM providers (g4f,
+          // some OpenAI-compatible) send the entire tool call in one chunk
+          // at the END of the stream, so tool_call_delta never fires during
+          // streaming. By pre-emitting tool_call here (with status "pending"),
+          // the UI shows the tool call card DURING streaming, not after.
+          // The final tool_call event (after stream ends) will update it.
+          for (const [index, tc] of toolCallAccumulator) {
+            if (tc.name && !preEmittedToolCalls.has(index)) {
+              preEmittedToolCalls.add(index);
+              emit({
+                type: "tool_call",
+                data: {
+                  tool_name: tc.name,
+                  args: { _streaming: tc.args } as Record<string, unknown>,
+                  tool_call_id: tc.id,
+                  _preemit: true,
+                },
+                timestamp: nowISO(),
+              });
+            }
+          }
         }
       }
       const fr = extractFinishReason(chunk);
