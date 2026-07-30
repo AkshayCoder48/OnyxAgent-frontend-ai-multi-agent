@@ -809,7 +809,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 
   // Build the enhanced system prompt with the tool list + usage knowledge.
   const toolListText = registeredTools.length > 0
-    ? `\n\n## Available Tools (${registeredTools.length} total)\nYou have access to these tools. Use them by name when the user's request matches:\n${registeredTools.map((t) => `- **${t.name}** — ${t.description}`).join("\n")}\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list.`
+    ? `\n\n## Available Tools (${registeredTools.length} total)\nYou have access to these tools. Use them by calling them through the FUNCTION-CALLING API (the tool_calls mechanism). NEVER write tool calls as plain text (e.g. "Thought: ... Action: run_terminal Input: {...}"). ALWAYS use the function-calling mechanism to invoke tools.\n\nUse them by name when the user's request matches:\n${registeredTools.map((t) => `- **${t.name}** — ${t.description}`).join("\n")}\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list. NEVER write "Thought:", "Action:", "Input:", "Observation:", or "Final Answer:" as text — these are ReAct patterns that DON'T work here. Use the tool_calls mechanism instead.`
     : "";
 
   const toolKnowledgeBase = `

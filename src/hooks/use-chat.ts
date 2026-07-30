@@ -38,15 +38,25 @@ interface UseChatOptions {
 }
 
 const DEFAULT_SYSTEM_PROMPT =
-  "You are a helpful AI assistant. Use the available tools when they would help answer the user's request. Be concise.";
+  "You are a helpful AI assistant. You have access to tools — call them using the FUNCTION-CALLING API (the tool_calls mechanism) when they would help answer the user's request. NEVER write tool calls as plain text (e.g. 'Thought: ... Action: run_terminal Input: {...}'). ALWAYS use the tool-calling mechanism. Be concise.";
 
 // AI Framework presets — each changes the system prompt to match the
 // framework's conventions and behavior patterns.
+//
+// CRITICAL: ALL framework presets MUST instruct the AI to use the
+// FUNCTION-CALLING API (not text) to invoke tools. Previously the LangChain
+// preset told the AI to "Use the ReAct pattern: Structure outputs with clear
+// sections (Thought, Action, Observation, Final Answer)" — which caused the
+// AI to write tool calls as PLAIN TEXT ("Thought: ... Action: run_terminal
+// Input: {...}") instead of emitting proper function-call tool_calls. This
+// made it look like the AI wasn't calling tools at all. All presets now
+// explicitly say: "NEVER write tool calls as text. ALWAYS use the function-
+// calling API."
 const FRAMEWORK_PROMPTS: Record<string, string> = {
   default: DEFAULT_SYSTEM_PROMPT,
   pydantic_ai: `You are an AI agent built with PydanticAI. You have access to tools that you can call to help the user.
 Follow PydanticAI conventions:
-- Call tools when they would help answer the user's request
+- Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
 - Structure your responses clearly with markdown
 - When using tools, explain what you're doing briefly
 - Handle errors gracefully and suggest alternatives
@@ -54,19 +64,19 @@ Follow PydanticAI conventions:
   langchain: `You are an AI agent powered by LangChain. You have access to tools through LangChain's agent framework.
 Follow LangChain conventions:
 - Use the ReAct (Reasoning + Acting) pattern: think about what to do, call a tool, observe the result, repeat
+- CRITICAL: Call tools using the FUNCTION-CALLING API. NEVER write "Thought:", "Action:", "Input:", "Observation:", or "Final Answer:" as text. The ReAct pattern is a reasoning framework — reason internally, then invoke tools via the tool-calling mechanism, NOT by writing text.
 - Chain tool calls together when needed
 - Use memory of previous interactions to provide context-aware responses
-- Structure outputs with clear sections (Thought, Action, Observation, Final Answer)
-- Be transparent about your reasoning process`,
+- Be transparent about your reasoning process in your text responses, but tool invocations MUST go through the function-calling API`,
   crewai: `You are a CrewAI agent working as part of a crew. You have specific tools and a role to fulfill.
 Follow CrewAI conventions:
 - Focus on your role: research, analyze, create, or execute
-- Use tools to gather information and perform actions
+- Use tools by calling them through the FUNCTION-CALLING API. NEVER write tool calls as text.
 - Report findings clearly and concisely
 - Collaborate effectively by sharing relevant context
 - Deliver structured, actionable outputs`,
   openai_assistants: `You are an OpenAI Assistant with access to tools. Follow OpenAI Assistants API conventions:
-- Use function calling to interact with available tools
+- Use FUNCTION CALLING to interact with available tools. NEVER write tool calls as text.
 - Provide clear, helpful responses
 - When tools return results, analyze them and continue the conversation
 - Be concise but thorough
