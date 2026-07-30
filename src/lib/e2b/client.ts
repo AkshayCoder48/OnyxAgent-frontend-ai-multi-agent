@@ -410,8 +410,6 @@ export class E2BClient {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let fullStdout = "";
-    let fullStderr = "";
 
     try {
       while (true) {
@@ -429,11 +427,11 @@ export class E2BClient {
             .filter((l) => l.startsWith("data:"))
             .map((l) => l.slice(5).trimStart());
           if (dataLines.length === 0) continue;
-          const dataStr = dataLines.join("\n");
+          const jsonStr = dataLines.join("\n");
           try {
-            const msg = JSON.parse(dataStr) as {
+            const msg = JSON.parse(jsonStr) as {
               type: "stdout" | "stderr" | "result" | "error";
-              data?: string;
+              data?: unknown;
               exit_code?: number;
               sandboxId?: string;
               error?: string;
@@ -446,28 +444,24 @@ export class E2BClient {
               }
             }
             if (msg.type === "stdout" && msg.data) {
-              // DEFENSIVE: Ensure data is always a string. The server-side
-              // runCode callback now extracts .line, but if any upstream
-              // code passes an object, coerce it to string here so we never
-              // concatenate "[object Object]" into the output.
-              const dataStr = typeof msg.data === "string"
+              // Ensure data is always a string. Handle both string and
+              // OutputMessage object ({ line, timestamp, error }) cases.
+              const outStr = typeof msg.data === "string"
                 ? msg.data
                 : (typeof msg.data === "object" && msg.data && "line" in msg.data
                     ? String((msg.data as { line: unknown }).line ?? "")
                     : String(msg.data));
-              if (dataStr) {
-                fullStdout += dataStr;
-                yield { type: "stdout", data: dataStr };
+              if (outStr) {
+                yield { type: "stdout", data: outStr };
               }
             } else if (msg.type === "stderr" && msg.data) {
-              const dataStr = typeof msg.data === "string"
+              const errStr = typeof msg.data === "string"
                 ? msg.data
                 : (typeof msg.data === "object" && msg.data && "line" in msg.data
                     ? String((msg.data as { line: unknown }).line ?? "")
                     : String(msg.data));
-              if (dataStr) {
-                fullStderr += dataStr;
-                yield { type: "stderr", data: dataStr };
+              if (errStr) {
+                yield { type: "stderr", data: errStr };
               }
             } else if (msg.type === "result") {
               yield { type: "result", exit_code: msg.exit_code ?? 0 };

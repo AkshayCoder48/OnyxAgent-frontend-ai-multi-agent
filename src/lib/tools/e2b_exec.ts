@@ -262,10 +262,8 @@ registerTool(
             // AWAIT the sync so the sandbox sees the latest OPFS files
             // before the code runs. Previously this was fire-and-forget
             // (`void syncOpfsToSandbox(...)`) which meant the terminal/
-            // Python command ran BEFORE the sync finished, seeing stale
-            // file content (e.g. `cat file.txt` showed old content after
-            // `write_file` had updated it).
-            await syncOpfsToSandbox(ctx.userId, dynamicKey);
+            // NON-BLOCKING sync: fire-and-forget so Python starts immediately.
+            void syncOpfsToSandbox(ctx.userId, dynamicKey);
             const onOutput = ctx.onToolOutput;
             let stdout = "";
             let stderr = "";
@@ -298,10 +296,9 @@ registerTool(
     }
 
     try {
-      // AWAIT the sync so the sandbox sees the latest OPFS files before
-      // the code runs. Previously fire-and-forget (`void ...`) which
-      // caused terminal/Python to see stale file content.
-      await syncOpfsToSandbox(ctx.userId, apiKey);
+      // NON-BLOCKING sync: fire-and-forget so Python starts immediately
+      // with live streaming. See run_terminal for full explanation.
+      void syncOpfsToSandbox(ctx.userId, apiKey);
 
       const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const onOutput = ctx.onToolOutput;
@@ -375,11 +372,16 @@ registerTool(
     }
 
     try {
-      // AWAIT the sync so the sandbox sees the latest OPFS files before
-      // the terminal command runs. Previously fire-and-forget (`void ...`)
-      // which caused `cat file.txt` to show old content after `write_file`
-      // had updated it in OPFS — the sync hadn't finished yet.
-      await syncOpfsToSandbox(ctx.userId, apiKey);
+      // NON-BLOCKING sync: fire-and-forget. Previously this was `await
+      // syncOpfsToSandbox(...)` which blocked for 1-2 minutes while
+      // uploading files to the sandbox BEFORE the command could run.
+      // The user saw no output for 2 minutes because the sync was
+      // blocking. Now we start the sync in the background and run the
+      // command immediately — the sandbox may not have the latest files
+      // for the first command after a file change, but subsequent commands
+      // will see them (the sync completes in the background). This is the
+      // right tradeoff: fast command execution > perfect file freshness.
+      void syncOpfsToSandbox(ctx.userId, apiKey);
 
       const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
       const onOutput = ctx.onToolOutput;
