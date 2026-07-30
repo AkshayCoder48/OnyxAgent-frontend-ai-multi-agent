@@ -501,43 +501,47 @@ export async function POST(req: NextRequest) {
             // wrapper. This forces ALL programs to think they're connected to a
             // terminal → line-buffering → live streaming for EVERY command.
             //
-            // Why not `stdbuf`? `stdbuf -oL -eL` only works for programs that
-            // use libc's stdio buffering. It FAILS for:
-            //   - Commands with shell operators (|, &&, ;, >) — stdbuf only
-            //     wraps the FIRST command, not pipelines
-            //   - Go/Rust/static binaries that don't use glibc
-            //   - Programs that do their own internal buffering
-            //
             // `script -qec 'COMMAND' /dev/null` creates a PTY for the ENTIRE
-            // command string, so EVERY program (pip, curl, cat, echo, npm, git,
-            // shell pipelines, chains, redirects, everything) line-buffers
-            // its output and streams live.
+            // command string. All shell operators (|, &&, ;, >, 2>&1) work
+            // because the command is passed to $SHELL -c.
+            //
+            // NOTE: `script` merges stdout+stderr into one PTY stream, so
+            // onStderr never fires — all output comes through onStdout. This
+            // is fine for display purposes (the live output box shows everything).
             //
             //   -q  = quiet (no start/end messages)
             //   -e  = return the exit code of the command
             //   -c  = run command (passed to $SHELL -c, so operators work)
             //   /dev/null = discard the typescript file
-            //
-            // Escape single quotes in the command: ' → '\''
             const escapedCommand = command.replace(/'/g, "'\\''");
             const ptyCommand = `script -qec '${escapedCommand}' /dev/null`;
 
-            // ANSI escape code stripper — removes PTY control sequences that
-            // make output look like "[1G[0K\[1G[ØK|[1G[ØK/" (spinner/progress
-            // bars). The PTY emits these because programs think they're on a
-            // terminal and use cursor movement (CSI codes) for progress bars.
-            // We strip them so the live output box shows clean text.
-            // Regex matches: CSI (ESC [) sequences, OSC (ESC ]) sequences,
-            // and other common escape sequences.
-            const ANSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\][^\x1b]*\x1b\\/g;
-            let lastOutput = "";
-            let promptDetected = false;
-            const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
+            // STATEFUL ANSI STRIPPER: Escape sequences can be split across
+            // chunks (the PTY emits them in small pieces). A naive per-chunk
+            // regex would leave fragments like "[1G" when ESC is in one chunk
+            // and "[1G" is in the next. This stateful stripper buffers
+            // incomplete escape sequences and only emits clean text.
+            let ansiBuffer = "";
+            const stripAnsiStream = (s: string): string => {
+              ansiBuffer += s;
+              // Remove complete ANSI escape sequences:
+              // CSI: ESC [ ... letter (e.g. ESC[1G, ESC[0K, ESC[32m)
+              // OSC: ESC ] ... BEL or ESC ] ... ESC \
+              // Other: ESC =, ESC >, ESC M, etc.
+              // Also remove bare ESC characters left over from split sequences.
+              ansiBuffer = ansiBuffer
+                .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")   // CSI
+                .replace(/\x1b\][^\x07]*\x07/g, "")             // OSC (BEL-terminated)
+                .replace(/\x1b\][^\x1b]*\x1b\\/g, "")           // OSC (ST-terminated)
+                .replace(/\x1b[=>NMcD]/g, "")                   // Simple escapes
+                .replace(/\x1b\([AB0]/g, "")                    // Charset designation
+                .replace(/\x1b/g, "");                           // Bare ESC (cleanup)
+              return ansiBuffer;
+            };
 
+            let promptDetected = false;
             // Detect interactive prompts like "Ok to proceed? (y)",
             // "[Y/n]", "Enter password:", "Continue? (y/N)", etc.
-            // When detected, emit a special "prompt" event so the UI can
-            // show an input field for the user to respond.
             const PROMPT_RE = /\b(ok to proceed\?\s*\(.*?\)|\(y\/n\)|\(y\/N\)|\(Y\/n\)|\(Y\/N\)|\[y\/n\]|\[Y\/N\]|continue\?\s*\(.*?\)|are you sure\?\s*\(.*?\)|enter password:|username:|>\s*$|:\s*$)/i;
 
             try {
@@ -545,11 +549,10 @@ export async function POST(req: NextRequest) {
                 cwd,
                 timeoutMs: timeout * 1000,
                 onStdout: (data: string) => {
-                  const clean = stripAnsi(data);
+                  // `script` merges stdout+stderr → all output comes here.
+                  const clean = stripAnsiStream(data);
                   if (clean) {
-                    lastOutput = clean;
                     send({ type: "stdout", data: clean });
-                    // Check for interactive prompts
                     if (PROMPT_RE.test(clean) && !promptDetected) {
                       promptDetected = true;
                       send({ type: "prompt", prompt: clean.trim() });
@@ -557,9 +560,10 @@ export async function POST(req: NextRequest) {
                   }
                 },
                 onStderr: (data: string) => {
-                  const clean = stripAnsi(data);
+                  // Rarely fires with `script` (merged into stdout), but
+                  // handle it just in case.
+                  const clean = stripAnsiStream(data);
                   if (clean) {
-                    lastOutput = clean;
                     send({ type: "stderr", data: clean });
                     if (PROMPT_RE.test(clean) && !promptDetected) {
                       promptDetected = true;
@@ -568,6 +572,11 @@ export async function POST(req: NextRequest) {
                   }
                 },
               });
+              // Flush any remaining ANSI buffer.
+              if (ansiBuffer) {
+                send({ type: "stdout", data: ansiBuffer });
+                ansiBuffer = "";
+              }
               send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
             } catch (execErr) {
               if (isDeadSandboxError(execErr)) {

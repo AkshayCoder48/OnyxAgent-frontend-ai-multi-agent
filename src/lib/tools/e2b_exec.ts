@@ -161,11 +161,19 @@ async function syncSandboxToOpfs(
     const { writeFileAtPath, ensurePath } = opfs;
     const MAX_FILE_SIZE = 500 * 1024; // 500KB
 
-    // Recursively walk the sandbox /home/user directory
-    // Skip system directories that don't contain user files
-    const SKIP_DIRS = new Set([
-      ".cache", ".npm", ".local", ".config", ".bash_history",
-      ".bash_logout", ".bashrc", ".profile", ".sudo_as_admin_successful",
+    // Recursively walk the sandbox /home/user directory.
+    // CRITICAL: Do NOT skip .cache, .local, .npm, .config — these contain
+    // installed packages (playwright installs to ~/.cache/ms-playwright/,
+    // pip installs to ~/.local/lib/, npm uses ~/.npm/ for cache, ~/.config/
+    // for config). Previously these were skipped, so when a new sandbox was
+    // created (dead-sandbox recovery, quota eviction, cold start), all
+    // installed packages were gone — the user had to reinstall playwright
+    // every time. Now we sync them to OPFS so they persist across sandboxes.
+    // We only skip shell dotfiles (.bashrc, .profile, etc.) which are
+    // sandbox-template-specific and shouldn't be restored.
+    const SKIP_FILES = new Set([
+      ".bash_history", ".bash_logout", ".bashrc", ".profile",
+      ".sudo_as_admin_successful", ".wget-hsts",
     ]);
 
     async function walkSandbox(dirPath: string): Promise<void> {
@@ -177,8 +185,10 @@ async function syncSandboxToOpfs(
       }
 
       for (const entry of entries) {
-        // Skip hidden/system files
-        if (entry.name?.startsWith(".") || entry.path.split("/").pop()?.startsWith(".")) continue;
+        const fname = entry.name ?? entry.path.split("/").pop() ?? "";
+        // Skip specific shell dotfiles, but ALLOW .cache, .local, .npm,
+        // .config (they contain installed packages like playwright).
+        if (SKIP_FILES.has(fname)) continue;
 
         // Check if it's a directory
         if (entry.type === "directory" || entry.type === "dir") {
@@ -258,7 +268,7 @@ registerTool(
           const dynamicKey = await settingsService.getDecryptedSandboxKey(userId);
           if (dynamicKey) {
             // Use the dynamically-loaded key for this call.
-            const client = getE2BClient(dynamicKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
+            const client = getE2BClient(dynamicKey, null, "shared");
             // AWAIT the sync so the sandbox sees the latest OPFS files
             // before the code runs. Previously this was fire-and-forget
             // (`void syncOpfsToSandbox(...)`) which meant the terminal/
@@ -300,7 +310,7 @@ registerTool(
       // with live streaming. See run_terminal for full explanation.
       void syncOpfsToSandbox(ctx.userId, apiKey);
 
-      const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
+      const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;
 
       // runPythonStream is an async generator. Iterate it and pipe chunks.
@@ -383,7 +393,7 @@ registerTool(
       // right tradeoff: fast command execution > perfect file freshness.
       void syncOpfsToSandbox(ctx.userId, apiKey);
 
-      const client = getE2BClient(apiKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
+      const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;
 
       let stdout = "";
