@@ -476,16 +476,22 @@ export function useChat(options: UseChatOptions = {}) {
           // ALSO clear the toolArgBuffer so the next round's tool calls
           // (which may reuse the same index) don't inherit stale args.
           if (currentMessageIdRef.current) {
-            const { tool_name, args, tool_call_id } = wsEvent.data as {
+            const data = wsEvent.data as {
               tool_name: string;
               args: Record<string, unknown>;
               tool_call_id: string;
+              _preemit?: boolean;
             };
+            const { tool_name, args, tool_call_id } = data;
+            // Pre-emit tool calls (sent during streaming before args are
+            // fully parsed) get status "pending" so the user sees the card
+            // immediately. The final tool_call event (after stream ends)
+            // will update it to "running" with parsed args.
             const toolCall: ToolCall = {
               id: tool_call_id,
               name: tool_name,
               args,
-              status: "running",
+              status: data._preemit ? "pending" : "running",
             };
 
             // Clear the toolArgBuffer entry for this tool call. Find by
@@ -501,22 +507,34 @@ export function useChat(options: UseChatOptions = {}) {
               }
             }
 
-            // Check if there's a pending tool call to replace
+            // Check if there's a pre-emitted or pending tool call to replace.
+            // The runtime pre-emits tool_call events during streaming (as soon
+            // as the tool name is known) so the card appears immediately. We
+            // need to find and UPDATE that card instead of creating a duplicate.
             const msgs = useChatStore.getState().messages;
             const msg = msgs.find((m) => m.id === currentMessageIdRef.current);
-            const pendingTc = msg?.toolCalls?.find(
-              (t) => t.status === "pending" && t.name === tool_name,
+            // Match by tool_call_id first (most reliable), then by name+pending.
+            let existingTc = msg?.toolCalls?.find(
+              (t) => t.id === tool_call_id,
             );
+            if (!existingTc) {
+              existingTc = msg?.toolCalls?.find(
+                (t) => (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined) && t.name === tool_name,
+              );
+            }
 
-            if (pendingTc) {
-              // Replace the pending tool call
-              updateToolCallPart(currentMessageIdRef.current, pendingTc.id, {
+            if (existingTc) {
+              // Replace the pre-emitted/pending tool call — NO duplicate.
+              updateToolCallPart(currentMessageIdRef.current, existingTc.id, {
                 id: tool_call_id,
                 args,
                 status: "running",
               });
+            } else if (data._preemit) {
+              // Pre-emit with no existing card — add as pending.
+              addToolCallPart(currentMessageIdRef.current, toolCall);
             } else {
-              // No pending — add new
+              // Normal (non-preemit) tool_call with no existing — add new.
               addToolCallPart(currentMessageIdRef.current, toolCall);
             }
           }
