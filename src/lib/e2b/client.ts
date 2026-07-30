@@ -34,9 +34,10 @@ export interface E2BExecResult {
 }
 
 export interface StreamMessage {
-  type: "stdout" | "stderr" | "result";
+  type: "stdout" | "stderr" | "result" | "prompt";
   data?: string;
   exit_code?: number;
+  prompt?: string;
 }
 
 export class E2BError extends Error {
@@ -430,11 +431,12 @@ export class E2BClient {
           const jsonStr = dataLines.join("\n");
           try {
             const msg = JSON.parse(jsonStr) as {
-              type: "stdout" | "stderr" | "result" | "error";
+              type: "stdout" | "stderr" | "result" | "error" | "prompt";
               data?: unknown;
               exit_code?: number;
               sandboxId?: string;
               error?: string;
+              prompt?: string;
             };
             // Cache the sandbox ID from any message that includes it.
             if (msg.sandboxId && msg.sandboxId !== this.sandboxId) {
@@ -470,6 +472,10 @@ export class E2BClient {
               yield { type: "stderr", data: msg.error ?? "Unknown error" };
               yield { type: "result", exit_code: -1 };
               return;
+            } else if (msg.type === "prompt" && msg.prompt) {
+              // Interactive prompt detected (e.g. "Ok to proceed? (y)")
+              // The UI shows an input field so the user can respond.
+              yield { type: "prompt", prompt: msg.prompt };
             }
           } catch {
             // ignore malformed JSON

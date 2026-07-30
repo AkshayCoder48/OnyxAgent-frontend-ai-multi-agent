@@ -521,12 +521,52 @@ export async function POST(req: NextRequest) {
             // Escape single quotes in the command: ' → '\''
             const escapedCommand = command.replace(/'/g, "'\\''");
             const ptyCommand = `script -qec '${escapedCommand}' /dev/null`;
+
+            // ANSI escape code stripper — removes PTY control sequences that
+            // make output look like "[1G[0K\[1G[ØK|[1G[ØK/" (spinner/progress
+            // bars). The PTY emits these because programs think they're on a
+            // terminal and use cursor movement (CSI codes) for progress bars.
+            // We strip them so the live output box shows clean text.
+            // Regex matches: CSI (ESC [) sequences, OSC (ESC ]) sequences,
+            // and other common escape sequences.
+            const ANSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[=>]|\x1b\][^\x1b]*\x1b\\/g;
+            let lastOutput = "";
+            let promptDetected = false;
+            const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
+
+            // Detect interactive prompts like "Ok to proceed? (y)",
+            // "[Y/n]", "Enter password:", "Continue? (y/N)", etc.
+            // When detected, emit a special "prompt" event so the UI can
+            // show an input field for the user to respond.
+            const PROMPT_RE = /\b(ok to proceed\?\s*\(.*?\)|\(y\/n\)|\(y\/N\)|\(Y\/n\)|\(Y\/N\)|\[y\/n\]|\[Y\/N\]|continue\?\s*\(.*?\)|are you sure\?\s*\(.*?\)|enter password:|username:|>\s*$|:\s*$)/i;
+
             try {
               await sandbox.commands.run(ptyCommand, {
                 cwd,
                 timeoutMs: timeout * 1000,
-                onStdout: (data: string) => send({ type: "stdout", data }),
-                onStderr: (data: string) => send({ type: "stderr", data }),
+                onStdout: (data: string) => {
+                  const clean = stripAnsi(data);
+                  if (clean) {
+                    lastOutput = clean;
+                    send({ type: "stdout", data: clean });
+                    // Check for interactive prompts
+                    if (PROMPT_RE.test(clean) && !promptDetected) {
+                      promptDetected = true;
+                      send({ type: "prompt", prompt: clean.trim() });
+                    }
+                  }
+                },
+                onStderr: (data: string) => {
+                  const clean = stripAnsi(data);
+                  if (clean) {
+                    lastOutput = clean;
+                    send({ type: "stderr", data: clean });
+                    if (PROMPT_RE.test(clean) && !promptDetected) {
+                      promptDetected = true;
+                      send({ type: "prompt", prompt: clean.trim() });
+                    }
+                  }
+                },
               });
               send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
             } catch (execErr) {
