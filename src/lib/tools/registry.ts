@@ -65,7 +65,7 @@ export interface ToolContext {
   onToolOutput?: (
     toolCallId: string,
     output: string,
-    type: "stdout" | "stderr",
+    type: "stdout" | "stderr" | "prompt",
   ) => void;
 }
 

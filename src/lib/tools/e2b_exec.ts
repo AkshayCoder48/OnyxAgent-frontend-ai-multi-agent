@@ -397,6 +397,11 @@ registerTool(
         } else if (chunk.type === "stderr" && chunk.data) {
           stderr += chunk.data;
           if (onOutput) onOutput("", chunk.data, "stderr");
+        } else if (chunk.type === "prompt" && chunk.prompt) {
+          // Interactive prompt detected (e.g. "Ok to proceed? (y)").
+          // Emit as a tool_output with type "prompt" so the UI can show
+          // an input field. The response is sent via sendStdin.
+          if (onOutput) onOutput("", chunk.prompt, "prompt" as "stdout");
         } else if (chunk.type === "result") {
           exitCode = chunk.exit_code ?? 0;
         }
