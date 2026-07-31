@@ -5,6 +5,9 @@ import dynamic from "next/dynamic";
 export interface MarkdownContentProps {
   content: string;
   onCiteClick?: (index: number) => void;
+  /** When true, renders the writing cursor inline at the end of the last
+   *  paragraph — right next to the last letter, NOT on a new line below. */
+  showCursor?: boolean;
 }
 
 /**
@@ -27,6 +30,6 @@ const MarkdownContentImpl = dynamic(
   },
 );
 
-export function MarkdownContent({ content, onCiteClick }: MarkdownContentProps) {
-  return <MarkdownContentImpl content={content} onCiteClick={onCiteClick} />;
+export function MarkdownContent({ content, onCiteClick, showCursor }: MarkdownContentProps) {
+  return <MarkdownContentImpl content={content} onCiteClick={onCiteClick} showCursor={showCursor} />;
 }

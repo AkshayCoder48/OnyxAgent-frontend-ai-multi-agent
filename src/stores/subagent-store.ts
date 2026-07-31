@@ -129,7 +129,10 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
     set((state) => ({
       subagents: state.subagents.filter((s) => s.id !== id),
       sessions: state.sessions.filter((s) => s.subagentId !== id),
-      activeSubagentId: state.activeSessionId && state.sessions.find((s) => s.id === state.activeSessionId)?.subagentId === id
+      // Fix: was `activeSubagentId` (doesn't exist in the store interface).
+      // Use `activeSessionId` — clear it if the active session belonged to
+      // the deleted subagent.
+      activeSessionId: state.activeSessionId && state.sessions.find((s) => s.id === state.activeSessionId)?.subagentId === id
         ? null
         : state.activeSessionId,
     }));
@@ -253,3 +256,13 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
     }
   },
 }));
+
+// AUTO-HYDRATE: Load from localStorage on module import so the store is
+// populated before any component or tool reads it. Previously the store
+// only loaded when the sidebar or settings page mounted — meaning the
+// AI's spawn_subagent tool saw an empty store and created duplicates,
+// and query_subagent couldn't find subagents that existed in localStorage
+// but hadn't been loaded yet.
+if (typeof window !== "undefined") {
+  useSubagentStore.getState().loadFromStorage();
+}

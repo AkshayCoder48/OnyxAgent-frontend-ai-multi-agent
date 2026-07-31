@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toolCaption } from "@/lib/agent-step-captions";
+import { WritingCursor } from "./writing-cursor";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
@@ -449,7 +450,12 @@ function RunningToolPanel({
   // the liveCaption (e.g. "Running a terminal command…") during execution.
   // Now every tool shows "Writing tool_name…" with the streaming cursor +
   // spinner, so the user always sees what's being composed/executed.
-  const writingLabel = `Writing ${toolCall.name}…`;
+  // If the tool name is a "pending-N" placeholder (LLM sent args before the
+  // function name), show "Composing…" instead of the raw placeholder.
+  const displayName = toolCall.name.startsWith("pending-")
+    ? "tool"
+    : toolCall.name;
+  const writingLabel = `Writing ${displayName}…`;
 
   return (
     <div className="space-y-2 py-1">
@@ -548,7 +554,7 @@ function StreamingArgsDisplay({ args }: { args: string }) {
       className="scrollbar-thin max-h-48 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words"
     >
       {args.slice(-2000)}
-      <span className="writing-cursor-inline" aria-hidden="true" />
+      <WritingCursor size="0.85em" />
     </pre>
   );
 }
