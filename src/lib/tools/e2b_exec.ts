@@ -269,11 +269,11 @@ registerTool(
           if (dynamicKey) {
             // Use the dynamically-loaded key for this call.
             const client = getE2BClient(dynamicKey, null, "shared");
-            // AWAIT the sync so the sandbox sees the latest OPFS files
-            // before the code runs. Previously this was fire-and-forget
-            // (`void syncOpfsToSandbox(...)`) which meant the terminal/
-            // NON-BLOCKING sync: fire-and-forget so Python starts immediately.
-            void syncOpfsToSandbox(ctx.userId, dynamicKey);
+            // BLOCKING sync with 5s timeout — see run_terminal for full explanation.
+            await Promise.race([
+              syncOpfsToSandbox(ctx.userId, dynamicKey),
+              new Promise((resolve) => setTimeout(resolve, 5000)),
+            ]);
             const onOutput = ctx.onToolOutput;
             let stdout = "";
             let stderr = "";
@@ -306,9 +306,11 @@ registerTool(
     }
 
     try {
-      // NON-BLOCKING sync: fire-and-forget so Python starts immediately
-      // with live streaming. See run_terminal for full explanation.
-      void syncOpfsToSandbox(ctx.userId, apiKey);
+      // BLOCKING sync with 5s timeout — see run_terminal for full explanation.
+      await Promise.race([
+        syncOpfsToSandbox(ctx.userId, apiKey),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
 
       const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;
@@ -382,16 +384,17 @@ registerTool(
     }
 
     try {
-      // NON-BLOCKING sync: fire-and-forget. Previously this was `await
-      // syncOpfsToSandbox(...)` which blocked for 1-2 minutes while
-      // uploading files to the sandbox BEFORE the command could run.
-      // The user saw no output for 2 minutes because the sync was
-      // blocking. Now we start the sync in the background and run the
-      // command immediately — the sandbox may not have the latest files
-      // for the first command after a file change, but subsequent commands
-      // will see them (the sync completes in the background). This is the
-      // right tradeoff: fast command execution > perfect file freshness.
-      void syncOpfsToSandbox(ctx.userId, apiKey);
+      // BLOCKING sync with 5-second timeout. Previously this was fire-and-
+      // forget (non-blocking) which caused files to NOT be synced when
+      // run_terminal ran — the user's workspace files weren't in the sandbox.
+      // Now we await the sync but with a 5s timeout — if it takes longer
+      // (e.g. first sync with many files), we proceed anyway so the command
+      // isn't blocked indefinitely. The manifest optimization means most
+      // syncs complete in <1s (only changed files are uploaded).
+      await Promise.race([
+        syncOpfsToSandbox(ctx.userId, apiKey),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
 
       const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;

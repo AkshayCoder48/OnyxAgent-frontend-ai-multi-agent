@@ -2251,10 +2251,16 @@ body.sidebar-open {
 /* --- Streaming cursor wrapper: makes the last <p> inline so the cursor
  *   flows right after the last letter, NOT on a new line below. The cursor
  *   is a sibling AFTER the ReactMarkdown output, so without this the
- *   block-level <p> would push it to a new line. --- */
+ *   block-level <p> would push it to a new line.
+ *
+ *   Use display: inline-block (not inline) so the <p> still has block
+ *   formatting context but allows the cursor to flow on the same line.
+ *   Also remove margin-bottom so there's no gap. --- */
 .streaming-cursor-wrapper > p:last-child,
 .streaming-cursor-wrapper > div > p:last-child {
-  display: inline;
+  display: inline-block;
+  margin-bottom: 0;
+  width: 100%;
 }
 .streaming-cursor-wrapper > pre:last-child,
 .streaming-cursor-wrapper > ul:last-child,

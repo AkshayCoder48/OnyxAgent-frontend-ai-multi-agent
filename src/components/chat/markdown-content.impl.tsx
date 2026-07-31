@@ -380,8 +380,13 @@ export const MarkdownContent = React.memo(function MarkdownContent({
     .replaceAll(":CURSOR:", "");
   const processed = onCiteClick ? preprocessCitations(cleanContent) : cleanContent;
 
-  return (
-    <div className={showCursor ? "streaming-cursor-wrapper" : undefined}>
+  // When cursor is off, render ReactMarkdown directly (no wrapper div, no
+  // cursor) — this prevents the wrapper div from adding block-level spacing
+  // and the cursor from remaining in completed messages.
+  // When cursor is on, wrap in a div that makes the last <p> inline so the
+  // cursor flows right after the last letter.
+  if (!showCursor) {
+    return (
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
@@ -389,12 +394,24 @@ export const MarkdownContent = React.memo(function MarkdownContent({
       >
         {processed}
       </ReactMarkdown>
-      {showCursor && <WritingCursor size="0.9em" />}
+    );
+  }
+
+  return (
+    <div className="streaming-cursor-wrapper">
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
+      >
+        {processed}
+      </ReactMarkdown>
+      <WritingCursor size="0.9em" />
     </div>
   );
 }, (prev, next) => {
-  // Short-circuit: if the content string is identical, skip re-render
-  // entirely. This handles the case where a parent re-rendered but the
+  // Short-circuit: if the content string AND showCursor are identical, skip
+  // re-render. This handles the case where a parent re-rendered but the
   // `content` prop didn't change (e.g. another message updated).
-  return prev.content === next.content && prev.onCiteClick === next.onCiteClick;
+  return prev.content === next.content && prev.onCiteClick === next.onCiteClick && prev.showCursor === next.showCursor;
 });
