@@ -144,6 +144,9 @@ const RESULT_LEN_BUDGETS: Record<string, number> = {
   read_file: 60_000,       // 60K — full file content (most files < 60K)
   list_folder: 20_000,     // 20K — directory listings
   list_files: 20_000,
+  create_file: 10_000,     // 10K — creation result (path, size)
+  write_file: 10_000,      // 10K — write result
+  edit_file: 10_000,       // 10K — edit result
   send_file: 10_000,       // 10K — file download metadata
   send_folder: 10_000,
   web_search: 8_000,       // 8K — search results
