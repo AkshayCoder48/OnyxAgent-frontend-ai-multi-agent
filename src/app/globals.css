@@ -2248,6 +2248,20 @@ body.sidebar-open {
   transform: translateZ(0);
 }
 
+/* --- Streaming cursor wrapper: makes the last <p> inline so the cursor
+ *   flows right after the last letter, NOT on a new line below. The cursor
+ *   is a sibling AFTER the ReactMarkdown output, so without this the
+ *   block-level <p> would push it to a new line. --- */
+.streaming-cursor-wrapper > p:last-child,
+.streaming-cursor-wrapper > div > p:last-child {
+  display: inline;
+}
+.streaming-cursor-wrapper > pre:last-child,
+.streaming-cursor-wrapper > ul:last-child,
+.streaming-cursor-wrapper > ol:last-child {
+  margin-bottom: 0;
+}
+
 /* --- Inline writing cursor (appended to markdown text during streaming) --- */
 .writing-cursor-inline {
   display: inline-block;
