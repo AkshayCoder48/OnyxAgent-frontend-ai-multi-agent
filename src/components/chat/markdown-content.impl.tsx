@@ -119,12 +119,15 @@ const SHARED_COMPONENTS = {
     );
   },
   p({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
-    // Strip any CURSOR_MARKER that leaked into paragraph children.
-    // The cursor is rendered by the wrapper div (outside ReactMarkdown)
-    // — we just need to clean the marker from the text here.
+    // Strip any CURSOR markers that leaked into paragraph children.
+    // Defensive — the content should already be cleaned before parsing,
+    // but this catches any residual markers.
     function stripMarker(child: React.ReactNode): React.ReactNode {
       if (typeof child === "string") {
-        return child.replaceAll("\u0000CURSOR\u0000", "");
+        return child
+          .replaceAll("\u0000CURSOR\u0000", "")
+          .replaceAll(/\u0000?CURSOR\u0000?/g, "")
+          .replaceAll(":CURSOR:", "");
       }
       if (Array.isArray(child)) {
         return child.map(stripMarker);
@@ -366,11 +369,15 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // idle time. This keeps scrolling / input responsive even while the AI
   // is streaming at 30ms intervals.
   const deferredContent = React.useDeferredValue(content);
-  // Strip any cursor markers from content — we render the cursor as a
-  // sibling AFTER the markdown, but use a wrapper that makes the last
-  // paragraph display: inline so the cursor flows right after the last
-  // letter (not on a new line below).
-  const cleanContent = deferredContent.replaceAll("\u0000CURSOR\u0000", "");
+  // Strip ALL cursor markers from content. The marker may appear as:
+  //   - \u0000CURSOR\u0000 (null-terminated, original format)
+  //   - CURSOR (null chars stripped during JSON serialization)
+  //   - :CURSOR: (alternative format)
+  // We strip all variants and render the cursor as a React sibling instead.
+  const cleanContent = deferredContent
+    .replaceAll("\u0000CURSOR\u0000", "")
+    .replaceAll(/\u0000?CURSOR\u0000?/g, "")
+    .replaceAll(":CURSOR:", "");
   const processed = onCiteClick ? preprocessCitations(cleanContent) : cleanContent;
 
   return (
