@@ -472,12 +472,12 @@ export function WritingCursor({
     <span
       className={`writing-cursor ${className ?? ""}`}
       style={{
-        display: "inline",
+        display: "inline-flex",
+        alignItems: "center",
         width: size,
         height: size,
         marginLeft: "0.1em",
-        verticalAlign: "-0.125em",
-        lineHeight: 0,
+        verticalAlign: "middle",
       }}
       role="status"
       aria-label="AI is writing"
@@ -494,7 +494,7 @@ export function WritingCursor({
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
         className="writing-cursor-shape"
-        style={{ display: "inline-block", verticalAlign: "baseline" }}
+        style={{ display: "block" }}
       >
         {shape.render("var(--color-primary, currentColor)")}
       </svg>
