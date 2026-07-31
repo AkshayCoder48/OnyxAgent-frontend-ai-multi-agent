@@ -2,6 +2,7 @@
 
 import { registerTool } from "./registry";
 import { nanoid } from "nanoid";
+import { useSubagentStore, type SubagentConfig } from "@/stores/subagent-store";
 
 /**
  * Subagent orchestration tools — lets the main AI act as an orchestrator that
@@ -20,6 +21,7 @@ import { nanoid } from "nanoid";
 interface SubagentTask {
   task_id: string;
   subagent_name: string;
+  subagent_id?: string;
   description: string;
   status: "pending" | "running" | "waiting_for_answer" | "completed" | "failed" | "cancelled" | "retrying";
   error: string | null;
@@ -89,10 +91,35 @@ Task types:
   },
   async (args) => {
     const taskId = `subagent_${nanoid(12)}`;
+    const subagentName = args.subagent_name as string;
+    const description = args.description as string;
+    const taskType = (args.task_type as string) ?? "general";
+
+    // CRITICAL: Also create a SubagentConfig in the zustand store so:
+    // 1. query_subagent can find it (was returning "unavailable" because
+    //    the store was empty — only the in-memory taskStore had the task)
+    // 2. The sidebar shows it for @-tagging (reads from store.subagents)
+    // 3. It persists to localStorage and survives page refresh
+    const store = useSubagentStore.getState();
+    // Check if a subagent with this name already exists (avoid duplicates).
+    let subagentConfig = store.subagents.find(
+      (s) => s.name.toLowerCase() === subagentName.toLowerCase() && s.enabled,
+    );
+    if (!subagentConfig) {
+      subagentConfig = store.createSubagent({
+        name: subagentName,
+        description,
+        specialty: taskType as SubagentConfig["specialty"],
+        enabled: true,
+        systemPrompt: `You are ${subagentName}, a specialized subagent. Task: ${description}. Use the available tools to complete your task. Report results clearly.`,
+      });
+    }
+
     const task: SubagentTask = {
       task_id: taskId,
-      subagent_name: args.subagent_name as string,
-      description: args.description as string,
+      subagent_name: subagentName,
+      subagent_id: subagentConfig.id,
+      description,
       status: "pending",
       error: null,
       created_at: new Date().toISOString(),
@@ -113,9 +140,10 @@ Task types:
 
     return {
       task_id: taskId,
+      subagent_id: subagentConfig.id,
       subagent_name: task.subagent_name,
       status: "pending",
-      message: `Subagent spawned. Use query_subagent or steer_subagent to interact with it. Use list_subagents to see all active tasks.`,
+      message: `Subagent spawned and registered. Use query_subagent with the task_id to interact with it. Use list_subagents to see all active tasks.`,
     };
   },
   false,
@@ -221,11 +249,16 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       if (!task) {
         return { error: `Task ${taskId} not found.` };
       }
-      subagentId = task.subagent_name; // fallback — use the name as ID
-      // Try to find a subagent with this name.
-      const existing = store.subagents.find((s) => s.name === task.subagent_name);
+      // Use subagent_id if available (most reliable), else find by name.
+      let existing: SubagentConfig | undefined;
+      if (task.subagent_id) {
+        existing = store.getSubagent(task.subagent_id);
+      }
       if (!existing) {
-        return { error: `Subagent "${task.subagent_name}" no longer exists.` };
+        existing = store.subagents.find((s) => s.name === task.subagent_name);
+      }
+      if (!existing) {
+        return { error: `Subagent "${task.subagent_name}" no longer exists. It may have been deleted. Spawn a new one with spawn_subagent.` };
       }
       subagentId = existing.id;
     } else {

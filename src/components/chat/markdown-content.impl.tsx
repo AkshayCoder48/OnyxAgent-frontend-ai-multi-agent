@@ -7,6 +7,7 @@ import rehypeHighlight from "rehype-highlight";
 import { ExternalLink } from "lucide-react";
 
 import { CopyButton } from "./copy-button";
+import { WritingCursor } from "./writing-cursor";
 import type { MarkdownContentProps } from "./markdown-content";
 
 /** Parse `language-xyz` from a `<code>` className that rehype-highlight emits. */
@@ -118,6 +119,32 @@ const SHARED_COMPONENTS = {
     );
   },
   p({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
+    // Check if children contain the CURSOR_MARKER — if so, replace it
+    // with the WritingCursor component. This makes the cursor appear
+    // INLINE at the end of the paragraph, right next to the last letter.
+    if (showCursorRef.current && typeof children === "string" && children.includes("\u0000CURSOR\u0000")) {
+      const parts = children.split("\u0000CURSOR\u0000");
+      return (
+        <p className="mb-3 leading-relaxed last:mb-0" {...props}>
+          {parts[0]}
+          <WritingCursor size="0.9em" />
+          {parts.slice(1)}
+        </p>
+      );
+    }
+    // Also check array children (when citations are present)
+    if (showCursorRef.current && Array.isArray(children)) {
+      const lastChild = children[children.length - 1];
+      if (typeof lastChild === "string" && lastChild.includes("\u0000CURSOR\u0000")) {
+        const parts = lastChild.split("\u0000CURSOR\u0000");
+        const newChildren = [...children.slice(0, -1), parts[0], <WritingCursor key="cursor" size="0.9em" />, parts.slice(1)];
+        return (
+          <p className="mb-3 leading-relaxed last:mb-0" {...props}>
+            {newChildren}
+          </p>
+        );
+      }
+    }
     return (
       <p className="mb-3 leading-relaxed last:mb-0" {...props}>
         {children}
@@ -312,6 +339,7 @@ const SHARED_COMPONENTS = {
 // hoisted to module scope for stable reference) can access the current
 // callback without being recreated on every render.
 const onCiteClickRef = React.createRef<((index: number) => void) | null>();
+const showCursorRef = React.createRef<boolean>();
 
 // Shared plugin arrays — stable references so ReactMarkdown's memoization works.
 const REMARK_PLUGINS = [remarkGfm];
@@ -334,11 +362,17 @@ const REHYPE_PLUGINS = [rehypeHighlight];
 export const MarkdownContent = React.memo(function MarkdownContent({
   content,
   onCiteClick,
+  showCursor,
 }: MarkdownContentProps) {
   // Keep the ref in sync so the shared `a` override can call the latest
   // onCiteClick without forcing a re-creation of the components map.
   React.useEffect(() => {
     onCiteClickRef.current = onCiteClick ?? null;
+  });
+  // Keep showCursor in a ref so the `p` override can read it without being
+  // recreated on every render (the components map is module-scoped).
+  React.useEffect(() => {
+    showCursorRef.current = showCursor ?? false;
   });
 
   // Defer the markdown re-parse: React will render a stale version (the
@@ -346,7 +380,15 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // idle time. This keeps scrolling / input responsive even while the AI
   // is streaming at 30ms intervals.
   const deferredContent = React.useDeferredValue(content);
-  const processed = onCiteClick ? preprocessCitations(deferredContent) : deferredContent;
+  // When showCursor is true, append a special marker to the content that
+  // the `p` override detects and replaces with the WritingCursor component.
+  // This makes the cursor appear INLINE at the end of the last paragraph —
+  // right next to the last letter — instead of on a new line below.
+  const CURSOR_MARKER = "\u0000CURSOR\u0000";
+  const contentWithCursor = showCursor
+    ? deferredContent + CURSOR_MARKER
+    : deferredContent;
+  const processed = onCiteClick ? preprocessCitations(contentWithCursor) : contentWithCursor;
 
   return (
     <ReactMarkdown

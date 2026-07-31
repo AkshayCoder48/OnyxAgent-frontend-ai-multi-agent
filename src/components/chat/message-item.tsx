@@ -222,10 +222,8 @@ function TextBubble({
           <MarkdownContent
             content={stripFunctionCallTags(text)}
             onCiteClick={onCiteClick}
+            showCursor={showCursor}
           />
-          {showCursor && (
-            <span className="writing-cursor-inline" aria-hidden="true" />
-          )}
         </div>
       )}
     </div>
