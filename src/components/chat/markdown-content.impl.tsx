@@ -119,35 +119,21 @@ const SHARED_COMPONENTS = {
     );
   },
   p({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
-    // Check if children contain the CURSOR_MARKER — if so, replace it
-    // with the WritingCursor component. This makes the cursor appear
-    // INLINE at the end of the paragraph, right next to the last letter.
-    if (showCursorRef.current && typeof children === "string" && children.includes("\u0000CURSOR\u0000")) {
-      const parts = children.split("\u0000CURSOR\u0000");
-      return (
-        <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-          {parts[0]}
-          <WritingCursor size="0.9em" />
-          {parts.slice(1)}
-        </p>
-      );
-    }
-    // Also check array children (when citations are present)
-    if (showCursorRef.current && Array.isArray(children)) {
-      const lastChild = children[children.length - 1];
-      if (typeof lastChild === "string" && lastChild.includes("\u0000CURSOR\u0000")) {
-        const parts = lastChild.split("\u0000CURSOR\u0000");
-        const newChildren = [...children.slice(0, -1), parts[0], <WritingCursor key="cursor" size="0.9em" />, parts.slice(1)];
-        return (
-          <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-            {newChildren}
-          </p>
-        );
+    // Strip any CURSOR_MARKER that leaked into paragraph children.
+    // The cursor is rendered by the wrapper div (outside ReactMarkdown)
+    // — we just need to clean the marker from the text here.
+    function stripMarker(child: React.ReactNode): React.ReactNode {
+      if (typeof child === "string") {
+        return child.replaceAll("\u0000CURSOR\u0000", "");
       }
+      if (Array.isArray(child)) {
+        return child.map(stripMarker);
+      }
+      return child;
     }
     return (
       <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-        {children}
+        {stripMarker(children)}
       </p>
     );
   },
@@ -380,24 +366,24 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // idle time. This keeps scrolling / input responsive even while the AI
   // is streaming at 30ms intervals.
   const deferredContent = React.useDeferredValue(content);
-  // When showCursor is true, append a special marker to the content that
-  // the `p` override detects and replaces with the WritingCursor component.
-  // This makes the cursor appear INLINE at the end of the last paragraph —
-  // right next to the last letter — instead of on a new line below.
-  const CURSOR_MARKER = "\u0000CURSOR\u0000";
-  const contentWithCursor = showCursor
-    ? deferredContent + CURSOR_MARKER
-    : deferredContent;
-  const processed = onCiteClick ? preprocessCitations(contentWithCursor) : contentWithCursor;
+  // Strip any cursor markers from content — we render the cursor as a
+  // sibling AFTER the markdown, but use a wrapper that makes the last
+  // paragraph display: inline so the cursor flows right after the last
+  // letter (not on a new line below).
+  const cleanContent = deferredContent.replaceAll("\u0000CURSOR\u0000", "");
+  const processed = onCiteClick ? preprocessCitations(cleanContent) : cleanContent;
 
   return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={REHYPE_PLUGINS}
-      components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
-    >
-      {processed}
-    </ReactMarkdown>
+    <div className={showCursor ? "streaming-cursor-wrapper" : undefined}>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
+      >
+        {processed}
+      </ReactMarkdown>
+      {showCursor && <WritingCursor size="0.9em" />}
+    </div>
   );
 }, (prev, next) => {
   // Short-circuit: if the content string is identical, skip re-render
