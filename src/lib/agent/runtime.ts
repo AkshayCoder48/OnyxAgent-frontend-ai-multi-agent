@@ -606,6 +606,9 @@ async function streamRound(
   // Track which tool call indices we've already pre-emitted (so we don't
   // emit duplicate tool_call events during streaming).
   const preEmittedToolCalls = new Set<number>();
+  // Track whether we've already pre-emitted DSML tool calls (from FreeGPT
+  // providers that send tool calls as XML text instead of delta.tool_calls).
+  let dsmlPreEmitted = false;
   let finishReason: string | null = null;
   let usage: RoundResult["usage"];
   let aborted = false;
@@ -628,6 +631,30 @@ async function streamRound(
               data: { index: roundIndex, content: cleanText },
               timestamp: nowISO(),
             });
+          }
+          // REAL-TIME DSML DETECTION: When we detect the DSML tool_calls
+          // open tag in the accumulated content, try to parse any complete
+          // invoke tags and pre-emit tool_call events so the UI shows the
+          // tool card DURING streaming (not after). This is critical for
+          // FreeGPT providers that send tool calls as DSML text — without
+          // this, the tool card only appears after the stream ends.
+          if (content.includes("DSML") && !dsmlPreEmitted) {
+            const dsmlResult = parseDSMLToolCalls(content);
+            if (dsmlResult && dsmlResult.toolCalls.length > 0) {
+              for (const tc of dsmlResult.toolCalls) {
+                emit({
+                  type: "tool_call",
+                  data: {
+                    tool_name: tc.name,
+                    args: { _streaming: tc.arguments } as Record<string, unknown>,
+                    tool_call_id: tc.id,
+                    _preemit: true,
+                  },
+                  timestamp: nowISO(),
+                });
+              }
+              dsmlPreEmitted = true;
+            }
           }
         }
         if (delta.thinking) {
