@@ -1531,7 +1531,8 @@ function DataManagementSection() {
         for (const f of walked) {
           try {
             const file = await f.handle.getFile();
-            if (file.size < 500 * 1024) { // skip files > 500KB
+            // No size limit — back up all files
+            if (true) {
               const text = await file.text();
               opfsFiles.push({ path: f.path, content: text });
             }
@@ -1644,7 +1645,7 @@ function DataManagementSection() {
         <AlertTriangle className="h-3.5 w-3.5" />
         <span>
           Export downloads all your data (conversations, files, settings, skills) as a JSON file.
-          Import restores from a previously exported file. Files larger than 500KB are not included in exports.
+          Import restores from a previously exported file. All files are included in exports (no size limit).
         </span>
       </div>
     </div>
