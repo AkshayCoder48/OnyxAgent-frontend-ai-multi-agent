@@ -33,6 +33,7 @@ import "./workflow";
 import "./memory";
 import "./counterfactual";
 import "./subagents";
+import "./workspace_analysis";
 import "./image_preview";
 
 export {};
