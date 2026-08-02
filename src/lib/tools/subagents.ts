@@ -23,10 +23,16 @@ interface SubagentTask {
   subagent_name: string;
   subagent_id?: string;
   description: string;
-  status: "pending" | "running" | "waiting_for_answer" | "completed" | "failed" | "cancelled" | "retrying";
+  status: "pending" | "running" | "waiting_for_answer" | "completed" | "failed" | "cancelled" | "retrying" | "disposed";
   error: string | null;
   created_at: string;
   messages: Array<{ type: string; text: string; timestamp: string }>;
+  /** Whether this task's agent should auto-dispose on completion. */
+  disposable: boolean;
+  /** Specialization role (e.g. "Frontend Engineer"). */
+  role?: string;
+  /** Parent task that spawned this one (for nested orchestration). */
+  parent_task?: string;
 }
 
 // In-memory task store (shared across all tool invocations in the session).
@@ -38,9 +44,13 @@ function emitStatus(task: SubagentTask) {
     detail: {
       task_id: task.task_id,
       subagent_name: task.subagent_name,
+      subagent_id: task.subagent_id,
       description: task.description,
       status: task.status,
       error: task.error,
+      disposable: task.disposable,
+      role: task.role,
+      parent_task: task.parent_task,
     },
   }));
 }
@@ -67,7 +77,17 @@ Task types:
 - "code": write/modify code files
 - "analysis": analyze data, files, or results
 - "writing": draft text, docs, summaries
-- "general": any other task`,
+- "general": any other task
+
+Disposal:
+- disposable: true → agent auto-disposes (status="disposed", enabled=false, removed from sidebar) once complete_subagent is called. Use for one-off tasks.
+- disposable: false (default) → agent stays in the sidebar for follow-up work.
+
+Role:
+- A specialization label (e.g. "Frontend Engineer", "Database Engineer", "Planner", "Security Reviewer"). Drives the orchestration pipeline's role assignment. Suggested roles:
+  Planner, Frontend Engineer, Backend Engineer, Database Engineer, Testing Engineer,
+  Documentation Writer, API Specialist, Performance Optimizer, Security Reviewer,
+  Refactoring Specialist, Deployment Engineer`,
   {
     type: "object",
     properties: {
@@ -85,6 +105,19 @@ Task types:
         description: "Category of work the subagent will perform.",
         default: "general",
       },
+      disposable: {
+        type: "boolean",
+        description: "If true, the agent auto-disposes after its task completes (removed from sidebar, enabled=false). Use for one-off tasks. Default false.",
+        default: false,
+      },
+      role: {
+        type: "string",
+        description: "Specialization role (e.g. 'Frontend Engineer', 'Database Engineer'). Drives orchestration pipeline role assignment.",
+      },
+      parent_task_id: {
+        type: "string",
+        description: "Optional: the task_id of a parent subagent that spawned this one (for nested orchestration).",
+      },
     },
     required: ["subagent_name", "description"],
     additionalProperties: false,
@@ -94,6 +127,9 @@ Task types:
     const subagentName = args.subagent_name as string;
     const description = args.description as string;
     const taskType = (args.task_type as string) ?? "general";
+    const disposable = (args.disposable as boolean) ?? false;
+    const role = args.role as string | undefined;
+    const parentTaskId = args.parent_task_id as string | undefined;
 
     // CRITICAL: Also create a SubagentConfig in the zustand store so:
     // 1. query_subagent can find it (was returning "unavailable" because
@@ -111,7 +147,21 @@ Task types:
         description,
         specialty: taskType as SubagentConfig["specialty"],
         enabled: true,
-        systemPrompt: `You are ${subagentName}, a specialized subagent. Task: ${description}. Use the available tools to complete your task. Report results clearly.`,
+        disposable,
+        role,
+        parent_task: parentTaskId,
+        lifecycle_status: "idle",
+        systemPrompt: `You are ${subagentName}${role ? `, a ${role}` : ""}, a specialized subagent. Task: ${description}. Use the available tools to complete your task. Report results clearly.`,
+      });
+    } else {
+      // Already exists — update lifecycle/disposable/role fields so the
+      // UI reflects the new spawn (e.g. re-using a persistent agent).
+      store.updateSubagent(subagentConfig.id, {
+        disposable,
+        role: role ?? subagentConfig.role,
+        parent_task: parentTaskId ?? subagentConfig.parent_task,
+        lifecycle_status: "idle",
+        last_activity: new Date().toISOString(),
       });
     }
 
@@ -124,6 +174,9 @@ Task types:
       error: null,
       created_at: new Date().toISOString(),
       messages: [],
+      disposable,
+      role,
+      parent_task: parentTaskId,
     };
     taskStore.set(taskId, task);
     emitStatus(task);
@@ -137,7 +190,9 @@ Task types:
       subagent_id: subagentConfig.id,
       subagent_name: task.subagent_name,
       status: "pending",
-      message: `Subagent spawned. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to send messages and get replies.`,
+      disposable,
+      role,
+      message: `Subagent spawned${role ? ` (role: ${role})` : ""}${disposable ? " [DISPOSABLE — will auto-dispose on completion]" : ""}. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to send messages and get replies.`,
     };
   },
   false,
@@ -167,9 +222,13 @@ registerTool(
       .map((t) => ({
         task_id: t.task_id,
         subagent_name: t.subagent_name,
+        subagent_id: t.subagent_id,
         description: t.description,
         status: t.status,
         error: t.error,
+        disposable: t.disposable,
+        role: t.role,
+        parent_task: t.parent_task,
         message_count: t.messages.length,
         created_at: t.created_at,
       }));
@@ -394,6 +453,7 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
           description: description || `Auto-spawned ${specialty} subagent`,
           specialty: specialty as "research" | "code" | "analysis" | "writing" | "general",
           systemPrompt: `You are ${name}, a ${specialty} subagent. ${description || ""}`,
+          lifecycle_status: "idle",
         });
       }
       subagentId = existing.id;
@@ -402,11 +462,14 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       const newTask: SubagentTask = {
         task_id: `subagent_${nanoid(12)}`,
         subagent_name: name,
+        subagent_id: existing.id,
         description: description || message.slice(0, 80),
         status: "running",
         error: null,
         created_at: new Date().toISOString(),
         messages: [],
+        disposable: existing.disposable ?? false,
+        role: existing.role,
       };
       taskStore.set(newTask.task_id, newTask);
       emitStatus(newTask);
@@ -418,6 +481,12 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       task.status = "running";
       emitStatus(task);
     }
+    // Lifecycle: this agent is now actively working.
+    try {
+      store.updateLifecycleStatus(subagentId, "working");
+    } catch {
+      // best-effort
+    }
 
     try {
       const reply = await executeSubagentTurn(subagentId, message);
@@ -426,6 +495,11 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
         emitStatus(task);
         emitMessage(task.task_id, "result", reply);
       }
+      try {
+        useSubagentStore.getState().updateLifecycleStatus(subagentId, "completed");
+      } catch {
+        // best-effort
+      }
       return { subagent_name: store.getSubagent(subagentId)?.name, reply };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -433,6 +507,11 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
         task.status = "failed";
         task.error = errMsg;
         emitStatus(task);
+      }
+      try {
+        useSubagentStore.getState().updateLifecycleStatus(subagentId, "idle");
+      } catch {
+        // best-effort
       }
       return { error: errMsg };
     }
@@ -481,7 +560,16 @@ Examples:
 // === Tool: complete_subagent ===
 registerTool(
   "complete_subagent",
-  "Mark a subagent task as completed with a final result message. Use this when the subagent has finished its work and you want to record the outcome. The task moves to 'completed' status and is removed from the active list after 10 seconds.",
+  `Mark a subagent task as completed with a final result message. Use this when the subagent has finished its work and you want to record the outcome. The task moves to 'completed' status.
+
+DISPOSABLE AGENTS: If the subagent was spawned with disposable=true, it is automatically disposed:
+- lifecycle_status → "disposed"
+- enabled → false (removed from sidebar)
+- status → "disposed"
+- Removed from taskStore immediately
+A "disposed" status event is emitted so the UI can clean up.
+
+NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. The task is auto-removed from the active list after 30 seconds (but the SubagentConfig persists).`,
   {
     type: "object",
     properties: {
@@ -498,6 +586,64 @@ registerTool(
     if (!task) {
       return { error: `Subagent ${taskId} not found.` };
     }
+
+    // Pull the live disposable flag — check both the task and the store
+    // (the store is the source of truth for persisted agents).
+    let disposable = task.disposable;
+    try {
+      const { useSubagentStore } = await import("@/stores/subagent-store");
+      const store = useSubagentStore.getState();
+      if (task.subagent_id) {
+        const cfg = store.getSubagent(task.subagent_id);
+        if (cfg) {
+          // Prefer the persisted flag (it may have been updated since spawn).
+          disposable = cfg.disposable ?? disposable;
+          // Update lifecycle to "completed" for both disposable + persistent
+          // agents — only the dispose step below differs.
+          store.updateLifecycleStatus(cfg.id, "completed");
+        }
+      }
+    } catch {
+      // store unavailable — fall back to task-level disposable flag
+    }
+
+    if (disposable) {
+      // Auto-dispose: mark disposed, disable config (removes from sidebar),
+      // and remove from the in-memory taskStore immediately.
+      task.status = "disposed";
+      task.error = null;
+      emitStatus(task);
+      emitMessage(taskId, "result", result);
+      emitMessage(taskId, "info", "[DISPOSABLE] Agent auto-disposed after completion.");
+      task.messages.push({ type: "result", text: result, timestamp: new Date().toISOString() });
+      task.messages.push({
+        type: "info",
+        text: "Agent auto-disposed after completion (disposable=true).",
+        timestamp: new Date().toISOString(),
+      });
+
+      try {
+        const { useSubagentStore } = await import("@/stores/subagent-store");
+        if (task.subagent_id) {
+          useSubagentStore.getState().disposeAgent(task.subagent_id);
+        }
+      } catch {
+        // best-effort
+      }
+
+      // Remove from taskStore right away — the agent is gone.
+      taskStore.delete(taskId);
+
+      return {
+        task_id: taskId,
+        status: "disposed",
+        disposable: true,
+        result,
+        message: "Disposable agent completed and auto-disposed (removed from sidebar).",
+      };
+    }
+
+    // Non-disposable — keep the agent around for follow-up work.
     task.status = "completed";
     task.error = null;
     emitStatus(task);
@@ -509,7 +655,13 @@ registerTool(
     // so query_subagent still works shortly after completion).
     setTimeout(() => taskStore.delete(taskId), 30_000);
 
-    return { task_id: taskId, status: "completed", result };
+    return {
+      task_id: taskId,
+      status: "completed",
+      disposable: false,
+      result,
+      message: "Task completed. Agent remains available for follow-up work.",
+    };
   },
   false,
   "orchestration",

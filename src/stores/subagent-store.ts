@@ -33,6 +33,16 @@ export interface SubagentMessage {
   isStreaming?: boolean;
 }
 
+/** Lifecycle states for an agent (the orchestration pipeline). */
+export type AgentLifecycleStatus =
+  | "idle"
+  | "planning"
+  | "working"
+  | "waiting"
+  | "reviewing"
+  | "completed"
+  | "disposed";
+
 export interface SubagentConfig {
   id: string;
   name: string;
@@ -50,6 +60,18 @@ export interface SubagentConfig {
   systemPrompt: string;
   /** Is the subagent enabled (can be called by orchestrator)? */
   enabled: boolean;
+  /** Whether this agent auto-disposes after its task completes. Disposable
+   *  agents are removed from the sidebar (enabled=false) once they finish. */
+  disposable?: boolean;
+  /** Specialization label (e.g. "Frontend Engineer", "Database Engineer").
+   *  Surfaces in the UI + drives the orchestration pipeline's role assignment. */
+  role?: string;
+  /** Current lifecycle state — used by the orchestration pipeline + UI badges. */
+  lifecycle_status?: AgentLifecycleStatus;
+  /** The task ID that spawned this agent (for traceability). */
+  parent_task?: string;
+  /** ISO timestamp of the agent's last activity (tool call, message, etc.). */
+  last_activity?: string;
   created_at: string;
 }
 
@@ -74,6 +96,10 @@ interface SubagentStore {
   updateSubagent: (id: string, updates: Partial<SubagentConfig>) => void;
   deleteSubagent: (id: string) => void;
   getSubagent: (id: string) => SubagentConfig | undefined;
+
+  // Lifecycle management — the orchestration pipeline drives these.
+  updateLifecycleStatus: (id: string, status: AgentLifecycleStatus) => void;
+  disposeAgent: (id: string) => void;
 
   // Session actions
   createSession: (subagentId: string, title?: string) => SubagentChatSession;
@@ -109,6 +135,11 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
       apiKey: config.apiKey ?? null,
       systemPrompt: config.systemPrompt || "",
       enabled: config.enabled ?? true,
+      disposable: config.disposable ?? false,
+      role: config.role,
+      lifecycle_status: config.lifecycle_status ?? "idle",
+      parent_task: config.parent_task,
+      last_activity: new Date().toISOString(),
       created_at: new Date().toISOString(),
     };
     set((state) => ({
@@ -140,6 +171,33 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
   },
 
   getSubagent: (id) => get().subagents.find((s) => s.id === id),
+
+  updateLifecycleStatus: (id, status) => {
+    set((state) => ({
+      subagents: state.subagents.map((s) =>
+        s.id === id
+          ? { ...s, lifecycle_status: status, last_activity: new Date().toISOString() }
+          : s,
+      ),
+    }));
+    get().saveToStorage();
+  },
+
+  disposeAgent: (id) => {
+    set((state) => ({
+      subagents: state.subagents.map((s) =>
+        s.id === id
+          ? {
+              ...s,
+              lifecycle_status: "disposed",
+              enabled: false,
+              last_activity: new Date().toISOString(),
+            }
+          : s,
+      ),
+    }));
+    get().saveToStorage();
+  },
 
   createSession: (subagentId, title) => {
     const session: SubagentChatSession = {
