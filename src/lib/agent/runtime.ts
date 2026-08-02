@@ -478,6 +478,9 @@ function extractUsage(chunk: Record<string, unknown>): {
 
 interface RoundResult {
   content: string;
+  /** Text that was generated BEFORE the first tool call in this round.
+   *  Used by buildAssistantParts to place pre-tool text above the tool card. */
+  textBeforeTools?: string;
   thinking: string;
   reasoning: string;
   toolCalls: Array<{
@@ -590,6 +593,12 @@ async function streamRound(
   let content = "";
   let thinking = "";
   let reasoning = "";
+  // Track text that came BEFORE the first tool call. When the AI generates
+  // text → tool call → more text in the same round, we need to know which
+  // text was "pre-tool" so buildAssistantParts can put it BEFORE the tool
+  // card (not after). Without this, ALL text gets concatenated and placed
+  // after the tool calls, making the response look cut/split.
+  let textBeforeTools = "";
   const toolCallAccumulator = new Map<
     number,
     { id: string; name: string; args: string }
@@ -638,6 +647,11 @@ async function streamRound(
           });
         }
         if (delta.toolCalls) {
+          // Capture text that came before the first tool call. This lets
+          // buildAssistantParts place pre-tool text ABOVE the tool card.
+          if (toolCallAccumulator.size === 0 && content) {
+            textBeforeTools = content;
+          }
           for (const tc of delta.toolCalls) {
             const existing = toolCallAccumulator.get(tc.index) ?? {
               id: tc.id ?? nanoid(),
@@ -743,6 +757,7 @@ async function streamRound(
 
   return {
     content,
+    textBeforeTools: textBeforeTools || undefined,
     thinking,
     reasoning,
     toolCalls,
@@ -832,6 +847,7 @@ function buildAssistantParts(
     status?: string;
   }>,
   content: string,
+  textBeforeTools?: string,
 ): import("@/types/chat").MessagePart[] {
   const parts: import("@/types/chat").MessagePart[] = [];
   if (thinking && thinking.trim()) {
@@ -839,6 +855,12 @@ function buildAssistantParts(
   }
   if (reasoning && reasoning.trim()) {
     parts.push({ id: `p-reason-${Date.now()}`, type: "reasoning", content: reasoning });
+  }
+  // Text that came BEFORE the first tool call goes ABOVE the tool cards.
+  // This prevents the response from looking "cut" — half text above, half
+  // below the tool card. Without this, ALL text gets pushed after the tools.
+  if (textBeforeTools && textBeforeTools.trim()) {
+    parts.push({ id: `p-text-pre-${Date.now()}`, type: "text", content: textBeforeTools });
   }
   for (const tc of toolCalls) {
     parts.push({
@@ -857,8 +879,17 @@ function buildAssistantParts(
       },
     });
   }
+  // Text AFTER tools: push only the text that came AFTER the tool calls.
+  // If textBeforeTools was set, content includes both pre+post text — we
+  // need to extract just the post-text (everything after textBeforeTools).
   if (content && content.trim()) {
-    parts.push({ id: `p-text-${Date.now()}`, type: "text", content });
+    let postText = content;
+    if (textBeforeTools && content.startsWith(textBeforeTools)) {
+      postText = content.slice(textBeforeTools.length);
+    }
+    if (postText.trim()) {
+      parts.push({ id: `p-text-${Date.now()}`, type: "text", content: postText });
+    }
   }
   return parts;
 }
@@ -1237,6 +1268,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
   // 4. Agent loop — max MAX_ROUNDS.
   let round = 0;
   let lastAssistantContent = "";
+  let lastAssistantTextBeforeTools: string | undefined;
   let lastAssistantThinking = "";
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
@@ -1350,6 +1382,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
             lastAssistantReasoning || undefined,
             allToolCalls,
             lastAssistantContent || `(error: ${message})`,
+            lastAssistantTextBeforeTools,
           ),
           toolCalls: allToolCalls,
           modelName: opts.provider.model,
@@ -1370,6 +1403,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
 
     if (roundResult.usage) lastUsage = roundResult.usage;
     lastAssistantContent = roundResult.content;
+    lastAssistantTextBeforeTools = roundResult.textBeforeTools;
     lastAssistantThinking = roundResult.thinking;
     lastAssistantReasoning = roundResult.reasoning;
 
@@ -1392,6 +1426,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
             roundResult.reasoning || undefined,
             allToolCalls,
             finalContent,
+            roundResult.textBeforeTools,
           ),
           toolCalls: allToolCalls,
           modelName: opts.provider.model,
@@ -1588,6 +1623,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         allToolCalls,
         lastAssistantContent ||
           `(reached max rounds (${MAX_ROUNDS}); last content shown above)`,
+        lastAssistantTextBeforeTools,
       ),
       toolCalls: allToolCalls,
       modelName: opts.provider.model,
