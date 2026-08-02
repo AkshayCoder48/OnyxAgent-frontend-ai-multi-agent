@@ -263,7 +263,7 @@ async function backupAllFilesFromSandbox(
   sandbox: Sandbox,
 ): Promise<Array<{ path: string; content: string }>> {
   const files: Array<{ path: string; content: string }> = [];
-  const MAX_FILE_SIZE = 500 * 1024; // 500KB per file
+  // NO file size limit — user requested all files (code, images, etc.) be backed up.
   const SKIP_FILES = new Set([
     ".bash_history", ".bash_logout", ".bashrc", ".profile",
     ".sudo_as_admin_successful", ".wget-hsts",
@@ -288,7 +288,7 @@ async function backupAllFilesFromSandbox(
       } else {
         try {
           const bytes = await sandbox.files.read(entry.path, { format: "bytes" });
-          if (bytes.byteLength > MAX_FILE_SIZE) continue; // skip large files
+          // NO size limit — back up ALL files regardless of size.
           // Skip binary files — detect null bytes in the first 1KB.
           const checkLen = Math.min(bytes.byteLength, 1024);
           let isBinary = false;
@@ -1212,11 +1212,10 @@ export async function POST(req: NextRequest) {
         // Download ALL files from the sandbox at /home/user (recursive) so
         // the client can save them to OPFS as a backup. Returns a JSON
         // object: { files: [{ path, content, isBase64 }] }.
-        // Files larger than 500KB are skipped (too big for JSON transport).
+        // NO file size limit — back up ALL files (code, images, etc.).
         // Binary files are returned as base64 to avoid UTF-8 corruption.
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         const files: Array<{ path: string; content: string; isBase64?: boolean }> = [];
-        const MAX_FILE_SIZE = 500 * 1024; // 500KB per file
 
         async function walkDir(dirPath: string) {
           try {
@@ -1230,11 +1229,10 @@ export async function POST(req: NextRequest) {
                 // Read file content as bytes to avoid UTF-8 corruption.
                 try {
                   const bytes = await sandbox.files.read(entryPath, { format: "bytes" });
-                  if (bytes.byteLength <= MAX_FILE_SIZE) {
-                    // Convert to base64 for safe JSON transport.
-                    const base64 = Buffer.from(bytes).toString("base64");
-                    files.push({ path: entryPath, content: base64, isBase64: true });
-                  }
+                  // NO size limit — back up ALL files regardless of size.
+                  // Convert to base64 for safe JSON transport.
+                  const base64 = Buffer.from(bytes).toString("base64");
+                  files.push({ path: entryPath, content: base64, isBase64: true });
                 } catch {
                   // skip unreadable files (binary, too large, etc.)
                 }

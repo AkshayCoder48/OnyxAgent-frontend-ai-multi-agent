@@ -21,7 +21,7 @@
  * sandboxes on the account before creating a new one, enforcing the
  * "one sandbox per API key" rule.
  *
- * Files >500KB are skipped in backup/restore (too large for JSON transport).
+ * NO file size limit — ALL files (code, images, etc.) are backed up and restored.
  * Binary files are skipped (can't JSON-serialize).
  */
 

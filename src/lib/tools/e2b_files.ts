@@ -526,7 +526,7 @@ registerTool(
       const filesMap: Record<string, Uint8Array> = {};
       let fileCount = 0;
       let totalSize = 0;
-      const MAX_TOTAL = 4 * 1024 * 1024;
+      const MAX_TOTAL = Infinity; // No limit — user requested all files
       const walked = await walkSandboxForZip(client, path);
       for (const f of walked) {
         if (totalSize > MAX_TOTAL) {
@@ -633,7 +633,7 @@ registerTool(
     const files: Record<string, Uint8Array> = {};
     let fileCount = 0;
     let totalSize = 0;
-    const MAX_TOTAL = 4 * 1024 * 1024;
+    const MAX_TOTAL = Infinity; // No limit — user requested all files
 
     const walked = await walkSandboxForZip(client, path);
     for (const f of walked) {
