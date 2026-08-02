@@ -349,6 +349,109 @@ function extractFinishReason(chunk: Record<string, unknown>): string | null {
   return choice.finish_reason ?? choice.stop_reason ?? null;
 }
 
+/**
+ * Parse DSML (DeepSeek-style Markup Language) tool calls from text content.
+ * Some providers (e.g. FreeGPT/freeaixyz4all) don't support the standard
+ * OpenAI tool_calls API — instead, the model writes tool calls as XML-like
+ * tags in the text:
+ *
+ *   <｜｜DSML｜｜tool_calls>
+ *   <｜｜DSML｜｜invoke name="list_chats">
+ *   </｜｜DSML｜｜invoke>
+ *   <｜｜DSML｜｜invoke name="run_terminal">
+ *   <｜｜DSML｜｜parameter name="command" string="true">ls -la</｜｜DSML｜｜parameter>
+ *   </｜｜DSML｜｜invoke>
+ *   </｜｜DSML｜｜tool_calls>
+ *
+ * This parser detects the pattern, extracts tool name + args, and returns
+ * them as a tool_calls array (same format as the standard API). The caller
+ * then strips the DSML tags from the visible text.
+ *
+ * Returns { toolCalls: [...], cleanText: "..." } or null if no DSML found.
+ */
+function parseDSMLToolCalls(text: string): {
+  toolCalls: Array<{ index: number; id: string; name: string; arguments: string }>;
+  cleanText: string;
+} | null {
+  // Quick check — if the DSML marker isn't in the text, skip.
+  if (!text.includes("DSML")) return null;
+
+  let cleanText = text;
+  const toolCalls: Array<{ index: number; id: string; name: string; arguments: string }> = [];
+  let index = 0;
+
+  // Remove the entire <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls> block.
+  // The special character ｜ (U+FF5C) is used by DeepSeek.
+  const dsmlBlockRe = /<｜｜DSML｜｜tool_calls>([\s\S]*?)<\/｜｜DSML｜｜tool_calls>/g;
+  const dsmlBlockMatch = dsmlBlockRe.exec(text);
+
+  if (!dsmlBlockMatch) {
+    // Also try without closing tag (streaming — may be incomplete).
+    const openTag = "<｜｜DSML｜｜tool_calls>";
+    const openIdx = text.indexOf(openTag);
+    if (openIdx === -1) return null;
+    // Has open tag but no close — extract from open tag to end.
+    const block = text.slice(openIdx + openTag.length);
+    cleanText = text.slice(0, openIdx).trim();
+
+    // Parse invoke tags from the block.
+    const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)">([\s\S]*?)(?:<\/｜｜DSML｜｜invoke>|$)/g;
+    let invokeMatch;
+    while ((invokeMatch = invokeRe.exec(block)) !== null) {
+      const name = invokeMatch[1]!;
+      const body = invokeMatch[2] ?? "";
+      const args: Record<string, unknown> = {};
+
+      // Parse <｜｜DSML｜｜parameter name="X" string="true">VALUE</｜｜DSML｜｜parameter>
+      const paramRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+      let paramMatch;
+      while ((paramMatch = paramRe.exec(body)) !== null) {
+        const paramName = paramMatch[1]!;
+        const paramValue = paramMatch[2]!.trim();
+        args[paramName] = paramValue;
+      }
+
+      toolCalls.push({
+        index: index++,
+        id: `dsml_${Date.now()}_${index}`,
+        name,
+        arguments: JSON.stringify(args),
+      });
+    }
+  } else {
+    // Has both open and close tags.
+    cleanText = (text.slice(0, dsmlBlockMatch.index) + text.slice(dsmlBlockRe.lastIndex)).trim();
+    const block = dsmlBlockMatch[1] ?? "";
+
+    const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)">([\s\S]*?)<\/｜｜DSML｜｜invoke>/g;
+    let invokeMatch;
+    while ((invokeMatch = invokeRe.exec(block)) !== null) {
+      const name = invokeMatch[1]!;
+      const body = invokeMatch[2] ?? "";
+      const args: Record<string, unknown> = {};
+
+      const paramRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+      let paramMatch;
+      while ((paramMatch = paramRe.exec(body)) !== null) {
+        const paramName = paramMatch[1]!;
+        const paramValue = paramMatch[2]!.trim();
+        args[paramName] = paramValue;
+      }
+
+      toolCalls.push({
+        index: index++,
+        id: `dsml_${Date.now()}_${index}`,
+        name,
+        arguments: JSON.stringify(args),
+      });
+    }
+  }
+
+  if (toolCalls.length === 0 && !dsmlBlockMatch) return null;
+
+  return { toolCalls, cleanText };
+}
+
 function extractUsage(chunk: Record<string, unknown>): {
   promptTokens?: number;
   completionTokens?: number;
@@ -506,11 +609,17 @@ async function streamRound(
       if (delta) {
         if (delta.text) {
           content += delta.text;
-          emit({
-            type: "text_delta",
-            data: { index: roundIndex, content: delta.text },
-            timestamp: nowISO(),
-          });
+          // Strip DSML tags from streaming text so the user never sees the
+          // raw <｜｜DSML｜｜...> XML. The tags are parsed into tool_calls
+          // after the stream ends (in the post-stream DSML parser above).
+          const cleanText = delta.text.replace(/<｜｜DSML｜｜[^>]*>/g, "").replace(/<\/｜｜DSML｜｜[^>]*>/g, "");
+          if (cleanText) {
+            emit({
+              type: "text_delta",
+              data: { index: roundIndex, content: cleanText },
+              timestamp: nowISO(),
+            });
+          }
         }
         if (delta.thinking) {
           thinking += delta.thinking;
@@ -603,6 +712,34 @@ async function streamRound(
     }
     return { id: tc.id, name: tc.name, args };
   });
+
+  // DSML PARSER: Some providers (FreeGPT/freeaixyz4all) don't support the
+  // standard OpenAI tool_calls API — the model writes tool calls as XML-like
+  // tags (<｜｜DSML｜｜tool_calls>...) in the TEXT content. Parse these and
+  // convert to proper tool calls. Strip the DSML tags from the content so
+  // the user never sees the raw XML.
+  if (toolCalls.length === 0) {
+    const dsmlResult = parseDSMLToolCalls(content);
+    if (dsmlResult && dsmlResult.toolCalls.length > 0) {
+      content = dsmlResult.cleanText;
+      for (const tc of dsmlResult.toolCalls) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.arguments) as Record<string, unknown>;
+        } catch {
+          args = { _raw: tc.arguments };
+        }
+        toolCalls.push({ id: tc.id, name: tc.name, args });
+      }
+    }
+  } else {
+    // Even with standard tool_calls, strip any DSML tags that leaked into
+    // the text content (some providers mix both formats).
+    const dsmlResult = parseDSMLToolCalls(content);
+    if (dsmlResult) {
+      content = dsmlResult.cleanText;
+    }
+  }
 
   return {
     content,
