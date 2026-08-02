@@ -32,11 +32,17 @@ export const maxDuration = 300;
 
 const DEFAULT_CWD = "/home/user";
 const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — files persist for a full day
-// SHARED SANDBOX ARCHITECTURE: one sandbox per API key, reused across ALL
-// conversations. OPFS is the single source of truth for files — the sandbox
-// is only a code runner. When the sandbox quota is exceeded (e.g. "20/20"),
-// we kill ALL sandboxes on the account, create ONE fresh sandbox, and OPFS
-// auto-syncs to it on the next run_python/run_terminal call.
+// ROTATION: E2B sandboxes have a 24h hard TTL. We rotate at 23h to avoid
+// hitting the limit (backup → kill → create → restore). The client-side
+// `ensureFreshSandbox` in `src/lib/e2b/sandbox-rotation.ts` is the primary
+// trigger; the server-side check in `getSandbox` is a safety net for when
+// the client-side rotation didn't run (e.g., user closed the tab for >23h
+// but the server instance is still alive with the cached entry).
+const ROTATION_AGE_MS = 23 * 60 * 60 * 1000; // 23 hours
+// SHARED SANDBOX ARCHITECTURE: ONE sandbox per API key — the E2B sandbox is
+// the SINGLE source of truth for files (no OPFS). When the sandbox quota is
+// exceeded (e.g. "20/20"), we kill ALL sandboxes on the account, create ONE
+// fresh sandbox, and the file tools repopulate it from scratch.
 //
 // We keep MAX_SANDBOXES=3 in the local cache as headroom (the shared one
 // + maybe a stale entry during dead-sandbox recovery). The quota recovery
@@ -184,20 +190,22 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     const localIds = new Set<string>();
     for (const [, entry] of sharedCache) localIds.add(entry.sandbox.sandboxId);
     for (const [, entry] of separateCache) localIds.add(entry.sandbox.sandboxId);
-    // Kill any running sandbox that isn't in our cache (orphaned).
-    // Keep the 3 most recent (in case the user has multiple tabs open).
-    const sorted = page
+    // SINGLE-SANDBOX RULE: kill ALL running sandboxes that aren't in our
+    // local cache. Previously we kept the 3 most recent (headroom for
+    // multi-tab users), but with the E2B-as-source-of-truth architecture
+    // we enforce ONE sandbox per API key. Files are backed up before
+    // rotation, so killing orphans doesn't lose data — the next operation
+    // just creates a fresh sandbox.
+    const toKill = page
       .filter((s) => s.state !== "closed" && !localIds.has(s.sandboxId))
       .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
-    // Kill all but the 3 most recent orphans.
-    const toKill = sorted.slice(3);
     await Promise.all(
       toKill.map((s) =>
         Sandbox.kill(s.sandboxId, { apiKey: knownApiKey }).catch(() => {}),
       ),
     );
     if (toKill.length > 0) {
-      console.log(`[sandbox] killed ${toKill.length} orphaned sandbox(es) to free quota`);
+      console.log(`[sandbox] killed ${toKill.length} orphaned sandbox(es) to enforce single-sandbox rule`);
     }
   } catch {
     // best-effort — don't fail the operation if listing/killing fails.
@@ -240,19 +248,151 @@ async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
   }
 }
 
+/**
+ * Recursively walk /home/user in a sandbox and return all TEXT files as
+ * { path, content } pairs. Used by the `rotate` and `backup_all` actions
+ * to migrate files to a new sandbox.
+ *
+ * - Files >500KB are SKIPPED (too large for JSON transport).
+ * - Binary files are SKIPPED (can't JSON-serialize — detected by checking
+ *   the first 1KB for null bytes).
+ * - Shell dotfiles (.bashrc, .profile, etc.) are skipped — they're
+ *   sandbox-template-specific and shouldn't be restored.
+ */
+async function backupAllFilesFromSandbox(
+  sandbox: Sandbox,
+): Promise<Array<{ path: string; content: string }>> {
+  const files: Array<{ path: string; content: string }> = [];
+  const MAX_FILE_SIZE = 500 * 1024; // 500KB per file
+  const SKIP_FILES = new Set([
+    ".bash_history", ".bash_logout", ".bashrc", ".profile",
+    ".sudo_as_admin_successful", ".wget-hsts",
+  ]);
+
+  async function walkDir(dirPath: string) {
+    let entries;
+    try {
+      entries = await sandbox.files.list(dirPath);
+    } catch {
+      return; // can't list this dir — skip
+    }
+    for (const entry of entries) {
+      const fname = entry.name ?? entry.path.split("/").pop() ?? "";
+      if (SKIP_FILES.has(fname)) continue;
+      const isDir =
+        entry.type === "dir" ||
+        entry.type === "directory" ||
+        entry.type === "FILE_TYPE_DIRECTORY";
+      if (isDir) {
+        await walkDir(entry.path);
+      } else {
+        try {
+          const bytes = await sandbox.files.read(entry.path, { format: "bytes" });
+          if (bytes.byteLength > MAX_FILE_SIZE) continue; // skip large files
+          // Skip binary files — detect null bytes in the first 1KB.
+          const checkLen = Math.min(bytes.byteLength, 1024);
+          let isBinary = false;
+          for (let i = 0; i < checkLen; i++) {
+            if (bytes[i] === 0) { isBinary = true; break; }
+          }
+          if (isBinary) continue;
+          // Convert to UTF-8 string — safe because we verified it's text.
+          const text = Buffer.from(bytes).toString("utf8");
+          files.push({ path: entry.path, content: text });
+        } catch {
+          // skip unreadable files (permissions, etc.)
+        }
+      }
+    }
+  }
+
+  await walkDir(DEFAULT_CWD);
+  return files;
+}
+
+/**
+ * Perform an atomic sandbox rotation: killOrphans → backup → kill → create → restore.
+ *
+ * Used by:
+ *   - The `rotate` action (called by the client-side `ensureFreshSandbox`
+ *     when the sandbox is >23h old).
+ *   - The `getSandbox` safety-net check (when the server's cached entry is
+ *     >23h old).
+ *
+ * Returns the new sandbox + counts of files backed up and restored.
+ */
+async function performRotation(
+  apiKey: string,
+  conversationId: string | null,
+  mode: "shared" | "separate",
+): Promise<{ sandbox: Sandbox; backedUp: number; restored: number }> {
+  const key = cacheKey(apiKey, conversationId, mode);
+
+  // 1. Enforce single-sandbox rule — kill ALL orphaned sandboxes on the
+  //    account before creating a new one.
+  await killOrphanedSandboxes(apiKey);
+
+  // 2. Try to backup files from the current sandbox (if any).
+  let backupFiles: Array<{ path: string; content: string }> = [];
+  const cached = lookupCached(apiKey, conversationId, mode);
+  if (cached) {
+    if (await isAlive(cached.sandbox)) {
+      try {
+        backupFiles = await backupAllFilesFromSandbox(cached.sandbox);
+        console.log(`[sandbox] rotation: backed up ${backupFiles.length} files from ${cached.sandbox.sandboxId}`);
+      } catch (err) {
+        // best-effort — if backup fails, continue with empty backup
+        console.warn(`[sandbox] rotation: backup failed:`, err instanceof Error ? err.message : String(err));
+      }
+    }
+    // 3. Kill the old sandbox (evictCacheEntry kills + removes from cache).
+    evictCacheEntry(mode, key);
+  }
+
+  // 4. Create a new sandbox (createAndCacheSandbox handles quota recovery).
+  const sandbox = await createAndCacheSandbox(apiKey, conversationId, mode);
+
+  // 5. Restore the backup (if any) to the new sandbox.
+  let restored = 0;
+  if (backupFiles.length > 0) {
+    for (const f of backupFiles) {
+      try {
+        await sandbox.files.write(f.path, f.content);
+        restored++;
+      } catch {
+        // skip files that fail to write
+      }
+    }
+    console.log(`[sandbox] rotation: restored ${restored}/${backupFiles.length} files to ${sandbox.sandboxId}`);
+  }
+
+  return { sandbox, backedUp: backupFiles.length, restored };
+}
+
 /** Create a fresh sandbox and cache it. Used by getSandbox() and the
  *  dead-sandbox recovery path. Creates predefined folders best-effort.
+ *
+ *  SINGLE-SANDBOX ENFORCEMENT: `killOrphanedSandboxes(apiKey)` runs at the
+ *  start of EVERY create to kill orphaned sandboxes from previous sessions /
+ *  dead serverless instances. This prevents the "20/20 sandbox limit reached"
+ *  error and enforces the "one sandbox per API key" rule.
  *
  *  QUOTA RECOVERY: if `Sandbox.create` fails with a quota error (e.g.
  *  "20/20 sandbox limit reached"), we kill ALL sandboxes on the account
  *  (enforcing the "one shared sandbox" rule), clear our local cache, and
- *  retry the create. OPFS auto-syncs to the new sandbox on the next
- *  run_python/run_terminal call — no files are lost. */
+ *  retry the create. */
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
   mode: "shared" | "separate",
 ): Promise<Sandbox> {
+  // Enforce single-sandbox rule — kill ALL orphaned sandboxes on the account
+  // before creating a new one. This runs on EVERY create (not just when the
+  // cache is full) to handle the case where orphans accumulated from previous
+  // serverless instances (Vercel cold starts lose the in-memory cache, but
+  // the sandboxes keep running on E2B).
+  await killOrphanedSandboxes(apiKey);
+
   await enforceLimit();
 
   let sandbox: Sandbox;
@@ -262,7 +402,6 @@ async function createAndCacheSandbox(
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
     // per API key. When quota is exceeded, nuke everything and start fresh.
-    // OPFS is the source of truth — no files are lost.
     if (isQuotaError(createErr)) {
       console.warn(`[sandbox] quota exceeded, killing ALL sandboxes on account and retrying...`);
       await killAllSandboxesOnAccount(apiKey);
@@ -315,6 +454,18 @@ async function getSandbox(
   // 1. Check the in-memory cache first.
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
+    // ROTATION SAFETY NET: if the cached sandbox is >23h old, rotate it
+    // (backup → kill → create → restore) before use. The client-side
+    // `ensureFreshSandbox` is the primary trigger; this is a fallback for
+    // when the client didn't rotate (e.g., user closed the tab for >23h
+    // but the server instance is still alive with the cached entry).
+    // Without this, the sandbox would be killed by E2B's 24h hard limit
+    // and all files would be lost.
+    if (Date.now() - cached.createdAt > ROTATION_AGE_MS) {
+      console.log(`[sandbox] getSandbox: cached sandbox ${cached.sandbox.sandboxId} is >23h old, rotating...`);
+      const { sandbox: rotated } = await performRotation(apiKey, conversationId, mode);
+      return rotated;
+    }
     // Liveness check — if the cached sandbox is dead, evict + fall through
     // to create a new one. Skip the ping if we verified alive in the last
     // 2 minutes (avoids redundant 3s pings on rapid back-to-back calls —
@@ -1096,6 +1247,47 @@ export async function POST(req: NextRequest) {
 
         await walkDir(DEFAULT_CWD);
         return NextResponse.json({ sandboxId: sandbox.sandboxId, files, count: files.length });
+      }
+
+      case "backup_all": {
+        // Recursively walk /home/user and return ALL text files as
+        // { path, content } pairs (raw UTF-8 text, NOT base64).
+        // Files >500KB are SKIPPED (too large for JSON transport).
+        // Binary files are SKIPPED (can't JSON-serialize — detected by
+        // checking the first 1KB for null bytes).
+        // Shell dotfiles are skipped (sandbox-template-specific).
+        //
+        // Used by the auto-rotation system to migrate files to a new sandbox.
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const files = await backupAllFilesFromSandbox(sandbox);
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          files,
+          count: files.length,
+        });
+      }
+
+      case "rotate": {
+        // Atomic sandbox rotation: killOrphans → backup → kill → create → restore.
+        // Called by the client-side `ensureFreshSandbox` when the sandbox is
+        // >23h old (approaching E2B's 24h hard TTL).
+        //
+        // The rotation is TRANSPARENT — the new sandbox has the same files
+        // as the old one (text files ≤500KB). Tools don't know it happened;
+        // they just see the new sandboxId on the next call.
+        //
+        // Returns { sandboxId, backedUp, restored }.
+        const { sandbox, backedUp, restored } = await performRotation(
+          apiKey,
+          conversationId,
+          sandboxMode,
+        );
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          backedUp,
+          restored,
+          rotated: true,
+        });
       }
 
       case "restore_files": {
