@@ -410,16 +410,32 @@ export const MessageItem = React.memo(function MessageItem({
             <>
               {showPlaceholder && (
                 <div
-                  className="bg-muted flex items-center gap-2 rounded-2xl rounded-tl-sm px-4 py-2.5"
+                  className="reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-2xl rounded-tl-sm border border-foreground/10 bg-muted/50 ring-1 ring-primary/15"
                   role="status"
                   aria-live="polite"
                 >
-                  <div className="flex gap-1" aria-hidden="true">
-                    <span className="bg-muted-foreground/40 h-1.5 w-1.5 animate-bounce rounded-full [animation-delay:0ms]" />
-                    <span className="bg-muted-foreground/40 h-1.5 w-1.5 animate-bounce rounded-full [animation-delay:150ms]" />
-                    <span className="bg-muted-foreground/40 h-1.5 w-1.5 animate-bounce rounded-full [animation-delay:300ms]" />
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left sm:px-4"
+                  >
+                    <span className="inline-flex h-3 w-3 shrink-0 items-center justify-center" aria-hidden="true">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+                    </span>
+                    <span className="text-foreground/80 font-mono text-[10px] font-medium tracking-wider uppercase">
+                      Thinking
+                    </span>
+                    <span className="streaming-dots" aria-hidden="true">
+                      <span /> <span /> <span />
+                    </span>
+                  </button>
+                  <div className="px-3 pb-3 sm:px-4 sm:pb-4">
+                    <div className="flex flex-col gap-1.5">
+                      <div className="shimmer h-2 w-[90%] rounded-full" />
+                      <div className="shimmer h-2 w-[75%] rounded-full" />
+                      <div className="shimmer h-2 w-[82%] rounded-full" />
+                      <div className="shimmer h-2 w-[60%] rounded-full" />
+                    </div>
                   </div>
-                  <span className="text-muted-foreground text-xs">Thinking...</span>
                 </div>
               )}
 

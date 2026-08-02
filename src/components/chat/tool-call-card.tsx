@@ -219,7 +219,9 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
                   ? "Available Skills"
                   : toolCall.name === "run_python"
                     ? "Run Python"
-                    : toolCall.name;
+                    : toolCall.name.startsWith("pending-")
+                      ? "Composing…"
+                      : toolCall.name;
 
   const ToolIcon = isDateTime
     ? Clock
