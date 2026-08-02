@@ -1,23 +1,33 @@
 "use client";
 
 import { registerTool, type ToolContext } from "./registry";
-import * as opfs from "@/lib/storage/opfs";
-import { invalidateSyncManifest } from "./e2b_exec";
-import { zipSync, strToU8 } from "fflate";
+import { getE2BClient } from "@/lib/e2b/client";
+import {
+  ensureFreshSandboxForCtx,
+} from "@/lib/e2b/sandbox-rotation";
+import { zipSync } from "fflate";
 
 /**
- * File/workspace tools — ALL storage is local (OPFS).
+ * File/workspace tools — ALL storage is the E2B sandbox.
  *
- * The E2B sandbox is used ONLY as a code runner (run_python, run_terminal).
- * File operations (create, read, write, delete, list) ALWAYS use OPFS
- * (Origin Private File System) — the sandbox is never used for file storage.
+ * The E2B sandbox is the SINGLE source of truth for files. There is NO OPFS
+ * sync — files are written directly to the sandbox and read directly from it.
  *
- * When the AI runs code via run_python/run_terminal, the runtime auto-syncs
- * OPFS files to the sandbox before execution so the code can access them.
- * This is fully automatic — no backup/restore needed.
+ * This fixes:
+ *   - File truncation (no sync needed — files already in sandbox)
+ *   - File not found (no sync race condition)
+ *   - Empty content (no sync timing issue)
+ *   - Concurrency limits (single sandbox, auto-rotated at 23h)
  *
- * Tools (10):
- *   - list_files
+ * The path is relative to `/home/user` (the sandbox workspace root). The
+ * server-side `/api/sandbox` route normalizes relative paths to absolute.
+ *
+ * Auto-rotation: `ensureFreshSandboxForCtx(ctx)` is called before every
+ * operation. If the sandbox is >23h old, it's rotated (backup → kill →
+ * create → restore) transparently. Tools don't know it happened.
+ *
+ * Tools (12):
+ *   - list_folder
  *   - read_file
  *   - create_file
  *   - write_file
@@ -25,6 +35,8 @@ import { zipSync, strToU8 } from "fflate";
  *   - delete_file
  *   - create_folder
  *   - delete_folder
+ *   - move_file
+ *   - rename_file
  *   - send_file
  *   - send_folder
  */
@@ -55,13 +67,12 @@ function extensionOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
-/** Build the OPFS workspace path for a user. */
-function opfsWorkspacePath(userId: string, sub = ""): string {
-  return `users/${userId}/workspace${sub ? `/${sub}` : ""}`;
-}
+/** Error message shown when no E2B API key is configured. */
+const NO_KEY_ERROR =
+  "File operations require an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
 // ---------------------------------------------------------------------------
-// Tool: list_files.
+// Tool: list_folder.
 // ---------------------------------------------------------------------------
 
 registerTool(
@@ -79,22 +90,24 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string | undefined, ".");
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      const files = await client.listFiles(path);
-      return { entries: files, path };
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
+      const entries = await client.listFiles(path);
+      return {
+        entries: entries.map((e) => ({
+          name: e.path.split("/").pop() ?? e.path,
+          path: e.path,
+          type: e.type,
+          size: e.size,
+        })),
+        path,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to list ${path}: ${msg}` };
     }
-    // OPFS fallback.
-    const entries = await opfs.listDir(ctx.userId, `workspace/${path === "." ? "" : path}`);
-    return {
-      entries: entries.map((e) => ({
-        name: e.name,
-        path: e.path,
-        type: e.kind,
-        size: e.size,
-      })),
-      path,
-    };
   },
   false,
   "files",
@@ -117,21 +130,23 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    let content: string;
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      content = await client.readFile(path);
-    } else {
-      content = await opfs.readTextFile(opfsWorkspacePath(ctx.userId, path));
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
+      const content = await client.readFile(path);
+      if (content.length > 256 * 1024) {
+        return {
+          content: content.slice(0, 256 * 1024),
+          truncated: true,
+          total_size: content.length,
+        };
+      }
+      return { content };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to read ${path}: ${msg}` };
     }
-    if (content.length > 256 * 1024) {
-      return {
-        content: content.slice(0, 256 * 1024),
-        truncated: true,
-        total_size: content.length,
-      };
-    }
-    return { content };
   },
   false,
   "files",
@@ -161,81 +176,34 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    if (false) { // dead code — OPFS always used
-      // Sandbox branch (dead code — key is always null, but kept for safety)
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
       if (!overwrite) {
+        // Check if the file already exists by trying to read it.
         try {
           const existing = await client.readFile(path);
           if (existing !== undefined && existing !== "") {
-            throw new Error(`File already exists: ${path} (use overwrite=true to replace it)`);
-          }
-        } catch (err) {
-          if (err instanceof Error && /already exists/.test(err.message)) {
-            throw err;
-          }
-          // Other errors (file not found, etc.) — continue to create.
-        }
-      }
-      try {
-        await client.writeFile(path, content);
-        return {
-          success: true,
-          path,
-          size: content.length,
-          message: `Created ${path} (${content.length} bytes)`,
-        };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return {
-          error: `Failed to create file ${path}: ${msg}`,
-        };
-      }
-    } else {
-      // OPFS branch — this is the one that actually runs
-      const opfsPath = opfsWorkspacePath(ctx.userId, path);
-      const parts = path.split("/");
-      const filename = parts.pop()!;
-      const subdir = parts.join("/");
-      if (!overwrite) {
-        // Check if the file already exists by trying to read it.
-        // opfs.readFile returns a Blob if the file exists, or throws if it doesn't.
-        let fileExists = false;
-        try {
-          const blob = await opfs.readFile(opfsPath);
-          // If we got here, the file exists — check if it has content
-          if (blob && blob.size > 0) {
-            fileExists = true;
+            return {
+              error: `File already exists: ${path}. Use write_file to overwrite it, or set overwrite=true.`,
+              path,
+            };
           }
         } catch {
-          // File doesn't exist — proceed to create
-        }
-        if (fileExists) {
-          return {
-            error: `File already exists: ${path}. Use write_file to overwrite it, or set overwrite=true.`,
-            path,
-          };
+          // File doesn't exist — proceed to create.
         }
       }
-      try {
-        // CRITICAL: when subdir is empty, pass "workspace" (no trailing slash).
-        // A trailing slash causes OPFS ensurePath to create a directory with
-        // an empty name, which makes the file appear as a folder.
-        const subPath = subdir ? `workspace/${subdir}` : "workspace";
-        await opfs.writeFile(ctx.userId, subPath, filename, content);
-      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
-        return {
-          success: true,
-          path,
-          size: content.length,
-          message: `Created ${path} (${content.length} bytes)`,
-        };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return {
-          error: `Failed to create file ${path}: ${msg}`,
-        };
-      }
+      await client.writeFile(path, content);
+      return {
+        success: true,
+        path,
+        size: content.length,
+        message: `Created ${path} (${content.length} bytes)`,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to create file ${path}: ${msg}` };
     }
   },
   false,
@@ -264,23 +232,16 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      try {
-        await client.writeFile(path, content);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { error: `Failed to write file ${path}: ${msg}` };
-      }
-    } else {
-      const parts = path.split("/");
-      const filename = parts.pop()!;
-      const subdir = parts.join("/");
-      const subPath = subdir ? `workspace/${subdir}` : "workspace";
-      await opfs.writeFile(ctx.userId, subPath, filename, content);
-      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
+      await client.writeFile(path, content);
+      return { path, bytes: content.length };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to write file ${path}: ${msg}` };
     }
-    return { path, bytes: content.length };
   },
   false,
   "files",
@@ -309,10 +270,11 @@ registerTool(
     const find = args.find as string;
     const replace = args.replace as string;
     const replaceAll = (args.replace_all as boolean) ?? true;
-    let original: string;
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      original = await client.readFile(path);
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
+      const original = await client.readFile(path);
       let updated: string;
       let count: number;
       if (replaceAll) {
@@ -321,6 +283,9 @@ registerTool(
         }
         const parts = original.split(find);
         count = parts.length - 1;
+        if (count === 0) {
+          return { path, replacements: 0, note: "substring not found" };
+        }
         updated = parts.join(replace);
       } else {
         const idx = original.indexOf(find);
@@ -332,30 +297,9 @@ registerTool(
       }
       await client.writeFile(path, updated);
       return { path, replacements: count };
-    } else {
-      const opfsPath = opfsWorkspacePath(ctx.userId, path);
-      original = await opfs.readTextFile(opfsPath);
-      let updated: string;
-      let count: number;
-      if (replaceAll) {
-        const parts = original.split(find);
-        count = parts.length - 1;
-        updated = parts.join(replace);
-      } else {
-        const idx = original.indexOf(find);
-        if (idx === -1) {
-          return { path, replacements: 0, note: "substring not found" };
-        }
-        updated = original.slice(0, idx) + replace + original.slice(idx + find.length);
-        count = 1;
-      }
-      const parts = path.split("/");
-      const filename = parts.pop()!;
-      const subdir = parts.join("/");
-      const subPath = subdir ? `workspace/${subdir}` : "workspace";
-      await opfs.writeFile(ctx.userId, subPath, filename, updated);
-      invalidateSyncManifest(ctx.userId);
-      return { path, replacements: count };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to edit ${path}: ${msg}` };
     }
   },
   false,
@@ -384,15 +328,17 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    const recursive = (args.recursive as boolean) ?? false;
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      await client.deleteFile(path, recursive);
-    } else {
-      await opfs.deleteFile(opfsWorkspacePath(ctx.userId, path));
-    invalidateSyncManifest(ctx.userId);
+    const _recursive = (args.recursive as boolean) ?? false;
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
+      await client.deleteFile(path);
+      return { deleted: true, path };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to delete ${path}: ${msg}` };
     }
-    return { deleted: true, path };
   },
   false,
   "files",
@@ -415,13 +361,16 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+    try {
+      const client = getE2BClient(apiKey, null, "shared");
       await client.createFolder(path);
-    } else {
-      await opfs.ensurePath(ctx.userId, `workspace/${path}`);
+      return { created: true, path };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to create folder ${path}: ${msg}` };
     }
-    return { created: true, path };
   },
   false,
   "files",
@@ -447,24 +396,18 @@ registerTool(
     if (path === "." || path === "" || path === "/") {
       throw new Error("Refusing to delete workspace root");
     }
-    // OPFS: use removeDir which does recursive delete properly.
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
     try {
-      await opfs.removeDir(ctx.userId, `workspace/${path}`);
-    invalidateSyncManifest(ctx.userId);
+      // The E2B SDK's `files.remove` works for both files AND directories
+      // (it's effectively `rm -rf` under the hood — envd handles recursion).
+      const client = getE2BClient(apiKey, null, "shared");
+      await client.deleteFile(path);
+      return { deleted: true, path };
     } catch (err) {
-      // If removeDir fails, try listing + deleting each file
-      try {
-        const entries = await opfs.listDir(ctx.userId, `workspace/${path}`);
-        for (const e of entries) {
-          if (e.kind === "file") {
-            await opfs.deleteFile(`users/${ctx.userId}/workspace/${path}/${e.name}`);
-          }
-        }
-      } catch {
-        // best-effort
-      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to delete folder ${path}: ${msg}` };
     }
-    return { deleted: true, path };
   },
   false,
   "files",
@@ -502,9 +445,62 @@ function mimeForName(name: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
+/** Walk a sandbox directory recursively and return all files with their
+ *  relative paths and bytes. Used by send_file (directory case) and
+ *  send_folder to build ZIP archives.
+ *
+ *  `basePath` is the original path argument — relative paths in the ZIP are
+ *  computed relative to it. */
+async function walkSandboxForZip(
+  client: ReturnType<typeof getE2BClient>,
+  basePath: string,
+): Promise<Array<{ relPath: string; bytes: Uint8Array }>> {
+  const out: Array<{ relPath: string; bytes: Uint8Array }> = [];
+  const base = basePath.replace(/^\/+/, "");
+
+  async function walk(dirPath: string): Promise<void> {
+    let entries;
+    try {
+      entries = await client.listFiles(dirPath);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const isDir = entry.type === "directory";
+      if (isDir) {
+        await walk(entry.path);
+      } else {
+        try {
+          const blob = await client.readFileBytes(entry.path);
+          if (!blob) continue;
+          const buf = new Uint8Array(await blob.arrayBuffer());
+          // Compute the relative path (strip /home/user/ prefix and the
+          // basePath prefix so the ZIP structure mirrors the folder layout).
+          let rel = entry.path.replace(/^\/+/, "");
+          // Strip leading /home/user/
+          rel = rel.replace(/^home\/user\//, "");
+          // Strip the basePath prefix (if present)
+          if (base && base !== "." && rel.startsWith(base + "/")) {
+            rel = rel.slice(base.length + 1);
+          } else if (rel === base) {
+            rel = rel.split("/").pop() ?? rel;
+          }
+          const fileName = entry.path.split("/").pop() ?? entry.path;
+          out.push({ relPath: rel || fileName, bytes: buf });
+        } catch {
+          // skip files that can't be read
+        }
+      }
+    }
+  }
+
+  await walk(basePath);
+  return out;
+}
+
 registerTool(
   "send_file",
-  "Send a file from the user's workspace to the chat as a downloadable attachment. The user sees a download card with the file's name, size, and extension. The download URL is a base64 data URL (stateless — survives page reloads and Vercel deployments).",
+  "Send a file from the user's workspace to the chat as a downloadable attachment. The user sees a download card with the file's name, size, and extension. The download URL is a base64 data URL (stateless — survives page reloads and Vercel deployments). If the path is a directory, automatically sends it as a ZIP archive.",
   {
     type: "object",
     properties: {
@@ -516,134 +512,84 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const name = path.split("/").pop() || path;
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+
+    const client = getE2BClient(apiKey, null, "shared");
+
+    // Check if the path is a directory. If so, auto-redirect to the folder
+    // download flow (zip + download) instead of failing with "is a directory".
+    try {
+      const entries = await client.listFiles(path);
+      // listFiles succeeded → the path is a directory.
+      // Build a ZIP of the folder and return it as a folder download.
+      const filesMap: Record<string, Uint8Array> = {};
+      let fileCount = 0;
+      let totalSize = 0;
+      const MAX_TOTAL = 4 * 1024 * 1024;
+      const walked = await walkSandboxForZip(client, path);
+      for (const f of walked) {
+        if (totalSize > MAX_TOTAL) {
+          return {
+            error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
+            path,
+          };
+        }
+        filesMap[f.relPath] = f.bytes;
+        fileCount += 1;
+        totalSize += f.bytes.length;
+      }
+      if (fileCount === 0) {
+        return { error: `Folder is empty: ${path}`, path };
+      }
+      const zipped = zipSync(filesMap);
+      let bin = "";
+      for (let i = 0; i < zipped.length; i++) bin += String.fromCharCode(zipped[i]!);
+      const b64 = btoa(bin);
+      const download_url = `data:application/zip;base64,${b64}`;
+      return {
+        kind: "file_download",
+        item_type: "folder" as const,
+        name,
+        path,
+        size: totalSize,
+        size_human: humanSize(totalSize),
+        file_count: fileCount,
+        extension: "zip",
+        download_url,
+      };
+    } catch {
+      // listFiles failed → the path is a file (not a directory). Fall
+      // through to the normal file read below.
+    }
+
+    // Read the file as bytes (preserves binary data).
     let content: string;
     let size: number;
-
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-
-      // Check if the path is a directory. If so, auto-redirect to the folder
-      // download flow (zip + download) instead of failing with "is a directory".
-      try {
-        const entries = await client.listFiles(path);
-        // If listFiles succeeded and returned entries, the path is a directory.
-        // Build a ZIP of the folder and return it as a folder download.
-        if (entries.length >= 0) {
-          const filesMap: Record<string, Uint8Array> = {};
-          let fileCount = 0;
-          let totalSize = 0;
-          const MAX_TOTAL = 4 * 1024 * 1024;
-          for (const entry of entries) {
-            if (entry.type !== "file") continue;
-            if (totalSize > MAX_TOTAL) {
-              return {
-                error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
-                path,
-              };
-            }
-            try {
-              const fileContent = await client.readFile(entry.path);
-              const bytes = strToU8(fileContent);
-              const rel = entry.path.replace(/^\/+/, "").replace(new RegExp(`^${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\/?`), "");
-              const fileName = entry.name ?? entry.path.split("/").pop() ?? entry.path;
-              filesMap[rel || fileName] = bytes;
-              fileCount += 1;
-              totalSize += bytes.length;
-            } catch {
-              // skip individual file failures
-            }
-          }
-          if (fileCount === 0) {
-            return { error: `Folder is empty: ${path}`, path };
-          }
-          const zipped = zipSync(filesMap);
-          let bin = "";
-          for (let i = 0; i < zipped.length; i++) bin += String.fromCharCode(zipped[i]!);
-          const b64 = btoa(bin);
-          const download_url = `data:application/zip;base64,${b64}`;
-          return {
-            kind: "file_download",
-            item_type: "folder" as const,
-            name,
-            path,
-            size: totalSize,
-            size_human: humanSize(totalSize),
-            file_count: fileCount,
-            extension: "zip",
-            download_url,
-          };
-        }
-      } catch {
-        // listFiles failed → the path is a file (not a directory). Fall
-        // through to the normal file read below.
+    try {
+      const blob = await client.readFileBytes(path);
+      if (!blob) {
+        return { error: `File not found: ${path}`, path };
       }
-
-      content = await client.readFile(path);
-      size = content.length;
-    } else {
-      // OPFS mode — check if the path is a directory first.
-      try {
-        const dir = await opfs.ensurePath(ctx.userId, `workspace/${path}`);
-        const walked = await opfs.walkFiles(dir);
-        if (walked.length >= 0) {
-          // It's a directory — build a ZIP.
-          const filesMap: Record<string, Uint8Array> = {};
-          let fileCount = 0;
-          let totalSize = 0;
-          const MAX_TOTAL = 4 * 1024 * 1024;
-          for (const f of walked) {
-            if (totalSize > MAX_TOTAL) {
-              return {
-                error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
-                path,
-              };
-            }
-            const file = await f.handle.getFile();
-            const buf = new Uint8Array(await file.arrayBuffer());
-            filesMap[f.path] = buf;
-            fileCount += 1;
-            totalSize += buf.length;
-          }
-          if (fileCount === 0) {
-            return { error: `Folder is empty: ${path}`, path };
-          }
-          const zipped = zipSync(filesMap);
-          let bin = "";
-          for (let i = 0; i < zipped.length; i++) bin += String.fromCharCode(zipped[i]!);
-          const b64 = btoa(bin);
-          const download_url = `data:application/zip;base64,${b64}`;
-          return {
-            kind: "file_download",
-            item_type: "folder" as const,
-            name,
-            path,
-            size: totalSize,
-            size_human: humanSize(totalSize),
-            file_count: fileCount,
-            extension: "zip",
-            download_url,
-          };
-        }
-      } catch {
-        // Not a directory — fall through to file read.
-      }
-
-      const blob = await opfs.readFile(opfsWorkspacePath(ctx.userId, path));
-      content = await blob.text();
       size = blob.size;
+      // Hard cap at 4 MB — data URLs are ~1.33x the content size, and the
+      // tool result is stored in the chat history (IndexedDB). Larger files
+      // would balloon the quota.
+      const MAX_BYTES = 4 * 1024 * 1024;
+      if (size > MAX_BYTES) {
+        return {
+          error: `File is too large to send as a download (${humanSize(size)} > ${humanSize(MAX_BYTES)} limit). Use read_file in chunks instead.`,
+          path,
+          size,
+          size_human: humanSize(size),
+        };
+      }
+      content = await blob.text();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to read ${path}: ${msg}` };
     }
-    // Hard cap at 4 MB — data URLs are ~1.33x the content size, and the
-    // tool result is stored in the chat history (IndexedDB). Larger files
-    // would balloon the quota.
-    const MAX_BYTES = 4 * 1024 * 1024;
-    if (size > MAX_BYTES) {
-      return {
-        error: `File is too large to send as a download (${humanSize(size)} > ${humanSize(MAX_BYTES)} limit). Use read_file in chunks instead.`,
-        path,
-        size,
-        size_human: humanSize(size),
-      };
-    }
+
     const download_url = makeDataUrl(content, mimeForName(name));
     return {
       kind: "file_download",
@@ -678,6 +624,10 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const folderName = path.split("/").pop() || path || "folder";
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
+
+    const client = getE2BClient(apiKey, null, "shared");
 
     // Gather { relativePath: Uint8Array } for fflate's zipSync.
     const files: Record<string, Uint8Array> = {};
@@ -685,41 +635,17 @@ registerTool(
     let totalSize = 0;
     const MAX_TOTAL = 4 * 1024 * 1024;
 
-    if (false) { // dead code — OPFS always used
-      const client = getE2BClient(key, ctx.conversationId, ctx.sandboxMode ?? "shared");
-      const all = await client.listFiles(path);
-      for (const entry of all) {
-        if (entry.type !== "file") continue;
-        if (totalSize > MAX_TOTAL) {
-          return {
-            error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
-            path,
-          };
-        }
-        const content = await client.readFile(entry.path);
-        const bytes = strToU8(content);
-        const rel = entry.path.replace(/^\/+/, "").replace(new RegExp(`^${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\/?`), "");
-        const fileName = entry.name ?? entry.path.split("/").pop() ?? entry.path;
-        files[rel || fileName] = bytes;
-        fileCount += 1;
-        totalSize += bytes.length;
+    const walked = await walkSandboxForZip(client, path);
+    for (const f of walked) {
+      if (totalSize > MAX_TOTAL) {
+        return {
+          error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
+          path,
+        };
       }
-    } else {
-      const dir = await opfs.ensurePath(ctx.userId, `workspace/${path}`);
-      const walked = await opfs.walkFiles(dir);
-      for (const f of walked) {
-        if (totalSize > MAX_TOTAL) {
-          return {
-            error: `Folder is too large to zip-and-send (>${humanSize(MAX_TOTAL)}). Use list_folder + read_file on individual files instead.`,
-            path,
-          };
-        }
-        const file = await f.handle.getFile();
-        const buf = new Uint8Array(await file.arrayBuffer());
-        files[f.path] = buf;
-        fileCount += 1;
-        totalSize += buf.length;
-      }
+      files[f.relPath] = f.bytes;
+      fileCount += 1;
+      totalSize += f.bytes.length;
     }
 
     if (fileCount === 0) {
@@ -773,28 +699,30 @@ registerTool(
     if (source === destination) {
       return { moved: true, source, destination, note: "Source and destination are the same." };
     }
-    // Read the source file.
-    let content: string;
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
     try {
-      content = await opfs.readTextFile(opfsWorkspacePath(ctx.userId, source));
-    } catch {
-      return { error: `Source file not found: ${source}` };
+      const client = getE2BClient(apiKey, null, "shared");
+      // Read the source file.
+      let content: string;
+      try {
+        content = await client.readFile(source);
+      } catch {
+        return { error: `Source file not found: ${source}` };
+      }
+      // Write to destination.
+      await client.writeFile(destination, content);
+      // Delete the source.
+      try {
+        await client.deleteFile(source);
+      } catch {
+        // best-effort — the file was already copied
+      }
+      return { moved: true, source, destination, size: content.length };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to move ${source} → ${destination}: ${msg}` };
     }
-    // Write to destination.
-    const parts = destination.split("/");
-    const filename = parts.pop()!;
-    const subdir = parts.join("/");
-    const subPath = subdir ? `workspace/${subdir}` : "workspace";
-    await opfs.writeFile(ctx.userId, subPath, filename, content);
-      invalidateSyncManifest(ctx.userId); // force re-sync to sandbox on next run
-    // Delete the source.
-    try {
-      await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
-    invalidateSyncManifest(ctx.userId);
-    } catch {
-      // best-effort — the file was already copied
-    }
-    return { moved: true, source, destination, size: content.length };
   },
   false,
   "files",
@@ -825,26 +753,31 @@ registerTool(
     parts.pop(); // remove old filename
     parts.push(newName); // add new filename
     const destination = parts.join("/");
-    // Read source.
-    let content: string;
+
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { error: NO_KEY_ERROR };
     try {
-      content = await opfs.readTextFile(opfsWorkspacePath(ctx.userId, source));
-    } catch {
-      return { error: `Source file not found: ${source}` };
+      const client = getE2BClient(apiKey, null, "shared");
+      // Read source.
+      let content: string;
+      try {
+        content = await client.readFile(source);
+      } catch {
+        return { error: `Source file not found: ${source}` };
+      }
+      // Write to new path.
+      await client.writeFile(destination, content);
+      // Delete old file.
+      try {
+        await client.deleteFile(source);
+      } catch {
+        // best-effort
+      }
+      return { renamed: true, old_path: source, new_path: destination, size: content.length };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to rename ${source} → ${destination}: ${msg}` };
     }
-    // Write to new path.
-    const subdir = parts.slice(0, -1).join("/");
-    const subPath = subdir ? `workspace/${subdir}` : "workspace";
-    await opfs.writeFile(ctx.userId, subPath, newName, content);
-    invalidateSyncManifest(ctx.userId);
-    // Delete old file.
-    try {
-      await opfs.deleteFile(opfsWorkspacePath(ctx.userId, source));
-    invalidateSyncManifest(ctx.userId);
-    } catch {
-      // best-effort
-    }
-    return { renamed: true, old_path: source, new_path: destination, size: content.length };
   },
   false,
   "files",

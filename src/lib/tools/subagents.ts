@@ -127,23 +127,17 @@ Task types:
     };
     taskStore.set(taskId, task);
     emitStatus(task);
-    emitMessage(taskId, "info", `Subagent "${task.subagent_name}" spawned: ${task.description}`);
 
-    // Simulate the subagent starting work after a brief delay.
-    setTimeout(() => {
-      const t = taskStore.get(taskId);
-      if (!t || t.status === "cancelled") return;
-      t.status = "running";
-      emitStatus(t);
-      emitMessage(taskId, "info", `${t.subagent_name} is now running...`);
-    }, 500);
+    // NO initial message — the AI can only interact with the subagent via
+    // query_subagent. The user requested no auto-message on spawn.
+    // Use set_subagent_config to assign an AI provider, then query_subagent.
 
     return {
       task_id: taskId,
       subagent_id: subagentConfig.id,
       subagent_name: task.subagent_name,
       status: "pending",
-      message: `Subagent spawned and registered. Use query_subagent with the task_id to interact with it. Use list_subagents to see all active tasks.`,
+      message: `Subagent spawned. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to send messages and get replies.`,
     };
   },
   false,
@@ -180,6 +174,134 @@ registerTool(
         created_at: t.created_at,
       }));
     return { tasks, count: tasks.length };
+  },
+  false,
+  "orchestration",
+);
+
+// === Tool: set_subagent_config ===
+// Lets the main agent assign an AI provider/model to a subagent, or set a
+// custom AI config (base_url, api_key, model_id). The main agent can see
+// all available providers and models from the user's settings.
+registerTool(
+  "set_subagent_config",
+  `Configure a subagent's AI provider and model. You can either:
+1. Assign an existing provider from the user's configured providers (pass provider_id + model)
+2. Set a custom AI config (pass custom_base_url, custom_model, custom_api_key — api_key is optional)
+
+First, call list_ai_providers=true to see what's available. Then assign one with provider_id + model, OR set a custom config.
+
+The subagent will use this config for all its LLM calls. If not set, the subagent inherits the main agent's active provider.`,
+  {
+    type: "object",
+    properties: {
+      subagent_name: {
+        type: "string",
+        description: "The name of the subagent to configure.",
+      },
+      list_ai_providers: {
+        type: "boolean",
+        description: "If true, return the list of available AI providers and their models (don't update anything).",
+        default: false,
+      },
+      provider_id: {
+        type: "string",
+        description: "ID of an existing provider to assign (from the list).",
+      },
+      model: {
+        type: "string",
+        description: "Model ID to use (must be in the provider's models list).",
+      },
+      custom_base_url: {
+        type: "string",
+        description: "Custom base URL for a custom AI provider (e.g. https://api.openai.com/v1).",
+      },
+      custom_model: {
+        type: "string",
+        description: "Model ID for the custom provider.",
+      },
+      custom_api_key: {
+        type: "string",
+        description: "API key for the custom provider. OPTIONAL — if not set, the subagent will use the main agent's key.",
+      },
+    },
+    required: ["subagent_name"],
+    additionalProperties: false,
+  },
+  async (args) => {
+    const subagentName = args.subagent_name as string;
+    const store = useSubagentStore.getState();
+
+    // Find the subagent config.
+    let config = store.subagents.find(
+      (s) => s.name.toLowerCase() === subagentName.toLowerCase(),
+    );
+
+    // If list_ai_providers is true, return the available providers.
+    if (args.list_ai_providers) {
+      try {
+        const { aiProviderService } = await import("@/lib/services");
+        const { useAuthStore } = await import("@/stores");
+        const userId = useAuthStore.getState().user?.id;
+        if (!userId) return { error: "No authenticated user." };
+        const providers = await aiProviderService.list(userId);
+        return {
+          providers: providers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            base_url: p.base_url,
+            models: p.models,
+            is_active: p.is_active,
+          })),
+          message: "These are the available AI providers. Use provider_id + model to assign one to the subagent.",
+        };
+      } catch (e) {
+        return { error: `Failed to list providers: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    }
+
+    if (!config) {
+      return { error: `Subagent "${subagentName}" not found. Spawn it first with spawn_subagent.` };
+    }
+
+    // Assign existing provider.
+    if (args.provider_id) {
+      const updates: Partial<SubagentConfig> = {
+        providerId: args.provider_id,
+        model: args.model ?? null,
+        baseUrl: null,  // Clear custom config.
+        apiKey: null,
+      };
+      store.updateSubagent(config.id, updates);
+      return {
+        success: true,
+        subagent_name: subagentName,
+        provider_id: args.provider_id,
+        model: args.model,
+        message: `Subagent "${subagentName}" is now using provider ${args.provider_id}${args.model ? ` (model: ${args.model})` : ""}.`,
+      };
+    }
+
+    // Set custom AI config.
+    if (args.custom_base_url || args.custom_model) {
+      const updates: Partial<SubagentConfig> = {
+        baseUrl: args.custom_base_url ?? null,
+        model: args.custom_model ?? null,
+        apiKey: args.custom_api_key ?? null,  // Optional.
+        providerId: null,  // Clear provider assignment.
+      };
+      store.updateSubagent(config.id, updates);
+      return {
+        success: true,
+        subagent_name: subagentName,
+        custom_base_url: args.custom_base_url,
+        custom_model: args.custom_model,
+        api_key_set: !!args.custom_api_key,
+        message: `Subagent "${subagentName}" is now using a custom AI config. Base URL: ${args.custom_base_url}, Model: ${args.custom_model}. API key: ${args.custom_api_key ? "set" : "not set (will use main agent's key)"}.`,
+      };
+    }
+
+    return { error: "Pass list_ai_providers=true to see providers, or provider_id+model to assign, or custom_base_url+custom_model for custom AI." };
   },
   false,
   "orchestration",
