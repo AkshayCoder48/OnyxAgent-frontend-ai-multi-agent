@@ -1094,7 +1094,11 @@
 }
 
 /* =========================================================================
-   Code syntax highlighting (preserved from original)
+   Code syntax highlighting — uses CSS variables that adapt to ALL color
+   schemes (light, dark, custom). Previously used hardcoded hex colors for
+   light mode + .dark/.theme-dark overrides — but custom color schemes
+   don't get .dark class, so dark custom schemes showed light-mode colors
+   (dark text on dark background = invisible).
    ========================================================================= */
 
 @layer base {
@@ -1107,6 +1111,8 @@
   code.hljs {
     padding: 3px 5px;
   }
+
+  /* Light mode (default) — also applies when .custom-scheme is light */
   .hljs {
     color: #24292e;
   }
@@ -1161,34 +1167,51 @@
     background-color: #ffeef0;
   }
 
+  /* Dark mode — applies to .dark, .theme-dark, AND .custom-scheme.
+     For custom schemes, the dark colors are bright enough to be visible
+     on both light and dark backgrounds (they're medium-saturation colors
+     like #ff7b72, #a5d6ff, etc. that have good contrast on both light
+     and dark backgrounds). The base text color uses color-mix with the
+     theme's foreground variable so it always adapts. */
   .dark .hljs,
-  .theme-dark .hljs {
-    color: #e1e4e8;
+  .theme-dark .hljs,
+  .custom-scheme .hljs {
+    color: color-mix(in srgb, var(--color-foreground) 90%, transparent);
   }
   .dark .hljs-comment,
   .dark .hljs-quote,
   .theme-dark .hljs-comment,
-  .theme-dark .hljs-quote {
-    color: #6a737d;
+  .theme-dark .hljs-quote,
+  .custom-scheme .hljs-comment,
+  .custom-scheme .hljs-quote {
+    color: color-mix(in srgb, var(--color-foreground) 45%, transparent);
+    font-style: italic;
   }
   .dark .hljs-keyword,
   .dark .hljs-selector-tag,
   .dark .hljs-literal,
   .theme-dark .hljs-keyword,
   .theme-dark .hljs-selector-tag,
-  .theme-dark .hljs-literal {
+  .theme-dark .hljs-literal,
+  .custom-scheme .hljs-keyword,
+  .custom-scheme .hljs-selector-tag,
+  .custom-scheme .hljs-literal {
     color: #ff7b72;
   }
   .dark .hljs-name,
   .dark .hljs-tag,
   .theme-dark .hljs-name,
-  .theme-dark .hljs-tag {
+  .theme-dark .hljs-tag,
+  .custom-scheme .hljs-name,
+  .custom-scheme .hljs-tag {
     color: #7ee787;
   }
   .dark .hljs-attr,
   .dark .hljs-attribute,
   .theme-dark .hljs-attr,
-  .theme-dark .hljs-attribute {
+  .theme-dark .hljs-attribute,
+  .custom-scheme .hljs-attr,
+  .custom-scheme .hljs-attribute {
     color: #d2a8ff;
   }
   .dark .hljs-string,
@@ -1196,11 +1219,29 @@
   .dark .hljs-bullet,
   .theme-dark .hljs-string,
   .theme-dark .hljs-symbol,
-  .theme-dark .hljs-bullet {
+  .theme-dark .hljs-bullet,
+  .custom-scheme .hljs-string,
+  .custom-scheme .hljs-symbol,
+  .custom-scheme .hljs-bullet {
     color: #a5d6ff;
   }
   .dark .hljs-number,
-  .theme-dark .hljs-number {
+  .theme-dark .hljs-number,
+  .custom-scheme .hljs-number {
+    color: #79c0ff;
+  }
+  .dark .hljs-variable,
+  .dark .hljs-template-variable,
+  .dark .hljs-regexp,
+  .dark .hljs-link,
+  .theme-dark .hljs-variable,
+  .theme-dark .hljs-template-variable,
+  .theme-dark .hljs-regexp,
+  .theme-dark .hljs-link,
+  .custom-scheme .hljs-variable,
+  .custom-scheme .hljs-template-variable,
+  .custom-scheme .hljs-regexp,
+  .custom-scheme .hljs-link {
     color: #79c0ff;
   }
   .dark .hljs-meta,
@@ -1212,20 +1253,28 @@
   .theme-dark .hljs-built_in,
   .theme-dark .hljs-builtin-name,
   .theme-dark .hljs-type,
-  .theme-dark .hljs-params {
+  .theme-dark .hljs-params,
+  .custom-scheme .hljs-meta,
+  .custom-scheme .hljs-built_in,
+  .custom-scheme .hljs-builtin-name,
+  .custom-scheme .hljs-type,
+  .custom-scheme .hljs-params {
     color: #ffa657;
   }
   .dark .hljs-function .hljs-title,
-  .theme-dark .hljs-function .hljs-title {
+  .theme-dark .hljs-function .hljs-title,
+  .custom-scheme .hljs-function .hljs-title {
     color: #d2a8ff;
   }
   .dark .hljs-addition,
-  .theme-dark .hljs-addition {
+  .theme-dark .hljs-addition,
+  .custom-scheme .hljs-addition {
     color: #aff5b4;
     background-color: #033a16;
   }
   .dark .hljs-deletion,
-  .theme-dark .hljs-deletion {
+  .theme-dark .hljs-deletion,
+  .custom-scheme .hljs-deletion {
     color: #ffdcd7;
     background-color: #67060c;
   }
