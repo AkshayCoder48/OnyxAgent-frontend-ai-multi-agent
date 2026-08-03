@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useConversations } from "@/hooks";
 import { useAuthStore } from "@/stores";
 import { Button, Skeleton } from "@/components/ui";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetClose } from "@/components/ui";
+import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { cn } from "@/lib/utils";
 import { useChatSidebarStore } from "@/stores";
 import {
@@ -343,6 +344,34 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
   const router = useRouter();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { isOpen, close } = useChatSidebarStore();
+  const [convSidebarWidth, setConvSidebarWidth] = useResizableSidebar(
+    "conversation-sidebar-width",
+    256,
+    200,
+    450,
+  );
+  const handleConvResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = convSidebarWidth;
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = moveEvent.clientX - startX;
+        setConvSidebarWidth(startWidth + delta);
+      };
+      const handleMouseUp = () => {
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [convSidebarWidth, setConvSidebarWidth],
+  );
   const {
     conversations,
     currentConversationId,
@@ -420,8 +449,19 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
   return (
     <>
       <aside
-        className={cn("bg-background hidden w-64 shrink-0 flex-col border-r md:flex", className)}
+        className={cn("bg-background hidden shrink-0 flex-col border-r md:flex relative", className)}
+        style={{ width: `${convSidebarWidth}px` }}
       >
+        {/* Resize handle on the right edge */}
+        <div
+          onMouseDown={handleConvResize}
+          className="absolute top-0 bottom-0 right-0 z-30 w-1.5 cursor-col-resize transition-colors hover:bg-primary/30"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize conversations sidebar"
+        >
+          <div className="absolute inset-y-0 -inset-x-1" />
+        </div>
         <div className="flex h-12 shrink-0 items-center justify-between border-b px-4 py-3">
           <h2 className="text-sm font-semibold">{t("conversations")}</h2>
           <Button

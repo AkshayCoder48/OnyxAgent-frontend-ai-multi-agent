@@ -707,12 +707,15 @@ async function streamRound(
           // the UI shows the tool call card DURING streaming, not after.
           // The final tool_call event (after stream ends) will update it.
           for (const [index, tc] of toolCallAccumulator) {
-            if (tc.name && !preEmittedToolCalls.has(index)) {
+            // Pre-emit as soon as we have EITHER a name OR an id. Even if
+            // the name hasn't arrived yet, the card will show "Composing…"
+            // and update when the name arrives.
+            if ((tc.name || tc.id) && !preEmittedToolCalls.has(index)) {
               preEmittedToolCalls.add(index);
               emit({
                 type: "tool_call",
                 data: {
-                  tool_name: tc.name,
+                  tool_name: tc.name || `pending-${index}`,
                   args: { _streaming: tc.args } as Record<string, unknown>,
                   tool_call_id: tc.id,
                   _preemit: true,
@@ -1492,11 +1495,59 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     lastAssistantThinking = roundResult.thinking;
     lastAssistantReasoning = roundResult.reasoning;
 
+    // Accumulate parts for this round into assistantParts so the final
+    // message has the correct chronological order (text → tool → text →
+    // tool → text) across ALL rounds. Without this, buildAssistantParts
+    // rebuilds from scratch and loses the multi-round ordering, causing
+    // content to appear "cut" into multiple parts.
+    if (roundResult.thinking && roundResult.thinking.trim()) {
+      assistantParts.push({ id: `p-think-${Date.now()}-${round}`, type: "thinking", content: roundResult.thinking });
+    }
+    if (roundResult.reasoning && roundResult.reasoning.trim()) {
+      assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning });
+    }
+    if (roundResult.textBeforeTools && roundResult.textBeforeTools.trim()) {
+      assistantParts.push({ id: `p-text-pre-${Date.now()}-${round}`, type: "text", content: roundResult.textBeforeTools });
+    }
+    for (const tc of roundResult.toolCalls) {
+      assistantParts.push({
+        id: `p-tool-${tc.id}`,
+        type: "tool",
+        toolCall: {
+          id: tc.id,
+          name: tc.name,
+          args: tc.args,
+          status: "completed" as const,
+        },
+      });
+    }
+    // Post-tool text (content minus textBeforeTools)
+    if (roundResult.content && roundResult.content.trim()) {
+      let postText = roundResult.content;
+      if (roundResult.textBeforeTools && roundResult.content.startsWith(roundResult.textBeforeTools)) {
+        postText = roundResult.content.slice(roundResult.textBeforeTools.length);
+      }
+      if (postText.trim()) {
+        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText });
+      }
+    }
+
     // No tool calls → final result.
     if (roundResult.toolCalls.length === 0 || roundResult.aborted) {
       // If the content is empty (e.g. aborted before any text arrived),
       // use a minimal placeholder so the DB row isn't empty.
       const finalContent = roundResult.content || (roundResult.aborted ? "" : "");
+      // Use accumulated assistantParts (correct multi-round ordering) if
+      // available, otherwise fall back to buildAssistantParts.
+      const finalParts = assistantParts.length > 0
+        ? assistantParts
+        : buildAssistantParts(
+            roundResult.thinking || undefined,
+            roundResult.reasoning || undefined,
+            allToolCalls,
+            finalContent,
+            roundResult.textBeforeTools,
+          );
       // Persist the final assistant message.
       const savedMessage = await conversationService.addMessage(
         conversationId,
@@ -1506,13 +1557,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
           content: finalContent,
           thinking: roundResult.thinking || undefined,
           reasoning: roundResult.reasoning || undefined,
-          parts: buildAssistantParts(
-            roundResult.thinking || undefined,
-            roundResult.reasoning || undefined,
-            allToolCalls,
-            finalContent,
-            roundResult.textBeforeTools,
-          ),
+          parts: finalParts,
           toolCalls: allToolCalls,
           modelName: opts.provider.model,
         },

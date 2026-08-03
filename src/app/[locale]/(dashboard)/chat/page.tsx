@@ -1,13 +1,72 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { useChatSidebarStore } from "@/stores";
 import { FolderOpen, Menu, Bot, X } from "lucide-react";
+
+/** Resizable right sidebar wrapper — drag the left edge to resize. */
+function ResizableRightPanel({
+  storageKey,
+  defaultWidth,
+  minWidth,
+  maxWidth,
+  children,
+}: {
+  storageKey: string;
+  defaultWidth: number;
+  minWidth: number;
+  maxWidth: number;
+  children: React.ReactNode;
+}) {
+  const [width, setWidth] = useResizableSidebar(storageKey, defaultWidth, minWidth, maxWidth);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = width;
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = startX - moveEvent.clientX;
+        setWidth(startWidth + delta);
+      };
+      const handleMouseUp = () => {
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [width, setWidth],
+  );
+
+  return (
+    <aside
+      className="hidden shrink-0 animate-slide-in-right md:block relative"
+      style={{ width: `${width}px` }}
+    >
+      {children}
+      <div
+        onMouseDown={handleMouseDown}
+        className="absolute top-0 bottom-0 left-0 z-30 w-1.5 cursor-col-resize transition-colors hover:bg-primary/30"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+      >
+        <div className="absolute inset-y-0 -inset-x-1" />
+      </div>
+    </aside>
+  );
+}
 
 type RightPanel = "files" | "subagents" | null;
 
@@ -73,16 +132,16 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Desktop right panel — files or subagents */}
+      {/* Desktop right panel — files or subagents (resizable) */}
       {rightPanel === "files" && (
-        <aside className="hidden w-72 shrink-0 animate-slide-in-right md:block md:w-80">
+        <ResizableRightPanel storageKey="file-sidebar-width" defaultWidth={320} minWidth={240} maxWidth={600}>
           <FileSidebar />
-        </aside>
+        </ResizableRightPanel>
       )}
       {rightPanel === "subagents" && (
-        <aside className="hidden shrink-0 animate-slide-in-right md:block">
+        <ResizableRightPanel storageKey="subagent-sidebar-width" defaultWidth={360} minWidth={280} maxWidth={600}>
           <SubAgentSidebar open onClose={() => setRightPanel(null)} />
-        </aside>
+        </ResizableRightPanel>
       )}
 
       {/* Mobile sheet — files */}
