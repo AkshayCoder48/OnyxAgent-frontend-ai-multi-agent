@@ -158,7 +158,7 @@ registerTool(
 
 registerTool(
   "create_file",
-  "Create a new text file in the user's workspace. Refuses to overwrite an existing file unless `overwrite` is true.",
+  "Create a new text file in the user's workspace. Refuses to overwrite an existing file unless `overwrite` is true. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.",
   {
     type: "object",
     properties: {
@@ -216,7 +216,7 @@ registerTool(
 
 registerTool(
   "write_file",
-  "Overwrite a text file in the user's workspace (creates it if missing). Use this when you know the file should exist or want to replace its contents entirely.",
+  "Overwrite a text file in the user's workspace (creates it if missing). Use this when you know the file should exist or want to replace its contents entirely. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.",
   {
     type: "object",
     properties: {
@@ -253,7 +253,7 @@ registerTool(
 
 registerTool(
   "edit_file",
-  "Edit a text file by replacing a substring with a new string. By default replaces all occurrences; set `replace_all: false` to replace only the first.",
+  "Edit a text file by replacing a substring with a new string. By default replaces all occurrences; set `replace_all: false` to replace only the first. For large edits, use create_file_chunk with mode='append'.",
   {
     type: "object",
     properties: {

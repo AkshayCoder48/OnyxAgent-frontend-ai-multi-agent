@@ -19,6 +19,7 @@ import "./ask_user";
 import "./e2b_files";
 import "./e2b_exec";
 import "./e2b_rag";
+import "./file_writer";
 import "./local_chats";
 import "./todos";
 import "./dynamic_tools";

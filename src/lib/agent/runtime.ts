@@ -130,7 +130,7 @@ const CHAT_PROXY_URL = "/api/chat-proxy";
 /** Tools where the args contain large content (files, code, etc). */
 const LARGE_ARG_TOOLS = new Set([
   "create_file", "write_file", "edit_file", "create_custom_tool",
-  "preview_image", "workflow",
+  "preview_image", "workflow", "create_file_chunk",
 ]);
 
 /** Max length of any single string value in tool args sent to the API. */
@@ -142,11 +142,14 @@ const MAX_ARG_LEN = 500;
  *  because the truncation happens in the runtime, not the tool. */
 const RESULT_LEN_BUDGETS: Record<string, number> = {
   read_file: 60_000,       // 60K — full file content (most files < 60K)
+  read_file_section: 60_000, // 60K — section content (can be large if end_line omitted)
   list_folder: 20_000,     // 20K — directory listings
   list_files: 20_000,
   create_file: 10_000,     // 10K — creation result (path, size)
   write_file: 10_000,      // 10K — write result
   edit_file: 10_000,       // 10K — edit result
+  verify_path: 10_000,     // 10K — verify result (path, created_dirs)
+  create_file_chunk: 10_000, // 10K — chunk write result (path, sizes, verified)
   send_file: 10_000,       // 10K — file download metadata
   send_folder: 10_000,
   web_search: 8_000,       // 8K — search results
@@ -1125,9 +1128,9 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **web_fetch**: Use to read the full content of a specific URL. Use AFTER ddg_search to deep-read a promising result page.
 
 ### File Management (OPFS — local browser storage)
-- **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions.
+- **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.
 - **read_file**: Read the content of a file in the workspace.
-- **edit_file**: Edit a file by finding and replacing text.
+- **edit_file**: Edit a file by finding and replacing text. For large edits, use create_file_chunk with mode='append'.
 - **delete_file**: Remove a file from the workspace.
 - **move_file**: Move or rename a file (source → destination).
 - **rename_file**: Rename a file (just the filename, keeps the same directory).
@@ -1135,6 +1138,29 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **search_files**: Grep/search for text across files. Use when the user asks "find X in my files".
 - **create_folder**: Create a new directory in the workspace.
 - **delete_folder**: Delete a folder and all its contents.
+- **verify_path**: Verify a path exists, create directories (and empty file) if missing. Call BEFORE create_file_chunk to ensure parent dirs exist.
+- **create_file_chunk**: Write/append content in 2-4 KB (50-200 line) chunks with progress tracking. Use mode="create" for the first chunk, mode="append" for subsequent chunks.
+- **read_file_section**: Read a specific section of a file (by 0-based line range). Use to verify previously written chunks before appending the next one, or to resume an interrupted write.
+
+### CRITICAL: Incremental File Writing Policy
+NEVER generate an entire large file in one operation. Large files MUST be written incrementally:
+
+1. Call verify_path to create directories + verify the file path
+2. Call create_file_chunk with mode="create" for the first chunk (50-200 lines)
+3. Call create_file_chunk with mode="append" for each subsequent chunk
+4. Split on: functions, classes, interfaces, components, modules, logical sections
+5. NEVER split in the middle of: JSON objects, function bodies, classes, JSX elements, multiline strings
+6. Chunk size: 2-4 KB (50-200 lines) per chunk
+
+If a write fails:
+- Detect the reason (directory missing → mkdir -p, permission → use ./useless/ fallback)
+- Retry ONLY the failed chunk, never regenerate previous chunks
+- If all writes fail, save to ./useless/ directory as fallback — never discard generated content
+
+Available tools for incremental writing:
+- verify_path: Create/verify directories + files before writing
+- create_file_chunk: Write/append content in chunks with progress tracking
+- read_file_section: Read specific sections for verification and resume
 
 ### Memory & Knowledge
 - **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
