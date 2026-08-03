@@ -219,7 +219,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
                   ? "Available Skills"
                   : toolCall.name === "run_python"
                     ? "Run Python"
-                    : toolCall.name.startsWith("pending-")
+                    : !toolCall.name || toolCall.name.startsWith("pending-")
                       ? "Composing…"
                       : toolCall.name;
 
@@ -454,7 +454,7 @@ function RunningToolPanel({
   // spinner, so the user always sees what's being composed/executed.
   // If the tool name is a "pending-N" placeholder (LLM sent args before the
   // function name), show "Composing…" instead of the raw placeholder.
-  const displayName = toolCall.name.startsWith("pending-")
+  const displayName = !toolCall.name || toolCall.name.startsWith("pending-")
     ? "tool"
     : toolCall.name;
   const writingLabel = `Writing ${displayName}…`;

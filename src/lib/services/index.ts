@@ -1026,11 +1026,17 @@ export const settingsService = {
     return this.setSandboxKey(userId, key);
   },
 
-  /** Decrypt + return the E2B sandbox API key, or null if none is stored. */
+  /** Decrypt + return the E2B sandbox API key, or null if none is stored.
+   *  Tries to restore the vault from session before decrypting. */
   async getDecryptedSandboxKey(userId: string): Promise<string | null> {
     const row = await db.user_settings.where("user_id").equals(userId).first();
     if (!row || !row.e2b_api_key_encrypted) return null;
     try {
+      // Try to restore vault from session if not already unlocked.
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
       return await vaultDecrypt(row.e2b_api_key_encrypted);
     } catch {
       return null;
@@ -1121,13 +1127,19 @@ export const settingsService = {
     });
   },
 
-  /** Decrypt + return the LangSearch API key, or null if none is stored. */
+  /** Decrypt + return the LangSearch API key, or null if none is stored.
+   *  Tries to restore the vault from session before decrypting. */
   async getDecryptedLangSearchApiKey(userId: string): Promise<string | null> {
     const row = await db.user_settings.where("user_id").equals(userId).first();
     if (!row) return null;
     const encrypted = row.extra?.langsearch_api_key_encrypted;
     if (typeof encrypted !== "string" || !encrypted) return null;
     try {
+      // Try to restore vault from session if not already unlocked.
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
       return await vaultDecrypt(encrypted);
     } catch {
       return null;

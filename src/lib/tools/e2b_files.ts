@@ -417,15 +417,19 @@ registerTool(
 // Tool: send_file.
 // ---------------------------------------------------------------------------
 
-/** Encode a string as a `data:` URL with the given MIME type. The content is
- *  base64-encoded so the URL is safe for binary-ish bytes too (the E2B
- *  `files.read` returns text, but the file may be a base64-encoded payload
- *  the agent wrote — encoding keeps the URL lossless). */
-function makeDataUrl(text: string, mimeType = "application/octet-stream"): string {
-  // btoa is browser-native; encodeUTF8→base64 handles non-Latin1 chars.
-  const bytes = new TextEncoder().encode(text);
+/** Encode raw bytes as a `data:` URL with the given MIME type.
+ *  Base64-encodes the bytes directly (NOT through `blob.text()`, which
+ *  decodes the bytes as UTF-8 and corrupts binary files — images, PDFs,
+ *  archives become a different size and unopenable). */
+function makeDataUrlFromBytes(bytes: Uint8Array, mimeType = "application/octet-stream"): string {
   let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  // Chunk in 32K slices to avoid call-stack limits on
+  // String.fromCharCode.apply for large files.
+  const CHUNK = 32 * 1024;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const end = Math.min(i + CHUNK, bytes.length);
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, end) as unknown as number[]);
+  }
   const b64 = btoa(bin);
   return `data:${mimeType};base64,${b64}`;
 }
@@ -563,9 +567,13 @@ registerTool(
       // through to the normal file read below.
     }
 
-    // Read the file as bytes (preserves binary data).
-    let content: string;
+    // Read the file as BYTES (not text) to preserve binary data. Going
+    // through `blob.text()` decodes the bytes as UTF-8, which corrupts
+    // binary files (images, PDFs, archives) — the downloaded file would
+    // be a different size and unopenable. Base64-encoding the raw bytes
+    // keeps the download lossless.
     let size: number;
+    let download_url: string;
     try {
       const blob = await client.readFileBytes(path);
       if (!blob) {
@@ -584,13 +592,13 @@ registerTool(
           size_human: humanSize(size),
         };
       }
-      content = await blob.text();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      download_url = makeDataUrlFromBytes(bytes, mimeForName(name));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { error: `Failed to read ${path}: ${msg}` };
     }
 
-    const download_url = makeDataUrl(content, mimeForName(name));
     return {
       kind: "file_download",
       item_type: "file" as const,
