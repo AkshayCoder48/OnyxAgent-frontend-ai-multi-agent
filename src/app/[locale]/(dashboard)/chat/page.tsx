@@ -51,19 +51,21 @@ function ResizableRightPanel({
 
   return (
     <aside
-      className="hidden shrink-0 animate-slide-in-right md:block relative"
+      className="hidden shrink-0 animate-slide-in-right md:block relative overflow-visible"
       style={{ width: `${width}px` }}
     >
-      {children}
       <div
         onMouseDown={handleMouseDown}
-        className="absolute top-0 bottom-0 left-0 z-30 w-1.5 cursor-col-resize transition-colors hover:bg-primary/30"
+        className="absolute top-0 bottom-0 left-0 z-50 cursor-col-resize transition-colors hover:bg-primary/40 group"
+        style={{ width: "4px", marginLeft: "-2px" }}
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize sidebar"
       >
-        <div className="absolute inset-y-0 -inset-x-1" />
+        {/* Invisible wider hit area for easier grabbing */}
+        <div className="absolute inset-y-0 -inset-x-2" />
       </div>
+      {children}
     </aside>
   );
 }

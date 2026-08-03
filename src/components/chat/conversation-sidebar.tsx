@@ -449,18 +449,19 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
   return (
     <>
       <aside
-        className={cn("bg-background hidden shrink-0 flex-col border-r md:flex relative", className)}
+        className={cn("bg-background hidden shrink-0 flex-col border-r md:flex relative overflow-visible", className)}
         style={{ width: `${convSidebarWidth}px` }}
       >
         {/* Resize handle on the right edge */}
         <div
           onMouseDown={handleConvResize}
-          className="absolute top-0 bottom-0 right-0 z-30 w-1.5 cursor-col-resize transition-colors hover:bg-primary/30"
+          className="absolute top-0 bottom-0 right-0 z-50 cursor-col-resize transition-colors hover:bg-primary/40"
+          style={{ width: "4px", marginRight: "-2px" }}
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize conversations sidebar"
         >
-          <div className="absolute inset-y-0 -inset-x-1" />
+          <div className="absolute inset-y-0 -inset-x-2" />
         </div>
         <div className="flex h-12 shrink-0 items-center justify-between border-b px-4 py-3">
           <h2 className="text-sm font-semibold">{t("conversations")}</h2>
