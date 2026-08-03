@@ -435,8 +435,8 @@ export function useChat(options: UseChatOptions = {}) {
                 existing.args += tc.arguments;
               }
             }
-            // Flush every 30ms — creates/updates the pending tool call
-            // so the user sees streaming args in realtime.
+            // Flush every 16ms — creates/updates the pending tool call
+            // so the user sees streaming args in realtime. 16ms ≈ 60fps.
             if (!toolArgTimer.current) {
               toolArgTimer.current = setTimeout(() => {
                 toolArgTimer.current = null;
@@ -446,13 +446,21 @@ export function useChat(options: UseChatOptions = {}) {
                 if (!msg?.toolCalls) return;
 
                 for (const [index, buffered] of toolArgBuffer.current) {
-                  const existing = msg.toolCalls.find(
+                  // Match by ID, pending-ID, OR by name (for pre-emitted cards
+                  // that have a different ID than the delta's ID).
+                  let existing = msg.toolCalls.find(
                     (t) => t.id === buffered.id || t.id === `pending-${index}`,
                   );
+                  if (!existing && buffered.name) {
+                    existing = msg.toolCalls.find(
+                      (t) => t.name === buffered.name && (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined),
+                    );
+                  }
                   if (existing) {
-                    // Update existing pending tool call's streaming args
+                    // Update existing pending/pre-emitted tool call's streaming args
                     updateToolCallPart(currentMessageIdRef.current, existing.id, {
                       args: { _streaming: buffered.args },
+                      name: buffered.name || existing.name,
                     });
                   } else {
                     // Create new pending tool call

@@ -1521,15 +1521,24 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         },
       });
     }
-    // Post-tool text (content minus textBeforeTools)
+    // Post-tool text (content minus textBeforeTools).
+    // Only split if textBeforeTools is a clean prefix of content. If the
+    // content was modified (DSML stripping, etc.), don't split — put all
+    // remaining text as one part. This prevents single words/periods from
+    // ending up as separate parts below the tool call.
     if (roundResult.content && roundResult.content.trim()) {
-      let postText = roundResult.content;
       if (roundResult.textBeforeTools && roundResult.content.startsWith(roundResult.textBeforeTools)) {
-        postText = roundResult.content.slice(roundResult.textBeforeTools.length);
+        const postText = roundResult.content.slice(roundResult.textBeforeTools.length);
+        if (postText.trim()) {
+          assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText });
+        }
+      } else if (!roundResult.textBeforeTools) {
+        // No text-before-tools → all content is post-tool text
+        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: roundResult.content });
       }
-      if (postText.trim()) {
-        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText });
-      }
+      // If textBeforeTools exists but doesn't match content prefix (DSML
+      // stripping changed it), the text was already pushed as textBeforeTools
+      // — don't push a duplicate.
     }
 
     // No tool calls → final result.
