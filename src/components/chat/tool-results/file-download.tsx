@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Download, File as FileIcon, Folder, Loader2, FileArchive } from "lucide-react";
+import { Download, Folder, Loader2, FileArchive } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface FileDownloadPayload {
@@ -16,20 +16,31 @@ export interface FileDownloadPayload {
   download_url: string;
 }
 
-/** Parse a tool result string into a FileDownloadPayload, or null if it
- *  isn't a valid file_download payload. */
+/** Parse a tool result into a FileDownloadPayload, or null if it isn't a
+ *  valid file_download payload. Accepts BOTH shapes:
+ *   - string: live WS event results (JSON.stringify of the tool handler's
+ *     return value, set by `tool_result` in use-chat.ts).
+ *   - object: persisted DB results (the tool handler's return value is
+ *     stored as-is by runtime.ts and rehydrated by conversation-to-chat.ts).
+ *  Without the object branch, reloading a conversation would fall through
+ *  to GenericToolResult and render the raw JSON — including the entire
+ *  base64 data URL — as visible text. */
 export function parseFileDownloadResult(result: unknown): FileDownloadPayload | null {
-  if (typeof result !== "string") return null;
-  const trimmed = result.trim();
-  if (!trimmed.startsWith("{")) return null;
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed?.kind !== "file_download") return null;
-    if (!parsed.download_url || typeof parsed.download_url !== "string") return null;
-    return parsed as FileDownloadPayload;
-  } catch {
-    return null;
+  let parsed: unknown = result;
+  if (typeof result === "string") {
+    const trimmed = result.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
   }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.kind !== "file_download") return null;
+  if (!obj.download_url || typeof obj.download_url !== "string") return null;
+  return parsed as FileDownloadPayload;
 }
 
 const EXT_ICONS: Record<string, string> = {
@@ -71,40 +82,42 @@ export function FileDownloadResult({ payload }: { payload: FileDownloadPayload }
   const ext = (payload.extension || "").toLowerCase();
   const emoji = isFolder ? "📁" : EXT_ICONS[ext] || "📄";
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (downloading) return;
     setDownloading(true);
     try {
-      // Data URLs can be downloaded directly via an anchor element —
-      // no need for fetch() (which can fail with "Failed to fetch" on
-      // some browsers/Vercel for large data URLs).
+      // Convert data: URLs → Blob → object URL before triggering the
+      // download. Direct data: URLs can fail silently for large payloads
+      // (browser size limits vary, and anchor.click() doesn't throw when
+      // it refuses to navigate) — the user just sees nothing happen.
+      // Going through a Blob sidesteps those limits AND lets us surface
+      // real errors via the catch block.
+      const url = payload.download_url;
+      let downloadUrl: string;
+      let shouldRevoke = false;
+      if (url.startsWith("data:")) {
+        const resp = await fetch(url);
+        const blob = await resp.blob();
+        downloadUrl = URL.createObjectURL(blob);
+        shouldRevoke = true;
+      } else {
+        downloadUrl = url;
+      }
       const a = document.createElement("a");
-      a.href = payload.download_url;
+      a.href = downloadUrl;
       a.download = isFolder ? `${payload.name}.zip` : payload.name;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      if (shouldRevoke) {
+        // Defer revoke — some browsers need the URL to survive the
+        // dispatch cycle of the click event.
+        setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      }
       setDownloaded(true);
     } catch (e) {
       console.error("Download failed:", e);
-      // Fallback: try fetch + blob approach
-      (async () => {
-        try {
-          const resp = await fetch(payload.download_url);
-          const blob = await resp.blob();
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = isFolder ? `${payload.name}.zip` : payload.name;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          URL.revokeObjectURL(url);
-          setDownloaded(true);
-        } catch (e2) {
-          alert(`Download failed: ${e2 instanceof Error ? e2.message : "Unknown error"}`);
-        }
-      })();
+      alert(`Download failed: ${e instanceof Error ? e.message : "Unknown error"}`);
     } finally {
       setDownloading(false);
     }

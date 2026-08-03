@@ -7,7 +7,6 @@ import { Input } from "@/components/ui/input";
 import {
   Folder,
   Download,
-  FolderDown,
   MoreVertical,
   Pencil,
   Trash2,
@@ -17,7 +16,6 @@ import {
   Loader2,
   Search,
   ServerOff,
-  Settings,
   Upload,
   FileText,
   FileCode,
@@ -176,8 +174,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   // local WS-listener below.
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // Resolve the file system: E2B client (if key + mode allows) or local OPFS.
-  const [useLocal, setUseLocal] = useState(false);
+  // Resolve the E2B sandbox client from the user's stored API key. All file
+  // operations (list, read, write, delete) go through E2B now — OPFS is no
+  // longer used for the workspace. Paths in the sidebar are relative to
+  // `/home/user` (the sandbox workspace root), which is exactly what the
+  // E2B client expects.
   useEffect(() => {
     let cancelled = false;
     if (!user?.id) {
@@ -187,22 +188,15 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     }
     (async () => {
       try {
-        const mode = await settingsService.getFileSystemMode(user.id);
         const apiKey = await settingsService.getDecryptedSandboxKey(user.id);
         if (cancelled) return;
-
-        // ALWAYS use local (OPFS) for file storage. The E2B sandbox is only
-        // a code runner — files are stored in OPFS and auto-synced to the
-        // sandbox before code execution. This keeps the sidebar and the AI's
-        // file tools looking at the same file system.
-        setUseLocal(true);
-        setClient(null);
-        void mode; void apiKey; // referenced to avoid unused warnings
-      } catch {
-        if (!cancelled) {
-          setUseLocal(true);
+        if (apiKey) {
+          setClient(getE2BClient(apiKey, null, "shared"));
+        } else {
           setClient(null);
         }
+      } catch {
+        if (!cancelled) setClient(null);
       } finally {
         if (!cancelled) setClientLoaded(true);
       }
@@ -216,27 +210,13 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     async (path: string) => {
       setLoading(true);
       try {
-        if (useLocal && user?.id) {
-          // Local OPFS mode — list files with real sizes
-          const { listDir } = await import("@/lib/storage/opfs");
-          const subPath = path === "." ? "workspace" : `workspace/${path}`;
-          const entries = await listDir(user.id, subPath);
-          const fileEntries = entries.map((e) => ({
-            name: e.name,
-            type: (e.kind === "directory" ? "dir" : "file") as "file" | "dir",
-            size: e.size ?? 0,
-          }));
-          setListing({
-            path,
-            absolute: path,
-            parent: parentOf(path),
-            entries: fileEntries,
-          });
-        } else if (client) {
-          // E2B sandbox mode
-          const files = await client.listFiles(path);
-          setListing(e2bFilesToListing(path, files));
+        if (!client) {
+          setListing(null);
+          return;
         }
+        // E2B sandbox mode — paths are relative to /home/user.
+        const files = await client.listFiles(path);
+        setListing(e2bFilesToListing(path, files));
       } catch (e) {
         console.warn("[file-sidebar] Failed to load files:", e);
         setListing(null);
@@ -244,7 +224,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         setLoading(false);
       }
     },
-    [client, useLocal, user?.id],
+    [client],
   );
 
   // Auto-refresh when the agent completes a workspace-mutating tool call
@@ -274,9 +254,9 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   // is null we intentionally skip the fetch — calling listFiles() with no
   // API key is what produces the "failed to fetch" toast spam.
   useEffect(() => {
-    if (client || useLocal) void fetchListing(currentPath);
+    if (client) void fetchListing(currentPath);
     else if (clientLoaded) setLoading(false);
-  }, [currentPath, fetchListing, onRefreshKey, refreshTick, client, useLocal, clientLoaded]);
+  }, [currentPath, fetchListing, onRefreshKey, refreshTick, client, clientLoaded]);
 
   const navigateTo = (path: string) => {
     setCurrentPath(path);
@@ -285,23 +265,14 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
 
   const handleDownloadFile = async (entry: WorkspaceEntry) => {
     if (entry.type !== "file") return;
+    if (!client) return;
     const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
     try {
-      let blob: Blob;
-      if (useLocal && user?.id) {
-        // Read as Blob (NOT readTextFile) to preserve binary data.
-        // readTextFile decodes as UTF-8, which corrupts binary files
-        // (e.g. 0xFF → EF BF BD, inflating 102KB → 184KB + breaking the file).
-        const { readFile } = await import("@/lib/storage/opfs");
-        blob = await readFile(`users/${user.id}/workspace/${fullPath}`);
-      } else if (client) {
-        // Use readFileBytes (returns Blob) not readFile (returns string).
-        const result = await client.readFileBytes(fullPath);
-        if (!result) return;
-        blob = result;
-      } else {
-        return;
-      }
+      // Use readFileBytes (returns Blob) not readFile (returns string) —
+      // readFile decodes as UTF-8, which corrupts binary files
+      // (e.g. 0xFF → EF BF BD, inflating 102KB → 184KB + breaking the file).
+      const blob = await client.readFileBytes(fullPath);
+      if (!blob) return;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -319,46 +290,53 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
 
   const handleDownloadFolder = async (entry: WorkspaceEntry) => {
     if (entry.type !== "dir") return;
+    if (!client) return;
     const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
     try {
-      if (useLocal && user?.id) {
-        // Local mode: zip the folder from OPFS.
-        // Read files as Blobs (not text) to preserve binary data.
-        const { listDir, readFile } = await import("@/lib/storage/opfs");
-        const { zipSync } = await import("fflate");
-        const entries = await listDir(user.id, `workspace/${fullPath}`);
-        const files: Record<string, Uint8Array> = {};
+      // Walk the sandbox recursively and zip the contents.
+      // Read files as bytes (Blob → arrayBuffer) to preserve binary data.
+      const { zipSync } = await import("fflate");
+      const files: Record<string, Uint8Array> = {};
+      const walk = async (dirPath: string, relPrefix: string) => {
+        let entries: E2BFile[];
+        try {
+          entries = await client.listFiles(dirPath);
+        } catch {
+          return;
+        }
         for (const e of entries) {
-          if (e.kind === "file") {
+          const isDir = e.type !== "file";
+          const entryName = e.path.split("/").filter(Boolean).pop() ?? e.path;
+          if (isDir) {
+            await walk(e.path, relPrefix ? `${relPrefix}/${entryName}` : entryName);
+          } else {
             try {
-              const blob = await readFile(`users/${user.id}/workspace/${fullPath}/${e.name}`);
+              const blob = await client.readFileBytes(e.path);
+              if (!blob) continue;
               const buf = new Uint8Array(await blob.arrayBuffer());
-              files[e.name] = buf;
-            } catch {}
+              const rel = relPrefix ? `${relPrefix}/${entryName}` : entryName;
+              files[rel] = buf;
+            } catch {
+              // skip files that can't be read
+            }
           }
         }
-        const zipped = zipSync(files);
-        const blob = new Blob([zipped], { type: "application/zip" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${entry.name}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      } else if (client) {
-        const content = await client.readFile(fullPath);
-        const blob = new Blob([content], { type: "application/octet-stream" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${entry.name}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+      };
+      await walk(fullPath, "");
+      if (Object.keys(files).length === 0) {
+        toast.error("Download failed", { description: "Folder is empty" });
+        return;
       }
+      const zipped = zipSync(files);
+      const blob = new Blob([zipped], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${entry.name}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } catch (e) {
       toast.error("Download failed", {
         description: e instanceof Error ? e.message : "Unknown error",
@@ -374,11 +352,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   const files = filtered.filter((e) => e.type === "file");
 
   // No sandbox: show an empty state instead of erroring on every keystroke.
-  const noSandbox = clientLoaded && !client && !useLocal;
+  const noSandbox = clientLoaded && !client;
 
   // File upload from the sidebar — opens the native file selector, then
-  // uploads the file to the sandbox (or OPFS in local mode). Shows a toast
-  // with progress, then refreshes the file listing.
+  // uploads the file to the E2B sandbox. Shows a toast with progress, then
+  // refreshes the file listing.
   const sidebarFileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingToSidebar, setUploadingToSidebar] = useState(false);
 
@@ -394,6 +372,12 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
       console.error("[file-sidebar] Upload aborted: no authenticated user");
       return;
     }
+    if (!client) {
+      toast.error("No sandbox available", {
+        description: "Add an E2B Sandbox API key in Settings → Config to upload files.",
+      });
+      return;
+    }
 
     setUploadingToSidebar(true);
     let successCount = 0;
@@ -401,18 +385,17 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     const uploadedFileMetas: Array<{ name: string; size: number; mime_type: string; uploaded_at: string }> = [];
     for (const file of fileArray) {
       try {
-        const { writeFileAtPath, isOPFSAvailable } = await import("@/lib/storage/opfs");
-        if (!isOPFSAvailable()) {
-          throw new Error("OPFS is not available in this browser");
-        }
         const parts = file.name.split("/");
         const filename = (parts.pop() || file.name).replace(/[\\/]+/g, "_");
-        const raw = new Uint8Array(await file.arrayBuffer());
-        const buf = new ArrayBuffer(raw.byteLength);
-        new Uint8Array(buf).set(raw);
-        const blob = new Blob([buf], { type: file.type || "application/octet-stream" });
-        const dirPath = `users/${user.id}/workspace`;
-        await writeFileAtPath(dirPath, filename, blob);
+        // Compute the destination path relative to /home/user (the sandbox
+        // workspace root). When the user is inside a subfolder, drop the
+        // file there; otherwise drop it at the workspace root.
+        const fullPath = currentPath === "." ? filename : `${currentPath}/${filename}`;
+        // Read as text and write to E2B. (Note: text() is lossy for binary
+        // files — matches the existing client.uploadFile behavior. For
+        // lossless binary uploads, use the chat attachment flow.)
+        const content = await file.text();
+        await client.writeFile(fullPath, content);
         // Track metadata for the manifest file (invisible tagging for AI).
         uploadedFileMetas.push({
           name: filename,
@@ -431,22 +414,21 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     }
 
     // === INVISIBLE FILE TAGGING FOR AI ===
-    // Write/update a `.onyxagent_files.json` manifest in the workspace that
-    // lists ALL uploaded files with their metadata. This file is synced to
-    // the sandbox by syncOpfsToSandbox() before code execution, so the AI
-    // can read it to discover what files exist in the workspace.
-    if (successCount > 0 && user) {
+    // Write/update a `.onyxagent_files.json` manifest at the workspace root
+    // listing ALL uploaded files with their metadata. The AI can read it
+    // from the sandbox to discover what files exist in the workspace.
+    if (successCount > 0 && client) {
       try {
-        const { writeFileAtPath, listDir, readTextFile } = await import("@/lib/storage/opfs");
-        const manifestPath = `users/${user.id}/workspace`;
         const manifestFile = ".onyxagent_files.json";
 
         // Read the existing manifest (if any) and merge new files.
         let existing: Array<{ name: string; size: number; mime_type: string; uploaded_at: string }> = [];
         try {
-          const oldContent = await readTextFile(`${manifestPath}/${manifestFile}`);
-          const parsed = JSON.parse(oldContent);
-          if (Array.isArray(parsed)) existing = parsed;
+          const oldContent = await client.readFile(manifestFile);
+          if (oldContent) {
+            const parsed = JSON.parse(oldContent);
+            if (Array.isArray(parsed?.files)) existing = parsed.files;
+          }
         } catch {
           // No existing manifest — start fresh.
         }
@@ -457,11 +439,14 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         for (const f of uploadedFileMetas) byName.set(f.name, f);
         const merged = Array.from(byName.values());
 
-        await writeFileAtPath(manifestPath, manifestFile, JSON.stringify({
-          description: "Auto-generated manifest of uploaded files. The AI can read this to discover what files exist in the workspace.",
-          generated_at: new Date().toISOString(),
-          files: merged,
-        }, null, 2));
+        await client.writeFile(
+          manifestFile,
+          JSON.stringify({
+            description: "Auto-generated manifest of uploaded files. The AI can read this to discover what files exist in the workspace.",
+            generated_at: new Date().toISOString(),
+            files: merged,
+          }, null, 2),
+        );
       } catch (manifestErr) {
         console.warn("[file-sidebar] Failed to write file manifest:", manifestErr);
       }
@@ -481,7 +466,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     } else if (failureCount > 0 && successCount > 0) {
       toast.message(`Uploaded ${successCount}, failed ${failureCount}`);
     }
-  }, [user, currentPath, fetchListing]);
+  }, [user, client, currentPath, fetchListing]);
 
   return (
     <div className="flex h-full flex-col bg-card">
@@ -580,8 +565,6 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
           </div>
         ) : noSandbox ? (
           <div className="flex flex-col gap-4 px-3 py-4">
-            {/* OPFS Skills section — shows even without E2B sandbox */}
-            <OPFSSkillsSection userId={user?.id} />
             {/* No sandbox warning */}
             <div className="flex flex-col items-center justify-center text-center gap-2 pt-4 border-t border-border">
               <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -639,10 +622,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                     entry={entry}
                     onDownload={() => handleDownloadFolder(entry)}
                     onDelete={async () => {
-                      if (!user) return;
+                      if (!client) return;
                       try {
-                        const { removeDir } = await import("@/lib/storage/opfs");
-                        await removeDir(user.id, `workspace/${fullPath}`);
+                        // E2B's deleteFile is recursive (rm -rf), so it
+                        // works on directories too.
+                        await client.deleteFile(fullPath);
                         toast.success(`Deleted folder: ${entry.name}`);
                         fetchListing(currentPath);
                       } catch (e) {
@@ -650,19 +634,38 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                       }
                     }}
                     onRename={async (newName) => {
-                      if (!user || !newName.trim()) return;
+                      if (!client || !newName.trim()) return;
                       try {
-                        const { readFile, writeFile, removeDir } = await import("@/lib/storage/opfs");
                         const parentPath = currentPath === "." ? "" : currentPath;
-                        // Read all files in old folder, write to new folder, delete old
-                        const oldEntries = await (await import("@/lib/storage/opfs")).listDir(user.id, `workspace/${fullPath}`);
-                        for (const e of oldEntries) {
-                          if (e.kind === "file") {
-                            const content = await readFile(`users/${user.id}/workspace/${fullPath}/${e.name}`);
-                            await writeFile(user.id, `workspace/${parentPath ? parentPath + "/" : ""}${newName}`, e.name, content);
+                        const newFullPath = parentPath ? `${parentPath}/${newName}` : newName;
+                        // Walk the old folder recursively, read each file as
+                        // bytes, and write to the new path. E2B's deleteFile
+                        // is recursive (rm -rf), so we delete the old folder
+                        // at the end.
+                        const moveFiles = async (dirPath: string, relPrefix: string) => {
+                          const entries = await client.listFiles(dirPath);
+                          for (const e of entries) {
+                            const isDir = e.type !== "file";
+                            const entryName = e.path.split("/").filter(Boolean).pop() ?? e.path;
+                            if (isDir) {
+                              await moveFiles(e.path, relPrefix ? `${relPrefix}/${entryName}` : entryName);
+                            } else {
+                              try {
+                                const blob = await client.readFileBytes(e.path);
+                                if (!blob) continue;
+                                const content = await blob.text();
+                                const dest = relPrefix
+                                  ? `${newFullPath}/${relPrefix}/${entryName}`
+                                  : `${newFullPath}/${entryName}`;
+                                await client.writeFile(dest, content);
+                              } catch {
+                                // skip files that can't be read
+                              }
+                            }
                           }
-                        }
-                        await removeDir(user.id, `workspace/${fullPath}`);
+                        };
+                        await moveFiles(fullPath, "");
+                        await client.deleteFile(fullPath);
                         toast.success(`Renamed to: ${newName}`);
                         fetchListing(currentPath);
                       } catch (e) {
@@ -696,11 +699,10 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                     entry={entry}
                     onDownload={() => handleDownloadFile(entry)}
                     onDelete={async () => {
-                      if (!user) return;
+                      if (!client) return;
                       try {
-                        const { deleteFile } = await import("@/lib/storage/opfs");
                         const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
-                        await deleteFile(`users/${user.id}/workspace/${fullPath}`);
+                        await client.deleteFile(fullPath);
                         toast.success(`Deleted: ${entry.name}`);
                         fetchListing(currentPath);
                       } catch (e) {
@@ -708,14 +710,23 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                       }
                     }}
                     onRename={async (newName) => {
-                      if (!user || !newName.trim()) return;
+                      if (!client || !newName.trim()) return;
                       try {
-                        const { readTextFile, writeFile, deleteFile } = await import("@/lib/storage/opfs");
                         const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
                         const parentDir = currentPath === "." ? "" : currentPath;
-                        const content = await readTextFile(`users/${user.id}/workspace/${fullPath}`);
-                        await writeFile(user.id, `workspace/${parentDir ? parentDir + "/" : ""}`, newName, content);
-                        await deleteFile(`users/${user.id}/workspace/${fullPath}`);
+                        const newFullPath = parentDir ? `${parentDir}/${newName}` : newName;
+                        // Read as bytes (Blob) and write back as text.
+                        // Binary data may be corrupted by the text() round-
+                        // trip — but rename of binary files is rare and
+                        // matches the existing client.writeFile behavior.
+                        const blob = await client.readFileBytes(fullPath);
+                        if (!blob) {
+                          toast.error("Rename failed: file not found");
+                          return;
+                        }
+                        const content = await blob.text();
+                        await client.writeFile(newFullPath, content);
+                        await client.deleteFile(fullPath);
                         toast.success(`Renamed to: ${newName}`);
                         fetchListing(currentPath);
                       } catch (e) {
@@ -736,94 +747,6 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
           {dirs.length} folders · {files.length} files
         </div>
       )}
-    </div>
-  );
-}
-
-// ---- OPFS Skills Section ----
-// Shows installed skills from OPFS when no E2B sandbox is available.
-function OPFSSkillsSection({ userId }: { userId?: string }) {
-  const [skills, setSkills] = useState<Array<{ name: string; description?: string }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
-  const [skillContent, setSkillContent] = useState<string>("");
-
-  useEffect(() => {
-    if (!userId) return;
-    (async () => {
-      try {
-        const { skillService } = await import("@/lib/services");
-        const rows = await skillService.list(userId);
-        setSkills(rows.map((r) => ({ name: r.name, description: r.description ?? undefined })));
-      } catch {
-        // ignore
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [userId]);
-
-  const readSkill = async (name: string) => {
-    if (expandedSkill === name) {
-      setExpandedSkill(null);
-      return;
-    }
-    setExpandedSkill(name);
-    setSkillContent("Loading…");
-    try {
-      const { skillService } = await import("@/lib/services");
-      const { readTextFile } = await import("@/lib/storage/opfs");
-      const skill = await skillService.getByName(userId!, name);
-      if (skill) {
-        const content = await readTextFile(`${skill.dir_path}/SKILL.md`);
-        setSkillContent(content || "(empty)");
-      } else {
-        setSkillContent("Skill not found in database.");
-      }
-    } catch (e) {
-      setSkillContent(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="text-xs text-muted-foreground p-2">Loading skills…</div>
-    );
-  }
-
-  if (skills.length === 0) {
-    return (
-      <div className="text-xs text-muted-foreground p-2">
-        No installed skills. Install skills from{" "}
-        <Link href="/settings/skills" className="underline">Settings → Skills</Link>.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground px-1 pb-1">
-        Installed skills ({skills.length})
-      </p>
-      {skills.map((skill) => (
-        <div key={skill.name}>
-          <button
-            onClick={() => readSkill(skill.name)}
-            className="flex w-full items-center gap-2 px-2 py-1.5 text-xs hover:bg-foreground/5 rounded transition-colors"
-          >
-            <span className="text-sm">📘</span>
-            <span className="truncate font-medium">{skill.name}</span>
-            {expandedSkill === skill.name && (
-              <ChevronRight className="h-3 w-3 ml-auto rotate-90 transition-transform" />
-            )}
-          </button>
-          {expandedSkill === skill.name && (
-            <pre className="max-h-48 overflow-auto rounded bg-muted/50 p-2 mx-1 mb-1 font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-              {skillContent}
-            </pre>
-          )}
-        </div>
-      ))}
     </div>
   );
 }

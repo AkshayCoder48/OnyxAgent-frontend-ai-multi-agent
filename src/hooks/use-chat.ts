@@ -451,22 +451,30 @@ export function useChat(options: UseChatOptions = {}) {
                   let existing = msg.toolCalls.find(
                     (t) => t.id === buffered.id || t.id === `pending-${index}`,
                   );
-                  if (!existing && buffered.name) {
+                  if (!existing && buffered.name && !buffered.name.startsWith("pending-")) {
                     existing = msg.toolCalls.find(
                       (t) => t.name === buffered.name && (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined),
                     );
                   }
                   if (existing) {
                     // Update existing pending/pre-emitted tool call's streaming args
+                    // Only update the name if it's a REAL name (not pending-N)
+                    const realName = buffered.name && !buffered.name.startsWith("pending-")
+                      ? buffered.name
+                      : existing.name;
                     updateToolCallPart(currentMessageIdRef.current, existing.id, {
                       args: { _streaming: buffered.args },
-                      name: buffered.name || existing.name,
+                      name: realName,
                     });
                   } else {
-                    // Create new pending tool call
+                    // Create new pending tool call — use empty name if only
+                    // pending-N is available (card shows "Composing…")
+                    const realName = buffered.name && !buffered.name.startsWith("pending-")
+                      ? buffered.name
+                      : "";
                     addToolCallPart(currentMessageIdRef.current, {
                       id: buffered.id,
-                      name: buffered.name,
+                      name: realName,
                       args: { _streaming: buffered.args },
                       status: "pending",
                     });
