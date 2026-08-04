@@ -485,15 +485,12 @@ export function useChat(options: UseChatOptions = {}) {
                         ? { id: buffered.id }
                         : {}),
                     });
-                  } else {
-                    // Create new pending tool call
-                    addToolCallPart(currentMessageIdRef.current, {
-                      id: buffered.id,
-                      name: realName,
-                      args: { _streaming: buffered.args },
-                      status: "pending",
-                    });
                   }
+                  // DO NOT create a new card here — only the tool_call event
+                  // (pre-emit or final) creates cards. The delta handler only
+                  // UPDATES existing cards. This prevents duplicate cards and
+                  // ensures the card appears via the pre-emit, not via the
+                  // delta flush — which fixes the "stuck then appears" issue.
                 }
               }, 16);
             }
@@ -525,16 +522,21 @@ export function useChat(options: UseChatOptions = {}) {
               status: data._preemit ? "pending" : "running",
             };
 
-            // Clear the toolArgBuffer entry for this tool call. Find by
-            // matching name or id, since the index may not be available.
-            for (const [idx, buffered] of toolArgBuffer.current) {
-              if (
-                buffered.name === tool_name ||
-                buffered.id === tool_call_id ||
-                buffered.id === `pending-${idx}`
-              ) {
-                toolArgBuffer.current.delete(idx);
-                break;
+            // Clear the toolArgBuffer entry for this tool call — BUT ONLY
+            // for non-pre-emit events. Pre-emit events fire DURING streaming
+            // (before all args have arrived), so clearing the buffer would
+            // cause subsequent deltas to be lost. Only clear when the FINAL
+            // tool_call event arrives (after stream ends, _preemit is false).
+            if (!data._preemit) {
+              for (const [idx, buffered] of toolArgBuffer.current) {
+                if (
+                  buffered.name === tool_name ||
+                  buffered.id === tool_call_id ||
+                  buffered.id === `pending-${idx}`
+                ) {
+                  toolArgBuffer.current.delete(idx);
+                  break;
+                }
               }
             }
 

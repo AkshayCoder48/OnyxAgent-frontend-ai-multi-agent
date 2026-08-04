@@ -10,7 +10,7 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { Bot, ChevronDown, FileText, Globe, Paperclip, RefreshCw, User } from "lucide-react";
+import { Bot, ChevronDown, ChevronUp, FileText, Globe, Loader2, Paperclip, RefreshCw, User, Wrench } from "lucide-react";
 import Image from "next/image";
 import { useAuthStore } from "@/stores";
 import { getFileUrl } from "@/lib/file-api";
@@ -268,6 +268,82 @@ interface MessageItemProps {
   onRegenerate?: () => void;
 }
 
+/**
+ * CollapsibleToolGroup — when 2+ consecutive tool calls happen without any
+ * text between them, they're collapsed into a single bar showing
+ * "N Tool Calls" with an expand arrow. Click to expand/collapse.
+ *
+ * Design: matches the tool call card style — rounded, subtle background,
+ * uses CSS variables so it works with ALL color schemes.
+ */
+function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").MessagePart[] }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
+  const allDone = toolParts.every((p) => p.toolCall?.status === "completed" || p.toolCall?.status === "error");
+  const anyRunning = toolParts.some((p) => p.toolCall?.status === "running" || p.toolCall?.status === "pending");
+  const errorCount = toolParts.filter((p) => p.toolCall?.status === "error").length;
+
+  return (
+    <div className="mb-2">
+      {/* Collapsed bar */}
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-lg border px-4 py-2.5 text-left transition-all duration-200",
+          anyRunning
+            ? "border-primary/10 bg-primary/5"
+            : "border-foreground/8 bg-muted/30 hover:bg-muted/50",
+        )}
+      >
+        <div
+          className={cn(
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+            anyRunning ? "bg-primary/10" : "bg-foreground/5",
+          )}
+        >
+          {anyRunning ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+          ) : (
+            <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+          )}
+        </div>
+        <span className="text-foreground/90 text-sm font-medium">
+          {toolParts.length} Tool Calls
+        </span>
+        {errorCount > 0 && (
+          <span className="text-destructive text-xs font-medium">
+            {errorCount} failed
+          </span>
+        )}
+        {anyRunning && (
+          <span className="streaming-dots" aria-hidden="true">
+            <span /> <span /> <span />
+          </span>
+        )}
+        <div className="ml-auto text-muted-foreground">
+          {expanded ? (
+            <ChevronUp className="h-4 w-4" />
+          ) : (
+            <ChevronDown className="h-4 w-4" />
+          )}
+        </div>
+      </button>
+
+      {/* Expanded tool cards */}
+      {expanded && (
+        <div className="mt-2 space-y-2 pl-2 border-l-2 border-foreground/8">
+          {toolParts.map((part) => (
+            <div key={part.id} className="w-full">
+              <ToolCallCard toolCall={part.toolCall!} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export const MessageItem = React.memo(function MessageItem({
   message,
   groupPosition,
@@ -442,10 +518,8 @@ export const MessageItem = React.memo(function MessageItem({
               {useParts ? (
                 /* Chronological timeline: reasoning/thinking blocks first (at
                  * top), then tool calls + text interleaved in their ORIGINAL
-                 * order. This way text that was written BEFORE a tool call
-                 * appears above the tool card (not pushed below it), and text
-                 * written AFTER a tool call appears below it — matching what
-                 * the user saw during streaming. */
+                 * order. Consecutive tool calls (without text between them)
+                 * are grouped into a collapsible "N Tool Calls" bar. */
                 (() => {
                   const thinkingParts = parts.filter((p) => (p.type === "thinking" || p.type === "reasoning") && p.content);
                   const chronologicalParts = parts.filter(
@@ -454,11 +528,45 @@ export const MessageItem = React.memo(function MessageItem({
                   const lastPart = parts[parts.length - 1];
                   const isLastStreaming = Boolean(message.isStreaming);
 
+                  // Group consecutive tool calls into collapsible groups.
+                  // A group is 2+ consecutive tool parts with no text between.
+                  // Single tool calls are rendered as-is (no collapse).
+                  type RenderItem =
+                    | { kind: "text"; part: typeof chronologicalParts[0]; isLast: boolean }
+                    | { kind: "tool"; part: typeof chronologicalParts[0]; isLast: boolean }
+                    | { kind: "toolGroup"; parts: typeof chronologicalParts; isLast: boolean };
+
+                  const renderItems: RenderItem[] = [];
+                  let i = 0;
+                  while (i < chronologicalParts.length) {
+                    const part = chronologicalParts[i]!;
+                    const isLast = i === chronologicalParts.length - 1;
+                    if (part.type === "tool" && part.toolCall) {
+                      // Start collecting consecutive tool parts
+                      const group: typeof chronologicalParts = [];
+                      while (i < chronologicalParts.length && chronologicalParts[i]!.type === "tool") {
+                        group.push(chronologicalParts[i]!);
+                        i++;
+                      }
+                      if (group.length >= 2) {
+                        // 2+ consecutive tools → collapsible group
+                        renderItems.push({ kind: "toolGroup", parts: group, isLast: i === chronologicalParts.length });
+                      } else {
+                        // Single tool → render as-is
+                        renderItems.push({ kind: "tool", part: group[0]!, isLast: i === chronologicalParts.length });
+                      }
+                    } else {
+                      // Text part
+                      renderItems.push({ kind: "text", part, isLast });
+                      i++;
+                    }
+                  }
+
                   return (
                     <>
                       {/* Reasoning/Thinking blocks (all at top) */}
-                      {thinkingParts.map((part, i) => {
-                        const isLast = i === thinkingParts.length - 1 && chronologicalParts.length === 0;
+                      {thinkingParts.map((part, j) => {
+                        const isLast = j === thinkingParts.length - 1 && chronologicalParts.length === 0;
                         if (part.type === "thinking") {
                           return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                         }
@@ -466,21 +574,25 @@ export const MessageItem = React.memo(function MessageItem({
                       })}
 
                       {/* Tool calls + text in chronological order */}
-                      {chronologicalParts.map((part, i) => {
-                        const isLastChronological = i === chronologicalParts.length - 1;
-                        if (part.type === "tool" && part.toolCall) {
+                      {renderItems.map((item) => {
+                        if (item.kind === "toolGroup") {
                           return (
-                            <div key={part.id} className="w-full">
-                              <ToolCallCard toolCall={part.toolCall} />
+                            <CollapsibleToolGroup key={`group-${item.parts[0]!.id}`} parts={item.parts} />
+                          );
+                        }
+                        if (item.kind === "tool" && item.part.toolCall) {
+                          return (
+                            <div key={item.part.id} className="w-full">
+                              <ToolCallCard toolCall={item.part.toolCall} />
                             </div>
                           );
                         }
                         // Text part
                         return (
                           <TextBubble
-                            key={part.id}
-                            text={part.content ?? ""}
-                            showCursor={isLastStreaming && isLastChronological && lastPart?.type === "text"}
+                            key={item.part.id}
+                            text={item.part.content ?? ""}
+                            showCursor={isLastStreaming && item.isLast && lastPart?.type === "text"}
                             isUser={isUser}
                             onCiteClick={onCiteClick}
                           />
