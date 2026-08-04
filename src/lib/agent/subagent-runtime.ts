@@ -322,6 +322,12 @@ export async function executeSubagentTurn(
                 sandboxMode: "shared" as const,
                 envVars: {},
                 onToolOutput: () => {},
+                // Let file tools resolve the sandbox key dynamically.
+                // The tools call ensureFreshSandboxForCtx(ctx) which calls
+                // resolveSandboxApiKey(ctx) — if e2bApiKey/sandboxApiKey are
+                // undefined, it falls back to settingsService.getDecryptedSandboxKey(userId).
+                // This ensures subagent tools can use the E2B sandbox even
+                // when the runtime didn't pass the key through.
               };
               toolResult = await tool.handler(toolArgs, ctx);
             } else {

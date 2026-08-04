@@ -441,6 +441,15 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       if (!existing) {
         return { error: `Subagent "${task.subagent_name}" no longer exists. It may have been deleted. Spawn a new one with spawn_subagent.` };
       }
+      // Allow querying disposed agents — re-enable them so they can be used again.
+      // The user should be able to message a subagent even after it was disposed.
+      if (existing.lifecycle_status === "disposed" || !existing.enabled) {
+        store.updateSubagent(existing.id, {
+          enabled: true,
+          lifecycle_status: "idle",
+        });
+        existing = store.getSubagent(existing.id)!;
+      }
       subagentId = existing.id;
     } else {
       // New task — create or find a subagent by name.

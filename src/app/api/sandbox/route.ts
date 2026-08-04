@@ -400,7 +400,7 @@ async function createAndCacheSandbox(
 
   let sandbox: Sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 }); // 24 hours
+    sandbox = await Sandbox.create({ apiKey, timeoutMs: 3_600_000 }); // 1 hour (E2B max)
   } catch (createErr) {
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
