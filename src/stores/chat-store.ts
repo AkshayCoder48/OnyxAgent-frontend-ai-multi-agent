@@ -221,28 +221,23 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
-      const last = parts[parts.length - 1];
-      // If the last part is "thinking", append to it.
-      // Otherwise, find the last thinking part that comes after the last
-      // tool part (same logic as text — prevents splitting when other
-      // deltas interleave with thinking within a single round).
-      if (last && last.type === "thinking") {
-        parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
+      // ALWAYS append to the LAST thinking part if one exists.
+      // The previous logic tried to find the last thinking part after the
+      // last tool part, but this caused the content to split into TWO
+      // thinking parts when other deltas (text, tool) interleaved —
+      // resulting in two "Thinking" bars with half the content each.
+      // Now: find the LAST thinking part regardless of what's between.
+      const lastThinkIdx = parts.reduce(
+        (acc, p, i) => (p.type === "thinking" ? i : acc),
+        -1,
+      );
+      if (lastThinkIdx >= 0) {
+        parts[lastThinkIdx] = {
+          ...parts[lastThinkIdx]!,
+          content: (parts[lastThinkIdx]!.content ?? "") + text,
+        };
       } else {
-        let lastToolIdx = -1;
-        let lastThinkIdx = -1;
-        for (let i = 0; i < parts.length; i++) {
-          if (parts[i]!.type === "tool") lastToolIdx = i;
-          if (parts[i]!.type === "thinking") lastThinkIdx = i;
-        }
-        if (lastThinkIdx >= 0 && lastToolIdx < lastThinkIdx) {
-          parts[lastThinkIdx] = {
-            ...parts[lastThinkIdx]!,
-            content: (parts[lastThinkIdx]!.content ?? "") + text,
-          };
-        } else {
-          parts.push({ id: newPartId(), type: "thinking" as const, content: text });
-        }
+        parts.push({ id: newPartId(), type: "thinking" as const, content: text });
       }
 
       const messages = [...state.messages];
@@ -258,25 +253,20 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
-      const last = parts[parts.length - 1];
-      // Same logic as thinking — prevent splitting when other deltas interleave.
-      if (last && last.type === "reasoning") {
-        parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
+      // Same fix as thinking — ALWAYS append to the LAST reasoning part
+      // regardless of what's between. Prevents content from splitting
+      // into two reasoning bars when other deltas interleave.
+      const lastReasonIdx = parts.reduce(
+        (acc, p, i) => (p.type === "reasoning" ? i : acc),
+        -1,
+      );
+      if (lastReasonIdx >= 0) {
+        parts[lastReasonIdx] = {
+          ...parts[lastReasonIdx]!,
+          content: (parts[lastReasonIdx]!.content ?? "") + text,
+        };
       } else {
-        let lastToolIdx = -1;
-        let lastReasonIdx = -1;
-        for (let i = 0; i < parts.length; i++) {
-          if (parts[i]!.type === "tool") lastToolIdx = i;
-          if (parts[i]!.type === "reasoning") lastReasonIdx = i;
-        }
-        if (lastReasonIdx >= 0 && lastToolIdx < lastReasonIdx) {
-          parts[lastReasonIdx] = {
-            ...parts[lastReasonIdx]!,
-            content: (parts[lastReasonIdx]!.content ?? "") + text,
-          };
-        } else {
-          parts.push({ id: newPartId(), type: "reasoning" as const, content: text });
-        }
+        parts.push({ id: newPartId(), type: "reasoning" as const, content: text });
       }
 
       const messages = [...state.messages];
