@@ -412,24 +412,27 @@ export function useChat(options: UseChatOptions = {}) {
             for (const tc of toolCalls) {
               const existing = toolArgBuffer.current.get(tc.index);
               if (tc.name) {
-                // New tool call — REPLACE the buffer entry (don't append to
-                // old args from a previous round that used the same index).
-                // The tool_call event (which fires when the tool is finalized)
-                // clears the buffer entry, but as a safety measure we also
-                // reset here when a new tool name arrives.
+                // New tool call with a name — REPLACE the buffer entry.
+                // Use the real ID if provided, otherwise keep the existing ID
+                // (don't generate pending-N — causes matching issues).
                 toolArgBuffer.current.set(tc.index, {
-                  id: tc.id || `pending-${tc.index}`,
+                  id: tc.id || existing?.id || `pending-${tc.index}`,
                   name: tc.name,
                   args: tc.arguments || "",
                 });
-              } else if (tc.id && tc.id !== existing?.id) {
-                // Different tool_call_id at the same index — new tool call
-                // without a name. Reset the buffer entry.
+              } else if (tc.id && tc.id !== existing?.id && !existing) {
+                // First delta has ID but no name — create buffer entry.
+                // Don't use pending-N as the name — use empty string.
                 toolArgBuffer.current.set(tc.index, {
                   id: tc.id,
-                  name: existing?.name || `pending-${tc.index}`,
+                  name: "",
                   args: tc.arguments || "",
                 });
+              } else if (tc.id && tc.id !== existing?.id && existing) {
+                // Different tool_call_id at the same index — update ID but
+                // keep the name (provider may send ID first, then name).
+                existing.id = tc.id;
+                if (tc.arguments) existing.args += tc.arguments;
               } else if (tc.arguments && existing) {
                 // Append args to existing buffer entry (same tool call)
                 existing.args += tc.arguments;
@@ -446,32 +449,44 @@ export function useChat(options: UseChatOptions = {}) {
                 if (!msg?.toolCalls) return;
 
                 for (const [index, buffered] of toolArgBuffer.current) {
-                  // Match by ID, pending-ID, OR by name (for pre-emitted cards
-                  // that have a different ID than the delta's ID).
+                  // Match by ID first. Then try matching by index-based pending ID.
+                  // Then try matching by name (for pre-emitted cards with different IDs).
+                  // Finally, try matching ANY pending card that doesn't have a real name yet.
                   let existing = msg.toolCalls.find(
-                    (t) => t.id === buffered.id || t.id === `pending-${index}`,
+                    (t) => t.id === buffered.id,
                   );
-                  if (!existing && buffered.name && !buffered.name.startsWith("pending-")) {
+                  if (!existing) {
                     existing = msg.toolCalls.find(
-                      (t) => t.name === buffered.name && (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined),
+                      (t) => t.id === `pending-${index}`,
+                    );
+                  }
+                  const realName = buffered.name && !buffered.name.startsWith("pending-")
+                    ? buffered.name
+                    : "";
+                  if (!existing && realName) {
+                    // Match by name — finds pre-emitted cards
+                    existing = msg.toolCalls.find(
+                      (t) => t.name === realName && (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined),
+                    );
+                  }
+                  if (!existing) {
+                    // Last resort: match ANY pending/streaming card (the first one)
+                    existing = msg.toolCalls.find(
+                      (t) => (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined) && (!t.name || t.name.startsWith("pending-") || t.name === ""),
                     );
                   }
                   if (existing) {
-                    // Update existing pending/pre-emitted tool call's streaming args
-                    // Only update the name if it's a REAL name (not pending-N)
-                    const realName = buffered.name && !buffered.name.startsWith("pending-")
-                      ? buffered.name
-                      : existing.name;
+                    // Update existing card's streaming args + name
                     updateToolCallPart(currentMessageIdRef.current, existing.id, {
                       args: { _streaming: buffered.args },
-                      name: realName,
+                      name: realName || existing.name,
+                      // Also update the ID if we now have a real one
+                      ...(buffered.id && !buffered.id.startsWith("pending-") && existing.id.startsWith("pending-")
+                        ? { id: buffered.id }
+                        : {}),
                     });
                   } else {
-                    // Create new pending tool call — use empty name if only
-                    // pending-N is available (card shows "Composing…")
-                    const realName = buffered.name && !buffered.name.startsWith("pending-")
-                      ? buffered.name
-                      : "";
+                    // Create new pending tool call
                     addToolCallPart(currentMessageIdRef.current, {
                       id: buffered.id,
                       name: realName,
@@ -480,7 +495,7 @@ export function useChat(options: UseChatOptions = {}) {
                     });
                   }
                 }
-              }, 50);
+              }, 16);
             }
           }
           break;
