@@ -326,8 +326,8 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
     // Assign existing provider.
     if (args.provider_id) {
       const updates: Partial<SubagentConfig> = {
-        providerId: args.provider_id,
-        model: args.model ?? null,
+        providerId: args.provider_id as string,
+        model: (args.model as string) ?? null,
         baseUrl: null,  // Clear custom config.
         apiKey: null,
       };
@@ -344,9 +344,9 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
     // Set custom AI config.
     if (args.custom_base_url || args.custom_model) {
       const updates: Partial<SubagentConfig> = {
-        baseUrl: args.custom_base_url ?? null,
-        model: args.custom_model ?? null,
-        apiKey: args.custom_api_key ?? null,  // Optional.
+        baseUrl: (args.custom_base_url as string) ?? null,
+        model: (args.custom_model as string) ?? null,
+        apiKey: (args.custom_api_key as string) ?? null,  // Optional.
         providerId: null,  // Clear provider assignment.
       };
       store.updateSubagent(config.id, updates);
@@ -759,7 +759,7 @@ The tool is immediately available to the specified subagent (or all subagents if
     // Build the tool handler from the implementation string.
     // The implementation is a function body that receives `args` + `ctx`.
     // We wrap it in a Function constructor for isolation.
-    let handler;
+    let handler: ((args: Record<string, unknown>, ctx: unknown) => Promise<unknown> | unknown) | undefined;
     try {
       // eslint-disable-next-line no-new-func
       handler = new Function("args", "ctx", `"use strict"; ${implementation}`) as (
@@ -770,7 +770,7 @@ The tool is immediately available to the specified subagent (or all subagents if
       // Wrap in an async function so the runtime can await it.
       const wrappedHandler = async (toolArgs: Record<string, unknown>, toolCtx: unknown) => {
         try {
-          return await handler(toolArgs, toolCtx);
+          return await handler!(toolArgs, toolCtx);
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };
         }

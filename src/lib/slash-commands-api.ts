@@ -20,6 +20,8 @@ export interface UserSlashCommandRecord {
   /** null for built-in overrides; non-null for user-defined custom commands. */
   prompt: string | null;
   is_enabled: boolean;
+  /** True for built-in (catalog) commands; false for user-defined. */
+  is_builtin?: boolean;
   created_at: string;
   updated_at: string | null;
 }

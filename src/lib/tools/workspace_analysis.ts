@@ -417,7 +417,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
       // We need is_secret — re-read the raw settings row for that flag.
       const settings = await settingsService.get(ctx.userId);
       const secretSet = new Set(
-        (settings.env_vars ?? []).filter((v) => v.is_secret).map((v) => v.name),
+        (settings.env_vars as Array<{ name: string; is_secret: boolean; value_present: boolean }>).filter((v) => v.is_secret).map((v) => v.name),
       );
       env_vars = Object.entries(decrypted).map(([name, value]) => ({
         name,

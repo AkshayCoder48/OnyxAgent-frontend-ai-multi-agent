@@ -22,7 +22,7 @@ import { Bot } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
 
-export function ChatContainer() {
+export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void } = {}) {
   const {
     currentConversationId,
     currentMessages,
@@ -292,7 +292,11 @@ export function ChatContainer() {
       }
     },
     openSettings: () => {
-      document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
+      if (onOpenSettings) {
+        onOpenSettings();
+      } else {
+        document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
+      }
     },
   };
 

@@ -11,13 +11,27 @@ interface AuthState {
   isLoading: boolean;
   vaultUnlocked: boolean;
   avatarVersion: number;
+  /** Transient auth error message (set by login/register failures). */
+  error: string | null;
 
   setUser: (user: User | null) => void;
   setLoading: (loading: boolean) => void;
   setVaultUnlocked: (unlocked: boolean) => void;
+  setAvatarVersion: (v: number) => void;
+  bumpAvatarVersion: () => void;
+  /** Clear the transient `error` field. */
+  clearError: () => void;
   init: () => Promise<void>;
   logout: () => Promise<void>;
-  bumpAvatarVersion: () => void;
+  /** Email + passphrase login (legacy auth-screen entry point). In the
+   *  backendless mode the default user is auto-created, so this is mostly
+   *  used to switch to a different account when the user explicitly signs
+   *  out and back in. */
+  login: (email: string, passphrase: string) => Promise<void>;
+  /** Email + passphrase registration (legacy auth-screen entry point). */
+  register: (email: string, fullName: string, passphrase: string) => Promise<void>;
+  /** Mark onboarding as complete by writing a timestamp on the user row. */
+  completeOnboarding: () => Promise<void>;
 }
 
 const LAST_USER_ID_KEY = "agent-chat-app:last-user-id";
@@ -109,6 +123,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   isLoading: false,
   vaultUnlocked: true,
   avatarVersion: 0,
+  error: null,
 
   setUser: (user) =>
     set({
@@ -121,7 +136,64 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   setVaultUnlocked: (unlocked) => set({ vaultUnlocked: unlocked }),
 
+  setAvatarVersion: (v) => set({ avatarVersion: v }),
+
   bumpAvatarVersion: () => set((s) => ({ avatarVersion: s.avatarVersion + 1 })),
+
+  clearError: () => set({ error: null }),
+
+  login: async (email, passphrase) => {
+    set({ isLoading: true, error: null });
+    try {
+      const user = await authService.login(email, passphrase);
+      setLastUserId(user.id);
+      set({
+        user,
+        isAuthenticated: true,
+        vaultUnlocked: true,
+        isLoading: false,
+        error: null,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Login failed";
+      set({ isLoading: false, error: msg });
+      throw e;
+    }
+  },
+
+  register: async (email, fullName, passphrase) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { user } = await authService.register(email, fullName, passphrase);
+      setLastUserId(user.id);
+      set({
+        user,
+        isAuthenticated: true,
+        vaultUnlocked: true,
+        isLoading: false,
+        error: null,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Registration failed";
+      set({ isLoading: false, error: msg });
+      throw e;
+    }
+  },
+
+  completeOnboarding: async () => {
+    const u = useAuthStore.getState().user;
+    if (!u) return;
+    const now = new Date().toISOString();
+    try {
+      const { db } = await import("@/lib/db");
+      await db.users.update(u.id, { onboarding_completed_at: now });
+      set({ user: { ...u, onboarding_completed_at: now } });
+    } catch {
+      // best-effort — even if persist fails, advance the in-memory user so
+      // the UI moves on instead of being stuck on the onboarding wizard.
+      set({ user: { ...u, onboarding_completed_at: now } });
+    }
+  },
 
   init: async () => {
     // If already done, don't re-run (prevents flicker + infinite loops).

@@ -150,13 +150,17 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
     // If already an object, use directly.
     if (typeof result === "object") {
       const obj = result as { kind?: string; url?: string; alt?: string; error?: string };
-      if (obj.kind === "image_preview" || obj.url) return obj;
+      if (obj.kind === "image_preview" || obj.url) {
+        return { url: obj.url ?? "", alt: obj.alt, error: obj.error };
+      }
     }
     // If a string, try JSON.parse.
     if (typeof result === "string") {
       try {
         const obj = JSON.parse(result) as { kind?: string; url?: string; alt?: string; error?: string };
-        if (obj.url) return obj;
+        if (obj.url) {
+          return { url: obj.url, alt: obj.alt, error: obj.error };
+        }
       } catch {
         // not JSON — maybe it's a raw URL
         if (result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/")) {

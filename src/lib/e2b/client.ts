@@ -24,6 +24,9 @@ export interface E2BFile {
   path: string;
   type: "file" | "directory";
   size?: number;
+  /** Optional file name (some sandbox list responses include it; otherwise
+   *  callers can derive it from `path.split("/").pop()`). */
+  name?: string;
 }
 
 export interface E2BExecResult {

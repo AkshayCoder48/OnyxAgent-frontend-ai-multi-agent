@@ -98,7 +98,7 @@ export function SharedView({ compressed, onExit }: SharedViewProps) {
           <CardContent className="py-8">
             <ErrorState
               title="Invalid or corrupted share link"
-              message="We couldn’t decode this conversation. The link may have been truncated or modified."
+              description="We couldn’t decode this conversation. The link may have been truncated or modified."
             />
             <div className="mt-6 flex justify-center">
               <Button type="button" onClick={handleStartOwnChat}>
@@ -157,10 +157,10 @@ export function SharedView({ compressed, onExit }: SharedViewProps) {
           </div>
         ) : (
           <ol className="space-y-4">
-            {payload.messages.map((m, i) => (
+            {payload.messages.map((m: SharedMessageLike, i: number) => (
               <SharedMessage
                 key={`${i}-${m.created_at}`}
-                role={m.role}
+                role={m.role as MessageRole}
                 content={m.content}
                 modelName={m.model_name}
                 createdAt={m.created_at}
@@ -196,10 +196,21 @@ interface SharedMessageProps {
   createdAt: string;
 }
 
+/** Shape used by the shared-view payload messages (role is a string here
+ *  because shared payloads are user-generated and may include legacy roles). */
+interface SharedMessageLike {
+  role: string;
+  content: string;
+  model_name?: string | null;
+  created_at: string;
+}
+
 function SharedMessage({ role, content, modelName, createdAt }: SharedMessageProps) {
   const isUser = role === "user";
   const isSystem = role === "system";
-  const isTool = role === "tool";
+  // Cast to string — shared payloads may include legacy "tool" role messages
+  // that aren't part of the local MessageRole union.
+  const isTool = (role as string) === "tool";
 
   const label = isUser
     ? "You"

@@ -55,7 +55,7 @@ registerTool(
           id,
           name: args.name || "Untitled Workflow",
           description: args.description || "",
-          steps: args.steps || [],
+          steps: (args.steps as unknown[]) || [],
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };

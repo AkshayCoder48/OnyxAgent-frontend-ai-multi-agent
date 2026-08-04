@@ -460,9 +460,9 @@ export const MessageItem = React.memo(function MessageItem({
                       {thinkingParts.map((part, i) => {
                         const isLast = i === thinkingParts.length - 1 && chronologicalParts.length === 0;
                         if (part.type === "thinking") {
-                          return <ThinkingBlock key={part.id} text={part.content} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
+                          return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                         }
-                        return <ReasoningBlock key={part.id} text={part.content} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
+                        return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                       })}
 
                       {/* Tool calls + text in chronological order */}

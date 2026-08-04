@@ -52,7 +52,7 @@ async function getSandbox(apiKey: string): Promise<Sandbox> {
       void oldest[1].sandbox.kill().catch(() => {});
     }
   }
-  const sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 }); // 24 hours
+  const sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 }); // 24 hours
   sandboxCache.set(apiKey, { sandbox, createdAt: Date.now() });
   return sandbox;
 }
@@ -265,7 +265,9 @@ export async function GET(req: NextRequest) {
         entries.map((e) => ({
           path: e.path,
           type:
-            e.type === "directory" || e.type === "FILE_TYPE_DIRECTORY"
+            (e.type as string) === "directory" ||
+            (e.type as string) === "FILE_TYPE_DIRECTORY" ||
+            e.type === "dir"
               ? "directory"
               : "file",
           size: e.size,

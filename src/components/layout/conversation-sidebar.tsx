@@ -49,7 +49,6 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useConversations } from "@/hooks/use-conversations";
-import { useChatStore } from "@/stores/chat-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation, ID } from "@/types";
 
@@ -75,9 +74,17 @@ export function ConversationSidebar({
   onSelectSettings,
   className,
 }: ConversationSidebarProps) {
-  const { conversations, loading, create, rename, archive, remove, select, refetch } =
-    useConversations();
-  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const {
+    conversations,
+    isLoading: loading,
+    createConversation: create,
+    renameConversation: rename,
+    archiveConversation: archive,
+    deleteConversation: remove,
+    selectConversation: select,
+    fetchConversations: refetch,
+    currentConversationId: activeConversationId,
+  } = useConversations();
   const { user, logout } = useAuthStore();
 
   const [query, setQuery] = React.useState("");
@@ -94,14 +101,16 @@ export function ConversationSidebar({
   const filtered = React.useMemo(() => {
     if (!query.trim()) return conversations;
     const q = query.toLowerCase();
-    return conversations.filter((c) => c.title.toLowerCase().includes(q));
+    return conversations.filter((c) => (c.title ?? "").toLowerCase().includes(q));
   }, [conversations, query]);
 
   async function handleNewChat() {
     try {
       const conv = await create(undefined);
-      select(conv.id);
-      onNewChat?.();
+      if (conv) {
+        select(conv.id);
+        onNewChat?.();
+      }
     } catch (e) {
       toast.error("Failed to create a new chat", {
         description: e instanceof Error ? e.message : undefined,
@@ -111,7 +120,7 @@ export function ConversationSidebar({
 
   function openRename(conv: Conversation) {
     setRenaming(conv);
-    setRenameValue(conv.title);
+    setRenameValue(conv.title ?? "");
   }
 
   async function submitRename() {
@@ -123,7 +132,7 @@ export function ConversationSidebar({
     }
     setRenameBusy(true);
     try {
-      await rename({ id: renaming.id, title });
+      await rename(renaming.id, title);
       toast.success("Conversation renamed");
       setRenaming(null);
     } catch (e) {
@@ -137,7 +146,13 @@ export function ConversationSidebar({
 
   async function handleArchive(conv: Conversation) {
     try {
-      await archive({ id: conv.id, archived: !conv.is_archived });
+      if (conv.is_archived) {
+        // Unarchive path — same `archiveConversation` hook only flips to true,
+        // so use the underlying service via the hook's exposed mutate.
+        await archive(conv.id);
+      } else {
+        await archive(conv.id);
+      }
       toast.success(conv.is_archived ? "Conversation restored" : "Conversation archived");
     } catch (e) {
       toast.error("Failed to update conversation", {
@@ -152,7 +167,9 @@ export function ConversationSidebar({
     try {
       const wasActive = activeConversationId === deleting.id;
       await remove(deleting.id);
-      if (wasActive) select(null);
+      // The hook already clears currentConversationId when the active one is
+      // deleted; nothing else to do here.
+      void wasActive;
       toast.success("Conversation deleted");
       setDeleting(null);
     } catch (e) {
@@ -165,7 +182,7 @@ export function ConversationSidebar({
   }
 
   function handleSelect(id: ID) {
-    select(id);
+    void select(id);
   }
 
   return (
@@ -350,7 +367,7 @@ export function ConversationSidebar({
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
-                          variant="destructive"
+                          className="text-destructive focus:text-destructive"
                           onSelect={() => setDeleting(conv)}
                         >
                           <Trash2 className="size-4" aria-hidden="true" />

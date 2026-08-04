@@ -72,6 +72,9 @@ function normalizePath(p: string | undefined | null): string {
 
 interface CacheEntry {
   sandbox: Sandbox;
+  /** API key used to create this sandbox. Stored separately because the
+   *  E2B Sandbox type doesn't expose apiKey publicly. */
+  apiKey: string;
   createdAt: number;
   key: string;
   /** Set to true after a liveness check has confirmed the sandbox is alive.
@@ -170,7 +173,7 @@ async function enforceLimit(): Promise<void> {
   // Vercel serverless cold starts lose the in-memory cache, but the sandbox
   // keeps running on E2B). This is the root cause of the "20/20 sandbox"
   // quota error. Best-effort — don't block on it.
-  void killOrphanedSandboxes(oldest.sandbox.apiKey).catch(() => {});
+  void killOrphanedSandboxes(oldest.apiKey).catch(() => {});
 }
 
 /**
@@ -197,7 +200,7 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     // rotation, so killing orphans doesn't lose data — the next operation
     // just creates a fresh sandbox.
     const toKill = page
-      .filter((s) => s.state !== "closed" && !localIds.has(s.sandboxId))
+      .filter((s) => (s.state as string) !== "closed" && !localIds.has(s.sandboxId))
       .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
     await Promise.all(
       toKill.map((s) =>
@@ -233,7 +236,7 @@ async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
   try {
     const paginator = Sandbox.list({ apiKey, limit: 50 });
     const page = await paginator.nextItems();
-    const running = page.filter((s) => s.state !== "closed");
+    const running = page.filter((s) => (s.state as string) !== "closed");
     await Promise.all(
       running.map((s) =>
         Sandbox.kill(s.sandboxId, { apiKey }).catch(() => {}),
@@ -280,9 +283,9 @@ async function backupAllFilesFromSandbox(
       const fname = entry.name ?? entry.path.split("/").pop() ?? "";
       if (SKIP_FILES.has(fname)) continue;
       const isDir =
-        entry.type === "dir" ||
-        entry.type === "directory" ||
-        entry.type === "FILE_TYPE_DIRECTORY";
+        (entry.type as string) === "dir" ||
+        (entry.type as string) === "directory" ||
+        (entry.type as string) === "FILE_TYPE_DIRECTORY";
       if (isDir) {
         await walkDir(entry.path);
       } else {
@@ -397,7 +400,7 @@ async function createAndCacheSandbox(
 
   let sandbox: Sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 }); // 24 hours
+    sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 }); // 24 hours
   } catch (createErr) {
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
@@ -409,7 +412,7 @@ async function createAndCacheSandbox(
       sharedCache.clear();
       separateCache.clear();
       // Retry the create — should succeed now that the account has 0 sandboxes.
-      sandbox = await Sandbox.create({ apiKey, timeout: 86_400_000 });
+      sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 });
     } else {
       throw createErr;
     }
@@ -435,6 +438,7 @@ async function createAndCacheSandbox(
   const key = cacheKey(apiKey, conversationId, mode);
   const entry: CacheEntry = {
     sandbox,
+    apiKey,
     createdAt: Date.now(),
     key,
     verifiedAliveAt: Date.now(),
@@ -495,6 +499,7 @@ async function getSandbox(
       const sandbox = await Sandbox.connect(clientSandboxId, { apiKey });
       const entry: CacheEntry = {
         sandbox,
+        apiKey,
         createdAt: Date.now(),
         key,
         verifiedAliveAt: Date.now(), // trust it's alive
@@ -986,9 +991,9 @@ export async function POST(req: NextRequest) {
               // The E2B SDK returns type as "file" or "dir" (lowercase 3-letter).
               // Also handle "directory" and "FILE_TYPE_DIRECTORY" for safety.
               type:
-                e.type === "dir" ||
-                e.type === "directory" ||
-                e.type === "FILE_TYPE_DIRECTORY"
+                (e.type as string) === "dir" ||
+                (e.type as string) === "directory" ||
+                (e.type as string) === "FILE_TYPE_DIRECTORY"
                   ? "directory"
                   : "file",
               name: e.name,
@@ -1007,9 +1012,9 @@ export async function POST(req: NextRequest) {
               items: entries.map((e) => ({
                 path: e.path,
                 type:
-                  e.type === "dir" ||
-                  e.type === "directory" ||
-                  e.type === "FILE_TYPE_DIRECTORY"
+                  (e.type as string) === "dir" ||
+                  (e.type as string) === "directory" ||
+                  (e.type as string) === "FILE_TYPE_DIRECTORY"
                     ? "directory"
                     : "file",
                 name: e.name,
@@ -1222,7 +1227,7 @@ export async function POST(req: NextRequest) {
             const entries = await sandbox.files.list(dirPath);
             for (const entry of entries) {
               const entryPath = entry.path;
-              if (entry.type === "dir" || entry.type === "directory" || entry.type === "FILE_TYPE_DIRECTORY" || entry.type === "dir") {
+              if ((entry.type as string) === "dir" || (entry.type as string) === "directory" || (entry.type as string) === "FILE_TYPE_DIRECTORY" || (entry.type as string) === "dir") {
                 // Recurse into subdirectories
                 await walkDir(entryPath);
               } else {
@@ -1314,7 +1319,7 @@ export async function POST(req: NextRequest) {
             sandboxID: s.sandboxId,
             startedAt: s.startedAt ?? new Date().toISOString(),
             state: s.state,
-            templateID: s.templateID,
+            templateID: s.templateId,
           })),
         });
       }

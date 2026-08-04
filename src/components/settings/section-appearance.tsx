@@ -118,7 +118,7 @@ export function SectionAppearance() {
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
     setBrand(savedBrand);
     setFontSize(savedFont);
-    const preset = BRAND_PRESETS.find((p) => p.id === savedBrand) ?? BRAND_PRESETS[0];
+    const preset = BRAND_PRESETS.find((p) => p.id === savedBrand) ?? BRAND_PRESETS[0]!;
     applyBrand(preset);
     applyFont(savedFont);
   }, []);
@@ -211,7 +211,7 @@ export function SectionAppearance() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => handleBrand(BRAND_PRESETS[0])}
+          onClick={() => handleBrand(BRAND_PRESETS[0]!)}
           disabled={brand === "neutral"}
         >
           Reset to default

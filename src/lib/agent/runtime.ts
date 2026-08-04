@@ -1346,7 +1346,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     return [
       { role: "system", content: enhancedSystemPrompt + handoffContext },
       ...trimmedHistory
-        .filter((m) => m.role !== "tool")
+        .filter((m) => (m.role as string) !== "tool")
         .map((m): ChatCompletionMessage => {
           if (m.role === "user") return { role: "user", content: m.content };
           if (m.role === "system") return { role: "system", content: m.content };
@@ -1726,7 +1726,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         // never call it.
         const streamingToolCtx: ToolContext = {
           ...toolCtxForList,
-          onToolOutput: (toolCallId: string, output: string, type: "stdout" | "stderr") => {
+          onToolOutput: (toolCallId: string, output: string, type: "stdout" | "stderr" | "prompt") => {
             // The e2b_exec tools pass an empty toolCallId (they don't know
             // it at construction time) — substitute the real one from this
             // turn.

@@ -73,7 +73,7 @@ export function RunPythonResult({ result }: ResultProps) {
 
 // ---- run_terminal result ----
 export function RunTerminalResult({ args, result }: ResultProps) {
-  const cmd = args.command as string;
+  const cmd = (args?.command as string) ?? "";
   const r = result as { output?: { stdout?: string; stderr?: string; exit_code?: number }; error?: string } | undefined;
   return (
     <div className="space-y-2">
@@ -102,7 +102,7 @@ export function RunTerminalResult({ args, result }: ResultProps) {
 
 // ---- search_documents result (RAG) ----
 export function RAGSearchResult({ args, result }: ResultProps) {
-  const query = args.query as string;
+  const query = (args?.query as string) ?? "";
   const r = result as { output?: { matches?: Array<{ file: string; line: number; text: string }>; count?: number } } | undefined;
   const matches = r?.output?.matches ?? [];
 
@@ -179,7 +179,7 @@ export function FileDownloadResult({ result }: ResultProps) {
 
 // ---- ask_user result (transcript view inside ToolCallCard) ----
 export function AskUserResult({ args, result, status }: ResultProps) {
-  const questions = (args.questions || []) as Array<{ question?: string; choices?: string[] }>;
+  const questions = ((args?.questions as Array<{ question?: string; choices?: string[] }>) || []) ;
   const r = result as { output?: { answer?: string } } | undefined;
 
   return (
@@ -218,7 +218,7 @@ export function AskUserResult({ args, result, status }: ResultProps) {
 
 // ---- list_files / read_file / write_file etc. (generic file ops) ----
 export function FileOpResult({ args, result, status }: ResultProps) {
-  const path = (args.path as string) || "";
+  const path = (args?.path as string) || "";
   const r = result as { success?: boolean; output?: unknown; error?: string } | undefined;
 
   return (

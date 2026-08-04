@@ -170,14 +170,14 @@ export function SectionProviders() {
     setTestingId(p.id);
     try {
       const result = await test({ id: p.id, model: p.models[0] });
-      if (result.success) {
-        toast.success(`Connection OK · ${result.latency_ms ?? "?"} ms`, {
-          description: result.message,
+      if (result.ok) {
+        toast.success(`Connection OK · ${result.status_code}`, {
+          description: result.detail,
           icon: <CheckCircle2 className="size-4" />,
         });
       } else {
         toast.error("Provider test failed", {
-          description: result.message,
+          description: result.detail,
           icon: <XCircle className="size-4" />,
         });
       }

@@ -97,7 +97,7 @@ export function SubAgentSidebar({
     // Detect @ mention.
     const mentionMatch = trimmed.match(/^@(\w+)/);
     const taggedSubagentId = mentionMatch
-      ? subagents.find((s) => s.name.toLowerCase() === mentionMatch[1].toLowerCase())?.id
+      ? subagents.find((s) => s.name.toLowerCase() === (mentionMatch[1] ?? "").toLowerCase())?.id
       : null;
 
     // If no active session and no @ tag, show a hint.

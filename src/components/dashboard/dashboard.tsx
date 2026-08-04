@@ -61,7 +61,7 @@ async function fetchStats(userId: string): Promise<Stats> {
 
 export function Dashboard({ onNewChat, onOpenSettings }: DashboardProps) {
   const { user } = useAuthStore();
-  const { conversations, select } = useConversations();
+  const { conversations, selectConversation: select } = useConversations();
 
   const statsQuery = useQuery({
     queryKey: ["dashboard-stats", user?.id],

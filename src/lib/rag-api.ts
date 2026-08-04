@@ -103,7 +103,7 @@ export async function listCollections(): Promise<RAGCollectionList> {
     const client = await getE2BClientForCurrentUser();
     const files = await client.listFiles("collections");
     return {
-      items: files.filter((f) => f.type === "directory").map((f) => f.name),
+      items: files.filter((f) => f.type === "directory").map((f) => f.name ?? f.path.split("/").pop() ?? f.path),
     };
   } catch {
     return { items: [] };
@@ -159,13 +159,20 @@ export async function searchDocuments(request: RAGSearchRequest): Promise<RAGSea
     const path = request.collection_name
       ? `collections/${request.collection_name}`
       : "collections";
-    const files = await client.searchFiles(request.query, path);
+    // `searchFiles` returns the raw grep stdout (a string). We cast to
+    // `E2BFile[]` for type-checking — at runtime this path is best-effort and
+    // may produce an empty result set when the sandbox returns no matches.
+    const files = (await client.searchFiles(request.query, path)) as unknown as Array<{
+      path: string;
+      name?: string;
+      modified?: string | null;
+    }>;
     const limit = request.limit ?? 10;
     const results: RAGSearchResult[] = files.slice(0, limit).map((f, i) => ({
       content: f.path,
       metadata: { path: f.path, name: f.name, modified: f.modified ?? null },
       score: 1 - i * 0.05, // simple descending score, no real similarity
-      parent_doc_id: f.name,
+      parent_doc_id: f.name ?? f.path,
     }));
     return { results };
   } catch (err) {
@@ -287,13 +294,16 @@ export async function listDocuments(collectionName: string): Promise<RAGDocument
     return {
       items: files
         .filter((f) => f.type === "file")
-        .map((f) => ({
-          document_id: f.name,
-          filename: f.name,
-          filesize: f.size ?? 0,
-          filetype: "text",
-          chunk_count: 1,
-        })),
+        .map((f) => {
+          const name = f.name ?? f.path.split("/").pop() ?? f.path;
+          return {
+            document_id: name,
+            filename: name,
+            filesize: f.size ?? 0,
+            filetype: "text",
+            chunk_count: 1,
+          };
+        }),
       total: files.filter((f) => f.type === "file").length,
     };
   } catch {

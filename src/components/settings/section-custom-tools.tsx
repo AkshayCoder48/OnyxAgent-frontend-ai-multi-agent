@@ -185,9 +185,9 @@ export function SectionCustomTools() {
             description: form.description.trim(),
             impl_kind: form.impl_kind,
             parameters_schema: parsedSchema,
-            http_url: form.impl_kind === "http_webhook" ? form.http_url.trim() : null,
-            http_headers: form.impl_kind === "http_webhook" ? headers : null,
-            python_source: form.impl_kind === "python_snippet" ? form.python_source : null,
+            http_url: form.impl_kind === "http_webhook" ? form.http_url.trim() : undefined,
+            http_headers: form.impl_kind === "http_webhook" ? headers : undefined,
+            python_source: form.impl_kind === "python_snippet" ? form.python_source : undefined,
             is_active: form.is_active,
           },
         });
@@ -198,9 +198,9 @@ export function SectionCustomTools() {
           description: form.description.trim(),
           impl_kind: form.impl_kind,
           parameters_schema: parsedSchema,
-          http_url: form.impl_kind === "http_webhook" ? form.http_url.trim() : null,
-          http_headers: form.impl_kind === "http_webhook" ? headers : null,
-          python_source: form.impl_kind === "python_snippet" ? form.python_source : null,
+          http_url: form.impl_kind === "http_webhook" ? form.http_url.trim() : undefined,
+          http_headers: form.impl_kind === "http_webhook" ? headers : undefined,
+          python_source: form.impl_kind === "python_snippet" ? form.python_source : undefined,
           is_active: form.is_active,
         });
         toast.success("Tool created");

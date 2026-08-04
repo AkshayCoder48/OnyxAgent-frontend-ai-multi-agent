@@ -107,7 +107,7 @@ export function SectionMcp() {
     setForm({
       name: s.name,
       transport: s.transport,
-      url: s.url,
+      url: s.url ?? "",
       headers: headersToRows(s.headers),
       is_active: s.is_active,
     });
