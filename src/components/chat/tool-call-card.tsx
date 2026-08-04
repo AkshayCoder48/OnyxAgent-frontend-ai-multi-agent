@@ -262,8 +262,12 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   return (
     <Card
       className={cn(
-        "bg-muted/50 step-card-in",
-        isRunning && "border-brand/50 relative overflow-hidden",
+        "step-card-in overflow-hidden border border-foreground/8 transition-all duration-200",
+        isRunning
+          ? "bg-primary/5 ring-1 ring-primary/10"
+          : isError
+            ? "bg-destructive/5"
+            : "bg-muted/30 hover:bg-muted/50",
       )}
     >
       <div
@@ -277,74 +281,89 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             toggleExpanded();
           }
         }}
-        className="hover:bg-foreground/[0.03] flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-left transition-colors"
+        className="flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors"
       >
-        <div className="flex min-w-0 items-center gap-2">
-          <ToolIcon
-            className={cn(
-              "h-4 w-4 shrink-0",
-              isRunning
-                ? "text-brand animate-pulse"
-                : hasSpecialRenderer
-                  ? "text-primary"
-                  : "text-muted-foreground",
-            )}
-          />
+        {/* Icon container — rounded, subtle background */}
+        <div
+          className={cn(
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors",
+            isRunning
+              ? "bg-primary/10"
+              : isError
+                ? "bg-destructive/10"
+                : "bg-foreground/5",
+          )}
+        >
           {isRunning ? (
-            <span className="text-foreground/80 flex min-w-0 items-center gap-1.5 text-sm font-medium">
-              <span className="truncate">{liveCaption}</span>
-              <span className="flex shrink-0 gap-0.5" aria-hidden="true">
-                <span className="bg-brand/70 h-1 w-1 animate-bounce rounded-full [animation-delay:0ms]" />
-                <span className="bg-brand/70 h-1 w-1 animate-bounce rounded-full [animation-delay:150ms]" />
-                <span className="bg-brand/70 h-1 w-1 animate-bounce rounded-full [animation-delay:300ms]" />
-              </span>
-            </span>
+            <Loader2 className="h-4 w-4 animate-spin text-primary" aria-label="Running" />
+          ) : isError ? (
+            <XCircle className="h-4 w-4 text-destructive" aria-label="Failed" />
           ) : (
-            <span className="truncate text-sm font-medium">{friendlyName}</span>
+            <ToolIcon
+              className={cn(
+                "h-4 w-4",
+                hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
+              )}
+            />
+          )}
+        </div>
+
+        {/* Content — name + hint */}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          {isRunning ? (
+            <div className="flex items-center gap-2">
+              <span className="text-foreground/90 truncate text-sm font-medium">
+                {liveCaption}
+              </span>
+              <span className="streaming-dots shrink-0" aria-hidden="true">
+                <span /> <span /> <span />
+              </span>
+            </div>
+          ) : (
+            <span className="text-foreground/90 truncate text-sm font-medium">
+              {friendlyName}
+            </span>
           )}
           {inputHint && !isRunning ? (
-            <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs italic">
+            <span className="text-muted-foreground truncate text-xs">
               {inputHint}
             </span>
           ) : null}
         </div>
+
+        {/* Right actions */}
         <div className="flex shrink-0 items-center gap-1">
-          {isRunning ? (
-            <Loader2 className="text-brand h-4 w-4 animate-spin" aria-label="Running" />
-          ) : (
+          {!isRunning && (
             <>
               {isError ? (
-                <XCircle className="text-destructive pop-in h-4 w-4 shrink-0" aria-label="Failed" />
+                <span className="text-destructive text-xs font-medium">Failed</span>
               ) : (
-                <CheckCircle2 className="text-brand pop-in h-4 w-4 shrink-0" aria-label="Done" />
+                <span className="text-muted-foreground text-xs font-medium">Done</span>
               )}
               <Button
                 variant="ghost"
                 size="icon"
                 className={cn(
-                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground h-6 w-6 transition-colors",
+                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground h-7 w-7 transition-colors",
                   showRaw && "text-primary",
                 )}
                 onClick={toggleRaw}
-                title={showRaw ? "Show formatted view" : "Show arguments + raw output"}
-                aria-label={showRaw ? "Show formatted view" : "Show arguments and raw output"}
+                title={showRaw ? "Show formatted view" : "Show details"}
+                aria-label={showRaw ? "Show formatted view" : "Show details"}
               >
                 <Code2 className="h-3.5 w-3.5" />
               </Button>
-              {expanded ? (
-                <ChevronUp className="text-muted-foreground h-4 w-4" />
-              ) : (
-                <ChevronDown className="text-muted-foreground h-4 w-4" />
-              )}
+              <div className="text-muted-foreground">
+                {expanded ? (
+                  <ChevronUp className="h-4 w-4" />
+                ) : (
+                  <ChevronDown className="h-4 w-4" />
+                )}
+              </div>
             </>
           )}
         </div>
       </div>
-
-      {/* Live progress shimmer — only while the step is in flight. */}
-      {isRunning && (
-        <div className="step-progress pointer-events-none absolute inset-x-0 bottom-0 h-0.5" />
-      )}
 
       {expanded && (
         <CardContent className="px-3 pt-0 pb-3">
@@ -459,19 +478,29 @@ function RunningToolPanel({
   const displayName = !toolCall.name || toolCall.name.startsWith("pending-")
     ? "tool"
     : toolCall.name;
-  const writingLabel = `Writing ${displayName}…`;
+  const liveCaptionForPanel = toolCaption(toolCall.name);
 
   return (
-    <div className="space-y-2 py-1">
-      <div className="flex items-center gap-2 text-sm">
-        <Loader2 className="text-brand h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-        <span className="text-foreground/80 font-medium">
-          {writingLabel}
+    <div className="space-y-3 py-2">
+      {/* Header — tool name + spinner */}
+      <div className="flex items-center gap-2.5">
+        <Loader2 className="text-primary h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
+        <span className="text-foreground/90 text-sm font-medium">
+          {liveCaptionForPanel}
+        </span>
+        <span className="streaming-dots" aria-hidden="true">
+          <span /> <span /> <span />
         </span>
       </div>
-      {/* Show streaming args while LLM is composing the tool call */}
+
+      {/* Streaming args — shown while LLM is composing the tool call */}
       {isStreaming && streamingArgs && (
-        <StreamingArgsDisplay args={streamingArgs} />
+        <div className="bg-foreground/[0.03] rounded-lg border border-foreground/8 p-3">
+          <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide uppercase">
+            Composing
+          </div>
+          <StreamingArgsDisplay args={streamingArgs} />
+        </div>
       )}
       {/* Show the final args when the tool is running */}
       {!isStreaming && previewArg && (
@@ -480,13 +509,13 @@ function RunningToolPanel({
         </pre>
       )}
       {hasLiveOutput && (
-        <div className="border-foreground/10 bg-background/60 scrollbar-thin overflow-hidden rounded-lg border">
-          <div className="border-foreground/8 text-foreground/55 flex items-center justify-between border-b px-3 py-1.5 font-mono text-[10px] tracking-wider uppercase">
+        <div className="bg-foreground/[0.03] scrollbar-thin overflow-hidden rounded-lg border border-foreground/8">
+          <div className="text-muted-foreground flex items-center justify-between border-b border-foreground/8 px-3 py-2 text-[10px] font-medium tracking-wide uppercase">
             <span className="flex items-center gap-1.5">
-              <span className="bg-brand/70 inline-block h-1.5 w-1.5 animate-pulse rounded-full" />
+              <span className="bg-primary/70 inline-block h-1.5 w-1.5 animate-pulse rounded-full" />
               Live output
             </span>
-            <span className="text-muted-foreground">
+            <span>
               {stdout.length + stderr.length} bytes
             </span>
           </div>
@@ -501,10 +530,6 @@ function RunningToolPanel({
           </pre>
         </div>
       )}
-      <p className="text-muted-foreground text-[11px] italic">
-        The agent is waiting for this tool to finish. Long-running commands
-        (installs, builds, network ops) can take a few minutes.
-      </p>
     </div>
   );
 }
