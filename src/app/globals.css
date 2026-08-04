@@ -2297,6 +2297,79 @@ body.sidebar-open {
   transform: translateZ(0);
 }
 
+/* --- Prompt box corner animation — animated gradient border on the
+ *   chat input that uses appearance-aware CSS variables. Pulsing glow
+ *   in the primary color, works with ALL color schemes. --- */
+.input-focus-glow {
+  position: relative;
+}
+.input-focus-glow::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-primary) 30%, transparent),
+    color-mix(in srgb, var(--color-primary) 5%, transparent),
+    color-mix(in srgb, var(--color-primary) 30%, transparent)
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
+.input-focus-glow:focus-within::before {
+  opacity: 1;
+  animation: prompt-box-glow 3s ease-in-out infinite;
+}
+@keyframes prompt-box-glow {
+  0%, 100% {
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--color-primary) 30%, transparent),
+      color-mix(in srgb, var(--color-primary) 5%, transparent),
+      color-mix(in srgb, var(--color-primary) 30%, transparent)
+    );
+  }
+  50% {
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--color-primary) 50%, transparent),
+      color-mix(in srgb, var(--color-primary) 15%, transparent),
+      color-mix(in srgb, var(--color-primary) 50%, transparent)
+    );
+  }
+}
+.input-focus-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 0 color-mix(in srgb, var(--color-primary) 0%, transparent);
+  transition: box-shadow 0.4s ease;
+  pointer-events: none;
+}
+.input-focus-glow:focus-within::after {
+  box-shadow:
+    0 0 20px -5px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  animation: prompt-box-pulse 3s ease-in-out infinite;
+}
+@keyframes prompt-box-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px -5px color-mix(in srgb, var(--color-primary) 15%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 30px -3px color-mix(in srgb, var(--color-primary) 25%, transparent);
+  }
+}
+
 /* --- Streaming cursor wrapper: makes the last <p> inline so the cursor
  *   flows right after the last letter, NOT on a new line below. The cursor
  *   is a sibling AFTER the ReactMarkdown output, so without this the

@@ -1524,11 +1524,27 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     // tool → text) across ALL rounds. Without this, buildAssistantParts
     // rebuilds from scratch and loses the multi-round ordering, causing
     // content to appear "cut" into multiple parts.
+    //
+    // MERGE consecutive thinking/reasoning parts: if the LAST part in
+    // assistantParts is the same type (thinking or reasoning), append the
+    // new content to it instead of creating a new part. This prevents
+    // multiple "Thinking" bars from appearing when the AI generates thinking
+    // across multiple rounds that get split by tool calls.
     if (roundResult.thinking && roundResult.thinking.trim()) {
-      assistantParts.push({ id: `p-think-${Date.now()}-${round}`, type: "thinking", content: roundResult.thinking });
+      const lastPart = assistantParts[assistantParts.length - 1];
+      if (lastPart && lastPart.type === "thinking" && lastPart.content) {
+        lastPart.content += "\n" + roundResult.thinking;
+      } else {
+        assistantParts.push({ id: `p-think-${Date.now()}-${round}`, type: "thinking", content: roundResult.thinking });
+      }
     }
     if (roundResult.reasoning && roundResult.reasoning.trim()) {
-      assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning });
+      const lastPart = assistantParts[assistantParts.length - 1];
+      if (lastPart && lastPart.type === "reasoning" && lastPart.content) {
+        lastPart.content += "\n" + roundResult.reasoning;
+      } else {
+        assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning });
+      }
     }
     if (roundResult.textBeforeTools && roundResult.textBeforeTools.trim()) {
       assistantParts.push({ id: `p-text-pre-${Date.now()}-${round}`, type: "text", content: roundResult.textBeforeTools });

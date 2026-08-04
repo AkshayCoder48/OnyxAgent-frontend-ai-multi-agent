@@ -1061,14 +1061,42 @@ export function useChat(options: UseChatOptions = {}) {
     abortRef.current?.abort();
     abortRef.current = null;
     if (currentMessageIdRef.current) {
-      updateMessage(currentMessageIdRef.current, (msg) => ({ ...msg, isStreaming: false }));
+      const msgId = currentMessageIdRef.current;
+      // Mark the message as not streaming + mark ALL tool calls as "stopped"
+      // (instead of "running"/"pending") so they don't show spinners forever.
+      const msgs = useChatStore.getState().messages;
+      const msg = msgs.find((m) => m.id === msgId);
+      if (msg?.toolCalls) {
+        for (const tc of msg.toolCalls) {
+          if (tc.status === "running" || tc.status === "pending") {
+            updateToolCallPart(msgId, tc.id, {
+              status: "completed" as const,
+              result: { stopped: true, message: "Stopped by user" },
+            });
+          }
+        }
+      }
+      // Also update tool calls inside parts.
+      if (msg?.parts) {
+        for (const p of msg.parts) {
+          if (p.type === "tool" && p.toolCall && (p.toolCall.status === "running" || p.toolCall.status === "pending")) {
+            updateToolCallPart(msgId, p.toolCall.id, {
+              status: "completed" as const,
+              result: { stopped: true, message: "Stopped by user" },
+            });
+          }
+        }
+      }
+      updateMessage(msgId, (m) => ({ ...m, isStreaming: false }));
     }
+    // Flush any pending streaming buffers.
+    flushTextDelta();
     setCurrentMessageId(null);
     currentGroupIdRef.current = null;
     setIsProcessing(false);
     setPendingApproval(null);
     setPendingQuestions(null);
-  }, [updateMessage, setCurrentMessageId]);
+  }, [updateMessage, setCurrentMessageId, updateToolCallPart, flushTextDelta]);
 
   /**
    * Local-only todo action controls. The runtime has no equivalent channel —
