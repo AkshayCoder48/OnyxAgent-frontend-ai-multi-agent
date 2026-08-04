@@ -521,7 +521,20 @@ export const MessageItem = React.memo(function MessageItem({
                  * order. Consecutive tool calls (without text between them)
                  * are grouped into a collapsible "N Tool Calls" bar. */
                 (() => {
-                  const thinkingParts = parts.filter((p) => (p.type === "thinking" || p.type === "reasoning") && p.content);
+                  // Merge consecutive thinking/reasoning parts of the same type
+                  // into a single part. This prevents multiple "Thinking" bars
+                  // from appearing when the AI generates thinking across
+                  // multiple rounds split by tool calls.
+                  const rawThinkingParts = parts.filter((p) => (p.type === "thinking" || p.type === "reasoning") && p.content);
+                  const thinkingParts: typeof rawThinkingParts = [];
+                  for (const p of rawThinkingParts) {
+                    const last = thinkingParts[thinkingParts.length - 1];
+                    if (last && last.type === p.type && last.content) {
+                      last.content += "\n" + p.content;
+                    } else {
+                      thinkingParts.push({ ...p });
+                    }
+                  }
                   const chronologicalParts = parts.filter(
                     (p) => (p.type === "tool" && p.toolCall) || (p.type === "text" && p.content),
                   );
