@@ -136,31 +136,11 @@ const LARGE_ARG_TOOLS = new Set([
 /** Max length of any single string value in tool args sent to the API. */
 const MAX_ARG_LEN = 500;
 
-/** Per-tool result length budgets (in chars). Tools that return file content
- *  or listings need much larger budgets than the default 2000 — otherwise the
- *  AI sees truncated file content, gets confused, tries to fix it, but can't
- *  because the truncation happens in the runtime, not the tool. */
-const RESULT_LEN_BUDGETS: Record<string, number> = {
-  read_file: 60_000,       // 60K — full file content (most files < 60K)
-  read_file_section: 60_000, // 60K — section content (can be large if end_line omitted)
-  list_folder: 20_000,     // 20K — directory listings
-  list_files: 20_000,
-  create_file: 10_000,     // 10K — creation result (path, size)
-  write_file: 10_000,      // 10K — write result
-  edit_file: 10_000,       // 10K — edit result
-  verify_path: 10_000,     // 10K — verify result (path, created_dirs)
-  create_file_chunk: 10_000, // 10K — chunk write result (path, sizes, verified)
-  send_file: 10_000,       // 10K — file download metadata
-  send_folder: 10_000,
-  web_search: 8_000,       // 8K — search results
-  web_fetch: 30_000,       // 30K — fetched web page content
-  run_python: 15_000,      // 15K — Python output
-  run_terminal: 15_000,    // 15K — terminal output
-  search_files: 20_000,    // 20K — grep results
-  read_chat: 20_000,       // 20K — past chat content
-  query_subagent: 15_000,  // 15K — subagent response
-};
-const DEFAULT_RESULT_LEN = 4_000; // 4K default (was 2K — too small)
+/** NO truncation — the user requested all results be sent in full to the AI.
+ *  Tool results are in the AI's workspace, not the context window, so there's
+ *  no risk of maxing context. The previous per-tool budgets caused the AI to
+ *  see truncated file content and get confused. */
+const DEFAULT_RESULT_LEN = Infinity;
 
 function truncateToolArgs(
   toolName: string,
@@ -178,10 +158,10 @@ function truncateToolArgs(
   return out;
 }
 
-function truncateResult(toolName: string, result: string): string {
-  const maxLen = RESULT_LEN_BUDGETS[toolName] ?? DEFAULT_RESULT_LEN;
-  if (result.length <= maxLen) return result;
-  return result.slice(0, maxLen) + `\n... [truncated at ${maxLen} chars, ${result.length} total. Use read_file with a specific path to see more, or ask the user to provide the specific section you need.]`;
+function truncateResult(_toolName: string, result: string): string {
+  // NO truncation — return the full result. The user requested all tool
+  // results be sent in full to the AI without any length limits.
+  return result;
 }
 
 // ---------------------------------------------------------------------------
