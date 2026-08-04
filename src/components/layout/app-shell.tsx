@@ -11,7 +11,7 @@ import { SharedView } from "@/components/chat/shared-view";
 
 export function AppShell() {
   const init = useAuthStore((s) => s.init);
-  const loading = useAuthStore((s) => s.loading);
+  const loading = useAuthStore((s) => s.isLoading);
   const user = useAuthStore((s) => s.user);
   const vaultUnlocked = useAuthStore((s) => s.vaultUnlocked);
 

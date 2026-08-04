@@ -49,7 +49,7 @@ export default function EnvSettingsPage() {
         settingsService.get(user.id),
         settingsService.getDecryptedEnvVars(user.id),
       ]);
-      const next: EnvVar[] = settings.env_vars.map((v) => ({
+      const next: EnvVar[] = (settings.env_vars as Array<{ name: string; is_secret: boolean; value_present: boolean }>).map((v) => ({
         name: v.name,
         // `getDecryptedEnvVars` returns the decrypted value for both secret
         // and plain vars — we keep the actual value in state so the reveal

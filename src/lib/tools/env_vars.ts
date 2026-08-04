@@ -44,7 +44,9 @@ registerTool(
     if (!name) return { success: false, output: null, error: "name is required" };
     const vars = (await settingsService.getDecryptedEnvVars(ctx.userId)) || {};
     vars[name] = value;
-    await settingsService.setEnvVars(ctx.userId, vars);
+    // `setEnvVars` expects `Record<string, { value: string; is_secret: boolean }>`;
+    // the decrypted dict is `Record<string, string>`, so wrap each entry.
+    await settingsService.setEnvVars(ctx.userId, Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, { value: v, is_secret: false }])));
     return { success: true, output: { added: name, total_vars: Object.keys(vars).length } };
   },
 );
@@ -67,7 +69,9 @@ registerTool(
     if (!name) return { success: false, output: null, error: "name is required" };
     const vars = (await settingsService.getDecryptedEnvVars(ctx.userId)) || {};
     vars[name] = value;
-    await settingsService.setEnvVars(ctx.userId, vars);
+    // `setEnvVars` expects `Record<string, { value: string; is_secret: boolean }>`;
+    // the decrypted dict is `Record<string, string>`, so wrap each entry.
+    await settingsService.setEnvVars(ctx.userId, Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, { value: v, is_secret: false }])));
     return { success: true, output: { set: name, total_vars: Object.keys(vars).length } };
   },
 );
@@ -92,7 +96,9 @@ registerTool(
       return { success: false, output: null, error: `Env var '${name}' not found` };
     }
     vars[name] = value;
-    await settingsService.setEnvVars(ctx.userId, vars);
+    // `setEnvVars` expects `Record<string, { value: string; is_secret: boolean }>`;
+    // the decrypted dict is `Record<string, string>`, so wrap each entry.
+    await settingsService.setEnvVars(ctx.userId, Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, { value: v, is_secret: false }])));
     return { success: true, output: { edited: name } };
   },
 );
@@ -115,7 +121,9 @@ registerTool(
       return { success: false, output: null, error: `Env var '${name}' not found` };
     }
     delete vars[name];
-    await settingsService.setEnvVars(ctx.userId, vars);
+    // `setEnvVars` expects `Record<string, { value: string; is_secret: boolean }>`;
+    // the decrypted dict is `Record<string, string>`, so wrap each entry.
+    await settingsService.setEnvVars(ctx.userId, Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, { value: v, is_secret: false }])));
     return { success: true, output: { deleted: name, remaining: Object.keys(vars).length } };
   },
 );

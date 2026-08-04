@@ -84,7 +84,7 @@ registerTool(
     const questions: AskUserQuestion[] = (rawQuestions as Array<Record<string, unknown>>).map((q) => ({
       question: String(q?.question ?? ""),
       options: Array.isArray(q?.options) ? (q.options as string[]) : [],
-      allowCustom: q?.allow_custom ?? true,
+      allowCustom: Boolean(q?.allow_custom ?? true),
     }));
 
     if (questions.some((q) => !q.question)) {

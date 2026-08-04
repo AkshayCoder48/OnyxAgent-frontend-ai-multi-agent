@@ -845,9 +845,9 @@ export function useChat(options: UseChatOptions = {}) {
       const framework = settings.ai_framework ?? "default";
       const frameworkPrompt = FRAMEWORK_PROMPTS[framework] ?? FRAMEWORK_PROMPTS.default;
       const systemPrompt =
-        settings.system_prompt_enabled && settings.system_prompt
+        (settings.system_prompt_enabled && settings.system_prompt
           ? settings.system_prompt
-          : frameworkPrompt;
+          : frameworkPrompt) ?? "";
 
       // Tool approval: if the user opted into auto-approval (Settings →
       // Config → "Auto-approve tool calls"), pass it through so the runtime

@@ -58,7 +58,7 @@ export function OnboardingFlow() {
   const completeOnboarding = useAuthStore((s) => s.completeOnboarding);
   const user = useAuthStore((s) => s.user);
   const { create: createProvider } = useProviders();
-  const { setHopxKey: saveHopxKey } = useSettings();
+  const { setSandboxKey: saveHopxKey } = useSettings();
 
   const [stepIdx, setStepIdx] = React.useState(0);
   const [busy, setBusy] = React.useState(false);
@@ -72,7 +72,7 @@ export function OnboardingFlow() {
   // ---- Step 3 (hopx) state ----
   const [hopxKey, setHopxKey] = React.useState("");
 
-  const current = STEPS[stepIdx];
+  const current = STEPS[stepIdx] ?? STEPS[0]!;
 
   function goNext() {
     setStepIdx((i) => Math.min(i + 1, STEPS.length - 1));

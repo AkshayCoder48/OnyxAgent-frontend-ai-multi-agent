@@ -11,9 +11,12 @@ interface SheetProps {
 }
 
 interface SheetContentProps {
-  children: React.ReactNode;
+  children?: React.ReactNode;
   className?: string;
   side?: "left" | "right";
+  style?: React.CSSProperties;
+  /** Allow arbitrary data-* / aria-* / unknown props to be forwarded. */
+  [key: string]: unknown;
 }
 
 export function Sheet({ open, onOpenChange, children }: SheetProps) {
@@ -112,5 +115,18 @@ export function SheetClose({ onClick, className }: { onClick: () => void; classN
       <X className="h-5 w-5" />
       <span className="sr-only">Close</span>
     </button>
+  );
+}
+
+/** Description text rendered inside a Sheet header (typically sr-only for a11y). */
+export function SheetDescription({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <p className={cn("text-sm text-muted-foreground", className)}>{children}</p>
   );
 }

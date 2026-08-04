@@ -165,7 +165,7 @@ export async function removeDir(userId: string, subPath: string): Promise<void> 
     let dir = targetDir;
     // Walk to the parent of the leaf, then remove the leaf.
     for (let i = 0; i < segments.length - 1; i++) {
-      dir = await dir.getDirectoryHandle(segments[i]);
+      dir = await dir.getDirectoryHandle(segments[i]!);
     }
     const leaf = segments[segments.length - 1];
     if (leaf) {

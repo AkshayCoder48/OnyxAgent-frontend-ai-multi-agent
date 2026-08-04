@@ -45,11 +45,13 @@ export interface ConversationRow extends Conversation {
   last_message_at?: string | null;
 }
 
-export interface MessageRow extends ConversationMessage {
+export interface MessageRow extends Omit<ConversationMessage, "parts"> {
   /** Reasoning trace persisted alongside `content`. */
   thinking?: string | null;
   reasoning?: string | null;
-  /** Ordered timeline (assistant turns). Serialized MessagePart[]. */
+  /** Ordered timeline (assistant turns). Serialized MessagePart[].
+   *  Stored as `unknown[]` because the wire shape is loosely-typed JSON
+   *  (the runtime parses parts lazily from the persisted JSON). */
   parts?: unknown[] | null;
 }
 
@@ -172,6 +174,10 @@ export interface SkillRow {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  /** Optional version string (read from SKILL.md frontmatter). */
+  version?: string | null;
+  /** Where the skill came from — "catalog" (marketplace) or "local" (upload). */
+  source?: "catalog" | "local" | string;
 }
 
 // Charts/Maps are stored as part of a tool_call's `result` JSONB column. We

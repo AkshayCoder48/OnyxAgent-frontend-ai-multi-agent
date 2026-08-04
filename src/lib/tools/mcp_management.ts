@@ -60,7 +60,7 @@ registerTool(
     if (!name || !url) {
       return { success: false, output: null, error: "name and url are required" };
     }
-    if (transport === "stdio") {
+    if ((transport as string) === "stdio") {
       return { success: false, output: null, error: "stdio transport is not supported in browser mode. Use sse or streamable_http." };
     }
     const server = await mcpService.create(ctx.userId, {
@@ -68,7 +68,7 @@ registerTool(
       transport,
       url,
       headers: (args.headers as Record<string, string>) || {},
-      is_active: args.is_active ?? true,
+      is_active: Boolean(args.is_active ?? true),
     });
     return { success: true, output: { created: server.name, id: server.id } };
   },

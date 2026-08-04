@@ -72,12 +72,14 @@ export function SectionAgentSettings() {
     if (settings && !hydrated) {
       setDefaultModel(settings.default_model ?? "");
       setTemperature(settings.default_temperature ?? 0.7);
-      setThinkingEnabled(settings.default_thinking_enabled);
-      setThinkingEffort(settings.default_thinking_effort ?? "medium");
+      setThinkingEnabled(settings.default_thinking_enabled ?? false);
+      setThinkingEffort((settings.default_thinking_effort ?? "medium") as ThinkingEffort);
       setSystemPrompt(settings.system_prompt ?? "");
       setSystemPromptEnabled(settings.system_prompt_enabled);
       // Convert env vars metadata to rows (names only — values loaded below).
-      setEnvRows(envVarsMetadataToRows(settings.env_vars ?? []));
+      const ev = settings.env_vars;
+      const evArray = Array.isArray(ev) ? ev : [];
+      setEnvRows(envVarsMetadataToRows(evArray));
       setHydrated(true);
     }
   }, [settings, hydrated]);

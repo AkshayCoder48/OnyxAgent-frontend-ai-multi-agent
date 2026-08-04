@@ -91,7 +91,11 @@ export function useSlashCommands() {
   });
   const createM = useMutation({
     mutationFn: async (input: { name: string; prompt: string; isEnabled?: boolean }) =>
-      slashCommandService.createCustom(userId!, input.name, input.prompt, input.isEnabled ?? true),
+      slashCommandService.createCustom(userId!, {
+        name: input.name,
+        prompt: input.prompt,
+        is_enabled: input.isEnabled ?? true,
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["slash-commands", userId] }),
   });
   const updateM = useMutation({

@@ -268,13 +268,13 @@ function buildShapeLibrary(): ShapeDef[] {
           <defs>
             <mask id={`lens-mask-${i}`}>
               <rect width="24" height="24" fill="black" />
-              <circle cx={12 + l.offX} cy={12 + (l.offY ?? 0)} r="8" fill="white" />
-              <circle cx={12 - l.offX} cy={12 - (l.offY ?? 0)} r="8" fill="white" />
+              <circle cx={12 + (l.offX ?? 0)} cy={12 + (l.offY ?? 0)} r="8" fill="white" />
+              <circle cx={12 - (l.offX ?? 0)} cy={12 - (l.offY ?? 0)} r="8" fill="white" />
             </mask>
             <mask id={`lens-mask-inv-${i}`}>
               <rect width="24" height="24" fill="white" />
-              <circle cx={12 + l.offX} cy={12 + (l.offY ?? 0)} r="8" fill="black" />
-              <circle cx={12 - l.offX} cy={12 - (l.offY ?? 0)} r="8" fill="black" />
+              <circle cx={12 + (l.offX ?? 0)} cy={12 + (l.offY ?? 0)} r="8" fill="black" />
+              <circle cx={12 - (l.offX ?? 0)} cy={12 - (l.offY ?? 0)} r="8" fill="black" />
             </mask>
           </defs>
           <rect width="24" height="24" fill={color} opacity="0.85" mask={`url(#lens-mask-${i})`} />

@@ -13,6 +13,10 @@ export interface ChatMessageFile {
   mime_type: string;
   /** "image" | "pdf" | "docx" | "text" — derived from MIME on upload. */
   file_type: string;
+  /** Optional file size in bytes (not always present on legacy rows). */
+  size?: number;
+  /** Optional URL/path for rendering previews (image thumbnails, etc.). */
+  url?: string;
 }
 
 export interface ChatMessage {

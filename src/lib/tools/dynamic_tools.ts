@@ -13,7 +13,7 @@ export async function loadDynamicTools(userId: string): Promise<void> {
   const tools = await customToolService.list(userId);
   for (const t of tools) {
     if (!t.is_active) continue;
-    const handler = buildHandler(t.impl_kind, t.http_url, t.http_headers, t.python_source);
+    const handler = buildHandler(t.impl_kind, t.http_url ?? null, t.http_headers, t.python_source ?? null);
     if (handler) {
       dynamicHandlers.set(t.name, handler);
       registerTool(
@@ -151,9 +151,9 @@ registerTool(
       description: args.description as string,
       parameters_schema: args.parameters as Record<string, unknown>,
       impl_kind: args.impl_kind as "http_webhook" | "python_snippet",
-      http_url: (args.http_url as string) || null,
+      http_url: (args.http_url as string) || undefined,
       http_headers: (args.http_headers as Record<string, string>) || null,
-      python_source: (args.python_source as string) || null,
+      python_source: (args.python_source as string) || undefined,
       is_active: true,
     });
     // Hot-register the handler
@@ -198,7 +198,7 @@ registerTool(
     await customToolService.update(existing.id, patch);
     // Re-register
     const updated = (await customToolService.list(ctx.userId)).find((t) => t.name === name)!;
-    const handler = buildHandler(updated.impl_kind, updated.http_url, updated.http_headers, updated.python_source);
+    const handler = buildHandler(updated.impl_kind, updated.http_url ?? null, updated.http_headers, updated.python_source ?? null);
     if (handler) {
       dynamicHandlers.set(name, handler);
       registerTool(name, updated.description, updated.parameters_schema as Record<string, unknown>, handler, false);

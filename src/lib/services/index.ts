@@ -845,7 +845,11 @@ export interface UserSettings {
    *  DuckDuckGo scraper — yielding richer summaries and better recall.
    *  When absent, the tools transparently fall back to DuckDuckGo. */
   langsearch_api_key_present: boolean;
-  env_vars: Array<{ name: string; is_secret: boolean; value_present: boolean }>;
+  /** Env vars — read shape is the metadata array; the update patch accepts
+   *  a `Record<string, string>` (the service converts to the DB shape). */
+  env_vars:
+    | Array<{ name: string; is_secret: boolean; value_present: boolean }>
+    | Record<string, string>;
   /** When true, the agent runtime skips HITL approval for tools flagged
    *  `requires_approval` (e.g. `run_terminal`). Stored under `extra`. */
   auto_approve_tools: boolean;
@@ -863,6 +867,14 @@ export interface UserSettings {
    *  "langchain" = LangChain, "autogen" = AutoGen, "crewai" = CrewAI.
    *  Stored under `extra.ai_framework`. */
   ai_framework?: string;
+  /** Default model name (e.g. "gpt-4o-mini") — stored under `extra`. */
+  default_model?: string | null;
+  /** Default sampling temperature — stored under `extra`. */
+  default_temperature?: number | null;
+  /** Whether extended-thinking is enabled by default — stored under `extra`. */
+  default_thinking_enabled?: boolean;
+  /** Default thinking effort ("low" | "medium" | "high") — stored under `extra`. */
+  default_thinking_effort?: "low" | "medium" | "high" | string | null;
 }
 
 export const settingsService = {

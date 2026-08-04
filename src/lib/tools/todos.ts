@@ -50,7 +50,7 @@ registerTool(
   async (args, ctx): Promise<ToolResult> => {
     // In-memory todos per conversation (could persist to Dexie if needed)
     // We use a module-level Map keyed by conversationId
-    const convId = ctx.conversationId;
+    const convId = ctx.conversationId ?? "";
     if (!todosByConv.has(convId)) todosByConv.set(convId, []);
 
     const todos = todosByConv.get(convId)!;
