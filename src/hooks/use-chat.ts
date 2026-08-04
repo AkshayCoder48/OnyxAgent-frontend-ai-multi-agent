@@ -485,15 +485,12 @@ export function useChat(options: UseChatOptions = {}) {
                         ? { id: buffered.id }
                         : {}),
                     });
-                  } else {
-                    // Create new pending tool call
-                    addToolCallPart(currentMessageIdRef.current, {
-                      id: buffered.id,
-                      name: realName,
-                      args: { _streaming: buffered.args },
-                      status: "pending",
-                    });
                   }
+                  // DO NOT create a new card here — only the tool_call event
+                  // (pre-emit or final) creates cards. The delta handler only
+                  // UPDATES existing cards. This prevents duplicate cards and
+                  // ensures the card appears via the pre-emit, not via the
+                  // delta flush — which fixes the "stuck then appears" issue.
                 }
               }, 16);
             }
