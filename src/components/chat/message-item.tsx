@@ -277,7 +277,7 @@ interface MessageItemProps {
  * uses CSS variables so it works with ALL color schemes.
  */
 function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").MessagePart[] }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = React.useState(false);
   const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
   const allDone = toolParts.every((p) => p.toolCall?.status === "completed" || p.toolCall?.status === "error");
   const anyRunning = toolParts.some((p) => p.toolCall?.status === "running" || p.toolCall?.status === "pending");
