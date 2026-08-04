@@ -525,16 +525,21 @@ export function useChat(options: UseChatOptions = {}) {
               status: data._preemit ? "pending" : "running",
             };
 
-            // Clear the toolArgBuffer entry for this tool call. Find by
-            // matching name or id, since the index may not be available.
-            for (const [idx, buffered] of toolArgBuffer.current) {
-              if (
-                buffered.name === tool_name ||
-                buffered.id === tool_call_id ||
-                buffered.id === `pending-${idx}`
-              ) {
-                toolArgBuffer.current.delete(idx);
-                break;
+            // Clear the toolArgBuffer entry for this tool call — BUT ONLY
+            // for non-pre-emit events. Pre-emit events fire DURING streaming
+            // (before all args have arrived), so clearing the buffer would
+            // cause subsequent deltas to be lost. Only clear when the FINAL
+            // tool_call event arrives (after stream ends, _preemit is false).
+            if (!data._preemit) {
+              for (const [idx, buffered] of toolArgBuffer.current) {
+                if (
+                  buffered.name === tool_name ||
+                  buffered.id === tool_call_id ||
+                  buffered.id === `pending-${idx}`
+                ) {
+                  toolArgBuffer.current.delete(idx);
+                  break;
+                }
               }
             }
 
