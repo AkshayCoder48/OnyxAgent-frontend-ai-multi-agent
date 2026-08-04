@@ -40,6 +40,9 @@
   "exclude": [
     "node_modules",
     "**/*.test.ts",
-    "**/*.test.tsx"
+    "**/*.test.tsx",
+    "skills/**",
+    "examples/**",
+    "capacitor.config.ts"
   ]
 }

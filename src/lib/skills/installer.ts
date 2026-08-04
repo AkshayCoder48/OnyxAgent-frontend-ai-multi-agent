@@ -296,6 +296,9 @@ export interface SkillsMPSkill {
   /** Unique identifier (the API's `id` field). Used as the slug for the
    *  install flow. */
   slug: string;
+  /** The API's `id` field — same as slug in most cases, but some responses
+   *  return a separate numeric id. */
+  id?: string;
   /** Human-readable display name. */
   name: string;
   description: string;
