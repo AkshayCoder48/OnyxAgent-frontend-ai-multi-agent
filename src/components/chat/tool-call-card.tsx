@@ -426,8 +426,10 @@ function RunningToolPanel({
   toolCall: ToolCall;
   liveCaption: string;
 }) {
-  // Handle streaming args (when tool call is still being built by the LLM)
-  const isStreaming = toolCall.status === "pending";
+  // Handle streaming args (when tool call is still being built by the LLM).
+  // Show streaming args when the tool is pending (LLM composing) OR running
+  // (tool executing but _streaming args haven't been replaced yet).
+  const isStreaming = toolCall.status === "pending" || toolCall.status === "running";
   const streamingArgs = (toolCall.args as { _streaming?: string })?._streaming;
 
   // Pick the most informative arg to display

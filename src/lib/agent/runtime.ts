@@ -641,6 +641,8 @@ async function streamRound(
           // tool card DURING streaming (not after). This is critical for
           // FreeGPT providers that send tool calls as DSML text — without
           // this, the tool card only appears after the stream ends.
+          // We retry on every text delta because the DSML tags might be
+          // incomplete on the first check (streaming — tags arrive in pieces).
           if (content.includes("DSML") && !dsmlPreEmitted) {
             const dsmlResult = parseDSMLToolCalls(content);
             if (dsmlResult && dsmlResult.toolCalls.length > 0) {
@@ -657,6 +659,22 @@ async function streamRound(
                 });
               }
               dsmlPreEmitted = true;
+            }
+            // If DSML tag detected but no complete invoke tags yet, emit a
+            // "composing" tool_call so the user sees a card immediately.
+            // The card will be updated when the invoke tags complete.
+            if (!dsmlPreEmitted && content.includes("tool_calls")) {
+              dsmlPreEmitted = true;
+              emit({
+                type: "tool_call",
+                data: {
+                  tool_name: "tool",
+                  args: { _streaming: "Composing tool call…" } as Record<string, unknown>,
+                  tool_call_id: `dsml_composing_${Date.now()}`,
+                  _preemit: true,
+                },
+                timestamp: nowISO(),
+              });
             }
           }
         }
