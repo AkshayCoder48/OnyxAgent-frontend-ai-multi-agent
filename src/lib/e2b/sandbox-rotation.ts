@@ -28,8 +28,9 @@
 import { getE2BClient, evictAllE2BClients } from "./client";
 import type { ToolContext } from "@/lib/tools/registry";
 
-// 23 hours — rotate BEFORE the 24h E2B hard limit kicks in.
-const ROTATION_AGE_MS = 23 * 60 * 60 * 1000;
+// 50 minutes — rotate BEFORE the 1-hour E2B sandbox timeout kills the sandbox.
+// E2B's max sandbox timeout is 1 hour, so we rotate at 50 min to be safe.
+const ROTATION_AGE_MS = 50 * 60 * 1000;
 
 // localStorage keys (per API key).
 function createdAtKey(apiKey: string): string {
