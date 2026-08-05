@@ -853,6 +853,9 @@ export interface UserSettings {
   /** When true, the agent runtime skips HITL approval for tools flagged
    *  `requires_approval` (e.g. `run_terminal`). Stored under `extra`. */
   auto_approve_tools: boolean;
+  /** When true, all tool calls execute in a SINGLE round (no multi-round
+   *  text → tool → text → tool loops). Produces ONE message bubble. */
+  single_round_mode?: boolean;
   /** "auto" (default — uses E2B sandbox if key set, else local), "local"
    *  (always local), "hopx" (legacy alias for E2B sandbox — errors if no key).
    *  Stored under `extra.file_system_mode`. */
@@ -916,6 +919,7 @@ export const settingsService = {
       // `extra.auto_approve_tools` defaults to false — the HITL approval gate
       // is on by default for safety. The settings page can flip it on.
       auto_approve_tools: !!row.extra?.auto_approve_tools,
+      single_round_mode: !!row.extra?.single_round_mode,
       file_system_mode: (row.extra?.file_system_mode as "auto" | "local" | "hopx") ?? "auto",
       sandbox_mode: (row.extra?.sandbox_mode as "shared" | "separate") ?? "shared",
       ai_framework: (row.extra?.ai_framework as string) ?? "default",
@@ -1178,6 +1182,28 @@ export const settingsService = {
     }
     if (!row) throw new Error("Could not initialize user settings");
     const extra = { ...(row.extra ?? {}), auto_approve_tools: enabled };
+    await db.user_settings.update(row.id, {
+      extra,
+      updated_at: nowISO(),
+    });
+  },
+
+  /** Single-round mode: all tools execute in one round, producing a single
+   *  message bubble instead of multiple bubbles split by tool calls. */
+  async getSingleRoundMode(userId: string): Promise<boolean> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return false;
+    return !!row.extra?.single_round_mode;
+  },
+
+  async setSingleRoundMode(userId: string, enabled: boolean): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    const extra = { ...(row.extra ?? {}), single_round_mode: enabled };
     await db.user_settings.update(row.id, {
       extra,
       updated_at: nowISO(),

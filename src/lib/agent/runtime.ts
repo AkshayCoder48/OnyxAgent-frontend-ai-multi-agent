@@ -92,6 +92,12 @@ export interface AgentTurnOptions {
    * but it has no effect.
    */
   autoApproveTools?: boolean;
+  /** When true, the agent executes ALL tool calls in a SINGLE round (no
+   *  multi-round text → tool → text → tool loops). All tools run in
+   *  parallel, then the AI gets all results at once and generates a
+   *  single final response. This produces ONE message bubble instead of
+   *  multiple bubbles split by tool calls. */
+  singleRoundMode?: boolean;
 }
 
 export interface AgentTurnResult {
@@ -1262,7 +1268,18 @@ When you detect a large or complex task, automatically spawn subagents to handle
 - "Research and summarize" → spawn a Researcher to search, an Analyst to summarize
 - "Create content" → spawn a Writer subagent, and use create_custom_tool if it needs special capabilities
 
-Each subagent shares the same sandbox + file system as you, so they can read/write the same files.`;
+Each subagent shares the same sandbox + file system as you, so they can read/write the same files.
+
+## CRITICAL: Tool Usage Guide
+Before using ANY tool, read the \`agent.md\` file in the workspace root. It contains:
+- Complete use cases for every tool
+- When to use each tool (run_python vs run_terminal, create_file vs create_file_chunk, etc.)
+- Incremental file writing policy (for files >200 lines)
+- Task complexity detection guide
+- Subagent orchestration patterns
+- Error recovery procedures
+
+Use \`read_file\` with path \`agent.md\` to read it. If the file doesn't exist, the tool descriptions below serve as a fallback.`;
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
 
@@ -1406,7 +1423,11 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
   // back in `message_saved`.
   const assistantMessageId = nanoid();
 
-  while (round < MAX_ROUNDS) {
+  // In single-round mode, cap at 2 rounds: round 1 = tools, round 2 = final
+  // response (no more tool calls). This produces ONE message bubble.
+  const effectiveMaxRounds = opts.singleRoundMode ? 2 : MAX_ROUNDS;
+
+  while (round < effectiveMaxRounds) {
     round += 1;
     if (signal?.aborted) {
       return {
@@ -1806,7 +1827,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
       role: "assistant",
       content:
         lastAssistantContent ||
-        `(reached max rounds (${MAX_ROUNDS}); last content shown above)`,
+        `(reached max rounds (${effectiveMaxRounds}); last content shown above)`,
       thinking: lastAssistantThinking || undefined,
       reasoning: lastAssistantReasoning || undefined,
       parts: buildAssistantParts(
@@ -1814,7 +1835,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         lastAssistantReasoning || undefined,
         allToolCalls,
         lastAssistantContent ||
-          `(reached max rounds (${MAX_ROUNDS}); last content shown above)`,
+          `(reached max rounds (${effectiveMaxRounds}); last content shown above)`,
         lastAssistantTextBeforeTools,
       ),
       toolCalls: allToolCalls,
