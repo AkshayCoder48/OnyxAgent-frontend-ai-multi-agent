@@ -497,20 +497,30 @@ function RunningToolPanel({
         </span>
       </div>
 
-      {/* Streaming args — shown while LLM is composing the tool call */}
-      {isStreaming && streamingArgs && (
+      {/* Streaming args — keep visible while pending OR running.
+          DON'T delete when the tool starts running — the user wants to see
+          what command/code is being executed. Only hide if the final parsed
+          args replace them (previewArg is shown instead). */}
+      {streamingArgs && (
         <div className="bg-foreground/[0.03] rounded-lg border border-foreground/8 p-3">
           <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide uppercase">
-            Composing
+            {toolCall.status === "pending" ? "Composing" : "Arguments"}
           </div>
           <StreamingArgsDisplay args={streamingArgs} />
         </div>
       )}
-      {/* Show the final args when the tool is running */}
-      {!isStreaming && previewArg && (
-        <pre className="scrollbar-thin max-h-64 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
-          {previewArg}
-        </pre>
+      {/* Show the final args when the tool is running AND streaming args
+          are gone (replaced by parsed args). If streaming args still exist,
+          they're shown above — don't duplicate. */}
+      {!streamingArgs && previewArg && (
+        <div className="bg-foreground/[0.03] rounded-lg border border-foreground/8 p-3">
+          <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide uppercase">
+            Arguments
+          </div>
+          <pre className="scrollbar-thin max-h-64 overflow-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
+            {previewArg}
+          </pre>
+        </div>
       )}
       {hasLiveOutput && (
         <div className="bg-foreground/[0.03] scrollbar-thin overflow-hidden rounded-lg border border-foreground/8">

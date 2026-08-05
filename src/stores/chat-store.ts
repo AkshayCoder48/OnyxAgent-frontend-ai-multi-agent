@@ -167,7 +167,6 @@ export const useChatStore = create<ChatState>((set) => ({
   // the changed message + its parent array.
   appendTextDelta: (messageId, text) =>
     set((state) => {
-      // Find the message index without mapping the entire array
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
 
@@ -175,41 +174,41 @@ export const useChatStore = create<ChatState>((set) => ({
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
       const last = parts[parts.length - 1];
       // If the last part is "text", append to it (normal streaming case).
-      // If the last part is "thinking" or "reasoning" (interleaved thinking
-      // and text within the same round), we still want to append to the
-      // LAST text part to avoid splitting text into multiple bubbles.
-      // Only create a NEW text part if there's no existing text part, or
-      // if a tool call happened after the last text part.
       if (last && last.type === "text") {
         parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
       } else {
-        // Check if there's a text part after the last tool part.
-        // Find the last text part that comes after the last tool part.
-        let lastToolIdx = -1;
-        let lastTextIdx = -1;
-        for (let i = 0; i < parts.length; i++) {
-          if (parts[i]!.type === "tool") lastToolIdx = i;
-          if (parts[i]!.type === "text") lastTextIdx = i;
-        }
-        // If there's a text part AND it comes after the last tool part
-        // (or there are no tool parts), append to it. This prevents text
-        // from splitting when thinking/reasoning deltas interleave with
-        // text deltas within a single round.
-        if (lastTextIdx >= 0 && lastToolIdx < lastTextIdx) {
-          parts[lastTextIdx] = {
-            ...parts[lastTextIdx]!,
-            content: (parts[lastTextIdx]!.content ?? "") + text,
-          };
+        // The last part is NOT text (could be thinking, reasoning, or tool).
+        // We need to decide: append to an existing text part, or create new?
+        //
+        // If the last part is a TOOL call, we should create a NEW text part
+        // — this is text AFTER a tool call (post-tool text), which is a
+        // separate text block from the pre-tool text.
+        //
+        // If the last part is thinking/reasoning, we should append to the
+        // LAST text part (text was streaming, thinking interleaved, now
+        // more text arrives — it should go into the same text bubble).
+        if (last && (last.type === "thinking" || last.type === "reasoning")) {
+          // Find the last text part — append to it.
+          const lastTextIdx = parts.reduce(
+            (acc, p, i) => (p.type === "text" ? i : acc),
+            -1,
+          );
+          if (lastTextIdx >= 0) {
+            parts[lastTextIdx] = {
+              ...parts[lastTextIdx]!,
+              content: (parts[lastTextIdx]!.content ?? "") + text,
+            };
+          } else {
+            parts.push({ id: newPartId(), type: "text" as const, content: text });
+          }
         } else {
+          // Last part is tool (or empty) — create new text part.
           parts.push({ id: newPartId(), type: "text" as const, content: text });
         }
       }
 
-      // Only create new objects for the changed message + the array wrapper
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts, content: msg.content + text };
-
-      // Debounced save (not on every delta)
       savePersisted(messages);
       return { messages };
     }),

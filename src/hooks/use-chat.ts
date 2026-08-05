@@ -558,10 +558,21 @@ export function useChat(options: UseChatOptions = {}) {
 
             if (existingTc) {
               // Replace the pre-emitted/pending tool call — NO duplicate.
+              // PRESERVE the streaming args: if the existing card has
+              // _streaming args AND the new args are empty/pre-emit, keep
+              // the _streaming args visible until the tool completes.
+              const existingArgs = existingTc.args as { _streaming?: string };
+              const hasStreamingArgs = existingArgs?._streaming !== undefined;
+              const isPreemit = !!data._preemit;
               updateToolCallPart(currentMessageIdRef.current, existingTc.id, {
                 id: tool_call_id,
-                args,
-                status: "running",
+                // If this is the FINAL tool_call (not pre-emit) with real
+                // parsed args, use them. If it's a pre-emit or the args
+                // are empty, keep the streaming args visible.
+                args: (!isPreemit && Object.keys(args).length > 0)
+                  ? args
+                  : (hasStreamingArgs ? existingTc.args : args),
+                status: isPreemit ? "pending" : "running",
               });
             } else if (data._preemit) {
               // Pre-emit with no existing card — add as pending.
