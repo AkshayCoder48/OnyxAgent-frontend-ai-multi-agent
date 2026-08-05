@@ -867,6 +867,7 @@ export function useChat(options: UseChatOptions = {}) {
       // skips the HITL gate for `requires_approval` tools (run_terminal,
       // run_python, etc.). Defaults to false — secure-by-default.
       const autoApproveTools = !!settings.auto_approve_tools;
+      const singleRoundMode = !!settings.single_round_mode;
 
       // Abort controller for stop / unmount.
       const controller = new AbortController();
@@ -892,6 +893,7 @@ export function useChat(options: UseChatOptions = {}) {
         emit: handleAgentEvent,
         signal: controller.signal,
         autoApproveTools,
+        singleRoundMode,
       };
     },
     [conversationId, handleAgentEvent],

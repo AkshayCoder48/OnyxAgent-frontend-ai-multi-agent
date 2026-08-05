@@ -580,11 +580,75 @@ function ToolApprovalSection() {
           </span>
         </div>
       )}
+      {/* Single-round mode toggle */}
+      <SingleRoundModeSection />
     </div>
   );
 }
 
-// ---------- System Prompt Section ----------
+function SingleRoundModeSection() {
+  const { user } = useAuth();
+  const [singleRound, setSingleRound] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    void (async () => {
+      try {
+        const v = await settingsService.getSingleRoundMode(user.id);
+        setSingleRound(v);
+      } catch {
+        // ignore
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, [user]);
+
+  const toggle = async (next: boolean) => {
+    if (!user) return;
+    setSingleRound(next);
+    setSaving(true);
+    try {
+      await settingsService.setSingleRoundMode(user.id, next);
+      toast.success(
+        next
+          ? "Single-round mode enabled — all tools run in one round, single message bubble"
+          : "Multi-round mode restored — separate bubbles for each round",
+      );
+    } catch (err) {
+      setSingleRound(!next);
+      toast.error(err instanceof Error ? err.message : "Failed to update");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-foreground/15 p-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Single-round mode</p>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Execute all tool calls in a single round and produce one message
+          bubble. Disable for multi-round responses where each tool call
+          gets its own text + response cycle.
+        </p>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        <Switch
+          id="single-round-mode"
+          checked={singleRound}
+          onCheckedChange={(v) => void toggle(v)}
+          disabled={saving}
+        />
+      </div>
+    </div>
+  );
+}
 
 function SystemPromptSection() {
   const { user } = useAuth();
