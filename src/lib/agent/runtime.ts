@@ -180,6 +180,10 @@ interface ChatCompletionMessage {
   /** For tool-result messages. */
   tool_call_id?: string;
   name?: string;
+  /** DeepSeek/moonshot/g4f reasoning_content — MUST be passed back to the
+   *  API in thinking mode, otherwise the provider rejects the request with
+   *  "The reasoning_content in the thinking mode must be passed back to the API." */
+  reasoning_content?: string;
 }
 
 interface ChatCompletionTool {
@@ -1335,6 +1339,11 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
             content: m.content
               ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
               : "",
+            // Pass reasoning_content back to the API — required by DeepSeek/
+            // moonshot/g4f providers in thinking mode. Without it, the API
+            // rejects with "The reasoning_content in the thinking mode must
+            // be passed back to the API."
+            reasoning_content: m.reasoning || undefined,
           };
         }),
     ];
@@ -1635,12 +1644,16 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     }
 
     // Tool calls requested — append the assistant turn to the message list.
-    // CRITICAL: Truncate large tool call arguments before sending them back
-    // in the message history. The full arguments are stored in allToolCalls
-    // for the UI — the API only needs enough to know what was called.
+    // CRITICAL: Pass reasoning_content back to the API — DeepSeek/moonshot/g4f
+    // providers in thinking mode REQUIRE this. Without it, the API rejects
+    // with "The reasoning_content in the thinking mode must be passed back
+    // to the API."
+    // Also truncate large tool call arguments before sending them back.
     messages.push({
       role: "assistant",
       content: roundResult.content || "",
+      // Pass reasoning_content back so the provider can maintain context.
+      reasoning_content: roundResult.reasoning || undefined,
       tool_calls: roundResult.toolCalls.map((tc) => ({
         id: tc.id,
         type: "function",
