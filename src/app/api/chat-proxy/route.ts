@@ -268,8 +268,13 @@ export async function POST(
     "content-type":
       upstream.headers.get("content-type") ??
       "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache",
+    "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
+    // CRITICAL: Tell Vercel's edge/Node proxy to NOT buffer the response.
+    // Without this, Vercel buffers the entire SSE stream and delivers it
+    // all at once — killing the real-time streaming experience.
+    "x-vercel-no-buffering": "1",
+    "x-accel-buffering": "no",
   };
 
   // Pass through rate-limit + model metadata headers.
