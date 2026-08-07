@@ -556,6 +556,8 @@ async function streamRound(
     },
     body: JSON.stringify(body),
     signal,
+    // Prevent browser/proxy from buffering the response.
+    cache: "no-store",
   });
 
   if (!response.ok || !response.body) {
