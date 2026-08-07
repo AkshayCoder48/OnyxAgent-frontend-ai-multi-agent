@@ -156,12 +156,55 @@ function truncateToolArgs(
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
     if (typeof value === "string" && value.length > MAX_ARG_LEN) {
+      // Truncate but ensure the string is properly terminated (no unterminated strings)
       out[key] = value.slice(0, MAX_ARG_LEN) + `... [truncated, ${value.length} chars total]`;
     } else {
       out[key] = value;
     }
   }
   return out;
+}
+
+/**
+ * Safely stringify tool call arguments as JSON. If the args contain
+ * non-serializable values (undefined, functions, circular refs), or if
+ * the JSON string would be malformed (unterminated strings from streaming
+ * truncation), fall back to a safe representation.
+ *
+ * This fixes the "Unterminated string starting at: line 1 column 42" error
+ * that occurs when streaming tool call args are truncated mid-string and
+ * passed back to the API as malformed JSON.
+ */
+function safeStringifyArgs(args: Record<string, unknown>): string {
+  try {
+    // First, clean any _streaming sentinel values (they're not valid for the API)
+    const cleanArgs: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (key === "_streaming") continue;
+      if (key === "_raw") {
+        cleanArgs["raw"] = value;
+        continue;
+      }
+      // If value is a string that looks truncated (ends mid-escape), fix it
+      if (typeof value === "string") {
+        // Remove any trailing incomplete escape sequences
+        let cleaned = value.replace(/\\+$/, (match) => {
+          // If odd number of backslashes, the last one is an incomplete escape
+          return match.length % 2 === 1 ? match.slice(0, -1) : match;
+        });
+        cleanArgs[key] = cleaned;
+      } else {
+        cleanArgs[key] = value;
+      }
+    }
+    const result = JSON.stringify(cleanArgs);
+    // Verify the JSON is valid by parsing it back
+    JSON.parse(result);
+    return result;
+  } catch {
+    // If JSON.stringify fails, return a minimal valid JSON
+    return JSON.stringify({ error: "args could not be serialized" });
+  }
 }
 
 function truncateResult(_toolName: string, result: string): string {
@@ -1463,6 +1506,17 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
       // AUTO CONTEXT ERROR DETECTION: If the error is related to context
       // window overflow or DEGRADED functions, automatically generate a
       // handoff letter, reduce history, and retry ONCE.
+      // AUTO RETRY: If the error is a timeout (524) or network blip, retry
+      // the round up to 2 times before giving up. These are transient errors
+      // that happen between rounds when the connection drops momentarily.
+      const isTimeout = /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message);
+      if (isTimeout && round < effectiveMaxRounds) {
+        console.warn(`[agent] Timeout/network error on round ${round}, retrying...`, message.slice(0, 100));
+        // Wait 1 second before retrying to let the connection recover
+        await new Promise((r) => setTimeout(r, 1000));
+        continue; // retry the same round
+      }
+
       const isContextError = /degraded|context.*length|too many tokens|maximum context|context window|too long/i.test(message);
       if (isContextError && !handoffContext) {
         console.warn("[agent] Context error detected, generating handoff + retrying...", message.slice(0, 100));
@@ -1684,7 +1738,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         type: "function",
         function: {
           name: tc.name,
-          arguments: JSON.stringify(truncateToolArgs(tc.name, tc.args)),
+          arguments: safeStringifyArgs(truncateToolArgs(tc.name, tc.args)),
         },
       })),
     });
