@@ -193,6 +193,10 @@ export async function POST(
   // browser-added headers like `origin`/`referer`).
   const forwardHeaders: Record<string, string> = {
     "content-type": "application/json",
+    // Explicitly tell the upstream we want streaming — some providers
+    // (FreeGPT/freeaixyz4all) check this header to decide whether to
+    // stream or buffer the entire response.
+    "accept": "text/event-stream",
   };
 
   const authHeader = request.headers.get("authorization");
@@ -206,10 +210,9 @@ export async function POST(
     }
   }
 
-  // Always advertise we accept streaming responses.
-  if (!forwardHeaders["accept"]) {
-    forwardHeaders["accept"] = "text/event-stream,application/json;q=0.9";
-  }
+  // Accept header is already set to text/event-stream above.
+  // Don't override it with the q=0.9 fallback — some providers
+  // check for exact "text/event-stream" to enable streaming.
 
   let upstream: Response;
   try {
