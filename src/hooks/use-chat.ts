@@ -341,8 +341,7 @@ export function useChat(options: UseChatOptions = {}) {
                     textDeltaBuffer.current = "";
                   }
                   textDeltaTimer.current = null;
-                }, 30);
-              }
+                }, 1); // 1ms — flush immediately (next tick), no batching delay
             }
           }
           break;
