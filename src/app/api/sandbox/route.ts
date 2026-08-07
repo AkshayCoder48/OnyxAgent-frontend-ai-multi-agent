@@ -435,6 +435,82 @@ async function createAndCacheSandbox(
     }
   }
 
+  // Write agent.md to the sandbox — contains the complete tool usage guide.
+  // The system prompt tells the AI to read this file first. This keeps the
+  // system prompt small (doesn't bloat context) while giving the AI access
+  // to detailed tool documentation.
+  try {
+    const agentMd = `# Agent.md — Tool Usage Guide
+
+## Pre-Execution: ALWAYS analyze workspace first
+Before starting ANY task, call analyze_workspace to understand the project. NEVER blindly modify files.
+
+## File Management
+- list_folder: List directory contents. Discover what files exist.
+- read_file: Read a text file. Returns full content (no truncation).
+- read_file_section: Read specific line range. For large files or verification.
+- create_file: Create a new file (200 lines or fewer). Refuses overwrite unless overwrite: true.
+- write_file: Write/overwrite a file. Replace entire content.
+- edit_file: Edit by finding and replacing text. For targeted edits.
+- delete_file: Delete a file.
+- create_folder / delete_folder: Create/delete directories.
+- move_file / rename_file: Move or rename files.
+- send_file / send_folder: Download files/folders as data URLs/ZIPs.
+
+## Incremental File Writing (files >200 lines)
+NEVER generate an entire large file in one operation. Use:
+1. verify_path: Create directories + empty file
+2. create_file_chunk (mode="create"): First chunk (2-4 KB, 50-200 lines)
+3. create_file_chunk (mode="append"): Subsequent chunks
+4. Split on: functions, classes, interfaces, components. NEVER split mid-function/JSON/JSX.
+
+## Code Execution
+- run_python: Python 3 code. Data analysis, calculations, ML, web scraping. 60s timeout.
+- run_terminal: Shell commands. File ops, git, npm/pip installs, system queries. 120s timeout.
+
+## Web and Search
+- web_search / news_search: Search the web (LangSearch if configured, else DuckDuckGo).
+- image_search / video_search / map_search: Search via DuckDuckGo.
+- web_fetch: Read full content of a URL. Use AFTER web_search.
+
+## Subagent Orchestration
+- spawn_subagent: Create a subagent. Use disposable: true for one-off tasks.
+- set_subagent_config: Assign AI provider/model to a subagent.
+- query_subagent: Send a message and get a reply.
+- list_subagents / complete_subagent / cancel_subagent / steer_subagent.
+
+## Other Tools
+- memory: Store/retrieve persistent facts about the user.
+- todos: Create a live task checklist for multi-step tasks.
+- get_current_datetime: Get current date/time.
+- create_chart_tool: Create data visualizations.
+- preview_image: Display an image inline.
+- load_skill / list_skills: Use installed skills.
+- create_tool: Create custom HTTP/Python tools.
+
+## Task Complexity
+- Tiny: No tools or single answer. No sub-agents.
+- Small: One file change. Usually no sub-agents.
+- Medium: 2-4 files. Optional sub-agents.
+- Large: 5-10+ files. Spawn specialists.
+- Massive: Repository-wide. Multi-agent workflow.
+
+## Error Recovery
+- Directory missing: verify_path auto-creates with mkdir -p.
+- Write fails: Retry only the failed chunk, never regenerate previous chunks.
+- If all writes fail: Save to ./useless/ as fallback. Never discard content.
+
+## Tool Calling Rules
+- ALWAYS use the function-calling API (tool_calls mechanism).
+- NEVER write "Thought:", "Action:", "Input:" as text.
+- Call tools in parallel when independent.
+- Chain tools when output feeds into the next.
+`;
+    await sandbox.files.write("/home/user/agent.md", agentMd);
+  } catch {
+    // best-effort — file may already exist or write may fail
+  }
+
   const key = cacheKey(apiKey, conversationId, mode);
   const entry: CacheEntry = {
     sandbox,
