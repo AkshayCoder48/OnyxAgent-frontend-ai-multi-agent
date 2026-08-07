@@ -224,6 +224,14 @@ export async function POST(
       // to a fetch() request and is a no-op otherwise.
       // @ts-expect-error — `duplex` is valid in undici but not in the DOM lib.
       duplex: "half",
+      // CRITICAL: Prevent Node's undici from buffering the upstream response.
+      // Without this, undici reads the entire response into memory before
+      // making it available to `upstream.body.getReader()`. This is the
+      // equivalent of `curl -N` (no-buffer) — we want each chunk flushed
+      // to the client the moment it arrives from the upstream provider.
+      // @ts-expect-error — `cache` is not on the standard fetch type but
+      // is respected by undici to disable response caching/buffering.
+      cache: "no-store",
     });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
@@ -287,9 +295,24 @@ export async function POST(
     }
   }
 
-  // Direct passthrough — no TransformStream, no buffering, no transformation.
-  // Next.js will stream `upstream.body` chunk-by-chunk to the client.
-  return new NextResponse(upstream.body, {
+  // CRITICAL: Use an identity TransformStream to force immediate flushing.
+  // Without this, Node's response pipeline may buffer chunks (like curl
+  // without -N). The TransformStream passes each chunk through unchanged
+  // but forces the readable side to be "pull-based" — each chunk is
+  // flushed to the client the moment it arrives from the upstream.
+  const passthrough = new TransformStream({
+    transform(chunk, controller) {
+      // Pass chunk through immediately — no buffering, no delay.
+      controller.enqueue(chunk);
+    },
+    flush(controller) {
+      controller.terminate();
+    },
+  });
+
+  const streamedBody = upstream.body?.pipeThrough(passthrough);
+
+  return new NextResponse(streamedBody, {
     status: upstream.status,
     headers: responseHeaders,
   });
