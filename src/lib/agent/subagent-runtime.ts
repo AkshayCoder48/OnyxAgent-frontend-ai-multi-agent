@@ -14,17 +14,26 @@ import { stripFunctionCallTags } from "@/lib/text-sanitizer";
  *
  * Uses sessions (persisted to localStorage) so chats survive page refresh.
  * Each session is a separate conversation with a subagent.
+ *
+ * Fixes applied:
+ * - Passes reasoning_content back to the API (required by DeepSeek/moonshot)
+ * - Adds Accept: text/event-stream + cache: no-store (curl -N equivalent)
+ * - Streams tool call args live (shows tool card immediately, not after stream ends)
+ * - No 60ms throttle (flush immediately like main chat)
+ * - Tool calls execute in parallel
  */
 
 interface ChatCompletionMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | null;
   tool_calls?: Array<{
     id: string;
     type: "function";
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+  name?: string;
+  reasoning_content?: string;
 }
 
 async function resolveApiConfig(subagent: SubagentConfig) {
@@ -34,15 +43,11 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   const providers = await aiProviderService.list(userId);
   if (providers.length === 0) throw new Error("No AI providers configured. Add one in Settings → Config.");
 
-  // Read the main chat's selected provider + model from the chat store.
-  // This is set by the ChatControls component when the user picks a model.
   const { selectedProviderId, selectedModel } = await import("@/stores/chat-store").then(m => {
     const store = m.useChatStore.getState();
     return { selectedProviderId: store.selectedProviderId, selectedModel: store.selectedModel };
   });
 
-  // Provider resolution: subagent override → main chat's selected provider →
-  // first active provider → first provider.
   let provider = subagent.providerId
     ? providers.find((p) => p.id === subagent.providerId)
     : selectedProviderId
@@ -57,8 +62,6 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   }
   if (!apiKey) throw new Error(`No API key for provider "${provider.name}"`);
 
-  // Model resolution: subagent override → main chat's selected model →
-  // provider's first model.
   const model = subagent.model || selectedModel || provider.models[0] || "gpt-4o-mini";
   const baseUrl = subagent.baseUrl || provider.base_url;
   const noPrefix = (provider as { no_prefix?: boolean }).no_prefix ?? false;
@@ -73,7 +76,7 @@ async function resolveApiConfig(subagent: SubagentConfig) {
 export async function executeSubagentTurn(
   subagentId: string,
   userMessage: string,
-  fileIds?: string[],
+  _fileIds?: string[],
   sessionId?: string,
 ): Promise<string> {
   const store = useSubagentStore.getState();
@@ -93,7 +96,6 @@ export async function executeSubagentTurn(
     role: "user",
     content: userMessage,
     timestamp: new Date().toISOString(),
-    fileIds,
   };
   store.addMessage(sid, userMsg);
 
@@ -107,6 +109,8 @@ export async function executeSubagentTurn(
     isStreaming: true,
   });
 
+  let accumulatedReasoning = "";
+
   try {
     const config = await resolveApiConfig(subagent);
     const allTools = listTools();
@@ -116,7 +120,6 @@ export async function executeSubagentTurn(
     }));
 
     // Build message history from the session.
-    // Truncate to last 20 messages to avoid context window overflow.
     const updatedSession = useSubagentStore.getState().sessions.find((s) => s.id === sid);
     const sessionMessages = (updatedSession?.messages ?? [])
       .filter((m) => m.role !== "system" && !m.isStreaming);
@@ -131,6 +134,8 @@ export async function executeSubagentTurn(
       ...trimmedSessionMessages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
+        // Pass reasoning_content back — required by DeepSeek/moonshot/g4f
+        reasoning_content: (m as { reasoning?: string }).reasoning || undefined,
       })),
     ];
 
@@ -146,30 +151,33 @@ export async function executeSubagentTurn(
         messages: apiMessages,
         temperature: 0.7,
         stream: true, // ALWAYS stream
+        stream_options: { include_usage: true },
       };
       if (config.toolsEnabled && toolsSchema.length > 0) {
         body.tools = toolsSchema;
         body.tool_choice = "auto";
       }
-      // Provider-specific thinking toggle (e.g. Poolside's chat_template_kwargs).
       if (config.thinkingEnabled) {
         body.chat_template_kwargs = { enable_thinking: true };
       }
 
-      // Use ?url= query param — Vercel can't strip query params.
+      // Use ?url= query param + Accept: text/event-stream + cache: no-store
+      // (curl -N equivalent — no buffering anywhere in the pipeline)
       const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-target-url": targetUrl,
           Authorization: `Bearer ${config.apiKey}`,
+          Accept: "text/event-stream",
         },
         body: JSON.stringify(body),
+        cache: "no-store",
       });
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        throw new Error(`API ${res.status}: ${errText.slice(0, 200)}`);
+        throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);
       }
 
       // Check if the response is actually SSE (stream:true).
@@ -183,9 +191,25 @@ export async function executeSubagentTurn(
 
         // Handle tool calls.
         if (msg.tool_calls && msg.tool_calls.length > 0 && config.toolsEnabled) {
-          await handleToolCalls(
-            msg, apiMessages, allTools, subagentId, sid, assistantMsgId, config,
+          // Pass reasoning_content back
+          if (msg.reasoning_content) accumulatedReasoning += msg.reasoning_content;
+          apiMessages.push({
+            role: "assistant",
+            content: msg.content || "",
+            reasoning_content: accumulatedReasoning || undefined,
+            tool_calls: msg.tool_calls.map((tc: { id: string; function: { name: string; arguments: string } }) => ({
+              id: tc.id,
+              type: "function" as const,
+              function: tc.function,
+            })),
+          });
+
+          // Execute tool calls in parallel
+          await executeToolCallsParallel(
+            msg.tool_calls, allTools, subagentId, sid, assistantMsgId, apiMessages,
+            msg.content || "",
           );
+          fullResponse = stripFunctionCallTags(msg.content || "");
           continue;
         }
 
@@ -197,95 +221,138 @@ export async function executeSubagentTurn(
         break;
       }
 
-      // Parse SSE stream.
+      // Parse SSE stream — NO THROTTLE, flush immediately (like main chat)
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
       let buffer = "";
       let accumulatedText = "";
+      accumulatedReasoning = "";
       let toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
 
-      // THROTTLE: only update the store every 60ms to prevent lag from
-      // too many re-renders when the API sends many small chunks rapidly.
-      let lastUpdateTime = 0;
-      const UPDATE_INTERVAL_MS = 60;
-      let pendingUpdate = false;
-      const flushUpdate = () => {
-        if (pendingUpdate) {
-          useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-            content: stripFunctionCallTags(accumulatedText),
-            isStreaming: true,
-          });
-          pendingUpdate = false;
-        }
-      };
+      // Track which tool calls we've already shown as "running" to avoid duplicates
+      const shownToolCalls = new Set<string>();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Process complete SSE lines.
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || ""; // keep the last partial line
+        // Process complete SSE lines (split on \n\n for full events)
+        let eventIdx: number;
+        while ((eventIdx = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, eventIdx);
+          buffer = buffer.slice(eventIdx + 2);
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data: ")) continue;
-          const dataStr = trimmed.slice(6);
-          if (dataStr === "[DONE]") continue;
+          for (const line of rawEvent.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            const dataStr = trimmed.slice(5).trim();
+            if (!dataStr || dataStr === "[DONE]") continue;
 
-          try {
-            const chunk = JSON.parse(dataStr);
-            const delta = chunk.choices?.[0]?.delta;
-            if (!delta) continue;
+            try {
+              const chunk = JSON.parse(dataStr);
+              const delta = chunk.choices?.[0]?.delta;
+              if (!delta) continue;
 
-            // Text delta — accumulate + throttled stream to UI.
-            if (delta.content) {
-              accumulatedText += delta.content;
-              const now = Date.now();
-              if (now - lastUpdateTime >= UPDATE_INTERVAL_MS) {
-                lastUpdateTime = now;
+              // Text delta — flush immediately (no throttle)
+              if (delta.content) {
+                accumulatedText += delta.content;
+                // Immediate update — no 60ms throttle
                 useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
                   content: stripFunctionCallTags(accumulatedText),
                   isStreaming: true,
                 });
-                pendingUpdate = false;
-              } else {
-                pendingUpdate = true;
               }
-            }
 
-            // Tool call delta — buffer the arguments (they arrive in chunks).
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index ?? 0;
-                if (!toolCallsBuffer[idx]) {
-                  toolCallsBuffer[idx] = {
-                    id: tc.id || nanoid(),
-                    function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" },
-                  };
-                } else {
-                  if (tc.function?.name) toolCallsBuffer[idx]!.function.name += tc.function.name;
-                  if (tc.function?.arguments) toolCallsBuffer[idx]!.function.arguments += tc.function.arguments;
-                  if (tc.id) toolCallsBuffer[idx]!.id = tc.id;
+              // Reasoning delta — accumulate for passing back to API
+              if (delta.reasoning_content || delta.reasoning) {
+                accumulatedReasoning += (delta.reasoning_content || delta.reasoning || "");
+              }
+
+              // Tool call delta — buffer + show immediately
+              if (delta.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallsBuffer[idx]) {
+                    toolCallsBuffer[idx] = {
+                      id: tc.id || nanoid(),
+                      function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" },
+                    };
+                  } else {
+                    if (tc.function?.name) toolCallsBuffer[idx]!.function.name += tc.function.name;
+                    if (tc.function?.arguments) toolCallsBuffer[idx]!.function.arguments += tc.function.arguments;
+                    if (tc.id) toolCallsBuffer[idx]!.id = tc.id;
+                  }
+
+                  // Show tool call card IMMEDIATELY when name is known (streaming)
+                  const tcBuf = toolCallsBuffer[idx]!;
+                  if (tcBuf.function.name && !shownToolCalls.has(tcBuf.id)) {
+                    shownToolCalls.add(tcBuf.id);
+                    const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
+                    useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+                      content: stripFunctionCallTags(accumulatedText),
+                      toolCalls: [
+                        ...(currentMsg?.toolCalls ?? []),
+                        {
+                          id: tcBuf.id,
+                          name: tcBuf.function.name,
+                          args: { _streaming: tcBuf.function.arguments } as Record<string, unknown>,
+                          status: "pending" as const,
+                        },
+                      ],
+                    });
+                  } else if (tcBuf.function.arguments && shownToolCalls.has(tcBuf.id)) {
+                    // Update streaming args on existing card
+                    const msg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
+                    if (msg?.toolCalls) {
+                      useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+                        toolCalls: msg.toolCalls.map((tc2) =>
+                          tc2.id === tcBuf.id
+                            ? { ...tc2, args: { _streaming: tcBuf.function.arguments } as Record<string, unknown> }
+                            : tc2,
+                        ),
+                      });
+                    }
+                  }
                 }
               }
+            } catch {
+              // partial JSON — skip
             }
-          } catch {
-            // partial JSON — skip, will complete on next chunk
           }
         }
       }
-      // Flush any pending update after the stream ends.
-      flushUpdate();
 
       // Process any buffered tool calls.
       if (toolCallsBuffer.length > 0 && config.toolsEnabled) {
-        // Add the assistant message with tool calls to the API history.
+        // Parse args and update tool call cards to "running"
+        const parsedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+        for (const tc of toolCallsBuffer) {
+          let toolArgs: Record<string, unknown> = {};
+          try {
+            toolArgs = JSON.parse(tc.function.arguments || "{}");
+          } catch {
+            toolArgs = { _raw: tc.function.arguments };
+          }
+          parsedToolCalls.push({ id: tc.id, name: tc.function.name, args: toolArgs });
+
+          // Update card to "running" with parsed args
+          const msg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
+          if (msg?.toolCalls) {
+            useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+              toolCalls: msg.toolCalls.map((tc2) =>
+                tc2.id === tc.id ? { ...tc2, args: toolArgs, status: "running" as const } : tc2,
+              ),
+            });
+          }
+        }
+
+        // Add assistant message with tool calls + reasoning_content to API history
         apiMessages.push({
           role: "assistant",
           content: accumulatedText || "",
+          reasoning_content: accumulatedReasoning || undefined,
           tool_calls: toolCallsBuffer.map((tc) => ({
             id: tc.id,
             type: "function" as const,
@@ -293,21 +360,9 @@ export async function executeSubagentTurn(
           })),
         });
 
-        // Execute each tool call.
-        for (const tc of toolCallsBuffer) {
-          const toolArgs = JSON.parse(tc.function.arguments || "{}");
-          const tool = allTools.find((t) => t.name === tc.function.name);
-
-          // Add a running tool call card to the message.
-          const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
-          useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-            content: stripFunctionCallTags(accumulatedText),
-            toolCalls: [
-              ...(currentMsg?.toolCalls ?? []),
-              { id: tc.id, name: tc.function.name, args: toolArgs, status: "running" as const },
-            ],
-          });
-
+        // Execute all tool calls in PARALLEL (same as main runtime)
+        await Promise.all(parsedToolCalls.map(async (ptc) => {
+          const tool = allTools.find((t) => t.name === ptc.name);
           let toolResult: unknown;
           let toolStatus: "completed" | "error" = "completed";
           try {
@@ -322,16 +377,10 @@ export async function executeSubagentTurn(
                 sandboxMode: "shared" as const,
                 envVars: {},
                 onToolOutput: () => {},
-                // Let file tools resolve the sandbox key dynamically.
-                // The tools call ensureFreshSandboxForCtx(ctx) which calls
-                // resolveSandboxApiKey(ctx) — if e2bApiKey/sandboxApiKey are
-                // undefined, it falls back to settingsService.getDecryptedSandboxKey(userId).
-                // This ensures subagent tools can use the E2B sandbox even
-                // when the runtime didn't pass the key through.
               };
-              toolResult = await tool.handler(toolArgs, ctx);
+              toolResult = await tool.handler(ptc.args, ctx);
             } else {
-              toolResult = { error: `Unknown tool: ${tc.function.name}` };
+              toolResult = { error: `Unknown tool: ${ptc.name}` };
               toolStatus = "error";
             }
           } catch (e) {
@@ -339,23 +388,23 @@ export async function executeSubagentTurn(
             toolStatus = "error";
           }
 
-          // Update the tool call card status.
+          // Update tool call card with result
           const updatedMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
           if (updatedMsg?.toolCalls) {
             useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
               toolCalls: updatedMsg.toolCalls.map((tc2) =>
-                tc2.id === tc.id ? { ...tc2, result: toolResult, status: toolStatus } : tc2,
+                tc2.id === ptc.id ? { ...tc2, result: toolResult, status: toolStatus } : tc2,
               ),
             });
           }
 
           apiMessages.push({
             role: "tool" as const,
-            content: JSON.stringify(toolResult).slice(0, 10000),
-            tool_call_id: tc.id,
+            content: JSON.stringify(toolResult),
+            tool_call_id: ptc.id,
           });
-        }
-        // Reset for the next iteration — the API will process the tool results.
+        }));
+
         fullResponse = stripFunctionCallTags(accumulatedText);
         continue;
       }
@@ -380,30 +429,27 @@ export async function executeSubagentTurn(
   }
 }
 
-/** Helper to handle tool calls in non-streaming mode. */
-async function handleToolCalls(
-  msg: { content?: string; tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> },
-  apiMessages: ChatCompletionMessage[],
+/** Execute tool calls in parallel for non-streaming mode. */
+async function executeToolCallsParallel(
+  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>,
   allTools: ReturnType<typeof listTools>,
-  subagentId: string,
+  _subagentId: string,
   sid: string,
   assistantMsgId: string,
-  _config: unknown,
+  apiMessages: ChatCompletionMessage[],
+  _accumulatedText: string,
 ) {
-  apiMessages.push({
-    role: "assistant",
-    content: msg.content || "",
-    tool_calls: (msg.tool_calls ?? []).map((tc) => ({
-      id: tc.id,
-      type: "function" as const,
-      function: tc.function,
-    })),
-  });
+  await Promise.all(toolCalls.map(async (tc) => {
+    let toolArgs: Record<string, unknown> = {};
+    try {
+      toolArgs = JSON.parse(tc.function.arguments || "{}");
+    } catch {
+      toolArgs = { _raw: tc.function.arguments };
+    }
 
-  for (const tc of msg.tool_calls ?? []) {
-    const toolArgs = JSON.parse(tc.function.arguments || "{}");
     const tool = allTools.find((t) => t.name === tc.function.name);
 
+    // Add running tool call card
     const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
       toolCalls: [
@@ -418,7 +464,7 @@ async function handleToolCalls(
       if (tool) {
         const ctx = {
           userId: useAuthStore.getState().user?.id ?? "",
-          conversationId: subagentId,
+          conversationId: _subagentId,
           emit: () => {},
           signal: undefined,
           e2bApiKey: undefined,
@@ -437,6 +483,7 @@ async function handleToolCalls(
       toolStatus = "error";
     }
 
+    // Update tool call card with result
     const updatedMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
     if (updatedMsg?.toolCalls) {
       useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
@@ -448,8 +495,8 @@ async function handleToolCalls(
 
     apiMessages.push({
       role: "tool" as const,
-      content: JSON.stringify(toolResult).slice(0, 10000),
+      content: JSON.stringify(toolResult),
       tool_call_id: tc.id,
     });
-  }
+  }));
 }
