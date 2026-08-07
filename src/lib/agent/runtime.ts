@@ -545,12 +545,14 @@ async function streamRound(
   emit({ type: "llm_started", timestamp: nowISO() });
 
   // Pass the target URL via ?url= query param — Vercel can't strip query params.
+  // Use Accept: text/event-stream to signal streaming intent to all proxies.
   const response = await fetch(`${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-target-url": targetUrl,
       Authorization: `Bearer ${provider.apiKey}`,
+      Accept: "text/event-stream",
     },
     body: JSON.stringify(body),
     signal,
