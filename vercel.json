@@ -4,6 +4,9 @@
   "functions": {
     "src/app/api/sandbox/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/chat-proxy/route.ts": {
+      "maxDuration": 300
     }
   }
 }
