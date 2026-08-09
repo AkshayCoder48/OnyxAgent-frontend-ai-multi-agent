@@ -1,3 +1,5 @@
+import type { GenUINode } from "@/lib/genui/types";
+
 export type MessageRole = "user" | "assistant" | "system";
 /** Rating values for message feedback. */
 export enum RatingValue {
@@ -55,6 +57,11 @@ export interface ChatMessage {
    *  correctly. ``content``/``thinking``/``toolCalls`` are kept in sync as
    *  flat aggregates for copy/persist/rating. */
   parts?: MessagePart[];
+  /** Parsed GenUI nodes (Generative UI) extracted from the message text.
+   *  Populated by the agent runtime when the AI emits a
+   *  ``<<<genui>>>...<<</genui>>>`` block. Persisted to Dexie so the rich
+   *  components survive reloads. Rendered by ``GenUIBlock`` after the text. */
+  genui?: GenUINode[];
 }
 
 export interface ToolCall {

@@ -17,6 +17,34 @@ import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
+import { GenUIBlock } from "@/components/genui/GenUIBlock";
+import { useGenUIFromText } from "@/hooks/useGenUIStream";
+import { segmentText } from "@/lib/genui/stream-parser";
+import { validateSpec } from "@/lib/genui/validate";
+import type { GenUINode } from "@/lib/genui/types";
+import { useChatStore } from "@/stores/chat-store";
+
+/**
+ * Extract + validate GenUI nodes from a message's full text (content + parts).
+ * Returns null if no `<<<genui>>>` sentinel is present. Used to populate
+ * `message.genui` for persistence when streaming completes.
+ */
+function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
+  const text = message.content ||
+    (Array.isArray(message.parts)
+      ? message.parts
+          .filter((p) => p.type === "text" && p.content)
+          .map((p) => p.content ?? "")
+          .join("\n\n")
+      : "");
+  if (!text || !text.includes("<<<genui>>>")) return null;
+  const seg = segmentText(text);
+  if (seg.blocks.length === 0) return null;
+  const allNodes: GenUINode[] = [];
+  for (const b of seg.blocks) for (const n of b.nodes) allNodes.push(n);
+  const validated = validateSpec({ nodes: allNodes });
+  return validated.nodes.length > 0 ? validated.nodes : null;
+}
 
 /**
  * ThinkingBlock / ReasoningBlock — collapsible reasoning display.
@@ -181,49 +209,116 @@ function TextBubble({
   showCursor,
   isUser,
   onCiteClick,
+  genuiNodes,
+  isStreaming,
 }: {
   text: string;
   showCursor: boolean;
   isUser: boolean;
   onCiteClick?: (index: number) => void;
+  /** Persisted GenUI nodes (set when streaming completes). When present AND
+   *  the text no longer contains sentinels, these are used to render the
+   *  GenUI block. During streaming, the live-parsed spec takes precedence. */
+  genuiNodes?: GenUINode[];
+  /** True while the message is actively streaming. Drives the GenUIBlock's
+   *  shimmer placeholder. */
+  isStreaming?: boolean;
 }) {
+  // Parse the text for `<<<genui>>>` sentinels. During streaming this gives
+  // us a live spec (partial JSON tolerated). After streaming, if the text
+  // still has sentinels, this splits them out so they don't leak into the
+  // markdown render.
+  const { genuiSpec, textBefore, textAfter, inGenUI } = useGenUIFromText(text);
+
+  if (isUser) {
+    return (
+      <div
+        className={cn(
+          "relative max-w-full break-words rounded-2xl px-3 py-2 sm:px-4 sm:py-2.5 rounded-tr-sm",
+        )}
+        style={{
+          backgroundColor: "var(--chat-user-bg, var(--color-foreground))",
+        }}
+      >
+        <p className="text-background text-sm break-words whitespace-pre-wrap overflow-wrap-anywhere">{text}</p>
+      </div>
+    );
+  }
+
+  // Decide which spec to render:
+  //   - If the text has sentinels (genuiSpec !== null), use the live-parsed spec.
+  //   - Else if we have persisted genuiNodes, use those.
+  //   - Else no GenUI to render.
+  const liveSpec = genuiSpec;
+  const persistedSpec =
+    !liveSpec && genuiNodes && genuiNodes.length > 0
+      ? { nodes: genuiNodes }
+      : null;
+  const specToRender = liveSpec ?? persistedSpec;
+  const hasLiveSentinels = liveSpec !== null;
+
+  // Text to render as markdown:
+  //   - If sentinels are present, render before + after (excluding the block).
+  //   - Else render the full text as-is.
+  const beforeText = hasLiveSentinels ? textBefore : text;
+  const afterText = hasLiveSentinels ? textAfter : "";
+
   return (
     <div
       className={cn(
-        "relative max-w-full break-words rounded-2xl px-3 py-2 sm:px-4 sm:py-2.5",
-        isUser
-          ? "text-background rounded-tr-sm"
-          : "rounded-tl-sm w-full",
+        "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
         // Streaming AI bubbles get: glow + shimmer sweep + animated border
-        !isUser && showCursor && "streaming-glow streaming-shimmer streaming-border",
+        isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
       )}
-      style={
-        isUser
-          ? { backgroundColor: "var(--chat-user-bg, var(--color-foreground))" }
-          : { backgroundColor: "var(--chat-assistant-bg, var(--color-muted))" }
-      }
+      style={{
+        backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
+      }}
     >
-      {isUser ? (
-        <p className="text-sm break-words whitespace-pre-wrap overflow-wrap-anywhere">{text}</p>
-      ) : (
-        // Assistant message: render via MarkdownContent so markdown formatting
-        // shows during both streaming and after completion. The text is
-        // sanitized to strip raw function-call XML tags.
+      {/* Before-text (markdown) */}
+      {beforeText && beforeText.trim() && (
         <div
           className={cn(
             "prose-sm max-w-none break-words text-sm",
-            // PERF: Apply `content-visibility: auto` ONLY to non-streaming
-            // messages. On streaming messages it causes re-layout on every
-            // 30ms text-delta flush (height changes → intrinsic-size recalc).
-            !showCursor && "prose-sm-static",
-            showCursor && "stream-reveal stream-batch-fade",
+            !isStreaming && "prose-sm-static",
+            isStreaming && "stream-reveal stream-batch-fade",
           )}
         >
           <MarkdownContent
-            content={stripFunctionCallTags(text)}
+            content={stripFunctionCallTags(beforeText)}
+            onCiteClick={onCiteClick}
+            showCursor={showCursor && !specToRender && !afterText}
+          />
+        </div>
+      )}
+
+      {/* GenUI block (live or persisted) */}
+      {specToRender && (
+        <div className={cn(beforeText && beforeText.trim() ? "mt-3" : "")}>
+          <GenUIBlock spec={specToRender} streaming={inGenUI} />
+        </div>
+      )}
+
+      {/* After-text (markdown) — rare; only if the AI emits text after the block */}
+      {afterText && afterText.trim() && (
+        <div
+          className={cn(
+            "prose-sm max-w-none break-words text-sm mt-3",
+            !isStreaming && "prose-sm-static",
+            isStreaming && "stream-reveal stream-batch-fade",
+          )}
+        >
+          <MarkdownContent
+            content={stripFunctionCallTags(afterText)}
             onCiteClick={onCiteClick}
             showCursor={showCursor}
           />
+        </div>
+      )}
+
+      {/* If streaming with no text yet and no GenUI, show the cursor inline */}
+      {isStreaming && showCursor && !beforeText && !specToRender && !afterText && (
+        <div className="prose-sm max-w-none break-words text-sm stream-reveal stream-batch-fade">
+          <MarkdownContent content="" onCiteClick={onCiteClick} showCursor={true} />
         </div>
       )}
     </div>
@@ -379,6 +474,26 @@ export const MessageItem = React.memo(function MessageItem({
     [message.parts],
   );
   const useParts = !isUser && parts.length > 0;
+
+  // Persist GenUI nodes when streaming completes. Once `isStreaming` flips
+  // to false, if the message text contains `<<<genui>>>` sentinels but
+  // `message.genui` isn't set yet, parse + validate the spec and store it
+  // via `updateMessage`. This makes the spec survive reloads (it's saved to
+  // Dexie by the chat store's persist middleware).
+  const updateMessage = useChatStore((s) => s.updateMessage);
+  React.useEffect(() => {
+    if (isUser) return;
+    if (message.isStreaming) return;
+    if (message.genui && message.genui.length > 0) return;
+    const extracted = extractGenUIFromMessage(message);
+    if (extracted && extracted.length > 0) {
+      updateMessage(message.id, (msg) => ({
+        ...msg,
+        genui: extracted,
+      }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [message.id, message.isStreaming, message.content, message.parts, isUser]);
 
   return (
     <div
@@ -608,6 +723,8 @@ export const MessageItem = React.memo(function MessageItem({
                             showCursor={isLastStreaming && item.isLast && lastPart?.type === "text"}
                             isUser={isUser}
                             onCiteClick={onCiteClick}
+                            genuiNodes={!message.isStreaming ? message.genui : undefined}
+                            isStreaming={isLastStreaming && item.isLast}
                           />
                         );
                       })}
@@ -637,6 +754,8 @@ export const MessageItem = React.memo(function MessageItem({
                       showCursor={!isUser && Boolean(message.isStreaming)}
                       isUser={isUser}
                       onCiteClick={onCiteClick}
+                      genuiNodes={!message.isStreaming ? message.genui : undefined}
+                      isStreaming={Boolean(message.isStreaming)}
                     />
                   )}
                   {message.toolCalls && message.toolCalls.length > 0 && (
@@ -721,6 +840,7 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.isStreaming === next.message.isStreaming &&
     prev.message.parts === next.message.parts &&
     prev.message.toolCalls === next.message.toolCalls &&
+    prev.message.genui === next.message.genui &&
     prev.groupPosition === next.groupPosition &&
     prev.showFooter === next.showFooter &&
     prev.onRegenerate === next.onRegenerate

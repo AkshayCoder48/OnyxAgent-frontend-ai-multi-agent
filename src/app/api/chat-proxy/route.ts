@@ -229,8 +229,6 @@ export async function POST(
       // making it available to `upstream.body.getReader()`. This is the
       // equivalent of `curl -N` (no-buffer) — we want each chunk flushed
       // to the client the moment it arrives from the upstream provider.
-      // @ts-expect-error — `cache` is not on the standard fetch type but
-      // is respected by undici to disable response caching/buffering.
       cache: "no-store",
     });
   } catch (err: unknown) {

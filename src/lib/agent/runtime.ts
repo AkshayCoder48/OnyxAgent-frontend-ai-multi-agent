@@ -1326,7 +1326,48 @@ A file called \`agent.md\` has been written to the sandbox at \`/home/user/agent
 - Error recovery procedures
 - Tool calling rules
 
-Read it FIRST with \`read_file\` (path: \`agent.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/agent.md\` as fallback.`;
+Read it FIRST with \`read_file\` (path: \`agent.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/agent.md\` as fallback.
+
+## Generative UI (GenUI)
+When rich structure helps (comparisons, image grids, data tables, source panels), emit a \`<<<genui>>>...<<</genui>>>\` block with a JSON spec. Available types: header, image, image_grid, comparison_table, code_block, sources_panel, card, card_grid, stat, stats_row, callout, list, checklist, timeline, stepper, divider, columns, tabs, accordion, text_block, quote, key_value, badge, progress, sparkline, suggestion_chips, agent_card, terminal_card, weather_card, stock_ticker.
+Every image requires meta.source. Keep prose short beside a spec. Never emit raw HTML.
+
+### GenUI spec format
+The block contains a JSON object of shape \`{ "nodes": [{ "id": "unique-id", "type": "...", "props": {...}, "children": [...] }] }\`. The parser is tolerant — partial JSON during streaming is fine (strings may be cut mid-value, brackets may be missing) — but try to emit well-formed JSON so the live preview renders correctly.
+
+### When to use GenUI
+- **Use GenUI** when the answer is fundamentally visual/structured: a comparison table, an image grid, a stat row, a timeline, a source panel, a code block with syntax highlighting, a checklist the user can interact with, a weather card, a stock ticker, etc.
+- **Do NOT use GenUI** for prose answers, simple lists, or short responses — just write markdown. GenUI is for *rich* structure that markdown can't express well.
+- **Keep prose short beside a spec** — a sentence or two of context, then the spec. Don't duplicate the spec's content in prose.
+
+### GenUI examples
+Comparison table:
+\`\`\`
+<<<genui>>>
+{"nodes":[{"id":"cmp1","type":"comparison_table","props":{"title":"Plan comparison","options":["Free","Pro","Team"],"features":[{"feature":"Users","values":[1,5,20]},{"feature":"Storage","values":["1GB","50GB","1TB"]},{"feature":"SSO","values":[false,true,true]}]}}]}
+<<</genui>>>
+\`\`\`
+
+Image grid:
+\`\`\`
+<<<genui>>>
+{"nodes":[{"id":"grid1","type":"image_grid","props":{"columns":3},"children":[{"id":"img1","type":"image","props":{"src":"https://example.com/a.jpg","alt":"A","caption":"Option A"}},{"id":"img2","type":"image","props":{"src":"https://example.com/b.jpg","alt":"B","caption":"Option B"}}]}]}
+<<</genui>>>
+\`\`\`
+
+Stats row:
+\`\`\`
+<<<genui>>>
+{"nodes":[{"id":"stats1","type":"stats_row","children":[{"id":"s1","type":"stat","props":{"label":"MRR","value":"$12.4k","delta":8.2,"deltaLabel":"vs last month"}},{"id":"s2","type":"stat","props":{"label":"Churn","value":"2.1%","delta":-0.4,"deltaLabel":"vs last month"}}]}]}
+<<</genui>>>
+\`\`\`
+
+### GenUI rules
+- Every \`image\` node MUST include \`meta: { source: "url-or-attribution" }\` so the image is attributed.
+- URLs in props must be \`https://\`, \`http://\`, or \`data:image/\` — other schemes are stripped.
+- Node IDs must be unique within the spec (used as React keys).
+- Nesting is capped at depth 4 — don't go deeper.
+- Keep specs small — one block per concept. Don't cram everything into one giant spec.`;
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
 
