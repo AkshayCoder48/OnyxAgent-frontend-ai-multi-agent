@@ -1179,8 +1179,10 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **run_terminal**: Use for shell commands — file operations, git, npm/pip installs, system queries. Supports pipes (|), redirects (>), and chains (&&).
 
 ### Web & Search
-- **ddg_search**: Use for web searches via DuckDuckGo. Returns titles + URLs + snippets. Best for finding current information, documentation, or answers to factual questions.
-- **web_fetch**: Use to read the full content of a specific URL. Use AFTER ddg_search to deep-read a promising result page.
+- **web_search**: Search the web for text results. Uses LangSearch (if API key configured in Settings) for richer summaries, else falls back to Miklium (Yahoo-based). Returns titles, URLs, snippets. Best for finding current information, documentation, or answers to factual questions.
+- **image_search**: Search for images via Miklium. Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants pictures, photos, or diagrams.
+- **video_search**: Search for videos via Miklium. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants tutorials or multimedia content.
+- **web_fetch**: Use to read the full content of a specific URL. Use AFTER web_search to deep-read a promising result page.
 
 ### File Management (OPFS — local browser storage)
 - **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.

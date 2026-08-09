@@ -61,11 +61,9 @@ NEVER generate an entire large file in one operation. Use incremental writing:
 - `run_terminal`: File operations (ls, cat, grep), git, npm/pip installs, system queries
 
 ### 5. Web & Search
-- **web_search**: Search the web. Uses LangSearch (if API key configured) or DuckDuckGo fallback.
-- **news_search**: Search for news. Uses LangSearch or DuckDuckGo.
-- **image_search**: Search for images via DuckDuckGo.
-- **video_search**: Search for videos via DuckDuckGo.
-- **map_search**: Search for places/locations via DuckDuckGo.
+- **web_search**: Search the web for text results. Uses LangSearch (if API key configured in Settings) for richer summaries, else falls back to Miklium (Yahoo-based). Returns titles, URLs, snippets.
+- **image_search**: Search for images via Miklium. Returns image URLs, thumbnails, dimensions, and source pages.
+- **video_search**: Search for videos via Miklium. Returns video titles, URLs, thumbnails, durations, and channel info.
 - **web_fetch**: Read the full content of a specific URL. Use AFTER web_search to deep-read pages.
 
 ### 6. Subagent Orchestration

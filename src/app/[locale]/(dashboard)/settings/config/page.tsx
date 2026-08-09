@@ -462,7 +462,7 @@ function OtherApiKeysSection() {
       description="Keys for web search (Tavily, LangSearch) and embeddings. Stored encrypted locally; leave blank to keep an existing key."
     >
       <div className="space-y-4">
-        <FormField label="LangSearch API key" htmlFor="langsearch-key" description="Optional — when set, web_search & news_search use LangSearch's hybrid API (richer summaries); falls back to DuckDuckGo when blank or on error.">
+        <FormField label="LangSearch API key" htmlFor="langsearch-key" description="Optional — when set, web_search uses LangSearch's hybrid API (richer summaries); falls back to Miklium when blank or on error. Image & video search always use Miklium.">
           <Input
             id="langsearch-key"
             type="password"

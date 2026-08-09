@@ -5,7 +5,7 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Newspaper, Video, MapPin, ExternalLink } from "lucide-react";
+import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Video, ExternalLink, Clock, Eye, ThumbsUp, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -244,161 +244,196 @@ export function FileOpResult({ args, result, status }: ResultProps) {
 }
 
 // ---- Tool renderer dispatcher ----
-// ---- DuckDuckGo Search Results ----
+// ---- Web Search Results (LangSearch + Miklium) ----
+// Handles results from both LangSearch (has title, domain, icon, description)
+// and Miklium (has url, snippet, snippetType, symbols).
 export function WebSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; description?: string; domain?: string; icon?: string }> } } | undefined;
+  const r = result as { output?: { results?: Array<{ title?: string; url?: string; description?: string; snippet?: string; domain?: string; icon?: string; source?: string; provider?: string; snippetType?: string; symbols?: number }>; provider?: string } } | undefined;
   const results = r?.output?.results ?? [];
+  const provider = r?.output?.provider ?? "miklium";
   if (results.length === 0) return <GenericToolResult result={result} />;
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <Globe className="h-3 w-3" /> {results.length} web results
-      </div>
-      {results.slice(0, 8).map((item, i) => (
-        <a
-          key={i}
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex gap-2 rounded-lg border border-border p-2 hover:bg-accent transition-colors"
-        >
-          {item.icon && <img src={item.icon} alt="" className="h-4 w-4 shrink-0 rounded-sm mt-0.5" />}
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground truncate">{item.title}</div>
-            <div className="text-[10px] text-muted-foreground truncate">{item.domain}</div>
-            {item.description && <div className="text-[10px] text-muted-foreground line-clamp-2 mt-0.5">{item.description}</div>}
-          </div>
-          <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0 mt-0.5" />
-        </a>
-      ))}
-    </div>
-  );
-}
 
-export function ImageSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; imageUrl?: string; thumbnail?: string; width?: number; height?: number; source?: string }> } } | undefined;
-  const results = r?.output?.results ?? [];
-  if (results.length === 0) return <GenericToolResult result={result} />;
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <ImageIcon className="h-3 w-3" /> {results.length} images
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          <Globe className="h-3 w-3" /> {results.length} web result{results.length !== 1 ? "s" : ""}
+        </div>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">
+          {provider}
+        </Badge>
       </div>
-      <div className="grid grid-cols-3 gap-1.5">
-        {results.slice(0, 9).map((item, i) => (
-          <a
-            key={i}
-            href={item.imageUrl || item.thumbnail}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="group relative aspect-square overflow-hidden rounded-lg border border-border"
-          >
-            <img
-              src={item.imageUrl || item.thumbnail}
-              alt={item.title}
-              className="h-full w-full object-cover transition-transform group-hover:scale-105"
-              loading="lazy"
-            />
-            <div className="absolute inset-0 bg-black/60 opacity-0 transition-opacity group-hover:opacity-100 flex items-end p-1">
-              <span className="text-[9px] text-white line-clamp-2">{item.title}</span>
-            </div>
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export function NewsSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; description?: string; domain?: string; date?: string }> } } | undefined;
-  const results = r?.output?.results ?? [];
-  if (results.length === 0) return <GenericToolResult result={result} />;
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <Newspaper className="h-3 w-3" /> {results.length} news articles
-      </div>
-      {results.slice(0, 6).map((item, i) => (
-        <a
-          key={i}
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="block rounded-lg border border-border p-2 hover:bg-accent transition-colors"
-        >
-          <div className="text-xs font-medium text-foreground">{item.title}</div>
-          {item.description && <div className="text-[10px] text-muted-foreground line-clamp-2 mt-0.5">{item.description}</div>}
-          <div className="text-[10px] text-muted-foreground mt-0.5">{item.domain}{item.date ? ` · ${item.date}` : ""}</div>
-        </a>
-      ))}
-    </div>
-  );
-}
-
-export function VideoSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; imageUrl?: string; source?: string; date?: string; description?: string }> } } | undefined;
-  const results = r?.output?.results ?? [];
-  if (results.length === 0) return <GenericToolResult result={result} />;
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <Video className="h-3 w-3" /> {results.length} videos
-      </div>
-      {results.slice(0, 5).map((item, i) => (
-        <a
-          key={i}
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex gap-2 rounded-lg border border-border p-2 hover:bg-accent transition-colors"
-        >
-          {item.imageUrl && (
-            <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
-              <img src={item.imageUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
-              <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-                <Video className="h-4 w-4 text-white" />
+      <div className="space-y-1.5">
+        {results.slice(0, 8).map((item, i) => {
+          const title = item.title || item.domain || item.url;
+          const desc = item.description || item.snippet;
+          const domain = item.domain || (item.url ? domainOf(item.url) : "");
+          return (
+            <a
+              key={i}
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group flex gap-2.5 rounded-xl border border-border bg-card/50 p-2.5 hover:bg-accent hover:border-primary/30 transition-all"
+            >
+              <span className="bg-primary/10 text-primary flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold tabular-nums">
+                {i + 1}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  {item.icon ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={item.icon} alt="" className="h-3.5 w-3.5 shrink-0 rounded-sm" />
+                  ) : null}
+                  <p className="text-foreground truncate text-xs font-semibold group-hover:text-primary transition-colors">{title}</p>
+                </div>
+                <div className="text-muted-foreground mt-0.5 flex items-center gap-1 text-[10px]">
+                  <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                  <span className="truncate">{domain}</span>
+                </div>
+                {desc && (
+                  <p className="text-muted-foreground mt-1 line-clamp-2 text-[11px] leading-relaxed">{desc}</p>
+                )}
               </div>
-            </div>
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground line-clamp-2">{item.title}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">{item.source}{item.date ? ` · ${item.date}` : ""}</div>
-          </div>
-        </a>
-      ))}
+            </a>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-export function MapSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; description?: string; domain?: string }>; map_url?: string } } | undefined;
+// ---- Image Search Results (Miklium) ----
+// Miklium returns: { imageUrl, title, referenceUrl, size: {width, height}, query }
+export function ImageSearchResults({ result }: ResultProps) {
+  const r = result as { output?: { results?: Array<{ title?: string; imageUrl?: string; thumbnail?: string; url?: string; width?: number; height?: number; source?: string; domain?: string }> } } | undefined;
   const results = r?.output?.results ?? [];
-  const mapUrl = r?.output?.map_url;
+  if (results.length === 0) return <GenericToolResult result={result} />;
+
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <MapPin className="h-3 w-3" /> {results.length} places
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          <ImageIcon className="h-3 w-3" /> {results.length} image{results.length !== 1 ? "s" : ""}
+        </div>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">miklium</Badge>
       </div>
-      {mapUrl && (
-        <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg border border-primary/30 bg-primary/5 p-2 text-center text-xs font-medium text-primary hover:bg-primary/10 transition-colors">
-          View on DuckDuckGo Maps →
-        </a>
-      )}
-      {results.slice(0, 5).map((item, i) => (
-        <a
-          key={i}
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex gap-2 rounded-lg border border-border p-2 hover:bg-accent transition-colors"
-        >
-          <MapPin className="h-3 w-3 text-primary shrink-0 mt-0.5" />
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-foreground truncate">{item.title}</div>
-            {item.description && <div className="text-[10px] text-muted-foreground line-clamp-1">{item.description}</div>}
-          </div>
-        </a>
-      ))}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {results.slice(0, 9).map((item, i) => {
+          const imgSrc = item.imageUrl || item.thumbnail;
+          const linkUrl = item.url || item.imageUrl || item.thumbnail || "#";
+          return (
+            <a
+              key={i}
+              href={linkUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group relative aspect-square overflow-hidden rounded-xl border border-border bg-muted"
+            >
+              {imgSrc ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={imgSrc}
+                  alt={item.title || ""}
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-110"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center">
+                  <ImageIcon className="text-muted-foreground h-6 w-6" />
+                </div>
+              )}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100 flex items-end p-2">
+                <div className="w-full">
+                  {item.title && (
+                    <p className="text-[9px] text-white line-clamp-2 leading-tight">{item.title}</p>
+                  )}
+                  {(item.width || item.height) && (
+                    <p className="text-[8px] text-white/60 mt-0.5">{item.width}×{item.height}</p>
+                  )}
+                </div>
+              </div>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---- Video Search Results (Miklium) ----
+// Miklium returns: { videoUrl, thumbUrl, title, description, duration, query, additionalData: { channelTitle, statistics } }
+export function VideoSearchResults({ result }: ResultProps) {
+  const r = result as { output?: { results?: Array<{ title?: string; url?: string; videoUrl?: string; imageUrl?: string; thumbUrl?: string; thumbnail?: string; source?: string; channelTitle?: string; duration?: string; description?: string; viewCount?: string; likeCount?: string; domain?: string }> } } | undefined;
+  const results = r?.output?.results ?? [];
+  if (results.length === 0) return <GenericToolResult result={result} />;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          <Video className="h-3 w-3" /> {results.length} video{results.length !== 1 ? "s" : ""}
+        </div>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">miklium</Badge>
+      </div>
+      <div className="space-y-1.5">
+        {results.slice(0, 5).map((item, i) => {
+          const thumb = item.thumbUrl || item.imageUrl || item.thumbnail;
+          const linkUrl = item.videoUrl || item.url || "#";
+          const channel = item.channelTitle || item.source;
+          return (
+            <a
+              key={i}
+              href={linkUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group flex gap-3 rounded-xl border border-border bg-card/50 p-2 hover:bg-accent hover:border-primary/30 transition-all"
+            >
+              <div className="relative h-16 w-24 shrink-0 overflow-hidden rounded-lg bg-muted">
+                {thumb ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center">
+                    <Video className="text-muted-foreground h-5 w-5" />
+                  </div>
+                )}
+                <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/40 transition-colors">
+                  <Play className="h-5 w-5 fill-white text-white" />
+                </div>
+                {item.duration && (
+                  <div className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 font-mono text-[8px] text-white">
+                    {item.duration}
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-foreground group-hover:text-primary line-clamp-2 text-xs font-semibold transition-colors">{item.title}</p>
+                {channel && (
+                  <p className="text-muted-foreground mt-0.5 truncate text-[10px]">{channel}</p>
+                )}
+                <div className="mt-1 flex items-center gap-2 text-[9px] text-muted-foreground">
+                  {item.viewCount && (
+                    <span className="flex items-center gap-0.5">
+                      <Eye className="h-2.5 w-2.5" />
+                      {formatCount(item.viewCount)}
+                    </span>
+                  )}
+                  {item.likeCount && (
+                    <span className="flex items-center gap-0.5">
+                      <ThumbsUp className="h-2.5 w-2.5" />
+                      {formatCount(item.likeCount)}
+                    </span>
+                  )}
+                  {item.domain && (
+                    <span className="truncate">{item.domain}</span>
+                  )}
+                </div>
+              </div>
+            </a>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -453,13 +488,29 @@ export function ToolResultRenderer({ toolName, ...props }: ResultProps & { toolN
       return <WebSearchResults {...props} />;
     case "image_search":
       return <ImageSearchResults {...props} />;
-    case "news_search":
-      return <NewsSearchResults {...props} />;
     case "video_search":
       return <VideoSearchResults {...props} />;
-    case "map_search":
-      return <MapSearchResults {...props} />;
     default:
       return <GenericToolResult {...props} />;
   }
+}
+
+// ---- Helper functions ----
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/** Format a view/like count string (e.g. "1450239102") into "1.5B", "1.2M", "12K". */
+function formatCount(countStr: string): string {
+  const n = parseInt(countStr, 10);
+  if (isNaN(n)) return countStr;
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(n);
 }

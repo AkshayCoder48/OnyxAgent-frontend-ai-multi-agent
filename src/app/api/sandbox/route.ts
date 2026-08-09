@@ -469,8 +469,8 @@ NEVER generate an entire large file in one operation. Use:
 - run_terminal: Shell commands. File ops, git, npm/pip installs, system queries. 120s timeout.
 
 ## Web and Search
-- web_search / news_search: Search the web (LangSearch if configured, else DuckDuckGo).
-- image_search / video_search / map_search: Search via DuckDuckGo.
+- web_search: Search the web (LangSearch if API key configured, else Miklium).
+- image_search / video_search: Search via Miklium (Yahoo-based).
 - web_fetch: Read full content of a URL. Use AFTER web_search.
 
 ## Subagent Orchestration

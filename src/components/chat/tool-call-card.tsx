@@ -37,9 +37,7 @@ import {
   ToolResultRenderer,
   WebSearchResults as DDGWebResults,
   ImageSearchResults as DDGImageResults,
-  NewsSearchResults as DDGNewsResults,
   VideoSearchResults as DDGVideoResults,
-  MapSearchResults as DDGMapResults,
 } from "./tool-results";
 
 interface ToolCallCardProps {
@@ -54,11 +52,9 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   // DDG search tools — detect and auto-expand
   const isDDGWebSearch = toolCall.name === "web_search" && toolCall.status === "completed";
   const isDDGImageSearch = toolCall.name === "image_search" && toolCall.status === "completed";
-  const isDDGNewsSearch = toolCall.name === "news_search" && toolCall.status === "completed";
   const isDDGVideoSearch = toolCall.name === "video_search" && toolCall.status === "completed";
-  const isDDGMapSearch = toolCall.name === "map_search" && toolCall.status === "completed";
   const isAnyDDGSearch =
-    isDDGWebSearch || isDDGImageSearch || isDDGNewsSearch || isDDGVideoSearch || isDDGMapSearch;
+    isDDGWebSearch || isDDGImageSearch || isDDGVideoSearch;
 
   const [expanded, setExpanded] = useState(
     toolCall.name === "ask_user" ||
@@ -201,13 +197,9 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           ? "Web Search"
           : isDDGImageSearch
             ? "Image Search"
-            : isDDGNewsSearch
-              ? "News Search"
-              : isDDGVideoSearch
-                ? "Video Search"
-                : isDDGMapSearch
-                  ? "Map Search"
-                  : isChart
+            : isDDGVideoSearch
+              ? "Video Search"
+              : isChart
           ? "Chart"
           : isAskUser
             ? "Question"
@@ -397,12 +389,8 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             <DDGWebResults result={toolCall.result} />
           ) : toolCall.status === "completed" && isDDGImageSearch ? (
             <DDGImageResults result={toolCall.result} />
-          ) : toolCall.status === "completed" && isDDGNewsSearch ? (
-            <DDGNewsResults result={toolCall.result} />
           ) : toolCall.status === "completed" && isDDGVideoSearch ? (
             <DDGVideoResults result={toolCall.result} />
-          ) : toolCall.status === "completed" && isDDGMapSearch ? (
-            <DDGMapResults result={toolCall.result} />
           ) : isAskUser ? (
             <AskUserResult args={toolCall.args} resultText={resultText} />
           ) : isRunPython ? (
