@@ -38,9 +38,15 @@ export function parseFileDownloadResult(result: unknown): FileDownloadPayload | 
   }
   if (!parsed || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
-  if (obj.kind !== "file_download") return null;
-  if (!obj.download_url || typeof obj.download_url !== "string") return null;
-  return parsed as FileDownloadPayload;
+  // The tool result is wrapped as { success, output: { kind: "file_download", ... } }
+  // Check `.output` first, then fall back to bare spec.
+  const output = obj.output as Record<string, unknown> | undefined;
+  const target = (output && typeof output === "object" && output.kind === "file_download")
+    ? output
+    : (obj.kind === "file_download" ? obj : null);
+  if (!target) return null;
+  if (!target.download_url || typeof target.download_url !== "string") return null;
+  return target as unknown as FileDownloadPayload;
 }
 
 const EXT_ICONS: Record<string, string> = {

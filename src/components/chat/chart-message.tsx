@@ -4,7 +4,15 @@ import dynamic from "next/dynamic";
 
 import type { ChartSpec } from "@/types";
 
-/** Parse a `create_chart` tool result into a ChartSpec, or null if it isn't one. */
+/** Parse a `create_chart` tool result into a ChartSpec, or null if it isn't one.
+ *
+ * The tool result may be:
+ *   - A JSON string: '{"success":true,"output":{"kind":"chart",...}}'
+ *   - An object: { success: true, output: { kind: "chart", ... } }
+ *   - A bare spec: { kind: "chart", ... }
+ *
+ * We handle all three by checking `.output.kind` first, then `.kind`.
+ */
 export function parseChartResult(result: unknown): ChartSpec | null {
   let payload: unknown = result;
   if (typeof result === "string") {
@@ -14,7 +22,14 @@ export function parseChartResult(result: unknown): ChartSpec | null {
       return null;
     }
   }
-  if (payload && typeof payload === "object" && (payload as { kind?: unknown }).kind === "chart") {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as { kind?: unknown; output?: { kind?: unknown } };
+  // Case 1: full ToolResult wrapper { success, output: { kind: "chart", ... } }
+  if (obj.output && typeof obj.output === "object" && obj.output.kind === "chart") {
+    return obj.output as unknown as ChartSpec;
+  }
+  // Case 2: bare spec { kind: "chart", ... }
+  if (obj.kind === "chart") {
     return payload as ChartSpec;
   }
   return null;

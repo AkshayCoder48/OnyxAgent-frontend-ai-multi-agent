@@ -139,24 +139,42 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
 
   // Parse image preview result — same pattern as chartSpec. The tool result
   // may be a JSON string (not a parsed object), so we parse it here.
+  // The tool returns { success: true, output: { kind: "image_preview", url, alt } }
+  // so the actual spec is at `.output`, not the top level.
   const imagePreviewSpec = useMemo(() => {
     if (toolCall.name !== "preview_image" || toolCall.status !== "completed") return null;
     const result = toolCall.result;
     if (!result) return null;
+
+    // Helper to extract spec from a parsed object — handles both
+    // { output: { kind, url } } (full ToolResult) and { kind, url } (bare spec)
+    const extractSpec = (obj: Record<string, unknown>): { url: string; alt?: string; error?: string } | null => {
+      // Case 1: full ToolResult wrapper { success, output: { kind, url } }
+      const output = obj.output as Record<string, unknown> | undefined;
+      if (output && typeof output === "object") {
+        const url = String(output.url || "");
+        if (url || output.error) {
+          return { url, alt: output.alt as string | undefined, error: output.error as string | undefined };
+        }
+      }
+      // Case 2: bare spec { kind, url }
+      const url2 = String(obj.url || "");
+      if (url2 || obj.error) {
+        return { url: url2, alt: obj.alt as string | undefined, error: obj.error as string | undefined };
+      }
+      return null;
+    };
+
     // If already an object, use directly.
     if (typeof result === "object") {
-      const obj = result as { kind?: string; url?: string; alt?: string; error?: string };
-      if (obj.kind === "image_preview" || obj.url) {
-        return { url: obj.url ?? "", alt: obj.alt, error: obj.error };
-      }
+      return extractSpec(result as Record<string, unknown>);
     }
     // If a string, try JSON.parse.
     if (typeof result === "string") {
       try {
-        const obj = JSON.parse(result) as { kind?: string; url?: string; alt?: string; error?: string };
-        if (obj.url) {
-          return { url: obj.url, alt: obj.alt, error: obj.error };
-        }
+        const obj = JSON.parse(result) as Record<string, unknown>;
+        const spec = extractSpec(obj);
+        if (spec) return spec;
       } catch {
         // not JSON — maybe it's a raw URL
         if (result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/")) {

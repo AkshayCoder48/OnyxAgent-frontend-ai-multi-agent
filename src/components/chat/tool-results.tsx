@@ -244,13 +244,51 @@ export function FileOpResult({ args, result, status }: ResultProps) {
 }
 
 // ---- Tool renderer dispatcher ----
+// ---- Helper: parse tool result (handles both JSON string and object) ----
+/**
+ * The runtime emits tool results as JSON STRINGS (via `tool_result` SSE event
+ * with `content: string`). The renderers need to parse them back into objects
+ * to access `.output.results`. This helper handles both cases safely.
+ */
+function parseResult<T = Record<string, unknown>>(result: unknown): T | null {
+  if (!result) return null;
+  if (typeof result === "string") {
+    try {
+      return JSON.parse(result) as T;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof result === "object") {
+    return result as T;
+  }
+  return null;
+}
+
 // ---- Web Search Results (LangSearch + Miklium) ----
 // Handles results from both LangSearch (has title, domain, icon, description)
 // and Miklium (has url, snippet, snippetType, symbols).
 export function WebSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; description?: string; snippet?: string; domain?: string; icon?: string; source?: string; provider?: string; snippetType?: string; symbols?: number }>; provider?: string } } | undefined;
-  const results = r?.output?.results ?? [];
-  const provider = r?.output?.provider ?? "miklium";
+  const parsed = parseResult<{
+    output?: {
+      results?: Array<{
+        title?: string;
+        url?: string;
+        description?: string;
+        snippet?: string;
+        domain?: string;
+        icon?: string;
+        source?: string;
+        provider?: string;
+        snippetType?: string;
+        symbols?: number;
+      }>;
+      provider?: string;
+      query?: string;
+    };
+  }>(result);
+  const results = parsed?.output?.results ?? [];
+  const provider = parsed?.output?.provider ?? "miklium";
   if (results.length === 0) return <GenericToolResult result={result} />;
 
   return (
@@ -303,60 +341,168 @@ export function WebSearchResults({ result }: ResultProps) {
   );
 }
 
-// ---- Image Search Results (Miklium) ----
+// ---- Image Search Results (Miklium) — Swipeable Carousel ----
 // Miklium returns: { imageUrl, title, referenceUrl, size: {width, height}, query }
 export function ImageSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; imageUrl?: string; thumbnail?: string; url?: string; width?: number; height?: number; source?: string; domain?: string }> } } | undefined;
-  const results = r?.output?.results ?? [];
+  const parsed = parseResult<{
+    output?: {
+      results?: Array<{
+        title?: string;
+        imageUrl?: string;
+        thumbnail?: string;
+        url?: string;
+        width?: number;
+        height?: number;
+        source?: string;
+        domain?: string;
+      }>;
+    };
+  }>(result);
+  const results = parsed?.output?.results ?? [];
+  const [currentIdx, setCurrentIdx] = React.useState(0);
+  const touchStartX = React.useRef<number | null>(null);
+
   if (results.length === 0) return <GenericToolResult result={result} />;
+
+  const total = results.length;
+  // Clamp index in case results shrank
+  const idx = Math.min(currentIdx, total - 1);
+  const current = results[idx];
+  if (!current) return <GenericToolResult result={result} />;
+
+  const imgSrc = current.imageUrl || current.thumbnail;
+  const linkUrl = current.url || current.imageUrl || current.thumbnail || "#";
+
+  const goPrev = () => setCurrentIdx((i) => (i - 1 + total) % total);
+  const goNext = () => setCurrentIdx((i) => (i + 1) % total);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0]?.clientX ?? null;
+  };
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current === null) return;
+    const endX = e.changedTouches[0]?.clientX ?? touchStartX.current;
+    const delta = endX - touchStartX.current;
+    if (Math.abs(delta) > 40) {
+      if (delta > 0) goPrev();
+      else goNext();
+    }
+    touchStartX.current = null;
+  };
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-          <ImageIcon className="h-3 w-3" /> {results.length} image{results.length !== 1 ? "s" : ""}
+          <ImageIcon className="h-3 w-3" /> {total} image{total !== 1 ? "s" : ""}
         </div>
         <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">miklium</Badge>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {results.slice(0, 9).map((item, i) => {
-          const imgSrc = item.imageUrl || item.thumbnail;
-          const linkUrl = item.url || item.imageUrl || item.thumbnail || "#";
-          return (
-            <a
-              key={i}
-              href={linkUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group relative aspect-square overflow-hidden rounded-xl border border-border bg-muted"
-            >
-              {imgSrc ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={imgSrc}
-                  alt={item.title || ""}
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-110"
-                  loading="lazy"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center">
-                  <ImageIcon className="text-muted-foreground h-6 w-6" />
-                </div>
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100 flex items-end p-2">
-                <div className="w-full">
-                  {item.title && (
-                    <p className="text-[9px] text-white line-clamp-2 leading-tight">{item.title}</p>
-                  )}
-                  {(item.width || item.height) && (
-                    <p className="text-[8px] text-white/60 mt-0.5">{item.width}×{item.height}</p>
-                  )}
-                </div>
+
+      {/* Swipeable image carousel */}
+      <div
+        className="relative overflow-hidden rounded-xl border border-border bg-muted select-none"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
+        <div
+          className="flex transition-transform duration-300 ease-out"
+          style={{ transform: `translateX(-${idx * 100}%)` }}
+        >
+          {results.map((item, i) => {
+            const src = item.imageUrl || item.thumbnail;
+            return (
+              <div key={i} className="relative w-full shrink-0" style={{ aspectRatio: "16 / 11" }}>
+                {src ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={src}
+                    alt={item.title || ""}
+                    className="h-full w-full object-cover"
+                    loading={i === idx ? "eager" : "lazy"}
+                    draggable={false}
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center">
+                    <ImageIcon className="text-muted-foreground h-8 w-8" />
+                  </div>
+                )}
+                {/* Gradient overlay with title */}
+                {(item.title || item.width || item.height) && (
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent p-2.5">
+                    {item.title && (
+                      <p className="text-[10px] text-white line-clamp-1 leading-tight font-medium">{item.title}</p>
+                    )}
+                    {(item.width || item.height) && (
+                      <p className="text-[9px] text-white/60 mt-0.5">{item.width}×{item.height}</p>
+                    )}
+                  </div>
+                )}
               </div>
-            </a>
-          );
-        })}
+            );
+          })}
+        </div>
+
+        {/* Left/Right nav arrows (desktop) */}
+        {total > 1 && (
+          <>
+            <button
+              type="button"
+              onClick={goPrev}
+              className="absolute left-1.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors backdrop-blur-sm"
+              aria-label="Previous image"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={goNext}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors backdrop-blur-sm"
+              aria-label="Next image"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        {/* Dot indicators */}
+        {total > 1 && (
+          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex gap-1">
+            {results.map((_, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => setCurrentIdx(i)}
+                className={cn(
+                  "h-1.5 rounded-full transition-all",
+                  i === idx ? "w-4 bg-white" : "w-1.5 bg-white/50 hover:bg-white/70",
+                )}
+                aria-label={`Go to image ${i + 1}`}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Counter badge */}
+        <div className="absolute top-1.5 right-1.5 rounded-full bg-black/60 px-2 py-0.5 font-mono text-[9px] text-white backdrop-blur-sm">
+          {idx + 1} / {total}
+        </div>
       </div>
+
+      {/* Open source link */}
+      <a
+        href={linkUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-muted-foreground hover:text-primary flex items-center justify-center gap-1 text-[10px] transition-colors"
+      >
+        <ExternalLink className="h-2.5 w-2.5" />
+        <span className="truncate">Open source: {domainOf(linkUrl)}</span>
+      </a>
     </div>
   );
 }
@@ -364,8 +510,26 @@ export function ImageSearchResults({ result }: ResultProps) {
 // ---- Video Search Results (Miklium) ----
 // Miklium returns: { videoUrl, thumbUrl, title, description, duration, query, additionalData: { channelTitle, statistics } }
 export function VideoSearchResults({ result }: ResultProps) {
-  const r = result as { output?: { results?: Array<{ title?: string; url?: string; videoUrl?: string; imageUrl?: string; thumbUrl?: string; thumbnail?: string; source?: string; channelTitle?: string; duration?: string; description?: string; viewCount?: string; likeCount?: string; domain?: string }> } } | undefined;
-  const results = r?.output?.results ?? [];
+  const parsed = parseResult<{
+    output?: {
+      results?: Array<{
+        title?: string;
+        url?: string;
+        videoUrl?: string;
+        imageUrl?: string;
+        thumbUrl?: string;
+        thumbnail?: string;
+        source?: string;
+        channelTitle?: string;
+        duration?: string;
+        description?: string;
+        viewCount?: string;
+        likeCount?: string;
+        domain?: string;
+      }>;
+    };
+  }>(result);
+  const results = parsed?.output?.results ?? [];
   if (results.length === 0) return <GenericToolResult result={result} />;
 
   return (
