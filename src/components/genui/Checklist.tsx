@@ -19,10 +19,13 @@ interface ChecklistItem {
  */
 export function Checklist({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const itemsRaw = arr<Record<string, unknown>>(props.items);
+  const itemsRaw = arr<unknown>(props.items);
   const initialItems: ChecklistItem[] = itemsRaw.map((it) => {
+    if (typeof it === "string") return { text: it, checked: false } as ChecklistItem;
     const o = obj(it);
-    return { text: str(o.text), checked: bool(o.checked, false) };
+    const statusRaw = str(o.status, "").toLowerCase();
+    const isChecked = statusRaw === "done" || statusRaw === "complete" || statusRaw === "checked" || bool(o.checked, false);
+    return { text: str(o.text || o.label || o.title), checked: isChecked };
   });
 
   const [items, setItems] = React.useState<ChecklistItem[]>(initialItems);

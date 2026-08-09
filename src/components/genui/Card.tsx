@@ -20,9 +20,9 @@ import { GenUIComponentProps, str } from "./helpers";
  */
 export function CardBlock({ props, children, streaming, renderChildren }: GenUIComponentProps) {
   const title = str(props.title);
-  const body = str(props.body);
-  const badge = str(props.badge);
-  const href = str(props.href);
+  const body = str(props.description || props.body || props.text);
+  const badge = str(props.badge || props.label);
+  const href = str(props.href || props.url);
   const icon = str(props.icon);
 
   if (streaming && !title && !body && (!children || children.length === 0)) {

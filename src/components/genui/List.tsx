@@ -22,11 +22,12 @@ interface ListItem {
  */
 export function List({ props, streaming }: GenUIComponentProps) {
   const ordered = bool(props.ordered, false);
-  const itemsRaw = arr<Record<string, unknown>>(props.items);
+  const itemsRaw = arr<unknown>(props.items);
   const items: ListItem[] = itemsRaw.map((it) => {
+    if (typeof it === "string") return { text: it } as ListItem;
     const o = obj(it);
     return {
-      text: str(o.text),
+      text: str(o.text || o.label),
       icon: str(o.icon),
       href: str(o.href),
       status: str(o.status, "default") as ListItem["status"],

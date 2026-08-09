@@ -20,11 +20,12 @@ interface Step {
  */
 export function Stepper({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const current = num(props.current, 0);
-  const stepsRaw = arr<Record<string, unknown>>(props.steps);
+  const current = num(props.current ?? props.step ?? props.activeStep, 0);
+  const stepsRaw = arr<unknown>(props.steps);
   const steps: Step[] = stepsRaw.map((s) => {
+    if (typeof s === "string") return { title: s } as Step;
     const o = obj(s);
-    return { title: str(o.title), description: str(o.description) };
+    return { title: str(o.title || o.text), description: str(o.description || o.body || o.text) };
   });
 
   if (streaming && steps.length === 0) {

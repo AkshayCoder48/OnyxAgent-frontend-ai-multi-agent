@@ -13,8 +13,9 @@ import { GenUIComponentProps, str } from "./helpers";
  *   - variant ("default" | "secondary" | "destructive" | "outline" | "success" | "warning")
  */
 export function BadgeBlock({ props, streaming }: GenUIComponentProps) {
-  const text = str(props.text);
-  const variant = str(props.variant, "default");
+  const text = str(props.text || props.label);
+  const variantRaw = str(props.variant || props.color || props.tone, "default");
+  const variant = variantRaw === "green" ? "success" : variantRaw === "red" ? "destructive" : variantRaw === "yellow" || variantRaw === "orange" ? "warning" : variantRaw === "blue" ? "default" : variantRaw;
 
   if (streaming && !text) {
     return <div className="shimmer h-5 w-16 rounded-full" />;

@@ -22,7 +22,7 @@ interface SourceEntry {
  */
 export function SourcesPanel({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title, "Sources");
-  const sources = arr<Record<string, unknown>>(props.sources).map((s) => {
+  const sources = arr<Record<string, unknown>>(props.sources || props.items).map((s) => {
     const o = obj(s);
     return {
       url: str(o.url),

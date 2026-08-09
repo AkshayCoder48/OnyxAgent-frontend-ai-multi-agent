@@ -3,7 +3,7 @@
 import * as React from "react";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
-import { GenUIComponentProps, str, num } from "./helpers";
+import { GenUIComponentProps, str, num, obj } from "./helpers";
 
 /**
  * `image` — next/image with caption / credit / href.
@@ -20,10 +20,11 @@ import { GenUIComponentProps, str, num } from "./helpers";
  * through the Next.js image optimizer).
  */
 export function ImageBlock({ props, streaming }: GenUIComponentProps) {
-  const src = str(props.src);
+  const src = str(props.src || props.url);
   const alt = str(props.alt);
   const caption = str(props.caption);
-  const credit = str(props.credit);
+  const metaObj = obj(props.meta);
+  const credit = str(props.credit || metaObj.source || props.source);
   const href = str(props.href);
   const width = num(props.width, 800);
   const height = num(props.height, 600);

@@ -15,7 +15,7 @@ import { GenUIComponentProps, str, arr, num } from "./helpers";
  * legend — just the trend line. Width is responsive.
  */
 export function Sparkline({ props, streaming }: GenUIComponentProps) {
-  const dataRaw = arr<number>(props.data).filter(
+  const dataRaw = arr<number>(props.data || props.values || props.points).filter(
     (n) => typeof n === "number" && Number.isFinite(n),
   );
   const data = dataRaw.map((n) => Number(n));

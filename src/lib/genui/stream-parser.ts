@@ -424,6 +424,32 @@ export function segmentText(full: string): TextSegment {
     cursor = closeIdx + GENUI_CLOSE.length;
   }
 
+  // Strip wrapping code fences around GenUI blocks.
+  //
+  // The AI sometimes wraps the <<<genui>>> sentinel in a markdown code fence:
+  //   ```json
+  //   <<<genui>>>
+  //   {"nodes":[...]}
+  //   <<</genui>>>
+  //   ```
+  //
+  // This leaves an unclosed ```json at the end of `before` and a stray ``` at
+  // the start of `after`, which breaks markdown rendering. Detect and strip
+  // both halves so the markdown renders cleanly.
+  if (blocks.length > 0) {
+    // Check if `before` ends with an opening code fence (```lang or ~~~lang).
+    // The fence may be followed by a newline before the <<<genui>>> sentinel.
+    const fenceMatch = before.match(/\n?[ \t]*(`{3,}|~{3,})[a-zA-Z0-9+#.-]*\s*$/);
+    if (fenceMatch && fenceMatch.index !== undefined) {
+      before = before.slice(0, fenceMatch.index);
+      // Strip the matching closing fence from `after` (or from the streaming
+      // tail if the block is still open).
+      if (after) {
+        after = after.replace(/^\s*(`{3,}|~{3,})\s*/, "");
+      }
+    }
+  }
+
   return { before, blocks, inGenUI, after };
 }
 

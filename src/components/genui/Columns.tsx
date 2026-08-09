@@ -12,7 +12,7 @@ import { GenUIComponentProps, num } from "./helpers";
  *   - gap (px, default 16)
  */
 export function Columns({ props, children, streaming, renderChildren }: GenUIComponentProps) {
-  const count = Math.max(1, Math.min(4, Math.floor(num(props.count, 2))));
+  const count = Math.max(1, Math.min(4, Math.floor(num(props.count || props.columns, 2))));
   const gap = num(props.gap, 16);
 
   const colsClass = {

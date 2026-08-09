@@ -14,7 +14,7 @@ import { GenUIComponentProps, str, bool } from "./helpers";
  *   - level ("h1" | "h2" | "h3", default "h2")
  */
 export function Header({ props, streaming }: GenUIComponentProps) {
-  const title = str(props.title);
+  const title = str(props.title || props.text);
   const subtitle = str(props.subtitle);
   const eyebrow = str(props.eyebrow);
   const level = str(props.level, "h2") as "h1" | "h2" | "h3";

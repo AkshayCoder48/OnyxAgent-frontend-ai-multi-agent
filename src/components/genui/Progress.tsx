@@ -24,7 +24,15 @@ interface ProgressItem {
  */
 export function ProgressBlock({ props, streaming }: GenUIComponentProps) {
   const singleLabel = str(props.label);
-  const singleValue = num(props.value, 0);
+  const explicitValue = props.value;
+  const currentVal = num(props.current ?? props.total, 0); // total used as current if current missing
+  const totalVal = num(props.total, 0);
+  // If explicit value given, use it. Else if current+total given, compute percentage.
+  const singleValue = explicitValue != null
+    ? num(explicitValue, 0)
+    : totalVal > 0
+      ? (currentVal / totalVal) * 100
+      : 0;
   const singleMax = num(props.max, 100);
   const itemsRaw = Array.isArray(props.items) ? props.items : [];
   const items: ProgressItem[] = itemsRaw.map((it) => {

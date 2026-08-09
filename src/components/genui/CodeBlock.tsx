@@ -20,8 +20,8 @@ import { GenUIComponentProps, str, bool } from "./helpers";
  */
 export function CodeBlock({ props, streaming }: GenUIComponentProps) {
   const code = str(props.code);
-  const language = str(props.language);
-  const filename = str(props.filename);
+  const language = str(props.language || props.lang);
+  const filename = str(props.filename || props.title);
   const showLineNumbers = bool(props.showLineNumbers, false);
 
   if (streaming && !code) {

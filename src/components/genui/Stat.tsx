@@ -18,7 +18,7 @@ export function Stat({ props, streaming }: GenUIComponentProps) {
   const label = str(props.label);
   const valueRaw = props.value;
   const value = typeof valueRaw === "number" ? valueRaw : str(valueRaw);
-  const delta = num(props.delta, 0);
+  const delta = num(props.delta ?? props.trend, 0);
   const deltaLabel = str(props.deltaLabel);
 
   if (streaming && !label && !value) {

@@ -18,13 +18,13 @@ interface TimelineEvent {
  */
 export function Timeline({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const eventsRaw = arr<Record<string, unknown>>(props.events);
+  const eventsRaw = arr<Record<string, unknown>>(props.events || props.items);
   const events: TimelineEvent[] = eventsRaw.map((e) => {
     const o = obj(e);
     return {
       date: str(o.date),
       title: str(o.title),
-      description: str(o.description),
+      description: str(o.description || o.body || o.text),
     };
   });
 

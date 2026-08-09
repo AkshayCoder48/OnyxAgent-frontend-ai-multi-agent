@@ -20,46 +20,57 @@ export const MAX_DEPTH = 4;
 /** URL schemes allowed in GenUI specs. */
 const ALLOWED_URL_SCHEMES = ["https:", "http:", "data:image/"];
 
-/** Known URL-bearing prop names per type. Used for URL sanitization. */
+/** Known URL-bearing prop names per type. Used for URL sanitization.
+ * Includes all common aliases the AI might use. */
 const URL_PROPS_BY_TYPE: Record<string, string[]> = {
-  image: ["src", "href"],
+  image: ["src", "url", "href"],
   sources_panel: [],
-  card: ["href"],
-  agent_card: ["avatar", "href"],
+  card: ["href", "url"],
+  agent_card: ["avatar", "avatarUrl", "href", "url"],
 };
 
-/** Allow-list of string prop names per type. Anything not listed is dropped. */
+/** Allow-list of string prop names per type. Anything not listed is dropped.
+ *
+ * These lists include ALL common aliases the AI naturally uses — e.g. `body`
+ * AND `description` AND `text` for card content, `src` AND `url` for image
+ * source, `variant` AND `tone` AND `color` for callout/badge coloring. This
+ * makes the GenUI system forgiving: the AI can use whichever prop name feels
+ * natural and the renderer will find it.
+ */
 const ALLOWED_PROPS_BY_TYPE: Record<string, string[]> = {
-  header: ["title", "subtitle", "eyebrow", "level"],
-  image: ["src", "alt", "caption", "credit", "href", "width", "height"],
-  image_grid: ["columns", "gap"],
-  comparison_table: ["title", "features", "options"],
-  code_block: ["language", "code", "filename", "showLineNumbers"],
-  sources_panel: ["title", "sources"],
-  card: ["title", "body", "badge", "href", "icon"],
-  card_grid: ["columns", "gap"],
-  stat: ["label", "value", "delta", "deltaLabel"],
-  stats_row: ["gap"],
-  callout: ["variant", "title", "body"],
-  list: ["ordered", "items"],
-  checklist: ["title", "items"],
-  timeline: ["title", "events"],
-  stepper: ["title", "current", "steps"],
-  divider: ["label"],
-  columns: ["count", "gap"],
-  tabs: ["title", "tabs"],
-  accordion: ["title", "items"],
-  text_block: ["content", "variant"],
-  quote: ["text", "author", "role"],
-  key_value: ["title", "pairs"],
-  badge: ["text", "variant"],
-  progress: ["label", "value", "max", "variant"],
-  sparkline: ["data", "label", "color"],
-  suggestion_chips: ["title", "chips"],
-  agent_card: ["name", "role", "description", "avatar", "href", "status"],
-  terminal_card: ["title", "lines", "prompt"],
-  weather_card: ["location", "temperature", "unit", "condition", "icon"],
-  stock_ticker: ["symbol", "price", "currency", "change", "changePercent"],
+  header: ["title", "subtitle", "eyebrow", "level", "text"],
+  image: ["src", "url", "alt", "caption", "credit", "href", "width", "height", "meta", "source"],
+  image_grid: ["columns", "gap", "count"],
+  comparison_table: ["title", "features", "options", "headers", "rows"],
+  code_block: ["language", "code", "filename", "title", "showLineNumbers", "lang"],
+  sources_panel: ["title", "sources", "items"],
+  card: ["title", "body", "description", "text", "badge", "href", "icon", "url", "children"],
+  card_grid: ["columns", "gap", "count"],
+  stat: ["label", "value", "delta", "deltaLabel", "trend", "unit"],
+  stats_row: ["gap", "columns"],
+  callout: ["variant", "tone", "type", "color", "title", "body", "text", "description"],
+  list: ["ordered", "items", "title", "variant"],
+  checklist: ["title", "items", "label"],
+  timeline: ["title", "events", "items"],
+  stepper: ["title", "current", "step", "steps", "activeStep"],
+  divider: ["label", "text"],
+  columns: ["count", "gap", "columns"],
+  tabs: ["title", "tabs", "labels", "items"],
+  accordion: ["title", "items", "sections"],
+  text_block: ["content", "text", "body", "variant", "title", "type"],
+  quote: ["text", "author", "role", "source", "citation"],
+  key_value: ["title", "pairs", "rows", "items", "entries"],
+  badge: ["text", "label", "variant", "color", "tone"],
+  progress: ["label", "value", "max", "variant", "color", "current", "total"],
+  sparkline: ["data", "label", "color", "values", "points"],
+  suggestion_chips: ["title", "chips", "items", "suggestions"],
+  agent_card: ["name", "role", "description", "prompt", "task", "avatar", "avatarUrl", "href", "url", "status", "state"],
+  terminal_card: ["title", "lines", "prompt", "commands", "output"],
+  weather_card: ["location", "city", "temperature", "temp", "unit", "condition", "icon", "high", "low", "humidity", "wind"],
+  stock_ticker: ["symbol", "name", "price", "currency", "change", "changePercent", "changePct", "spark", "sparkline", "trend"],
+  // Custom component types — allow arbitrary HTML/JSX content.
+  custom_html: ["html", "title", "height", "width", "sandbox"],
+  custom_card: ["title", "html", "body", "description", "icon", "height"],
   unknown_json: ["__raw", "__type"],
 };
 

@@ -8,18 +8,26 @@ import { GenUIComponentProps, str, num } from "./helpers";
  * `weather_card` — current weather display.
  *
  * Props:
- *   - location (string)
- *   - temperature (number)
+ *   - location / city (string)
+ *   - temperature / temp (number)
  *   - unit ("C" | "F", default "C")
  *   - condition (string) — e.g. "Sunny", "Partly Cloudy", "Rain"
  *   - icon (string) — override the auto-picked icon: "sun" | "cloud" | "rain" | "snow" | "wind"
+ *   - high (number) — forecast high
+ *   - low (number) — forecast low
+ *   - humidity (number)
+ *   - wind (number)
  */
 export function WeatherCard({ props, streaming }: GenUIComponentProps) {
-  const location = str(props.location);
-  const temperature = num(props.temperature, 0);
+  const location = str(props.location || props.city);
+  const temperature = num(props.temperature ?? props.temp, 0);
   const unit = str(props.unit, "C");
   const condition = str(props.condition);
   const iconHint = str(props.icon).toLowerCase();
+  const high = num(props.high, 0);
+  const low = num(props.low, 0);
+  const humidity = num(props.humidity, 0);
+  const wind = num(props.wind, 0);
 
   if (streaming && !location && !condition) {
     return (
@@ -62,6 +70,26 @@ export function WeatherCard({ props, streaming }: GenUIComponentProps) {
             <span className="text-muted-foreground text-sm">{condition}</span>
           )}
         </div>
+        {(high !== 0 || low !== 0) && (
+          <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+            {high !== 0 && <span>H: {Math.round(high)}°</span>}
+            {low !== 0 && <span>L: {Math.round(low)}°</span>}
+          </div>
+        )}
+        {(humidity !== 0 || wind !== 0) && (
+          <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+            {humidity !== 0 && (
+              <span className="flex items-center gap-0.5">
+                <Droplets className="h-3 w-3" />{humidity}%
+              </span>
+            )}
+            {wind !== 0 && (
+              <span className="flex items-center gap-0.5">
+                <Wind className="h-3 w-3" />{wind}km/h
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

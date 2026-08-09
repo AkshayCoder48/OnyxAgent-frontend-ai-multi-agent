@@ -10,7 +10,7 @@ import { GenUIComponentProps, str } from "./helpers";
  *   - label (string) — centered text on the line
  */
 export function Divider({ props }: GenUIComponentProps) {
-  const label = str(props.label);
+  const label = str(props.label || props.text);
 
   if (!label) {
     return <hr className="bg-border my-2 h-px w-full border-0" />;

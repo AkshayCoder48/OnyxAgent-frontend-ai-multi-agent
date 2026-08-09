@@ -13,7 +13,7 @@ import { GenUIComponentProps, str } from "./helpers";
  */
 export function Quote({ props, streaming }: GenUIComponentProps) {
   const text = str(props.text);
-  const author = str(props.author);
+  const author = str(props.author || props.source || props.citation);
   const role = str(props.role);
 
   if (streaming && !text) {

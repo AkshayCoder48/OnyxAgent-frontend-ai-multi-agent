@@ -19,10 +19,10 @@ import { GenUIComponentProps, str } from "./helpers";
 export function AgentCard({ props, streaming }: GenUIComponentProps) {
   const name = str(props.name);
   const role = str(props.role);
-  const description = str(props.description);
-  const avatar = str(props.avatar);
+  const description = str(props.description || props.prompt || props.task);
+  const avatar = str(props.avatar || props.avatarUrl);
   const href = str(props.href);
-  const status = str(props.status);
+  const status = str(props.status || props.state);
 
   if (streaming && !name) {
     return (

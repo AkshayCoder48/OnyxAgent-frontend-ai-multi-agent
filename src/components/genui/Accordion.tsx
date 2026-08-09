@@ -26,10 +26,10 @@ interface AccordionItemDef {
  */
 export function AccordionBlock({ props, children, streaming, renderChildren }: GenUIComponentProps) {
   const title = str(props.title);
-  const itemsRaw = arr<Record<string, unknown>>(props.items);
+  const itemsRaw = arr<Record<string, unknown>>(props.items || props.sections);
   const items: AccordionItemDef[] = itemsRaw.map((it) => {
     const o = obj(it);
-    return { title: str(o.title), body: str(o.body) };
+    return { title: str(o.title), body: str(o.body || o.description || o.text || o.content) };
   });
 
   const useItems = items.length > 0;

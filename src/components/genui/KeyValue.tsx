@@ -17,11 +17,11 @@ interface KVPair {
  */
 export function KeyValue({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const pairsRaw = arr<Record<string, unknown>>(props.pairs);
+  const pairsRaw = arr<Record<string, unknown>>(props.pairs || props.rows || props.items || props.entries);
   const pairs: KVPair[] = pairsRaw.map((p) => {
     const o = obj(p);
     return {
-      label: str(o.label),
+      label: str(o.label || o.key),
       value: typeof o.value === "number" ? String(o.value) : str(o.value),
     };
   });

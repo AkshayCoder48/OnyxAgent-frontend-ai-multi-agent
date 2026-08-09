@@ -21,10 +21,11 @@ interface TabDef {
  */
 export function TabsBlock({ props, children, streaming, renderChildren }: GenUIComponentProps) {
   const title = str(props.title);
-  const tabsRaw = arr<Record<string, unknown>>(props.tabs);
+  const tabsRaw = arr<unknown>(props.tabs || props.labels || props.items);
   const tabs: TabDef[] = tabsRaw.map((t) => {
+    if (typeof t === "string") return { label: t, value: t.toLowerCase().replace(/\s+/g, "-") } as TabDef;
     const o = obj(t);
-    return { label: str(o.label), value: str(o.value) };
+    return { label: str(o.label || o.title || o.name), value: str(o.value || o.id) || str(o.label || o.title || o.name).toLowerCase().replace(/\s+/g, "-") };
   });
 
   const childCount = children?.length ?? 0;

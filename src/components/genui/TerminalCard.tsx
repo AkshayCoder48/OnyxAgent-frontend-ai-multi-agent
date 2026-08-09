@@ -20,11 +20,12 @@ interface TerminalLine {
 export function TerminalCard({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title, "Terminal");
   const prompt = str(props.prompt, "$");
-  const linesRaw = arr<Record<string, unknown>>(props.lines);
+  const linesRaw = arr<unknown>(props.lines || props.commands || props.output);
   const lines: TerminalLine[] = linesRaw.map((l) => {
+    if (typeof l === "string") return { text: l, type: "output" } as TerminalLine;
     const o = obj(l);
     return {
-      text: str(o.text),
+      text: str(o.text || o.content || o.command),
       type: (str(o.type, "output") as TerminalLine["type"]) || "output",
     };
   });

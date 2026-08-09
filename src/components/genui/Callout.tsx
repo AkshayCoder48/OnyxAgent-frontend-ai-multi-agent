@@ -14,9 +14,9 @@ import { GenUIComponentProps, str } from "./helpers";
  *   - body (string)
  */
 export function Callout({ props, streaming }: GenUIComponentProps) {
-  const variant = str(props.variant, "info") as "info" | "warn" | "success" | "error";
+  const variant = str(props.variant || props.tone || props.type || props.color, "info") as "info" | "warn" | "success" | "error";
   const title = str(props.title);
-  const body = str(props.body);
+  const body = str(props.body || props.text || props.description);
 
   if (streaming && !title && !body) {
     return (

@@ -24,10 +24,11 @@ interface ChipDef {
  */
 export function SuggestionChips({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const chipsRaw = arr<Record<string, unknown>>(props.chips);
+  const chipsRaw = arr<unknown>(props.chips || props.items || props.suggestions);
   const chips: ChipDef[] = chipsRaw.map((c) => {
+    if (typeof c === "string") return { text: c } as ChipDef;
     const o = obj(c);
-    return { text: str(o.text), href: str(o.href) };
+    return { text: str(o.text || o.label), href: str(o.href) };
   });
 
   if (streaming && chips.length === 0) {

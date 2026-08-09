@@ -14,7 +14,7 @@ import { GenUIComponentProps, num, gridCols } from "./helpers";
  * Children: `image` nodes rendered via `renderChildren`.
  */
 export function ImageGrid({ props, children, streaming, renderChildren }: GenUIComponentProps) {
-  const columns = num(props.columns, 2);
+  const columns = num(props.columns ?? props.count, 2);
   const gap = num(props.gap, 8);
 
   if (streaming && (!children || children.length === 0)) {

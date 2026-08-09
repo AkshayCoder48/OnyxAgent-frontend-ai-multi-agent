@@ -15,8 +15,9 @@ import { GenUIComponentProps, str } from "./helpers";
  * For full markdown, the AI should emit markdown outside the GenUI block.
  */
 export function TextBlock({ props, streaming }: GenUIComponentProps) {
-  const content = str(props.content);
-  const variant = str(props.variant, "default") as "default" | "muted" | "lead";
+  const title = str(props.title);
+  const content = str(props.content || props.text || props.body);
+  const variant = str(props.variant || props.type, "default") as "default" | "muted" | "lead";
 
   if (streaming && !content) {
     return (
@@ -30,16 +31,21 @@ export function TextBlock({ props, streaming }: GenUIComponentProps) {
   if (!content) return null;
 
   return (
-    <p
-      className={cn(
-        "text-sm leading-relaxed whitespace-pre-wrap",
-        variant === "muted" && "text-muted-foreground",
-        variant === "lead" && "text-foreground text-base leading-relaxed",
-        variant === "default" && "text-foreground",
+    <div>
+      {title && (
+        <h3 className="text-foreground mb-1 text-sm font-semibold">{title}</h3>
       )}
-    >
-      {content}
-    </p>
+      <p
+        className={cn(
+          "text-sm leading-relaxed whitespace-pre-wrap",
+          variant === "muted" && "text-muted-foreground",
+          variant === "lead" && "text-foreground text-base leading-relaxed",
+          variant === "default" && "text-foreground",
+        )}
+      >
+        {content}
+      </p>
+    </div>
   );
 }
 
