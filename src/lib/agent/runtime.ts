@@ -121,17 +121,7 @@ export interface AgentTurnResult {
     | "no_provider";
 }
 
-const MAX_ROUNDS = 15;
-
-/**
- * Request budget safeguards — prevent accidental request explosions.
- * These caps are per-agent-turn (one user message → one assistant response).
- * If any cap is hit, the loop stops gracefully and returns whatever content
- * was accumulated so far.
- */
-const MAX_API_REQUESTS_PER_TURN = 20; // hard cap on API calls per turn
-const MAX_RETRIES_PER_ROUND = 3; // max retries on transient errors per round
-const MAX_TOOL_CALLS_PER_TURN = 40; // total tool calls across all rounds
+const MAX_ROUNDS = 50;
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
 // ---------------------------------------------------------------------------
@@ -1505,8 +1495,6 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
   let allToolCalls: ToolCall[] = [];
-  // Request budget tracking — prevents accidental request explosions.
-  let apiRequestCount = 0;
   let retryCountThisTurn = 0;
   // Accumulated ordered parts (thinking/reasoning/text/tool) across all
   // rounds — persisted on the assistant message so a page refresh restores
@@ -1522,23 +1510,10 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
 
   // In single-round mode, cap at 2 rounds: round 1 = tools, round 2 = final
   // response (no more tool calls). This produces ONE message bubble.
-  // In multi-round mode, cap at MAX_ROUNDS (15) — enough for complex tasks
-  // but prevents runaway loops.
   const effectiveMaxRounds = opts.singleRoundMode ? 2 : MAX_ROUNDS;
 
   while (round < effectiveMaxRounds) {
     round += 1;
-
-    // --- Request budget safeguards ---
-    // Stop gracefully if we've hit the API request cap or tool call cap.
-    if (apiRequestCount >= MAX_API_REQUESTS_PER_TURN) {
-      console.warn(`[agent] Request budget exhausted (${apiRequestCount} API requests). Stopping.`);
-      break;
-    }
-    if (allToolCalls.length >= MAX_TOOL_CALLS_PER_TURN) {
-      console.warn(`[agent] Tool call budget exhausted (${allToolCalls.length} tool calls). Stopping.`);
-      break;
-    }
 
     if (signal?.aborted) {
       return {
@@ -1552,8 +1527,6 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         stopReason: "aborted",
       };
     }
-
-    apiRequestCount += 1;
 
     let roundResult: RoundResult;
     try {
@@ -1576,13 +1549,12 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
       // the round up to 2 times before giving up. These are transient errors
       // that happen between rounds when the connection drops momentarily.
       const isTimeout = /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message);
-      if (isTimeout && retryCountThisTurn < MAX_RETRIES_PER_ROUND && round < effectiveMaxRounds) {
+      if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
         retryCountThisTurn += 1;
-        console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/${MAX_RETRIES_PER_ROUND}), retrying...`, message.slice(0, 100));
+        console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));
         // Wait 1 second before retrying to let the connection recover
         await new Promise((r) => setTimeout(r, 1000));
         round -= 1; // don't consume a round on retry
-        apiRequestCount -= 1; // don't count the failed request
         continue; // retry the same round
       }
 
