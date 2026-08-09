@@ -121,7 +121,17 @@ export interface AgentTurnResult {
     | "no_provider";
 }
 
-const MAX_ROUNDS = 50;
+const MAX_ROUNDS = 15;
+
+/**
+ * Request budget safeguards — prevent accidental request explosions.
+ * These caps are per-agent-turn (one user message → one assistant response).
+ * If any cap is hit, the loop stops gracefully and returns whatever content
+ * was accumulated so far.
+ */
+const MAX_API_REQUESTS_PER_TURN = 20; // hard cap on API calls per turn
+const MAX_RETRIES_PER_ROUND = 3; // max retries on transient errors per round
+const MAX_TOOL_CALLS_PER_TURN = 40; // total tool calls across all rounds
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
 // ---------------------------------------------------------------------------
@@ -1337,7 +1347,35 @@ Quick reference — available types: header, text_block, card, card_grid, stat, 
 
 The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. See agent.md for details and examples.`;
 
-  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
+  const singleRoundDirective = opts.singleRoundMode
+    ? `\n\n## SINGLE-ROUND MODE (ACTIVE)
+You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to complete the task:
+
+- **Round 1**: Plan the ENTIRE task, then emit ALL tool calls you need in ONE response. Multiple independent tool calls are executed in parallel automatically — do NOT wait for one to finish before requesting the next. If you need to read a file AND search the web AND run code, emit all three tool_calls in the same response.
+- **Round 2**: You will receive all tool results at once. Generate your FINAL text response. Do NOT request more tool calls in round 2 — they will NOT be executed. Your round 2 response is your final answer.
+
+### Rules for single-round mode:
+1. **Plan before acting** — think through what you need to do, then emit all tool calls at once
+2. **Batch independent tool calls** — if tool A and tool B don't depend on each other's output, emit both in the same response
+3. **Use GenUI for presentation** — do NOT use tools merely to display information. Use \`<<<genui>>>\` blocks for cards, tables, charts, games, calculators, and any visual output. GenUI requires NO tool calls.
+4. **Don't split simple tasks** — if a task can be done with 1-3 tool calls + a text response, do it all in round 1
+5. **Round 2 is final** — after receiving tool results, write your complete answer. Do not request more tools.
+6. **Avoid unnecessary rounds** — if your round 1 response already answers the user's question (even without tool results), that's fine. The system will stop after round 1 if no tool calls are made.
+
+### Examples of good single-round behavior:
+- User: "Compare 3 phone plans" → Round 1: emit \`web_search\` × 3 (parallel) → Round 2: final comparison table as GenUI
+- User: "What files are in my project?" → Round 1: emit \`list_folder\` → Round 2: summarize + GenUI card grid
+- User: "Make a BMI calculator" → Round 1: NO tool calls, just emit a \`custom_card\` GenUI block with the calculator HTML → done (no round 2 needed)
+- User: "Read package.json and explain it" → Round 1: emit \`read_file\` → Round 2: explain
+
+### Bad behavior (DO NOT DO):
+- Requesting one tool call, waiting for the result, then requesting another in a new round (wastes a round)
+- Using a tool call just to display a card (use GenUI instead)
+- Requesting tool calls in round 2 (they won't execute)
+- Splitting a simple task across multiple rounds when one would suffice`
+    : "";
+
+  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${singleRoundDirective}`;
 
   // CONTEXT WINDOW MANAGEMENT: Always strip tool_calls from history to
   // prevent DEGRADED errors. The AI doesn't need old tool calls to continue.
@@ -1467,6 +1505,9 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
   let allToolCalls: ToolCall[] = [];
+  // Request budget tracking — prevents accidental request explosions.
+  let apiRequestCount = 0;
+  let retryCountThisTurn = 0;
   // Accumulated ordered parts (thinking/reasoning/text/tool) across all
   // rounds — persisted on the assistant message so a page refresh restores
   // the exact same card ordering the user saw live.
@@ -1481,10 +1522,24 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
 
   // In single-round mode, cap at 2 rounds: round 1 = tools, round 2 = final
   // response (no more tool calls). This produces ONE message bubble.
+  // In multi-round mode, cap at MAX_ROUNDS (15) — enough for complex tasks
+  // but prevents runaway loops.
   const effectiveMaxRounds = opts.singleRoundMode ? 2 : MAX_ROUNDS;
 
   while (round < effectiveMaxRounds) {
     round += 1;
+
+    // --- Request budget safeguards ---
+    // Stop gracefully if we've hit the API request cap or tool call cap.
+    if (apiRequestCount >= MAX_API_REQUESTS_PER_TURN) {
+      console.warn(`[agent] Request budget exhausted (${apiRequestCount} API requests). Stopping.`);
+      break;
+    }
+    if (allToolCalls.length >= MAX_TOOL_CALLS_PER_TURN) {
+      console.warn(`[agent] Tool call budget exhausted (${allToolCalls.length} tool calls). Stopping.`);
+      break;
+    }
+
     if (signal?.aborted) {
       return {
         conversationId,
@@ -1497,6 +1552,8 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
         stopReason: "aborted",
       };
     }
+
+    apiRequestCount += 1;
 
     let roundResult: RoundResult;
     try {
@@ -1519,10 +1576,13 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
       // the round up to 2 times before giving up. These are transient errors
       // that happen between rounds when the connection drops momentarily.
       const isTimeout = /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message);
-      if (isTimeout && round < effectiveMaxRounds) {
-        console.warn(`[agent] Timeout/network error on round ${round}, retrying...`, message.slice(0, 100));
+      if (isTimeout && retryCountThisTurn < MAX_RETRIES_PER_ROUND && round < effectiveMaxRounds) {
+        retryCountThisTurn += 1;
+        console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/${MAX_RETRIES_PER_ROUND}), retrying...`, message.slice(0, 100));
         // Wait 1 second before retrying to let the connection recover
         await new Promise((r) => setTimeout(r, 1000));
+        round -= 1; // don't consume a round on retry
+        apiRequestCount -= 1; // don't count the failed request
         continue; // retry the same round
       }
 
@@ -1679,7 +1739,13 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
     }
 
     // No tool calls → final result.
-    if (roundResult.toolCalls.length === 0 || roundResult.aborted) {
+    // ALSO: In single-round mode, round 2 is the FINAL round — even if the
+    // model requests more tool calls, we do NOT execute them. This enforces
+    // the "one message bubble" guarantee: round 1 = tools, round 2 = final
+    // text response. Executing tools in round 2 would require a round 3,
+    // breaking the single-bubble contract.
+    if (roundResult.toolCalls.length === 0 || roundResult.aborted ||
+        (opts.singleRoundMode && round >= 2)) {
       // If the content is empty (e.g. aborted before any text arrived),
       // use a minimal placeholder so the DB row isn't empty.
       const finalContent = roundResult.content || (roundResult.aborted ? "" : "");

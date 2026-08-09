@@ -18,7 +18,8 @@ import { useConversationStore, useChatStore } from "@/stores";
 import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-store";
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
-import { Bot } from "lucide-react";
+import { useSingleRoundMode } from "@/hooks/use-single-round-mode";
+import { Bot, Zap } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
 
@@ -30,6 +31,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   } = useConversationStore();
   const { addMessage: addChatMessage } = useChatStore();
   const { fetchConversations } = useConversations();
+  const { singleRoundMode, toggleSingleRoundMode } = useSingleRoundMode();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
   const handleConversationCreated = useCallback(() => {
@@ -327,6 +329,8 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       onTodoAction={sendTodoAction}
       onStop={stopGeneration}
       conversationId={currentConversationId}
+      singleRoundMode={singleRoundMode}
+      onToggleSingleRound={toggleSingleRoundMode}
     />
   );
 }
@@ -361,6 +365,9 @@ interface ChatUIProps {
   onAnswerQuestions?: (answers: AskUserAnswer[]) => void;
   onTodoAction?: (action: "dismiss" | "reset" | "snapshot") => void;
   onStop?: () => void;
+  /** Single-round mode state for the Zap toggle in ChatInput. */
+  singleRoundMode?: boolean;
+  onToggleSingleRound?: () => void;
 }
 
 function ChatUI({
@@ -387,6 +394,8 @@ function ChatUI({
   onAnswerQuestions,
   onTodoAction,
   onStop,
+  singleRoundMode,
+  onToggleSingleRound,
 }: ChatUIProps) {
   const tc = useTranslations("common");
   return (
@@ -480,6 +489,8 @@ function ChatUI({
                 onStop={onStop}
                 slashContext={slashContext}
                 commands={slashCommands}
+                singleRoundMode={singleRoundMode}
+                onToggleSingleRound={onToggleSingleRound}
               />
             </div>
             <div className="border-foreground/8 flex items-center justify-between gap-2 border-t px-2.5 py-1.5 sm:px-4 sm:py-2">
@@ -494,6 +505,12 @@ function ChatUI({
                   />
                   {isConnected ? tc("live") : tc("offline")}
                 </span>
+                {singleRoundMode && (
+                  <span className="bg-primary/10 text-primary inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wider uppercase">
+                    <Zap className="h-2.5 w-2.5 fill-current" />
+                    1-Round
+                  </span>
+                )}
               </div>
               <div className="flex min-w-0 items-center gap-1">
                 <ChatControls
