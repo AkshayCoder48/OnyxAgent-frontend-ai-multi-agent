@@ -390,6 +390,42 @@ export const conversationService = {
     await db.messages.delete(messageId);
     await bumpConversationTimestamp(conversationId);
   },
+
+  /**
+   * Delete ALL messages (and their tool calls + ratings) for a conversation.
+   * Used by the `/clear` slash command to wipe the chat history from Dexie
+   * so messages don't reappear after navigation/refresh (PRD §29, §31).
+   */
+  async deleteMessagesByConversation(conversationId: string): Promise<void> {
+    // Collect all message IDs for this conversation
+    const messages = await db.messages
+      .where("conversation_id")
+      .equals(conversationId)
+      .toArray();
+    const messageIds = messages.map((m) => m.id);
+
+    if (messageIds.length === 0) return;
+
+    // Delete tool_calls for all messages
+    await db.tool_calls
+      .where("message_id")
+      .anyOf(messageIds)
+      .delete();
+
+    // Delete message_ratings for all messages
+    await db.message_ratings
+      .where("message_id")
+      .anyOf(messageIds)
+      .delete();
+
+    // Delete the messages themselves
+    await db.messages
+      .where("conversation_id")
+      .equals(conversationId)
+      .delete();
+
+    await bumpConversationTimestamp(conversationId);
+  },
 };
 
 type ConversationToolCallStatus = "pending" | "running" | "completed" | "failed";

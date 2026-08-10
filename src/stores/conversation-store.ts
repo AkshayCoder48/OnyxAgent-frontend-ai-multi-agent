@@ -25,8 +25,26 @@ interface ConversationState {
   reset: () => void;
 }
 
+/**
+ * On initial load, hydrate `currentConversationId` from the URL `?id=` param
+ * so the sidebar immediately highlights the active chat — even before
+ * `fetchConversations()` resolves. Without this, the store starts with
+ * `null` and the sidebar shows "no chat selected" during the brief loading
+ * window after a page refresh (PRD §24).
+ */
+function getInitialConversationId(): string | null {
+  if (typeof window === "undefined") return null; // SSR safety
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
 const initialState = {
-  currentConversationId: null,
+  currentConversationId: getInitialConversationId(),
   currentMessages: [] as ConversationMessage[],
   isLoading: false,
   error: null,

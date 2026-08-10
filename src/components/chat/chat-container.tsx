@@ -19,6 +19,7 @@ import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-st
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { useSingleRoundMode } from "@/hooks/use-single-round-mode";
+import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import { Bot, Zap } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
@@ -116,6 +117,13 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       (prevId !== null && prevId !== currId); // Switching between conversations
 
     if (shouldClear) {
+      // Abort any in-flight AI stream BEFORE clearing messages — otherwise
+      // the stream keeps writing to currentMessageIdRef which points to a
+      // message in the OLD conversation, causing messages to vanish or
+      // appear in the wrong chat (PRD §26, §27, §28).
+      if (isProcessing) {
+        stopGeneration();
+      }
       clearMessages();
       // Drop any pending queue when switching threads — those messages were
       // typed in the previous conversation's context, sending them into a
@@ -137,7 +145,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     setPersistedConversationId(currId);
 
     prevConversationIdRef.current = currId;
-  }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId]);
+  }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId, isProcessing, stopGeneration]);
 
   // Load DB messages into the chat store when the conversation changes OR when
   // currentMessages populates after a fetch.
@@ -194,49 +202,27 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     }
 
     currentMessages.forEach((msg) => {
-      const toolCalls = msg.tool_calls?.map((tc) => ({
-        id: tc.tool_call_id,
-        name: tc.tool_name,
-        args: tc.args,
-        result: tc.result,
-        status: (tc.status === "failed" ? "error" : tc.status) as
-          "pending" | "running" | "completed" | "error",
-      }));
-      // Reconstruct an ordered timeline for assistant turns. The DB has no
-      // interleaving metadata, so we use the realistic order: tools ran
-      // before the final answer → tool parts first, then the text.
-      const parts =
-        msg.role === "assistant"
-          ? [
-              ...(toolCalls ?? []).map((tc) => ({
-                id: tc.id,
-                type: "tool" as const,
-                toolCall: tc,
-              })),
-              ...(msg.content
-                ? [
-                    {
-                      id: `${msg.id}-text`,
-                      type: "text" as const,
-                      content: msg.content,
-                    },
-                  ]
-                : []),
-            ]
-          : undefined;
-      addChatMessage({
+      // Use the shared helper that preserves thinking, reasoning, parts,
+      // and tool calls — the manual rebuild below discarded thinking and
+      // reasoning, causing them to vanish after page reload.
+      const chatMsg = conversationMessageToChatMessage({
         id: msg.id,
+        conversation_id: msg.conversation_id,
         role: msg.role,
         content: msg.content,
-        timestamp: new Date(msg.created_at),
-        conversationId: msg.conversation_id,
-        toolCalls,
-        parts,
-        user_rating: msg.user_rating ?? undefined,
-        rating_count: msg.rating_count ?? undefined,
+        created_at: msg.created_at,
+        tool_calls: msg.tool_calls,
+        user_rating: msg.user_rating,
+        rating_count: msg.rating_count,
         files: msg.files,
-        fileIds: msg.files?.map((f) => f.id),
+        thinking: (msg as { thinking?: string | null }).thinking,
+        reasoning: (msg as { reasoning?: string | null }).reasoning,
+        parts: (msg as { parts?: unknown[] | null }).parts as
+          | import("@/types").MessagePart[]
+          | null
+          | undefined,
       });
+      addChatMessage(chatMsg);
     });
   }, [currentMessages, addChatMessage, clearMessages, currentConversationId]);
 

@@ -310,13 +310,15 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "model_request_start": {
-          // Each agent round (text → tool → text → tool → text) creates a
-          // NEW assistant message bubble. This is the expected behavior —
-          // each round of the agent's response is a distinct message, so
-          // the user can see the agent's thought process: first message
-          // has the initial text + tool call, second message has the
-          // follow-up text after the tool result, etc.
-          createNewMessage("");
+          // One assistant turn = ONE message bubble, even if the agent
+          // runs multiple rounds (text → tool → text → tool → text).
+          // Previously this created a new message per round, splitting
+          // the response into multiple bubbles. Now we reuse the existing
+          // streaming message if one exists (rounds 2+ append to it).
+          // Only create a new message if there's no current streaming message.
+          if (!currentMessageIdRef.current) {
+            createNewMessage("");
+          }
           break;
         }
 
