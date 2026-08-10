@@ -469,17 +469,17 @@ export function ImageSearchResults({ result }: ResultProps) {
           </>
         )}
 
-        {/* Dot indicators */}
+        {/* Dot indicators — small, subtle */}
         {total > 1 && (
-          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex gap-1">
+          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex gap-0.5">
             {results.map((_, i) => (
               <button
                 key={i}
                 type="button"
                 onClick={() => setCurrentIdx(i)}
                 className={cn(
-                  "h-1.5 rounded-full transition-all",
-                  i === idx ? "w-4 bg-white" : "w-1.5 bg-white/50 hover:bg-white/70",
+                  "h-1 rounded-full transition-all",
+                  i === idx ? "w-3 bg-white" : "w-1 bg-white/40 hover:bg-white/60",
                 )}
                 aria-label={`Go to image ${i + 1}`}
               />
@@ -487,9 +487,9 @@ export function ImageSearchResults({ result }: ResultProps) {
           </div>
         )}
 
-        {/* Counter badge */}
-        <div className="absolute top-1.5 right-1.5 rounded-full bg-black/60 px-2 py-0.5 font-mono text-[9px] text-white backdrop-blur-sm">
-          {idx + 1} / {total}
+        {/* Counter badge — small */}
+        <div className="absolute top-1.5 right-1.5 rounded-full bg-black/60 px-1.5 py-0.5 font-mono text-[8px] text-white backdrop-blur-sm">
+          {idx + 1}/{total}
         </div>
       </div>
 

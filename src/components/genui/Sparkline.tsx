@@ -19,7 +19,7 @@ export function Sparkline({ props, streaming }: GenUIComponentProps) {
     (n) => typeof n === "number" && Number.isFinite(n),
   );
   const data = dataRaw.map((n) => Number(n));
-  const label = str(props.label);
+  const label = str(props.label || props.title);
   const color = str(props.color, "var(--color-primary, hsl(var(--primary)))");
 
   const width = 120;

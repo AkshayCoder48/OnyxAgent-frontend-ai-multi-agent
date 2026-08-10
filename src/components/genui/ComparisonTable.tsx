@@ -35,12 +35,38 @@ interface FeatureRow {
  */
 export function ComparisonTable({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const options = arr<string>(props.options).map((o) => String(o));
+  // The AI may use either:
+  //   - options + features (our format): options=["A","B"], features=[{feature:"X",values:[1,2]}]
+  //   - columns + rows (natural format): columns=["Framework","Ease"], rows=[["LangGraph","⭐⭐⭐"],...]
+  const optionsRaw = arr<string>(props.options || props.columns || props.headers).map((o) => String(o));
   const featuresRaw = arr<Record<string, unknown>>(props.features);
-  const features: FeatureRow[] = featuresRaw.map((f) => ({
-    feature: str(f.feature),
-    values: arr<CellValue>(f.values),
-  }));
+  const rowsRaw = arr<unknown>(props.rows);
+
+  let options = optionsRaw;
+  let features: FeatureRow[] = [];
+
+  if (featuresRaw.length > 0) {
+    // Our format: features array with {feature, values}
+    features = featuresRaw.map((f) => ({
+      feature: str(f.feature),
+      values: arr<CellValue>(f.values),
+    }));
+  } else if (rowsRaw.length > 0) {
+    // Natural format: rows is array of arrays. First column = feature name.
+    // If columns has N headers, each row has N values (first is the feature label).
+    // The first header is the "Feature" column label (e.g. "Framework").
+    options = optionsRaw.slice(1); // remaining headers are the comparison columns
+    features = rowsRaw.map((row) => {
+      const cells = Array.isArray(row) ? row : [row];
+      const featureName = String(cells[0] ?? "");
+      const values = cells.slice(1).map((c) => c as CellValue);
+      return { feature: featureName, values };
+    });
+    // If options was empty after slicing, generate generic column headers
+    if (options.length === 0 && features[0]) {
+      options = features[0].values.map((_, i) => `Col ${i + 1}`);
+    }
+  }
 
   if (streaming && features.length === 0) {
     return (

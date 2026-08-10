@@ -18,11 +18,14 @@ import { GenUIComponentProps, str } from "./helpers";
  */
 export function AgentCard({ props, streaming }: GenUIComponentProps) {
   const name = str(props.name);
-  const role = str(props.role);
+  const role = str(props.role || props.model);
   const description = str(props.description || props.prompt || props.task);
   const avatar = str(props.avatar || props.avatarUrl);
   const href = str(props.href);
   const status = str(props.status || props.state);
+  const tasksDone = props.tasks_done as number | undefined;
+  const accuracy = str(props.accuracy);
+  const toolsList = Array.isArray(props.tools) ? (props.tools as unknown[]).map(String) : [];
 
   if (streaming && !name) {
     return (
@@ -71,6 +74,29 @@ export function AgentCard({ props, streaming }: GenUIComponentProps) {
           <p className="text-muted-foreground mt-1 text-xs leading-relaxed line-clamp-2">
             {description}
           </p>
+        )}
+        {(tasksDone != null || accuracy) && (
+          <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted-foreground">
+            {tasksDone != null && (
+              <span className="flex items-center gap-0.5">
+                <span className="font-semibold text-foreground">{tasksDone}</span> tasks
+              </span>
+            )}
+            {accuracy && (
+              <span className="flex items-center gap-0.5">
+                <span className="font-semibold text-foreground">{accuracy}</span> accuracy
+              </span>
+            )}
+          </div>
+        )}
+        {toolsList.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {toolsList.slice(0, 5).map((t, i) => (
+              <span key={i} className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono text-[9px]">
+                {t}
+              </span>
+            ))}
+          </div>
         )}
       </div>
     </div>

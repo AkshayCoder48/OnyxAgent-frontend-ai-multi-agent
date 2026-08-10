@@ -23,7 +23,7 @@ export function StockTicker({ props, streaming }: GenUIComponentProps) {
   const price = num(props.price, 0);
   const currency = str(props.currency, "$");
   const change = num(props.change, 0);
-  const changePercent = num(props.changePercent ?? props.changePct, 0);
+  const changePercent = num(props.changePercent ?? props.changePct ?? props.change_percent, 0);
   const sparkData = arr<number>(props.spark || props.sparkline).filter(
     (n) => typeof n === "number" && Number.isFinite(n),
   );

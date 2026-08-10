@@ -22,7 +22,7 @@ import { GenUIComponentProps, str, num } from "./helpers";
  */
 export function CustomCard({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
-  const html = str(props.html);
+  const html = str(props.html || props.content);
   const body = str(props.body || props.description || props.text);
   const icon = str(props.icon);
   const height = num(props.height, 250);

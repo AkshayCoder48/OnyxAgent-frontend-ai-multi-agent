@@ -24,6 +24,8 @@ export function CardBlock({ props, children, streaming, renderChildren }: GenUIC
   const badge = str(props.badge || props.label);
   const href = str(props.href || props.url);
   const icon = str(props.icon);
+  const footer = str(props.footer);
+  const accent = str(props.accent);
 
   if (streaming && !title && !body && (!children || children.length === 0)) {
     return (
@@ -38,8 +40,14 @@ export function CardBlock({ props, children, streaming, renderChildren }: GenUIC
   }
 
   const hasChildren = children && children.length > 0;
+  // Accent color mapping for left border
+  const accentBorder = accent === "orange" ? "border-l-orange-500" :
+    accent === "green" ? "border-l-emerald-500" :
+    accent === "blue" ? "border-l-blue-500" :
+    accent === "red" ? "border-l-red-500" :
+    accent === "purple" ? "border-l-purple-500" : "";
   const inner = (
-    <Card className={cn("bg-card relative overflow-hidden")}>
+    <Card className={cn("bg-card relative overflow-hidden", accentBorder && "border-l-2", accentBorder)}>
       <CardContent className="p-4">
         <div className="flex items-start gap-3">
           {icon && (
@@ -66,6 +74,9 @@ export function CardBlock({ props, children, streaming, renderChildren }: GenUIC
             )}
             {hasChildren && renderChildren && (
               <div className="mt-2 space-y-2">{renderChildren(children)}</div>
+            )}
+            {footer && (
+              <p className="text-muted-foreground/60 mt-2 text-[10px] border-t border-border pt-1.5">{footer}</p>
             )}
           </div>
         </div>

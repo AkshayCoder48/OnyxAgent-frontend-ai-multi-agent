@@ -29,7 +29,7 @@ export function AccordionBlock({ props, children, streaming, renderChildren }: G
   const itemsRaw = arr<Record<string, unknown>>(props.items || props.sections);
   const items: AccordionItemDef[] = itemsRaw.map((it) => {
     const o = obj(it);
-    return { title: str(o.title), body: str(o.body || o.description || o.text || o.content) };
+    return { title: str(o.title || o.label), body: str(o.body || o.description || o.text || o.content) };
   });
 
   const useItems = items.length > 0;
