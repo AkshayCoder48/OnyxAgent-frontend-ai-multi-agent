@@ -472,66 +472,88 @@ Props: `title`, `html` (required), `body`/`description`/`text`, `icon`, `height`
 
 ### GenUI Examples
 
-#### Example 1: Product comparison (no tool calls needed)
+The parser accepts TWO JSON formats:
+1. **Flat format** (simpler, recommended): `{"type":"header","title":"...","subtitle":"..."}`
+2. **Wrapped format**: `{"id":"h1","type":"header","props":{"title":"...","subtitle":"..."}}`
+
+You can emit a single bare object, or wrap multiple nodes in `{"nodes":[...]}`. Both work.
+
+#### Example 1: Header + text + card (flat format, separate blocks)
 ```
-Here's how the plans compare:
+Here's a summary:
 
 <<<genui>>>
+{"type":"header","title":"Q4 Report","subtitle":"Performance overview"}
+<<</genui>>>
+
+<<<genui>>>
+{"type":"text_block","body":"Key metrics for this quarter are below."}
+<<</genui>>>
+
+<<<genui>>>
+{"type":"card","title":"Revenue","description":"$48.2k, up 12% from Q3","icon":"💰"}
+<<</genui>>>
+```
+
+#### Example 2: Stats row + sparkline (flat format, one block with nodes array)
+```
+<<<genui>>>
 {"nodes":[
-  {"id":"h","type":"header","props":{"title":"Plan Comparison","subtitle":"Choose the right plan for you"}},
-  {"id":"ct","type":"comparison_table","props":{"title":"Features","options":["Free","Pro","Enterprise"],"features":[
-    {"feature":"Users","values":["1","10","Unlimited"]},
-    {"feature":"Storage","values":["1GB","50GB","1TB"]},
-    {"feature":"API calls","values":["1K/mo","100K/mo","Unlimited"]},
-    {"feature":"SSO","values":[false,true,true]},
-    {"feature":"Support","values":["Community","Email","24/7 phone"]}
-  ]}},
-  {"id":"sc","type":"suggestion_chips","props":{"chips":["Start free trial","Talk to sales","See full docs"]}}
+  {"type":"stats_row","items":[
+    {"label":"Users","value":"8,421","delta":"+8%"},
+    {"label":"Revenue","value":"$48k","delta":"+12%"}
+  ]},
+  {"type":"sparkline","label":"Daily active users","data":[120,135,142,138,155,160,172]}
 ]}
 <<</genui>>>
 ```
 
-#### Example 2: Interactive BMI calculator (custom_html, no tool calls)
+#### Example 3: Card grid with items (flat format)
 ```
-Let me give you an interactive BMI calculator:
-
 <<<genui>>>
-{"nodes":[
-  {"id":"cc","type":"custom_card","props":{"title":"BMI Calculator","icon":"⚖️","description":"Enter your weight and height to calculate your Body Mass Index","height":180,"html":"<div style='display:flex;gap:8px;flex-wrap:wrap'><input id='w' type='number' placeholder='Weight (kg)' style='padding:6px;border:1px solid #ccc;border-radius:6px;flex:1;min-width:100px'><input id='h' type='number' placeholder='Height (m)' style='padding:6px;border:1px solid #ccc;border-radius:6px;flex:1;min-width:100px'></div><button onclick='calc()' style='margin-top:8px;padding:6px 16px;background:#6366f1;color:white;border:none;border-radius:6px;cursor:pointer'>Calculate</button><p id='r' style='margin-top:8px;font-size:18px;font-weight:bold'></p><script>function calc(){var w=+document.getElementById('w').value;var h=+document.getElementById('h').value;if(!w||!h){document.getElementById('r').textContent='Please enter values';return}var bmi=w/(h*h);var cat=bmi<18.5?'Underweight':bmi<25?'Normal':bmi<30?'Overweight':'Obese';document.getElementById('r').textContent='BMI: '+bmi.toFixed(1)+' ('+cat+')'}</script>"}}
+{"type":"card_grid","columns":3,"cards":[
+  {"title":"Kitesurf","description":"Cloudflare's browser for AI agents","icon":"🌐"},
+  {"title":"Fin","description":"Salesforce's $3.6B service agent","icon":"💼"},
+  {"title":"Astra","description":"OpenAI model paused on cyber-risk","icon":"⚠️"}
 ]}
 <<</genui>>>
 ```
 
-#### Example 3: Mini-game (tic-tac-toe via custom_html)
+#### Example 4: Comparison table (columns + rows format)
 ```
 <<<genui>>>
-{"nodes":[
-  {"id":"game","type":"custom_html","props":{"title":"Tic-Tac-Toe","height":380,"html":"<div id='s' style='text-align:center;font-size:20px;font-weight:bold;margin-bottom:8px'>Your turn (X)</div><div id='b' style='display:grid;grid-template-columns:repeat(3,80px);gap:4px;justify-content:center'></div><button onclick='reset()' style='margin-top:8px;padding:6px 16px;border:1px solid #ccc;border-radius:6px;cursor:pointer'>Reset</button><script>var b=document.getElementById('b'),s=document.getElementById('s'),g=Array(9).fill(''),p='X',over=false;function draw(){b.innerHTML='';g.forEach((v,i)=>{var d=document.createElement('div');d.style.cssText='width:80px;height:80px;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer;border:1px solid #ccc;border-radius:6px;background:#f5f5f5';d.textContent=v;d.onclick=()=>play(i);b.appendChild(d)})}function play(i){if(over||g[i])return;g[i]=p;check();p=p=='X'?'O':'X';s.textContent=over?s.textContent:'Your turn ('+p+')';draw()}function check(){var w=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];for(var l of w){if(g[l[0]]&&g[l[0]]==g[l[1]]&&g[l[0]]==g[l[2]]){over=true;s.textContent=g[l[0]]+' wins!';return}}if(!g.includes('')){over=true;s.textContent='Draw!'}}function reset(){g=Array(9).fill('');p='X';over=false;s.textContent='Your turn (X)';draw()}draw()</script>"}}
+{"type":"comparison_table","columns":["Framework","Ease of use","Multi-agent","Popularity"],"rows":[
+  ["LangGraph","⭐⭐⭐","Yes","High"],
+  ["CrewAI","⭐⭐⭐⭐","Yes","High"],
+  ["Google ADK","⭐⭐⭐⭐","Yes","Growing"]
 ]}
 <<</genui>>>
 ```
 
-#### Example 4: Dashboard with stats + chart (no tool calls)
+#### Example 5: Interactive BMI calculator (custom_html)
+```
+<<<genui>>>
+{"type":"custom_card","title":"BMI Calculator","icon":"⚖️","description":"Enter weight and height","height":180,"html":"<div style='display:flex;gap:8px'><input id='w' type='number' placeholder='Weight kg' style='padding:6px;border:1px solid #ccc;border-radius:6px;flex:1'><input id='h' type='number' placeholder='Height m' style='padding:6px;border:1px solid #ccc;border-radius:6px;flex:1'></div><button onclick='calc()' style='margin-top:8px;padding:6px 16px;background:#6366f1;color:white;border:none;border-radius:6px;cursor:pointer'>Calculate</button><p id='r' style='margin-top:8px;font-size:18px;font-weight:bold'></p><script>function calc(){var w=+document.getElementById('w').value;var h=+document.getElementById('h').value;if(!w||!h){document.getElementById('r').textContent='Enter values';return}var bmi=w/(h*h);var cat=bmi<18.5?'Underweight':bmi<25?'Normal':bmi<30?'Overweight':'Obese';document.getElementById('r').textContent='BMI: '+bmi.toFixed(1)+' ('+cat+')'}</script>"}
+<<</genui>>>
+```
+
+#### Example 6: Custom HTML game (tic-tac-toe)
+```
+<<<genui>>>
+{"type":"custom_html","title":"Tic-Tac-Toe","height":380,"html":"<div id='s' style='text-align:center;font-size:20px;font-weight:bold;margin-bottom:8px'>Your turn (X)</div><div id='b' style='display:grid;grid-template-columns:repeat(3,80px);gap:4px;justify-content:center'></div><button onclick='reset()' style='margin-top:8px;padding:6px 16px;border:1px solid #ccc;border-radius:6px;cursor:pointer'>Reset</button><script>var b=document.getElementById('b'),s=document.getElementById('s'),g=Array(9).fill(''),p='X',over=false;function draw(){b.innerHTML='';g.forEach((v,i)=>{var d=document.createElement('div');d.style.cssText='width:80px;height:80px;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer;border:1px solid #ccc;border-radius:6px';d.textContent=v;d.onclick=()=>play(i);b.appendChild(d)})}function play(i){if(over||g[i])return;g[i]=p;check();p=p=='X'?'O':'X';s.textContent=over?s.textContent:'Your turn ('+p+')';draw()}function check(){var w=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];for(var l of w){if(g[l[0]]&&g[l[0]]==g[l[1]]&&g[l[0]]==g[l[2]]){over=true;s.textContent=g[l[0]]+' wins!';return}}if(!g.includes('')){over=true;s.textContent='Draw!'}}function reset(){g=Array(9).fill('');p='X';over=false;s.textContent='Your turn (X)';draw()}draw()</script>"}
+<<</genui>>>
+```
+
+#### Example 7: Dashboard with multiple nodes (wrapped format)
 ```
 <<<genui>>>
 {"nodes":[
   {"id":"h","type":"header","props":{"title":"Q4 Dashboard","subtitle":"Performance overview"}},
   {"id":"sr","type":"stats_row","children":[
     {"id":"s1","type":"stat","props":{"label":"Revenue","value":"$48.2k","delta":12.4,"deltaLabel":"vs Q3"}},
-    {"id":"s2","type":"stat","props":{"label":"Users","value":"8,421","delta":8.1,"deltaLabel":"vs Q3"}},
-    {"id":"s3","type":"stat","props":{"label":"Churn","value":"2.3%","delta":-0.5,"deltaLabel":"vs Q3"}}
+    {"id":"s2","type":"stat","props":{"label":"Users","value":"8,421","delta":8.1,"deltaLabel":"vs Q3"}}
   ]},
-  {"id":"sk","type":"sparkline","props":{"label":"Daily active users","data":[120,135,142,138,155,160,172,168,185,190]}},
-  {"id":"pg","type":"progress","props":{"label":"Annual goal (1000 users)","value":842,"max":1000}}
-]}
-<<</genui>>>
-```
-
-#### Example 5: Interactive quiz (custom_html for education)
-```
-<<<genui>>>
-{"nodes":[
-  {"id":"quiz","type":"custom_card","props":{"title":"Science Quiz","icon":"🧪","description":"Test your knowledge of photosynthesis","height":250,"html":"<div id='q' style='font-weight:bold;margin-bottom:8px'>What do plants need for photosynthesis?</div><div id='opts'></div><p id='fb' style='margin-top:8px;font-weight:bold'></p><script>var opts=['Sunlight only','Water + CO2 + Sunlight','Soil only','Water only'];var correct=1;var oc=document.getElementById('opts');opts.forEach((o,i)=>{var b=document.createElement('button');b.textContent=o;b.style.cssText='display:block;margin:4px 0;padding:8px;width:100%;text-align:left;border:1px solid #ccc;border-radius:6px;cursor:pointer';b.onclick=()=>{var fb=document.getElementById('fb');if(i===correct){fb.textContent='✓ Correct!';fb.style.color='green'}else{fb.textContent='✗ Try again';fb.style.color='red'}};oc.appendChild(b)})</script>"}}
+  {"id":"pg","type":"progress","props":{"label":"Annual goal","value":842,"max":1000}}
 ]}
 <<</genui>>>
 ```

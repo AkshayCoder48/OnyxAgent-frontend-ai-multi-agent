@@ -306,7 +306,13 @@ function toSpec(raw: unknown, streaming: boolean): GenUISpec | null {
   return { nodes: normalized };
 }
 
-/** Ensure a node has an `id` and that `meta.streaming` is set correctly. */
+/** Ensure a node has an `id` and that `meta.streaming` is set correctly.
+ *
+ * CRITICAL: The AI often emits nodes with props at the TOP LEVEL (not nested
+ * in a `props` field), e.g. `{"type":"header","title":"..."}`. We must collect
+ * all unknown keys (everything except `type`, `id`, `children`, `meta`, `props`)
+ * into the `props` object so validateSpec + the renderers can find them.
+ */
 function normalizeNode(
   raw: Record<string, unknown>,
   idx: number,
@@ -318,10 +324,24 @@ function normalizeNode(
       ? raw.id
       : `genui-${idx}-${type}`;
 
-  const props =
+  // Collect props from BOTH `raw.props` (proper format) AND top-level keys
+  // (flat format that the AI naturally emits). Top-level keys take precedence
+  // only if `raw.props` doesn't have them (so explicit props win).
+  const RESERVED_KEYS = new Set(["type", "id", "children", "meta", "props"]);
+  const flatProps: Record<string, unknown> = {};
+  for (const key of Object.keys(raw)) {
+    if (!RESERVED_KEYS.has(key)) {
+      flatProps[key] = raw[key];
+    }
+  }
+
+  const nestedProps =
     raw.props && typeof raw.props === "object"
       ? (raw.props as Record<string, unknown>)
-      : undefined;
+      : {};
+
+  // Merge: flat props first, then nested props (nested wins on conflict)
+  const props = { ...flatProps, ...nestedProps };
 
   const children = Array.isArray(raw.children)
     ? raw.children

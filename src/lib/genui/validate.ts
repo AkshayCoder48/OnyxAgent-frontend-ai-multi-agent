@@ -166,7 +166,24 @@ export function validateNode(
     };
   }
 
-  const props = filterProps(type, node.props);
+  // Collect props from BOTH `node.props` (proper format) AND top-level keys
+  // (flat format the AI naturally emits: {"type":"header","title":"..."}).
+  // This is critical — without it, all props are lost when the AI uses flat
+  // format, and the renderer receives empty props → nothing renders.
+  const RESERVED_KEYS = new Set(["type", "id", "children", "meta", "props"]);
+  const flatProps: Record<string, unknown> = {};
+  for (const key of Object.keys(node)) {
+    if (!RESERVED_KEYS.has(key)) {
+      flatProps[key] = (node as unknown as Record<string, unknown>)[key];
+    }
+  }
+  const nestedProps =
+    node.props && typeof node.props === "object"
+      ? (node.props as Record<string, unknown>)
+      : {};
+  const mergedProps = { ...flatProps, ...nestedProps };
+
+  const props = filterProps(type, mergedProps);
 
   // Recursively validate children.
   let children: GenUINode[] | undefined;
