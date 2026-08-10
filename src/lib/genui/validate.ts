@@ -71,6 +71,9 @@ const ALLOWED_PROPS_BY_TYPE: Record<string, string[]> = {
   // Custom component types — allow arbitrary HTML/JSX content.
   custom_html: ["html", "title", "height", "width", "sandbox"],
   custom_card: ["title", "html", "body", "description", "icon", "height", "content"],
+  // Root wrapper — the AI sometimes emits {"type":"root","children":[...]}.
+  // Treated as a passthrough: no props, just renders children.
+  root: [],
   unknown_json: ["__raw", "__type"],
 };
 

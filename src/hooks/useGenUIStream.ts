@@ -106,6 +106,9 @@ function buildSegments(fullText: string): TextSegment[] {
         let nodes: unknown[] | null = null;
         if (Array.isArray((raw as Record<string, unknown>).nodes)) {
           nodes = (raw as Record<string, unknown>).nodes as unknown[];
+        } else if ((raw as Record<string, unknown>).type === "root" && Array.isArray((raw as Record<string, unknown>).children)) {
+          // Root wrapper — use children
+          nodes = (raw as Record<string, unknown>).children as unknown[];
         } else if (Array.isArray(raw)) {
           nodes = raw;
         } else if (typeof (raw as Record<string, unknown>).type === "string") {
@@ -128,6 +131,9 @@ function buildSegments(fullText: string): TextSegment[] {
       let nodes: unknown[] | null = null;
       if (Array.isArray((raw as Record<string, unknown>).nodes)) {
         nodes = (raw as Record<string, unknown>).nodes as unknown[];
+      } else if ((raw as Record<string, unknown>).type === "root" && Array.isArray((raw as Record<string, unknown>).children)) {
+        // Root wrapper — use children
+        nodes = (raw as Record<string, unknown>).children as unknown[];
       } else if (Array.isArray(raw)) {
         nodes = raw;
       } else if (typeof (raw as Record<string, unknown>).type === "string") {

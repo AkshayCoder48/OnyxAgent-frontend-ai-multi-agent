@@ -64,6 +64,7 @@ export const RENDERERS: Record<string, ComponentType<GenUIComponentProps>> = {
   stock_ticker: lazily(() => import("./StockTicker")),
   custom_html: lazily(() => import("./CustomHTML")),
   custom_card: lazily(() => import("./CustomCard")),
+  root: lazily(() => import("./Root")),
   unknown_json: lazily(() => import("./UnknownFallback")),
 };
 

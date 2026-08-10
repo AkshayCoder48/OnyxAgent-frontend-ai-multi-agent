@@ -287,9 +287,14 @@ function toSpec(raw: unknown, streaming: boolean): GenUISpec | null {
   const obj = raw as Record<string, unknown>;
 
   // Accept either `{nodes: [...]}` or a bare `[...]` or a single node object.
+  // Also handle `{"type":"root","children":[...]}` — a wrapper the AI
+  // sometimes emits. We treat it as a passthrough: extract children.
   let nodes: unknown;
   if (Array.isArray(obj.nodes)) {
     nodes = obj.nodes;
+  } else if (obj.type === "root" && Array.isArray(obj.children)) {
+    // Root wrapper — use its children directly
+    nodes = obj.children;
   } else if (Array.isArray(raw)) {
     nodes = raw;
   } else if (typeof obj.type === "string") {
