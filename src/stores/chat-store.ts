@@ -361,25 +361,9 @@ export const useChatStore = create<ChatState>((set) => ({
     pendingMessages = null;
     set((state) => {
       if (state.messages.length === 0) return state;
-      // Read the persisted conversation ID BEFORE removing it from
-      // sessionStorage — we need it to delete messages from Dexie.
-      let convId: string | null = null;
       if (typeof window !== "undefined") {
-        convId = window.sessionStorage.getItem(PERSIST_CONV_KEY);
         window.sessionStorage.removeItem(PERSIST_KEY);
         window.sessionStorage.removeItem(PERSIST_CONV_KEY);
-      }
-      // Also delete messages from Dexie (IndexedDB) so they don't
-      // reappear when the user navigates back to this conversation.
-      if (convId) {
-        // Dynamic import to avoid circular dependency at module load time.
-        import("@/lib/services")
-          .then(({ conversationService }) =>
-            conversationService.deleteMessagesByConversation(convId),
-          )
-          .catch(() => {
-            // Non-fatal — messages will still be cleared from memory.
-          });
       }
       return { messages: [] };
     });

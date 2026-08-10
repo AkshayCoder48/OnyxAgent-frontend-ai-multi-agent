@@ -88,12 +88,11 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     // Skip initial mount
     if (prevId === undefined) {
       prevConversationIdRef.current = currId;
-      // On mount, if there's a URL ?id= param, the conversation store
-      // might not have it yet (it starts as null). Don't reconcile with
-      // null — wait for fetchConversations to set the real ID.
-      if (currId) {
-        reconcilePersisted(currId);
-      }
+      // Reconcile persisted messages with the active conversation ID.
+      // CRITICAL: call this even when currId is null — otherwise stale
+      // messages from the PREVIOUS chat (still in sessionStorage) leak
+      // into the new chat / no-chat state after a page refresh.
+      reconcilePersisted(currId);
       return;
     }
 
@@ -269,7 +268,21 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   // Slash command handlers — passed down to ChatInput so the / palette can
   // run them locally without going through the agent.
   const slashContext = {
-    clearChat: clearMessages,
+    // `/clear` deletes messages from BOTH memory and Dexie so they don't
+    // reappear on navigation. This is different from the internal
+    // `clearMessages` which only clears memory (used when switching chats).
+    clearChat: async () => {
+      const convId = currentConversationId;
+      if (convId) {
+        try {
+          const { conversationService } = await import("@/lib/services");
+          await conversationService.deleteMessagesByConversation(convId);
+        } catch {
+          // Non-fatal — messages will still be cleared from memory.
+        }
+      }
+      clearMessages();
+    },
     regenerateLast: () => {
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];

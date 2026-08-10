@@ -387,8 +387,6 @@ export default function ConfigSettingsPage() {
 
 function OtherApiKeysSection() {
   const { user } = useAuth();
-  const [tavily, setTavily] = useState("");
-  const [embeddings, setEmbeddings] = useState("");
   const [langsearch, setLangsearch] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -398,8 +396,6 @@ function OtherApiKeysSection() {
     void (async () => {
       try {
         const s = await settingsService.get(user.id);
-        setTavily(s.tavily_api_key_present ? "•••••••••••• (saved)" : "");
-        setEmbeddings(s.embeddings_api_key_present ? "•••••••••••• (saved)" : "");
         setLangsearch(s.langsearch_api_key_present ? "•••••••••••• (saved)" : "");
       } catch {
         // ignore
@@ -414,16 +410,6 @@ function OtherApiKeysSection() {
     setSaving(true);
     try {
       let changed = false;
-      // Only persist when the user typed something new (don't clear existing
-      // keys when they leave a field blank).
-      if (tavily && !tavily.startsWith("••••")) {
-        await settingsService.setTavilyKey(user.id, tavily.trim());
-        changed = true;
-      }
-      if (embeddings && !embeddings.startsWith("••••")) {
-        await settingsService.setEmbeddingsKey(user.id, embeddings.trim());
-        changed = true;
-      }
       if (langsearch && !langsearch.startsWith("••••")) {
         await settingsService.setLangSearchKey(user.id, langsearch.trim());
         changed = true;
@@ -433,8 +419,6 @@ function OtherApiKeysSection() {
         return;
       }
       toast.success("API keys saved");
-      setTavily("•••••••••••• (saved)");
-      setEmbeddings("•••••••••••• (saved)");
       setLangsearch("•••••••••••• (saved)");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save");
@@ -459,7 +443,7 @@ function OtherApiKeysSection() {
   return (
     <SectionCard
       title="Other API keys"
-      description="Keys for web search (Tavily, LangSearch) and embeddings. Stored encrypted locally; leave blank to keep an existing key."
+      description="Keys for web search (LangSearch). Stored encrypted locally; leave blank to keep an existing key."
     >
       <div className="space-y-4">
         <FormField label="LangSearch API key" htmlFor="langsearch-key" description="Optional — when set, web_search uses LangSearch's hybrid API (richer summaries); falls back to Miklium when blank or on error. Image & video search always use Miklium.">
@@ -469,24 +453,6 @@ function OtherApiKeysSection() {
             value={langsearch}
             onChange={(e) => setLangsearch(e.target.value)}
             placeholder="sk-…  (get one at langsearch.com/api-keys)"
-          />
-        </FormField>
-        <FormField label="Tavily API key" htmlFor="tavily-key">
-          <Input
-            id="tavily-key"
-            type="password"
-            value={tavily}
-            onChange={(e) => setTavily(e.target.value)}
-            placeholder="tvly-…"
-          />
-        </FormField>
-        <FormField label="Embeddings API key" htmlFor="embeddings-key">
-          <Input
-            id="embeddings-key"
-            type="password"
-            value={embeddings}
-            onChange={(e) => setEmbeddings(e.target.value)}
-            placeholder="sk-…"
           />
         </FormField>
         <Button onClick={save} disabled={saving} size="sm">

@@ -485,6 +485,8 @@ NEVER generate an entire large file in one operation. Use:
 - get_current_datetime: Get current date/time.
 - create_chart_tool: Create data visualizations.
 - preview_image: Display an image inline.
+- ocr_image: Extract text from an image (screenshot, photo, scan). Accepts image_url or image_base64.
+- ocr_pdf: Extract text from a PDF. Accepts pdf_url or pdf_base64.
 - load_skill / list_skills: Use installed skills.
 - create_tool: Create custom HTTP/Python tools.
 

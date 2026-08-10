@@ -36,5 +36,6 @@ import "./counterfactual";
 import "./subagents";
 import "./workspace_analysis";
 import "./image_preview";
+import "./ocr";
 
 export {};

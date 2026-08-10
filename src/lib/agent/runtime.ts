@@ -137,6 +137,7 @@ const CHAT_PROXY_URL = "/api/chat-proxy";
 const LARGE_ARG_TOOLS = new Set([
   "create_file", "write_file", "edit_file", "create_custom_tool",
   "preview_image", "workflow", "create_file_chunk",
+  "ocr_image", "ocr_pdf",
 ]);
 
 /** Max length of any single string value in tool args sent to the API. */
@@ -1239,6 +1240,8 @@ Available tools for incremental writing:
 - **datetime**: Get the current date/time. Use when the user asks "what time is it" or when timestamps are needed.
 - **chart**: Create data visualizations (bar, line, pie, scatter, etc). Use when the user wants to "visualize" or "plot" data.
 - **preview_image**: Display an image inline in the chat from a URL or base64. Use when you want to show the user a visual — a generated image, a screenshot, a diagram URL, etc.
+- **ocr_image**: Extract text from an image using OCR. Use when the user wants to read text from a screenshot, photo, scanned document, or any image containing text. Accepts image_url or image_base64.
+- **ocr_pdf**: Extract text from a PDF document using OCR. Use when the user wants to read text from a scanned PDF or a PDF without selectable text. Accepts pdf_url or pdf_base64.
 - **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
 - **todos**: Create and manage a live task checklist. Use for multi-step tasks to show progress.
 - **workflow**: Create, run, and manage multi-step workflow pipelines. Use when the user wants to automate a sequence of AI/tool steps.
