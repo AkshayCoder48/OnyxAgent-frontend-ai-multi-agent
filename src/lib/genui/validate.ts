@@ -206,11 +206,28 @@ export function validateNode(
   };
 }
 
-/** Validate all nodes in a spec. */
+/** Validate all nodes in a spec.
+ *
+ * SPECIAL HANDLING: If a node has type "root", it's a wrapper the AI
+ * sometimes emits around the entire spec. We FLATTEN it — replace the
+ * root node with its validated children. This ensures root never reaches
+ * the renderer (where it would need a Root component).
+ */
 export function validateSpec(spec: GenUISpec | null): GenUISpec {
   if (!spec || !Array.isArray(spec.nodes)) return { nodes: [] };
-  const nodes = spec.nodes
-    .map((n) => validateNode(n, 0))
-    .filter((n): n is GenUINode => n !== null);
-  return { nodes };
+  const out: GenUINode[] = [];
+  for (const node of spec.nodes) {
+    // If the node is a root wrapper, flatten its children
+    if (node && typeof node === "object" && node.type === "root") {
+      const rootChildren = Array.isArray(node.children) ? node.children : [];
+      const validated = rootChildren
+        .map((c) => validateNode(c, 0))
+        .filter((c): c is GenUINode => c !== null);
+      out.push(...validated);
+    } else {
+      const validated = validateNode(node, 0);
+      if (validated) out.push(validated);
+    }
+  }
+  return { nodes: out };
 }
