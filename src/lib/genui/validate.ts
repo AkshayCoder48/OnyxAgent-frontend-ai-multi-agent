@@ -48,7 +48,7 @@ const ALLOWED_PROPS_BY_TYPE: Record<string, string[]> = {
   card_grid: ["columns", "gap", "count", "cards", "items", "children"],
   stat: ["label", "value", "delta", "deltaLabel", "trend", "unit"],
   stats_row: ["gap", "columns", "items", "stats", "children"],
-  callout: ["variant", "tone", "type", "color", "title", "body", "text", "description"],
+  callout: ["variant", "tone", "type", "color", "title", "body", "text", "description", "content"],
   list: ["ordered", "items", "title", "variant"],
   checklist: ["title", "items", "label"],
   timeline: ["title", "events", "items"],
