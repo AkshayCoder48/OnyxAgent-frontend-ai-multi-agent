@@ -224,11 +224,10 @@ function TextBubble({
    *  shimmer placeholder. */
   isStreaming?: boolean;
 }) {
-  // Parse the text for `<<<genui>>>` sentinels. During streaming this gives
-  // us a live spec (partial JSON tolerated). After streaming, if the text
-  // still has sentinels, this splits them out so they don't leak into the
-  // markdown render.
-  const { genuiSpec, textBefore, textAfter, inGenUI } = useGenUIFromText(text);
+  // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
+  // (text / genui / text / genui / ...) so interleaved text between multiple
+  // GenUI blocks is preserved.
+  const { segments, inGenUI } = useGenUIFromText(text);
 
   if (isUser) {
     return (
@@ -245,37 +244,26 @@ function TextBubble({
     );
   }
 
-  // Decide which spec to render:
-  //   - If the text has sentinels (genuiSpec !== null), use the live-parsed spec.
-  //   - Else if we have persisted genuiNodes, use those.
-  //   - Else no GenUI to render.
-  const liveSpec = genuiSpec;
+  // If there are no live sentinels but we have persisted genuiNodes, use those
+  // as a single GenUI block after the full text.
+  const hasLiveSentinels = segments.some((s) => s.type === "genui");
   const persistedSpec =
-    !liveSpec && genuiNodes && genuiNodes.length > 0
+    !hasLiveSentinels && genuiNodes && genuiNodes.length > 0
       ? { nodes: genuiNodes }
       : null;
-  const specToRender = liveSpec ?? persistedSpec;
-  const hasLiveSentinels = liveSpec !== null;
 
-  // Text to render as markdown:
-  //   - If sentinels are present, render before + after (excluding the block).
-  //   - Else render the full text as-is.
-  const beforeText = hasLiveSentinels ? textBefore : text;
-  const afterText = hasLiveSentinels ? textAfter : "";
-
-  return (
-    <div
-      className={cn(
-        "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
-        // Streaming AI bubbles get: glow + shimmer sweep + animated border
-        isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
-      )}
-      style={{
-        backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
-      }}
-    >
-      {/* Before-text (markdown) */}
-      {beforeText && beforeText.trim() && (
+  // If no segments and no persisted spec, just render the full text as markdown
+  if (segments.length === 0 && !persistedSpec) {
+    return (
+      <div
+        className={cn(
+          "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
+          isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
+        )}
+        style={{
+          backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
+        }}
+      >
         <div
           className={cn(
             "prose-sm max-w-none break-words text-sm",
@@ -284,43 +272,64 @@ function TextBubble({
           )}
         >
           <MarkdownContent
-            content={stripFunctionCallTags(beforeText)}
-            onCiteClick={onCiteClick}
-            showCursor={showCursor && !specToRender && !afterText}
-          />
-        </div>
-      )}
-
-      {/* GenUI block (live or persisted) */}
-      {specToRender && (
-        <div className={cn(beforeText && beforeText.trim() ? "mt-3" : "")}>
-          <GenUIBlock spec={specToRender} streaming={inGenUI} />
-        </div>
-      )}
-
-      {/* After-text (markdown) — rare; only if the AI emits text after the block */}
-      {afterText && afterText.trim() && (
-        <div
-          className={cn(
-            "prose-sm max-w-none break-words text-sm mt-3",
-            !isStreaming && "prose-sm-static",
-            isStreaming && "stream-reveal stream-batch-fade",
-          )}
-        >
-          <MarkdownContent
-            content={stripFunctionCallTags(afterText)}
+            content={stripFunctionCallTags(text)}
             onCiteClick={onCiteClick}
             showCursor={showCursor}
           />
         </div>
-      )}
+      </div>
+    );
+  }
 
-      {/* If streaming with no text yet and no GenUI, show the cursor inline */}
-      {isStreaming && showCursor && !beforeText && !specToRender && !afterText && (
-        <div className="prose-sm max-w-none break-words text-sm stream-reveal stream-batch-fade">
-          <MarkdownContent content="" onCiteClick={onCiteClick} showCursor={true} />
-        </div>
+  // Render segments in order — alternating text (markdown) and GenUI blocks.
+  // If persisted spec exists (no live sentinels), render full text + persisted spec.
+  const renderSegments = hasLiveSentinels
+    ? segments
+    : persistedSpec
+      ? [{ type: "text" as const, text }, { type: "genui" as const, spec: persistedSpec, streaming: false }]
+      : segments;
+
+  // Determine if cursor should show on the last text segment
+  const lastTextIdx = renderSegments.map((s) => s.type).lastIndexOf("text");
+
+  return (
+    <div
+      className={cn(
+        "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
+        isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
       )}
+      style={{
+        backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
+      }}
+    >
+      {renderSegments.map((seg, i) => {
+        if (seg.type === "text") {
+          const isLast = i === lastTextIdx;
+          return (
+            <div
+              key={i}
+              className={cn(
+                "prose-sm max-w-none break-words text-sm",
+                i > 0 && "mt-3",
+                !isStreaming && "prose-sm-static",
+                isStreaming && "stream-reveal stream-batch-fade",
+              )}
+            >
+              <MarkdownContent
+                content={stripFunctionCallTags(seg.text || "")}
+                onCiteClick={onCiteClick}
+                showCursor={showCursor && isLast}
+              />
+            </div>
+          );
+        }
+        // GenUI segment
+        return (
+          <div key={i} className={cn(i > 0 && "mt-3")}>
+            <GenUIBlock spec={seg.spec!} streaming={seg.streaming} />
+          </div>
+        );
+      })}
     </div>
   );
 }
