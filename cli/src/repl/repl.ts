@@ -15,13 +15,12 @@
 
 import { createInterface, type Interface as ReadlineInterface } from "readline";
 import { loadConfig, saveConfig } from "../lib/config.js";
-import { getSecret, clearVaultCache } from "../lib/vault.js";
-import {
-  streamChatCompletion,
-  type ProviderConfig,
-  type ChatMessage,
-  type ToolDefinition,
-} from "../lib/provider.js";
+import { getSecret } from "../lib/vault.js";
+import type { ProviderConfig, ChatMessage } from "../lib/provider.js";
+import { runAgentLoop } from "../lib/agent-loop.js";
+import { LocalExecutor } from "../lib/local-executor.js";
+import { E2BExecutor } from "../lib/e2b-executor.js";
+import type { Executor } from "../lib/executor.js";
 
 interface ReplOptions {
   json?: boolean;
@@ -106,44 +105,73 @@ export async function startRepl(opts: ReplOptions = {}): Promise<void> {
       temperature: config.temperature,
     };
 
-    // Stream response
+    // Get executor
+    const ws = config.workspaces.find((w) => w.root === config.activeWorkspaceRoot);
+    let executor: Executor;
+    if (ws?.executor === "e2b") {
+      const e2bKey = getSecret("e2b");
+      if (e2bKey) {
+        executor = new E2BExecutor(e2bKey, ws.sandboxId);
+      } else {
+        executor = new LocalExecutor(ws?.root ?? process.cwd());
+      }
+    } else {
+      executor = new LocalExecutor(ws?.root ?? process.cwd());
+    }
+
+    // System prompt
+    let systemPrompt = "You are OnyxAgent, a helpful AI assistant running in a terminal CLI. Use tools when needed. Be concise.";
+    if (config.systemPromptEnabled && config.customSystemPrompt) {
+      systemPrompt = config.customSystemPrompt;
+    }
+
     const abortController = new AbortController();
-    let fullText = "";
-    let fullReasoning = "";
 
     process.stdout.write("\x1b[36m"); // cyan for assistant
     try {
-      for await (const chunk of streamChatCompletion(
-        providerConfig,
-        messages,
-        undefined,
-        abortController.signal,
-      )) {
-        if (chunk.textDelta) {
-          fullText += chunk.textDelta;
-          process.stdout.write(chunk.textDelta);
-        }
-        if (chunk.reasoningDelta && opts.showReasoning) {
-          fullReasoning += chunk.reasoningDelta;
-          process.stderr.write(`\x1b[90m${chunk.reasoningDelta}\x1b[0m`);
-        }
-        if (chunk.done) break;
-      }
+      const result = await runAgentLoop({
+        provider: providerConfig,
+        executor,
+        systemPrompt,
+        userMessage: input,
+        maxRounds: 50,
+        singleRound: opts.singleRound ?? config.singleRoundMode,
+        showReasoning: opts.showReasoning,
+        signal: abortController.signal,
+        onTextDelta: (delta) => {
+          process.stdout.write(delta);
+        },
+        onReasoningDelta: (delta) => {
+          if (opts.showReasoning) {
+            process.stderr.write(`\x1b[90m${delta}\x1b[0m`);
+          }
+        },
+        onToolCall: (name, args) => {
+          const argStr = Object.keys(args).length > 0 ? `(${JSON.stringify(args).slice(0, 80)})` : "()";
+          console.log(`\n\x1b[33m🔧 ${name}${argStr}\x1b[0m`);
+        },
+        onToolResult: (_id, result) => {
+          const status = result.success ? "✓" : "✗";
+          const summary = result.success
+            ? typeof result.output === "object" && result.output !== null
+              ? JSON.stringify(result.output).slice(0, 150)
+              : String(result.output).slice(0, 150)
+            : result.error ?? "failed";
+          console.log(`\x1b[33m  ${status} ${summary}\x1b[0m`);
+        },
+      });
       process.stdout.write("\x1b[0m\n");
 
       // Add assistant message to history
       messages.push({
         role: "assistant",
-        content: fullText,
-        ...(fullReasoning ? { reasoning_content: fullReasoning } : {}),
+        content: result.finalContent,
+        ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
       });
     } catch (err) {
       process.stdout.write("\x1b[0m\n");
       if (err instanceof Error && err.name === "AbortError") {
         console.log("[Interrupted]");
-        if (fullText) {
-          messages.push({ role: "assistant", content: fullText + " [interrupted]" });
-        }
       } else {
         console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       }

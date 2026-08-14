@@ -120,8 +120,10 @@ export async function* streamChatCompletion(
     model: config.model,
     messages,
     stream: true,
-    temperature: config.temperature ?? 0.7,
   };
+  if (config.temperature !== undefined) {
+    body.temperature = config.temperature;
+  }
   if (tools && tools.length > 0 && config.toolsEnabled) {
     body.tools = tools;
   }
@@ -135,6 +137,81 @@ export async function* streamChatCompletion(
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
+    // Some free providers (Pollinations) don't support system messages,
+    // temperature, tools, or streaming. Try progressively stripped requests.
+    if (res.status === 402 || res.status === 500) {
+      // Retry 1: strip system messages + tools + temperature, keep stream
+      const retry1Messages = messages.filter((m) => m.role !== "system");
+      const retry1Body = {
+        model: config.model,
+        messages: retry1Messages,
+        stream: true,
+      };
+      // Use a 15s timeout for the streaming retry
+      const retry1Controller = new AbortController();
+      const retry1Timeout = setTimeout(() => retry1Controller.abort(), 15000);
+      try {
+        const retry1Res = await fetch(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(retry1Body),
+          signal: retry1Controller.signal,
+        });
+        clearTimeout(retry1Timeout);
+        if (retry1Res.ok && retry1Res.body) {
+          yield* parseSSEStream(retry1Res.body);
+          return;
+        }
+      } catch {
+        clearTimeout(retry1Timeout);
+      }
+
+      // Retry 2: non-streaming fallback (some providers only support non-stream)
+      const retry2Res = await fetch(endpoint, {
+        method: "POST",
+        headers: { ...headers, Accept: "application/json" },
+        body: JSON.stringify({
+          model: config.model,
+          messages: retry1Messages,
+          stream: false,
+        }),
+        signal,
+      });
+      if (retry2Res.ok) {
+        const data = await retry2Res.json();
+        const choice = data.choices?.[0];
+        const message = choice?.message ?? {};
+        if (message.content) {
+          yield { textDelta: message.content };
+        }
+        if (message.reasoning_content || message.reasoning) {
+          yield { reasoningDelta: message.reasoning_content || message.reasoning };
+        }
+        if (message.tool_calls) {
+          for (const tc of message.tool_calls) {
+            yield {
+              toolCallDelta: {
+                index: 0,
+                id: tc.id,
+                name: tc.function?.name,
+                arguments: tc.function?.arguments,
+              },
+            };
+          }
+        }
+        if (data.usage) {
+          yield {
+            usage: {
+              promptTokens: data.usage.prompt_tokens,
+              completionTokens: data.usage.completion_tokens,
+              totalTokens: data.usage.total_tokens,
+            },
+          };
+        }
+        yield { done: true };
+        return;
+      }
+    }
     throw new Error(`Provider HTTP ${res.status}: ${errText.slice(0, 500) || res.statusText}`);
   }
 
@@ -142,8 +219,15 @@ export async function* streamChatCompletion(
     throw new Error("No response body from provider");
   }
 
-  // Parse SSE stream
-  const reader = res.body.getReader();
+  if (!res.body) throw new Error("No response body from provider");
+  yield* parseSSEStream(res.body);
+}
+
+/**
+ * Parse an SSE stream body and yield StreamChunk objects.
+ */
+async function* parseSSEStream(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamChunk> {
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
@@ -179,8 +263,8 @@ export async function* streamChatCompletion(
             if (delta.content) {
               result.textDelta = delta.content;
             }
-            if (delta.reasoning_content) {
-              result.reasoningDelta = delta.reasoning_content;
+            if (delta.reasoning_content || delta.reasoning) {
+              result.reasoningDelta = delta.reasoning_content || delta.reasoning;
             }
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {

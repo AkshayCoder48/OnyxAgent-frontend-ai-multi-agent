@@ -1,8 +1,11 @@
 import { readFileSync } from "fs";
 import { loadConfig } from "../lib/config.js";
 import { getSecret } from "../lib/vault.js";
-import { streamChatCompletion, type ProviderConfig, type ChatMessage, type ToolDefinition } from "../lib/provider.js";
+import type { ProviderConfig } from "../lib/provider.js";
 import { LocalExecutor } from "../lib/local-executor.js";
+import { E2BExecutor } from "../lib/e2b-executor.js";
+import { runAgentLoop } from "../lib/agent-loop.js";
+import type { Executor } from "../lib/executor.js";
 
 export async function runChat(opts: {
   prompt?: string;
@@ -45,59 +48,95 @@ export async function runChat(opts: {
     temperature: config.temperature,
   };
 
-  // Build messages
-  const messages: ChatMessage[] = [];
+  // Get executor
+  const ws = config.workspaces.find((w) => w.root === config.activeWorkspaceRoot);
+  let executor: Executor;
+  if (ws?.executor === "e2b") {
+    const e2bKey = getSecret("e2b");
+    if (!e2bKey) {
+      console.error("E2B key not set. Run 'onyx key set e2b <key>' or use local executor.");
+      process.exit(1);
+    }
+    executor = new E2BExecutor(e2bKey, ws.sandboxId);
+  } else {
+    const root = ws?.root ?? process.cwd();
+    executor = new LocalExecutor(root);
+  }
 
-  // System prompt
-  let systemPrompt = "You are OnyxAgent, a helpful AI assistant. Use tools when needed. Be concise.";
+  // Build system prompt
+  let systemPrompt = "You are OnyxAgent, a helpful AI assistant running in a terminal CLI. Use tools when needed. Be concise and helpful.";
   if (config.systemPromptEnabled && config.customSystemPrompt) {
     systemPrompt = config.customSystemPrompt;
   }
-  messages.push({ role: "system", content: systemPrompt });
 
-  // User message
-  messages.push({ role: "user", content: prompt });
-
-  // For now, no tools (tools are handled in the agent loop)
-  const tools: ToolDefinition[] | undefined = undefined;
-
-  // Stream
+  // Set up abort handling
   const abortController = new AbortController();
   process.on("SIGINT", () => {
     abortController.abort();
-    console.log("\n[Interrupted]");
   });
 
+  // Run agent loop
   try {
-    let fullText = "";
-    let fullReasoning = "";
-
-    for await (const chunk of streamChatCompletion(providerConfig, messages, tools, abortController.signal)) {
-      if (chunk.textDelta) {
-        fullText += chunk.textDelta;
+    const result = await runAgentLoop({
+      provider: providerConfig,
+      executor,
+      systemPrompt,
+      userMessage: prompt,
+      maxRounds: opts.maxRounds,
+      singleRound: opts.singleRound ?? config.singleRoundMode,
+      showReasoning: opts.showReasoning,
+      signal: abortController.signal,
+      onTextDelta: (delta) => {
         if (!opts.json) {
-          process.stdout.write(chunk.textDelta);
+          process.stdout.write(delta);
         }
-      }
-      if (chunk.reasoningDelta) {
-        fullReasoning += chunk.reasoningDelta;
+      },
+      onReasoningDelta: (delta) => {
         if (opts.showReasoning && !opts.json) {
-          process.stderr.write(`\x1b[90m${chunk.reasoningDelta}\x1b[0m`);
+          process.stderr.write(`\x1b[90m${delta}\x1b[0m`);
         }
-      }
-      if (chunk.done) {
-        break;
-      }
-    }
+      },
+      onToolCall: (name, args) => {
+        if (!opts.json) {
+          const argStr = Object.keys(args).length > 0 ? `(${JSON.stringify(args).slice(0, 100)})` : "()";
+          console.log(`\n\x1b[33m🔧 ${name}${argStr}\x1b[0m`);
+        }
+      },
+      onToolResult: (_id, result) => {
+        if (!opts.json) {
+          const status = result.success ? "✓" : "✗";
+          const summary = result.success
+            ? typeof result.output === "object" && result.output !== null
+              ? JSON.stringify(result.output).slice(0, 200)
+              : String(result.output).slice(0, 200)
+            : result.error ?? "failed";
+          console.log(`\x1b[33m  ${status} ${summary}\x1b[0m`);
+        }
+      },
+      onRoundEnd: (round, hasToolCalls) => {
+        if (opts.jsonl) {
+          console.log(JSON.stringify({ type: "round_end", round, hasToolCalls }));
+        }
+      },
+    });
 
     if (opts.json) {
       console.log(JSON.stringify({
-        content: fullText,
-        reasoning: opts.showReasoning ? fullReasoning : undefined,
-        model: providerConfig.model,
+        content: result.finalContent,
+        reasoning: opts.showReasoning ? result.reasoning : undefined,
+        toolCalls: result.toolCalls.map((tc) => ({
+          name: tc.name,
+          args: tc.args,
+          success: tc.result?.success,
+        })),
+        rounds: result.rounds,
+        usage: result.usage,
       }, null, 2));
     } else {
       console.log(); // newline after streaming
+      if (result.toolCalls.length > 0) {
+        console.log(`\n\x1b[90m[Completed in ${result.rounds} round(s), ${result.toolCalls.length} tool call(s)]\x1b[0m`);
+      }
     }
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
