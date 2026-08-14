@@ -43,6 +43,7 @@
     "**/*.test.tsx",
     "skills/**",
     "examples/**",
-    "capacitor.config.ts"
+    "capacitor.config.ts",
+    "cli/**"
   ]
 }

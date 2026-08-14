@@ -193,6 +193,122 @@ MIT — free to use, modify, and distribute.
 
 ---
 
+## 💻 OnyxAgent CLI
+
+A first-class command-line interface that brings OnyxAgent's AI runtime to the terminal.
+
+### Installation
+
+```bash
+# From the repository
+bun install
+bun run cli -- --help
+
+# Or build the CLI
+bun run build:cli
+./cli/dist/index.js --help
+```
+
+### Quick Start
+
+```bash
+# Initialize a workspace
+onyx init ./my-project --executor local
+
+# Interactive setup (configure provider + model + key)
+onyx setup
+
+# Run diagnostics
+onyx doctor
+
+# Start interactive REPL
+onyx
+
+# Non-interactive chat
+onyx chat "Explain this codebase" --json
+
+# Execute commands
+onyx exec "ls -la"
+onyx python --file script.py
+```
+
+### Command Reference
+
+```text
+onyx                    Start interactive REPL
+onyx init [dir]         Initialize workspace (--executor local|e2b)
+onyx setup              Interactive first-run setup
+onyx doctor             Run diagnostics
+onyx status             Show current status
+onyx chat [prompt]      Send a prompt (--json, --jsonl, --prompt-file)
+onyx exec <command>     Execute shell command in workspace
+onyx python [code]      Execute Python code (--file path)
+
+onyx provider list|add|use|remove|test|models
+onyx key list|set|remove|test
+onyx config show|get|set|reset|export
+onyx files list|read|write|delete|search
+onyx workspace list|switch
+onyx executor get|use
+onyx tool list
+onyx data export|reset
+```
+
+### Interactive REPL
+
+The REPL supports:
+- **Streaming output** — text appears as the AI generates it
+- **Reasoning display** — toggle with `/reasoning`
+- **Slash commands** — `/help`, `/clear`, `/model`, `/exit`, etc.
+- **Shell execution** — `!<command>` runs shell commands
+- **History** — conversation context maintained across turns
+
+### Security Model
+
+- **Local executor**: All file operations are confined to the authorized workspace root. Path traversal, symlink escapes, and absolute paths outside the root are rejected.
+- **Secret vault**: API keys are encrypted with AES-256-GCM. Secrets never appear in config output, logs, or exports.
+- **Permissions**: Workspace initialization requires explicit confirmation. New directories need `--yes` for non-interactive use.
+- **Config files**: Restrictive permissions (0600 for secrets, 0700 for state directories).
+
+### Architecture
+
+```text
+cli/
+  src/
+    index.ts              — CLI entry point + command router (commander.js)
+    commands/              — Command implementations (init, chat, provider, etc.)
+    lib/
+      config.ts            — Atomic JSON config store with schema versioning
+      vault.ts             — AES-256-GCM encrypted secret storage
+      paths.ts             — XDG platform path resolution
+      provider.ts          — OpenAI-compatible streaming client (Chat + Responses API)
+      executor.ts          — Executor interface (local + E2B)
+      local-executor.ts    — Local filesystem executor with path safety
+    repl/
+      repl.ts              — Interactive REPL with streaming + slash commands
+```
+
+### Cross-Platform
+
+- **Linux**: XDG Base Directory Specification (`~/.config/onyxagent`, `~/.local/state/onyxagent`)
+- **macOS**: Application Support / Caches paths
+- **Windows**: `%APPDATA%\OnyxAgent` and `%LOCALAPPDATA%\OnyxAgent`
+
+### Development
+
+```bash
+# Run CLI in development mode (hot reload)
+bun run cli:dev -- --help
+
+# Build CLI
+bun run build:cli
+
+# Run tests
+cd cli && bun test
+```
+
+---
+
 <div align="center">
 
 **[Live Demo](https://my-project-livid-zeta-99.vercel.app)** · **[GitHub](https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent)**

@@ -67,3 +67,6 @@ upload/
 worklog.md
 .zscripts/
 upload/
+cli/dist/
+cli/node_modules/
+.onyxagent/
