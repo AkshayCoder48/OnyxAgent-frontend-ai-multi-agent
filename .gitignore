@@ -70,3 +70,4 @@ upload/
 cli/dist/
 cli/node_modules/
 .onyxagent/
+cli/.npmrc

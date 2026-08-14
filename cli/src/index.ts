@@ -269,7 +269,7 @@ tool.command("list").description("List available tools").action(async () => {
 // --- TUI command ---
 program
   .command("tui")
-  .description("Start the Terminal UI mode with boxed layout and ANSI colors")
+  .description("Start the Terminal UI mode — real Ink-based interactive interface")
   .action(async () => {
     const { startTui } = await import("./tui/tui.js");
     await startTui({
