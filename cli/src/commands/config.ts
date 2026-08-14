@@ -10,7 +10,7 @@ export async function showConfig(): Promise<void> {
 
 export async function getConfig(key: string): Promise<void> {
   const config = loadConfig();
-  const value = (config as Record<string, unknown>)[key];
+  const value = (config as unknown as Record<string, unknown>)[key];
   console.log(value !== undefined ? JSON.stringify(value) : "undefined");
 }
 
@@ -22,9 +22,9 @@ export async function setConfig(key: string, value: string): Promise<void> {
   // Handle nested keys like "appearance.color"
   const parts = key.split(".");
   if (parts.length === 1) {
-    (config as Record<string, unknown>)[key] = parsed;
+    (config as unknown as Record<string, unknown>)[key] = parsed;
   } else {
-    let obj: Record<string, unknown> = config as Record<string, unknown>;
+    let obj: Record<string, unknown> = config as unknown as Record<string, unknown>;
     for (let i = 0; i < parts.length - 1; i++) {
       obj = obj[parts[i]!] as Record<string, unknown>;
     }

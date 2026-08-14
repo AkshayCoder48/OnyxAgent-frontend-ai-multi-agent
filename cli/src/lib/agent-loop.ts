@@ -63,6 +63,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let lastContent = "";
   let lastReasoning = "";
   let lastUsage: AgentLoopResult["usage"];
+  let roundsCompleted = 0;
 
   const toolCtx: ToolContext = {
     executor: opts.executor,
@@ -73,6 +74,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
   for (let round = 1; round <= maxRounds; round++) {
     opts.onRoundStart?.(round);
+    roundsCompleted = round;
 
     // Stream AI response
     const toolCallAccumulator = new Map<number, { id: string; name: string; args: string }>();
@@ -191,7 +193,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     finalContent: lastContent,
     reasoning: lastReasoning || undefined,
     toolCalls: allToolCalls,
-    rounds: maxRounds,
+    rounds: roundsCompleted,
     usage: lastUsage,
   };
 }

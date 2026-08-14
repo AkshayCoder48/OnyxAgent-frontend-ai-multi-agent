@@ -19,8 +19,12 @@ export async function runDoctor(): Promise<void> {
   // Vault
   console.log(`\nVault: ${vaultExists() ? "initialized" : "not initialized"}`);
   if (vaultExists()) {
-    const secrets = listSecrets();
-    console.log(`  Secrets: ${secrets.length} (${secrets.join(", ") || "none"})`);
+    try {
+      const secrets = listSecrets();
+      console.log(`  Secrets: ${secrets.length} (${secrets.join(", ") || "none"})`);
+    } catch {
+      console.log(`  Secrets: locked — set ONYXAGENT_MASTER_KEY or run interactively to inspect`);
+    }
   }
 
   // Active workspace check

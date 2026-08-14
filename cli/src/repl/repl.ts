@@ -269,17 +269,17 @@ Available commands:
       break;
 
     case "status":
-      const { showStatus } = await import("./commands/status.js");
+      const { showStatus } = await import("../commands/status.js");
       await showStatus();
       break;
 
     case "tools":
-      const { listTools } = await import("./commands/tool.js");
+      const { listTools } = await import("../commands/tool.js");
       await listTools();
       break;
 
     case "files":
-      const { listFiles } = await import("./commands/files.js");
+      const { listFiles } = await import("../commands/files.js");
       await listFiles(".");
       break;
 

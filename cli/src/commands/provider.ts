@@ -1,5 +1,5 @@
 import { loadConfig, saveConfig, type ProviderConfig } from "../lib/config.js";
-import { getSecret, setSecret } from "../lib/vault.js";
+import { getSecret, setSecret, removeSecret } from "../lib/vault.js";
 import { testProvider as testProviderConn } from "../lib/provider.js";
 
 export async function listProviders(): Promise<void> {
@@ -83,6 +83,12 @@ export async function removeProvider(id: string): Promise<void> {
     config.activeProviderId = config.providers[0]?.id ?? null;
   }
   saveConfig(config);
+  // Also remove the provider's secret from the vault
+  try {
+    removeSecret(`provider_${id}`);
+  } catch {
+    // Vault may not be accessible — non-fatal
+  }
   console.log(`✓ Provider removed: ${id}`);
 }
 

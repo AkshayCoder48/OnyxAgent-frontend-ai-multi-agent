@@ -178,7 +178,7 @@ export async function* streamChatCompletion(
         signal,
       });
       if (retry2Res.ok) {
-        const data = await retry2Res.json();
+        const data = await retry2Res.json() as any;
         const choice = data.choices?.[0];
         const message = choice?.message ?? {};
         if (message.content) {
@@ -347,7 +347,7 @@ export async function chatCompletion(
     throw new Error(`Provider HTTP ${res.status}: ${errText.slice(0, 500) || res.statusText}`);
   }
 
-  const data = await res.json();
+  const data = await res.json() as any;
   const choice = data.choices?.[0];
   const message = choice?.message ?? {};
 
@@ -399,7 +399,7 @@ export async function testProvider(
         continue;
       }
 
-      const data = await res.json();
+      const data = await res.json() as any;
       const models: string[] = (data.data ?? []).map((m: { id: string }) => m.id);
 
       return { ok: true, models, latency };

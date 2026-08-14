@@ -191,8 +191,8 @@ config.command("set <key> <value>").description("Set a config value").action(asy
   await setConfig(key, value);
 });
 config.command("reset").description("Reset configuration to defaults").action(async () => {
-  const { resetConfig } = await import("./commands/config.js");
-  await resetConfig();
+  const { resetConfigCmd } = await import("./commands/config.js");
+  await resetConfigCmd();
 });
 config.command("export [path]").description("Export configuration (no secrets)").action(async (path?: string) => {
   const { exportConfig } = await import("./commands/config.js");
@@ -265,6 +265,18 @@ tool.command("list").description("List available tools").action(async () => {
   const { listTools } = await import("./commands/tool.js");
   await listTools();
 });
+
+// --- TUI command ---
+program
+  .command("tui")
+  .description("Start the Terminal UI mode with boxed layout and ANSI colors")
+  .action(async () => {
+    const { startTui } = await import("./tui/tui.js");
+    await startTui({
+      showReasoning: program.opts().showReasoning,
+      singleRound: program.opts().singleRound,
+    });
+  });
 
 // --- Data commands ---
 const data = program.command("data").description("Data management");

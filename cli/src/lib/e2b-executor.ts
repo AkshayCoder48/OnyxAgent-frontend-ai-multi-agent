@@ -59,14 +59,14 @@ export class E2BExecutor implements Executor {
     return entries.map((entry) => ({
       path: join(path, entry.name),
       name: entry.name,
-      isDirectory: entry.isDirectory(),
+      isDirectory: (entry.type as string) === "directory",
     }));
   }
 
   async stat(path: string): Promise<FileResult | null> {
     const sbx = await this.getSandbox();
     try {
-      const content = await sbx.files.readText(path);
+      const content = await sbx.files.read(path, { format: "text" });
       return { path, size: content.length, isDirectory: false };
     } catch {
       // Might be a directory
@@ -82,10 +82,10 @@ export class E2BExecutor implements Executor {
   async readFile(path: string, encoding: "utf-8" | "binary" = "utf-8"): Promise<string | Uint8Array> {
     const sbx = await this.getSandbox();
     if (encoding === "binary") {
-      const bytes = await sbx.files.readBytes(path);
+      const bytes = await sbx.files.read(path, { format: "bytes" });
       return bytes;
     }
-    return await sbx.files.readText(path);
+    return await sbx.files.read(path, { format: "text" });
   }
 
   async writeFile(path: string, content: string | Uint8Array): Promise<void> {
@@ -93,29 +93,28 @@ export class E2BExecutor implements Executor {
     if (typeof content === "string") {
       await sbx.files.write(path, content);
     } else {
-      await sbx.files.writeBytes(path, content);
+      await sbx.files.write(path, content as unknown as ArrayBuffer);
     }
   }
 
   async createDirectory(path: string): Promise<void> {
     const sbx = await this.getSandbox();
-    // E2B doesn't have a direct mkdir — use a shell command
-    await sbx.commands.run(`mkdir -p ${path}`);
+    await sbx.files.makeDir(path);
   }
 
   async moveFile(from: string, to: string): Promise<void> {
     const sbx = await this.getSandbox();
-    await sbx.commands.run(`mkdir -p "$(dirname ${to})" && mv ${from} ${to}`);
+    await sbx.files.rename(from, to);
   }
 
   async deleteFile(path: string): Promise<void> {
     const sbx = await this.getSandbox();
-    await sbx.commands.run(`rm -f ${path}`);
+    await sbx.files.remove(path);
   }
 
   async deleteDirectory(path: string, recursive: boolean = false): Promise<void> {
     const sbx = await this.getSandbox();
-    await sbx.commands.run(`rm ${recursive ? "-rf" : "-f"} ${path}`);
+    await sbx.files.remove(path);
   }
 
   async searchFiles(query: string, opts?: { maxResults?: number }): Promise<SearchResult[]> {

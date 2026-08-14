@@ -1,23 +1,59 @@
 {
-  "name": "@onyxagent/cli",
+  "name": "@akshaycoder48/onyxagent-cli",
   "version": "0.1.0",
-  "description": "OnyxAgent CLI — a first-class terminal agentic workspace",
+  "description": "OnyxAgent CLI \u2014 a first-class terminal agentic workspace with AI tools, file operations, code execution, and more",
   "type": "module",
   "bin": {
     "onyx": "./dist/index.js",
     "onyxagent": "./dist/index.js"
   },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node",
     "dev": "bun --hot src/index.ts",
-    "cli": "bun src/index.ts"
+    "cli": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "agent",
+    "assistant",
+    "openai",
+    "chatgpt",
+    "terminal",
+    "e2b",
+    "sandbox",
+    "tools",
+    "mcp",
+    "ocr"
+  ],
+  "author": "AkshayCoder48",
+  "license": "MIT",
+  "homepage": "https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent/issues"
   },
   "dependencies": {
     "@e2b/code-interpreter": "^2.7.1",
     "chalk": "^5.3.0",
     "commander": "^12.1.0"
   },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }

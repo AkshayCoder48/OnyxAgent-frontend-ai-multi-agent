@@ -279,7 +279,7 @@ registerTool({
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json() as any;
       if (!data.success) throw new Error(data.error || "Search failed");
       // Group by URL
       const byUrl = new Map<string, { url: string; snippet: string; domain: string }>();
@@ -321,7 +321,7 @@ registerTool({
         body: JSON.stringify({ search: [query], type: "images", maxResults: limit }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json() as any;
       const results = (data.results || []).map((r: { imageUrl: string; title: string; size?: { width?: number; height?: number }; referenceUrl: string }) => ({
         imageUrl: r.imageUrl,
         title: r.title,
@@ -359,7 +359,7 @@ registerTool({
         body: JSON.stringify({ search: [query], type: "videos", maxResults: limit, includeAdditionalData: true }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json() as any;
       const results = (data.results || []).map((r: { videoUrl: string; thumbUrl: string; title: string; description: string; duration: string; additionalData?: { channelTitle?: string; statistics?: { viewCount?: string; likeCount?: string } } }) => ({
         videoUrl: r.videoUrl,
         thumbnail: r.thumbUrl,
@@ -454,7 +454,7 @@ registerTool({
         });
       }
       if (!res.ok) throw new Error(`OCR HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json() as any;
       if (data.error) throw new Error(data.error);
       return { success: true, output: { text: data.text || "", charCount: (data.text || "").length } };
     } catch (e) {
