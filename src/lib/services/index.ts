@@ -870,6 +870,12 @@ export interface UserSettings {
   sandbox_api_key_present: boolean;
   tavily_api_key_present: boolean;
   embeddings_api_key_present: boolean;
+  /** Whether Telegram bot token is stored (encrypted). */
+  telegram_bot_token_present: boolean;
+  /** Whether WhatsApp instance ID is stored (encrypted, via Green-API). */
+  whatsapp_instance_id_present: boolean;
+  /** Whether WhatsApp API token is stored (encrypted, via Green-API). */
+  whatsapp_api_token_present: boolean;
   /** Whether a SkillsMP marketplace API key is stored (encrypted in
    *  `extra.skillsmp_api_key_encrypted`). Optional — anonymous access works
    *  for basic search (50 req/day), an API key raises the limit to 500/day. */
@@ -945,6 +951,9 @@ export const settingsService = {
       sandbox_api_key_present: !!row.e2b_api_key_encrypted,
       tavily_api_key_present: !!row.tavily_api_key_encrypted,
       embeddings_api_key_present: !!row.embeddings_api_key_encrypted,
+      telegram_bot_token_present: !!(row.extra?.telegram_bot_token_encrypted),
+      whatsapp_instance_id_present: !!(row.extra?.whatsapp_instance_id_encrypted),
+      whatsapp_api_token_present: !!(row.extra?.whatsapp_api_token_encrypted),
       skillsmp_api_key_present: !!row.extra?.skillsmp_api_key_encrypted,
       langsearch_api_key_present: !!row.extra?.langsearch_api_key_encrypted,
       env_vars: Object.entries(row.env_vars ?? {}).map(([name, v]) => ({
@@ -1369,8 +1378,57 @@ export const mcpService = {
 };
 
 // ---------------------------------------------------------------------------
-// customToolService — basic CRUD.
+// Generic secret storage for Telegram/WhatsApp bridge credentials.
+// Stored encrypted in user_settings.extra under custom keys.
 // ---------------------------------------------------------------------------
+
+export const secretService = {
+  async set(userId: string, keyName: string, value: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await settingsService.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) return;
+
+    const extra = { ...(row.extra ?? {}) };
+    const encryptedKey = `${keyName}_encrypted`;
+
+    if (value === null) {
+      delete extra[encryptedKey];
+    } else {
+      try {
+        if (!isVaultUnlocked()) {
+          const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+          await restoreVaultFromSession();
+        }
+        extra[encryptedKey] = await vaultEncrypt(value);
+      } catch {
+        extra[encryptedKey] = value; // fallback: store plaintext (not recommended)
+      }
+    }
+
+    await db.user_settings.update(row.id!, { extra, updated_at: nowISO() });
+  },
+
+  async get(userId: string, keyName: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return null;
+
+    const encrypted = row.extra?.[`${keyName}_encrypted`];
+    if (typeof encrypted !== "string" || !encrypted) return null;
+
+    try {
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
+      return await vaultDecrypt(encrypted);
+    } catch {
+      return null;
+    }
+  },
+};
 
 export const customToolService = {
   async list(userId: string, activeOnly = false) {

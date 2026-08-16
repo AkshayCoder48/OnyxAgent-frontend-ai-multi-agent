@@ -35,8 +35,9 @@ import {
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
 import { useAuth } from "@/hooks";
+import { useDeviceDetection } from "@/hooks/use-device-detection";
 import { useAuthStore } from "@/stores";
-import { aiProviderService, settingsService } from "@/lib/services";
+import { aiProviderService, settingsService, secretService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 import type { AIProviderRow } from "@/lib/db";
 
@@ -379,6 +380,9 @@ export default function ConfigSettingsPage() {
       <SystemPromptSection />
 
       <OtherApiKeysSection />
+
+      {/* Telegram & WhatsApp Bridge */}
+      <TelegramBridgeSection />
     </div>
   );
 }
@@ -1801,6 +1805,7 @@ function FileSystemModeSection() {
   const [mode, setMode] = useState<"auto" | "local" | "hopx">("auto");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const { device, canExecLocal, isMobile } = useDeviceDetection();
 
   useEffect(() => {
     if (!user) return;
@@ -1835,21 +1840,28 @@ function FileSystemModeSection() {
     return <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
   }
 
-  const options: { value: "auto" | "local" | "hopx"; label: string; description: string }[] = [
+  const options: { value: "auto" | "local" | "hopx"; label: string; description: string; badge?: string; recommended?: boolean }[] = [
     {
       value: "auto",
       label: "Auto",
       description: "Uses the E2B sandbox when an API key is set, otherwise falls back to local browser storage.",
+      badge: device === "desktop" ? "Desktop detected" : "Mobile detected",
     },
     {
       value: "local",
       label: "Local (browser storage)",
-      description: "All files, skills, and configs are stored in your browser's OPFS. No cloud sandbox. Terminal and Python execution won't work — only file read/write/list.",
+      description: device === "desktop"
+        ? `All files stored in your browser's OPFS. Desktop detected — ${canExecLocal ? "OPFS supported ✓" : "OPFS not available"}. Terminal & Python need E2B.`
+        : "All files stored in browser storage. On mobile, OPFS may be limited — consider E2B for full functionality.",
+      badge: device === "desktop" && canExecLocal ? "✓ Recommended for desktop" : undefined,
+      recommended: device === "desktop" && canExecLocal,
     },
     {
       value: "hopx",
       label: "E2B Sandbox (cloud)",
-      description: "All file ops, terminal, and Python execution run in the E2B cloud sandbox. Requires a valid E2B API key. (The mode is named \"hopx\" in storage for back-compat.)",
+      description: "All file ops, terminal, and Python execution run in the E2B cloud sandbox. Works on any device including mobile. Requires a valid E2B API key.",
+      badge: isMobile ? "✓ Recommended for mobile" : undefined,
+      recommended: isMobile,
     },
   ];
 
@@ -1884,7 +1896,19 @@ function FileSystemModeSection() {
               className="mt-1"
             />
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">{opt.label}</div>
+              <div className="flex items-center gap-2">
+                <div className="text-sm font-medium text-foreground">{opt.label}</div>
+                {opt.badge && (
+                  <span className={cn(
+                    "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                    opt.recommended
+                      ? "bg-primary/10 text-primary"
+                      : "bg-muted text-muted-foreground"
+                  )}>
+                    {opt.badge}
+                  </span>
+                )}
+              </div>
               <div className="text-xs text-muted-foreground mt-0.5">{opt.description}</div>
             </div>
           </label>
@@ -1988,5 +2012,96 @@ function AIFrameworkSection() {
         ))}
       </div>
     </div>
+  );
+}
+
+// ---------- Telegram & WhatsApp Bridge Section ----------
+
+function TelegramBridgeSection() {
+  const { user } = useAuth();
+  const [telegramToken, setTelegramToken] = useState("");
+  const [whatsappInstanceId, setWhatsappInstanceId] = useState("");
+  const [whatsappApiToken, setWhatsappApiToken] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    void (async () => {
+      try {
+        const s = await settingsService.get(user.id);
+        setTelegramToken(s.telegram_bot_token_present ? "•••••••••••• (saved)" : "");
+        setWhatsappInstanceId(s.whatsapp_instance_id_present ? "•••••••••••• (saved)" : "");
+        setWhatsappApiToken(s.whatsapp_api_token_present ? "•••••••••••• (saved)" : "");
+      } catch {
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [user]);
+
+  const save = async () => {
+    if (!user) return;
+    setSaving(true);
+    try {
+      let changed = false;
+      if (telegramToken && !telegramToken.startsWith("••••")) {
+        await secretService.set(user.id, "telegram_bot_token", telegramToken.trim());
+        changed = true;
+      }
+      if (whatsappInstanceId && !whatsappInstanceId.startsWith("••••")) {
+        await secretService.set(user.id, "whatsapp_instance_id", whatsappInstanceId.trim());
+        changed = true;
+      }
+      if (whatsappApiToken && !whatsappApiToken.startsWith("••••")) {
+        await secretService.set(user.id, "whatsapp_api_token", whatsappApiToken.trim());
+        changed = true;
+      }
+      if (!changed) { toast.info("No changes to save"); return; }
+      toast.success("Bridge credentials saved");
+      setTelegramToken("•••••••••••• (saved)");
+      setWhatsappInstanceId("•••••••••••• (saved)");
+      setWhatsappApiToken("•••••••••••• (saved)");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
+  }
+
+  return (
+    <SectionCard
+      title="Telegram & WhatsApp Bridge"
+      description="Connect OnyxAgent to Telegram and WhatsApp. The bridge runs as a background service on your VPS — no need to touch the web UI."
+    >
+      <div className="space-y-4">
+        <FormField label="Telegram Bot Token" htmlFor="telegram-token" description="From @BotFather on Telegram.">
+          <Input id="telegram-token" type="password" value={telegramToken} onChange={(e) => setTelegramToken(e.target.value)} placeholder="123456789:ABCdef..." />
+        </FormField>
+        <FormField label="WhatsApp Instance ID (Green-API)" htmlFor="wa-instance" description="Optional — from green-api.com.">
+          <Input id="wa-instance" type="password" value={whatsappInstanceId} onChange={(e) => setWhatsappInstanceId(e.target.value)} placeholder="1234567890" />
+        </FormField>
+        <FormField label="WhatsApp API Token (Green-API)" htmlFor="wa-token" description="Optional — from green-api.com.">
+          <Input id="wa-token" type="password" value={whatsappApiToken} onChange={(e) => setWhatsappApiToken(e.target.value)} placeholder="abcdef..." />
+        </FormField>
+        <Button onClick={save} disabled={saving} size="sm">
+          {saving && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
+          Save credentials
+        </Button>
+        <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">How it works:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Save your Telegram bot token above</li>
+            <li>Run: <code className="bg-muted px-1 rounded">TELEGRAM_BOT_TOKEN=... bun run mini-services/telegram-bridge/index.ts</code></li>
+            <li>Send a message to your bot on Telegram</li>
+            <li>AI processes it and streams the response back</li>
+          </ol>
+        </div>
+      </div>
+    </SectionCard>
   );
 }
