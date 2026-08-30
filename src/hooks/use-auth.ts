@@ -3,7 +3,6 @@
 import { useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore, resetInitState } from "@/stores";
-import { authService } from "@/lib/services";
 import { ApiError } from "@/lib/api-client";
 import { ROUTES } from "@/lib/constants";
 import type { User } from "@/types";
@@ -28,7 +27,7 @@ const DEFAULT_USER: User = {
 
 export function useAuth() {
   const router = useRouter();
-  const { user, isAuthenticated, isLoading, setUser, setLoading, logout: storeLogout } =
+  const { user, isLoading, setUser, setLoading, logout: storeLogout } =
     useAuthStore();
 
   // Run init once on mount. In non-auth mode this auto-creates the default

@@ -37,16 +37,19 @@ describe("Auth Store", () => {
     expect(state.isAuthenticated).toBe(true);
   });
 
-  it("should clear user on logout", () => {
+  it("should reset to the default local user on logout (non-auth mode)", async () => {
     // First set a user
     useAuthStore.getState().setUser(createMockUser());
 
-    // Then logout
-    useAuthStore.getState().logout();
+    // Then logout — in backendless/non-auth mode this intentionally does NOT
+    // clear the session; it resets to the auto-created default local user so
+    // the app keeps working without a login screen (see auth-store.ts).
+    await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
-    expect(state.user).toBeNull();
-    expect(state.isAuthenticated).toBe(false);
+    expect(state.user).not.toBeNull();
+    expect(state.user!.id).not.toBe("test-id");
+    expect(state.isAuthenticated).toBe(true);
   });
 
   it("should set loading state", () => {

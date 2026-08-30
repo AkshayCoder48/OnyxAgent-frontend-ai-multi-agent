@@ -70,10 +70,14 @@ export function PillNav({ brand, links, ctaLabel, ctaHref, secondaryCta }: PillN
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  useEffect(() => {
+  // Close the mobile overlay + dropdown menus on navigation. Render-time
+  // adjustment on pathname change (no effect → no cascading render).
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
     setOpen(false);
     setOpenMenu(null);
-  }, [pathname]);
+  }
 
   // Lock scroll + Escape while the mobile overlay is open.
   useEffect(() => {

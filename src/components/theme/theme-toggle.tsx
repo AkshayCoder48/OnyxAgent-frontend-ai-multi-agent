@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { Moon, Sun, Monitor } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useThemeStore, Theme, getResolvedTheme } from "@/stores/theme-store";
+
+/** No-op external-store subscription — the value never changes post-hydration. */
+const subscribeNoop = (): (() => void) => () => {};
 
 interface ThemeToggleProps {
   variant?: "icon" | "dropdown";
@@ -12,12 +15,15 @@ interface ThemeToggleProps {
 
 export function ThemeToggle({ variant = "icon", className }: ThemeToggleProps) {
   const { theme, setTheme } = useThemeStore();
-  const [mounted, setMounted] = useState(false);
-
-  // Prevent hydration mismatch by only rendering after mount
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  // "Is hydrated" flag via useSyncExternalStore: the server snapshot is
+  // false and the client snapshot is true, so the placeholder renders during
+  // SSR/hydration and the real UI afterwards — without an effect + setState
+  // (flagged by the React Compiler lint) and without hydration mismatches.
+  const mounted = useSyncExternalStore(
+    subscribeNoop,
+    () => true,
+    () => false,
+  );
 
   const resolvedTheme = getResolvedTheme(theme);
 

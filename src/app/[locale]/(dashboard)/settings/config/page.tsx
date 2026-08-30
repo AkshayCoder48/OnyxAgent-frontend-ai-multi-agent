@@ -35,8 +35,6 @@ import {
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
 import { useAuth } from "@/hooks";
-import { useDeviceDetection } from "@/hooks/use-device-detection";
-import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService, secretService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 import type { AIProviderRow } from "@/lib/db";
@@ -1036,7 +1034,7 @@ function ProviderEditor({
         </div>
         <p className="text-xs text-muted-foreground mb-2 mt-1">
           Add the model IDs you want exposed in the chat model picker, or click
-          "Fetch from URL" to auto-discover models from the provider's /v1/models endpoint.
+          &quot;Fetch from URL&quot; to auto-discover models from the provider&apos;s /v1/models endpoint.
         </p>
         <div className="flex gap-2">
           <Input
@@ -1356,170 +1354,6 @@ function E2BConfigSection() {
   );
 }
 
-// Sandbox management section — reset, restart, and list running sandboxes.
-// Reset kills the current sandbox (files lost). Restart creates a new sandbox
-// and restores files from the local OPFS backup. List shows all running
-// sandboxes on the E2B account.
-function SandboxManagementSection() {
-  const { user } = useAuth();
-  const [sandboxKey, setSandboxKey] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [sandboxes, setSandboxes] = useState<Array<{ sandboxID: string; startedAt: string; state?: string; templateID?: string }>>([]);
-  const [result, setResult] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const key = await settingsService.getDecryptedSandboxKey(user.id);
-        setSandboxKey(key);
-      } catch {
-        // ignore
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [user]);
-
-  const fetchSandboxes = async () => {
-    if (!sandboxKey) return;
-    setActionLoading(true);
-    try {
-      const { E2BClient } = await import("@/lib/e2b/client");
-      const items = await E2BClient.listSandboxes(sandboxKey);
-      setSandboxes(items);
-      setResult(`Found ${items.length} running sandbox${items.length === 1 ? "" : "es"}`);
-    } catch (err) {
-      setResult(`❌ Failed to list sandboxes: ${err instanceof Error ? err.message : "Unknown"}`);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleReset = async () => {
-    if (!sandboxKey) return;
-    setActionLoading(true);
-    try {
-      const { getE2BClient } = await import("@/lib/e2b/client");
-      const client = getE2BClient(sandboxKey, null, "shared");
-      const killed = await client.reset();
-      setResult(`✅ Sandbox reset${killed ? ` (killed ${killed})` : ""}. Next operation will create a fresh sandbox.`);
-      // Evict all cached clients so the next call creates a new one.
-      const { evictAllE2BClients } = await import("@/lib/e2b/client");
-      evictAllE2BClients();
-    } catch (err) {
-      setResult(`❌ Reset failed: ${err instanceof Error ? err.message : "Unknown"}`);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleRestart = async () => {
-    if (!sandboxKey) return;
-    setActionLoading(true);
-    try {
-      const { getE2BClient } = await import("@/lib/e2b/client");
-      const client = getE2BClient(sandboxKey, null, "shared");
-      // First, backup files from the current sandbox to OPFS.
-      let backupFiles: Array<{ path: string; content: string }> = [];
-      try {
-        const backup = await client.backupFiles();
-        backupFiles = backup.files;
-        // Save backup to OPFS for persistence.
-        const { writeFile } = await import("@/lib/storage/opfs");
-        const userId = useAuthStore.getState().user?.id;
-        if (userId) {
-          await writeFile(userId, "backups", "sandbox-backup.json", JSON.stringify(backupFiles));
-        }
-      } catch {
-        // backup failed — restart without restore
-      }
-      // Evict cached clients so the restart creates a fresh one.
-      const { evictAllE2BClients } = await import("@/lib/e2b/client");
-      evictAllE2BClients();
-      // Restart with backup restore.
-      const newClient = getE2BClient(sandboxKey, null, "shared");
-      const result = await newClient.restart(backupFiles);
-      setResult(`✅ Sandbox restarted (new ID: ${result.sandboxId.slice(0, 12)}…, ${result.restored} files restored)`);
-    } catch (err) {
-      setResult(`❌ Restart failed: ${err instanceof Error ? err.message : "Unknown"}`);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-      </div>
-    );
-  }
-
-  if (!sandboxKey) {
-    return (
-      <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
-        <AlertTriangle className="h-3.5 w-3.5" />
-        <span>No E2B sandbox key configured. Add one in the E2B Sandbox section above.</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" onClick={handleReset} disabled={actionLoading}>
-          {actionLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Trash2 className="h-4 w-4 mr-1.5" />}
-          Reset sandbox
-        </Button>
-        <Button size="sm" variant="outline" onClick={handleRestart} disabled={actionLoading}>
-          {actionLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <RefreshCw className="h-4 w-4 mr-1.5" />}
-          Restart sandbox
-        </Button>
-        <Button size="sm" variant="outline" onClick={fetchSandboxes} disabled={actionLoading}>
-          {actionLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Server className="h-4 w-4 mr-1.5" />}
-          List sandboxes
-        </Button>
-      </div>
-
-      {result && (
-        <div className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs">
-          {result}
-        </div>
-      )}
-
-      {sandboxes.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-xs font-medium text-muted-foreground">Running sandboxes:</p>
-          <div className="space-y-1 max-h-48 overflow-y-auto scrollbar-thin">
-            {sandboxes.map((sb) => (
-              <div key={sb.sandboxID} className="flex items-center justify-between rounded-md border border-border bg-card px-2.5 py-1.5 text-xs">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="shrink-0 h-2 w-2 rounded-full bg-emerald-500" />
-                  <span className="font-mono truncate">{sb.sandboxID}</span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0 text-muted-foreground">
-                  <span>{sb.state ?? "running"}</span>
-                  <span>·</span>
-                  <span>{new Date(sb.startedAt).toLocaleString()}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <AlertTriangle className="h-3.5 w-3.5" />
-        <span>
-          <strong>Reset</strong> kills the sandbox (files lost). <strong>Restart</strong> creates a new sandbox
-          and restores files from local backup. <strong>List</strong> shows all running sandboxes on your E2B account.
-        </span>
-      </div>
-    </div>
-  );
-}
 
 // Data management section — export/import all local data (OPFS files +
 // IndexedDB conversations/settings/skills) as a JSON file.
@@ -1799,124 +1633,6 @@ function SkillsMPConfigSection() {
   );
 }
 
-// File system mode section — choose local (OPFS) or E2B cloud sandbox.
-function FileSystemModeSection() {
-  const { user } = useAuth();
-  const [mode, setMode] = useState<"auto" | "local" | "hopx">("auto");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const { device, canExecLocal, isMobile } = useDeviceDetection();
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const m = await settingsService.getFileSystemMode(user.id);
-        setMode(m);
-      } catch {
-        // ignore
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [user]);
-
-  const changeMode = async (newMode: "auto" | "local" | "hopx") => {
-    if (!user || saving) return;
-    setSaving(true);
-    setMode(newMode);
-    try {
-      await settingsService.setFileSystemMode(user.id, newMode);
-      toast.success(`File system mode: ${newMode === "auto" ? "Auto (E2B sandbox if available, else local)" : newMode === "local" ? "Local (browser storage)" : "E2B Sandbox (cloud)"}`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
-      setMode(mode); // revert
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
-  }
-
-  const options: { value: "auto" | "local" | "hopx"; label: string; description: string; badge?: string; recommended?: boolean }[] = [
-    {
-      value: "auto",
-      label: "Auto",
-      description: "Uses the E2B sandbox when an API key is set, otherwise falls back to local browser storage.",
-      badge: device === "desktop" ? "Desktop detected" : "Mobile detected",
-    },
-    {
-      value: "local",
-      label: "Local (browser storage)",
-      description: device === "desktop"
-        ? `All files stored in your browser's OPFS. Desktop detected — ${canExecLocal ? "OPFS supported ✓" : "OPFS not available"}. Terminal & Python need E2B.`
-        : "All files stored in browser storage. On mobile, OPFS may be limited — consider E2B for full functionality.",
-      badge: device === "desktop" && canExecLocal ? "✓ Recommended for desktop" : undefined,
-      recommended: device === "desktop" && canExecLocal,
-    },
-    {
-      value: "hopx",
-      label: "E2B Sandbox (cloud)",
-      description: "All file ops, terminal, and Python execution run in the E2B cloud sandbox. Works on any device including mobile. Requires a valid E2B API key.",
-      badge: isMobile ? "✓ Recommended for mobile" : undefined,
-      recommended: isMobile,
-    },
-  ];
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <AlertTriangle className="h-3.5 w-3.5" />
-        <span>
-          Controls where the AI's file operations (create, read, write, delete)
-          are performed. Local mode works without any API key but can&apos;t run
-          shell commands or Python code.
-        </span>
-      </div>
-      <div className="space-y-2">
-        {options.map((opt) => (
-          <label
-            key={opt.value}
-            className={cn(
-              "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
-              mode === opt.value
-                ? "border-primary bg-primary/5"
-                : "border-border hover:bg-muted/50",
-              saving && "pointer-events-none opacity-50",
-            )}
-          >
-            <input
-              type="radio"
-              name="file-system-mode"
-              value={opt.value}
-              checked={mode === opt.value}
-              onChange={() => changeMode(opt.value)}
-              className="mt-1"
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <div className="text-sm font-medium text-foreground">{opt.label}</div>
-                {opt.badge && (
-                  <span className={cn(
-                    "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
-                    opt.recommended
-                      ? "bg-primary/10 text-primary"
-                      : "bg-muted text-muted-foreground"
-                  )}>
-                    {opt.badge}
-                  </span>
-                )}
-              </div>
-              <div className="text-xs text-muted-foreground mt-0.5">{opt.description}</div>
-            </div>
-          </label>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 
 // AI Framework selector — changes the system prompt to match the framework.
@@ -1988,6 +1704,7 @@ function AIFrameworkSection() {
         {frameworks.map((fw) => (
           <label
             key={fw.value}
+            htmlFor={`ai-framework-${fw.value}`}
             className={cn(
               "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
               framework === fw.value
@@ -1998,6 +1715,7 @@ function AIFrameworkSection() {
           >
             <input
               type="radio"
+              id={`ai-framework-${fw.value}`}
               name="ai-framework"
               value={fw.value}
               checked={framework === fw.value}

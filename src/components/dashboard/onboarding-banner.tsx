@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { ArrowRight, Sparkles, X } from "lucide-react";
 
@@ -10,15 +10,45 @@ import { ROUTES } from "@/lib/constants";
 
 const DISMISS_KEY = "onboarding.banner_dismissed";
 
+/** Local (per-tab) notifications for same-window dismissals. */
+const DISMISS_EVENT = "onyxagent:onboarding-banner-dismissed";
+
+function subscribe(callback: () => void): () => void {
+  // `storage` fires cross-tab; the custom event covers same-tab dismissal.
+  window.addEventListener("storage", callback);
+  window.addEventListener(DISMISS_EVENT, callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener(DISMISS_EVENT, callback);
+  };
+}
+
+function getDismissedSnapshot(): boolean {
+  return window.localStorage.getItem(DISMISS_KEY) !== null;
+}
+
+function getServerDismissedSnapshot(): boolean {
+  // Server snapshot: assume dismissed so nothing renders during SSR —
+  // prevents hydration mismatch for this client-only UI affordance.
+  return true;
+}
+
 export function OnboardingBanner() {
   const { user } = useAuth();
-  const [show, setShow] = useState(false);
+  // Read localStorage as an external store — no effect + setState, and the
+  // server snapshot keeps SSR/CSR output consistent.
+  const dismissed = useSyncExternalStore(
+    subscribe,
+    getDismissedSnapshot,
+    getServerDismissedSnapshot,
+  );
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const dismissed = window.localStorage.getItem(DISMISS_KEY);
-    setShow(!dismissed && !isOnboardingCompleted(user));
-  }, [user]);
+  const dismiss = useCallback(() => {
+    window.localStorage.setItem(DISMISS_KEY, "1");
+    window.dispatchEvent(new Event(DISMISS_EVENT));
+  }, []);
+
+  const show = !dismissed && !isOnboardingCompleted(user);
 
   if (!show) return null;
 
@@ -43,10 +73,7 @@ export function OnboardingBanner() {
         </Link>
         <button
           type="button"
-          onClick={() => {
-            window.localStorage.setItem(DISMISS_KEY, "1");
-            setShow(false);
-          }}
+          onClick={dismiss}
           className="text-muted-foreground hover:text-foreground hover:bg-accent inline-flex h-9 w-9 items-center justify-center rounded-lg transition-colors"
           aria-label="Dismiss"
         >

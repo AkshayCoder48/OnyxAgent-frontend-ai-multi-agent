@@ -17,17 +17,27 @@ import { toast } from "sonner";
  */
 export function useSingleRoundMode() {
   const { user } = useAuthStore();
+  const userId = user?.id;
   const [singleRoundMode, setSingleRoundModeState] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // Loading until the persisted value resolves; when there's no user there's
+  // nothing to load, so start idle.
+  const [loading, setLoading] = useState(() => !userId);
+
+  // User transitions: when the user signs out (or is absent), stop loading
+  // immediately. Render-time adjustment — no setState-in-effect (flagged by
+  // the React Compiler lint). Sign-in re-arms `loading` and the fetch effect
+  // below resolves it.
+  const [prevUserId, setPrevUserId] = useState(userId);
+  if (userId !== prevUserId) {
+    setPrevUserId(userId);
+    setLoading(Boolean(userId));
+  }
 
   useEffect(() => {
-    if (!user?.id) {
-      setLoading(false);
-      return;
-    }
+    if (!userId) return;
     let cancelled = false;
     settingsService
-      .getSingleRoundMode(user.id)
+      .getSingleRoundMode(userId)
       .then((enabled) => {
         if (!cancelled) setSingleRoundModeState(enabled);
       })
@@ -40,14 +50,14 @@ export function useSingleRoundMode() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [userId]);
 
   const toggleSingleRoundMode = useCallback(async () => {
-    if (!user?.id) return;
+    if (!userId) return;
     const next = !singleRoundMode;
     setSingleRoundModeState(next); // optimistic update
     try {
-      await settingsService.setSingleRoundMode(user.id, next);
+      await settingsService.setSingleRoundMode(userId, next);
       toast.success(
         next
           ? "Single-round mode enabled — fewer API requests, one message bubble"
@@ -59,7 +69,7 @@ export function useSingleRoundMode() {
       setSingleRoundModeState(!next);
       toast.error("Failed to update single-round mode");
     }
-  }, [user?.id, singleRoundMode]);
+  }, [userId, singleRoundMode]);
 
   return {
     singleRoundMode,

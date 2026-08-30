@@ -36,7 +36,6 @@
 import { nanoid } from "nanoid";
 import type {
   WSEvent,
-  ChatMessage,
   MessagePart,
   ToolCall,
   AskUserQuestion,
@@ -147,7 +146,6 @@ const MAX_ARG_LEN = 500;
  *  Tool results are in the AI's workspace, not the context window, so there's
  *  no risk of maxing context. The previous per-tool budgets caused the AI to
  *  see truncated file content and get confused. */
-const DEFAULT_RESULT_LEN = Infinity;
 
 function truncateToolArgs(
   toolName: string,
@@ -189,7 +187,7 @@ function safeStringifyArgs(args: Record<string, unknown>): string {
       // If value is a string that looks truncated (ends mid-escape), fix it
       if (typeof value === "string") {
         // Remove any trailing incomplete escape sequences
-        let cleaned = value.replace(/\\+$/, (match) => {
+        const cleaned = value.replace(/\\+$/, (match) => {
           // If odd number of backslashes, the last one is an incomplete escape
           return match.length % 2 === 1 ? match.slice(0, -1) : match;
         });
@@ -250,7 +248,7 @@ interface ChatCompletionTool {
 // JSON chunks. Tolerant of partial-event buffering and `data: [DONE]`.
 // ---------------------------------------------------------------------------
 
-async function* parseSSEStream(
+export async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
@@ -325,7 +323,7 @@ interface DeltaAccumulator {
   }>;
 }
 
-function extractDelta(chunk: Record<string, unknown>): DeltaAccumulator | null {
+export function extractDelta(chunk: Record<string, unknown>): DeltaAccumulator | null {
   const choices = chunk.choices as
     | Array<{ delta?: Record<string, unknown>; finish_reason?: string | null; stop_reason?: string | null }>
     | undefined;
@@ -376,7 +374,7 @@ function extractDelta(chunk: Record<string, unknown>): DeltaAccumulator | null {
 
 /** Pull the finish reason out of a chunk — handles both `finish_reason`
  *  (OpenAI standard) and `stop_reason` (vLLM). */
-function extractFinishReason(chunk: Record<string, unknown>): string | null {
+export function extractFinishReason(chunk: Record<string, unknown>): string | null {
   const choices = chunk.choices as
     | Array<{ finish_reason?: string | null; stop_reason?: string | null }>
     | undefined;
@@ -653,7 +651,7 @@ async function streamRound(
   let finishReason: string | null = null;
   let usage: RoundResult["usage"];
   let aborted = false;
-  let roundIndex = 0; // monotonically increasing part index for the UI.
+  const roundIndex = 0; // monotonically increasing part index for the UI.
 
   const reader = response.body.getReader();
   try {
@@ -1440,11 +1438,13 @@ You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to 
         return `## ${role}\n\n${content}${toolSummary}`;
       }).join("\n\n---\n\n");
 
-      // Write to the E2B sandbox at /home/user/chats/<filename> so the AI's
-      // `read_file` tool (which reads from the sandbox) can access it.
-      // We use the toolCtx's sandboxApiKey if available; if not (local mode
-      // or no sandbox configured), we skip the file write but still return
-      // the handoff letter so the AI gets the summary inline.
+      // The AI reads workspace files from the E2B SANDBOX (read_file has no
+      // OPFS path), so the transcript MUST be written there. Writing it to
+      // OPFS (the historical behavior) produced a handoff letter pointing at
+      // a file the agent could never open — the read_file call always failed
+      // with "not found". No sandbox key (local mode / no sandbox configured)
+      // → skip the file entirely and rely on the inline summary below.
+      let fileSaved = false;
       if (sandboxApiKey && typeof window !== "undefined") {
         try {
           const { getE2BClient } = await import("@/lib/e2b/client");
@@ -1452,6 +1452,7 @@ You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to 
           // Ensure the chats/ directory exists, then write the file.
           await client.createFolder("/home/user/chats").catch(() => {});
           await client.writeFile(`/home/user/chats/${chatFileName}`, fullChatText);
+          fileSaved = true;
         } catch (err) {
           console.warn("[agent] failed to write handoff to E2B sandbox:", err);
         }
@@ -1461,13 +1462,17 @@ You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to 
       const allToolNames = new Set<string>();
       history.forEach((m) => m.tool_calls?.forEach((tc) => allToolNames.add(tc.tool_name)));
 
-      return `\n\n## CONVERSATION HANDOFF LETTER
-This is a continuation of a long conversation. The full chat history (${history.length} messages) has been saved to a file.
-
-**File path:** \`chats/${chatFileName}\` (in the workspace)
+      const fileSection = fileSaved
+        ? `**File path:** \`chats/${chatFileName}\` (in the workspace)
 **How to read it:** Use the \`read_file\` tool with path \`chats/${chatFileName}\`
 
-### Summary
+`
+        : "";
+
+      return `\n\n## CONVERSATION HANDOFF LETTER
+This is a continuation of a long conversation. ${fileSaved ? `The full chat history (${history.length} messages) has been saved to a file.` : "The full history was too large to save; a summary follows."}
+
+${fileSection}### Summary
 - **Total messages:** ${history.length} (showing last ${MAX_HISTORY_MESSAGES})
 - **User messages:** ${userMessages.length}
 - **Tools used:** ${Array.from(allToolNames).join(", ") || "none"}
@@ -1480,8 +1485,7 @@ ${userMessages.slice(0, 5).map((m, i) => `${i + 1}. ${m.content?.slice(0, 200) ?
 
 ### Most recent exchanges:
 ${trimmedHistory.slice(-6).map((m) => `[${m.role}] ${m.content?.slice(0, 300) ?? "(tool calls)"}`).join("\n")}
-
-If you need more context, read the full chat file at \`chats/${chatFileName}\`.
+${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${chatFileName}\`.` : ""}
 `;
     } catch {
       return "";
@@ -1555,7 +1559,7 @@ If you need more context, read the full chat file at \`chats/${chatFileName}\`.
   let lastAssistantThinking = "";
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
-  let allToolCalls: ToolCall[] = [];
+  const allToolCalls: ToolCall[] = [];
   let retryCountThisTurn = 0;
   // Accumulated ordered parts (thinking/reasoning/text/tool) across all
   // rounds — persisted on the assistant message so a page refresh restores

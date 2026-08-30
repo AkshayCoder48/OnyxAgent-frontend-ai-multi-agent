@@ -76,7 +76,7 @@ function savePrefs(prefs: Prefs) {
 export default function NotificationsSettingsPage() {
   const [prefs, setPrefs] = useState<Prefs>(defaultPrefs);
   const [dirty, setDirty] = useState(false);
-  const initialPrefs = useMemo(loadPrefs, []);
+  const initialPrefs = useMemo(() => loadPrefs(), []);
 
   useEffect(() => {
     setPrefs(initialPrefs);

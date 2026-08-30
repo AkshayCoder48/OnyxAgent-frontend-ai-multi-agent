@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useResearchStore } from "@/stores";
 import type { ResearchTodo } from "@/types";
 import { Card, Progress, Button } from "@/components/ui";
@@ -71,12 +71,14 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
   const busy = !done;
 
   const [expanded, setExpanded] = useState(true);
-  const wasDone = useRef(false);
-  useEffect(() => {
-    if (done && !wasDone.current) setExpanded(false);
-    else if (!done && wasDone.current) setExpanded(true);
-    wasDone.current = done;
-  }, [done]);
+  // Collapse the panel when the plan finishes and re-expand when new active
+  // todos appear. Uses the render-time "adjust state when derived values
+  // change" pattern from the React docs (no effect → no cascading render).
+  const [prevDone, setPrevDone] = useState(done);
+  if (done !== prevDone) {
+    setPrevDone(done);
+    setExpanded(!done);
+  }
 
   // Hide when there are no todos OR when the user has dismissed the panel
   // (the store re-arms `dismissed = false` on the next event).

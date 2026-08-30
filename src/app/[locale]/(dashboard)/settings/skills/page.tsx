@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -326,7 +328,7 @@ export default function SkillsSettingsPage() {
           <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
             <strong>No E2B Sandbox API key configured.</strong> Skills require an E2B sandbox
             for the AI to read and use them. Add an E2B key in{" "}
-            <a href="/settings/config" className="underline font-medium">Settings → Config</a>{" "}
+            <Link href="/settings/config" className="underline font-medium">Settings → Config</Link>{" "}
             to enable skill installation.
           </div>
         )}
@@ -645,7 +647,7 @@ export default function SkillsSettingsPage() {
                 )}
                 {!hasMorePages && !search && catalog.kind === "ready" && catalog.items.length > 0 && (
                   <p className="text-center text-xs text-muted-foreground pt-4">
-                    You've reached the end of the catalog
+                    You&apos;ve reached the end of the catalog
                   </p>
                 )}
               </>

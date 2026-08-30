@@ -33,21 +33,6 @@ function joinPath(...parts: string[]): string {
     .join("/");
 }
 
-/**
- * Walk a chain of subdirectory names from a FileSystemDirectoryHandle,
- * creating any missing directories along the way. Returns the leaf handle.
- */
-async function walkAndCreate(
-  root: FileSystemDirectoryHandle,
-  segments: string[],
-): Promise<FileSystemDirectoryHandle> {
-  let current = root;
-  for (const seg of segments) {
-    current = await current.getDirectoryHandle(seg, { create: true });
-  }
-  return current;
-}
-
 /** Walk a chain of subdirectory names from a root OPFS path string. */
 async function getDirByPath(
   path: string,

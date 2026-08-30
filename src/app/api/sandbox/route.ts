@@ -926,7 +926,7 @@ export async function POST(req: NextRequest) {
               if (trailingStdout) send({ type: "stdout", data: trailingStdout });
               if (trailingStderr) send({ type: "stderr", data: trailingStderr });
               send({ type: "result", exit_code: exec.error ? 1 : 0, sandboxId: sandbox.sandboxId });
-            } catch (pyErr) {
+            } catch (_pyErr) {
               // Fallback: python3 -c with PTY streaming via `script` so
               // print() output flushes immediately (line-buffering).
               try {
@@ -999,7 +999,7 @@ export async function POST(req: NextRequest) {
             stderr,
             exit_code: exec.error ? 1 : 0,
           });
-        } catch (pyErr) {
+        } catch (_pyErr) {
           // First failure — try python3 -c as fallback (works if the sandbox
           // is alive but runCode's Jupyter kernel crashed).
           try {

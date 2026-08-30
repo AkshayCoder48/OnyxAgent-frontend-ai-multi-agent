@@ -51,7 +51,7 @@ export function ChatControls({
   const [tab, setTab] = useState<Tab>("model");
   const { currentConversationId } = useConversationStore();
 
-  const [availableModels, setAvailableModels] = useState<{ value: string; label: string }[]>([
+  const [availableModels] = useState<{ value: string; label: string }[]>([
     { value: "", label: "Default" },
   ]);
   const [providers, setProviders] = useState<CustomProvider[]>([]);

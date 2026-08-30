@@ -101,22 +101,44 @@ export class E2BClient {
   }
 
   /** Make a call to the server-side sandbox API. Auto-recovers from dead
-   *  sandboxes by restarting (with workspace restore) on "probably not
-   *  running" errors. Also implements bounded rate-limit (429) backoff per
-   *  PRD §30: detect 429 → wait per `Retry-After` (or exponential backoff)
-   *  → bounded retry → continue. Never enters an infinite retry loop. */
+   *  sandboxes by restarting (with OPFS backup restore) on "probably not
+   *  running" errors. Rate-limited (HTTP 429 / 529) calls back off —
+   *  honoring the server's retry-after hint when present — and retry a
+   *  bounded number of times. */
   private async call<T>(
     action: string,
     args: Record<string, unknown> = {},
   ): Promise<T> {
-    // PRD §30: bounded rate-limit backoff. We try up to 4 times total
-    // (initial + 3 retries) with exponential backoff (1s, 2s, 4s), capped
-    // at 8s. If the server sends a `Retry-After` header (in seconds) or a
-    // `retry_after_ms` field in the body, we honor that instead.
-    const MAX_RATE_LIMIT_RETRIES = 3;
-    const BASE_DELAY_MS = 1000;
-    const MAX_DELAY_MS = 8000;
+    // ── Request coalescing ──────────────────────────────────────────
+    // Identical in-flight requests (same action + args + sandbox) share a
+    // single promise so concurrent tools don't stampede the rate-limited
+    // sandbox API with duplicates.
+    const coalesceKey = `${this.apiKey}:${this.mode}:${action}:${JSON.stringify(args)}`;
+    const inFlight = E2BClient.inFlightCalls.get(coalesceKey);
+    if (inFlight) {
+      try {
+        return (await inFlight) as T;
+      } catch {
+        // The shared attempt failed — fall through and try again below.
+      }
+    }
 
+    const attempt = this.callUncached<T>(action, args).finally(() => {
+      E2BClient.inFlightCalls.delete(coalesceKey);
+    });
+    E2BClient.inFlightCalls.set(coalesceKey, attempt);
+    return attempt;
+  }
+
+  /** In-flight request coalescing map (shared across client instances). */
+  private static inFlightCalls = new Map<string, Promise<unknown>>();
+
+  /** The actual (non-coalesced) sandbox API call with bounded rate-limit
+   *  backoff (429 / 529). */
+  private async callUncached<T>(
+    action: string,
+    args: Record<string, unknown> = {},
+  ): Promise<T> {
     const doCall = async (sandboxId: string | null): Promise<Response> => {
       return fetch(API_ENDPOINT, {
         method: "POST",
@@ -134,18 +156,22 @@ export class E2BClient {
       });
     };
 
+    // ── Bounded rate-limit backoff (PRD §30) ──────────────────────
+    // E2B (and the serverless route in front of it) throttle with 429/529 —
+    // sandbox API quota or Vercel rate limits. Retry a bounded number of
+    // times instead of throwing: the operation is recoverable and a
+    // transient throttle shouldn't surface as a hard failure. Server hints
+    // are honored when present: a `retry_after_ms` body field, or a
+    // `Retry-After` header in seconds or HTTP-date form; otherwise
+    // exponential backoff (1s, 2s, 4s) capped at 8s. Never loops forever.
+    const MAX_RATE_LIMIT_RETRIES = 3;
+    const BASE_DELAY_MS = 1_000;
+    const MAX_DELAY_MS = 8_000;
     let res = await doCall(this.sandboxId);
     let data = await res.json().catch(() => ({}));
-
-    // ── RATE-LIMIT BACKOFF (PRD §30) ─────────────────────────────────────
-    // E2B returns 429 when the user exceeds their sandbox API quota, or when
-    // the server-side route hits Vercel's rate limit. We retry with bounded
-    // exponential backoff instead of throwing — the operation is recoverable
-    // and the user shouldn't see a hard failure for a transient throttle.
     let rateLimitAttempt = 0;
-    while (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+    while ((res.status === 429 || res.status === 529) && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
       rateLimitAttempt++;
-      // Honor server-sent retry hints; fall back to exponential backoff.
       const retryAfterHeader = res.headers.get("retry-after");
       const retryAfterBody = (data as { retry_after_ms?: number })?.retry_after_ms;
       let delayMs: number;
@@ -168,7 +194,7 @@ export class E2BClient {
       // Guard against negative / zero delays.
       delayMs = Math.max(delayMs, 100);
       console.warn(
-        `[e2b] rate-limited (429) on action="${action}" — retry ${rateLimitAttempt}/${MAX_RATE_LIMIT_RETRIES} after ${delayMs}ms`,
+        `[e2b] rate-limited (${res.status}) on action="${action}" — retry ${rateLimitAttempt}/${MAX_RATE_LIMIT_RETRIES} after ${delayMs}ms`,
       );
       await new Promise((r) => setTimeout(r, delayMs));
       res = await doCall(this.sandboxId);
@@ -229,14 +255,6 @@ export class E2BClient {
       if (res.status === 401) {
         throw new E2BError(
           "E2B API key is invalid. Get one at https://e2b.dev/dashboard?tab=keys",
-          res.status,
-          data,
-        );
-      }
-      if (res.status === 429) {
-        // We exhausted our bounded retry budget — surface a clear message.
-        throw new E2BError(
-          `E2B rate limit exceeded after ${MAX_RATE_LIMIT_RETRIES} retries. Please wait a moment and try again.`,
           res.status,
           data,
         );

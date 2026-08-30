@@ -148,7 +148,7 @@ export function buildFooterColumns(t: T): FooterColumn[] {
   ];
 }
 
-export function buildFooterLegal(t: T) {
+export function buildFooterLegal(_t: T) {
   return [];
 }
 

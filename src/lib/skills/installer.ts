@@ -337,7 +337,6 @@ export type CatalogSkill = SkillsMPSkill;
 
 const SKILLSMP_API_BASE = "https://skillsmp.com";
 const SKILLSMP_SEARCH_URL = `${SKILLSMP_API_BASE}/api/v1/skills/search`;
-const SKILLSMP_DEFAULT_LIMIT = 20;
 
 /**
  * Minimal static fallback catalog used when the SkillsMP API is unreachable

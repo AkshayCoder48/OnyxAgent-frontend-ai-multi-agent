@@ -44,6 +44,7 @@
     "skills/**",
     "examples/**",
     "capacitor.config.ts",
-    "cli/**"
+    "cli/**",
+    "mini-services/**"
   ]
 }

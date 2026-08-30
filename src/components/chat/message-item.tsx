@@ -10,7 +10,7 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { Bot, ChevronDown, ChevronUp, FileText, Globe, Loader2, Paperclip, RefreshCw, User, Wrench } from "lucide-react";
+import { Bot, ChevronDown, ChevronUp, FileText, Globe, Loader2, RefreshCw, User, Wrench } from "lucide-react";
 import Image from "next/image";
 import { useAuthStore } from "@/stores";
 import { getFileUrl } from "@/lib/file-api";
@@ -227,7 +227,7 @@ function TextBubble({
   // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
   // (text / genui / text / genui / ...) so interleaved text between multiple
   // GenUI blocks is preserved.
-  const { segments, inGenUI } = useGenUIFromText(text);
+  const { segments } = useGenUIFromText(text);
 
   if (isUser) {
     return (
@@ -383,7 +383,6 @@ interface MessageItemProps {
 function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").MessagePart[] }) {
   const [expanded, setExpanded] = React.useState(false);
   const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
-  const allDone = toolParts.every((p) => p.toolCall?.status === "completed" || p.toolCall?.status === "error");
   const anyRunning = toolParts.some((p) => p.toolCall?.status === "running" || p.toolCall?.status === "pending");
   const errorCount = toolParts.filter((p) => p.toolCall?.status === "error").length;
 
@@ -595,8 +594,7 @@ export const MessageItem = React.memo(function MessageItem({
           })()}
 
         {(() => {
-          // `parts` is now memoized at the top of the component (above).
-          const usePartsLocal = useParts;
+          // `parts` is memoized at the top of the component (above).
 
           // "Thinking…" placeholder — shown until anything streams in.
           const showPlaceholder =
@@ -865,65 +863,4 @@ function kindFor(file: ChatMessageFile): "image" | "file" {
   if (file.file_type === "image") return "image";
   if (file.mime_type.startsWith("image/")) return "image";
   return "file";
-}
-
-function FileChip({
-  filename,
-  hint,
-  size,
-  onClick,
-  href,
-}: {
-  filename: string;
-  hint?: string;
-  size?: number;
-  /** When provided, clicking opens the file in the preview panel. */
-  onClick?: () => void;
-  /** Fallback for legacy attachments without full metadata — opens in new tab. */
-  href?: string;
-}) {
-  const ext = filename.includes(".") ? filename.split(".").pop()!.toLowerCase() : null;
-  const sizeStr =
-    size != null
-      ? size < 1024
-        ? `${size} B`
-        : size < 1024 * 1024
-          ? `${(size / 1024).toFixed(1)} KB`
-          : `${(size / (1024 * 1024)).toFixed(1)} MB`
-      : null;
-  const className =
-    "border-foreground/15 bg-card hover:border-foreground/40 inline-flex max-w-xs items-center gap-2 rounded-xl border px-3 py-2 transition-colors text-left";
-  const inner = (
-    <>
-      <span className="bg-foreground/8 text-foreground/65 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
-        <FileText className="h-4 w-4" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="text-foreground block truncate text-sm font-medium">{filename}</span>
-        <span className="text-foreground/55 font-mono text-[10px] tracking-wider uppercase">
-          {ext}
-          {sizeStr ? ` · ${sizeStr}` : ""}
-        </span>
-      </span>
-      <Paperclip className="text-foreground/40 h-3.5 w-3.5 shrink-0" />
-    </>
-  );
-  if (onClick) {
-    return (
-      <button type="button" onClick={onClick} className={className} title={hint ?? filename}>
-        {inner}
-      </button>
-    );
-  }
-  return (
-    <a
-      href={href ?? "#"}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={className}
-      title={hint ?? filename}
-    >
-      {inner}
-    </a>
-  );
 }

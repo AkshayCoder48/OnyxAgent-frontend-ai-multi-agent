@@ -12,14 +12,9 @@ import {
   Code2,
   MessageCircleQuestion,
   Loader2,
-  CheckCircle2,
   XCircle,
   BarChart3,
   Download,
-  ImageIcon,
-  Newspaper,
-  Video,
-  MapPin,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toolCaption } from "@/lib/agent-step-captions";
@@ -34,7 +29,6 @@ import { GenericToolResult, RawToolView } from "./tool-results/generic";
 import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import {
-  ToolResultRenderer,
   WebSearchResults as DDGWebResults,
   ImageSearchResults as DDGImageResults,
   VideoSearchResults as DDGVideoResults,
@@ -76,16 +70,19 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   // matches the original "collapsed summary bar" default — but only if the
   // user hasn't manually expanded it in the meantime (which would override
   // the auto-collapse).
+  //
+  // Implemented with the render-time "adjust state when a prop changes"
+  // pattern from the React docs instead of a useEffect + setState (which
+  // triggers cascading renders and is flagged by the React Compiler lint).
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
-  const wasRunningRef = useRef(isRunning);
-  useEffect(() => {
+  const [prevIsRunning, setPrevIsRunning] = useState(isRunning);
+  if (isRunning !== prevIsRunning) {
+    setPrevIsRunning(isRunning);
     // Auto-expand on running transition (idle → running).
-    if (isRunning && !wasRunningRef.current) {
+    if (isRunning) {
       setExpanded(true);
     }
-    // Track for next render.
-    wasRunningRef.current = isRunning;
-  }, [isRunning]);
+  }
 
   // Short input hint shown in the collapsed bar — the query for search
   // tools, the URL for fetch_url, etc. (any tool with a url/query arg).
@@ -198,10 +195,15 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   const isFileDownload = fileDownloadSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
-  // Same for file_download cards.
-  useEffect(() => {
-    if (isChart || isFileDownload) setExpanded(true);
-  }, [isChart, isFileDownload]);
+  // Same for file_download cards. Uses the same render-time adjustment
+  // pattern as the running auto-expand above (no effect → no cascading
+  // render).
+  const [prevAutoExpand, setPrevAutoExpand] = useState(false);
+  const autoExpand = isChart || isFileDownload;
+  if (autoExpand !== prevAutoExpand) {
+    setPrevAutoExpand(autoExpand);
+    if (autoExpand) setExpanded(true);
+  }
 
   const hasSpecialRenderer =
     isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch;
@@ -269,7 +271,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
 
   // While still running: narrate what the agent is doing instead of the finished label,
   // and swap the chevron/raw toggle for a spinner — the header becomes a step caption.
-  // (Note: `isRunning` is declared up top so the auto-expand useEffect can read it.)
+  // (Note: `isRunning` is declared up top so the auto-expand render-time adjustment can read it.)
   const isError = toolCall.status === "error";
   const liveCaption = toolCaption(toolCall.name);
 
@@ -390,7 +392,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             // would otherwise render an empty body. The panel surfaces the
             // tool's command/args so the user can see exactly what's
             // executing (e.g. the shell command for `run_terminal`).
-            <RunningToolPanel toolCall={toolCall} liveCaption={liveCaption} />
+            <RunningToolPanel toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (
@@ -450,15 +452,12 @@ function tailText(s: string | undefined, max: number = STREAM_TAIL_BYTES): strin
 
 function RunningToolPanel({
   toolCall,
-  liveCaption,
 }: {
   toolCall: ToolCall;
-  liveCaption: string;
 }) {
   // Handle streaming args (when tool call is still being built by the LLM).
   // Show streaming args when the tool is pending (LLM composing) OR running
   // (tool executing but _streaming args haven't been replaced yet).
-  const isStreaming = toolCall.status === "pending" || toolCall.status === "running";
   const streamingArgs = (toolCall.args as { _streaming?: string })?._streaming;
 
   // Pick the most informative arg to display
@@ -485,9 +484,6 @@ function RunningToolPanel({
   // spinner, so the user always sees what's being composed/executed.
   // If the tool name is a "pending-N" placeholder (LLM sent args before the
   // function name), show "Composing…" instead of the raw placeholder.
-  const displayName = !toolCall.name || toolCall.name.startsWith("pending-")
-    ? "tool"
-    : toolCall.name;
   const liveCaptionForPanel = toolCaption(toolCall.name);
 
   return (
@@ -565,7 +561,7 @@ function ImagePreviewResult({ spec }: { spec: { url: string; alt?: string; error
   }
   return (
     <div className="py-2 space-y-2">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
+      {/* eslint-disable-next-line @next/next/no-img-element, jsx-a11y/no-noninteractive-element-interactions -- raw <img> for sandbox-generated data URLs; onError is a load-failure handler, not an interaction */}
       <img
         src={spec.url}
         alt={spec.alt ?? "AI-generated image preview"}

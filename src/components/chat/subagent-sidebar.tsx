@@ -35,7 +35,7 @@ export function SubAgentSidebar({
 }) {
   const {
     subagents, sessions, activeSessionId,
-    setActiveSession, createSession, deleteSession,
+    setActiveSession, deleteSession,
     loadFromStorage,
   } = useSubagentStore();
 

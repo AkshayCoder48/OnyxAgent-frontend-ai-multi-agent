@@ -1,17 +1,53 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Download, ExternalLink, Loader2, X } from "lucide-react";
+import { Download, ExternalLink, FileAudio, FileCode, FileImage, FileText, FileVideo, Loader2, X } from "lucide-react";
 
 import { useFilePreviewStore } from "@/stores";
 import { getFileUrl, loadFileUrl } from "@/lib/file-api";
 import { cn } from "@/lib/utils";
-import { FilePreviewCard, extOf, iconFor, previewKind } from "./file-preview-card";
+import { FilePreviewCard, extOf, previewKind, type PreviewKind } from "./file-preview-card";
 
 const DEFAULT_WIDTH = 480;
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 1100;
 const STORAGE_KEY = "filePreviewPanelWidth";
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Read the persisted panel width from localStorage (client-only value). */
+function initialWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_WIDTH;
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+  if (!stored) return DEFAULT_WIDTH;
+  const n = parseInt(stored, 10);
+  return Number.isFinite(n) ? clamp(n, MIN_WIDTH, MAX_WIDTH) : DEFAULT_WIDTH;
+}
+
+/**
+ * Module-level icon switcher — rendering `<KindIcon kind={…} />` keeps the
+ * component identity static (the React Compiler lint forbids assigning
+ * component references to variables during render, which the previous
+ * `const KindIcon = iconFor(kind)` pattern violated).
+ */
+function KindIcon({ kind, className }: { kind: PreviewKind; className?: string }) {
+  switch (kind) {
+    case "image":
+      return <FileImage className={className} />;
+    case "audio":
+      return <FileAudio className={className} />;
+    case "video":
+      return <FileVideo className={className} />;
+    case "code":
+    case "json":
+    case "html":
+      return <FileCode className={className} />;
+    default:
+      return <FileText className={className} />;
+  }
+}
 
 /**
  * Right-hand sidebar that previews the file currently selected in the chat.
@@ -20,18 +56,57 @@ const STORAGE_KEY = "filePreviewPanelWidth";
  */
 export function FilePreviewPanel() {
   const file = useFilePreviewStore((s) => s.file);
+
+  if (!file) return null;
+
+  // Keyed on the file id so the inner component's lazily-initialized state
+  // (panel width, cached blob URL) resets whenever a different file is
+  // opened — no effects needed for the reset.
+  return <FilePreviewContent key={file.id} />;
+}
+
+/**
+ * Inner content — separated so hooks can live after the outer early-return
+ * guard. Mounted only when a file is selected; remounted per file via key.
+ */
+function FilePreviewContent() {
+  const file = useFilePreviewStore((s) => s.file);
   const close = useFilePreviewStore((s) => s.close);
 
-  const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
+  // Lazy initializers — read localStorage / the blob-URL cache exactly once
+  // per mounted file instead of syncing through an effect.
+  const [width, setWidth] = useState<number>(initialWidth);
   const [isDragging, setIsDragging] = useState(false);
+  const [inlineUrl, setInlineUrl] = useState<string>(() =>
+    file ? getFileUrl(file.id) : "",
+  );
+  const [urlError, setUrlError] = useState<string | null>(null);
 
+  // Load the blob URL when it isn't already cached. `getFileUrl` is
+  // synchronous and returns "" when the URL isn't warm (e.g. when opening a
+  // file from conversation history). `loadFileUrl` reads the file from OPFS
+  // and caches a fresh blob URL — without this, the viewers get url="" and
+  // fetch("") throws "Failed to fetch".
+  const fileId = file?.id;
   useEffect(() => {
-    const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    if (stored) {
-      const n = parseInt(stored, 10);
-      if (Number.isFinite(n)) setWidth(clamp(n, MIN_WIDTH, MAX_WIDTH));
-    }
-  }, []);
+    if (!fileId || getFileUrl(fileId)) return;
+    let cancelled = false;
+    loadFileUrl(fileId)
+      .then((url) => {
+        if (cancelled) return;
+        if (url) {
+          setInlineUrl(url);
+        } else {
+          setUrlError("File not found in local storage");
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setUrlError(e instanceof Error ? e.message : "Failed to load file");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fileId]);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -67,106 +142,12 @@ export function FilePreviewPanel() {
 
   if (!file) return null;
 
-  return <FilePreviewContent />;
-}
-
-/**
- * Inner content — separated so we can use hooks (useEffect for async URL
- * loading) after the early `if (!file) return null` guard above.
- */
-function FilePreviewContent() {
-  const file = useFilePreviewStore((s) => s.file);
-  const close = useFilePreviewStore((s) => s.close);
-
-  const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
-  // The blob URL for the file. Populated asynchronously from OPFS via
-  // `loadFileUrl` when not already cached. Empty string = still loading.
-  const [inlineUrl, setInlineUrl] = useState<string>("");
-  const [urlError, setUrlError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const stored = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    if (stored) {
-      const n = parseInt(stored, 10);
-      if (Number.isFinite(n)) setWidth(clamp(n, MIN_WIDTH, MAX_WIDTH));
-    }
-  }, []);
-
-  // Load the blob URL when the file changes. `getFileUrl` is synchronous and
-  // returns "" if the URL isn't cached (e.g. when opening a file from
-  // conversation history). `loadFileUrl` reads the file from OPFS and caches
-  // a fresh blob URL — without this, the viewers get url="" and
-  // fetch("") throws "Failed to fetch".
-  useEffect(() => {
-    if (!file) {
-      setInlineUrl("");
-      setUrlError(null);
-      return;
-    }
-    let cancelled = false;
-    setInlineUrl(getFileUrl(file.id)); // try cache first (instant if available)
-    setUrlError(null);
-    if (!getFileUrl(file.id)) {
-      // Not cached — load from OPFS.
-      loadFileUrl(file.id)
-        .then((url) => {
-          if (cancelled) return;
-          if (url) {
-            setInlineUrl(url);
-          } else {
-            setUrlError("File not found in local storage");
-          }
-        })
-        .catch((e) => {
-          if (!cancelled) setUrlError(e instanceof Error ? e.message : "Failed to load file");
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [file]);
-
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isDragging) return;
-    const onMove = (e: MouseEvent) => {
-      const next = clamp(window.innerWidth - e.clientX, MIN_WIDTH, MAX_WIDTH);
-      setWidth(next);
-    };
-    const onUp = () => {
-      setIsDragging(false);
-      try {
-        localStorage.setItem(STORAGE_KEY, String(width));
-      } catch {
-        /* private mode / quota — drop persistence silently */
-      }
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [isDragging, width]);
-
-  if (!file) return null;
-
   // For blob URLs, just use inlineUrl directly — the <a download> attribute
   // forces the browser to download. Appending ?disposition=attachment to a
   // blob: URL makes it invalid and breaks the download.
   const downloadUrl = inlineUrl;
   const ext = extOf(file.filename);
   const kind = previewKind(file.mime_type, ext);
-  const KindIcon = iconFor(kind);
 
   // Loading state while the blob URL is being fetched from OPFS.
   if (!inlineUrl && !urlError) {
@@ -178,7 +159,7 @@ function FilePreviewContent() {
       >
         <header className="border-foreground/10 flex items-center gap-2 border-b px-3 py-2">
           <span className="bg-foreground/8 text-foreground/65 flex h-7 w-7 shrink-0 items-center justify-center rounded-md">
-            <KindIcon className="h-3.5 w-3.5" />
+            <KindIcon kind={kind} className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-foreground truncate text-sm font-medium" title={file.filename}>
@@ -213,7 +194,7 @@ function FilePreviewContent() {
       >
         <header className="border-foreground/10 flex items-center gap-2 border-b px-3 py-2">
           <span className="bg-foreground/8 text-foreground/65 flex h-7 w-7 shrink-0 items-center justify-center rounded-md">
-            <KindIcon className="h-3.5 w-3.5" />
+            <KindIcon kind={kind} className="h-3.5 w-3.5" />
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-foreground truncate text-sm font-medium" title={file.filename}>
@@ -263,7 +244,7 @@ function FilePreviewContent() {
 
       <header className="border-foreground/10 flex items-center gap-2 border-b px-3 py-2">
         <span className="bg-foreground/8 text-foreground/65 flex h-7 w-7 shrink-0 items-center justify-center rounded-md">
-          <KindIcon className="h-3.5 w-3.5" />
+          <KindIcon kind={kind} className="h-3.5 w-3.5" />
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-foreground truncate text-sm font-medium" title={file.filename}>
@@ -312,8 +293,4 @@ function FilePreviewContent() {
       </div>
     </aside>
   );
-}
-
-function clamp(n: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, n));
 }

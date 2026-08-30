@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { GenUIComponentProps, str, arr, num } from "./helpers";
+import { GenUIComponentProps, str, arr } from "./helpers";
 
 /**
  * `sparkline` — tiny inline SVG line chart.

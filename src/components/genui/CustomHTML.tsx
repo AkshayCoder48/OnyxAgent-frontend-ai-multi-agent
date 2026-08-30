@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { cn } from "@/lib/utils";
 import { GenUIComponentProps, str, num } from "./helpers";
 
 /**

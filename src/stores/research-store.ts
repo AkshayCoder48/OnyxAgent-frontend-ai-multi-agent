@@ -43,13 +43,6 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
   applyTodoEvent: (eventType, todo, allTodos) => {
     const turnId = get().currentTurnId ?? "default";
-    // Snapshot / reset events carry `allTodos` directly; individual events
-    // also include it so we can always replace the list cheaply.
-    const nextTodos: ResearchTodo[] = allTodos
-      ? (allTodos as ResearchTodo[])
-      : todo
-        ? [todo as ResearchTodo]
-        : [];
 
     set((state) => {
       const prevTurn = state.byTurn[turnId] ?? { todos: [] };

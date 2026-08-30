@@ -48,10 +48,7 @@ function deriveScheme(name: string, primary: string, bg: string, fg: string): Co
   // For light schemes: card = background, muted = background -4 (slightly darker)
   const card = isDark ? hexToHex(bg, 15) : bg;
   const muted = isDark ? hexToHex(bg, 8) : hexToHex(bg, -4);
-  const popover = card;
   const border = isDark ? hexToHex(bg, 30) : hexToHex(bg, -10);
-  const accent = isDark ? hexToHex(bg, 12) : hexToRgba(primary, 0.08);
-  const secondary = muted;
   return {
     name,
     primary,

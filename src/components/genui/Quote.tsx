@@ -29,7 +29,7 @@ export function Quote({ props, streaming }: GenUIComponentProps) {
 
   return (
     <blockquote className="border-l-2 border-primary/40 bg-muted/30 rounded-r-lg py-2 pr-3 pl-4">
-      <p className="text-foreground text-sm leading-relaxed italic">"{text}"</p>
+      <p className="text-foreground text-sm leading-relaxed italic">&quot;{text}&quot;</p>
       {(author || role) && (
         <footer className="text-muted-foreground mt-2 text-xs">
           {author && <span className="font-medium not-italic text-foreground/80">— {author}</span>}

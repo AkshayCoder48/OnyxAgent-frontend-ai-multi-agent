@@ -253,7 +253,7 @@ export async function executeSubagentTurn(
       let buffer = "";
       let accumulatedText = "";
       accumulatedReasoning = "";
-      let toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
+      const toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
 
       // Track which tool calls we've already shown as "running" to avoid duplicates
       const shownToolCalls = new Set<string>();

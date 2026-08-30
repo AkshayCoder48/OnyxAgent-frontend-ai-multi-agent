@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -107,7 +107,13 @@ export function SyncSourceWizard({
   const [cloneSourceId, setCloneSourceId] = useState<string>("");
   const [cloneName, setCloneName] = useState<string>("");
 
-  useEffect(() => {
+  // Reset the wizard to its initial state whenever it (re)opens or the
+  // default collection changes while open. Render-time adjustment (no
+  // effect → no cascading render).
+  const resetKey = `${open ? 1 : 0}:${defaultCollection ?? ""}`;
+  const [prevResetKey, setPrevResetKey] = useState(resetKey);
+  if (resetKey !== prevResetKey) {
+    setPrevResetKey(resetKey);
     if (open) {
       setMode("new");
       setStep("source");
@@ -115,7 +121,7 @@ export function SyncSourceWizard({
       setCloneSourceId("");
       setCloneName("");
     }
-  }, [open, defaultCollection]);
+  }
 
   const selectedConnector = useMemo(
     () => connectors.find((c) => c.type === form.connector_type),

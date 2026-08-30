@@ -22,17 +22,21 @@ export function Reveal({ children, className, delay = 0 }: RevealProps) {
 
   useEffect(() => {
     if (!ref.current) return;
-    const rect = ref.current.getBoundingClientRect();
-    const inViewportNow = rect.top < window.innerHeight * 0.95;
-    if (inViewportNow) return; // already visible — keep it visible
-
-    setShown(false);
+    // The observer fires an initial callback as soon as observe() is called,
+    // with the element's CURRENT intersection state: above-the-fold elements
+    // get isIntersecting=true (stay visible — no visual change), below-fold
+    // elements get false and are hidden until scrolled into view. This keeps
+    // every setState inside an external-system callback (IntersectionObserver)
+    // instead of a synchronous call in the effect body.
     const obs = new IntersectionObserver(
       (entries) => {
         const e = entries[0];
-        if (e?.isIntersecting) {
+        if (!e) return;
+        if (e.isIntersecting) {
           setShown(true);
           obs.disconnect();
+        } else {
+          setShown(false);
         }
       },
       { threshold: 0.1, rootMargin: "0px 0px -8% 0px" },

@@ -292,7 +292,7 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
     const store = useSubagentStore.getState();
 
     // Find the subagent config.
-    let config = store.subagents.find(
+    const config = store.subagents.find(
       (s) => s.name.toLowerCase() === subagentName.toLowerCase(),
     );
 
@@ -770,7 +770,6 @@ The tool is immediately available to the specified subagent (or all subagents if
     // We wrap it in a Function constructor for isolation.
     let handler: ((args: Record<string, unknown>, ctx: unknown) => Promise<unknown> | unknown) | undefined;
     try {
-      // eslint-disable-next-line no-new-func
       handler = new Function("args", "ctx", `"use strict"; ${implementation}`) as (
         args: Record<string, unknown>,
         ctx: unknown,

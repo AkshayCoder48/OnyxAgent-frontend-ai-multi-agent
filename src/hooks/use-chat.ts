@@ -168,6 +168,13 @@ export function useChat(options: UseChatOptions = {}) {
   // `null` means "no active generation" — events with no generation_id
   // (legacy/external emitters) are still accepted when null, for back-compat.
   const activeGenerationIdRef = useRef<string | null>(null);
+  // The generation that OWNS the current streaming assistant message. Rounds
+  // 2+ of the same generation reuse the message; a NEW generation always
+  // starts a new message — even if the previous generation's `complete`
+  // never arrived (runtime crash, aborted turn unwinding late). Without
+  // this, generation B's deltas would append to generation A's message
+  // whenever A's lifecycle events were lost (cross-generation contamination).
+  const currentMessageGenerationRef = useRef<string | null>(null);
 
   // ── STREAMING BUFFERS ──────────────────────────────────────────────
   // Every delta type is buffered + flushed on a timer so React doesn't
@@ -283,6 +290,18 @@ export function useChat(options: UseChatOptions = {}) {
       };
 
       const createNewMessage = (content: string): string => {
+        // Flush any pending delta buffers into the PREVIOUS message before
+        // switching, so the tail of generation N-1's stream never lands in
+        // generation N's message (cross-generation contamination).
+        flushTextDelta();
+        if (currentMessageIdRef.current) {
+          // Finalize the previous generation's message — it will no longer
+          // receive updates.
+          updateMessage(currentMessageIdRef.current, (msg) => ({
+            ...msg,
+            isStreaming: false,
+          }));
+        }
         const newMsgId = nanoid();
         // Use current conversationId from store to avoid closure issues.
         const effectiveConversationId =
@@ -301,6 +320,22 @@ export function useChat(options: UseChatOptions = {}) {
         });
         setCurrentMessageId(newMsgId);
         return newMsgId;
+      };
+
+      /** Ensure an assistant message exists and belongs to the ACTIVE
+       *  generation. Creates a new message (finalizing the previous one and
+       *  flushing its pending buffers) when the message is owned by a
+       *  different generation; no-ops when the active generation already owns
+       *  the streaming message (rounds 2+ of the same turn). */
+      const ensureMessageForActiveGeneration = (): void => {
+        if (
+          currentMessageIdRef.current !== null &&
+          currentMessageGenerationRef.current === activeGenerationIdRef.current
+        ) {
+          return; // same generation still streaming — reuse the message
+        }
+        createNewMessage("");
+        currentMessageGenerationRef.current = activeGenerationIdRef.current;
       };
 
       switch (wsEvent.type) {
@@ -383,9 +418,13 @@ export function useChat(options: UseChatOptions = {}) {
             // First event of a new generation — adopt it.
             activeGenerationIdRef.current = eventGenId;
           }
-          if (!currentMessageIdRef.current) {
-            createNewMessage("");
-          }
+          // MESSAGE OWNERSHIP: reuse the streaming message only while the
+          // ACTIVE generation owns it. If the previous generation's
+          // `complete` was lost (runtime crash / late abort unwind), the
+          // message still belongs to that generation — start a fresh bubble
+          // instead of appending the new turn's text to the old message
+          // (finalizing the old one and flushing its pending buffers).
+          ensureMessageForActiveGeneration();
           break;
         }
 
@@ -879,6 +918,9 @@ export function useChat(options: UseChatOptions = {}) {
           setCurrentMessageId(null);
           // Clear the active generation — the next turn mints a new one.
           activeGenerationIdRef.current = null;
+          // Reset message ownership — the next generation starts a fresh
+          // assistant message even if this complete arrives out of order.
+          currentMessageGenerationRef.current = null;
           // Drop the abort controller — the turn is done.
           abortRef.current = null;
           break;
@@ -890,6 +932,8 @@ export function useChat(options: UseChatOptions = {}) {
       // so we deliberately omit it here — that's the whole point of the ref.
       addMessage,
       updateMessage,
+      replaceMessageId,
+      flushTextDelta,
       appendTextDelta,
       appendThinkingDelta,
       appendReasoningDelta,
@@ -1212,6 +1256,9 @@ export function useChat(options: UseChatOptions = {}) {
     // complete) are dropped instead of corrupting the next turn's message.
     // PRD §19: "A stopped generation cannot modify a subsequent generation."
     activeGenerationIdRef.current = null;
+    // Reset message ownership — the next generation must start a new message,
+    // never append to the stopped one.
+    currentMessageGenerationRef.current = null;
     setIsProcessing(false);
     setPendingApproval(null);
     setPendingQuestions(null);

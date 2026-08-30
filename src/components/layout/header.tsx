@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { MessageSquare, type LucideIcon } from "lucide-react";
 import { useActiveRoute } from "@/lib/active-route";
-import { APP_NAME, ROUTES } from "@/lib/constants";
+import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
 type NavEntry = { labelKey: string; href: string; icon: LucideIcon };

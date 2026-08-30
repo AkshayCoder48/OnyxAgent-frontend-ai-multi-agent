@@ -44,8 +44,6 @@ async function evictAllE2BClients() {
   }
   _evictAllE2BClients();
 }
-/** Alias for forward-compat — clears all cached sandbox clients. */
-const evictAllSandboxClients = evictAllE2BClients;
 import type {
   User,
   Conversation,
@@ -111,7 +109,7 @@ export const authService = {
     };
     await d.users.add(row);
     setVault(key);
-    const { vault_salt, vault_check, is_app_admin, updated_at, ...user } = row;
+    const { vault_salt: _vs, vault_check: _vc, is_app_admin: _aa, updated_at: _ua, ...user } = row;
     return { user: user as User, requiresUnlock: false };
   },
 
@@ -123,8 +121,10 @@ export const authService = {
     email = email.trim().toLowerCase();
     const row = await d.users.where("email").equals(email).first();
     if (!row) throw new Error("Invalid email or passphrase");
-    const key = await unlockVault(passphrase, row.vault_salt, row.vault_check);
-    const { vault_salt, vault_check, is_app_admin, updated_at, ...user } = row;
+    // unlockVault caches the derived key internally; the return value isn't
+    // needed here.
+    await unlockVault(passphrase, row.vault_salt, row.vault_check);
+    const { vault_salt: _vs, vault_check: _vc, is_app_admin: _aa, updated_at: _ua, ...user } = row;
     return user as User;
   },
 
@@ -136,7 +136,7 @@ export const authService = {
   async getCurrentUser(userId: string): Promise<User | null> {
     const row = await db.users.get(userId);
     if (!row) return null;
-    const { vault_salt, vault_check, is_app_admin, updated_at, ...user } = row;
+    const { vault_salt: _vs, vault_check: _vc, is_app_admin: _aa, updated_at: _ua, ...user } = row;
     return user as User;
   },
 
@@ -148,7 +148,7 @@ export const authService = {
     });
     const updated = await db.users.get(userId);
     if (!updated) throw new Error("User not found");
-    const { vault_salt, vault_check, is_app_admin, updated_at, ...user } = updated;
+    const { vault_salt: _vs, vault_check: _vc, is_app_admin: _aa, updated_at: _ua, ...user } = updated;
     return user as User;
   },
 
@@ -167,7 +167,7 @@ export const authService = {
     await db.users.update(userId, update);
     const updated = await db.users.get(userId);
     if (!updated) throw new Error("User not found");
-    const { vault_salt, vault_check, is_app_admin, updated_at: _u, ...user } = updated;
+    const { vault_salt: _vs, vault_check: _vc, is_app_admin: _aa, updated_at: _ua, ...user } = updated;
     return user as User;
   },
 
@@ -211,9 +211,9 @@ export const conversationService = {
     opts: { includeArchived?: boolean; limit?: number; skip?: number } = {},
   ): Promise<Conversation[]> {
     const { includeArchived = true, limit = 50, skip = 0 } = opts;
-    let collection = db.conversations.where("user_id").equals(userId);
+    const collection = db.conversations.where("user_id").equals(userId);
     const all = await collection.toArray();
-    let filtered = includeArchived ? all : all.filter((c) => !c.is_archived);
+    const filtered = includeArchived ? all : all.filter((c) => !c.is_archived);
     filtered.sort((a, b) =>
       (b.updated_at ?? "").localeCompare(a.updated_at ?? ""),
     );
@@ -724,7 +724,7 @@ export interface AIProviderInput {
 
 export const aiProviderService = {
   async list(userId: string, activeOnly = false): Promise<AIProviderRow[]> {
-    let collection = db.ai_providers.where("user_id").equals(userId);
+    const collection = db.ai_providers.where("user_id").equals(userId);
     const rows = await collection.toArray();
     return activeOnly ? rows.filter((r) => r.is_active) : rows;
   },

@@ -7,7 +7,6 @@ import { Loader2, Plus, Save, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
@@ -61,8 +60,8 @@ export function SectionAgentSettings() {
   const [temperature, setTemperature] = React.useState(0.7);
   const [thinkingEnabled, setThinkingEnabled] = React.useState(false);
   const [thinkingEffort, setThinkingEffort] = React.useState<ThinkingEffort>("medium");
-  const [systemPrompt, setSystemPrompt] = React.useState("");
-  const [systemPromptEnabled, setSystemPromptEnabled] = React.useState(false);
+  const [, setSystemPrompt] = React.useState("");
+  const [, setSystemPromptEnabled] = React.useState(false);
   const [envRows, setEnvRows] = React.useState<EnvRow[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);

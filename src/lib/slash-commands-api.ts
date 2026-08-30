@@ -26,11 +26,6 @@ export interface UserSlashCommandRecord {
   updated_at: string | null;
 }
 
-interface UserSlashCommandList {
-  items: UserSlashCommandRecord[];
-  total: number;
-}
-
 function requireUserId(): string {
   const userId = useAuthStore.getState().user?.id;
   if (!userId) {

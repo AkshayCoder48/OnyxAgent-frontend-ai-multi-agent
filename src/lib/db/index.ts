@@ -81,7 +81,7 @@ export interface MessageRatingRow extends MessageRating {
   updated_at: string;
 }
 
-export interface ConversationShareRow extends ConversationShare {}
+export type ConversationShareRow = ConversationShare;
 
 export interface UserSlashCommandRow {
   id: string;

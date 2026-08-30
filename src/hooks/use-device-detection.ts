@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 
 /**
  * Detect whether the app is running on a desktop or mobile device.
@@ -42,15 +42,33 @@ export function supportsLocalExecution(): boolean {
 }
 
 export function useDeviceDetection() {
-  const [device, setDevice] = useState<DeviceType>("desktop");
-  const [canExecLocal, setCanExecLocal] = useState(false);
-
-  useEffect(() => {
-    setDevice(detectDevice());
-    setCanExecLocal(supportsLocalExecution());
-  }, []);
+  // Device capability reads (navigator/window) as external-store snapshots:
+  // the server snapshot returns the safe defaults, the client snapshot reads
+  // the real environment, and useSyncExternalStore reconciles after hydration
+  // without a setState-in-effect (flagged by the React Compiler lint).
+  const subscribeNoop = (): (() => void) => () => {};
+  const device = useSyncExternalStore(
+    subscribeNoop,
+    detectDevice,
+    getServerDevice,
+  );
+  const canExecLocal = useSyncExternalStore(
+    subscribeNoop,
+    supportsLocalExecution,
+    getServerCanExecLocal,
+  );
 
   return { device, canExecLocal, isMobile: device === "mobile", isDesktop: device === "desktop" };
+}
+
+/** Server snapshot — matches the pre-hydration defaults. */
+function getServerDevice(): DeviceType {
+  return "desktop";
+}
+
+/** Server snapshot — OPFS is never available during SSR. */
+function getServerCanExecLocal(): boolean {
+  return false;
 }
 
 /**

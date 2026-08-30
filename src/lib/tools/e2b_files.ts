@@ -1,6 +1,6 @@
 "use client";
 
-import { registerTool, type ToolContext } from "./registry";
+import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
 import {
   ensureFreshSandboxForCtx,
@@ -524,7 +524,7 @@ registerTool(
     // Check if the path is a directory. If so, auto-redirect to the folder
     // download flow (zip + download) instead of failing with "is a directory".
     try {
-      const entries = await client.listFiles(path);
+      await client.listFiles(path);
       // listFiles succeeded → the path is a directory.
       // Build a ZIP of the folder and return it as a folder download.
       const filesMap: Record<string, Uint8Array> = {};

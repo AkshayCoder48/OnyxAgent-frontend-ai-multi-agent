@@ -86,25 +86,47 @@ export async function GET(req: NextRequest) {
         continue;
       }
 
-      const data = await res.json();
+      const data: unknown = await res.json();
 
       // OpenAI-compatible response: { data: [{ id: "gpt-4o", ... }, ...] }
       // Some providers return: { models: [{ id: "..." }] } or just an array
+      /** Extract a model id string from an unknown entry shape. */
+      const modelIdOf = (m: unknown): unknown => {
+        if (typeof m === "string") return m;
+        if (m && typeof m === "object") {
+          const rec = m as { id?: unknown; name?: unknown; model?: unknown };
+          return rec.id ?? rec.name ?? rec.model;
+        }
+        return undefined;
+      };
+      const isNonEmptyString = (id: unknown): id is string =>
+        typeof id === "string" && id.length > 0;
+
       let models: string[] = [];
       if (Array.isArray(data)) {
-        models = data
-          .map((m: any) => m.id ?? m.name ?? m.model)
-          .filter((id: any) => typeof id === "string" && id.length > 0);
-      } else if (Array.isArray(data?.data)) {
-        models = data.data
-          .map((m: any) => m.id ?? m.name ?? m.model)
-          .filter((id: any) => typeof id === "string" && id.length > 0);
-      } else if (Array.isArray(data?.models)) {
-        models = data.models
-          .map((m: any) => (typeof m === "string" ? m : (m.id ?? m.name ?? m.model)))
-          .filter((id: any) => typeof id === "string" && id.length > 0);
-      } else if (data?.id) {
-        models = [data.id];
+        models = data.map(modelIdOf).filter(isNonEmptyString);
+      } else if (
+        data &&
+        typeof data === "object" &&
+        Array.isArray((data as { data?: unknown }).data)
+      ) {
+        models = ((data as { data: unknown[] }).data)
+          .map(modelIdOf)
+          .filter(isNonEmptyString);
+      } else if (
+        data &&
+        typeof data === "object" &&
+        Array.isArray((data as { models?: unknown }).models)
+      ) {
+        models = ((data as { models: unknown[] }).models)
+          .map(modelIdOf)
+          .filter(isNonEmptyString);
+      } else if (
+        data &&
+        typeof data === "object" &&
+        typeof (data as { id?: unknown }).id === "string"
+      ) {
+        models = [(data as { id: string }).id];
       }
 
       if (models.length > 0) {

@@ -7,7 +7,7 @@ import { useAuth } from "@/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Bot, Plus, Trash2, Save, X } from "lucide-react";
+import { Bot, Trash2, Save } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface AIProvider {
@@ -46,7 +46,7 @@ export default function SubagentsSettingsPage() {
         <h1 className="text-2xl font-bold tracking-tight">Subagents</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Subagents are created automatically by the AI orchestrator when it detects a large task.
-          You can configure each subagent's API provider, model, and system prompt here. All subagents
+          You can configure each subagent&apos;s API provider, model, and system prompt here. All subagents
           share the same sandbox + file system as the main agent.
         </p>
       </div>
@@ -161,14 +161,15 @@ function SubagentCard({
         <div className="border-t border-border p-4 space-y-3">
           {/* Name */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 h-9" />
+            <label htmlFor="subagent-name" className="text-xs font-medium text-muted-foreground">Name</label>
+            <Input id="subagent-name" value={name} onChange={(e) => setName(e.target.value)} className="mt-1 h-9" />
           </div>
 
           {/* Specialty */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">Specialty</label>
+            <label htmlFor="subagent-specialty" className="text-xs font-medium text-muted-foreground">Specialty</label>
             <select
+              id="subagent-specialty"
               value={specialty}
               onChange={(e) => setSpecialty(e.target.value as SubagentConfig["specialty"])}
               className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
@@ -183,14 +184,15 @@ function SubagentCard({
 
           {/* Description */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">Description</label>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 h-9" />
+            <label htmlFor="subagent-description" className="text-xs font-medium text-muted-foreground">Description</label>
+            <Input id="subagent-description" value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 h-9" />
           </div>
 
           {/* System Prompt */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
+            <label htmlFor="subagent-system-prompt" className="text-xs font-medium text-muted-foreground">System Prompt</label>
             <textarea
+              id="subagent-system-prompt"
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={3}
@@ -201,10 +203,11 @@ function SubagentCard({
 
           {/* Provider override */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">
-              API Provider (leave empty to inherit main agent's)
+            <label htmlFor="subagent-provider" className="text-xs font-medium text-muted-foreground">
+              API Provider (leave empty to inherit main agent&apos;s)
             </label>
             <select
+              id="subagent-provider"
               value={providerId}
               onChange={(e) => {
                 setProviderId(e.target.value);
@@ -221,10 +224,11 @@ function SubagentCard({
 
           {/* Model override */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">
+            <label htmlFor="subagent-model" className="text-xs font-medium text-muted-foreground">
               Model (leave empty to inherit)
             </label>
             <select
+              id="subagent-model"
               value={model}
               onChange={(e) => setModel(e.target.value)}
               disabled={!providerId && !selectedProvider}
@@ -239,10 +243,11 @@ function SubagentCard({
 
           {/* API Key override */}
           <div>
-            <label className="text-xs font-medium text-muted-foreground">
-              API Key (leave empty to inherit provider's key)
+            <label htmlFor="subagent-api-key" className="text-xs font-medium text-muted-foreground">
+              API Key (leave empty to inherit provider&apos;s key)
             </label>
             <Input
+              id="subagent-api-key"
               type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}

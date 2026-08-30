@@ -63,33 +63,6 @@ interface WorkspaceSummary {
 const NO_KEY_ERROR =
   "Workspace analysis requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
-const KEY_FILE_NAMES = [
-  "README.md",
-  "README.MD",
-  "README",
-  "readme.md",
-  "package.json",
-  "tsconfig.json",
-  "jsconfig.json",
-  "next.config.js",
-  "next.config.ts",
-  "next.config.mjs",
-  "vite.config.ts",
-  "vite.config.js",
-  "tailwind.config.js",
-  "tailwind.config.ts",
-  "postcss.config.js",
-  "postcss.config.mjs",
-  "Dockerfile",
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  ".env",
-  ".env.local",
-  ".env.example",
-  ".env.development",
-  ".env.production",
-];
-
 function basename(p: string): string {
   const parts = p.split("/");
   return parts[parts.length - 1] ?? p;

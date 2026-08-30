@@ -3,7 +3,6 @@
 import { registerTool, type ToolHandler } from "./registry";
 import type { ToolResult } from "@/types";
 import { customToolService } from "@/lib/services";
-import { db } from "@/lib/db";
 
 // In-memory cache of dynamically registered tool handlers (keyed by tool name)
 const dynamicHandlers = new Map<string, ToolHandler>();

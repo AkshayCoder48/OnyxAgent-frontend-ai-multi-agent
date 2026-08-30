@@ -2,7 +2,6 @@
 import { registerTool } from "./registry";
 import type { ToolContext } from "./registry";
 import type { ToolResult } from "@/types";
-import { db } from "@/lib/db";
 import { v4 as uuid } from "uuid";
 
 interface Todo {

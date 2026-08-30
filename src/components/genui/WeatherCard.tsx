@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Cloud, Sun, CloudRain, Snowflake, CloudSnow, Wind, Droplets } from "lucide-react";
+import { Cloud, Sun, CloudRain, Snowflake, Wind, Droplets } from "lucide-react";
 import { GenUIComponentProps, str, num } from "./helpers";
 
 /**

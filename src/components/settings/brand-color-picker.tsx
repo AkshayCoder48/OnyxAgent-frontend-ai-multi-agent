@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { Check } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -72,6 +72,28 @@ const DEFAULT_PRESET_KEY = "blue";
 
 const STORAGE_KEY = "settings.brand_color_preset";
 
+/** Same-tab notification so the picker re-renders after a pick. */
+const BRAND_CHANGE_EVENT = "onyxagent:brand-color-change";
+
+function subscribeBrand(callback: () => void): () => void {
+  window.addEventListener("storage", callback);
+  window.addEventListener(BRAND_CHANGE_EVENT, callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener(BRAND_CHANGE_EVENT, callback);
+  };
+}
+
+function getSavedPresetKey(): string {
+  const saved = window.localStorage.getItem(STORAGE_KEY);
+  return saved && PRESETS.some((p) => p.key === saved) ? saved : DEFAULT_PRESET_KEY;
+}
+
+function getServerPresetKey(): string {
+  // Server snapshot — the default preset; reconciles after hydration.
+  return DEFAULT_PRESET_KEY;
+}
+
 function applyPreset(p: Preset) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
@@ -99,26 +121,31 @@ function applyPreset(p: Preset) {
 
 export function BrandColorPicker() {
   const defaultPreset = PRESETS.find((p) => p.key === DEFAULT_PRESET_KEY) ?? PRESETS[0]!;
-  const [active, setActive] = useState<string>(defaultPreset.key);
+  // Persisted preset read as an external store (localStorage) — no
+  // setState-in-effect; the server snapshot keeps SSR output stable.
+  const active = useSyncExternalStore(
+    subscribeBrand,
+    getSavedPresetKey,
+    getServerPresetKey,
+  );
 
+  // Apply the active preset's CSS variables whenever it changes (mount +
+  // picks). DOM mutation belongs in an effect — this one calls no setState.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const preset = PRESETS.find((p) => p.key === saved);
-      if (preset) {
-        setActive(preset.key);
-        applyPreset(preset);
-      }
-    }
-  }, []);
-
-  const handlePick = (preset: Preset) => {
-    setActive(preset.key);
+    const preset = PRESETS.find((p) => p.key === active) ?? defaultPreset;
     applyPreset(preset);
-    document.documentElement.setAttribute("data-brand", preset.key);
-    window.localStorage.setItem(STORAGE_KEY, preset.key);
-  };
+  }, [active, defaultPreset]);
+
+  const handlePick = useCallback(
+    (preset: Preset) => {
+      applyPreset(preset);
+      document.documentElement.setAttribute("data-brand", preset.key);
+      window.localStorage.setItem(STORAGE_KEY, preset.key);
+      // Notify subscribers (this tab) that the store changed.
+      window.dispatchEvent(new Event(BRAND_CHANGE_EVENT));
+    },
+    [],
+  );
 
   return (
     <div className="grid gap-2 sm:grid-cols-2">

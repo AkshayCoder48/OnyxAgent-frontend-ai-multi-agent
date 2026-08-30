@@ -39,8 +39,6 @@ export function TabsBlock({ props, children, streaming, renderChildren }: GenUIC
   });
 
   const childCount = children?.length ?? 0;
-  // If we have tabs with content, use those. If we have children, use those.
-  const hasInlineContent = tabs.some((t) => t.content);
 
   if (streaming && tabs.length === 0 && childCount === 0) {
     return (

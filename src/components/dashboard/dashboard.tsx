@@ -59,6 +59,12 @@ async function fetchStats(userId: string): Promise<Stats> {
   return { totalConversations, totalMessages, activeProviders };
 }
 
+// Page-load timestamp captured at module scope — reading the clock during
+// render is impure (flagged by the React Compiler lint). The banner check
+// below only needs "completed within 1h", and the memo recomputes solely
+// when the user changes, so a load-time reference is equivalent.
+const PAGE_LOADED_AT = Date.now();
+
 export function Dashboard({ onNewChat, onOpenSettings }: DashboardProps) {
   const { user } = useAuthStore();
   const { conversations, selectConversation: select } = useConversations();
@@ -71,12 +77,13 @@ export function Dashboard({ onNewChat, onOpenSettings }: DashboardProps) {
   });
 
   // Onboarding banner: show only if completed within the last hour.
+  const onboardingCompletedAt = user?.onboarding_completed_at;
   const showOnboardingBanner = React.useMemo(() => {
-    if (!user?.onboarding_completed_at) return false;
-    const completed = new Date(user.onboarding_completed_at).getTime();
+    if (!onboardingCompletedAt) return false;
+    const completed = new Date(onboardingCompletedAt).getTime();
     if (Number.isNaN(completed)) return false;
-    return Date.now() - completed < 60 * 60 * 1000; // < 1h
-  }, [user?.onboarding_completed_at]);
+    return PAGE_LOADED_AT - completed < 60 * 60 * 1000; // < 1h
+  }, [onboardingCompletedAt]);
 
   const recent = React.useMemo<Conversation[]>(
     () => conversations.slice(0, 5),
@@ -229,7 +236,7 @@ export function Dashboard({ onNewChat, onOpenSettings }: DashboardProps) {
           </Card>
         ) : (
           <Card>
-            <ul role="list" className="divide-y">
+            <ul className="divide-y">
               {recent.map((conv) => (
                 <li key={conv.id}>
                   <button

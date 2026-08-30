@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { GenUIComponentProps, str, bool } from "./helpers";
+import { GenUIComponentProps, str } from "./helpers";
 
 /**
  * `header` — section heading with eyebrow / title / subtitle.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { Button, Spinner } from "@/components/ui";
+import { Button } from "@/components/ui";
 import { Loader2, Paperclip, Send, Square, Sparkles, Zap } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {

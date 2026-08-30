@@ -1,23 +1,36 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
 import jsxA11y from "eslint-plugin-jsx-a11y";
+import coreWebVitals from "eslint-config-next/core-web-vitals";
+import nextTypescript from "eslint-config-next/typescript";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({ baseDirectory: __dirname });
-
+// eslint-config-next@16 exports native FLAT configs (arrays of config
+// objects). The previous version of this file pushed them through
+// `FlatCompat.extends(...)` — which is only for LEGACY eslintrc-format
+// shareable configs — and ESLint 9 crashed with "Converting circular
+// structure to JSON" while validating the flat config through the legacy
+// validator. Importing the flat configs directly fixes the crash.
 const eslintConfig = [
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
-    ignores: [".next/", "node_modules/", "out/", "next-env.d.ts"],
+    ignores: [
+      ".next/",
+      "node_modules/",
+      "out/",
+      "next-env.d.ts",
+      "cli/",
+      "mini-services/",
+      "skills/",
+      "examples/",
+    ],
   },
+  ...coreWebVitals,
+  ...nextTypescript,
   // Accessibility: enforce the jsx-a11y recommended ruleset explicitly.
-  // next/core-web-vitals (loaded via FlatCompat above) already registers the
-  // "jsx-a11y" plugin but only enables a small subset of its rules, so we
-  // re-use that plugin registration and turn on the full recommended ruleset.
+  // next/core-web-vitals registers the "jsx-a11y" plugin (scoped to JS/TS
+  // files) but only enables a small subset of its rules; we enable the full
+  // recommended ruleset for the same file set. The plugin itself must NOT be
+  // redeclared here — ESLint refuses to redefine an already-registered
+  // plugin, and rules resolve against the earlier registration.
   {
+    files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
     rules: {
       ...jsxA11y.flatConfigs.recommended.rules,
       // High-value rules — keep as errors so they block the build.
@@ -29,6 +42,9 @@ const eslintConfig = [
           // labels that wrap them aren't flagged as orphaned.
           controlComponents: ["Checkbox", "Switch", "RadioGroupItem", "Slider"],
           assert: "either",
+          // Radio "card" labels wrap the input plus a rich description block
+          // (div > div > text), so the accessible text sits at depth 3.
+          depth: 4,
         },
       ],
       "jsx-a11y/aria-props": "error",

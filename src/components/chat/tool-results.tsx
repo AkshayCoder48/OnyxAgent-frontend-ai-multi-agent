@@ -5,7 +5,7 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Video, ExternalLink, Clock, Eye, ThumbsUp, Play } from "lucide-react";
+import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Video, ExternalLink, Eye, ThumbsUp, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -370,7 +370,6 @@ export function ImageSearchResults({ result }: ResultProps) {
   const current = results[idx];
   if (!current) return <GenericToolResult result={result} />;
 
-  const imgSrc = current.imageUrl || current.thumbnail;
   const linkUrl = current.url || current.imageUrl || current.thumbnail || "#";
 
   const goPrev = () => setCurrentIdx((i) => (i - 1 + total) % total);

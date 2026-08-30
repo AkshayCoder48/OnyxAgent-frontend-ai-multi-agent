@@ -1,8 +1,7 @@
 "use client";
 
-import { X, FileText, FileImage, FileCode, FileSpreadsheet, FileType, Download, Loader2 } from "lucide-react";
+import { X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { LucideIcon } from "lucide-react";
 
 /**
  * Shared file card component — used in both the chat input (attached files)
@@ -73,18 +72,6 @@ function badgeColorFor(ext: string): string {
   return "bg-muted-foreground/60 text-white";
 }
 
-/** Get the icon component for the file type (used for the card's icon area
- *  when the extension badge isn't enough). */
-function iconFor(ext: string): LucideIcon | null {
-  const e = ext.toLowerCase();
-  if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"].includes(e)) return FileImage;
-  if (["py", "js", "ts", "tsx", "jsx", "json", "html", "css", "yaml", "yml", "sh", "sql"].includes(e)) return FileCode;
-  if (["csv", "xls", "xlsx", "tsv"].includes(e)) return FileSpreadsheet;
-  if (["pdf"].includes(e)) return FileType;
-  if (["md", "txt", "rtf"].includes(e)) return FileText;
-  return null;
-}
-
 function formatSize(bytes: number | undefined): string | null {
   if (bytes == null) return null;
   if (bytes < 1024) return `${bytes} B`;
@@ -100,7 +87,7 @@ function getExt(filename: string): string {
 export function FileCard({
   filename,
   size,
-  mimeType,
+  mimeType: _mimeType,
   onClick,
   onRemove,
   href,
@@ -112,7 +99,6 @@ export function FileCard({
   const sizeStr = formatSize(size);
   const badgeColor = badgeColorFor(ext);
   const badgeLabel = ext ? ext.slice(0, 4).toUpperCase() : "FILE";
-  const Icon = iconFor(ext);
 
   // Upload in progress — show a progress bar overlay.
   const isUploading = uploadProgress !== undefined && uploadProgress >= 0 && uploadProgress < 100;

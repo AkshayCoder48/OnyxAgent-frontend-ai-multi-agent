@@ -8,7 +8,7 @@ import { useAuthStore } from "@/stores";
 import { qk } from "@/lib/query-keys";
 import { getErrorMessage, setUrlParam } from "@/lib/utils";
 import { useConversationStore, useChatStore } from "@/stores";
-import type { Conversation, ConversationMessage } from "@/types";
+import type { Conversation } from "@/types";
 
 const PAGE_SIZE = 30;
 

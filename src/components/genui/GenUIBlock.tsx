@@ -55,7 +55,6 @@ const GenUINodeRenderer = React.memo(function GenUINodeRenderer({
   node: GenUINode;
   forceStreaming?: boolean;
 }) {
-  const Renderer = getRenderer(node.type);
   const isStreaming = forceStreaming ?? Boolean(node.meta?.streaming);
 
   const renderChildren = React.useCallback(
@@ -80,9 +79,16 @@ const GenUINodeRenderer = React.memo(function GenUINodeRenderer({
     renderChildren,
   };
 
+  // Look up the renderer and render it via createElement — assigning the
+  // component to a Capitalized local (`const Renderer = getRenderer(...)`)
+  // is flagged by the React Compiler lint as "creating a component during
+  // render". getRenderer returns a stable, module-registered component, and
+  // createElement references it directly without a local binding.
+  const renderer = getRenderer(node.type);
+
   return (
     <GenUIBlockErrorBoundary node={node}>
-      <Renderer {...componentProps} />
+      {React.createElement(renderer, componentProps)}
     </GenUIBlockErrorBoundary>
   );
 });
@@ -103,7 +109,6 @@ class GenUIBlockErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error) {
-    // eslint-disable-next-line no-console
     console.warn("[GenUI] renderer crashed:", error, this.props.node);
   }
 
