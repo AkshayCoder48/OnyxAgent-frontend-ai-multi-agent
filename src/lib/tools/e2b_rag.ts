@@ -2,18 +2,22 @@
 
 import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
-import * as opfs from "@/lib/storage/opfs";
 
 /**
  * search_documents — grep-based document search across the user's workspace.
  *
  * The original backend used pgvector + embeddings for RAG. In the backendless
  * model we don't have a server-side vector store; instead we grep the user's
- * text files (in the E2B sandbox if a key is configured, OPFS otherwise) and
- * return matching snippets with surrounding context. This is intentionally
- * simple — no embeddings, no reranking, no chunking — but it works for the
- * common case (the user uploaded some .md/.txt/.json/.csv files and wants the
- * agent to find a passage).
+ * text files in the E2B sandbox (the authoritative workspace) and return
+ * matching snippets with surrounding context. This is intentionally simple —
+ * no embeddings, no reranking, no chunking — but it works for the common case
+ * (the user uploaded some .md/.txt/.json/.csv files and wants the agent to
+ * find a passage).
+ *
+ * PRD §25/§26: the OPFS fallback was removed. E2B is the single source of
+ * truth for workspace files. If no sandbox key is configured, the tool
+ * returns an error message instead of silently scanning a divergent OPFS
+ * tree (which the AI's `read_file` tool cannot see anyway).
  *
  * The result shape matches what the chat UI's `parseRAGResults` helper
  * expects (see `components/chat/tool-results/rag.tsx`):
@@ -76,6 +80,34 @@ async function grepFile(
   return hits;
 }
 
+/** Recursively list all files under `rootPath` in the E2B sandbox. */
+async function listSandboxFiles(
+  client: ReturnType<typeof getE2BClient>,
+  rootPath: string,
+): Promise<Array<{ path: string; name: string }>> {
+  const out: Array<{ path: string; name: string }> = [];
+  const stack: string[] = [rootPath];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Awaited<ReturnType<typeof client.listFiles>>;
+    try {
+      entries = await client.listFiles(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = entry.path.startsWith("/") ? entry.path : `${dir.replace(/\/$/, "")}/${entry.path}`;
+      const name = entry.name ?? full.split("/").pop() ?? full;
+      if (entry.type === "directory") {
+        stack.push(full);
+      } else if (entry.type === "file") {
+        out.push({ path: full, name });
+      }
+    }
+  }
+  return out;
+}
+
 registerTool(
   "search_documents",
   "Search the user's workspace for documents containing the given query string. Returns matching snippets with surrounding context. Use this whenever the user asks about content of files they've uploaded or created in the workspace. Cite sources inline as [1], [2], etc.",
@@ -112,47 +144,32 @@ registerTool(
     const allHits: SearchHit[] = [];
 
     const apiKey = ctx.e2bApiKey ?? ctx.sandboxApiKey;
-    if (apiKey) {
-      const client = getE2BClient(apiKey, ctx.userId);
-      const entries = await client.listFiles(path);
-      for (const entry of entries) {
-        if (allHits.length >= maxHits) break;
-        const entryName = entry.name ?? entry.path.split("/").pop() ?? entry.path;
-        if (entry.type !== "file" || !isTextFile(entryName)) continue;
-        try {
-          const content = await client.readFile(entry.path);
-          const hits = await grepFile(content, query, entryName);
-          for (const h of hits) {
-            if (allHits.length >= maxHits) break;
-            allHits.push(h);
-          }
-        } catch {
-          // skip unreadable files.
+    if (!apiKey) {
+      return {
+        results: [],
+        error:
+          "Document search requires an E2B sandbox. Configure one in Settings → Config → E2B Sandbox.",
+      };
+    }
+
+    const client = getE2BClient(apiKey, ctx.userId, ctx.sandboxMode ?? "shared");
+    const rootPath = path === "."
+      ? "/home/user"
+      : (path.startsWith("/") ? path : `/home/user/${path}`);
+    const files = await listSandboxFiles(client, rootPath);
+
+    for (const file of files) {
+      if (allHits.length >= maxHits) break;
+      if (!isTextFile(file.name)) continue;
+      try {
+        const content = await client.readFile(file.path);
+        const hits = await grepFile(content, query, file.name);
+        for (const h of hits) {
+          if (allHits.length >= maxHits) break;
+          allHits.push(h);
         }
-      }
-    } else {
-      // OPFS fallback.
-      const entries = await opfs.listDir(ctx.userId, `workspace/${path === "." ? "" : path}`);
-      // Recursively walk directories.
-      const queue = [...entries];
-      while (queue.length > 0 && allHits.length < maxHits) {
-        const entry = queue.shift()!;
-        if (entry.kind === "directory") {
-          const nested = await opfs.listDir(ctx.userId, entry.path.replace(`users/${ctx.userId}/`, ""));
-          queue.push(...nested);
-          continue;
-        }
-        if (!isTextFile(entry.name)) continue;
-        try {
-          const content = await opfs.readTextFile(entry.path);
-          const hits = await grepFile(content, query, entry.name);
-          for (const h of hits) {
-            if (allHits.length >= maxHits) break;
-            allHits.push(h);
-          }
-        } catch {
-          // skip.
-        }
+      } catch {
+        // skip unreadable files.
       }
     }
 

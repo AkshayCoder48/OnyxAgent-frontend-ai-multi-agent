@@ -101,12 +101,22 @@ export class E2BClient {
   }
 
   /** Make a call to the server-side sandbox API. Auto-recovers from dead
-   *  sandboxes by restarting (with OPFS backup restore) on "probably not
-   *  running" errors. */
+   *  sandboxes by restarting (with workspace restore) on "probably not
+   *  running" errors. Also implements bounded rate-limit (429) backoff per
+   *  PRD §30: detect 429 → wait per `Retry-After` (or exponential backoff)
+   *  → bounded retry → continue. Never enters an infinite retry loop. */
   private async call<T>(
     action: string,
     args: Record<string, unknown> = {},
   ): Promise<T> {
+    // PRD §30: bounded rate-limit backoff. We try up to 4 times total
+    // (initial + 3 retries) with exponential backoff (1s, 2s, 4s), capped
+    // at 8s. If the server sends a `Retry-After` header (in seconds) or a
+    // `retry_after_ms` field in the body, we honor that instead.
+    const MAX_RATE_LIMIT_RETRIES = 3;
+    const BASE_DELAY_MS = 1000;
+    const MAX_DELAY_MS = 8000;
+
     const doCall = async (sandboxId: string | null): Promise<Response> => {
       return fetch(API_ENDPOINT, {
         method: "POST",
@@ -126,6 +136,44 @@ export class E2BClient {
 
     let res = await doCall(this.sandboxId);
     let data = await res.json().catch(() => ({}));
+
+    // ── RATE-LIMIT BACKOFF (PRD §30) ─────────────────────────────────────
+    // E2B returns 429 when the user exceeds their sandbox API quota, or when
+    // the server-side route hits Vercel's rate limit. We retry with bounded
+    // exponential backoff instead of throwing — the operation is recoverable
+    // and the user shouldn't see a hard failure for a transient throttle.
+    let rateLimitAttempt = 0;
+    while (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+      rateLimitAttempt++;
+      // Honor server-sent retry hints; fall back to exponential backoff.
+      const retryAfterHeader = res.headers.get("retry-after");
+      const retryAfterBody = (data as { retry_after_ms?: number })?.retry_after_ms;
+      let delayMs: number;
+      if (typeof retryAfterBody === "number" && retryAfterBody > 0) {
+        delayMs = Math.min(retryAfterBody, MAX_DELAY_MS);
+      } else if (retryAfterHeader) {
+        // Retry-After can be seconds or a date — handle both.
+        const asNum = Number(retryAfterHeader);
+        if (!Number.isNaN(asNum)) {
+          delayMs = Math.min(asNum * 1000, MAX_DELAY_MS);
+        } else {
+          const asDate = Date.parse(retryAfterHeader);
+          delayMs = Number.isNaN(asDate)
+            ? Math.min(BASE_DELAY_MS * Math.pow(2, rateLimitAttempt - 1), MAX_DELAY_MS)
+            : Math.min(asDate - Date.now(), MAX_DELAY_MS);
+        }
+      } else {
+        delayMs = Math.min(BASE_DELAY_MS * Math.pow(2, rateLimitAttempt - 1), MAX_DELAY_MS);
+      }
+      // Guard against negative / zero delays.
+      delayMs = Math.max(delayMs, 100);
+      console.warn(
+        `[e2b] rate-limited (429) on action="${action}" — retry ${rateLimitAttempt}/${MAX_RATE_LIMIT_RETRIES} after ${delayMs}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+      res = await doCall(this.sandboxId);
+      data = await res.json().catch(() => ({}));
+    }
 
     // Save the sandbox ID from SUCCESSFUL responses only. The server may
     // return HTTP 200 with an `error` field when the sandbox died mid-command
@@ -181,6 +229,14 @@ export class E2BClient {
       if (res.status === 401) {
         throw new E2BError(
           "E2B API key is invalid. Get one at https://e2b.dev/dashboard?tab=keys",
+          res.status,
+          data,
+        );
+      }
+      if (res.status === 429) {
+        // We exhausted our bounded retry budget — surface a clear message.
+        throw new E2BError(
+          `E2B rate limit exceeded after ${MAX_RATE_LIMIT_RETRIES} retries. Please wait a moment and try again.`,
           res.status,
           data,
         );

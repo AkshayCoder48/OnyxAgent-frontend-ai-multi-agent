@@ -707,7 +707,7 @@ export const MessageItem = React.memo(function MessageItem({
                         if (part.type === "thinking") {
                           return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                         }
-                        return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
+                        return <ReasoningBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                       })}
 
                       {/* Tool calls + text in chronological order */}

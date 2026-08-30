@@ -20,6 +20,7 @@ import type {
   ToolCall,
   WSEvent,
 } from "@/types";
+import { getGenerationId } from "@/types";
 import { setUrlParam } from "@/lib/utils";
 import { useConversationStore, useResearchStore } from "@/stores";
 
@@ -143,6 +144,31 @@ export function useChat(options: UseChatOptions = {}) {
   }, []);
   const currentGroupIdRef = useRef<string | null>(null);
 
+  // ── GENERATION IDENTITY ─────────────────────────────────────────────────
+  // PRD §19: "Use a generation/request identity. Every event carries/retains
+  // the generation identity. If event.generationId !== activeGenerationId,
+  // ignore the event."
+  //
+  // The runtime mints a fresh `generationId` (a nanoid) at the start of every
+  // `runAgentTurn` call and injects it into `data.generation_id` on EVERY
+  // emitted WSEvent. We track the active generation here and discard events
+  // whose generation_id doesn't match — this is the critical fix for the
+  // "stale message_saved corrupts new generation" race:
+  //
+  //   1. User clicks Stop → stopGeneration() clears activeGenerationId.
+  //   2. User immediately sends a new message → new runAgentTurn starts,
+  //      sets activeGenerationId = "gen-B".
+  //   3. The OLD runtime (still finishing up after the abort) emits its
+  //      final `message_saved` for "gen-A".
+  //   4. WITHOUT generation_id check, the handler would replace the new
+  //      turn's temp message ID with the old turn's DB ID — hijacking all
+  //      subsequent text deltas onto the wrong message.
+  //   5. WITH generation_id check, the stale event is silently dropped.
+  //
+  // `null` means "no active generation" — events with no generation_id
+  // (legacy/external emitters) are still accepted when null, for back-compat.
+  const activeGenerationIdRef = useRef<string | null>(null);
+
   // ── STREAMING BUFFERS ──────────────────────────────────────────────
   // Every delta type is buffered + flushed on a timer so React doesn't
   // re-render the whole message tree on every single token. Previously
@@ -232,16 +258,31 @@ export function useChat(options: UseChatOptions = {}) {
   // Single event handler for every WSEvent the runtime emits. Maps each event
   // type to the appropriate chat-store mutation. This is the same handler the
   // WebSocket version had — only the transport changed.
+  //
+  // GENERATION AWARENESS (PRD §19): Every event from `runAgentTurn` carries
+  // `data.generation_id`. We compare it to `activeGenerationIdRef.current`:
+  //   - If they match → process the event normally.
+  //   - If they differ → SILENTLY DROP (it's from a stale generation).
+  //   - If the event has no generation_id → accept (legacy/external emitter).
+  //
+  // The only events exempt from the generation check are `conversation_created`,
+  // `model_request_start` (which SETS the active generation), and `error` /
+  // `complete` (which CLEAR it). All delta/tool/result events are checked.
   const handleAgentEvent = useCallback(
     (wsEvent: WSEvent) => {
-      const createNewMessage = (content: string): string => {
-        if (currentMessageIdRef.current) {
-          updateMessage(currentMessageIdRef.current, (msg) => ({
-            ...msg,
-            isStreaming: false,
-          }));
-        }
+      const eventGenId = getGenerationId(wsEvent);
+      const activeGenId = activeGenerationIdRef.current;
 
+      // Helper: returns true if this event should be processed based on
+      // generation_id matching. null eventGenId means "always accept" (legacy
+      // emitter or pre-runtime event).
+      const isFromActiveGeneration = (): boolean => {
+        if (!eventGenId) return true; // legacy / external event
+        if (!activeGenId) return true; // no active generation — accept
+        return eventGenId === activeGenId;
+      };
+
+      const createNewMessage = (content: string): string => {
         const newMsgId = nanoid();
         // Use current conversationId from store to avoid closure issues.
         const effectiveConversationId =
@@ -291,6 +332,15 @@ export function useChat(options: UseChatOptions = {}) {
           // nanoid for the real database ID. We use replaceMessageId (not
           // updateMessage) because updateMessage matches by ID — you can't
           // change the ID inside it.
+          //
+          // GENERATION GUARD: Only replace the ID if this message_saved
+          // belongs to the ACTIVE generation. A stale message_saved from a
+          // previous (aborted) generation must NOT replace the current
+          // generation's temp ID — that was the root cause of the
+          // "stale message_saved corrupts new generation" bug.
+          if (!isFromActiveGeneration()) {
+            break;
+          }
           const { message_id } = wsEvent.data as { message_id: string };
           const oldId = currentMessageIdRef.current;
           if (oldId && oldId !== message_id) {
@@ -298,12 +348,15 @@ export function useChat(options: UseChatOptions = {}) {
             currentMessageIdRef.current = message_id;
           } else if (!oldId) {
             // Fallback: find the last assistant message with a temp id.
+            // This is safe now because we've already verified the generation
+            // matches — so the temp message we find IS this generation's.
             const messages = useChatStore.getState().messages;
             const lastTemp = [...messages]
               .reverse()
               .find((msg) => msg.role === "assistant" && !!msg.isTemporaryId);
             if (lastTemp && lastTemp.id !== message_id) {
               replaceMessageId(lastTemp.id, message_id);
+              currentMessageIdRef.current = message_id;
             }
           }
           break;
@@ -312,10 +365,24 @@ export function useChat(options: UseChatOptions = {}) {
         case "model_request_start": {
           // One assistant turn = ONE message bubble, even if the agent
           // runs multiple rounds (text → tool → text → tool → text).
-          // Previously this created a new message per round, splitting
-          // the response into multiple bubbles. Now we reuse the existing
-          // streaming message if one exists (rounds 2+ append to it).
-          // Only create a new message if there's no current streaming message.
+          //
+          // GENERATION LIFECYCLE:
+          //   - First `model_request_start` of a turn: adopt the event's
+          //     generation_id as the active generation. Create the assistant
+          //     message ONCE.
+          //   - Subsequent `model_request_start` events (rounds 2+ of the
+          //     same turn): the event's generation_id matches the active
+          //     generation → reuse the existing streaming message.
+          //   - Stale `model_request_start` from a previous generation:
+          //     event's generation_id differs → SILENTLY DROP.
+          if (eventGenId && activeGenId && eventGenId !== activeGenId) {
+            // Stale event from a previous generation — ignore.
+            break;
+          }
+          if (eventGenId && !activeGenId) {
+            // First event of a new generation — adopt it.
+            activeGenerationIdRef.current = eventGenId;
+          }
           if (!currentMessageIdRef.current) {
             createNewMessage("");
           }
@@ -323,15 +390,16 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "text_delta": {
-          // Buffer text deltas and flush every 30ms. This is the hot path —
-          // without batching, every token triggers a full Zustand store
-          // update + React re-render of the entire message list + markdown
-          // re-parse, which causes "4 lines at once", stuttering, and
-          // eventual app freeze on long responses. 30ms batches 3-5 tokens
-          // per render pass while still feeling real-time (24fps = 41ms).
-          if (!currentMessageIdRef.current) {
-            createNewMessage("");
-          }
+          // GENERATION GUARD: drop deltas from stale generations.
+          // Previously, this handler had a fallback `createNewMessage("")`
+          // when `currentMessageIdRef.current` was null. That fallback was
+          // a source of "broken half word" bugs — if the ref was somehow
+          // null mid-stream (e.g. after a stale complete event), each delta
+          // would create a NEW assistant message, splitting words like
+          // "Hel" + "lo" across two bubbles. Now we DROP the delta instead
+          // (the buffer is preserved across drops so nothing is lost if the
+          // ref comes back, but a stale delta never creates a phantom bubble).
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const content = (wsEvent.data as { index: number; content: string }).content;
             if (content) {
@@ -351,10 +419,10 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "thinking_delta": {
-          // Reasoning trace — batch like text deltas to prevent lag
-          if (!currentMessageIdRef.current) {
-            createNewMessage("");
-          }
+          // Reasoning trace — batch like text deltas to prevent lag.
+          // GENERATION GUARD: same as text_delta — drop stale, NO fallback
+          // createNewMessage (prevents phantom thinking bars).
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const content = (wsEvent.data as { index: number; content: string }).content;
             thinkingBuffer.current += content;
@@ -372,10 +440,9 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "reasoning_delta": {
-          // DeepSeek/Moonshot/g4f-style reasoning — batch to prevent lag
-          if (!currentMessageIdRef.current) {
-            createNewMessage("");
-          }
+          // DeepSeek/Moonshot/g4f-style reasoning — batch to prevent lag.
+          // GENERATION GUARD: same as text_delta — drop stale, NO fallback.
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const content = (wsEvent.data as { index: number; content: string }).content;
             reasoningBuffer.current += content;
@@ -399,8 +466,10 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "tool_call_delta": {
-          // Tool call args streaming — buffer and flush every 50ms to prevent
+          // Tool call args streaming — buffer and flush every 16ms to prevent
           // lag and duplicate pending tool calls.
+          // GENERATION GUARD: drop stale.
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const data = wsEvent.data as {
               tool_calls?: Array<{
@@ -505,6 +574,8 @@ export function useChat(options: UseChatOptions = {}) {
           // tool call with the final one (with parsed args + running status).
           // ALSO clear the toolArgBuffer so the next round's tool calls
           // (which may reuse the same index) don't inherit stale args.
+          // GENERATION GUARD: drop stale.
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const data = wsEvent.data as {
               tool_name: string;
@@ -588,7 +659,11 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "tool_result": {
-          // Update tool call with result
+          // Update tool call with result.
+          // GENERATION GUARD: drop stale. (A stale tool_result from a
+          // previous generation could otherwise write a result onto the
+          // current generation's tool card if IDs happened to collide.)
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const { tool_call_id, content } = wsEvent.data as {
               tool_call_id: string;
@@ -649,6 +724,8 @@ export function useChat(options: UseChatOptions = {}) {
           // Buffer + flush every 50ms to prevent store update spam when the
           // sandbox emits chunks rapidly (e.g. `pip install` = 100s of lines).
           // Without batching, each chunk triggers a full React re-render.
+          // GENERATION GUARD: drop stale.
+          if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const { tool_call_id, content, type } = wsEvent.data as {
               tool_call_id: string;
@@ -675,6 +752,12 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "final_result": {
+          // GENERATION GUARD: a stale final_result from a previous (aborted)
+          // generation must NOT finalize the current generation's message.
+          // Without this check, stopping and immediately starting a new turn
+          // could cause the new turn's message to be marked isStreaming=false
+          // prematurely by the old turn's final_result.
+          if (!isFromActiveGeneration()) break;
           flushTextDelta();
           // Finalize message
           if (currentMessageIdRef.current) {
@@ -699,6 +782,10 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "error": {
+          // GENERATION GUARD: a stale error from a previous generation must
+          // NOT mark the current generation's message as errored. If the
+          // event's generation_id doesn't match, drop it silently.
+          if (!isFromActiveGeneration()) break;
           flushTextDelta();
           // Handle error
           if (currentMessageIdRef.current) {
@@ -714,6 +801,12 @@ export function useChat(options: UseChatOptions = {}) {
             updateMessage(id, (msg) => ({ ...msg, isStreaming: false }));
           }
           setIsProcessing(false);
+          // PRD §18: error preserves already-streamed content + marks the
+          // active assistant turn as error. Clear the active generation so
+          // any subsequent stale events from this generation are dropped.
+          activeGenerationIdRef.current = null;
+          setCurrentMessageId(null);
+          abortRef.current = null;
           break;
         }
 
@@ -775,11 +868,17 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "complete": {
+          // GENERATION GUARD: only clear if this complete belongs to the
+          // active generation. A stale complete from a previous (aborted)
+          // generation must NOT clear the current generation's state.
+          if (!isFromActiveGeneration()) break;
           flushTextDelta();
           setIsProcessing(false);
           // Clear currentMessageId after complete (message_saved should have
           // handled ID mapping).
           setCurrentMessageId(null);
+          // Clear the active generation — the next turn mints a new one.
+          activeGenerationIdRef.current = null;
           // Drop the abort controller — the turn is done.
           abortRef.current = null;
           break;
@@ -1108,6 +1207,11 @@ export function useChat(options: UseChatOptions = {}) {
     flushTextDelta();
     setCurrentMessageId(null);
     currentGroupIdRef.current = null;
+    // CRITICAL: clear the active generation so any subsequent (stale) events
+    // emitted by the old runtime as it unwinds (final_result, message_saved,
+    // complete) are dropped instead of corrupting the next turn's message.
+    // PRD §19: "A stopped generation cannot modify a subsequent generation."
+    activeGenerationIdRef.current = null;
     setIsProcessing(false);
     setPendingApproval(null);
     setPendingQuestions(null);

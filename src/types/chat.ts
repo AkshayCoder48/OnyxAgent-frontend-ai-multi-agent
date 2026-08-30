@@ -172,6 +172,26 @@ export interface WSEvent {
   timestamp?: string;
 }
 
+/**
+ * Extract the `generation_id` from a WSEvent's `data` payload.
+ *
+ * Every event emitted by `runAgentTurn` carries a `generation_id` field inside
+ * its `data` object. This ID is generated ONCE at the start of a turn and
+ * remains stable for the entire multi-round lifetime of that turn. Consumers
+ * (use-chat.ts) use it to discard stale events from a previous generation
+ * that arrive after a stop/restart — without this, a delayed `message_saved`
+ * from turn N-1 could corrupt the message ID of turn N.
+ *
+ * Events that don't carry a generation_id (e.g. legacy events, or events
+ * emitted before the runtime mints one) return `null` — callers treat null
+ * as "always accept" for backward compatibility.
+ */
+export function getGenerationId(event: WSEvent): string | null {
+  if (!event.data || typeof event.data !== "object") return null;
+  const gid = (event.data as { generation_id?: unknown }).generation_id;
+  return typeof gid === "string" && gid.length > 0 ? gid : null;
+}
+
 export interface TextDeltaEvent {
   type: "text_delta";
   data: {

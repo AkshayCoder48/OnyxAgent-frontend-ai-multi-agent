@@ -3,7 +3,7 @@
 import { nanoid } from "nanoid";
 import { useSubagentStore, type SubagentConfig, type SubagentMessage } from "@/stores/subagent-store";
 import { useAuthStore } from "@/stores";
-import { aiProviderService } from "@/lib/services";
+import { aiProviderService, settingsService } from "@/lib/services";
 import { listTools } from "@/lib/tools/registry";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 
@@ -21,6 +21,11 @@ import { stripFunctionCallTags } from "@/lib/text-sanitizer";
  * - Streams tool call args live (shows tool card immediately, not after stream ends)
  * - No 60ms throttle (flush immediately like main chat)
  * - Tool calls execute in parallel
+ * - PRD §34/§35: Shares the SAME E2B sandbox as the main agent — subagents
+ *   receive the real `e2bApiKey` + `sandboxApiKey` + `envVars` so file
+ *   operations performed by a subagent hit the same workspace the main
+ *   agent sees. Previously `e2bApiKey: undefined` silently stripped sandbox
+ *   access from every subagent tool call.
  */
 
 interface ChatCompletionMessage {
@@ -110,6 +115,24 @@ export async function executeSubagentTurn(
   });
 
   let accumulatedReasoning = "";
+
+  // PRD §34/§35: Load the user's decrypted E2B sandbox key + env vars so
+  // subagent tool calls hit the SAME workspace as the main agent. Previously
+  // these were hardcoded to `undefined`, silently breaking every file tool
+  // a subagent tried to call.
+  let subagentSandboxKey: string | undefined;
+  let subagentEnvVars: Record<string, string> = {};
+  try {
+    const userId = useAuthStore.getState().user?.id;
+    if (userId) {
+      const decryptedKey = await settingsService.getDecryptedSandboxKey(userId);
+      subagentSandboxKey = decryptedKey ?? undefined;
+      const decryptedEnv = await settingsService.getDecryptedEnvVars(userId);
+      subagentEnvVars = decryptedEnv ?? {};
+    }
+  } catch (err) {
+    console.warn("[subagent] failed to load sandbox key / env vars:", err);
+  }
 
   try {
     const config = await resolveApiConfig(subagent);
@@ -208,6 +231,8 @@ export async function executeSubagentTurn(
           await executeToolCallsParallel(
             msg.tool_calls, allTools, subagentId, sid, assistantMsgId, apiMessages,
             msg.content || "",
+            subagentSandboxKey,
+            subagentEnvVars,
           );
           fullResponse = stripFunctionCallTags(msg.content || "");
           continue;
@@ -372,10 +397,11 @@ export async function executeSubagentTurn(
                 conversationId: subagentId,
                 emit: () => {},
                 signal: undefined,
-                e2bApiKey: undefined,
-                sandboxApiKey: undefined,
+                // PRD §34/§35: subagents share the main agent's E2B sandbox.
+                e2bApiKey: subagentSandboxKey,
+                sandboxApiKey: subagentSandboxKey,
                 sandboxMode: "shared" as const,
-                envVars: {},
+                envVars: subagentEnvVars,
                 onToolOutput: () => {},
               };
               toolResult = await tool.handler(ptc.args, ctx);
@@ -438,6 +464,8 @@ async function executeToolCallsParallel(
   assistantMsgId: string,
   apiMessages: ChatCompletionMessage[],
   _accumulatedText: string,
+  sandboxKey: string | undefined,
+  envVars: Record<string, string>,
 ) {
   await Promise.all(toolCalls.map(async (tc) => {
     let toolArgs: Record<string, unknown> = {};
@@ -467,10 +495,11 @@ async function executeToolCallsParallel(
           conversationId: _subagentId,
           emit: () => {},
           signal: undefined,
-          e2bApiKey: undefined,
-          sandboxApiKey: undefined,
+          // PRD §34/§35: subagents share the main agent's E2B sandbox.
+          e2bApiKey: sandboxKey,
+          sandboxApiKey: sandboxKey,
           sandboxMode: "shared" as const,
-          envVars: {},
+          envVars,
           onToolOutput: () => {},
         };
         toolResult = await tool.handler(toolArgs, ctx);

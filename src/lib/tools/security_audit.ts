@@ -1,12 +1,17 @@
 "use client";
 
 import { registerTool } from "./registry";
-import * as opfs from "@/lib/storage/opfs";
+import { getE2BClient } from "@/lib/e2b/client";
 
 /**
  * Security audit tool — scans the user's workspace for common security issues.
  * Checks for: exposed secrets, missing input validation, CORS issues, etc.
  * Returns a structured report with findings, severity, and fix suggestions.
+ *
+ * PRD §25/§26: scans the E2B sandbox (the authoritative workspace) instead
+ * of OPFS. Previously this tool walked the OPFS file tree directly, which
+ * could diverge from what the AI actually sees via `read_file` (the AI reads
+ * from E2B). Now both code paths resolve to the same source of truth.
  */
 
 interface Finding {
@@ -34,6 +39,37 @@ const EVAL_PATTERN = /eval\s*\(/g;
 const INNERHTML_PATTERN = /\.innerHTML\s*=/g;
 const DANGEROUS_HTML_PATTERN = /dangerouslySetInnerHTML/g;
 
+const TEXT_EXTENSIONS = new Set([
+  "ts", "tsx", "js", "jsx", "py", "json", "env", "yaml", "yml", "sh", "html", "css",
+]);
+
+/** Recursively list all files under `rootPath` in the E2B sandbox. */
+async function listSandboxFiles(
+  client: ReturnType<typeof getE2BClient>,
+  rootPath: string,
+): Promise<string[]> {
+  const out: string[] = [];
+  const stack: string[] = [rootPath];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Awaited<ReturnType<typeof client.listFiles>>;
+    try {
+      entries = await client.listFiles(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = entry.path.startsWith("/") ? entry.path : `${dir.replace(/\/$/, "")}/${entry.path}`;
+      if (entry.type === "directory") {
+        stack.push(full);
+      } else if (entry.type === "file") {
+        out.push(full);
+      }
+    }
+  }
+  return out;
+}
+
 registerTool(
   "security_audit",
   "Scan the user's workspace for common security issues. Checks for exposed secrets, dangerous code patterns, CORS misconfigurations, and other OWASP top 10 issues. Returns a structured report with findings, severity levels, and fix suggestions.",
@@ -48,21 +84,28 @@ registerTool(
     const scanPath = (args.path as string) || ".";
     const findings: Finding[] = [];
 
-    try {
-      const dir = await opfs.ensurePath(ctx.userId, `workspace/${scanPath === "." ? "" : scanPath}`);
-      const walked = await opfs.walkFiles(dir);
+    const sandboxKey = ctx.sandboxApiKey ?? ctx.e2bApiKey;
+    if (!sandboxKey) {
+      return {
+        error: "Security audit requires an E2B sandbox. Configure one in Settings → Config → E2B Sandbox.",
+      };
+    }
 
-      for (const f of walked) {
+    try {
+      const client = getE2BClient(sandboxKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
+      const rootPath = scanPath === "."
+        ? "/home/user"
+        : (scanPath.startsWith("/") ? scanPath : `/home/user/${scanPath}`);
+      const files = await listSandboxFiles(client, rootPath);
+
+      for (const filePath of files) {
         // Only scan text files
-        const ext = f.path.split(".").pop()?.toLowerCase();
-        if (!["ts", "tsx", "js", "jsx", "py", "json", "env", "yaml", "yml", "sh", "html", "css"].includes(ext || "")) {
-          continue;
-        }
+        const ext = filePath.split(".").pop()?.toLowerCase();
+        if (!TEXT_EXTENSIONS.has(ext || "")) continue;
 
         try {
-          const file = await f.handle.getFile();
-          if (file.size > 100 * 1024) continue; // skip large files
-          const content = await file.text();
+          const content = await client.readFile(filePath);
+          if (content.length > 100 * 1024) continue; // skip large files
           const lines = content.split("\n");
 
           // Check for exposed secrets
@@ -72,7 +115,7 @@ registerTool(
               if (pattern.test(line)) {
                 findings.push({
                   severity: "critical",
-                  file: f.path,
+                  file: filePath,
                   line: idx + 1,
                   description: `Exposed ${name} detected`,
                   fix: `Move the ${name} to an environment variable. Never hardcode secrets in source code.`,
@@ -84,7 +127,7 @@ registerTool(
             if (EVAL_PATTERN.test(line)) {
               findings.push({
                 severity: "warning",
-                file: f.path,
+                file: filePath,
                 line: idx + 1,
                 description: "Use of eval() detected — can lead to code injection",
                 fix: "Avoid eval(). Use JSON.parse() for data or Function() for controlled code execution.",
@@ -93,7 +136,7 @@ registerTool(
             if (INNERHTML_PATTERN.test(line)) {
               findings.push({
                 severity: "warning",
-                file: f.path,
+                file: filePath,
                 line: idx + 1,
                 description: "Direct innerHTML assignment — XSS risk",
                 fix: "Use textContent or sanitize HTML with DOMPurify before assigning to innerHTML.",
@@ -102,7 +145,7 @@ registerTool(
             if (DANGEROUS_HTML_PATTERN.test(line)) {
               findings.push({
                 severity: "info",
-                file: f.path,
+                file: filePath,
                 line: idx + 1,
                 description: "dangerouslySetInnerHTML used — ensure content is sanitized",
                 fix: "Only use dangerouslySetInnerHTML with sanitized content (e.g., DOMPurify.sanitize()).",
@@ -111,14 +154,16 @@ registerTool(
             if (CORS_PATTERN.test(line)) {
               findings.push({
                 severity: "warning",
-                file: f.path,
+                file: filePath,
                 line: idx + 1,
                 description: "Wildcard CORS detected — allows any origin",
                 fix: "Restrict CORS to specific origins instead of '*'",
               });
             }
           });
-        } catch {}
+        } catch {
+          // skip unreadable file
+        }
       }
 
       // Sort by severity (critical first)
@@ -135,7 +180,7 @@ registerTool(
       return {
         summary,
         findings: findings.slice(0, 50), // cap at 50 findings
-        scanned_files: walked.length,
+        scanned_files: files.length,
         scan_path: scanPath,
       };
     } catch (e) {

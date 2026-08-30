@@ -50,13 +50,13 @@ import { conversationService, settingsService } from "@/lib/services";
 // ---------------------------------------------------------------------------
 
 export interface AgentTurnOptions {
-  /** User id (used to scope Dexie queries, OPFS paths, E2B sandbox). */
+  /** User id (used to scope Dexie queries + E2B sandbox). */
   userId: string;
   /** Existing conversation id, or null to create one on first turn. */
   conversationId: string | null;
   /** The user's prompt for this turn. */
   userMessage: string;
-  /** File IDs already uploaded to OPFS — included as `file_ids`. */
+  /** File IDs already uploaded to the workspace — included as `file_ids`. */
   fileIds?: string[];
   /** AI provider config: base URL, decrypted API key, model name, tools flag. */
   provider: {
@@ -987,8 +987,47 @@ function buildAssistantParts(
 // Main entry — `runAgentTurn`.
 // ---------------------------------------------------------------------------
 
+/**
+ * Wrap the caller-supplied `emit` so that EVERY event emitted by the runtime
+ * carries the turn's `generationId` in `data.generation_id`. This is the
+ * stable identity consumers use to discard stale events from a previous
+ * generation (PRD §19). Events whose `data` is not an object (rare — only
+ * legacy callers) pass through unchanged.
+ */
+function wrapEmitWithGenerationId(
+  emit: (event: WSEvent) => void,
+  generationId: string,
+): (event: WSEvent) => void {
+  return (event: WSEvent) => {
+    if (event.data && typeof event.data === "object") {
+      // Inject generation_id without clobbering any existing field.
+      const patched = { ...(event.data as Record<string, unknown>), generation_id: generationId };
+      emit({ ...event, data: patched });
+    } else if (event.data === undefined) {
+      emit({ ...event, data: { generation_id: generationId } });
+    } else {
+      // data is a primitive (string/number) — leave it alone, can't add a field.
+      emit(event);
+    }
+  };
+}
+
 export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnResult> {
-  const { emit, signal } = opts;
+  const { signal } = opts;
+
+  // ── GENERATION IDENTITY ────────────────────────────────────────────────
+  // A single `generationId` is minted at the start of every turn and threaded
+  // through EVERY emitted WSEvent's `data.generation_id`. Consumers (use-chat.ts)
+  // track `activeGenerationIdRef` and discard events whose generation_id doesn't
+  // match. This is the critical fix for the "stale message_saved corrupts new
+  // generation" bug: when the user stops generation and immediately starts a
+  // new one, the old runtime's final `message_saved` event arrives AFTER the
+  // new turn has begun. Without generation_id, the handler would replace the
+  // new turn's temp message ID with the old turn's DB ID — hijacking all
+  // subsequent text deltas onto the wrong message. With generation_id, the
+  // stale event is silently dropped.
+  const generationId = nanoid();
+  const emit = wrapEmitWithGenerationId(opts.emit, generationId);
 
   // Lazily load the user's decrypted E2B sandbox API key + env-var dict
   // from the settings service. The runtime is the single source of truth
@@ -1004,7 +1043,8 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   let envVars: Record<string, string> | undefined = opts.toolContext?.envVars;
 
   // Check file system mode — if "local", force sandboxApiKey to undefined
-  // so file tools use OPFS fallback even if a sandbox key is configured.
+  // so file tools use the E2B sandbox's local-mode fallback (the E2B sandbox
+  // is still authoritative even in local mode — it just runs locally).
   let forceLocal = false;
   // Sandbox mode is always "shared" — all conversations share one sandbox.
   // (The separate-sandboxes option was removed per user request.)
@@ -1185,7 +1225,7 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **video_search**: Search for videos via Miklium. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants tutorials or multimedia content.
 - **web_fetch**: Use to read the full content of a specific URL. Use AFTER web_search to deep-read a promising result page.
 
-### File Management (OPFS — local browser storage)
+### File Management (E2B sandbox — authoritative workspace)
 - **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.
 - **read_file**: Read the content of a file in the workspace.
 - **edit_file**: Edit a file by finding and replacing text. For large edits, use create_file_chunk with mode='append'.
@@ -1383,13 +1423,13 @@ You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to 
 
   let handoffContext = "";
 
-  // Function to build handoff letter + save full chat to file.
+  // Function to build handoff letter + save full chat to the E2B sandbox.
   // Called when a context error is detected (DEGRADED, context length, etc.)
+  // PRD §25/§26: handoff letters used to be written to OPFS; now they go to
+  // the E2B sandbox (the authoritative workspace) so the AI's `read_file`
+  // tool can access them. OPFS is no longer touched for workspace files.
   async function generateHandoff(): Promise<string> {
     try {
-      const { writeFileAtPath, ensurePath } = await import("@/lib/storage/opfs");
-      const userId = opts.userId;
-      await ensurePath(userId, "chats");
       const chatFileName = `chat_${conversationId?.slice(0, 8) ?? "unknown"}_${Date.now()}.md`;
       const fullChatText = history.map((m) => {
         const role = m.role.toUpperCase();
@@ -1399,7 +1439,23 @@ You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to 
           : "";
         return `## ${role}\n\n${content}${toolSummary}`;
       }).join("\n\n---\n\n");
-      await writeFileAtPath(`users/${userId}/chats`, chatFileName, fullChatText);
+
+      // Write to the E2B sandbox at /home/user/chats/<filename> so the AI's
+      // `read_file` tool (which reads from the sandbox) can access it.
+      // We use the toolCtx's sandboxApiKey if available; if not (local mode
+      // or no sandbox configured), we skip the file write but still return
+      // the handoff letter so the AI gets the summary inline.
+      if (sandboxApiKey && typeof window !== "undefined") {
+        try {
+          const { getE2BClient } = await import("@/lib/e2b/client");
+          const client = getE2BClient(sandboxApiKey, conversationId, sandboxMode);
+          // Ensure the chats/ directory exists, then write the file.
+          await client.createFolder("/home/user/chats").catch(() => {});
+          await client.writeFile(`/home/user/chats/${chatFileName}`, fullChatText);
+        } catch (err) {
+          console.warn("[agent] failed to write handoff to E2B sandbox:", err);
+        }
+      }
 
       const userMessages = history.filter((m) => m.role === "user");
       const allToolNames = new Set<string>();
