@@ -2,7 +2,8 @@
    scaled to `size` via --orb-k. Each cell runs the same gather → settle →
    release keyframe; its animation-delay (and the swirl vectors --orb-ax/ay
    and --orb-bx/by, in stage px) turns nine identical animations into the
-   variant's choreography. */
+   variant's choreography. --orb-d overrides the cycle duration for the
+   fast/slow comet and patrol variants. */
 
 .root {
   position: relative;
@@ -35,7 +36,7 @@
   border-radius: 9999px;
   background: currentColor;
   animation-name: orbCell;
-  animation-duration: 2000ms;
+  animation-duration: var(--orb-d, 2000ms);
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-fill-mode: both;
@@ -90,6 +91,17 @@
   line-height: 1.25rem;
   color: var(--color-foreground);
   white-space: nowrap;
+}
+
+/* Cursor form — the orb flows INLINE with the streaming text, sitting
+   right after the latest generated letter (vertical-align drops the
+   lattice onto the text baseline; line-height 0 keeps it from stretching
+   the line box). */
+.cursorInline {
+  display: inline-block;
+  vertical-align: -0.24em;
+  margin-left: 0.14em;
+  line-height: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

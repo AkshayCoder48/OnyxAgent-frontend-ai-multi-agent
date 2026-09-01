@@ -7,7 +7,7 @@ import rehypeHighlight from "rehype-highlight";
 import { ExternalLink } from "lucide-react";
 
 import { CopyButton } from "./copy-button";
-import { WritingCursor } from "./writing-cursor";
+import { OrbCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
 
 /** Parse `language-xyz` from a `<code>` className that rehype-highlight emits. */
@@ -531,7 +531,7 @@ export const MarkdownContent = React.memo(function MarkdownContent({
           {processed}
         </ReactMarkdown>
       </StreamTintContext.Provider>
-      <WritingCursor size="0.9em" />
+      <OrbCursor variant="C2" size={14} />
     </div>
   );
 }, (prev, next) => {

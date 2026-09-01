@@ -10,16 +10,19 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronDown, FileText, Globe, Loader2, RefreshCw, Wrench } from "lucide-react";
+import { ChevronDown, FileText, Globe, RefreshCw } from "lucide-react";
 import { RatingButtons } from "./rating-buttons";
 import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
 import {
+  ShimmerLabel,
   ThinkingIndicator,
   ThinkingReasoning,
+  Orb,
 } from "@/components/assistant-ui/elements";
+import { ResearchPanel } from "./research-panel";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { segmentText } from "@/lib/genui/stream-parser";
@@ -293,16 +296,22 @@ interface MessageItemProps {
   /** When false, hides the footer (copy/timestamp/regenerate). Used for
    *  grouped messages where only the last message should show the footer. */
   showFooter?: boolean;
+  /** True for the message that owns the live todo plan — the inline
+   *  ResearchPanel renders at the exact position where the todo tool ran
+   *  inside this message's part flow (not stuck at the thread bottom). */
+  showTodoPanel?: boolean;
+  /** Wired to the inline todo panel's "Cut" (dismiss) button. */
+  onTodoDismiss?: () => void;
   onRegenerate?: () => void;
 }
 
 /**
  * CollapsibleToolGroup — when 2+ consecutive tool calls happen without any
- * text between them, they're collapsed into a single bar showing
- * "N Tool Calls" with an expand arrow. Click to expand/collapse.
+ * text between them, they're collapsed into a single disclosure line showing
+ * "N tool calls" with an expand chevron. Click to expand/collapse.
  *
- * Design: matches the tool call card style — rounded, subtle background,
- * uses CSS variables so it works with ALL color schemes.
+ * Design: matches the simple tool-name disclosure style — no card chrome,
+ * just a chevron, a quiet label, and a failure count when present.
  */
 function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").MessagePart[] }) {
   const [expanded, setExpanded] = React.useState(false);
@@ -311,17 +320,14 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
   const errorCount = toolParts.filter((p) => p.toolCall?.status === "error").length;
 
   return (
-    <div className="mb-2">
-      {/* Collapsed bar — matches the element-style tool card chrome. */}
+    <div className="mb-1.5">
+      {/* Collapsed line — simple disclosure row, same anatomy as a single
+          tool call: chevron · label · status. */}
       <button
         type="button"
         onClick={() => setExpanded((e) => !e)}
-        className={cn(
-          "flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200",
-          anyRunning
-            ? "border-primary/25 bg-primary/[0.06]"
-            : "border-border bg-secondary/50 hover:bg-secondary/70",
-        )}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left text-sm transition-colors hover:bg-accent/40"
       >
         <ChevronDown
           className={cn(
@@ -330,36 +336,25 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
           )}
           aria-hidden
         />
-        <div
-          className={cn(
-            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
-            anyRunning ? "bg-primary/10" : "bg-foreground/5",
-          )}
-        >
-          {anyRunning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          ) : (
-            <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
-          )}
-        </div>
-        <span className="text-foreground/90 text-sm font-medium">
-          {toolParts.length} tool calls
-        </span>
+        {anyRunning ? (
+          <ShimmerLabel className="text-sm font-medium text-foreground/90">
+            {toolParts.length} tool calls
+          </ShimmerLabel>
+        ) : (
+          <span className="text-foreground/90 text-sm font-medium">
+            {toolParts.length} tool calls
+          </span>
+        )}
         {errorCount > 0 && (
           <span className="text-destructive text-xs font-medium">
             {errorCount} failed
           </span>
         )}
-        {anyRunning && (
-          <span className="streaming-dots" aria-hidden="true">
-            <span /> <span /> <span />
-          </span>
-        )}
       </button>
 
-      {/* Expanded tool cards */}
+      {/* Expanded tool disclosures */}
       {expanded && (
-        <div className="mt-2 space-y-2 border-l-2 border-border pl-2">
+        <div className="mt-1 space-y-1 border-l border-border/70 pl-2">
           {toolParts.map((part) => (
             <div key={part.id} className="w-full">
               <ToolCallCard toolCall={part.toolCall!} />
@@ -375,6 +370,8 @@ export const MessageItem = React.memo(function MessageItem({
   message,
   groupPosition,
   showFooter = true,
+  showTodoPanel = false,
+  onTodoDismiss,
   onRegenerate,
 }: MessageItemProps) {
   const isUser = message.role === "user";
@@ -395,7 +392,9 @@ export const MessageItem = React.memo(function MessageItem({
     [hasSources, sources, openSources],
   );
 
-  // PERF: Memoize the filtered parts array (removes research/todo tool calls).
+  // PERF: Memoize the filtered parts array (removes research/todo tool calls
+  // from the TOOL rendering flow — they surface as the inline plan panel
+  // instead, injected at their original position below).
   // Previously this filter ran on every render for every message.
   const parts = React.useMemo(
     () =>
@@ -404,7 +403,57 @@ export const MessageItem = React.memo(function MessageItem({
       ),
     [message.parts],
   );
-  const useParts = !isUser && parts.length > 0;
+
+  // Id of the LAST research/todo tool part in the original parts order —
+  // the inline plan panel renders exactly there ("on the response bar where
+  // it was really generated"), not stuck at the thread bottom.
+  const lastResearchPartId = React.useMemo(() => {
+    let last: string | null = null;
+    for (const p of message.parts ?? []) {
+      if (p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name)) {
+        last = p.id;
+      }
+    }
+    return last;
+  }, [message.parts]);
+  // The flow parts (tools-not-research + text) in original order, so the
+  // panel can be spliced in at its generation position.
+  const flowParts = React.useMemo(
+    () =>
+      (message.parts ?? []).filter(
+        (p) =>
+          (p.type === "text" && p.content) ||
+          (p.type === "tool" &&
+            p.toolCall &&
+            !RESEARCH_TOOL_NAMES.has(p.toolCall.name)),
+      ),
+    [message.parts],
+  );
+  // Index (into flowParts) where the inline todo panel goes: right before
+  // the first flow part that comes AFTER the last research part in the
+  // original parts order. When every research part trails the flow, the
+  // panel lands at the end (after all rendered content).
+  const todoInsertIndex = React.useMemo(() => {
+    if (!showTodoPanel || !lastResearchPartId) return -1;
+    let seenResearch = false;
+    for (const p of message.parts ?? []) {
+      if (p.id === lastResearchPartId) {
+        seenResearch = true;
+        continue;
+      }
+      if (seenResearch && (flowParts.includes(p))) {
+        return flowParts.indexOf(p);
+      }
+    }
+    return flowParts.length;
+  }, [showTodoPanel, lastResearchPartId, message.parts, flowParts]);
+
+  // Parts flow rendering applies when there are non-research parts, OR when
+  // this message owns the live todo plan (a research-only message still
+  // renders the inline panel through the flow path below).
+  const useParts =
+    !isUser &&
+    (parts.length > 0 || (showTodoPanel && lastResearchPartId !== null));
 
   // Persist GenUI nodes when streaming completes. Once `isStreaming` flips
   // to false, if the message text contains `<<<genui>>>` sentinels but
@@ -500,6 +549,10 @@ export const MessageItem = React.memo(function MessageItem({
           // `parts` is memoized at the top of the component (above).
 
           // "Thinking…" placeholder — shown until anything streams in.
+          // SIMPLE THINKING TEXT: the orb lattice glyph leading the
+          // shimmering "Thinking" label on one baseline-aligned row (no
+          // large card, no fading placeholder lines — the old boxed
+          // treatment with three shimmer bars is gone).
           const showPlaceholder =
             !isUser &&
             message.isStreaming &&
@@ -511,32 +564,12 @@ export const MessageItem = React.memo(function MessageItem({
             <>
               {showPlaceholder && (
                 <div
-                  className="reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-xl border border-border bg-secondary/50 ring-1 ring-primary/15"
+                  className="flex h-7 items-center gap-2.5 px-1"
                   role="status"
                   aria-live="polite"
                 >
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left sm:px-4"
-                  >
-                    <span className="inline-flex h-3 w-3 shrink-0 items-center justify-center" aria-hidden="true">
-                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-                    </span>
-                    <span className="text-foreground/80 font-mono text-[10px] font-medium tracking-wider uppercase">
-                      Thinking
-                    </span>
-                    <span className="streaming-dots" aria-hidden="true">
-                      <span /> <span /> <span />
-                    </span>
-                  </button>
-                  <div className="px-3 pb-3 sm:px-4 sm:pb-4">
-                    <div className="flex flex-col gap-1.5">
-                      <div className="shimmer h-2 w-[90%] rounded-full" />
-                      <div className="shimmer h-2 w-[75%] rounded-full" />
-                      <div className="shimmer h-2 w-[82%] rounded-full" />
-                      <div className="shimmer h-2 w-[60%] rounded-full" />
-                    </div>
-                  </div>
+                  <Orb variant="S1" size={18} className="shrink-0" />
+                  <ThinkingIndicator label="Thinking" showDot={false} />
                 </div>
               )}
 
@@ -560,9 +593,7 @@ export const MessageItem = React.memo(function MessageItem({
                       thinkingParts.push({ ...p });
                     }
                   }
-                  const chronologicalParts = parts.filter(
-                    (p) => (p.type === "tool" && p.toolCall) || (p.type === "text" && p.content),
-                  );
+                  const chronologicalParts = flowParts;
                   const lastPart = parts[parts.length - 1];
                   const isLastStreaming = Boolean(message.isStreaming);
 
@@ -572,11 +603,26 @@ export const MessageItem = React.memo(function MessageItem({
                   type RenderItem =
                     | { kind: "text"; part: typeof chronologicalParts[0]; isLast: boolean }
                     | { kind: "tool"; part: typeof chronologicalParts[0]; isLast: boolean }
-                    | { kind: "toolGroup"; parts: typeof chronologicalParts; isLast: boolean };
+                    | { kind: "toolGroup"; parts: typeof chronologicalParts; isLast: boolean }
+                    | { kind: "todoPanel"; isLast: boolean };
 
                   const renderItems: RenderItem[] = [];
                   let i = 0;
+                  // Splice the inline todo plan panel in at its generation
+                  // position: after `todoInsertIndex` flow items have been
+                  // emitted, inject the panel marker (only when this message
+                  // owns the live plan — showTodoPanel).
+                  const emitTodoAt =
+                    todoInsertIndex >= 0 && showTodoPanel ? todoInsertIndex : Number.POSITIVE_INFINITY;
+                  let todoEmitted = false;
+                  const emitTodoIfDue = (emittedCount: number, isLast: boolean) => {
+                    if (!todoEmitted && emittedCount >= emitTodoAt) {
+                      renderItems.push({ kind: "todoPanel", isLast });
+                      todoEmitted = true;
+                    }
+                  };
                   while (i < chronologicalParts.length) {
+                    emitTodoIfDue(renderItems.length, i === chronologicalParts.length - 1);
                     const part = chronologicalParts[i]!;
                     const isLast = i === chronologicalParts.length - 1;
                     if (part.type === "tool" && part.toolCall) {
@@ -599,6 +645,8 @@ export const MessageItem = React.memo(function MessageItem({
                       i++;
                     }
                   }
+                  // Panel generated after every flow part → append at the end.
+                  emitTodoIfDue(renderItems.length, true);
 
                   return (
                     <>
@@ -611,8 +659,17 @@ export const MessageItem = React.memo(function MessageItem({
                         return <ReasoningBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                       })}
 
-                      {/* Tool calls + text in chronological order */}
+                      {/* Tool calls + text in chronological order, with the
+                          inline todo plan panel spliced in exactly where the
+                          todo tool ran (not stuck at the thread bottom). */}
                       {renderItems.map((item) => {
+                        if (item.kind === "todoPanel") {
+                          return (
+                            <div key="inline-todo-panel" className="w-full">
+                              <ResearchPanel onDismiss={onTodoDismiss} />
+                            </div>
+                          );
+                        }
                         if (item.kind === "toolGroup") {
                           return (
                             <CollapsibleToolGroup key={`group-${item.parts[0]!.id}`} parts={item.parts} />
@@ -773,6 +830,8 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.genui === next.message.genui &&
     prev.groupPosition === next.groupPosition &&
     prev.showFooter === next.showFooter &&
+    prev.showTodoPanel === next.showTodoPanel &&
+    prev.onTodoDismiss === next.onTodoDismiss &&
     prev.onRegenerate === next.onRegenerate
   );
 });

@@ -3,10 +3,13 @@
 import * as React from "react";
 import type { ChatMessage } from "@/types";
 import { MessageItem } from "./message-item";
+import { RESEARCH_TOOL_NAMES } from "./research-panel";
 
 interface MessageListProps {
   messages: ChatMessage[];
   onRegenerate?: (messageId: string) => void;
+  /** Wired to the INLINE todo plan panel's "Cut" button. */
+  onTodoDismiss?: () => void;
 }
 
 /**
@@ -101,7 +104,14 @@ function isNewDay(prev: ChatMessage | undefined, current: ChatMessage): boolean 
   );
 }
 
-export function MessageList({ messages, onRegenerate }: MessageListProps) {
+/** True when a message carries a research/todo tool part. */
+function hasResearchPart(message: ChatMessage): boolean {
+  return (message.parts ?? []).some(
+    (p) => p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name),
+  );
+}
+
+export function MessageList({ messages, onRegenerate, onTodoDismiss }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
 
   // PERF: Find the last assistant message index once (O(n) single pass)
@@ -111,6 +121,20 @@ export function MessageList({ messages, onRegenerate }: MessageListProps) {
       if (messages[i]?.role === "assistant") return i;
     }
     return -1;
+  }, [messages]);
+
+  // Todo plan ownership — the LAST assistant message that ran the todo
+  // tool owns the inline plan panel. The plan is a live, conversation-level
+  // entity (keyed by conversation in the research store), so rendering it
+  // at the position where that message's todo tool ran puts the checklist
+  // exactly where it was generated — instead of a panel stuck at the bottom
+  // of the thread. Older messages with research parts render nothing extra.
+  const todoOwnerId = React.useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]!;
+      if (msg.role === "assistant" && hasResearchPart(msg)) return msg.id;
+    }
+    return null;
   }, [messages]);
 
   return (
@@ -130,6 +154,8 @@ export function MessageList({ messages, onRegenerate }: MessageListProps) {
                 message={message}
                 groupPosition={groupPos}
                 showFooter={isLastInGroup}
+                showTodoPanel={!!todoOwnerId && message.id === todoOwnerId}
+                onTodoDismiss={onTodoDismiss}
                 onRegenerate={
                   onRegenerate && index === lastAssistantIndex && !message.isStreaming
                     ? () => onRegenerate(message.id)

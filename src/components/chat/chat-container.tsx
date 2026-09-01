@@ -10,7 +10,6 @@ import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
 import { PendingMessages } from "./pending-messages";
-import { ResearchPanel } from "./research-panel";
 import { ToolApprovalDialog } from "./tool-approval-dialog";
 import { QuestionPrompt } from "@/components/ui";
 import type { PendingApproval, AskUserQuestion, AskUserAnswer, Decision } from "@/types";
@@ -27,9 +26,12 @@ const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
 
 /**
  * Thinking status line shown between send and first token: the Orb lattice
- * glyph + the ThinkingIndicator element (pulsing dot, shimmering label,
- * ticking elapsed badge). Mounts fresh per turn, so the elapsed clock
- * starts from zero each time.
+ * glyph leading the ThinkingIndicator element (shimmering label + ticking
+ * elapsed badge, dot suppressed so the orb is the single indicator).
+ * Mounts fresh per turn, so the elapsed clock starts from zero each time.
+ * The orb and the label share one fixed-height row (h-7) with
+ * items-center, so the text sits exactly on the lattice's midline — no
+ * baseline drift between the two indicators.
  */
 function ThinkingStatus() {
   const [elapsed, setElapsed] = useState(0);
@@ -43,8 +45,8 @@ function ThinkingStatus() {
   }, []);
   return (
     <>
-      <Orb variant="S1" />
-      <ThinkingIndicator label="Thinking" elapsed={`${elapsed}s`} />
+      <Orb variant="S1" size={18} className="shrink-0" />
+      <ThinkingIndicator label="Thinking" elapsed={`${elapsed}s`} showDot={false} />
     </>
   );
 }
@@ -437,26 +439,27 @@ function ChatUI({
               <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
             </div>
           ) : (
-            <MessageList messages={messages} onRegenerate={onRegenerate} />
+            <MessageList
+              messages={messages}
+              onRegenerate={onRegenerate}
+              onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
+            />
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
               stays until the AI generates its first character/tool call.
-              assistant-ui "ThinkingIndicator" + "Orb" elements: a pulsing
-              dot + shimmering label + ticking elapsed badge, led by the Orb
-              lattice indicator. */}
+              assistant-ui "ThinkingIndicator" + "Orb" elements: the orb
+              lattice glyph leading a shimmering label + ticking elapsed
+              badge, all on one baseline-aligned row. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
-            <div className="animate-slide-up-fade flex items-center gap-2.5 px-1 py-3">
+            <div className="animate-slide-up-fade flex h-7 items-center gap-2.5 px-1 py-3">
               <ThinkingStatus />
             </div>
           )}
-          {/* Todo tool: live plan panel rendered INLINE IN THE RESPONSE FLOW
-              (on the ai response bar — not a stuck card above the prompt
-              box). The agent emits `todo_event` WS frames for every plan
-              mutation; this panel renders the live TodoList-element
-              checklist with a progress bar and a "Cut" button. */}
-          {onTodoAction && (
-            <ResearchPanel onDismiss={() => onTodoAction("dismiss")} />
-          )}
+          {/* Todo tool: the live plan panel is rendered INLINE IN THE
+              MESSAGE THREAD now — inside the assistant message that
+              generated it, at the exact position where the todo tool ran
+              (see MessageList / MessageItem). Nothing is pinned above the
+              composer anymore. */}
           {/* Loading state: show empty state until the AI generates its first
               letter. When the user sends the first message, we keep the empty
               state visible (with the user's message below it) until the

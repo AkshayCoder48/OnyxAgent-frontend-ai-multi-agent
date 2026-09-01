@@ -7,7 +7,7 @@ import { useSubagentStore, type SubagentMessage } from "@/stores/subagent-store"
 import { executeSubagentTurn } from "@/lib/agent/subagent-runtime";
 import { getFileUrl, uploadFile, type FileUploadResponse } from "@/lib/file-api";
 import { MarkdownContent } from "./markdown-content";
-import { WritingCursor } from "./writing-cursor";
+import { OrbCursor } from "@/components/assistant-ui/elements";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -464,7 +464,7 @@ function SubagentMessageItem({ message }: { message: SubagentMessage }) {
               )}
               <div className="prose-sm max-w-none break-words text-sm">
                 <MarkdownContent content={message.content || ""} />
-                {message.isStreaming && <WritingCursor size="0.95em" />}
+                {message.isStreaming && <OrbCursor variant="C2" size={14} />}
               </div>
             </>
           )}

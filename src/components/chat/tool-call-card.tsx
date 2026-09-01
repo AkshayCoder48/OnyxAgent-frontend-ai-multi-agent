@@ -1,6 +1,5 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { Button } from "@/components/ui";
 import type { ToolCall } from "@/types";
 import {
   Wrench,
@@ -12,14 +11,13 @@ import {
   Code2,
   MessageCircleQuestion,
   Loader2,
-  XCircle,
   BarChart3,
   Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ShimmerLabel, chipClass } from "@/components/assistant-ui/elements";
+import { ShimmerLabel, chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
-import { WritingCursor } from "./writing-cursor";
+import { OrbCursor } from "@/components/assistant-ui/elements";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
@@ -277,32 +275,25 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   const liveCaption = toolCaption(toolCall.name);
 
   return (
-    /* assistant-ui "Tool call" element anatomy, Terra retheme:
-       chevron · shimmering label (while running) · primary-arg chip ·
-       checkmark once settled · request/result disclosure panel. */
+    /* assistant-ui "Tool call" element anatomy — SIMPLE TOOL NAME line, no
+       card chrome: chevron · shimmering label (while running) · primary-arg
+       chip · checkmark once settled, with the request/result tucked behind
+       the disclosure. Tapping the line collapses / enlarges it. */
     <div
       data-slot="tool-call"
       className={cn(
-        "step-card-in overflow-hidden rounded-xl border transition-all duration-200",
-        isRunning
-          ? "border-primary/25 bg-primary/[0.06]"
-          : isError
-            ? "border-destructive/25 bg-destructive/[0.05]"
-            : "border-border bg-secondary/50 hover:bg-secondary/70",
+        "step-card-in min-w-0 max-w-full overflow-visible",
+        isError && "rounded-lg",
       )}
     >
-      <div
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
         aria-expanded={expanded}
         onClick={toggleExpanded}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleExpanded();
-          }
-        }}
-        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors"
+        className={cn(
+          "flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40",
+          isError && "bg-destructive/[0.05] hover:bg-destructive/10",
+        )}
       >
         {/* Disclosure chevron */}
         <ChevronRight
@@ -313,47 +304,35 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           aria-hidden
         />
 
-        {/* Icon container — rounded, subtle background */}
-        <div
-          className={cn(
-            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
-            isRunning
-              ? "bg-primary/10"
-              : isError
-                ? "bg-destructive/10"
-                : "bg-foreground/5",
-          )}
-        >
-          {isRunning ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" aria-label="Running" />
-          ) : isError ? (
-            <XCircle className="h-3.5 w-3.5 text-destructive" aria-label="Failed" />
-          ) : (
+        {/* Simple tool name — a small muted glyph for recognition, then the
+            label. NO icon box, NO card border: just the name on the line. */}
+        {isRunning ? (
+          <>
+            <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+            <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
+              {liveCaption}
+            </ShimmerLabel>
+          </>
+        ) : (
+          <>
             <ToolIcon
               className={cn(
-                "h-3.5 w-3.5",
+                "h-3.5 w-3.5 shrink-0",
                 hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
               )}
+              aria-hidden
             />
-          )}
-        </div>
-
-        {/* Content — label + primary-arg chip */}
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {isRunning ? (
-            <ShimmerLabel className="truncate text-sm font-medium">{liveCaption}</ShimmerLabel>
-          ) : (
-            <span className="text-foreground/90 truncate text-sm font-medium">
+            <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {friendlyName}
             </span>
-          )}
-          {inputHint && !isRunning ? (
-            <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
-          ) : null}
-        </div>
+          </>
+        )}
+        {inputHint && !isRunning ? (
+          <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
+        ) : null}
 
         {/* Right actions — settle state + raw toggle */}
-        <div className="flex shrink-0 items-center gap-1">
+        <span className="ml-auto flex shrink-0 items-center gap-0.5">
           {!isRunning && (
             <>
               {isError ? (
@@ -361,26 +340,36 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
               ) : (
                 <Check className="text-primary h-3.5 w-3.5" aria-label="Done" />
               )}
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground h-7 w-7 transition-colors",
-                  showRaw && "text-primary",
-                )}
+              <span
+                role="button"
+                tabIndex={0}
                 onClick={toggleRaw}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleRaw(e as unknown as MouseEvent);
+                  }
+                }}
                 title={showRaw ? "Show formatted view" : "Show details"}
                 aria-label={showRaw ? "Show formatted view" : "Show details"}
+                className={cn(
+                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+                  showRaw && "text-primary",
+                )}
               >
                 <Code2 className="h-3.5 w-3.5" />
-              </Button>
+              </span>
             </>
           )}
-        </div>
-      </div>
+        </span>
+      </button>
 
-      {expanded && (
-        <div className="px-3 pt-0 pb-3">
+      {/* Disclosure panel — the request/result and every specialized
+          renderer live behind the simple line. Height animates open/closed
+          via the CollapsePanel grid trick. */}
+      <CollapsePanel open={expanded}>
+        <div className="px-1.5 pt-0.5 pb-2 sm:px-2">
           {showRaw ? (
             <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isRunning ? (
@@ -419,7 +408,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             <GenericToolResult toolCall={toolCall} resultText={resultText} />
           )}
         </div>
-      )}
+      </CollapsePanel>
     </div>
   );
 }
@@ -597,7 +586,7 @@ function StreamingArgsDisplay({ args }: { args: string }) {
       className="scrollbar-thin max-h-48 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words"
     >
       {args.slice(-2000)}
-      <WritingCursor size="0.85em" />
+      <OrbCursor variant="C2" size={12} />
     </pre>
   );
 }

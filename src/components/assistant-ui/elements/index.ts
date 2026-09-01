@@ -28,4 +28,14 @@ export { MessagePair } from "./message-pair";
 export { StoppedRun } from "./stopped-run";
 export { ThinkingIndicator } from "./thinking-indicator";
 export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";
-export { Orb, type OrbProps, type OrbVariant, type LatticeVariant } from "./orb";
+export { Orb, OrbCursor, type OrbProps, type OrbVariant, type LatticeVariant, ORB_TASKS } from "./orb";
+export { InlineCitation, type Source } from "./inline-citation";
+export { DocumentReference, type DocumentAnchor } from "./document-reference";
+export { MemoryChips, type MemoryChip } from "./memory-chips";
+export { Timeline, type TimelineEvent } from "./timeline";
+export {
+  renderGenerativeUI,
+  styledGenerativeUILibrary,
+  type GenerativeUILibrary,
+  type GenerativeUINode as GenerativeUISpecNode,
+} from "./generative-ui";

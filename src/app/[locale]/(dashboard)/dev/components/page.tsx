@@ -18,16 +18,25 @@ import {
   CodeDiff,
   FileTree,
   GenerationLoader,
+  InlineCitation,
+  DocumentReference,
+  MemoryChips,
   MessagePair,
   Orb,
+  renderGenerativeUI,
+  styledGenerativeUILibrary,
   StreamingText,
   StoppedRun,
   SubagentList,
   ThinkingIndicator,
   ThinkingReasoning,
+  Timeline,
   TodoList,
   ToolCall,
   ToolTimeline,
+  type LatticeVariant,
+  type MemoryChip,
+  type TimelineEvent,
 } from "@/components/assistant-ui/elements";
 
 import { PageHeader } from "@/components/dashboard/page-header";
@@ -175,6 +184,13 @@ function AgentElementsShowcase() {
   const [toolOpen, setToolOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [currentId, setCurrentId] = useState("3");
+  const [citationOpen, setCitationOpen] = useState<number | null>(null);
+  const [activePage, setActivePage] = useState(4);
+  const [chips, setChips] = useState<MemoryChip[]>([
+    { id: "1", text: "Prefers TypeScript", change: "existing" },
+    { id: "2", text: "Works in a pnpm monorepo", change: "existing" },
+    { id: "3", text: "Ships with changesets", change: "added" },
+  ]);
 
   return (
     <Section title="Agent elements (tool cards)">
@@ -316,6 +332,73 @@ function AgentElementsShowcase() {
         </div>
 
         <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Inline citation + document reference + memory</p>
+          <div className="relative">
+            <InlineCitation
+              sources={[
+                {
+                  domain: "assistant-ui.com",
+                  title: "Optimistic updates in the runtime",
+                  snippet:
+                    "The runtime applies local edits immediately and reconciles them once the server acknowledges the write.",
+                },
+                {
+                  domain: "react.dev",
+                  title: "useSyncExternalStore reference",
+                  snippet:
+                    "Subscribes a component to an external store, re-rendering on every store change with a consistent snapshot.",
+                },
+              ]}
+              openIndex={citationOpen}
+              onOpenIndexChange={setCitationOpen}
+            />
+          </div>
+          <DocumentReference
+            title="migration-0.14.md"
+            pages={12}
+            activePage={activePage}
+            onJump={setActivePage}
+            anchors={[
+              { page: 4, quote: "The composer owns its draft; parent state that mirrored it is no longer read." },
+              { page: 9, quote: "Each thread keeps its own slot, cleared on switch rather than reused." },
+              { page: 4, quote: "Reloading a message creates a sibling branch automatically." },
+            ]}
+          />
+          <MemoryChips
+            chips={chips}
+            onForget={(id) => setChips((c) => c.filter((chip) => chip.id !== id))}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Timeline + generative UI</p>
+          <TimelinePreview />
+          {renderGenerativeUI(
+            {
+              $type: "Card",
+              title: "Release notes",
+              children: [
+                { $type: "Markdown", value: "**Revenue** is up 12% this quarter." },
+                {
+                  $type: "List",
+                  children: [
+                    { $type: "ListItem", children: "Composer drafts now persist per thread" },
+                    { $type: "ListItem", children: "Tool calls stream partial arguments" },
+                  ],
+                },
+                { $type: "Callout", value: "Drafts migrate on first read; nothing to run by hand." },
+              ],
+            },
+            styledGenerativeUILibrary,
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Orb lattice — all 25 variants</p>
+          <OrbGrid />
+        </div>
+
+        <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Thinking indicator + thinking reasoning + orbs</p>
           <ThinkingIndicator label="Reading thread.tsx" elapsed="12s" />
           <ThinkingReasoning
@@ -351,4 +434,44 @@ function LoaderPreview() {
     return () => clearInterval(id);
   }, []);
   return <GenerationLoader label="Generating" tick={tick} />;
+}
+
+/** Timeline preview — events revealed on a timer, past/now/future. */
+const GALLERY_EVENTS: readonly TimelineEvent[] = [
+  { id: "1", when: "past", time: "09:02", title: "Issue filed", detail: "Draft survives a thread switch" },
+  { id: "2", when: "past", time: "09:40", title: "Reproduced" },
+  { id: "3", when: "now", time: "10:15", title: "Fix in review", detail: "Clears the slot on switch" },
+  { id: "4", when: "future", time: "11:00", title: "Release 0.14.1" },
+];
+
+function TimelinePreview() {
+  const [visibleCount, setVisibleCount] = useState(0);
+  useEffect(() => {
+    if (visibleCount >= GALLERY_EVENTS.length) return;
+    const id = setTimeout(() => setVisibleCount((n) => n + 1), 600);
+    return () => clearTimeout(id);
+  }, [visibleCount]);
+  return <Timeline events={GALLERY_EVENTS} visibleCount={visibleCount} />;
+}
+
+/** Every orb variant, one grid — S/G/C/B/M families × 5. */
+const ORB_VARIANTS: readonly LatticeVariant[] = [
+  "S1", "S2", "S3", "S4", "S5",
+  "G1", "G2", "G3", "G4", "G5",
+  "C1", "C2", "C3", "C4", "C5",
+  "B1", "B2", "B3", "B4", "B5",
+  "M1", "M2", "M3", "M4", "M5",
+];
+
+function OrbGrid() {
+  return (
+    <div className="grid grid-cols-5 gap-3 sm:grid-cols-10">
+      {ORB_VARIANTS.map((v) => (
+        <div key={v} className="flex flex-col items-center gap-1.5">
+          <Orb variant={v} size={18} />
+          <span className="font-mono text-[9px] tabular-nums text-muted-foreground">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
