@@ -1,0 +1,57 @@
+"use client";
+
+import { useEffect } from "react";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { Composer } from "@/components/terra/composer";
+import { SettingsSheet } from "@/components/terra/settings-sheet";
+import { Sidebar, SidebarContent } from "@/components/terra/sidebar";
+import { Thread } from "@/components/terra/thread";
+import { TopBar } from "@/components/terra/top-bar";
+import { useTerra } from "@/components/terra/store";
+
+export default function Page() {
+  const mobileNavOpen = useTerra((s) => s.mobileNavOpen);
+  const setMobileNav = useTerra((s) => s.setMobileNav);
+  const newConversation = useTerra((s) => s.newConversation);
+
+  // ⌘N / Ctrl+N starts a new conversation.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        newConversation();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newConversation]);
+
+  return (
+    <div className="flex h-dvh w-full overflow-hidden bg-background text-ink">
+      <Sidebar />
+
+      {/* Mobile navigation drawer */}
+      <Sheet open={mobileNavOpen} onOpenChange={setMobileNav}>
+        <SheetContent
+          side="left"
+          className="w-[264px] max-w-[85vw] gap-0 border-r border-hairline bg-paper p-0 sm:max-w-none"
+        >
+          <SheetTitle className="sr-only">Chat navigation</SheetTitle>
+          <SheetDescription className="sr-only">Conversations and account</SheetDescription>
+          <SidebarContent onNavigate={() => setMobileNav(false)} />
+        </SheetContent>
+      </Sheet>
+
+      {/* Main column: one scroll container with pinned glass bars */}
+      <main className="relative h-full min-w-0 flex-1">
+        <div className="terra-scroll flex h-full flex-col overflow-y-auto">
+          <TopBar />
+          <Thread />
+          <Composer />
+        </div>
+      </main>
+
+      <SettingsSheet />
+    </div>
+  );
+}
