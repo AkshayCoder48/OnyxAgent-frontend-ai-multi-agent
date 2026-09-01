@@ -2,7 +2,6 @@ export { ChatContainer } from "./chat-container";
 export { MessageList } from "./message-list";
 export { MessageItem } from "./message-item";
 export { ToolCallCard } from "./tool-call-card";
-export { ToolApprovalDialog } from "./tool-approval-dialog";
 export { ChatInput } from "./chat-input";
 export { CopyButton } from "./copy-button";
 export { MarkdownContent } from "./markdown-content";

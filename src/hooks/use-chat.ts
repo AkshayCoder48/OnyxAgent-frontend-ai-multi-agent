@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import {
   runAgentTurn,
-  respondToApproval,
   respondToAskUser,
   type AgentTurnOptions,
 } from "@/lib/agent/runtime";
@@ -14,15 +13,17 @@ import type {
   AskUserAnswer,
   AskUserQuestion,
   ChatMessageFile,
-  Decision,
-  PendingApproval,
   ResearchTodo,
+  Todo,
   ToolCall,
   WSEvent,
 } from "@/types";
 import { getGenerationId } from "@/types";
 import { setUrlParam } from "@/lib/utils";
+import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
+import { useSubagentStore } from "@/stores/subagent-store";
+import { beginResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -105,7 +106,6 @@ Follow CrewAI conventions:
  *   - The exact `WSEvent` event handler that maps each event type to store
  *     mutations (text_delta → appendTextDelta, tool_call → addToolCallPart,
  *     etc.).
- *   - HITL approval flow (`tool_approval_required` → `respondToApproval`).
  *   - Ask-user flow (`ask_user` → `respondToAskUser`).
  *   - Todo integration (`todo_event` → `useResearchStore.applyTodoEvent`).
  *   - The `sendTodoAction` controls (dismiss / reset / snapshot) — local
@@ -115,7 +115,7 @@ Follow CrewAI conventions:
  */
 export function useChat(options: UseChatOptions = {}) {
   const { conversationId, onConversationCreated } = options;
-  const { setCurrentConversationId, currentConversationId: currentConversationIdFromStore } =
+  const { attachConversation, currentConversationId: currentConversationIdFromStore } =
     useConversationStore();
   const {
     messages,
@@ -128,6 +128,7 @@ export function useChat(options: UseChatOptions = {}) {
     addToolCallPart,
     updateToolCallPart,
     appendToolStreamingOutput,
+    endRound: endRoundPart,
     clearMessages,
   } = useChatStore();
   const { setCurrentTurnId: setCurrentTodoTurnId, reset: resetTodoTurn } = useResearchStore();
@@ -176,6 +177,24 @@ export function useChat(options: UseChatOptions = {}) {
   // whenever A's lifecycle events were lost (cross-generation contamination).
   const currentMessageGenerationRef = useRef<string | null>(null);
 
+  // ── ROUND TRACKING (PRD §9–16) ─────────────────────────────────────────
+  // Every `model_request_start` of the SAME generation is a new agent round
+  // (1-based). Parts created during a round are stamped with it so the UI
+  // renders one reasoning panel + one tool stack PER ROUND — never merged.
+  // `endRound` stamps roundEndedAt when a round finishes; its timing stays
+  // frozen forever after.
+  const activeRoundRef = useRef(1);
+
+  /** Freeze the given round's timing on the streaming message (no-op when
+   *  the message or round doesn't exist). */
+  const endActiveRound = useCallback(
+    (round: number) => {
+      const messageId = currentMessageIdRef.current;
+      if (messageId) endRoundPart(messageId, round);
+    },
+    [endRoundPart],
+  );
+
   // ── STREAMING BUFFERS ──────────────────────────────────────────────
   // Every delta type is buffered + flushed on a timer so React doesn't
   // re-render the whole message tree on every single token. Previously
@@ -212,17 +231,20 @@ export function useChat(options: UseChatOptions = {}) {
   const flushTextDelta = useCallback(() => {
     if (textDeltaTimer.current) { clearTimeout(textDeltaTimer.current); textDeltaTimer.current = null; }
     if (textDeltaBuffer.current && currentMessageIdRef.current) {
-      appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current);
+      // Round-stamp new text parts (activeRoundRef) so text + thinking of
+      // the same round land in one round segment — prevents the mid-stream
+      // single→multi-round layout flip that remounted the TextBubble.
+      appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current);
       textDeltaBuffer.current = "";
     }
     if (thinkingTimer.current) { clearTimeout(thinkingTimer.current); thinkingTimer.current = null; }
     if (thinkingBuffer.current && currentMessageIdRef.current) {
-      appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current);
+      appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current);
       thinkingBuffer.current = "";
     }
     if (reasoningTimer.current) { clearTimeout(reasoningTimer.current); reasoningTimer.current = null; }
     if (reasoningBuffer.current && currentMessageIdRef.current) {
-      appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current);
+      appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current);
       reasoningBuffer.current = "";
     }
     if (toolArgTimer.current) { clearTimeout(toolArgTimer.current); toolArgTimer.current = null; }
@@ -247,8 +269,10 @@ export function useChat(options: UseChatOptions = {}) {
   const providerIdRef = useRef<string | null>(null);
   const temperatureRef = useRef<number | null>(null);
   const thinkingEffortRef = useRef<"low" | "medium" | "high" | null>(null);
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<AskUserQuestion[] | null>(null);
+  /** Human-readable rate-limit status while the runtime backs off and
+   *  retries (PRD §7) — e.g. "Rate limit reached — retrying in 4s…". */
+  const [rateLimitStatus, setRateLimitStatus] = useState<string | null>(null);
 
   // The active agent turn's abort controller. Held in a ref so the various
   // `stopGeneration` / unmount handlers can abort the in-flight SSE stream.
@@ -256,10 +280,25 @@ export function useChat(options: UseChatOptions = {}) {
 
   // Track the active conversation id in the research store so todo events
   // route to the right turn bucket. Reset the bucket when going to a new chat.
+  // ALSO rehydrate persisted agent todos (Dexie) so the TodoPreview tables
+  // survive page refreshes and conversation switches (PRD §24).
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     setCurrentTodoTurnId(turnId);
     if (turnId === null) resetTodoTurn();
+    if (turnId) {
+      let cancelled = false;
+      restoreTodos(turnId).then((todos) => {
+        if (!cancelled && todos.length > 0) {
+          useResearchStore.getState().setAgentTodos(turnId, todos);
+        }
+      }).catch(() => {
+        // IndexedDB unavailable — live events will populate the store.
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
   }, [currentConversationIdFromStore, conversationId, setCurrentTodoTurnId, resetTodoTurn]);
 
   // Single event handler for every WSEvent the runtime emits. Maps each event
@@ -342,7 +381,11 @@ export function useChat(options: UseChatOptions = {}) {
         case "conversation_created": {
           // Handle new conversation created by the runtime.
           const { conversation_id } = wsEvent.data as { conversation_id: string };
-          setCurrentConversationId(conversation_id);
+          // `attachConversation` switches the id WITHOUT clearing anything and
+          // marks the conversation hydrated — the live streaming messages in
+          // the chat store are authoritative, so no DB reload may fire for
+          // this id (PRD §23–24: never wipe a live generation).
+          attachConversation(conversation_id);
           // Reflect the new ID in the URL so the page is refreshable + shareable.
           setUrlParam("id", conversation_id);
           // CRITICAL: associate the persisted (sessionStorage) messages with
@@ -404,19 +447,41 @@ export function useChat(options: UseChatOptions = {}) {
           // GENERATION LIFECYCLE:
           //   - First `model_request_start` of a turn: adopt the event's
           //     generation_id as the active generation. Create the assistant
-          //     message ONCE.
+          //     message ONCE. Round counter resets to 1.
           //   - Subsequent `model_request_start` events (rounds 2+ of the
           //     same turn): the event's generation_id matches the active
-          //     generation → reuse the existing streaming message.
+          //     generation → reuse the existing streaming message. Freeze
+          //     the previous round's timing, then advance the round counter
+          //     so new thinking/reasoning/tool parts stamp the NEW round.
           //   - Stale `model_request_start` from a previous generation:
           //     event's generation_id differs → SILENTLY DROP.
           if (eventGenId && activeGenId && eventGenId !== activeGenId) {
             // Stale event from a previous generation — ignore.
             break;
           }
+          const isFirstRequestOfGeneration = !activeGenId || activeGenId !== eventGenId;
           if (eventGenId && !activeGenId) {
             // First event of a new generation — adopt it.
             activeGenerationIdRef.current = eventGenId;
+          }
+          const eventRoundRaw = (wsEvent.data as { round?: unknown }).round;
+          const eventRound =
+            typeof eventRoundRaw === "number" && eventRoundRaw >= 1 ? Math.floor(eventRoundRaw) : null;
+          if (isFirstRequestOfGeneration && currentMessageGenerationRef.current !== activeGenerationIdRef.current) {
+            // Fresh turn — round numbering restarts.
+            activeRoundRef.current = eventRound ?? 1;
+          } else if (!isFirstRequestOfGeneration) {
+            // Rounds 2+ of the SAME turn: flush pending buffers (they belong
+            // to the OLD round), freeze the old round's elapsed time, then
+            // advance — starting Round 2 never resets Round 1's duration.
+            // A retry re-emits the SAME round number — only advance when the
+            // round actually changed.
+            const roundChanged = eventRound !== null ? eventRound !== activeRoundRef.current : true;
+            if (roundChanged) {
+              flushTextDelta();
+              endActiveRound(activeRoundRef.current);
+              activeRoundRef.current = eventRound ?? activeRoundRef.current + 1;
+            }
           }
           // MESSAGE OWNERSHIP: reuse the streaming message only while the
           // ACTIVE generation owns it. If the previous generation's
@@ -446,7 +511,7 @@ export function useChat(options: UseChatOptions = {}) {
               if (!textDeltaTimer.current) {
                 textDeltaTimer.current = setTimeout(() => {
                   if (textDeltaBuffer.current && currentMessageIdRef.current) {
-                    appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current);
+                    appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current);
                     textDeltaBuffer.current = "";
                   }
                   textDeltaTimer.current = null;
@@ -468,7 +533,7 @@ export function useChat(options: UseChatOptions = {}) {
             if (!thinkingTimer.current) {
               thinkingTimer.current = setTimeout(() => {
                 if (thinkingBuffer.current && currentMessageIdRef.current) {
-                  appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current);
+                  appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current);
                   thinkingBuffer.current = "";
                 }
                 thinkingTimer.current = null;
@@ -488,7 +553,7 @@ export function useChat(options: UseChatOptions = {}) {
             if (!reasoningTimer.current) {
               reasoningTimer.current = setTimeout(() => {
                 if (reasoningBuffer.current && currentMessageIdRef.current) {
-                  appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current);
+                  appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current);
                   reasoningBuffer.current = "";
                 }
                 reasoningTimer.current = null;
@@ -500,7 +565,24 @@ export function useChat(options: UseChatOptions = {}) {
 
         case "llm_started":
         case "llm_completed": {
-          // LLM lifecycle events — optionally show status. No-op for now.
+          // LLM lifecycle events — optionally show status. A new provider
+          // request also clears any stale rate-limit note.
+          setRateLimitStatus(null);
+          break;
+        }
+
+        case "rate_limited": {
+          // The runtime hit a 429/529 and is backing off before retrying.
+          // Surface it instead of letting the turn silently look dead —
+          // the agent state (accumulated content, tool calls) is preserved
+          // and no duplicate work is issued (PRD §7).
+          const d = wsEvent.data as { retryAfterMs?: number; attempt?: number; maxAttempts?: number };
+          const secs = Math.max(1, Math.round((d.retryAfterMs ?? 1000) / 1000));
+          const attempt = d.attempt ?? 1;
+          const max = d.maxAttempts ?? 3;
+          setRateLimitStatus(
+            `Rate limit reached — retrying automatically in ${secs}s… (attempt ${attempt}/${max})`,
+          );
           break;
         }
 
@@ -615,6 +697,26 @@ export function useChat(options: UseChatOptions = {}) {
           // (which may reuse the same index) don't inherit stale args.
           // GENERATION GUARD: drop stale.
           if (!isFromActiveGeneration()) break;
+
+          // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15): the moment a sub-agent
+          // tool call is detected, open the Sub-Agent sidebar so its
+          // progress streams visibly. If the user closed it manually, a NEW
+          // invocation re-opens it (setSidebarOpen is idempotent). Applies
+          // to pre-emits too (cards appear during streaming).
+          {
+            const tn = (wsEvent.data as { tool_name?: string }).tool_name;
+            if (
+              tn === "spawn_subagent" ||
+              tn === "query_subagent" ||
+              tn === "create_subagent_chat" ||
+              tn === "steer_subagent" ||
+              tn === "complete_subagent" ||
+              tn === "cancel_subagent"
+            ) {
+              useSubagentStore.getState().setSidebarOpen(true);
+            }
+          }
+
           if (currentMessageIdRef.current) {
             const data = wsEvent.data as {
               tool_name: string;
@@ -688,10 +790,10 @@ export function useChat(options: UseChatOptions = {}) {
               });
             } else if (data._preemit) {
               // Pre-emit with no existing card — add as pending.
-              addToolCallPart(currentMessageIdRef.current, toolCall);
+              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current);
             } else {
               // Normal (non-preemit) tool_call with no existing — add new.
-              addToolCallPart(currentMessageIdRef.current, toolCall);
+              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current);
             }
           }
           break;
@@ -798,6 +900,8 @@ export function useChat(options: UseChatOptions = {}) {
           // prematurely by the old turn's final_result.
           if (!isFromActiveGeneration()) break;
           flushTextDelta();
+          // Freeze the final round's timing (PRD §15 — settled state).
+          endActiveRound(activeRoundRef.current);
           // Finalize message
           if (currentMessageIdRef.current) {
             const { output } = wsEvent.data as { output: string };
@@ -807,7 +911,7 @@ export function useChat(options: UseChatOptions = {}) {
               .getState()
               .messages.find((m) => m.id === currentMessageIdRef.current);
             if (output && fr && !fr.content) {
-              appendTextDelta(currentMessageIdRef.current, output);
+              appendTextDelta(currentMessageIdRef.current, output, activeRoundRef.current);
             }
             updateMessage(currentMessageIdRef.current, (msg) => ({
               ...msg,
@@ -825,7 +929,12 @@ export function useChat(options: UseChatOptions = {}) {
           // NOT mark the current generation's message as errored. If the
           // event's generation_id doesn't match, drop it silently.
           if (!isFromActiveGeneration()) break;
+          // The turn ended (non-retryable) — clear any rate-limit note.
+          setRateLimitStatus(null);
           flushTextDelta();
+          // Freeze the round's timing before tearing down (failed round still
+          // shows its elapsed time — PRD §25).
+          endActiveRound(activeRoundRef.current);
           // Handle error
           if (currentMessageIdRef.current) {
             const id = currentMessageIdRef.current;
@@ -833,7 +942,7 @@ export function useChat(options: UseChatOptions = {}) {
             const errText = `\n\n❌ Error: ${message || "Unknown error"}`;
             const cur = useChatStore.getState().messages.find((m) => m.id === id);
             if (cur?.parts) {
-              appendTextDelta(id, errText);
+              appendTextDelta(id, errText, activeRoundRef.current);
             } else {
               updateMessage(id, (msg) => ({ ...msg, content: msg.content + errText }));
             }
@@ -846,39 +955,6 @@ export function useChat(options: UseChatOptions = {}) {
           activeGenerationIdRef.current = null;
           setCurrentMessageId(null);
           abortRef.current = null;
-          break;
-        }
-
-        case "tool_approval_required": {
-          // Human-in-the-Loop: AI wants to execute tools that need approval.
-          const { action_requests, review_configs } = wsEvent.data as {
-            action_requests: Array<{
-              id: string;
-              tool_name: string;
-              args: Record<string, unknown>;
-            }>;
-            review_configs: Array<{
-              tool_name: string;
-              allow_edit?: boolean;
-              timeout?: number;
-            }>;
-          };
-          setPendingApproval({
-            actionRequests: action_requests,
-            reviewConfigs: review_configs,
-          });
-          // Show pending tools in the current message
-          if (currentMessageIdRef.current) {
-            const id = currentMessageIdRef.current;
-            const toolNames = action_requests.map((ar) => ar.tool_name).join(", ");
-            const waitText = `\n\n⏸️ Waiting for approval: ${toolNames}`;
-            const cur = useChatStore.getState().messages.find((m) => m.id === id);
-            if (cur?.parts) {
-              appendTextDelta(id, waitText);
-            } else {
-              updateMessage(id, (msg) => ({ ...msg, content: msg.content + waitText }));
-            }
-          }
           break;
         }
 
@@ -902,16 +978,34 @@ export function useChat(options: UseChatOptions = {}) {
             todo: ResearchTodo | null;
             all_todos?: ResearchTodo[] | null;
           };
+          // Agent Todo system: new-shape todos (manage_todo / show_todo)
+          // carry `title` + 4-status values — route them to the agentTodos
+          // bucket that the TodoPreview table reads. Legacy ResearchTodo
+          // shapes keep the old panel path.
+          if (Array.isArray(all_todos)) {
+            const isNewShape = (all_todos as unknown[]).some(
+              (t) => t && typeof t === "object" && "title" in (t as Record<string, unknown>),
+            );
+            if (isNewShape) {
+              const turnId = currentConversationIdFromStore || conversationId || "default";
+              useResearchStore.getState().setAgentTodos(turnId, all_todos as unknown as Todo[]);
+              break;
+            }
+          }
           useResearchStore.getState().applyTodoEvent(event_type, todo, all_todos);
           break;
         }
 
         case "complete": {
+          // Turn finished — clear any rate-limit note.
+          setRateLimitStatus(null);
           // GENERATION GUARD: only clear if this complete belongs to the
           // active generation. A stale complete from a previous (aborted)
           // generation must NOT clear the current generation's state.
           if (!isFromActiveGeneration()) break;
           flushTextDelta();
+          // Freeze the final round's timing — its elapsed display settles.
+          endActiveRound(activeRoundRef.current);
           setIsProcessing(false);
           // Clear currentMessageId after complete (message_saved should have
           // handled ID mapping).
@@ -940,7 +1034,8 @@ export function useChat(options: UseChatOptions = {}) {
       addToolCallPart,
       updateToolCallPart,
       appendToolStreamingOutput,
-      setCurrentConversationId,
+      endActiveRound,
+      attachConversation,
       setCurrentMessageId,
       onConversationCreated,
       currentConversationIdFromStore,
@@ -1007,13 +1102,6 @@ export function useChat(options: UseChatOptions = {}) {
           ? settings.system_prompt
           : frameworkPrompt) ?? "";
 
-      // Tool approval: if the user opted into auto-approval (Settings →
-      // Config → "Auto-approve tool calls"), pass it through so the runtime
-      // skips the HITL gate for `requires_approval` tools (run_terminal,
-      // run_python, etc.). Defaults to false — secure-by-default.
-      const autoApproveTools = !!settings.auto_approve_tools;
-      const singleRoundMode = !!settings.single_round_mode;
-
       // Abort controller for stop / unmount.
       const controller = new AbortController();
       abortRef.current = controller;
@@ -1037,8 +1125,6 @@ export function useChat(options: UseChatOptions = {}) {
         thinkingEffort: thinkingEffortRef.current,
         emit: handleAgentEvent,
         signal: controller.signal,
-        autoApproveTools,
-        singleRoundMode,
       };
     },
     [conversationId, handleAgentEvent],
@@ -1055,6 +1141,12 @@ export function useChat(options: UseChatOptions = {}) {
       }
 
       const userMessageId = nanoid();
+      // A new AI response is starting with this user message — pick this
+      // response's random orb ONCE (25 variants, no immediate repeat). The
+      // selection stays stable for the whole response (never per chunk) and
+      // lives in a module singleton, so it never triggers app-wide renders
+      // (PRD §25–§29).
+      beginResponseOrb();
       addMessage({
         id: userMessageId,
         role: "user",
@@ -1168,48 +1260,6 @@ export function useChat(options: UseChatOptions = {}) {
     setQueuedMessages([]);
   }, []);
 
-  const sendResumeDecisions = useCallback(
-    (decisions: Decision[]) => {
-      setPendingApproval(null);
-
-      // Update message to show decisions were made
-      if (currentMessageIdRef.current) {
-        const approvedCount = decisions.filter((d) => d.type === "approve").length;
-        const editedCount = decisions.filter((d) => d.type === "edit").length;
-        const rejectedCount = decisions.filter((d) => d.type === "reject").length;
-
-        const summaryParts: string[] = [];
-        if (approvedCount > 0) summaryParts.push(`${approvedCount} approved`);
-        if (editedCount > 0) summaryParts.push(`${editedCount} edited`);
-        if (rejectedCount > 0) summaryParts.push(`${rejectedCount} rejected`);
-
-        updateMessage(currentMessageIdRef.current, (msg) => ({
-          ...msg,
-          content: msg.content.replace(
-            /\n\n⏸️ Waiting for approval:.*$/,
-            `\n\n✅ Decisions: ${summaryParts.join(", ")}`,
-          ),
-        }));
-      }
-
-      // Forward each decision to the runtime via window events. The runtime
-      // matches by `toolCallId` — emit one event per decision so each tool
-      // call gets its own response.
-      for (const d of decisions) {
-        const toolCallId =
-          d.type === "edit" && d.editedAction
-            ? d.editedAction.id
-            : (d as { id?: string }).id ?? "";
-        if (!toolCallId) continue;
-        respondToApproval(toolCallId, {
-          type: d.type,
-          editedArgs: d.editedAction?.args,
-        });
-      }
-    },
-    [updateMessage],
-  );
-
   const sendAskUserResponses = useCallback((answers: AskUserAnswer[]) => {
     setPendingQuestions(null);
     respondToAskUser(answers);
@@ -1260,7 +1310,6 @@ export function useChat(options: UseChatOptions = {}) {
     // never append to the stopped one.
     currentMessageGenerationRef.current = null;
     setIsProcessing(false);
-    setPendingApproval(null);
     setPendingQuestions(null);
   }, [updateMessage, setCurrentMessageId, updateToolCallPart, flushTextDelta]);
 
@@ -1356,10 +1405,10 @@ export function useChat(options: UseChatOptions = {}) {
     setTemperature,
     setThinkingEffort,
     // Human-in-the-Loop support
-    pendingApproval,
-    sendResumeDecisions,
     pendingQuestions,
     sendAskUserResponses,
+    /** Rate-limit backoff status (PRD §7) — non-null while retrying. */
+    rateLimitStatus,
     // Todo tool: live plan panel control (local-only)
     sendTodoAction,
   };

@@ -384,10 +384,29 @@ async function performRotation(
  *  "20/20 sandbox limit reached"), we kill ALL sandboxes on the account
  *  (enforcing the "one shared sandbox" rule), clear our local cache, and
  *  retry the create. */
+/** Sanitize client-supplied env vars for sandbox injection (PRD §14):
+ *  only string→string entries, sane size caps, no empty names. Values are
+ *  NEVER logged. */
+function sanitizeEnvs(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (count >= 100) break;
+    if (typeof k !== "string" || !k.trim() || k.length > 256) continue;
+    const val = typeof v === "string" ? v : String(v ?? "");
+    if (val.length > 32_768) continue;
+    out[k] = val;
+    count += 1;
+  }
+  return count > 0 ? out : undefined;
+}
+
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
   mode: "shared" | "separate",
+  envs?: Record<string, string>,
 ): Promise<Sandbox> {
   // Enforce single-sandbox rule — kill ALL orphaned sandboxes on the account
   // before creating a new one. This runs on EVERY create (not just when the
@@ -400,7 +419,11 @@ async function createAndCacheSandbox(
 
   let sandbox: Sandbox;
   try {
-    sandbox = await Sandbox.create({ apiKey, timeoutMs: 3_600_000 }); // 1 hour (E2B max)
+    // ENV INJECTION (PRD §14): sandbox-level env vars so interactive shells
+    // see them too. Per-execution envs (commands.run / runCode opts) are the
+    // always-fresh authoritative source — this create-time set is a
+    // best-effort baseline for connected sandboxes.
+    sandbox = await Sandbox.create({ apiKey, timeoutMs: 3_600_000, envs }); // 1 hour (E2B max)
   } catch (createErr) {
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
@@ -412,7 +435,7 @@ async function createAndCacheSandbox(
       sharedCache.clear();
       separateCache.clear();
       // Retry the create — should succeed now that the account has 0 sandboxes.
-      sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 });
+      sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000, envs });
     } else {
       throw createErr;
     }
@@ -728,6 +751,10 @@ export async function POST(req: NextRequest) {
             const command = args.command as string;
             const cwd = (args.cwd as string) ?? DEFAULT_CWD;
             const timeout = (args.timeout as number) ?? 120;
+            // ENV INJECTION (PRD §14): pass the user's env-var VALUES so
+            // `$VAR` references in shell commands resolve to real values
+            // instead of the variable NAME being echoed.
+            const envs = sanitizeEnvs(args.envs);
             const send = (obj: Record<string, unknown>) => {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
             };
@@ -781,6 +808,7 @@ export async function POST(req: NextRequest) {
             try {
               await sandbox.commands.run(ptyCommand, {
                 cwd,
+                envs,
                 timeoutMs: timeout * 1000,
                 onStdout: (data: string) => {
                   // `script` merges stdout+stderr → all output comes here.
@@ -817,9 +845,10 @@ export async function POST(req: NextRequest) {
                 const key = cacheKey(apiKey, conversationId, sandboxMode);
                 evictCacheEntry(sandboxMode, key);
                 try {
-                  const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
+                  const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode, envs);
                   await fresh.commands.run(ptyCommand, {
                     cwd,
+                    envs,
                     timeoutMs: timeout * 1000,
                     onStdout: (data: string) => send({ type: "stdout", data }),
                     onStderr: (data: string) => send({ type: "stderr", data }),
@@ -871,6 +900,8 @@ export async function POST(req: NextRequest) {
             }
             const code = args.code as string;
             const timeout = (args.timeout as number) ?? 60;
+            // ENV INJECTION (PRD §14) — same rationale as exec_stream.
+            const envs = sanitizeEnvs(args.envs);
             const send = (obj: Record<string, unknown>) => {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
             };
@@ -898,6 +929,7 @@ export async function POST(req: NextRequest) {
                   code: string,
                   opts?: {
                     timeoutMs?: number;
+                    envs?: Record<string, string>;
                     onStdout?: (msg: { line: string; timestamp?: string; error?: boolean }) => void;
                     onStderr?: (msg: { line: string; timestamp?: string; error?: boolean }) => void;
                   },
@@ -907,6 +939,7 @@ export async function POST(req: NextRequest) {
                 }>;
               }).runCode(code, {
                 timeoutMs: timeout * 1000,
+                envs,
                 onStdout: (msg) => {
                   // Extract the actual output line from the OutputMessage
                   // object. The SDK passes { line, timestamp, error }.

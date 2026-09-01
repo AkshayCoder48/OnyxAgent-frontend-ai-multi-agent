@@ -934,6 +934,28 @@
   }
 }
 
+/* Round panel entrance (PRD §15): a new agent round's panel slides in
+   separately — the execution history reads as a visual timeline of rounds,
+   never one growing reasoning block. */
+.round-in {
+  animation: round-in var(--duration-slow) var(--ease-spring) both;
+}
+@keyframes round-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .round-in {
+    animation: none;
+  }
+}
+
 .step-reveal {
   animation: step-reveal var(--duration-base) var(--ease-out) both;
 }
@@ -1487,9 +1509,13 @@
   }
 }
 
-/* Larger touch targets on mobile */
+/* Larger touch targets on mobile.
+   Switches are EXCLUDED: they're `<button role="switch">` elements whose
+   pill geometry is designed at h-6 (24px) — forcing 40px on them made the
+   thumb float in an oversized track so every toggle read as a circle
+   (the "deformed pills" bug). A 44×24 pill is already touch-friendly. */
 @media (max-width: 768px) {
-  button,
+  button:not([role="switch"]),
   [role="button"],
   a {
     min-height: 40px;

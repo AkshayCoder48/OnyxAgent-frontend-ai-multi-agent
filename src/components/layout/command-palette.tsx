@@ -6,9 +6,9 @@ import { useTranslations } from "next-intl";
 import { Command } from "cmdk";
 import {
   ArrowRight,
-  Bell,
   BookOpen,
   Database,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   MessageSquare,
@@ -163,9 +163,9 @@ export function CommandPalette() {
             onSelect={() => go(ROUTES.SETTINGS_APPEARANCE)}
           />
           <PaletteItem
-            icon={Bell}
-            label={t("notifications")}
-            onSelect={() => go(ROUTES.SETTINGS_NOTIFICATIONS)}
+            icon={KeyRound}
+            label={t("apiKeys")}
+            onSelect={() => go(ROUTES.SETTINGS_API_KEYS)}
           />
           <PaletteItem
             icon={Slash}

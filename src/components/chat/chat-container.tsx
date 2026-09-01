@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useMemo, useRef, useCallback, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -10,31 +10,165 @@ import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
 import { PendingMessages } from "./pending-messages";
-import { ToolApprovalDialog } from "./tool-approval-dialog";
 import { QuestionPrompt } from "@/components/ui";
-import type { PendingApproval, AskUserQuestion, AskUserAnswer, Decision } from "@/types";
+import type { AskUserQuestion, AskUserAnswer } from "@/types";
 import { useConversationStore, useChatStore } from "@/stores";
 import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-store";
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
-import { useSingleRoundMode } from "@/hooks/use-single-round-mode";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import { Orb, ThinkingIndicator } from "@/components/assistant-ui/elements";
-import { Zap } from "lucide-react";
+import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
+import { genuiPerfLog } from "@/lib/genui/perf";
+import { Hourglass } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
+
+/**
+ * SINGLE SCROLL OWNER (PRD §8–§11 — scroll jank fix).
+ *
+ * The old auto-scroll had two failure modes that produced the "pushes up
+ * and down at the same time" oscillation during GenUI streaming:
+ *
+ *   1. `messagesEndRef.scrollIntoView()` ran synchronously on EVERY store
+ *      flush (~33×/sec). `scrollIntoView` also scrolls EVERY scrollable
+ *      ancestor (page/body on mobile), not just the chat container — competing
+ *      scroll contexts fighting each other.
+ *   2. "User scrolled up" was inferred from raw scroll POSITION: when a
+ *      large GenUI card landed in one flush, dist-from-bottom spiked past
+ *      150px and the controller wrongly concluded the user had scrolled,
+ *      permanently stopping the follow (the user appeared stuck off-bottom
+ *      while the content kept growing).
+ *
+ * The new controller:
+ *   - Tracks USER INTENT (wheel-up / touch-drag-up / arrow-up keys) — the
+ *     only thing that disables auto-follow. Content growth can never
+ *     masquerade as user intent.
+ *   - Resumes follow automatically whenever the viewport is back at/near
+ *     the bottom (momentum, keyboard, or our own follow).
+ *   - Writes scrolls via container-scoped `scrollTop` (never touches
+ *     ancestors) and coalesces them through requestAnimationFrame — at
+ *     most ONE scroll write per animation frame, no matter how many
+ *     message updates arrive.
+ */
+function useChatScrollController(
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>,
+  messages: unknown[],
+) {
+  /** True once the user takes the viewport; false again when back at bottom. */
+  const userTookScrollRef = useRef(false);
+  /** Pending rAF handle for the coalesced follow-bottom write. */
+  const scrollRafRef = useRef<number | null>(null);
+  /** Stable handle to the frame-scheduled follow (set once on mount). */
+  const scheduleFollowRef = useRef<(() => void) | null>(null);
+
+  // Attach intent listeners + define the ONE scroll primitive.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const distFromBottom = () =>
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+
+    const clearRaf = () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+
+    // The ONE scroll write path: container-scoped, instant, frame-scheduled,
+    // and re-checked inside the frame (a user scroll arriving mid-frame wins).
+    const scheduleFollowBottom = () => {
+      if (scrollRafRef.current !== null) return; // already scheduled this frame
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        if (userTookScrollRef.current) return;
+        genuiPerfLog("Scroll", "follow-bottom");
+        container.scrollTop = container.scrollHeight;
+      });
+    };
+    scheduleFollowRef.current = scheduleFollowBottom;
+
+    // ── USER INTENT: only explicit user input disables auto-follow ──
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) userTookScrollRef.current = true;
+      else if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX)
+        userTookScrollRef.current = false;
+    };
+    let lastTouchY: number | null = null;
+    const onTouchStart = (e: TouchEvent) => {
+      lastTouchY = e.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY;
+      if (lastTouchY !== null && y !== undefined && y > lastTouchY + 3) {
+        // Finger moving down = dragging content up = user scrolling up.
+        userTookScrollRef.current = true;
+      }
+      lastTouchY = y ?? lastTouchY;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") {
+        userTookScrollRef.current = true;
+      } else if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX) {
+        userTookScrollRef.current = false;
+      }
+    };
+
+    // ── POSITION re-arm: back at the bottom (however it happened) resumes
+    // auto-follow. Content growth alone doesn't fire scroll events, so this
+    // can't be fooled the way the old position-only detector was.
+    const onScroll = () => {
+      if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX) {
+        userTookScrollRef.current = false;
+      }
+    };
+
+    container.addEventListener("scroll", onScroll, { passive: true });
+    container.addEventListener("wheel", onWheel, { passive: true });
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: true });
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      clearRaf();
+      scheduleFollowRef.current = null;
+      container.removeEventListener("scroll", onScroll);
+      container.removeEventListener("wheel", onWheel);
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+    // The container element is stable for ChatContainer's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Follow the bottom when messages update — through the frame scheduler,
+  // so a burst of flushes still produces at most one scroll write per frame.
+  useEffect(() => {
+    scheduleFollowRef.current?.();
+  }, [messages]);
+}
 
 /**
  * Thinking status line shown between send and first token: the Orb lattice
  * glyph leading the ThinkingIndicator element (shimmering label + ticking
  * elapsed badge, dot suppressed so the orb is the single indicator).
  * Mounts fresh per turn, so the elapsed clock starts from zero each time.
- * The orb and the label share one fixed-height row (h-7) with
- * items-center, so the text sits exactly on the lattice's midline — no
- * baseline drift between the two indicators.
+ *
+ * ORB (PRD §23–§28): the orb is the response's RANDOM pick (one of the full
+ * 25-variant collection, chosen once when the response began — never per
+ * chunk), noticeably LARGER than before (28px, up from 18px), and the label
+ * shares ONE flex row with `items-center` so the text sits exactly on the
+ * lattice's midline at any font size — no fixed offsets, no baseline drift,
+ * stable while the label changes and the orb animates.
  */
 function ThinkingStatus() {
   const [elapsed, setElapsed] = useState(0);
+  // Read once per mount — the module singleton holds the response's orb; a
+  // remount (next turn) re-reads it, and nothing else re-renders from this.
+  const orbVariant = useMemo(() => currentResponseOrb(), []);
   useEffect(() => {
     const startedAt = Date.now();
     const id = window.setInterval(
@@ -44,10 +178,10 @@ function ThinkingStatus() {
     return () => window.clearInterval(id);
   }, []);
   return (
-    <>
-      <Orb variant="S1" size={18} className="shrink-0" />
+    <span className="flex min-h-8 w-fit items-center gap-2.5">
+      <Orb variant={orbVariant} size={28} className="shrink-0" />
       <ThinkingIndicator label="Thinking" elapsed={`${elapsed}s`} showDot={false} />
-    </>
+    </span>
   );
 }
 
@@ -55,11 +189,11 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   const {
     currentConversationId,
     currentMessages,
+    hydratedConversationId,
     isLoading: isConversationLoading,
   } = useConversationStore();
   const { addMessage: addChatMessage } = useChatStore();
   const { fetchConversations } = useConversations();
-  const { singleRoundMode, toggleSingleRoundMode } = useSingleRoundMode();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
   const handleConversationCreated = useCallback(() => {
@@ -80,11 +214,10 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     setProviderId,
     setTemperature,
     setThinkingEffort,
-    pendingApproval,
-    sendResumeDecisions,
     pendingQuestions,
     sendAskUserResponses,
     sendTodoAction,
+    rateLimitStatus,
   } = useChat({
     conversationId: currentConversationId,
     onConversationCreated: handleConversationCreated,
@@ -92,8 +225,13 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  // true = user deliberately scrolled up; suppress auto-scroll until they return to bottom
-  const userScrolledUpRef = useRef(false);
+
+  // SINGLE SCROLL OWNER (PRD §8–§11): the one controller for the chat scroll
+  // container — user-intent based auto-follow, container-scoped writes,
+  // rAF-coalesced to at most one scroll per animation frame. Replaces the
+  // old position-only "userScrolledUp" + per-flush scrollIntoView pair that
+  // fought itself during GenUI streaming.
+  useChatScrollController(scrollContainerRef, messages);
 
   // Tracks which conversation's messages are CURRENTLY loaded into the chat
   // store. The load-effect (below) uses this to decide whether to (re)load.
@@ -173,14 +311,20 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     prevConversationIdRef.current = currId;
   }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId, isProcessing, stopGeneration]);
 
-  // Load DB messages into the chat store when the conversation changes OR when
-  // currentMessages populates after a fetch.
+  // Load DB messages into the chat store when a conversation's messages arrive.
   //
-  // CRITICAL: when a new chat is created (conversationId goes from null → new ID),
-  // the user's message is ALREADY in the chat store (added by use-chat.ts before
-  // the runtime creates the conversation). We must NOT clear it. The
-  // `prevConversationIdRef` tracks the previous ID so we can detect the
-  // null → ID transition and skip the load (the messages are already there).
+  // HYDRATION GUARD (PRD §17–22): `currentMessages` are only painted when
+  // `hydratedConversationId === currentConversationId` — i.e. the message
+  // array was FETCHED FOR the conversation that is actually selected. A
+  // stale fetch for conversation A arriving after the user switched to B
+  // can never paint (setMessagesFor already drops it, this is defense in
+  // depth). Messages not yet hydrated → show the persisted/live store
+  // messages (or the loading skeleton) — NOT an empty home screen.
+  //
+  // NEW CHAT TRANSITION: when a new chat is created (null → new ID), the
+  // user's message is ALREADY in the chat store (added by use-chat.ts
+  // before the runtime creates the conversation) and the runtime is
+  // streaming into it. We must NOT clear it — mark as loaded and wait.
   useEffect(() => {
     // No conversation selected — nothing to load. Reset the loaded-id tracker
     // so a subsequent selection of a previously-loaded conversation reloads.
@@ -189,44 +333,27 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       return;
     }
 
-    // Already loaded this conversation's messages into the chat store — skip.
-    if (loadedConvIdRef.current === currentConversationId) return;
-
-    // NEW CHAT TRANSITION: if we just went from null → new ID, the user's
-    // message is already in the chat store (added by use-chat.ts). Don't
-    // clear it — just mark as loaded so we don't try to load again.
-    // This flag is set by the clear-effect which runs BEFORE this effect.
-    //
-    // BUT: on page refresh, the conversation store starts with null, then
-    // fetchConversations() sets it to the URL's ?id=. This is ALSO a
-    // null→ID transition, but it's NOT a new chat — it's loading an
-    // existing conversation. We distinguish by checking if the chat store
-    // has any messages (new chat = user message already added; page load
-    // = empty chat store).
+    // New chat transition (null → ID): the live chat store is authoritative.
+    // Consume the flag set by the clear-effect and skip the DB paint.
     if (wasNewChatTransitionRef.current) {
-      wasNewChatTransitionRef.current = false; // consume the flag
-      const existingMessages = useChatStore.getState().messages;
-      if (existingMessages.length > 0) {
-        // Real new chat — user's message is in the store. Don't load.
-        loadedConvIdRef.current = currentConversationId;
-        setPersistedConversationId(currentConversationId);
-        return;
-      }
-      // Page refresh — chat store is empty, need to load from DB.
-      // Fall through to the normal loading logic below.
-    }
-
-    // Mark as loaded BEFORE mutating so a synchronous re-render doesn't double-
-    // apply.
-    loadedConvIdRef.current = currentConversationId;
-
-    clearMessages();
-    if (currentMessages.length === 0) {
-      // Reset the ref so the effect re-fires when messages arrive.
-      loadedConvIdRef.current = null;
+      wasNewChatTransitionRef.current = false;
+      loadedConvIdRef.current = currentConversationId;
       return;
     }
 
+    // Messages must belong to the conversation that is currently selected.
+    // Until they do, keep whatever the chat store already shows (restored
+    // sessionStorage messages or a previous paint) — never blank out.
+    if (hydratedConversationId !== currentConversationId) return;
+
+    // Already painted this conversation's messages into the chat store.
+    if (loadedConvIdRef.current === currentConversationId) return;
+
+    // Mark as painted BEFORE mutating so a synchronous re-render doesn't
+    // double-apply.
+    loadedConvIdRef.current = currentConversationId;
+
+    clearMessages();
     currentMessages.forEach((msg) => {
       // Use the shared helper that preserves thinking, reasoning, parts,
       // and tool calls — the manual rebuild below discarded thinking and
@@ -250,30 +377,14 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       });
       addChatMessage(chatMsg);
     });
-  }, [currentMessages, addChatMessage, clearMessages, currentConversationId]);
+  }, [currentMessages, hydratedConversationId, addChatMessage, clearMessages, currentConversationId]);
 
-  // Track whether the user has manually scrolled up so we don't hijack their position
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      userScrolledUpRef.current = distFromBottom > SCROLL_NEAR_BOTTOM_THRESHOLD_PX;
-    };
-    container.addEventListener("scroll", handleScroll, { passive: true });
-    return () => container.removeEventListener("scroll", handleScroll);
-  }, []);
-
-  // Auto-scroll on every messages update unless user has scrolled up.
-  // PERF: Use `behavior: "auto"` (instant) instead of "smooth" during
-  // streaming. `smooth` triggers a compositor animation on every 30ms
-  // text-delta flush, which stacks up and causes the browser to jank /
-  // freeze. Instant scroll is invisible to the user because the content
-  // is already at the bottom — there's nothing to animate.
-  useEffect(() => {
-    if (userScrolledUpRef.current) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [messages]);
+  // Auto-scroll is owned ENTIRELY by useChatScrollController above (see its
+  // doc comment). The old per-flush `messagesEndRef.scrollIntoView()` was
+  // removed: it scrolled every scrollable ancestor (not just the chat
+  // container), ran ~33×/sec synchronously, and its position-only "user
+  // scrolled" detection misfired whenever a large GenUI card landed in one
+  // flush — the up/down scroll fight.
 
   const { commands: slashCommands } = useSlashCommands();
 
@@ -348,15 +459,12 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       onCancelQueued={cancelQueued}
       messagesEndRef={messagesEndRef}
       scrollContainerRef={scrollContainerRef}
-      pendingApproval={pendingApproval}
-      onResumeDecisions={sendResumeDecisions}
       pendingQuestions={pendingQuestions}
       onAnswerQuestions={sendAskUserResponses}
       onTodoAction={sendTodoAction}
       onStop={stopGeneration}
+      rateLimitStatus={rateLimitStatus}
       conversationId={currentConversationId}
-      singleRoundMode={singleRoundMode}
-      onToggleSingleRound={toggleSingleRoundMode}
     />
   );
 }
@@ -385,15 +493,12 @@ interface ChatUIProps {
   onCancelQueued?: (id: string) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
-  pendingApproval?: PendingApproval | null;
-  onResumeDecisions?: (decisions: Decision[]) => void;
   pendingQuestions?: AskUserQuestion[] | null;
   onAnswerQuestions?: (answers: AskUserAnswer[]) => void;
   onTodoAction?: (action: "dismiss" | "reset" | "snapshot") => void;
   onStop?: () => void;
-  /** Single-round mode state for the Zap toggle in ChatInput. */
-  singleRoundMode?: boolean;
-  onToggleSingleRound?: () => void;
+  /** Rate-limit backoff note (PRD §7) — shown instead of a dead-looking turn. */
+  rateLimitStatus?: string | null;
 }
 
 function ChatUI({
@@ -414,14 +519,11 @@ function ChatUI({
   onCancelQueued,
   messagesEndRef,
   scrollContainerRef,
-  pendingApproval,
-  onResumeDecisions,
   pendingQuestions,
   onAnswerQuestions,
   onTodoAction,
   onStop,
-  singleRoundMode,
-  onToggleSingleRound,
+  rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
   return (
@@ -447,12 +549,26 @@ function ChatUI({
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
               stays until the AI generates its first character/tool call.
-              assistant-ui "ThinkingIndicator" + "Orb" elements: the orb
-              lattice glyph leading a shimmering label + ticking elapsed
-              badge, all on one baseline-aligned row. */}
+              The RANDOM response orb (one of 25, picked once per response)
+              leads the shimmering label + ticking elapsed badge on ONE
+              items-center flex row — vertically centered, no drift. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
-            <div className="animate-slide-up-fade flex h-7 items-center gap-2.5 px-1 py-3">
+            <div className="animate-slide-up-fade px-1 py-2">
               <ThinkingStatus />
+            </div>
+          )}
+          {/* Rate-limit backoff (PRD §7): the runtime is retrying with
+              exponential backoff — show a clear state instead of a
+              dead-looking turn. Agent state is preserved; nothing is
+              duplicated while this shows. */}
+          {rateLimitStatus && (
+            <div
+              className="animate-slide-up-fade flex items-center gap-2 rounded-lg bg-foreground/[0.04] px-3 py-2 text-xs text-foreground/70"
+              role="status"
+              aria-live="polite"
+            >
+              <Hourglass className="text-primary h-3.5 w-3.5 shrink-0 animate-pulse" aria-hidden />
+              <span className="min-w-0">{rateLimitStatus}</span>
             </div>
           )}
           {/* Todo tool: the live plan panel is rendered INLINE IN THE
@@ -467,16 +583,6 @@ function ChatUI({
               switch to a blank MessageList. */}
           <div ref={messagesEndRef} />
         </div>{" "}
-        {pendingApproval && onResumeDecisions && (
-          <div className="px-2 pb-2 sm:px-4 sm:pb-2">
-            <ToolApprovalDialog
-              actionRequests={pendingApproval.actionRequests}
-              reviewConfigs={pendingApproval.reviewConfigs}
-              onDecisions={onResumeDecisions}
-              disabled={!isConnected}
-            />
-          </div>
-        )}
         {pendingQuestions && pendingQuestions.length > 0 && onAnswerQuestions && (
           <div className="px-2 pb-2 sm:px-4 sm:pb-2">
             <QuestionPrompt
@@ -486,9 +592,8 @@ function ChatUI({
             />
           </div>
         )}
-        {/* Single-round mode indicator + queued messages live next to the
-            composer; the todo plan panel now lives INSIDE the scroll
-            container (inline in the response flow) above. */}
+        {/* Queued messages live next to the composer; the todo plan panel
+            lives INSIDE the scroll container (inline in the response flow). */}
         <div className="px-2 pb-2 sm:px-4 sm:pb-4">
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
@@ -500,15 +605,12 @@ function ChatUI({
                 onSend={sendMessage}
                 disabled={
                   !isConnected ||
-                  !!pendingApproval ||
                   !!(pendingQuestions && pendingQuestions.length)
                 }
                 isProcessing={isProcessing}
                 onStop={onStop}
                 slashContext={slashContext}
                 commands={slashCommands}
-                singleRoundMode={singleRoundMode}
-                onToggleSingleRound={onToggleSingleRound}
               />
             </div>
             <div className="border-foreground/8 flex items-center justify-between gap-2 border-t px-2.5 py-1.5 sm:px-4 sm:py-2">
@@ -523,12 +625,6 @@ function ChatUI({
                   />
                   {isConnected ? tc("live") : tc("offline")}
                 </span>
-                {singleRoundMode && (
-                  <span className="bg-primary/10 text-primary inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[9px] font-semibold tracking-wider uppercase">
-                    <Zap className="h-2.5 w-2.5 fill-current" />
-                    1-Round
-                  </span>
-                )}
               </div>
               <div className="flex min-w-0 items-center gap-1">
                 {/* "⏎ to send" hint (Terra spec) */}

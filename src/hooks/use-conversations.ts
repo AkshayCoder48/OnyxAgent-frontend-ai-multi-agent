@@ -35,10 +35,11 @@ export function useConversations() {
   const {
     currentConversationId,
     currentMessages,
+    hydratedConversationId,
     isLoading: selectLoading,
     error,
     setCurrentConversationId,
-    setCurrentMessages,
+    setMessagesFor,
     setLoading,
     setError,
   } = useConversationStore();
@@ -79,10 +80,6 @@ export function useConversations() {
     enabled: !!userId,
   });
 
-  // `isLoading` historically reflected both the list fetch and the
-  // select-messages fetch; preserve that union.
-  const isLoading = listLoading || selectLoading;
-
   const writeCache = useCallback(
     (updater: (prev: Conversation[]) => Conversation[]) =>
       queryClient.setQueryData<Conversation[]>(qk.conversations.list(), (prev = []) =>
@@ -91,45 +88,89 @@ export function useConversations() {
     [queryClient],
   );
 
-  const fetchConversations = useCallback(async () => {
-    // The list query auto-fetches and dedupes; force a fresh pull here to keep
-    // the previous explicit-refresh semantics (e.g. after a new conversation
-    // is created during an agent turn).
-    await queryClient.invalidateQueries({ queryKey: qk.conversations.list() });
-    // URL ?id= param always takes priority: select that conversation and load
-    // its messages if it isn't already the current one.
-    const urlId = new URLSearchParams(window.location.search).get("id");
-    if (urlId && useConversationStore.getState().currentConversationId !== urlId) {
-      // Cancel any in-flight select so a slower earlier fetch can't overwrite
-      // this one's messages. Capture the request id so we can detect
-      // supersession after the await.
+  // `isLoading` historically reflected both the list fetch and the
+  // select-messages fetch; preserve that union.
+  const isLoading = listLoading || selectLoading;
+
+  // Shared guarded loader used by BOTH the URL auto-hydration and the
+  // sidebar `selectConversation`. Behaviors:
+  //  - Re-clicking the CURRENTLY LOADED conversation is a no-op (PRD §21 —
+  //    never destructively clear the visible messages).
+  //  - Switching conversations atomically clears the stale message array,
+  //    fetches, and stores the result tagged with the id it belongs to.
+  //  - `verifyInList` (URL auto-hydration) additionally checks the fetched
+  //    list and drops the selection when the conversation no longer exists
+  //    (PRD §18.3 — verify activeChatId exists).
+  const loadConversationMessages = useCallback(
+    async (id: string, opts?: { verifyInList?: boolean }) => {
+      // Already the selected AND loaded conversation — no destructive reload.
+      const state0 = useConversationStore.getState();
+      if (state0.currentConversationId === id && state0.hydratedConversationId === id) {
+        return;
+      }
+
+      // Abort any previous in-flight message fetch so an earlier, slower request
+      // can't resolve after this one and show the wrong messages.
       messagesAbortRef.current?.abort();
       const controller = new AbortController();
       messagesAbortRef.current = controller;
       const myRequestId = ++selectRequestIdRef.current;
 
       // Atomically switch id + clear messages + flag loading. The clear is
-      // critical: without it, the previous conversation's messages would
-      // still be in `currentMessages` when the chat-container useEffect
-      // fires on the id change, and they'd get painted into the new chat.
-      useConversationStore.getState().selectConversation(urlId, { loading: true });
-      clearMessages();
-      setUrlParam("id", urlId);
+      // the critical fix: `currentMessages` can never hold the PREVIOUS
+      // conversation's messages while the id points at the new one.
+      useConversationStore.getState().selectConversation(id, { loading: true });
+      // Also synchronously clear the chat-store (streaming buffer) when this
+      // is a real SWITCH so the previous conversation's streamed content
+      // doesn't bleed in. (On URL auto-hydration after refresh the chat
+      // store may hold the sessionStorage-restored messages for THIS SAME
+      // conversation — keep those; the DB fetch replaces them below.)
+      if (state0.currentConversationId !== id) {
+        clearMessages();
+      }
+      setUrlParam("id", id);
+      setError(null);
       try {
-        const msgs = await conversationService.getMessages(urlId);
-        // Superseded by a newer select — drop the result.
+        const msgs = await conversationService.getMessages(id);
+        // Guard against a superseded request resolving after a newer select.
         if (controller.signal.aborted || selectRequestIdRef.current !== myRequestId) {
           return;
         }
-        setCurrentMessages(msgs);
-      } catch {
-        // Superseded — ignore.
-        if (controller.signal.aborted || selectRequestIdRef.current !== myRequestId) {
+        if (opts?.verifyInList) {
+          // PRD §18.3 — verify the conversation actually exists, DIRECTLY
+          // against the database (Dexie get-by-id), NOT the React Query list
+          // cache: on a hard refresh the auth user resolves asynchronously
+          // (transient default user first), so the list query may still be
+          // disabled and the cache empty at this moment — treating that as
+          // "conversation deleted" wrongly cleared the selection + URL.
+          // Existence is checked WITHOUT user scoping (see
+          // conversationService.exists) because the local-first app has
+          // transient/legacy user identities.
+          const exists = await conversationService.exists(id);
+          if (controller.signal.aborted || selectRequestIdRef.current !== myRequestId) {
+            return;
+          }
+          if (!exists) {
+            // Not accessible (deleted, no permission) — clear the stale id.
+            useConversationStore.getState().selectConversation(null, { loading: false });
+            setUrlParam("id", null);
+            return;
+          }
+        }
+        setMessagesFor(id, msgs);
+      } catch (err) {
+        // Ignore aborted/superseded requests — they're expected on rapid switch.
+        if (
+          controller.signal.aborted ||
+          selectRequestIdRef.current !== myRequestId ||
+          (err instanceof DOMException && err.name === "AbortError")
+        ) {
           return;
         }
-        // Not accessible (deleted, no permission) — clear the stale id
-        useConversationStore.getState().selectConversation(null, { loading: false });
+        const message = getErrorMessage(err, "Failed to fetch messages");
+        setError(message);
       } finally {
+        // Only the most recent request owns the loading flag.
         if (messagesAbortRef.current === controller) {
           if (selectRequestIdRef.current === myRequestId) {
             setLoading(false);
@@ -137,8 +178,43 @@ export function useConversations() {
           messagesAbortRef.current = null;
         }
       }
+    },
+    [clearMessages, setMessagesFor, setLoading, setError, queryClient],
+  );
+
+  // Tracks whether the URL-driven auto-hydration has already run for this
+  // page load (PRD §18). On mount, `currentConversationId` is pre-hydrated
+  // from the URL `?id=` — so the naive check "id already selected → skip
+  // loading" left the app on the EMPTY home screen with zero messages after
+  // every refresh. Auto-hydration runs at most once per page load, only when
+  // the messages for the URL id haven't been loaded, and never while a turn
+  // is streaming (the live chat store is authoritative then).
+  const autoHydratedRef = useRef(false);
+
+  const fetchConversations = useCallback(async () => {
+    // The list query auto-fetches and dedupes; force a fresh pull here to keep
+    // the previous explicit-refresh semantics (e.g. after a new conversation
+    // is created during an agent turn). Start it FIRST so the verifyInList
+    // check below can see fresh list data.
+    const listPromise = queryClient.invalidateQueries({ queryKey: qk.conversations.list() });
+
+    const urlId = new URLSearchParams(window.location.search).get("id");
+    const convState = useConversationStore.getState();
+    const needsHydration =
+      !!urlId &&
+      (convState.currentConversationId !== urlId || convState.hydratedConversationId !== urlId);
+
+    if (urlId && needsHydration && !autoHydratedRef.current && !useChatStore.getState().isStreaming) {
+      autoHydratedRef.current = true;
+      await listPromise;
+      // `loadConversationMessages` performs the full guarded select+fetch.
+      // It is safe even when the id is already "selected" — the point is
+      // that its MESSAGES were never loaded for this page load.
+      await loadConversationMessages(urlId, { verifyInList: true });
+    } else {
+      await listPromise;
     }
-  }, [queryClient, setCurrentMessages, clearMessages, setLoading]);
+  }, [queryClient, loadConversationMessages]);
 
   const loadingMoreRef = useRef(false);
 
@@ -185,64 +261,6 @@ export function useConversations() {
       }
     },
     [writeCache, setLoading, setError, getUserId],
-  );
-
-  const selectConversation = useCallback(
-    async (id: string) => {
-      // Abort any previous in-flight message fetch so an earlier, slower request
-      // can't resolve after this one and show the wrong messages.
-      messagesAbortRef.current?.abort();
-      const controller = new AbortController();
-      messagesAbortRef.current = controller;
-      // Capture the request id at call time; after every await we verify it
-      // still matches the latest. If a newer select happened, we drop the
-      // result silently — the newer select owns the store.
-      const myRequestId = ++selectRequestIdRef.current;
-
-      // Atomically switch id + clear messages + flag loading. The clear is
-      // the critical fix: previously `setCurrentConversationId` left
-      // `currentMessages` holding the PREVIOUS conversation's messages, so
-      // the chat-container useEffect that loads DB messages into the chat
-      // store would fire between the id change and the fetch resolving —
-      // and paint the previous conversation's messages into the new chat.
-      // Now `selectConversation` on the store clears `currentMessages` to
-      // `[]` in the same state update, so the chat-container effect sees an
-      // empty array and loads nothing until the fetch completes.
-      useConversationStore.getState().selectConversation(id, { loading: true });
-      // Also synchronously clear the chat-store (streaming buffer) so the
-      // previous conversation's streamed content doesn't bleed in.
-      clearMessages();
-      setUrlParam("id", id);
-      setError(null);
-      try {
-        const msgs = await conversationService.getMessages(id);
-        // Guard against a superseded request resolving after a newer select.
-        if (controller.signal.aborted || selectRequestIdRef.current !== myRequestId) {
-          return;
-        }
-        setCurrentMessages(msgs);
-      } catch (err) {
-        // Ignore aborted/superseded requests — they're expected on rapid switch.
-        if (
-          controller.signal.aborted ||
-          selectRequestIdRef.current !== myRequestId ||
-          (err instanceof DOMException && err.name === "AbortError")
-        ) {
-          return;
-        }
-        const message = getErrorMessage(err, "Failed to fetch messages");
-        setError(message);
-      } finally {
-        // Only the most recent request owns the loading flag.
-        if (messagesAbortRef.current === controller) {
-          if (selectRequestIdRef.current === myRequestId) {
-            setLoading(false);
-          }
-          messagesAbortRef.current = null;
-        }
-      }
-    },
-    [clearMessages, setCurrentMessages, setLoading, setError],
   );
 
   const archiveConversation = useCallback(
@@ -339,13 +357,13 @@ export function useConversations() {
       }
     }
     clearMessages();
-    setCurrentMessages([]);
-    setCurrentConversationId(null);
+    // Atomically reset: id -> null, messages -> [], hydrated -> null.
+    useConversationStore.getState().selectConversation(null, { loading: false });
     // Strip the stale ?id= immediately so a refresh mid-flight lands on a
     // fresh /chat instead of the old conversation. The new id will be set
     // by the agent runtime's `conversation_created` event on first message.
     setUrlParam("id", null);
-  }, [clearMessages, setCurrentMessages, setCurrentConversationId]);
+  }, [clearMessages]);
 
   return {
     conversations,
@@ -357,7 +375,7 @@ export function useConversations() {
     fetchMoreConversations,
     hasMore: hasMoreRef.current,
     createConversation,
-    selectConversation,
+    selectConversation: loadConversationMessages,
     archiveConversation,
     unarchiveConversation,
     deleteConversation,

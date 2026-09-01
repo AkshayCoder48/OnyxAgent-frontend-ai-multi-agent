@@ -46,6 +46,10 @@ const EXACT_CAPTIONS: Record<string, string> = {
   add_subtask: "Adding a subtask",
   set_dependency: "Setting a dependency",
   get_available_tasks: "Finding available tasks",
+  // Agent Todo system (PRD) — manage_todo / show_todo.
+  manage_todo: "Managing todos",
+  manage_todos: "Managing todos",
+  show_todo: "Showing the todo list",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */

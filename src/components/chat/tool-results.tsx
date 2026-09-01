@@ -20,12 +20,24 @@ interface ResultProps {
 export function GenericToolResult({ result }: ResultProps) {
   const text = React.useMemo(() => {
     if (typeof result === "string") return result;
+    if (result === undefined || result === null) return "";
     try {
       return JSON.stringify(result, null, 2);
     } catch {
       return String(result);
     }
   }, [result]);
+
+  // EMPTY-RECTANGLE PREVENTION (PRD §3): never render an unexplained empty
+  // box — when no result data is available, say so explicitly.
+  if (!text.trim()) {
+    return (
+      <p className="text-muted-foreground flex items-center gap-2 py-2 text-xs italic">
+        <Search className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        No result data recorded for this tool call.
+      </p>
+    );
+  }
 
   return (
     <pre className="max-h-64 overflow-auto rounded bg-muted p-2 font-mono text-[11px] leading-relaxed">

@@ -54,12 +54,18 @@ registerTool(
       const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;
 
+      // ENV INJECTION (PRD §14): pass the user's env-var VALUES into the
+      // sandbox execution — `os.environ["KEY"]` resolves to the actual
+      // secret value instead of the variable name being echoed.
+      const envs =
+        ctx.envVars && Object.keys(ctx.envVars).length > 0 ? ctx.envVars : undefined;
+
       // runPythonStream is an async generator. Iterate it and pipe chunks.
       let stdout = "";
       let stderr = "";
       let exitCode = 0;
 
-      for await (const chunk of client.runPythonStream(code, { timeout: 60 })) {
+      for await (const chunk of client.runPythonStream(code, { timeout: 60, envs })) {
         if (chunk.type === "stdout" && chunk.data) {
           stdout += chunk.data;
           if (onOutput) onOutput("", chunk.data, "stdout");
@@ -123,11 +129,17 @@ registerTool(
       const client = getE2BClient(apiKey, null, "shared");
       const onOutput = ctx.onToolOutput;
 
+      // ENV INJECTION (PRD §14): pass the user's env-var VALUES so `$VAR`
+      // references in the command resolve to real values (previously the
+      // NAME string was what the model echoed, since nothing injected it).
+      const envs =
+        ctx.envVars && Object.keys(ctx.envVars).length > 0 ? ctx.envVars : undefined;
+
       let stdout = "";
       let stderr = "";
       let exitCode = 0;
 
-      for await (const chunk of client.runCommandStream(command, { cwd, timeout: 120 })) {
+      for await (const chunk of client.runCommandStream(command, { cwd, timeout: 120, envs })) {
         if (chunk.type === "stdout" && chunk.data) {
           stdout += chunk.data;
           if (onOutput) onOutput("", chunk.data, "stdout");

@@ -185,18 +185,37 @@ export async function executeSubagentTurn(
       }
 
       // Use ?url= query param + Accept: text/event-stream + cache: no-store
-      // (curl -N equivalent — no buffering anywhere in the pipeline)
-      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-target-url": targetUrl,
-          Authorization: `Bearer ${config.apiKey}`,
-          Accept: "text/event-stream",
-        },
-        body: JSON.stringify(body),
-        cache: "no-store",
-      });
+      // (curl -N equivalent — no buffering anywhere in the pipeline).
+      // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + rate-limit error
+      // bodies with backoff + jitter, honoring Retry-After. Mirrors the
+      // main runtime's streamRound retry loop.
+      let res: Response;
+      let rateLimitAttempts = 0;
+      for (;;) {
+        res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-target-url": targetUrl,
+            Authorization: `Bearer ${config.apiKey}`,
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify(body),
+          cache: "no-store",
+        });
+
+        const rl = res.status === 429 || res.status === 529;
+        if (rl && rateLimitAttempts < 3) {
+          rateLimitAttempts += 1;
+          const ra = res.headers.get("retry-after");
+          const headerMs = ra && Number.isFinite(Number(ra)) ? Number(ra) * 1000 : null;
+          const backoff = Math.min(1000 * 2 ** (rateLimitAttempts - 1), 8000);
+          const delay = Math.min(Math.max(headerMs ?? backoff, 500), 30_000);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        break;
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");

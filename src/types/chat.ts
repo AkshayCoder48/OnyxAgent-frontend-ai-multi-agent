@@ -38,6 +38,13 @@ export interface ChatMessage {
   conversationId?: string;
   /** True if message ID is a temporary nanoid, not yet replaced by server ID */
   isTemporaryId?: boolean;
+  /** STABLE RENDER KEY (GenUI PRD §6/§14): the temporary id the message was
+   *  created with. `message_saved` swaps the temp nanoid for the real DB id
+   * at the end of a turn; keying the list on `renderKey ?? id` means that
+   * swap no longer remounts the whole message subtree (which reloaded every
+   * GenUI iframe once per turn at completion). Optional — legacy rows fall
+   * back to `id`. */
+  renderKey?: string;
   /** Current user's rating */
   user_rating?: UserRating;
   /** Aggregate rating counts */
@@ -91,6 +98,15 @@ export interface MessagePart {
   content?: string;
   /** Tool invocation for "tool" parts. */
   toolCall?: ToolCall;
+  /** 1-based agent round this part belongs to (multi-round turns).
+   *  Parts from different rounds NEVER merge into one reasoning panel —
+   *  each round renders its own panel with its own timing. */
+  round?: number;
+  /** Epoch ms when the round started (stamped on the first part of a round). */
+  roundStartedAt?: number;
+  /** Epoch ms when the round ended (stamped when the next round starts or
+   *  the turn completes). Frozen thereafter — completed round timing stays. */
+  roundEndedAt?: number;
 }
 
 export interface MapMarker {
@@ -164,7 +180,8 @@ export type WSEventType =
   | "context_usage"
   | "context_compacted"
   | "llm_started"
-  | "llm_completed";
+  | "llm_completed"
+  | "rate_limited";
 
 export interface WSEvent {
   type: WSEventType;
@@ -306,6 +323,33 @@ export interface TodoEventFrame {
     ts: string | null;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Agent Todo system (PRD "Agent Todo System") — stable IDs, 4 statuses,
+// persisted per conversation, displayed via `show_todo` tool previews.
+// ---------------------------------------------------------------------------
+
+/** The four user-facing todo states (internal values). */
+export type TodoStatus = "not_planned" | "in_progress" | "done" | "not_done";
+
+export interface Todo {
+  /** Stable short ID, e.g. `todo_8f42` — returned by creation, reused in
+   *  later tool calls across rounds and refreshes. */
+  id: string;
+  title: string;
+  description?: string;
+  status: TodoStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Human labels for each status (never communicate status by color alone). */
+export const TODO_STATUS_LABELS: Record<TodoStatus, string> = {
+  not_planned: "Not planned",
+  in_progress: "In progress",
+  done: "Done",
+  not_done: "Not done",
+};
 
 export type SubagentTaskStatus =
   "pending" | "running" | "waiting_for_answer" | "completed" | "failed" | "cancelled" | "retrying";

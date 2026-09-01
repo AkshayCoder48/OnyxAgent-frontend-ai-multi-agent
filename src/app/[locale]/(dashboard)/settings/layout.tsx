@@ -3,9 +3,9 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import {
-  Bell,
   Blocks,
   Bot,
+  Braces,
   KeyRound,
   Palette,
   Settings,
@@ -48,9 +48,11 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
     id: "workspace",
     label: "Workspace",
     tabs: [
-      { label: "Env vars", href: ROUTES.SETTINGS_ENV, icon: KeyRound },
+      // Env vars gets `Braces` (its ${VAR} syntax) so the adjacent API Keys
+      // tab can own the KeyRound glyph without the two reading as one.
+      { label: "Env vars", href: ROUTES.SETTINGS_ENV, icon: Braces },
+      { label: "API Keys", href: ROUTES.SETTINGS_API_KEYS, icon: KeyRound },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },
-      { label: "Notifications", href: ROUTES.SETTINGS_NOTIFICATIONS, icon: Bell },
     ],
   },
 ];

@@ -13,11 +13,14 @@ import {
   Loader2,
   BarChart3,
   Download,
+  ListChecks,
+  ListTodo,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ShimmerLabel, chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { OrbCursor } from "@/components/assistant-ui/elements";
+import { TodoPreview, parseTodoResult } from "./todo-preview";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
@@ -35,9 +38,12 @@ import {
 
 interface ToolCallCardProps {
   toolCall: ToolCall;
+  /** Conversation id — used by the todo tools to read the LIVE todo store
+   *  so TodoPreview statuses update in real time (PRD §7). */
+  turnId?: string | null;
 }
 
-export function ToolCallCard({ toolCall }: ToolCallCardProps) {
+export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // Collapsed by default — the bar acts as the toggle. `showRaw` swaps the
   // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.
@@ -59,6 +65,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
       ((toolCall.name === "send_file" || toolCall.name === "send_folder") &&
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
+      (toolCall.name === "show_todo" && toolCall.status === "completed") ||
       isAnyDDGSearch,
   );
   const [showRaw, setShowRaw] = useState(false);
@@ -87,8 +94,35 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   // tools, the URL for fetch_url, etc. (any tool with a url/query arg).
   const urlArg = toolCall.args?.url;
   const queryArg = toolCall.args?.query;
+  // Todo tools — chip shows the todo IDs involved (PRD §18: the primary
+  // argument rides next to the label; the tool name stays visible).
+  const isShowTodo = toolCall.name === "show_todo";
+  const isManageTodo =
+    toolCall.name === "manage_todo" || toolCall.name === "manage_todos";
+  const todoHint = useMemo(() => {
+    if (isShowTodo) {
+      const ids =
+        (Array.isArray(toolCall.args?.todo_ids) && toolCall.args.todo_ids) ||
+        (Array.isArray(toolCall.args?.todoIds) && toolCall.args.todoIds) ||
+        [];
+      if (toolCall.args?.all === true || ids.length === 0) return "all";
+      return ids.map((v) => String(v)).join(", ");
+    }
+    if (isManageTodo) {
+      const argId = toolCall.args?.todo_id ?? toolCall.args?.id;
+      if (typeof argId === "string" && argId) return argId;
+      // create action → the new ID is in the result; surface it once settled.
+      if (toolCall.status === "completed" && toolCall.result != null) {
+        const parsed = parseTodoResult(toolCall.result);
+        if (parsed?.todos.length) return parsed.todos[0]!.id;
+      }
+      const action = toolCall.args?.action;
+      return typeof action === "string" ? action : null;
+    }
+    return null;
+  }, [isShowTodo, isManageTodo, toolCall.args, toolCall.status, toolCall.result]);
   const inputHint =
-    typeof urlArg === "string" ? urlArg : typeof queryArg === "string" ? queryArg : null;
+    typeof urlArg === "string" ? urlArg : typeof queryArg === "string" ? queryArg : todoHint;
 
   const resultText =
     toolCall.result !== undefined
@@ -116,6 +150,22 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   const isAskUser = toolCall.name === "ask_user";
   const isLoadSkill = toolCall.name === "load_skill";
   const isListSkills = toolCall.name === "list_skills";
+  // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
+  // todos drive the TodoPreview table; memoized so streaming deltas don't
+  // re-parse on every render.
+  const parsedTodo = useMemo(
+    () => (isShowTodo || isManageTodo) ? parseTodoResult(toolCall.result) : null,
+    [isShowTodo, isManageTodo, toolCall.result],
+  );
+  const showTodoIds = useMemo(() => {
+    if (!isShowTodo) return undefined;
+    const ids =
+      (Array.isArray(toolCall.args?.todo_ids) && toolCall.args.todo_ids) ||
+      (Array.isArray(toolCall.args?.todoIds) && toolCall.args.todoIds) ||
+      [];
+    if (toolCall.args?.all === true || ids.length === 0) return undefined;
+    return ids.map((v) => String(v));
+  }, [isShowTodo, toolCall.args]);
   const loadedSkillName =
     isLoadSkill && typeof toolCall.args?.skill_name === "string" ? toolCall.args.skill_name : null;
   // Memoize the parsed chart spec — `parseChartResult` does `JSON.parse` for
@@ -205,7 +255,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo;
   const friendlyName = isDateTime
     ? "Current Date & Time"
     : isRAGSearch
@@ -220,7 +270,11 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
               ? "Video Search"
               : isChart
           ? "Chart"
-          : isAskUser
+          : isShowTodo
+            ? "Show Todo"
+            : isManageTodo
+              ? "Manage Todo"
+              : isAskUser
             ? "Question"
             : isFileDownload
               ? fileDownloadSpec?.item_type === "folder"
@@ -246,13 +300,17 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
         ? Globe
         : isChart
           ? BarChart3
-          : isAskUser
-            ? MessageCircleQuestion
-            : isFileDownload
-              ? Download
-              : isRunPython
-                ? Code2
-                : Wrench;
+          : isShowTodo
+            ? ListChecks
+            : isManageTodo
+              ? ListTodo
+              : isAskUser
+                ? MessageCircleQuestion
+                : isFileDownload
+                  ? Download
+                  : isRunPython
+                    ? Code2
+                    : Wrench;
 
   const toggleExpanded = () => {
     setExpanded((prev) => {
@@ -402,6 +460,23 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             <AskUserResult args={toolCall.args} resultText={resultText} />
           ) : isRunPython ? (
             <RunPythonResult toolCall={toolCall} resultText={resultText} />
+          ) : isShowTodo && toolCall.status === "completed" ? (
+            // Todo tools get a specialized renderer (PRD §19): the todo
+            // TABLE rides directly beneath the tool-call bar — the raw
+            // request/result stay available behind the </> toggle above.
+            <TodoPreview
+              turnId={turnId ?? undefined}
+              todoIds={showTodoIds}
+              fallbackTodos={parsedTodo?.todos}
+            />
+          ) : isManageTodo && toolCall.status === "completed" && parsedTodo?.todos.length ? (
+            // One-row preview of the affected todo (create/update) with its
+            // live status.
+            <TodoPreview
+              turnId={turnId ?? undefined}
+              todoIds={parsedTodo.todos.map((t) => t.id)}
+              fallbackTodos={parsedTodo.todos}
+            />
           ) : isLoadSkill ? (
             <LoadSkillResult resultText={resultText} status={toolCall.status} />
           ) : isListSkills ? null : (

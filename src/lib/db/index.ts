@@ -21,6 +21,7 @@ import type {
   MessageRating,
   ConversationShare,
   ChartSpec,
+  Todo,
 } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -194,6 +195,17 @@ export interface ChartSpecRow {
   created_at: string;
 }
 
+/** Per-conversation agent todos (PRD "Agent Todo System"). One row per
+ *  conversation holding the full todo list — written by the manage_todo /
+ *  show_todo tools, hydrated on conversation restore so todos survive
+ *  page refreshes. */
+export interface TodoListRow {
+  /** Primary key = conversation id (one row per conversation). */
+  conversation_id: string;
+  todos: Todo[];
+  updated_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Dexie subclass — typed tables for the whole app.
 // ---------------------------------------------------------------------------
@@ -213,6 +225,7 @@ export class AppDatabase extends Dexie {
   custom_tools!: Table<CustomToolRow, string>;
   skills!: Table<SkillRow, string>;
   chart_specs!: Table<ChartSpecRow, string>;
+  todo_lists!: Table<TodoListRow, string>;
 
   constructor(name = "agent-chat-app") {
     super(name);
@@ -252,6 +265,12 @@ export class AppDatabase extends Dexie {
       custom_tools: "&id, user_id, is_active, name, created_at",
       skills: "&id, user_id, name, [user_id+name], is_active, created_at",
       chart_specs: "&id, user_id, conversation_id, message_id, tool_call_id",
+    });
+
+    // Version 3: add the todo_lists table — per-conversation agent todos
+    // (stable `todo_XXXX` IDs, 4 statuses, survive page refreshes).
+    this.version(3).stores({
+      todo_lists: "&conversation_id, updated_at",
     });
   }
 }

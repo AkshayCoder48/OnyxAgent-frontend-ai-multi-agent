@@ -82,10 +82,14 @@ interface ChatState {
   replaceMessageId: (oldId: string, newId: string) => void;
   addToolCall: (messageId: string, toolCall: ToolCall) => void;
   updateToolCall: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
-  appendTextDelta: (messageId: string, text: string) => void;
-  appendThinkingDelta: (messageId: string, text: string) => void;
-  appendReasoningDelta: (messageId: string, text: string) => void;
-  addToolCallPart: (messageId: string, toolCall: ToolCall) => void;
+  appendTextDelta: (messageId: string, text: string, round?: number) => void;
+  appendThinkingDelta: (messageId: string, text: string, round?: number) => void;
+  appendReasoningDelta: (messageId: string, text: string, round?: number) => void;
+  addToolCallPart: (messageId: string, toolCall: ToolCall, round?: number) => void;
+  /** Stamp `roundEndedAt` on every part of `round` that lacks it — called
+   *  when the next round starts or the turn completes. Completed round
+   *  timing stays frozen forever (PRD §12). */
+  endRound: (messageId: string, round: number, endedAt?: number) => void;
   updateToolCallPart: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
   appendToolStreamingOutput: (
     messageId: string,
@@ -95,6 +99,24 @@ interface ChatState {
   ) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
+}
+
+// BACKGROUND RESILIENCE (PRD §6/§24): flush the debounced sessionStorage
+// snapshot the moment the page is hidden or unloaded, so a mid-stream
+// refresh restores the freshest possible partial state (the runtime's
+// per-round Dexie checkpoints carry the durable copy).
+if (typeof window !== "undefined") {
+  const flushNow = () => {
+    try {
+      flushPersisted();
+    } catch {
+      // ignore — best-effort
+    }
+  };
+  window.addEventListener("pagehide", flushNow);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushNow();
+  });
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -130,7 +152,17 @@ export const useChatStore = create<ChatState>((set) => ({
   replaceMessageId: (oldId, newId) =>
     set((state) => {
       const messages = state.messages.map((msg) =>
-        msg.id === oldId ? { ...msg, id: newId, isTemporaryId: false } : msg,
+        msg.id === oldId
+          ? {
+              ...msg,
+              id: newId,
+              isTemporaryId: false,
+              // Preserve the ORIGINAL temp id as the render key so the id
+              // swap doesn't remount the message subtree (GenUI iframes and
+              // streamed cards keep their DOM identity across the swap).
+              renderKey: msg.renderKey ?? oldId,
+            }
+          : msg,
       );
       savePersisted(messages);
       return { messages };
@@ -165,7 +197,7 @@ export const useChatStore = create<ChatState>((set) => ({
   // messages array. This is the hot path during streaming (called for every
   // text delta). Using a direct mutation pattern with a shallow copy of just
   // the changed message + its parent array.
-  appendTextDelta: (messageId, text) =>
+  appendTextDelta: (messageId, text, round) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -173,6 +205,12 @@ export const useChatStore = create<ChatState>((set) => ({
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
       const last = parts[parts.length - 1];
+      // ROUND STAMP (GenUI PRD §14): text parts created mid-round get the
+      // active round so a text part + the round's thinking parts land in the
+      // SAME round segment. Without this, an unstamped text part (round 0)
+      // followed by stamped thinking (round 1) flipped the message between
+      // the single-segment and multi-round layouts mid-stream — remounting
+      // the TextBubble (and any GenUI card inside it) once per turn.
       // If the last part is "text", append to it (normal streaming case).
       if (last && last.type === "text") {
         parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
@@ -199,11 +237,11 @@ export const useChatStore = create<ChatState>((set) => ({
               content: (parts[lastTextIdx]!.content ?? "") + text,
             };
           } else {
-            parts.push({ id: newPartId(), type: "text" as const, content: text });
+            parts.push({ id: newPartId(), type: "text" as const, content: text, round });
           }
         } else {
           // Last part is tool (or empty) — create new text part.
-          parts.push({ id: newPartId(), type: "text" as const, content: text });
+          parts.push({ id: newPartId(), type: "text" as const, content: text, round });
         }
       }
 
@@ -213,30 +251,38 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  appendThinkingDelta: (messageId, text) =>
+  appendThinkingDelta: (messageId, text, round) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
-      // ALWAYS append to the LAST thinking part if one exists.
-      // The previous logic tried to find the last thinking part after the
-      // last tool part, but this caused the content to split into TWO
-      // thinking parts when other deltas (text, tool) interleaved —
-      // resulting in two "Thinking" bars with half the content each.
-      // Now: find the LAST thinking part regardless of what's between.
+      // ROUND-AWARE MERGE: append to the last thinking part ONLY when it
+      // belongs to the SAME agent round. A new round (model_request_start
+      // after tool calls) creates a NEW thinking part — reasoning from
+      // different rounds is never merged into one panel (PRD §9–10).
+      // Within one round, interleaved text/tool deltas still merge into the
+      // same part (no split bars mid-round).
       const lastThinkIdx = parts.reduce(
         (acc, p, i) => (p.type === "thinking" ? i : acc),
         -1,
       );
-      if (lastThinkIdx >= 0) {
+      const lastThink = lastThinkIdx >= 0 ? parts[lastThinkIdx] : undefined;
+      const sameRound = lastThink !== undefined && lastThink.round === round;
+      if (lastThinkIdx >= 0 && sameRound) {
         parts[lastThinkIdx] = {
-          ...parts[lastThinkIdx]!,
-          content: (parts[lastThinkIdx]!.content ?? "") + text,
+          ...lastThink!,
+          content: (lastThink!.content ?? "") + text,
         };
       } else {
-        parts.push({ id: newPartId(), type: "thinking" as const, content: text });
+        parts.push({
+          id: newPartId(),
+          type: "thinking" as const,
+          content: text,
+          round,
+          roundStartedAt: Date.now(),
+        });
       }
 
       const messages = [...state.messages];
@@ -245,27 +291,34 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  appendReasoningDelta: (messageId, text) =>
+  appendReasoningDelta: (messageId, text, round) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
-      // Same fix as thinking — ALWAYS append to the LAST reasoning part
-      // regardless of what's between. Prevents content from splitting
-      // into two reasoning bars when other deltas interleave.
+      // ROUND-AWARE MERGE — same rule as thinking: only merge within the
+      // SAME round; a new round creates a new reasoning part (PRD §9–10).
       const lastReasonIdx = parts.reduce(
         (acc, p, i) => (p.type === "reasoning" ? i : acc),
         -1,
       );
-      if (lastReasonIdx >= 0) {
+      const lastReason = lastReasonIdx >= 0 ? parts[lastReasonIdx] : undefined;
+      const sameRound = lastReason !== undefined && lastReason.round === round;
+      if (lastReasonIdx >= 0 && sameRound) {
         parts[lastReasonIdx] = {
-          ...parts[lastReasonIdx]!,
-          content: (parts[lastReasonIdx]!.content ?? "") + text,
+          ...lastReason!,
+          content: (lastReason!.content ?? "") + text,
         };
       } else {
-        parts.push({ id: newPartId(), type: "reasoning" as const, content: text });
+        parts.push({
+          id: newPartId(),
+          type: "reasoning" as const,
+          content: text,
+          round,
+          roundStartedAt: Date.now(),
+        });
       }
 
       const messages = [...state.messages];
@@ -274,7 +327,7 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  addToolCallPart: (messageId, toolCall) =>
+  addToolCallPart: (messageId, toolCall, round) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -283,9 +336,43 @@ export const useChatStore = create<ChatState>((set) => ({
       const messages = [...state.messages];
       messages[idx] = {
         ...msg,
-        parts: [...(msg.parts ?? []), { id: newPartId(), type: "tool" as const, toolCall }],
+        parts: [
+          ...(msg.parts ?? []),
+          {
+            id: newPartId(),
+            type: "tool" as const,
+            toolCall,
+            // Stamp the round so tool calls stack under their round's panel.
+            round,
+            roundStartedAt: Date.now(),
+          },
+        ],
         toolCalls: [...(msg.toolCalls || []), toolCall],
       };
+      savePersisted(messages);
+      return { messages };
+    }),
+
+  endRound: (messageId, round, endedAt) =>
+    set((state) => {
+      const idx = state.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return state;
+
+      const msg = state.messages[idx]!;
+      if (!msg.parts) return state;
+      const at = endedAt ?? Date.now();
+      let changed = false;
+      const parts = msg.parts.map((p) => {
+        if (p.round === round && p.roundEndedAt === undefined) {
+          changed = true;
+          return { ...p, roundEndedAt: at };
+        }
+        return p;
+      });
+      if (!changed) return state;
+
+      const messages = [...state.messages];
+      messages[idx] = { ...msg, parts };
       savePersisted(messages);
       return { messages };
     }),

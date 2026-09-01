@@ -29,7 +29,7 @@ export const ROUTES = {
   SETTINGS_MCPS: "/settings/mcps",
   SETTINGS_TOOLS: "/settings/tools",
   SETTINGS_ENV: "/settings/env",
-  SETTINGS_NOTIFICATIONS: "/settings/notifications",
+  SETTINGS_API_KEYS: "/settings/api-keys",
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
   RAG: "/rag",

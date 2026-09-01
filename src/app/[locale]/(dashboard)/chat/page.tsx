@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
@@ -8,9 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
+import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
-import { ShareDialog } from "@/components/chat/share-dialog";
-import { FolderOpen, Menu, Bot, X, Share2, History } from "lucide-react";
+import { TimelineDialog } from "@/components/chat/timeline-dialog";
+import { FolderOpen, Menu, Bot, X, ListTree, History } from "lucide-react";
 
 /** Resizable right sidebar wrapper — drag the left edge to resize. */
 function ResizableRightPanel({
@@ -77,18 +78,50 @@ type RightPanel = "files" | "subagents" | null;
 export default function ChatPage() {
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [mobilePanel, setMobilePanel] = useState<RightPanel>(null);
-  const [shareOpen, setShareOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const { open: openChatSidebar } = useChatSidebarStore();
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
   const { conversations } = useConversations();
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
+  // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15): `use-chat` flips
+  // `sidebarOpen` on the subagent store the moment a sub-agent tool call
+  // starts — mirror it into the local panel state (both desktop and mobile)
+  // so the sidebar opens automatically and streams the sub-agent's progress.
+  // Closing the panel (header Bot button, X, or Sheet onOpenChange) writes
+  // false back to the store so a NEW invocation re-opens it.
+  const subagentSidebarOpen = useSubagentStore((s) => s.sidebarOpen);
+  const setSubagentSidebarOpen = useSubagentStore((s) => s.setSidebarOpen);
+  useEffect(() => {
+    if (subagentSidebarOpen) {
+      setRightPanel("subagents");
+      setMobilePanel("subagents");
+    } else {
+      setRightPanel((p) => (p === "subagents" ? null : p));
+      setMobilePanel((p) => (p === "subagents" ? null : p));
+    }
+  }, [subagentSidebarOpen]);
+
+  const closeSubagentSidebar = useCallback(() => {
+    setSubagentSidebarOpen(false);
+  }, [setSubagentSidebarOpen]);
+
   const togglePanel = (panel: RightPanel) => {
     if (window.innerWidth >= 768) {
-      setRightPanel((prev) => (prev === panel ? null : panel));
+      if (panel === "subagents") {
+        // Manual toggle writes through to the store so the auto-open effect
+        // stays in sync (closing here must not be re-opened by a stale flag).
+        setSubagentSidebarOpen(!subagentSidebarOpen);
+      } else {
+        setRightPanel((prev) => (prev === panel ? null : panel));
+      }
     } else {
-      setMobilePanel(panel);
+      if (panel === "subagents") {
+        setSubagentSidebarOpen(!subagentSidebarOpen);
+      } else {
+        setMobilePanel(panel);
+      }
     }
   };
 
@@ -125,16 +158,18 @@ export default function ChatPage() {
             >
               <History className="h-4 w-4" />
             </Button>
+            {/* Tool timeline (assistant-ui "Tool timeline") — replaces the old
+                share button: one glance at the whole working session as verbs,
+                targets, and file stats. */}
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setShareOpen(true)}
-              disabled={!currentConversationId}
-              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground disabled:opacity-40"
-              title="Share conversation"
-              aria-label="Share conversation"
+              onClick={() => setTimelineOpen(true)}
+              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+              title="Tool timeline"
+              aria-label="Show tool timeline"
             >
-              <Share2 className="h-4 w-4" />
+              <ListTree className="h-4 w-4" />
             </Button>
             <Button
               variant="ghost"
@@ -171,7 +206,7 @@ export default function ChatPage() {
       )}
       {rightPanel === "subagents" && (
         <ResizableRightPanel storageKey="subagent-sidebar-width" defaultWidth={360} minWidth={280} maxWidth={600}>
-          <SubAgentSidebar open onClose={() => setRightPanel(null)} />
+          <SubAgentSidebar open onClose={closeSubagentSidebar} />
         </ResizableRightPanel>
       )}
 
@@ -192,20 +227,22 @@ export default function ChatPage() {
       </Sheet>
 
       {/* Mobile sheet — subagents */}
-      <Sheet open={mobilePanel === "subagents"} onOpenChange={(o) => !o && setMobilePanel(null)}>
+      <Sheet
+        open={mobilePanel === "subagents"}
+        onOpenChange={(o) => {
+          if (!o) {
+            setMobilePanel(null);
+            setSubagentSidebarOpen(false);
+          }
+        }}
+      >
         <SheetContent side="right" className="w-[90vw] max-w-md p-0">
-          <SubAgentSidebar open onClose={() => setMobilePanel(null)} />
+          <SubAgentSidebar open onClose={() => { setMobilePanel(null); setSubagentSidebarOpen(false); }} />
         </SheetContent>
       </Sheet>
 
-      {/* Share current conversation (top-bar share icon) */}
-      {currentConversationId && (
-        <ShareDialog
-          conversationId={currentConversationId}
-          open={shareOpen}
-          onOpenChange={setShareOpen}
-        />
-      )}
+      {/* Tool timeline (header button) */}
+      <TimelineDialog open={timelineOpen} onOpenChange={setTimelineOpen} />
     </div>
   );
 }

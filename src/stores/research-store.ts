@@ -1,10 +1,14 @@
 "use client";
 
 import { create } from "zustand";
-import type { ResearchTodo } from "@/types";
+import type { ResearchTodo, Todo } from "@/types";
 
 interface ResearchTurn {
   todos: ResearchTodo[];
+  /** Agent Todo system (PRD): todos from manage_todo / show_todo with the
+   *  new 4-status shape. Read by the TodoPreview table attached to the
+   *  show_todo tool call — live updates flow in via todo_event snapshots. */
+  agentTodos?: Todo[];
   /** User clicked the "Cut" button — panel stays hidden until the next event. */
   dismissed?: boolean;
 }
@@ -20,6 +24,8 @@ interface ResearchState {
     todo: ResearchTodo | null,
     allTodos?: ResearchTodo[] | null,
   ) => void;
+  /** Replace the agent todos for a turn (new 4-status Todo shape). */
+  setAgentTodos: (turnId: string, todos: Todo[]) => void;
   dismiss: () => void;
   reset: (turnId?: string) => void;
 }
@@ -40,6 +46,18 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
   currentTurnId: null,
 
   setCurrentTurnId: (turnId) => set({ currentTurnId: turnId }),
+
+  setAgentTodos: (turnId, todos) => {
+    set((state) => {
+      const prevTurn = state.byTurn[turnId] ?? { todos: [] };
+      return {
+        byTurn: {
+          ...state.byTurn,
+          [turnId]: { ...prevTurn, agentTodos: todos, dismissed: false },
+        },
+      };
+    });
+  },
 
   applyTodoEvent: (eventType, todo, allTodos) => {
     const turnId = get().currentTurnId ?? "default";
@@ -100,3 +118,10 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
     });
   },
 }));
+
+/** Read the agent todos for a turn without subscribing to the whole store
+ *  (used by imperative callers). */
+export function getAgentTodos(turnId: string | null): Todo[] {
+  const key = turnId ?? "default";
+  return useResearchStore.getState().byTurn[key]?.agentTodos ?? [];
+}

@@ -137,10 +137,22 @@ function filterProps(
  *
  * `depth` is the current nesting depth (root = 0). Nodes deeper than
  * `MAX_DEPTH` are dropped.
+ *
+ * STREAMING KEY STABILITY (PRD §14 — GenUI flicker fix): when the AI emits
+ * no node `id`, the fallback id is derived from the node's POSITION PATH
+ * (depth + sibling index + type), NOT from Math.random(). The streaming
+ * pipeline re-parses the partial JSON on every 30ms flush; with random
+ * fallback ids every re-parse produced brand-new keys, unmounting and
+ * remounting the ENTIRE GenUI tree (and reloading every `custom_html`
+ * iframe) dozens of times per second — the "app disappears and reappears"
+ * flicker. Position-path ids are stable across re-parses of growing JSON
+ * (nodes are appended, existing paths don't move), so React reconciles the
+ * same component instances instead of remounting them.
  */
 export function validateNode(
   node: GenUINode,
   depth: number = 0,
+  index: number = 0,
 ): GenUINode | null {
   if (!node || typeof node !== "object") return null;
   if (depth > MAX_DEPTH) return null;
@@ -149,7 +161,7 @@ export function validateNode(
   const id =
     typeof node.id === "string" && node.id.length > 0
       ? node.id
-      : `genui-${depth}-${type}-${Math.random().toString(36).slice(2, 8)}`;
+      : `genui-${depth}-${index}-${type}`;
 
   // Unknown type → fallback node carrying raw JSON.
   if (!ALLOWED_PROPS_BY_TYPE[type]) {
@@ -188,11 +200,12 @@ export function validateNode(
 
   const props = filterProps(type, mergedProps);
 
-  // Recursively validate children.
+  // Recursively validate children. The sibling index keeps fallback ids
+  // stable across re-parses while the JSON grows (see the doc comment).
   let children: GenUINode[] | undefined;
   if (Array.isArray(node.children) && node.children.length > 0) {
     const validated = node.children
-      .map((c) => validateNode(c, depth + 1))
+      .map((c, i) => validateNode(c, depth + 1, i))
       .filter((c): c is GenUINode => c !== null);
     if (validated.length > 0) children = validated;
   }
@@ -221,11 +234,11 @@ export function validateSpec(spec: GenUISpec | null): GenUISpec {
     if (node && typeof node === "object" && node.type === "root") {
       const rootChildren = Array.isArray(node.children) ? node.children : [];
       const validated = rootChildren
-        .map((c) => validateNode(c, 0))
+        .map((c, i) => validateNode(c, 0, i))
         .filter((c): c is GenUINode => c !== null);
       out.push(...validated);
     } else {
-      const validated = validateNode(node, 0);
+      const validated = validateNode(node, 0, out.length);
       if (validated) out.push(validated);
     }
   }

@@ -90,12 +90,21 @@ interface SubagentStore {
   subagents: SubagentConfig[];
   sessions: SubagentChatSession[];
   activeSessionId: string | null;
+  /** Sidebar visibility (PRD §15 — auto-open). True while the Sub-Agent
+   *  sidebar should be open. Set to true automatically whenever a sub-agent
+   *  tool call starts; the user closing the sidebar sets it back to false,
+   * and the NEXT sub-agent invocation re-opens it. NOT persisted (UI
+   * state, not data). */
+  sidebarOpen: boolean;
 
   // Subagent config actions
   createSubagent: (config: Partial<SubagentConfig>) => SubagentConfig;
   updateSubagent: (id: string, updates: Partial<SubagentConfig>) => void;
   deleteSubagent: (id: string) => void;
   getSubagent: (id: string) => SubagentConfig | undefined;
+
+  /** Open/close the Sub-Agent sidebar (PRD §15). */
+  setSidebarOpen: (open: boolean) => void;
 
   // Lifecycle management — the orchestration pipeline drives these.
   updateLifecycleStatus: (id: string, status: AgentLifecycleStatus) => void;
@@ -122,6 +131,13 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
   subagents: [],
   sessions: [],
   activeSessionId: null,
+  sidebarOpen: false,
+
+  setSidebarOpen: (open) => {
+    // Skip no-op sets so subscribers don't re-render.
+    if (get().sidebarOpen === open) return;
+    set({ sidebarOpen: open });
+  },
 
   createSubagent: (config) => {
     const subagent: SubagentConfig = {

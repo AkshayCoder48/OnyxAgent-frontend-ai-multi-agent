@@ -1,7 +1,7 @@
 /* ThinkingReasoning — AICSS "Thinking + Reasoning" module.
    Frameless, basic-text UI: no card, no border — just the header line and
-   the reasoning stream beneath it. Geometry kept in sync with the TSX
-   (SENT_H 40 / GAP 4 / MAX_H 180 / FADE 16). */
+   the reasoning stream beneath it. Rows are NATURAL height (line-height
+   20px, gap 4px) — no fixed 40px boxes, no 2-line clamping (PRD §5). */
 
 .tr {
   display: block;
@@ -99,6 +99,7 @@
   position: relative;
   overflow: hidden;
   min-width: 0;
+  /* Capped by inline style (max-height 180px) from the TSX. */
 }
 
 .trViewport.isScroll {
@@ -115,17 +116,48 @@
 
 .trSentence {
   margin: 0;
-  height: 40px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  display: block;
   color: var(--color-foreground);
   opacity: 0.72;
   font-size: 0.75rem;
   line-height: 20px;
   overflow-wrap: anywhere;
+  white-space: normal;
   animation: trSentenceIn 240ms ease-out both;
+}
+
+/* ── Streaming tint (PRD §14, assistant-ui "Streaming text") ────────────
+   The newest words of the live sentence land in blue and settle into the
+   normal ink over ~700ms — never the whole block, just the trailing
+   window. Words keep their DOM identity (word-index keys) so a word moving
+   OUT of the tint window transitions color instead of snapping. */
+.trWord {
+  transition: color 700ms ease;
+}
+
+.trWordTint {
+  color: #3b82f6; /* blue-500 — the streaming tint (settles to ink) */
+}
+
+.trCaret {
+  display: inline-block;
+  width: 0.4em;
+  height: 0.95em;
+  margin-left: 0.12em;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: #3b82f6;
+  animation: trCaretBlink 900ms steps(2, start) infinite;
+}
+
+@keyframes trCaretBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 @keyframes trSentenceIn {
@@ -147,5 +179,11 @@
   .trCollapsible,
   .trCollapsible.isCollapsed {
     transition: none;
+  }
+  .trWord {
+    transition: none;
+  }
+  .trCaret {
+    animation: none;
   }
 }

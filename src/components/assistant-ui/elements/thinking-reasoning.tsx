@@ -10,9 +10,13 @@ import styles from "./ThinkingReasoning.module.css";
  *
  * Adapted from the reference to be props-driven (the sentences stream in
  * from the agent's live thinking/reasoning text, and `phase` is flipped by
- * the caller when the turn settles) while preserving the reference geometry:
- * 40px sentence rows, 4px gaps, a 180px capped viewport with 16px fades,
- * and the ~360ms collapse beat. Honors prefers-reduced-motion.
+ * the caller when the turn settles). Honors prefers-reduced-motion.
+ *
+ * NATURAL ROW HEIGHTS (PRD §5 — reasoning text formatting): sentences used
+ * to sit in FIXED 40px two-line boxes — short sentences left ~20px of dead
+ * space under them (the "unwanted gaps") and long sentences were clipped at
+ * two lines. Rows now size to their content: line-height 20px, 4px gaps,
+ * no clamping, with a 180px capped scroll viewport + 16px edge fades.
  */
 export interface ThinkingReasoningProps {
   /** The reasoning sentences, in order — revealed as they arrive. */
@@ -27,11 +31,34 @@ export interface ThinkingReasoningProps {
   activeLabel?: string;
 }
 
-// Geometry — keep in sync with the CSS below (reference values).
-const SENT_H = 40; // 2 lines × 20px
-const GAP = 4;
-const MAX_H = 180; // viewport grows with content up to this, then scrolls
+const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
 const FADE = 16; // top/bottom fade once the viewport is capped
+
+/**
+ * The live sentence's words: all plain except the newest two, which render
+ * tinted blue and settle into the normal ink over 700ms as they leave the
+ * trailing window (PRD §14 / assistant-ui "Streaming text"). A caret rides
+ * at the end while streaming. Word spans keep stable word-index keys so a
+ * word leaving the window transitions color rather than remounting.
+ */
+function StreamingSentence({ text }: { text: string }) {
+  const words = text.split(" ").filter(Boolean);
+  const tintFrom = Math.max(0, words.length - 2);
+  return (
+    <>
+      {words.map((w, wi) => (
+        <span
+          key={wi}
+          className={styles.trWord + (wi >= tintFrom ? " " + styles.trWordTint : "")}
+        >
+          {w}
+          {wi < words.length - 1 ? " " : ""}
+        </span>
+      ))}
+      <span className={styles.trCaret} aria-hidden="true" />
+    </>
+  );
+}
 
 export function ThinkingReasoning({
   sentences,
@@ -41,22 +68,32 @@ export function ThinkingReasoning({
   activeLabel = "Thinking…",
 }: ThinkingReasoningProps) {
   const [open, setOpen] = useState(false);
+  const [capped, setCapped] = useState(false);
   const [fade, setFade] = useState({ top: false, bottom: true });
   const viewportRef = useRef<HTMLDivElement>(null);
 
   const done = phase === "done";
   const count = sentences.length;
-  const contentH = count > 0 ? count * SENT_H + (count - 1) * GAP : 0;
-  const capped = contentH > MAX_H;
-  const viewH = capped ? MAX_H : contentH;
   const scrollable = done && open;
-  const translate = scrollable ? 0 : capped ? MAX_H - FADE - contentH : 0;
-  const showTop = scrollable ? fade.top : capped;
-  const showBottom = scrollable ? fade.bottom : capped;
-  const mask = capped
-    ? `linear-gradient(to bottom, transparent 0, #000 ${showTop ? FADE : 0}px, #000 calc(100% - ${showBottom ? FADE : 0}px), transparent 100%)`
-    : "none";
-  const elapsedS = Math.max(1, Math.round(elapsedSeconds));
+
+  // Capped detection + follow-the-stream auto-scroll. Runs whenever the
+  // sentence list grows (streaming) or the block expands (done + open).
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const over = el.scrollHeight > el.clientHeight + 1;
+    setCapped(over);
+    if (!done && over) {
+      // While streaming, keep the newest sentence in view.
+      el.scrollTop = el.scrollHeight;
+    }
+    if (scrollable) {
+      setFade({
+        top: el.scrollTop > 1,
+        bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 1,
+      });
+    }
+  }, [count, done, scrollable]);
 
   useEffect(() => {
     // Under reduced motion the block starts expanded (no reveal animations).
@@ -88,6 +125,13 @@ export function ThinkingReasoning({
   // While thinking the reasoning is always open; once done it folds into
   // the summary and the user can toggle it back open.
   const expanded = done ? open : true;
+
+  const showTop = scrollable ? fade.top : capped;
+  const showBottom = scrollable ? fade.bottom : capped;
+  const mask = capped
+    ? `linear-gradient(to bottom, transparent 0, #000 ${showTop ? FADE : 0}px, #000 calc(100% - ${showBottom ? FADE : 0}px), transparent 100%)`
+    : "none";
+  const elapsedS = Math.max(1, Math.round(elapsedSeconds));
 
   return (
     <div className={styles.tr}>
@@ -134,19 +178,20 @@ export function ThinkingReasoning({
             ref={viewportRef}
             className={styles.trViewport + (scrollable ? " " + styles.isScroll : "")}
             style={{
-              height: `${viewH}px`,
+              maxHeight: `${MAX_H}px`,
               WebkitMaskImage: mask,
               maskImage: mask,
             }}
             onScroll={scrollable ? onScroll : undefined}
           >
-            <div
-              className={styles.trStream}
-              style={{ transform: `translateY(${translate}px)` }}
-            >
+            <div className={styles.trStream}>
               {sentences.slice(0, count).map((line, i) => (
                 <p key={i} className={styles.trSentence}>
-                  {line}
+                  {!done && i === count - 1 ? (
+                    <StreamingSentence text={line} />
+                  ) : (
+                    line
+                  )}
                 </p>
               ))}
             </div>

@@ -145,7 +145,11 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss }: MessageLi
         const prev = messages[index - 1];
 
         return (
-          <div key={message.id}>
+          // STABLE RENDER KEY: the message's temp id survives the end-of-turn
+          // `message_saved` id swap (see ChatMessage.renderKey), so finalizing
+          // a turn never remounts the message subtree — GenUI cards keep
+          // their DOM identity and iframes don't reload at completion.
+          <div key={message.renderKey ?? message.id}>
             {isNewDay(prev, message) && (
               <DateSeparator date={new Date(message.timestamp)} />
             )}

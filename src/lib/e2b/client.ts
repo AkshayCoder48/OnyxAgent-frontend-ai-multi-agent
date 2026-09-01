@@ -424,30 +424,36 @@ export class E2BClient {
 
   async *runPythonStream(
     code: string,
-    opts?: { timeout?: number },
+    opts?: { timeout?: number; envs?: Record<string, string> },
   ): AsyncIterable<StreamMessage> {
     // REAL STREAMING via SSE — pipes stdout/stderr chunks to the caller
     // as they arrive from the E2B sandbox, instead of waiting for the
     // entire Python execution to finish. This is what makes `run_python`
     // output appear LIVE (e.g. `print()` lines show up immediately).
+    // `envs` (PRD §14): the user's env-var VALUES, injected into the
+    // execution so `os.environ[...]` resolves to real values.
     yield* this.consumeSSEStream("run_python_stream", {
       code,
       timeout: opts?.timeout ?? 60,
+      ...(opts?.envs ? { envs: opts.envs } : {}),
     });
   }
 
   async *runCommandStream(
     command: string,
-    opts?: { cwd?: string; timeout?: number },
+    opts?: { cwd?: string; timeout?: number; envs?: Record<string, string> },
   ): AsyncIterable<StreamMessage> {
     // REAL STREAMING via SSE — pipes stdout/stderr chunks to the caller
     // as they arrive from the E2B sandbox, instead of waiting for the
     // entire command to finish. This is what makes `run_terminal` output
     // appear LIVE (e.g. `ls -la` output streams line-by-line).
+    // `envs` (PRD §14): the user's env-var VALUES, injected into the
+    // command so `$VAR` references resolve to real values.
     yield* this.consumeSSEStream("exec_stream", {
       command,
       cwd: opts?.cwd ?? "/home/user",
       timeout: opts?.timeout ?? 120,
+      ...(opts?.envs ? { envs: opts.envs } : {}),
     });
   }
 

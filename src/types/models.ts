@@ -130,9 +130,6 @@ export interface UserSettings {
   env_vars:
     | Array<{ name: string; is_secret: boolean; value_present: boolean }>
     | Record<string, string>;
-  /** When true, the agent runtime skips HITL approval for tools flagged
-   *  `requires_approval` (e.g. `run_terminal`). Stored under `extra`. */
-  auto_approve_tools: boolean;
   /** "auto" | "local" | "hopx" — sandbox selection strategy. */
   file_system_mode?: "auto" | "local" | "hopx";
   /** Sandbox allocation strategy: "shared" or "separate". */

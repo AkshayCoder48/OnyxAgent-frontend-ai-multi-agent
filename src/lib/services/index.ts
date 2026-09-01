@@ -202,6 +202,9 @@ export interface AddMessageInput {
   }>;
   fileIds?: string[];
   modelName?: string;
+  /** Checkpoint flag — true while the turn is still in flight (see
+   *  saveAgentCheckpoint). Omitted on the final save. */
+  isStreaming?: boolean;
   tokensUsed?: number;
 }
 
@@ -224,6 +227,15 @@ export const conversationService = {
     const row = await db.conversations.get(id);
     if (!row || row.user_id !== userId) return null;
     return toConversation(row);
+  },
+
+  /** User-agnostic existence check. The local-first app can have transient
+   *  auth identities (synchronous default user before the persisted user
+   *  loads from Dexie, plus legacy default-user rows), so strict user
+   *  scoping would wrongly reject valid conversations during hydration. */
+  async exists(id: string): Promise<boolean> {
+    const row = await db.conversations.get(id);
+    return row !== undefined;
   },
 
   async create(userId: string, title?: string): Promise<Conversation> {
@@ -382,6 +394,89 @@ export const conversationService = {
     // Return message — keep thinking/reasoning/parts now that
     // ConversationMessage exposes them.
     return messageRow as unknown as ConversationMessage;
+  },
+
+  /**
+   * AGENT CHECKPOINT (PRD §6/§32 — background execution resilience):
+   * upsert an IN-PROGRESS assistant message with a STABLE id so a page
+   * refresh / tab close mid-turn preserves everything accumulated so far
+   * (rounds, reasoning, tool calls + results). The final end-of-turn save
+   * writes the SAME id, so one turn can never produce duplicate assistant
+   * rows. Tool-call rows for the message are replaced wholesale each save.
+   */
+  async saveAgentCheckpoint(
+    conversationId: string,
+    userId: string,
+    messageId: string,
+    input: Omit<AddMessageInput, "role"> & { role?: "assistant" },
+  ): Promise<ConversationMessage> {
+    const existing = await db.messages.get(messageId);
+    const ts = nowISO();
+    const row = {
+      id: messageId,
+      conversation_id: conversationId,
+      role: "assistant" as const,
+      content: input.content,
+      created_at: existing?.created_at ?? ts,
+      model_name: input.modelName,
+      tokens_used: input.tokensUsed,
+      tool_calls: [],
+      files: [],
+      thinking: input.thinking ?? null,
+      reasoning: input.reasoning ?? null,
+      parts: input.parts ?? null,
+      /** Extra (non-indexed) property — marks an interrupted turn after a
+       *  refresh. The final save omits it. */
+      is_streaming: input.isStreaming ?? true,
+    };
+    await db.messages.put(row);
+    await bumpConversationTimestamp(conversationId);
+    // Replace tool-call rows wholesale (checkpoints rewrite the full set).
+    await db.tool_calls.where("message_id").equals(messageId).delete();
+    if (input.toolCalls && input.toolCalls.length > 0) {
+      const toolRows: ToolCallRow[] = input.toolCalls.map((tc): ToolCallRow => ({
+        id: `${messageId}:${tc.id}`,
+        message_id: messageId,
+        tool_call_id: tc.id,
+        tool_name: tc.name,
+        args: tc.args,
+        result:
+          typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? null),
+        status: (tc.status ?? "completed") === "error" ? "failed" : "completed",
+        started_at: ts,
+        completed_at: ts,
+        duration_ms: 0,
+      }));
+      await db.tool_calls.bulkAdd(toolRows);
+      (row as unknown as ConversationMessage).tool_calls = toolRows.map((t) => ({
+        id: t.id,
+        message_id: t.message_id,
+        tool_call_id: t.tool_call_id,
+        tool_name: t.tool_name,
+        args: t.args,
+        result: t.result,
+        status: t.status as ConversationToolCallStatus,
+        started_at: t.started_at,
+        completed_at: t.completed_at,
+        duration_ms: t.duration_ms,
+      }));
+    }
+    if (!existing) {
+      // First checkpoint ≈ message creation — link attached files like
+      // addMessage does.
+      if (input.fileIds && input.fileIds.length > 0) {
+        await db.chat_files
+          .where("id")
+          .anyOf(input.fileIds)
+          .modify({ message_id: messageId, conversation_id: conversationId });
+      }
+      void userId; // reserved for future scoping
+    }
+    await db.conversations.update(conversationId, {
+      last_message_preview: input.content.slice(0, 200),
+      last_message_at: ts,
+    });
+    return row as unknown as ConversationMessage;
   },
 
   async deleteMessage(conversationId: string, messageId: string): Promise<void> {
@@ -870,12 +965,6 @@ export interface UserSettings {
   sandbox_api_key_present: boolean;
   tavily_api_key_present: boolean;
   embeddings_api_key_present: boolean;
-  /** Whether Telegram bot token is stored (encrypted). */
-  telegram_bot_token_present: boolean;
-  /** Whether WhatsApp instance ID is stored (encrypted, via Green-API). */
-  whatsapp_instance_id_present: boolean;
-  /** Whether WhatsApp API token is stored (encrypted, via Green-API). */
-  whatsapp_api_token_present: boolean;
   /** Whether a SkillsMP marketplace API key is stored (encrypted in
    *  `extra.skillsmp_api_key_encrypted`). Optional — anonymous access works
    *  for basic search (50 req/day), an API key raises the limit to 500/day. */
@@ -892,12 +981,6 @@ export interface UserSettings {
   env_vars:
     | Array<{ name: string; is_secret: boolean; value_present: boolean }>
     | Record<string, string>;
-  /** When true, the agent runtime skips HITL approval for tools flagged
-   *  `requires_approval` (e.g. `run_terminal`). Stored under `extra`. */
-  auto_approve_tools: boolean;
-  /** When true, all tool calls execute in a SINGLE round (no multi-round
-   *  text → tool → text → tool loops). Produces ONE message bubble. */
-  single_round_mode?: boolean;
   /** "auto" (default — uses E2B sandbox if key set, else local), "local"
    *  (always local), "hopx" (legacy alias for E2B sandbox — errors if no key).
    *  Stored under `extra.file_system_mode`. */
@@ -951,9 +1034,6 @@ export const settingsService = {
       sandbox_api_key_present: !!row.e2b_api_key_encrypted,
       tavily_api_key_present: !!row.tavily_api_key_encrypted,
       embeddings_api_key_present: !!row.embeddings_api_key_encrypted,
-      telegram_bot_token_present: !!(row.extra?.telegram_bot_token_encrypted),
-      whatsapp_instance_id_present: !!(row.extra?.whatsapp_instance_id_encrypted),
-      whatsapp_api_token_present: !!(row.extra?.whatsapp_api_token_encrypted),
       skillsmp_api_key_present: !!row.extra?.skillsmp_api_key_encrypted,
       langsearch_api_key_present: !!row.extra?.langsearch_api_key_encrypted,
       env_vars: Object.entries(row.env_vars ?? {}).map(([name, v]) => ({
@@ -961,10 +1041,6 @@ export const settingsService = {
         is_secret: v.is_secret,
         value_present: !!v.value,
       })),
-      // `extra.auto_approve_tools` defaults to false — the HITL approval gate
-      // is on by default for safety. The settings page can flip it on.
-      auto_approve_tools: !!row.extra?.auto_approve_tools,
-      single_round_mode: !!row.extra?.single_round_mode,
       file_system_mode: (row.extra?.file_system_mode as "auto" | "local" | "hopx") ?? "auto",
       sandbox_mode: (row.extra?.sandbox_mode as "shared" | "separate") ?? "shared",
       ai_framework: (row.extra?.ai_framework as string) ?? "default",
@@ -997,11 +1073,26 @@ export const settingsService = {
       update.extra = { ...(update.extra ?? row.extra ?? {}), default_thinking_effort: patch.default_thinking_effort };
     }
     // Handle env_vars — the settings page sends Record<string, string>,
-    // but the DB stores Record<string, { value, is_secret }>. Convert.
+    // but the DB stores Record<string, { value, is_secret }> (secrets
+    // ENCRYPTED). PRD §14 fix: this path previously hardcoded
+    // `is_secret: false` and skipped encryption, silently downgrading
+    // encrypted secrets to plaintext whenever the settings page saved.
+    // Now: preserve the existing flag (heuristic for new names), and
+    // encrypt secret values exactly like `setEnvVars` does.
     if (patch.env_vars !== undefined) {
+      const existing = row.env_vars ?? {};
       const envVarsRecord: Record<string, { value: string; is_secret: boolean }> = {};
       for (const [name, value] of Object.entries(patch.env_vars)) {
-        envVarsRecord[name] = { value: String(value), is_secret: false };
+        const prev = existing[name];
+        const isSecret =
+          prev?.is_secret ??
+          /key|token|secret|password|passphrase|credential|auth/i.test(name);
+        const val = String(value);
+        if (isSecret && val) {
+          envVarsRecord[name] = { value: await vaultEncrypt(val), is_secret: true };
+        } else {
+          envVarsRecord[name] = { value: val, is_secret: isSecret };
+        }
       }
       update.env_vars = envVarsRecord;
     }
@@ -1207,54 +1298,6 @@ export const settingsService = {
     }
   },
 
-  /**
-   * Read the auto-approve-tools flag from `extra`. When true the agent runtime
-   * skips the HITL approval gate for tools flagged `requires_approval` (e.g.
-   * `run_terminal`, `run_python`). Off by default — surfaces in the Config
-   * settings page as "Auto-approve tool calls".
-   */
-  async getAutoApproveTools(userId: string): Promise<boolean> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) return false;
-    return !!row.extra?.auto_approve_tools;
-  },
-
-  async setAutoApproveTools(userId: string, enabled: boolean): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    const extra = { ...(row.extra ?? {}), auto_approve_tools: enabled };
-    await db.user_settings.update(row.id, {
-      extra,
-      updated_at: nowISO(),
-    });
-  },
-
-  /** Single-round mode: all tools execute in one round, producing a single
-   *  message bubble instead of multiple bubbles split by tool calls. */
-  async getSingleRoundMode(userId: string): Promise<boolean> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) return false;
-    return !!row.extra?.single_round_mode;
-  },
-
-  async setSingleRoundMode(userId: string, enabled: boolean): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    const extra = { ...(row.extra ?? {}), single_round_mode: enabled };
-    await db.user_settings.update(row.id, {
-      extra,
-      updated_at: nowISO(),
-    });
-  },
-
   /** Set the file system mode: "auto", "local", or "hopx" (legacy alias for
    *  the E2B sandbox). */
   async setFileSystemMode(userId: string, mode: "auto" | "local" | "hopx"): Promise<void> {
@@ -1374,59 +1417,6 @@ export const mcpService = {
 
   async delete(id: string) {
     await db.mcp_servers.delete(id);
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Generic secret storage for Telegram/WhatsApp bridge credentials.
-// Stored encrypted in user_settings.extra under custom keys.
-// ---------------------------------------------------------------------------
-
-export const secretService = {
-  async set(userId: string, keyName: string, value: string | null): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await settingsService.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) return;
-
-    const extra = { ...(row.extra ?? {}) };
-    const encryptedKey = `${keyName}_encrypted`;
-
-    if (value === null) {
-      delete extra[encryptedKey];
-    } else {
-      try {
-        if (!isVaultUnlocked()) {
-          const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
-          await restoreVaultFromSession();
-        }
-        extra[encryptedKey] = await vaultEncrypt(value);
-      } catch {
-        extra[encryptedKey] = value; // fallback: store plaintext (not recommended)
-      }
-    }
-
-    await db.user_settings.update(row.id!, { extra, updated_at: nowISO() });
-  },
-
-  async get(userId: string, keyName: string): Promise<string | null> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) return null;
-
-    const encrypted = row.extra?.[`${keyName}_encrypted`];
-    if (typeof encrypted !== "string" || !encrypted) return null;
-
-    try {
-      if (!isVaultUnlocked()) {
-        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
-        await restoreVaultFromSession();
-      }
-      return await vaultDecrypt(encrypted);
-    } catch {
-      return null;
-    }
   },
 };
 

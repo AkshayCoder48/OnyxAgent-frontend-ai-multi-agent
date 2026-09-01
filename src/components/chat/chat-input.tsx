@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
-import { ArrowUp, Loader2, Paperclip, Square, Sparkles, Zap } from "lucide-react";
+import { ArrowUp, Loader2, Paperclip, Square, Sparkles } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {
   BUILTIN_COMMANDS,
@@ -26,10 +26,6 @@ interface ChatInputProps {
   slashContext?: SlashCommandContext;
   /** Effective slash commands (built-ins + user customs, after overrides). */
   commands?: SlashCommand[];
-  /** Single-round mode state — shows a visual indicator when active. */
-  singleRoundMode?: boolean;
-  /** Toggle single-round mode. */
-  onToggleSingleRound?: () => void;
 }
 
 /**
@@ -39,7 +35,6 @@ interface ChatInputProps {
  * - Auto-resizing textarea (min 40px, max 200px)
  * - File attachments with image previews
  * - Slash command palette
- * - Single-round mode toggle (Zap icon)
  * - Send / Stop button with smooth state transition
  * - Keyboard shortcuts: Enter to send, Shift+Enter for newline
  * - Focus glow effect via parent wrapper
@@ -52,8 +47,6 @@ export function ChatInput({
   onStop,
   slashContext,
   commands,
-  singleRoundMode,
-  onToggleSingleRound,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
@@ -273,28 +266,8 @@ export function ChatInput({
           />
         </div>
 
-        {/* Right: Single-round toggle + Send/Stop */}
+        {/* Right: Send/Stop */}
         <div className="flex shrink-0 items-center gap-1 pb-0.5">
-          {onToggleSingleRound && (
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              onClick={onToggleSingleRound}
-              disabled={disabled}
-              className={cn(
-                "h-9 w-9 shrink-0 rounded-xl transition-all",
-                singleRoundMode
-                  ? "bg-primary/10 text-primary hover:bg-primary/20"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/60",
-              )}
-              title={singleRoundMode ? "Single-round mode ON — click to turn off" : "Enable single-round mode"}
-              aria-label="Toggle single-round mode"
-              aria-pressed={singleRoundMode}
-            >
-              <Zap className={cn("h-4 w-4", singleRoundMode && "fill-current")} />
-            </Button>
-          )}
           {isProcessing && onStop ? (
             <Button
               type="button"

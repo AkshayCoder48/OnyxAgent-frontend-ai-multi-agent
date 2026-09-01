@@ -306,7 +306,7 @@ function toSpec(raw: unknown, streaming: boolean): GenUISpec | null {
 
   const normalized = (nodes as unknown[])
     .filter((n): n is Record<string, unknown> => !!n && typeof n === "object")
-    .map((n: Record<string, unknown>, idx: number) => normalizeNode(n, idx, streaming));
+    .map((n: Record<string, unknown>, idx: number) => normalizeNode(n, "", idx, streaming));
   if (normalized.length === 0) return null;
   return { nodes: normalized };
 }
@@ -317,17 +317,27 @@ function toSpec(raw: unknown, streaming: boolean): GenUISpec | null {
  * in a `props` field), e.g. `{"type":"header","title":"..."}`. We must collect
  * all unknown keys (everything except `type`, `id`, `children`, `meta`, `props`)
  * into the `props` object so validateSpec + the renderers can find them.
+ *
+ * STREAMING KEY STABILITY (PRD §14): fallback ids are derived from the node's
+ * position path (`${parentPath}${idx}-${type}`), which is stable across
+ * re-parses of the growing partial JSON — the same node keeps the same id,
+ * so React reconciles instead of remounting (the flicker fix). Including the
+ * parent path also prevents id collisions between siblings at different
+ * depths (previously a child `card` at index 0 collided with a top-level
+ * `card` at index 0 — duplicate React keys).
  */
 function normalizeNode(
   raw: Record<string, unknown>,
+  parentPath: string,
   idx: number,
   streaming: boolean,
 ): GenUINode {
   const type = typeof raw.type === "string" ? raw.type : "unknown";
+  const path = `${parentPath}${idx}-`;
   const id =
     typeof raw.id === "string" && raw.id.length > 0
       ? raw.id
-      : `genui-${idx}-${type}`;
+      : `genui-${path}${type}`;
 
   // Collect props from BOTH `raw.props` (proper format) AND top-level keys
   // (flat format that the AI naturally emits). Top-level keys take precedence
@@ -353,7 +363,7 @@ function normalizeNode(
         .filter(
           (c): c is Record<string, unknown> => !!c && typeof c === "object",
         )
-        .map((c, i) => normalizeNode(c, i, streaming))
+        .map((c, i) => normalizeNode(c, path, i, streaming))
     : undefined;
 
   const metaRaw =

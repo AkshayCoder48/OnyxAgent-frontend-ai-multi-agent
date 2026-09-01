@@ -39,6 +39,14 @@ export interface RawMessage {
  * old behavior) so messages saved before the parts-persistence change still
  * render correctly.
  *
+ * TOOL RESULT REPAIR (PRD §3 — "Web Search UI persistence"): messages saved
+ * before the result-backfill fix persisted tool parts WITHOUT
+ * `toolCall.result` (the result only lived in the separate `tool_calls` rows
+ * and in the live event stream). When such a legacy part is found, the result
+ * is merged back in from the matching `tool_calls` row — so old conversations
+ * reconstruct their rich tool cards (web search, charts, downloads…) exactly
+ * instead of rendering as empty rectangles after a refresh.
+ *
  * Used by both the authenticated chat (when loading a saved conversation) and
  * the public demo replay.
  */
@@ -53,11 +61,41 @@ export function conversationMessageToChatMessage(msg: RawMessage): ChatMessage {
     status: (tc.status === "failed" ? "error" : tc.status) as ToolCall["status"],
   }));
 
+  // Result lookup by tool_call_id — used to repair legacy parts (see doc).
+  const resultByToolId = new Map<string, { result: unknown; status: string }>();
+  for (const tc of msg.tool_calls ?? []) {
+    resultByToolId.set(tc.tool_call_id, {
+      result: tc.result,
+      status: tc.status === "failed" ? "error" : (tc.status ?? "completed"),
+    });
+  }
+
   // Use persisted parts if available; otherwise reconstruct from toolCalls +
   // content (legacy messages).
   let parts: MessagePart[] | undefined;
   if (Array.isArray(msg.parts) && msg.parts.length > 0) {
-    parts = msg.parts as MessagePart[];
+    parts = (msg.parts as MessagePart[]).map((p) => {
+      // Repair: tool part missing its result → merge from the tool_calls row.
+      if (
+        p.type === "tool" &&
+        p.toolCall &&
+        p.toolCall.result === undefined &&
+        p.toolCall.id
+      ) {
+        const row = resultByToolId.get(p.toolCall.id);
+        if (row) {
+          return {
+            ...p,
+            toolCall: {
+              ...p.toolCall,
+              result: row.result,
+              status: (row.status === "error" ? "error" : (p.toolCall.status ?? "completed")) as ToolCall["status"],
+            },
+          };
+        }
+      }
+      return p;
+    });
   } else if (msg.role === "assistant") {
     parts = [
       ...(toolCalls ?? []).map((tc) => ({

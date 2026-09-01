@@ -22,6 +22,7 @@ import {
   ThinkingReasoning,
   Orb,
 } from "@/components/assistant-ui/elements";
+import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
@@ -76,13 +77,19 @@ function ReasoningPanel({
   const isThinking = variant === "thinking";
 
   // Split the (possibly still-streaming) reasoning text into sentences —
-  // the element reveals them row by row with a 40px row height.
+  // the element reveals them row by row. PRD §5 (reasoning formatting):
+  // normalize ONLY unintended repeated whitespace (3+ blank lines → one
+  // paragraph break, long space runs → one space) — never a blanket trim
+  // on the raw stream, which would damage legitimate formatting.
   const sentences = React.useMemo(() => {
-    const trimmed = (text ?? "").trim();
-    if (!trimmed) return [] as string[];
-    return trimmed
+    const normalized = (text ?? "")
+      .replace(/\n{3,}/g, "\n\n") // collapse 3+ newlines to a paragraph break
+      .replace(/[^\S\n]{2,}/g, " ") // collapse space/tab runs (keep newlines)
+      .trim();
+    if (!normalized) return [] as string[];
+    return normalized
       .split(/(?<=[.!?;])\s+/)
-      .map((s) => s.trim())
+      .map((s) => s.replace(/\s+/g, " ").trim())
       .filter((s) => s.length > 0);
   }, [text]);
 
@@ -137,6 +144,19 @@ function ThinkingBlock(props: { text: string; open: boolean; isStreaming: boolea
 
 function ReasoningBlock(props: { text: string; open: boolean; isStreaming: boolean }) {
   return <ReasoningPanel {...props} variant="reasoning" />;
+}
+
+/**
+ * Random response orb glyph (PRD §25–§28): the 25-variant pick made once
+ * when this AI response began (see response-orb.ts). Rendered at 28px —
+ * noticeably larger than the old 18px — and leading the thinking label on
+ * ONE items-center flex row so the text sits on the lattice midline.
+ * Reading the singleton via useMemo means only this glyph re-renders when
+ * the response's orb is chosen — never the app, chat, or message list.
+ */
+function ResponseOrbGlyph({ size = 28 }: { size?: number }) {
+  const variant = React.useMemo(() => currentResponseOrb(), []);
+  return <Orb variant={variant} size={size} className="shrink-0" />;
 }
 
 function TextBubble({
@@ -313,7 +333,13 @@ interface MessageItemProps {
  * Design: matches the simple tool-name disclosure style — no card chrome,
  * just a chevron, a quiet label, and a failure count when present.
  */
-function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").MessagePart[] }) {
+function CollapsibleToolGroup({
+  parts,
+  turnId,
+}: {
+  parts: import("@/types/chat").MessagePart[];
+  turnId?: string | null;
+}) {
   const [expanded, setExpanded] = React.useState(false);
   const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
   const anyRunning = toolParts.some((p) => p.toolCall?.status === "running" || p.toolCall?.status === "pending");
@@ -357,12 +383,212 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
         <div className="mt-1 space-y-1 border-l border-border/70 pl-2">
           {toolParts.map((part) => (
             <div key={part.id} className="w-full">
-              <ToolCallCard toolCall={part.toolCall!} />
+              <ToolCallCard toolCall={part.toolCall!} turnId={turnId} />
             </div>
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ROUND-BASED RENDERING (PRD §9–16) — every agent round gets its own
+// reasoning panel + its own tool stack. Timing belongs to the round: while
+// active the elapsed badge ticks; once the next round starts (or the turn
+// completes) roundEndedAt freezes that round's duration forever — starting
+// Round 2 never resets Round 1's displayed duration.
+// ---------------------------------------------------------------------------
+
+/** Elapsed seconds for a round. Ticks while `active`; frozen once the round
+ *  ended. Falls back to a local measure when the part carried no timestamps
+ *  (legacy rows). */
+function useRoundElapsed(
+  startedAt: number | undefined,
+  endedAt: number | undefined,
+  active: boolean,
+): number {
+  const [now, setNow] = React.useState(() => Date.now());
+  const [localStart, setLocalStart] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    if (!active) return;
+    setLocalStart((s) => (s === null ? Date.now() : s));
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [active]);
+  const start = startedAt ?? localStart;
+  const end = endedAt ?? (active ? now : null);
+  if (start == null || end == null) return 0;
+  return Math.max(0, (end - start) / 1000);
+}
+
+function roundElapsedLabel(seconds: number): string {
+  const s = Math.max(1, Math.round(seconds));
+  return `${s}s`;
+}
+
+interface RoundSegmentData {
+  round: number;
+  startedAt?: number;
+  endedAt?: number;
+  /** Merged thinking/reasoning parts of THIS round only. */
+  thinkingParts: import("@/types/chat").MessagePart[];
+  /** Render items (tool / toolGroup / text / todoPanel) of this round. */
+  items: RoundRenderItem[];
+}
+
+type RoundRenderItem =
+  | { kind: "text"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
+  | { kind: "tool"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
+  | { kind: "toolGroup"; parts: import("@/types/chat").MessagePart[]; isLast: boolean; round: number }
+  | { kind: "todoPanel"; isLast: boolean; round: number };
+
+/**
+ * One agent round: a "Thought for Ns" reasoning panel (or a bare
+ * status row when the round has no reasoning text) with the round's tool
+ * stack visually attached beneath it (left hairline). Tool calls generated
+ * during the same round group together here — "these tools belong to this
+ * agent round."
+ */
+function RoundPanel({
+  segment,
+  isLastSegment,
+  isStreaming,
+  isUser,
+  turnId,
+  onCiteClick,
+  genuiNodes,
+  onTodoDismiss,
+}: {
+  segment: RoundSegmentData;
+  isLastSegment: boolean;
+  isStreaming: boolean;
+  isUser: boolean;
+  turnId?: string | null;
+  onCiteClick?: (index: number) => void;
+  genuiNodes?: GenUINode[];
+  onTodoDismiss?: () => void;
+}) {
+  const active = isStreaming && isLastSegment && segment.endedAt === undefined;
+  const elapsedSeconds = useRoundElapsed(segment.startedAt, segment.endedAt, active);
+
+  // Split the (possibly still-streaming) reasoning text into sentences for
+  // the ThinkingReasoning element. Each round's reasoning merges into one
+  // panel — but NEVER across rounds.
+  // PRD §5: normalize unintended whitespace only (see ReasoningPanel).
+  const reasoningText = segment.thinkingParts
+    .map((p) => p.content ?? "")
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[^\S\n]{2,}/g, " ")
+    .trim();
+
+  const sentences = React.useMemo(() => {
+    if (!reasoningText) return [] as string[];
+    return reasoningText
+      .split(/(?<=[.!?;])\s+/)
+      .map((s) => s.replace(/\s+/g, " ").trim())
+      .filter((s) => s.length > 0);
+  }, [reasoningText]);
+
+  const hasToolItems = segment.items.some(
+    (it) => it.kind === "tool" || it.kind === "toolGroup",
+  );
+
+  return (
+    <div className="round-in mb-1 min-w-0 max-w-full">
+      {/* Round header — the ThinkingReasoning panel header ("Thought for
+          Ns" / shimmering "Thinking…") when reasoning text exists, or a bare
+          status row otherwise. Rounds are NOT labeled "Round N" — each round
+          simply reads as its own thought session (user request: no visible
+          round numbering in thought sessions). */}
+      {sentences.length > 0 ? (
+        <ThinkingReasoning
+          sentences={sentences}
+          phase={active ? "thinking" : "done"}
+          elapsedSeconds={elapsedSeconds}
+          verb="Thought"
+          activeLabel="Thinking…"
+        />
+      ) : (
+        <div className="flex min-h-8 items-center gap-2.5 px-1" role="status" aria-live="polite">
+          {active ? (
+            <>
+              <ResponseOrbGlyph />
+              <ThinkingIndicator
+                label="Working"
+                elapsed={roundElapsedLabel(elapsedSeconds)}
+                showDot={false}
+              />
+            </>
+          ) : (
+            <>
+              <CheckRoundDone />
+              <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                {roundElapsedLabel(elapsedSeconds)}
+              </span>
+              {segment.thinkingParts.length === 0 && !hasToolItems && (
+                <span className="sr-only">completed</span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* The round's tool stack + text, in order. Tools get a left hairline
+          so the stack reads as belonging to this round (PRD §16). */}
+      {segment.items.map((item, idx) => {
+        if (item.kind === "todoPanel") {
+          return (
+            <div key="inline-todo-panel" className="w-full">
+              <ResearchPanel onDismiss={onTodoDismiss} />
+            </div>
+          );
+        }
+        if (item.kind === "toolGroup") {
+          return (
+            <div key={`group-${item.parts[0]!.id}`} className="border-border/70 mt-1 ml-1.5 border-l pl-3">
+              <CollapsibleToolGroup parts={item.parts} turnId={turnId} />
+            </div>
+          );
+        }
+        if (item.kind === "tool" && item.part.toolCall) {
+          return (
+            <div key={item.part.id} className="border-border/70 mt-1 ml-1.5 border-l pl-3">
+              <ToolCallCard toolCall={item.part.toolCall} turnId={turnId} />
+            </div>
+          );
+        }
+        // Text part — frameless, below the round's reasoning/tools.
+        const isLastItem = idx === segment.items.length - 1;
+        return (
+          <TextBubble
+            key={item.part.id}
+            text={item.part.content ?? ""}
+            showCursor={active && isLastItem && item.isLast}
+            isUser={isUser}
+            onCiteClick={onCiteClick}
+            genuiNodes={!isStreaming ? genuiNodes : undefined}
+            isStreaming={active && isLastItem}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function CheckRoundDone() {
+  return (
+    <svg viewBox="0 0 16 16" className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden>
+      <path
+        d="M3 8.5 6.2 11.5 13 4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -564,95 +790,156 @@ export const MessageItem = React.memo(function MessageItem({
             <>
               {showPlaceholder && (
                 <div
-                  className="flex h-7 items-center gap-2.5 px-1"
+                  className="flex min-h-8 items-center gap-2.5 px-1"
                   role="status"
                   aria-live="polite"
                 >
-                  <Orb variant="S1" size={18} className="shrink-0" />
+                  <ResponseOrbGlyph />
                   <ThinkingIndicator label="Thinking" showDot={false} />
                 </div>
               )}
 
               {useParts ? (
-                /* Chronological timeline: reasoning/thinking blocks first (at
-                 * top), then tool calls + text interleaved in their ORIGINAL
-                 * order. Consecutive tool calls (without text between them)
-                 * are grouped into a collapsible "N Tool Calls" bar. */
+                /* ROUND-BASED TIMELINE (PRD §9–21): every agent round renders
+                 * its OWN reasoning panel ("Thought for Ns", with
+                 * the round's own frozen/ticking timer) and its OWN tool
+                 * stack — reasoning from different rounds is never merged,
+                 * and rounds carry no visible "Round N" numbering. Turns with
+                 * one round segment keep the classic layout (one thinking
+                 * block, then tools + text in order). */
                 (() => {
-                  // Merge consecutive thinking/reasoning parts of the same type
-                  // into a single part. This prevents multiple "Thinking" bars
-                  // from appearing when the AI generates thinking across
-                  // multiple rounds split by tool calls.
-                  const rawThinkingParts = parts.filter((p) => (p.type === "thinking" || p.type === "reasoning") && p.content);
-                  const thinkingParts: typeof rawThinkingParts = [];
-                  for (const p of rawThinkingParts) {
-                    const last = thinkingParts[thinkingParts.length - 1];
-                    if (last && last.type === p.type && last.content) {
-                      last.content += "\n" + p.content;
-                    } else {
-                      thinkingParts.push({ ...p });
-                    }
-                  }
-                  const chronologicalParts = flowParts;
-                  const lastPart = parts[parts.length - 1];
                   const isLastStreaming = Boolean(message.isStreaming);
+                  const lastPart = parts[parts.length - 1];
 
-                  // Group consecutive tool calls into collapsible groups.
-                  // A group is 2+ consecutive tool parts with no text between.
-                  // Single tool calls are rendered as-is (no collapse).
-                  type RenderItem =
-                    | { kind: "text"; part: typeof chronologicalParts[0]; isLast: boolean }
-                    | { kind: "tool"; part: typeof chronologicalParts[0]; isLast: boolean }
-                    | { kind: "toolGroup"; parts: typeof chronologicalParts; isLast: boolean }
-                    | { kind: "todoPanel"; isLast: boolean };
-
-                  const renderItems: RenderItem[] = [];
+                  // ── Walk the flow parts into render items (tool grouping
+                  // + inline todo panel splice), tagged with each part's
+                  // round stamp (0 = legacy/unstamped).
+                  const renderItems: RoundRenderItem[] = [];
                   let i = 0;
-                  // Splice the inline todo plan panel in at its generation
-                  // position: after `todoInsertIndex` flow items have been
-                  // emitted, inject the panel marker (only when this message
-                  // owns the live plan — showTodoPanel).
                   const emitTodoAt =
                     todoInsertIndex >= 0 && showTodoPanel ? todoInsertIndex : Number.POSITIVE_INFINITY;
                   let todoEmitted = false;
-                  const emitTodoIfDue = (emittedCount: number, isLast: boolean) => {
+                  // Round of the last research part — the inline todo panel
+                  // (legacy research tools only) splices into that round.
+                  let todoRound = 0;
+                  for (const p of message.parts ?? []) {
+                    if (p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name)) {
+                      todoRound = p.round ?? 0;
+                    }
+                  }
+                  const emitTodoIfDue = (emittedCount: number, isLast: boolean, _round: number) => {
                     if (!todoEmitted && emittedCount >= emitTodoAt) {
-                      renderItems.push({ kind: "todoPanel", isLast });
+                      renderItems.push({ kind: "todoPanel", isLast, round: todoRound });
                       todoEmitted = true;
                     }
                   };
-                  while (i < chronologicalParts.length) {
-                    emitTodoIfDue(renderItems.length, i === chronologicalParts.length - 1);
-                    const part = chronologicalParts[i]!;
-                    const isLast = i === chronologicalParts.length - 1;
+                  while (i < flowParts.length) {
+                    emitTodoIfDue(renderItems.length, i === flowParts.length - 1, flowParts[i]!.round ?? 0);
+                    const part = flowParts[i]!;
+                    const isLast = i === flowParts.length - 1;
+                    const round = part.round ?? 0;
                     if (part.type === "tool" && part.toolCall) {
                       // Start collecting consecutive tool parts
-                      const group: typeof chronologicalParts = [];
-                      while (i < chronologicalParts.length && chronologicalParts[i]!.type === "tool") {
-                        group.push(chronologicalParts[i]!);
+                      const group: typeof flowParts = [];
+                      while (i < flowParts.length && flowParts[i]!.type === "tool") {
+                        group.push(flowParts[i]!);
                         i++;
                       }
                       if (group.length >= 2) {
                         // 2+ consecutive tools → collapsible group
-                        renderItems.push({ kind: "toolGroup", parts: group, isLast: i === chronologicalParts.length });
+                        renderItems.push({ kind: "toolGroup", parts: group, isLast: i === flowParts.length, round: group[0]!.round ?? round });
                       } else {
                         // Single tool → render as-is
-                        renderItems.push({ kind: "tool", part: group[0]!, isLast: i === chronologicalParts.length });
+                        renderItems.push({ kind: "tool", part: group[0]!, isLast: i === flowParts.length, round });
                       }
                     } else {
                       // Text part
-                      renderItems.push({ kind: "text", part, isLast });
+                      renderItems.push({ kind: "text", part, isLast, round });
                       i++;
                     }
                   }
                   // Panel generated after every flow part → append at the end.
-                  emitTodoIfDue(renderItems.length, true);
+                  emitTodoIfDue(renderItems.length, true, todoRound);
 
+                  // ── Merge thinking/reasoning parts WITHIN each round (never
+                  // across rounds — that's the whole point of the round
+                  // system: rounds 2+ create separate panels).
+                  const thinkByRound = new Map<number, import("@/types/chat").MessagePart[]>();
+                  for (const p of parts) {
+                    if ((p.type !== "thinking" && p.type !== "reasoning") || !p.content) continue;
+                    const r = p.round ?? 0;
+                    const arr = thinkByRound.get(r) ?? [];
+                    const last = arr[arr.length - 1];
+                    if (last && last.type === p.type && last.content) {
+                      last.content += "\n" + p.content;
+                    } else {
+                      arr.push({ ...p });
+                    }
+                    thinkByRound.set(r, arr);
+                  }
+
+                  // ── Assemble round segments in order of first appearance.
+                  const roundOrder: number[] = [];
+                  for (const p of message.parts ?? []) {
+                    const r = p.round ?? 0;
+                    if (!roundOrder.includes(r)) roundOrder.push(r);
+                  }
+                  const itemsByRound = new Map<number, RoundRenderItem[]>();
+                  for (const item of renderItems) {
+                    const arr = itemsByRound.get(item.round) ?? [];
+                    arr.push(item);
+                    itemsByRound.set(item.round, arr);
+                  }
+                  const segments: RoundSegmentData[] = roundOrder
+                    .map((r) => {
+                      let startedAt: number | undefined;
+                      let endedAt: number | undefined;
+                      for (const p of message.parts ?? []) {
+                        if ((p.round ?? 0) !== r) continue;
+                        if (p.roundStartedAt !== undefined && startedAt === undefined) startedAt = p.roundStartedAt;
+                        if (p.roundEndedAt !== undefined && endedAt === undefined) endedAt = p.roundEndedAt;
+                      }
+                      return {
+                        round: r,
+                        startedAt,
+                        endedAt,
+                        thinkingParts: thinkByRound.get(r) ?? [],
+                        items: itemsByRound.get(r) ?? [],
+                      };
+                    })
+                    .filter((seg) => seg.thinkingParts.length > 0 || seg.items.length > 0);
+
+                  const multiRound = segments.length > 1;
+
+                  // ── MULTI-ROUND path: one RoundPanel per round.
+                  if (multiRound) {
+                    return (
+                      <>
+                        {segments.map((seg, si) => (
+                          <RoundPanel
+                            key={`round-${seg.round}-${si}`}
+                            segment={seg}
+                            isLastSegment={si === segments.length - 1}
+                            isStreaming={isLastStreaming}
+                            isUser={isUser}
+                            turnId={message.conversationId}
+                            onCiteClick={onCiteClick}
+                            genuiNodes={!message.isStreaming ? message.genui : undefined}
+                            onTodoDismiss={onTodoDismiss}
+                          />
+                        ))}
+                      </>
+                    );
+                  }
+
+                  // ── Single-segment path (classic): one thinking block, then
+                  // tools + text in chronological order.
+                  const thinkingParts = segments[0]?.thinkingParts ?? [];
                   return (
                     <>
-                      {/* Reasoning/Thinking blocks (all at top) */}
+                      {/* Reasoning/Thinking block (single) */}
                       {thinkingParts.map((part, j) => {
-                        const isLast = j === thinkingParts.length - 1 && chronologicalParts.length === 0;
+                        const isLast = j === thinkingParts.length - 1 && flowParts.length === 0;
                         if (part.type === "thinking") {
                           return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
                         }
@@ -672,13 +959,13 @@ export const MessageItem = React.memo(function MessageItem({
                         }
                         if (item.kind === "toolGroup") {
                           return (
-                            <CollapsibleToolGroup key={`group-${item.parts[0]!.id}`} parts={item.parts} />
+                            <CollapsibleToolGroup key={`group-${item.parts[0]!.id}`} parts={item.parts} turnId={message.conversationId} />
                           );
                         }
                         if (item.kind === "tool" && item.part.toolCall) {
                           return (
                             <div key={item.part.id} className="w-full">
-                              <ToolCallCard toolCall={item.part.toolCall} />
+                              <ToolCallCard toolCall={item.part.toolCall} turnId={message.conversationId} />
                             </div>
                           );
                         }

@@ -43,6 +43,7 @@ import type {
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { conversationService, settingsService } from "@/lib/services";
+import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -83,20 +84,6 @@ export interface AgentTurnOptions {
   signal?: AbortSignal;
   /** Optional context the tools can read (vault key, E2B sandbox key, env vars…). */
   toolContext?: ToolContext;
-  /**
-   * Deprecated — kept for back-compat. Tool approval has been removed entirely
-   * (tools execute immediately when the model invokes them). When `false`,
-   * the value is ignored — approval is always skipped. The setting still
-   * appears in Settings → Config so users don't lose their stored preference,
-   * but it has no effect.
-   */
-  autoApproveTools?: boolean;
-  /** When true, the agent executes ALL tool calls in a SINGLE round (no
-   *  multi-round text → tool → text → tool loops). All tools run in
-   *  parallel, then the AI gets all results at once and generates a
-   *  single final response. This produces ONE message bubble instead of
-   *  multiple bubbles split by tool calls. */
-  singleRoundMode?: boolean;
 }
 
 export interface AgentTurnResult {
@@ -541,6 +528,9 @@ async function streamRound(
     thinkingEffort?: "low" | "medium" | "high" | null;
     emit: (e: WSEvent) => void;
     signal?: AbortSignal;
+    /** 1-based agent round number — stamped into the model_request_start
+     *  event so the UI can create a separate reasoning panel per round. */
+    roundNumber?: number;
   },
 ): Promise<RoundResult> {
   const {
@@ -551,6 +541,7 @@ async function streamRound(
     thinkingEffort,
     emit,
     signal,
+    roundNumber,
   } = opts;
 
   // Target URL — strip trailing slash. If the provider has `no_prefix` set,
@@ -586,21 +577,94 @@ async function streamRound(
 
   emit({ type: "llm_started", timestamp: nowISO() });
 
-  // Pass the target URL via ?url= query param — Vercel can't strip query params.
-  // Use Accept: text/event-stream to signal streaming intent to all proxies.
-  const response = await fetch(`${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-target-url": targetUrl,
-      Authorization: `Bearer ${provider.apiKey}`,
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-    signal,
-    // Prevent browser/proxy from buffering the response.
-    cache: "no-store",
-  });
+  // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + provider rate-limit
+  // errors with exponential backoff + jitter, honoring Retry-After /
+  // x-ratelimit-reset-headers when present. Mirrors the proven pattern
+  // from src/lib/e2b/client.ts. Each wait emits a `rate_limited` event so
+  // the UI can show "Rate limit reached — retrying automatically in Ns…"
+  // instead of silently dying. Retries are inherently single-flight (this
+  // loop is sequential within the turn) and the abort signal is honored
+  // during the wait.
+  const MAX_RATE_LIMIT_RETRIES = 3;
+  const parseRetryAfterMs = (resp: Response): number | null => {
+    const ra = resp.headers.get("retry-after");
+    if (ra) {
+      const asSeconds = Number(ra);
+      if (Number.isFinite(asSeconds) && asSeconds >= 0) return asSeconds * 1000;
+      const asDate = Date.parse(ra);
+      if (!Number.isNaN(asDate)) return Math.max(0, asDate - Date.now());
+    }
+    // OpenAI-style reset hints (seconds until the window resets).
+    const reset =
+      resp.headers.get("x-ratelimit-reset-requests") ??
+      resp.headers.get("x-ratelimit-reset-tokens");
+    if (reset) {
+      const m = reset.match(/[\d.]+/);
+      if (m) {
+        const secs = parseFloat(m[0]);
+        if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 30_000);
+      }
+    }
+    return null;
+  };
+
+  let response: Response;
+  let rateLimitAttempts = 0;
+  for (;;) {
+    // Pass the target URL via ?url= query param — Vercel can't strip query
+    // params. Use Accept: text/event-stream to signal streaming intent to
+    // all proxies.
+    response = await fetch(`${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-target-url": targetUrl,
+        Authorization: `Bearer ${provider.apiKey}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
+      signal,
+      // Prevent browser/proxy from buffering the response.
+      cache: "no-store",
+    });
+
+    const status = response.status;
+    let isRateLimited = status === 429 || status === 529;
+    if (!isRateLimited && status >= 400) {
+      // Some providers/proxies normalize 429 to an error-body with another
+      // status — sniff the body BEFORE deciding.
+      const text = await response.clone().text().catch(() => "");
+      isRateLimited = /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(text);
+    }
+
+    if (isRateLimited && rateLimitAttempts < MAX_RATE_LIMIT_RETRIES) {
+      rateLimitAttempts += 1;
+      const headerMs = parseRetryAfterMs(response);
+      const backoffMs = Math.min(1000 * 2 ** (rateLimitAttempts - 1), 8000);
+      const jitter = backoffMs * (0.7 + Math.random() * 0.6); // ±30%
+      const delayMs = Math.min(Math.max(headerMs ?? jitter, 500), 30_000);
+      emit({
+        type: "rate_limited",
+        data: {
+          retryAfterMs: Math.round(delayMs),
+          attempt: rateLimitAttempts,
+          maxAttempts: MAX_RATE_LIMIT_RETRIES,
+          status,
+        },
+        timestamp: nowISO(),
+      });
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, delayMs);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(t);
+          resolve();
+        }, { once: true });
+      });
+      if (signal?.aborted) break;
+      continue;
+    }
+    break;
+  }
 
   if (!response.ok || !response.body) {
     let detail = `Provider returned ${response.status}`;
@@ -626,7 +690,11 @@ async function streamRound(
     throw new Error(detail);
   }
 
-  emit({ type: "model_request_start", timestamp: nowISO() });
+  emit({
+    type: "model_request_start",
+    data: { round: roundNumber ?? 1 },
+    timestamp: nowISO(),
+  });
 
   // Accumulators — built up as deltas arrive.
   let content = "";
@@ -852,22 +920,6 @@ async function streamRound(
     usage,
     aborted,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Tool approval has been removed — tools now execute immediately when the
-// model invokes them. The window-event plumbing below remains for back-compat
-// with components that may still dispatch approval responses (e.g. older
-// versions of the ToolApprovalDialog). The `autoApproveTools` option is kept
-// for back-compat too but is treated as always-true.
-// ---------------------------------------------------------------------------
-
-const APPROVAL_EVENT_NAME = "agent:approval-response";
-const APPROVAL_REQUEST_EVENT_NAME = "agent:approval-request";
-
-interface ApprovalDecision {
-  type: "approve" | "edit" | "reject";
-  editedArgs?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,37 +1430,11 @@ GenUI lets you render rich interactive UI components — cards, tables, charts, 
 
 Quick reference — available types: header, text_block, card, card_grid, stat, stats_row, badge, progress, sparkline, key_value, quote, code_block, comparison_table, image, image_grid, list, checklist, timeline, stepper, divider, columns, tabs, accordion, callout, terminal_card, agent_card, weather_card, stock_ticker, suggestion_chips, sources_panel, **custom_html**, **custom_card**.
 
-The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. See agent.md for details and examples.`;
+The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. See agent.md for details and examples.
 
-  const singleRoundDirective = opts.singleRoundMode
-    ? `\n\n## SINGLE-ROUND MODE (ACTIVE)
-You are operating in SINGLE-ROUND mode. This means you have AT MOST 2 rounds to complete the task:
+${genuiThemePromptBlock(readChatTheme())}`;
 
-- **Round 1**: Plan the ENTIRE task, then emit ALL tool calls you need in ONE response. Multiple independent tool calls are executed in parallel automatically — do NOT wait for one to finish before requesting the next. If you need to read a file AND search the web AND run code, emit all three tool_calls in the same response.
-- **Round 2**: You will receive all tool results at once. Generate your FINAL text response. Do NOT request more tool calls in round 2 — they will NOT be executed. Your round 2 response is your final answer.
-
-### Rules for single-round mode:
-1. **Plan before acting** — think through what you need to do, then emit all tool calls at once
-2. **Batch independent tool calls** — if tool A and tool B don't depend on each other's output, emit both in the same response
-3. **Use GenUI for presentation** — do NOT use tools merely to display information. Use \`<<<genui>>>\` blocks for cards, tables, charts, games, calculators, and any visual output. GenUI requires NO tool calls.
-4. **Don't split simple tasks** — if a task can be done with 1-3 tool calls + a text response, do it all in round 1
-5. **Round 2 is final** — after receiving tool results, write your complete answer. Do not request more tools.
-6. **Avoid unnecessary rounds** — if your round 1 response already answers the user's question (even without tool results), that's fine. The system will stop after round 1 if no tool calls are made.
-
-### Examples of good single-round behavior:
-- User: "Compare 3 phone plans" → Round 1: emit \`web_search\` × 3 (parallel) → Round 2: final comparison table as GenUI
-- User: "What files are in my project?" → Round 1: emit \`list_folder\` → Round 2: summarize + GenUI card grid
-- User: "Make a BMI calculator" → Round 1: NO tool calls, just emit a \`custom_card\` GenUI block with the calculator HTML → done (no round 2 needed)
-- User: "Read package.json and explain it" → Round 1: emit \`read_file\` → Round 2: explain
-
-### Bad behavior (DO NOT DO):
-- Requesting one tool call, waiting for the result, then requesting another in a new round (wastes a round)
-- Using a tool call just to display a card (use GenUI instead)
-- Requesting tool calls in round 2 (they won't execute)
-- Splitting a simple task across multiple rounds when one would suffice`
-    : "";
-
-  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${singleRoundDirective}`;
+  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
 
   // CONTEXT WINDOW MANAGEMENT: Always strip tool_calls from history to
   // prevent DEGRADED errors. The AI doesn't need old tool calls to continue.
@@ -1565,6 +1591,10 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // rounds — persisted on the assistant message so a page refresh restores
   // the exact same card ordering the user saw live.
   const assistantParts: MessagePart[] = [];
+  // Per-round start timestamps (indexed by 1-based round number) — stamped
+  // onto persisted parts so each round's panel shows its own timing after a
+  // refresh (PRD §12: round N's timer belongs to round N only).
+  const roundStartTimes: number[] = [];
   const messages = [...priorMessages];
 
   // The "current" assistant message id we'll mutate as deltas arrive. The
@@ -1573,12 +1603,11 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // back in `message_saved`.
   const assistantMessageId = nanoid();
 
-  // In single-round mode, cap at 2 rounds: round 1 = tools, round 2 = final
-  // response (no more tool calls). This produces ONE message bubble.
-  const effectiveMaxRounds = opts.singleRoundMode ? 2 : MAX_ROUNDS;
+  const effectiveMaxRounds = MAX_ROUNDS;
 
   while (round < effectiveMaxRounds) {
     round += 1;
+    roundStartTimes[round] = Date.now();
 
     if (signal?.aborted) {
       return {
@@ -1603,6 +1632,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         thinkingEffort: opts.thinkingEffort,
         emit,
         signal,
+        roundNumber: round,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1610,10 +1640,15 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // AUTO CONTEXT ERROR DETECTION: If the error is related to context
       // window overflow or DEGRADED functions, automatically generate a
       // handoff letter, reduce history, and retry ONCE.
-      // AUTO RETRY: If the error is a timeout (524) or network blip, retry
-      // the round up to 2 times before giving up. These are transient errors
-      // that happen between rounds when the connection drops momentarily.
-      const isTimeout = /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message);
+      // AUTO RETRY: If the error is a timeout (524), rate limit, or network
+      // blip, retry the round up to 2 times before giving up. These are
+      // transient errors that happen between rounds when the connection
+      // drops momentarily. Rate-limit messages are the second line of
+      // defense — streamRound already retries 429/529 with backoff before
+      // the error ever reaches this handler (PRD §7).
+      const isTimeout =
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message) ||
+        /429|rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(message);
       if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
         retryCountThisTurn += 1;
         console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));
@@ -1645,6 +1680,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             thinkingEffort: opts.thinkingEffort,
             emit,
             signal,
+            roundNumber: round,
           });
         } catch (retryErr) {
           // Retry also failed — give up and report the original error
@@ -1654,12 +1690,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             data: { message: `Context error (retry also failed): ${retryMsg}` },
             timestamp: nowISO(),
           });
-          await conversationService.addMessage(conversationId, opts.userId, {
-            role: "assistant",
-            content: `(error: context limit reached. Full chat saved to /chats folder. ${retryMsg})`,
-            toolCalls: allToolCalls,
-            modelName: opts.provider.model,
-          });
+          await conversationService.saveAgentCheckpoint(
+            conversationId,
+            opts.userId,
+            assistantMessageId,
+            {
+              role: "assistant",
+              content: `(error: context limit reached. Full chat saved to /chats folder. ${retryMsg})`,
+              toolCalls: allToolCalls,
+              modelName: opts.provider.model,
+              isStreaming: false,
+            },
+          );
           emit({ type: "complete", timestamp: nowISO() });
           return {
             conversationId,
@@ -1677,22 +1719,29 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           data: { message },
           timestamp: nowISO(),
         });
-        // Persist what we have so far before exiting.
-        await conversationService.addMessage(conversationId, opts.userId, {
-          role: "assistant",
-          content: lastAssistantContent || `(error: ${message})`,
-          thinking: lastAssistantThinking || undefined,
-          reasoning: lastAssistantReasoning || undefined,
-          parts: buildAssistantParts(
-            lastAssistantThinking || undefined,
-            lastAssistantReasoning || undefined,
-            allToolCalls,
-            lastAssistantContent || `(error: ${message})`,
-            lastAssistantTextBeforeTools,
-          ),
-          toolCalls: allToolCalls,
-          modelName: opts.provider.model,
-        });
+        // Persist what we have so far before exiting (checkpoint upsert so
+        // an error path never duplicates the turn's row).
+        await conversationService.saveAgentCheckpoint(
+          conversationId,
+          opts.userId,
+          assistantMessageId,
+          {
+            role: "assistant",
+            content: lastAssistantContent || `(error: ${message})`,
+            thinking: lastAssistantThinking || undefined,
+            reasoning: lastAssistantReasoning || undefined,
+            parts: buildAssistantParts(
+              lastAssistantThinking || undefined,
+              lastAssistantReasoning || undefined,
+              allToolCalls,
+              lastAssistantContent || `(error: ${message})`,
+              lastAssistantTextBeforeTools,
+            ),
+            toolCalls: allToolCalls,
+            modelName: opts.provider.model,
+            isStreaming: false,
+          },
+        );
         emit({ type: "complete", timestamp: nowISO() });
         return {
           conversationId,
@@ -1719,29 +1768,29 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // rebuilds from scratch and loses the multi-round ordering, causing
     // content to appear "cut" into multiple parts.
     //
-    // MERGE consecutive thinking/reasoning parts: if the LAST part in
-    // assistantParts is the same type (thinking or reasoning), append the
-    // new content to it instead of creating a new part. This prevents
-    // multiple "Thinking" bars from appearing when the AI generates thinking
-    // across multiple rounds that get split by tool calls.
+    // ROUND STAMPING (PRD §9–16): every part of round R carries `round: R`
+    // and the round's start timestamp — reasoning from different rounds is
+    // NEVER merged into one panel; each renders its own panel with its own
+    // timing. Within one round, consecutive same-type parts still merge.
+    const roundStart = roundStartTimes[round] ?? Date.now();
     if (roundResult.thinking && roundResult.thinking.trim()) {
       const lastPart = assistantParts[assistantParts.length - 1];
-      if (lastPart && lastPart.type === "thinking" && lastPart.content) {
+      if (lastPart && lastPart.type === "thinking" && lastPart.content && lastPart.round === round) {
         lastPart.content += "\n" + roundResult.thinking;
       } else {
-        assistantParts.push({ id: `p-think-${Date.now()}-${round}`, type: "thinking", content: roundResult.thinking });
+        assistantParts.push({ id: `p-think-${Date.now()}-${round}`, type: "thinking", content: roundResult.thinking, round, roundStartedAt: roundStart });
       }
     }
     if (roundResult.reasoning && roundResult.reasoning.trim()) {
       const lastPart = assistantParts[assistantParts.length - 1];
-      if (lastPart && lastPart.type === "reasoning" && lastPart.content) {
+      if (lastPart && lastPart.type === "reasoning" && lastPart.content && lastPart.round === round) {
         lastPart.content += "\n" + roundResult.reasoning;
       } else {
-        assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning });
+        assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning, round, roundStartedAt: roundStart });
       }
     }
     if (roundResult.textBeforeTools && roundResult.textBeforeTools.trim()) {
-      assistantParts.push({ id: `p-text-pre-${Date.now()}-${round}`, type: "text", content: roundResult.textBeforeTools });
+      assistantParts.push({ id: `p-text-pre-${Date.now()}-${round}`, type: "text", content: roundResult.textBeforeTools, round, roundStartedAt: roundStart });
     }
     for (const tc of roundResult.toolCalls) {
       assistantParts.push({
@@ -1753,6 +1802,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           args: tc.args,
           status: "completed" as const,
         },
+        round,
+        roundStartedAt: roundStart,
       });
     }
     // Post-tool text (content minus textBeforeTools).
@@ -1764,11 +1815,11 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       if (roundResult.textBeforeTools && roundResult.content.startsWith(roundResult.textBeforeTools)) {
         const postText = roundResult.content.slice(roundResult.textBeforeTools.length);
         if (postText.trim()) {
-          assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText });
+          assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText, round, roundStartedAt: roundStart });
         }
       } else if (!roundResult.textBeforeTools) {
         // No text-before-tools → all content is post-tool text
-        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: roundResult.content });
+        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: roundResult.content, round, roundStartedAt: roundStart });
       }
       // If textBeforeTools exists but doesn't match content prefix (DSML
       // stripping changed it), the text was already pushed as textBeforeTools
@@ -1776,13 +1827,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     }
 
     // No tool calls → final result.
-    // ALSO: In single-round mode, round 2 is the FINAL round — even if the
-    // model requests more tool calls, we do NOT execute them. This enforces
-    // the "one message bubble" guarantee: round 1 = tools, round 2 = final
-    // text response. Executing tools in round 2 would require a round 3,
-    // breaking the single-bubble contract.
-    if (roundResult.toolCalls.length === 0 || roundResult.aborted ||
-        (opts.singleRoundMode && round >= 2)) {
+    if (roundResult.toolCalls.length === 0 || roundResult.aborted) {
       // If the content is empty (e.g. aborted before any text arrived),
       // use a minimal placeholder so the DB row isn't empty.
       const finalContent = roundResult.content || (roundResult.aborted ? "" : "");
@@ -1797,10 +1842,26 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             finalContent,
             roundResult.textBeforeTools,
           );
-      // Persist the final assistant message.
-      const savedMessage = await conversationService.addMessage(
+      // BACKFILL ROUND END TIMES (PRD §12/§15): round N ended when round N+1
+      // started; the LAST round ends now. Each round's elapsed = its own
+      // end − its own start, so completed panels show frozen, independent
+      // durations after a refresh.
+      const turnEndTime = Date.now();
+      for (const p of finalParts) {
+        if (p.round !== undefined && p.roundEndedAt === undefined) {
+          const nextRoundStart = roundStartTimes[p.round + 1];
+          p.roundEndedAt = nextRoundStart ?? turnEndTime;
+        }
+      }
+      // Persist the final assistant message. CHECKPOINT UPSERT (PRD
+      // §6/§32): write the SAME stable id the per-round checkpoints used,
+      // so a turn interrupted mid-stream (tab closed / refreshed) never
+      // produces a second assistant row for the same execution — the final
+      // save simply settles the existing checkpoint.
+      const savedMessage = await conversationService.saveAgentCheckpoint(
         conversationId,
         opts.userId,
+        assistantMessageId,
         {
           role: "assistant",
           content: finalContent,
@@ -1809,6 +1870,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           parts: finalParts,
           toolCalls: allToolCalls,
           modelName: opts.provider.model,
+          isStreaming: false,
         },
       );
       emit({
@@ -1897,6 +1959,14 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         if (!toolDef) {
           const errMsg = `Tool '${tc.name}' is not registered`;
           const fullResultStr = JSON.stringify({ error: errMsg });
+          // Backfill the error onto the persisted part (see the persistence
+          // fix in the success path below for rationale).
+          for (const part of assistantParts) {
+            if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+              part.toolCall.result = { error: errMsg };
+              part.toolCall.status = "error";
+            }
+          }
           emit({
             type: "tool_result",
             data: { tool_call_id: tc.id, content: fullResultStr },
@@ -1953,6 +2023,22 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           status = "error";
         }
 
+        // PERSISTENCE FIX (PRD §3/§26 — "Web Search UI persistence" /
+        // "UI Rendering Architecture"): the tool PART pushed into
+        // `assistantParts` was created WITHOUT a result (it is emitted before
+        // execution so the card renders immediately). The live UI receives
+        // the result through the `tool_result` EVENT — but the event only
+        // updates the in-memory chat store. Unless the result is ALSO
+        // backfilled onto the part here, the persisted `parts` array carries
+        // `toolCall.result === undefined`, and after a refresh every tool
+        // card (web search included) renders as an empty rectangle.
+        for (const part of assistantParts) {
+          if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+            part.toolCall.result = result;
+            part.toolCall.status = status;
+          }
+        }
+
         // Emit result IMMEDIATELY — no waiting for sibling tools.
         const fullResultStr =
           typeof result === "string" ? result : JSON.stringify(result);
@@ -1984,15 +2070,41 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // completed — so the UI shows results progressively.
     await Promise.all(resultPromises);
 
+    // ROUND-BOUNDARY CHECKPOINT (PRD §6/§32 — background execution
+    // resilience): persist everything accumulated so far under the turn's
+    // STABLE message id. If the tab is closed / refreshed mid-turn, the
+    // reload shows every completed round (reasoning, tool calls, results)
+    // instead of losing the whole turn; the final save settles the same
+    // row. Cheap upsert: only runs once per ROUND, not per delta.
+    try {
+      await conversationService.saveAgentCheckpoint(
+        conversationId,
+        opts.userId,
+        assistantMessageId,
+        {
+          content: lastAssistantContent || roundResult.textBeforeTools || "",
+          thinking: lastAssistantThinking || undefined,
+          reasoning: lastAssistantReasoning || undefined,
+          parts: assistantParts,
+          toolCalls: allToolCalls,
+          modelName: opts.provider.model,
+          isStreaming: true,
+        },
+      );
+    } catch {
+      // Non-fatal — the next checkpoint or the final save retries.
+    }
+
     // Loop back for the next round.
   }
 
   // Hit max rounds — persist whatever content was generated (don't error).
   // The agent may have produced useful intermediate text or tool results;
   // surfacing those is better than dropping them on the floor with an error.
-  const savedMessage = await conversationService.addMessage(
+  const savedMessage = await conversationService.saveAgentCheckpoint(
     conversationId,
     opts.userId,
+    assistantMessageId,
     {
       role: "assistant",
       content:
@@ -2010,6 +2122,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       ),
       toolCalls: allToolCalls,
       modelName: opts.provider.model,
+      isStreaming: false,
     },
   );
   emit({
@@ -2036,20 +2149,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 }
 
 // ---------------------------------------------------------------------------
-// Public helpers — exposed so the UI can dispatch approval / ask_user
-// responses back into the runtime via window events.
+// Public helpers — exposed so the UI can dispatch ask_user responses back
+// into the runtime via window events.
 // ---------------------------------------------------------------------------
-
-export function respondToApproval(
-  toolCallId: string,
-  decision: ApprovalDecision,
-): void {
-  window.dispatchEvent(
-    new CustomEvent(APPROVAL_EVENT_NAME, {
-      detail: { ...decision, toolCallId },
-    }),
-  );
-}
 
 export function respondToAskUser(
   answers: Array<{ answer: string; skipped: boolean }>,
@@ -2059,4 +2161,4 @@ export function respondToAskUser(
   );
 }
 
-export { APPROVAL_REQUEST_EVENT_NAME, ASK_USER_RESPONSE_EVENT };
+export { ASK_USER_RESPONSE_EVENT };
