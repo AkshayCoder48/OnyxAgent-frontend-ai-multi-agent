@@ -8,7 +8,12 @@ const withAnalyzer = withBundleAnalyzer({
   enabled: process.env.ANALYZE === "true",
 });
 
-const _frameAncestors = "frame-ancestors 'none';";
+// In dev (live preview), allow embedding in the preview iframe; keep the
+// strict frame lock for production builds.
+const _isDev = process.env.NODE_ENV !== "production";
+const _frameAncestors = _isDev
+  ? "frame-ancestors 'self' https:;"
+  : "frame-ancestors 'none';";
 const ContentSecurityPolicy = `
   default-src 'self';
   script-src 'self' 'unsafe-eval' 'unsafe-inline';
@@ -26,7 +31,8 @@ const ContentSecurityPolicy = `
 const securityHeaders = [
   { key: "Content-Security-Policy", value: ContentSecurityPolicy },
   { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "X-Frame-Options", value: "DENY" },
+  // X-Frame-Options: DENY is production-only (dev preview needs iframes).
+  ...(_isDev ? [] : [{ key: "X-Frame-Options", value: "DENY" }]),
   { key: "X-XSS-Protection", value: "1; mode=block" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },

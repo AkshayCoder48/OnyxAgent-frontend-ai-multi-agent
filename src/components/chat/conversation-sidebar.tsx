@@ -18,6 +18,7 @@ import {
   MessageSquare,
   MoreVertical,
   Pencil,
+  Search,
   Settings,
   Share2,
   SquarePen,
@@ -25,6 +26,44 @@ import {
 } from "lucide-react";
 import type { Conversation } from "@/types";
 import { ShareDialog } from "./share-dialog";
+
+/* ---------------------------------------------------------------------------
+ * Date grouping for the Terra editorial history: tracked-caps day buckets.
+ * ------------------------------------------------------------------------- */
+const GROUP_ORDER = ["Today", "Yesterday", "This week", "Older"] as const;
+type DateGroup = (typeof GROUP_ORDER)[number];
+
+function groupKeyFor(iso: string): DateGroup {
+  const d = new Date(iso);
+  const now = new Date();
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const dayMs = 24 * 60 * 60 * 1000;
+  const diffDays = Math.floor((startOfDay(now).getTime() - startOfDay(d).getTime()) / dayMs);
+  if (diffDays <= 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays <= 7) return "This week";
+  return "Older";
+}
+
+function groupByDate(conversations: Conversation[]): Map<DateGroup, Conversation[]> {
+  const map = new Map<DateGroup, Conversation[]>();
+  for (const label of GROUP_ORDER) map.set(label, []);
+  for (const c of conversations) {
+    map.get(groupKeyFor(c.updated_at || c.created_at))!.push(c);
+  }
+  return map;
+}
+
+/* Initials avatar for the account row (ink on soft-terracotta). */
+function accountInitials(user: { full_name?: string | null; email: string } | null): string {
+  if (!user) return "·";
+  const name = (user.full_name || user.email || "").trim();
+  if (!name) return "·";
+  const parts = name.split(/\s+/);
+  if (parts.length >= 2) return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
+  const base = name.includes("@") ? name.split("@")[0]! : name;
+  return base.slice(0, 2).toUpperCase();
+}
 
 interface ConversationItemProps {
   conversation: Conversation;
@@ -64,20 +103,18 @@ function ConversationItem({
   return (
     <div
       className={cn(
-        "group relative flex min-h-[44px] cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-sm transition-all",
+        // Date-grouped history rows — the ACTIVE row is a soft-terracotta
+        // pill (#F0E3D5 fill, #EAD6C4 hairline) with a terracotta icon.
+        "group relative flex min-h-[40px] cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all",
         isActive
-          ? "bg-accent text-foreground border-border border"
-          : "text-muted-foreground hover:bg-secondary/50 hover:text-secondary-foreground border border-transparent",
+          ? "bg-accent text-accent-foreground border border-[#ead6c4] dark:border-[#4c3d2a]"
+          : "text-foreground/70 hover:bg-foreground/5 hover:text-foreground border border-transparent",
       )}
       onClick={onSelect}
     >
-      {isActive && (
-        <span
-          aria-hidden
-          className="bg-foreground absolute top-1/2 left-0 h-5 w-0.5 -translate-y-1/2 rounded-r-full"
-        />
-      )}
-      <MessageSquare className={cn("h-4 w-4 shrink-0", isActive && "text-foreground")} />
+      <MessageSquare
+        className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-foreground/40")}
+      />
       {isEditing ? (
         <input
           type="text"
@@ -95,12 +132,6 @@ function ConversationItem({
       ) : (
         <div className="min-w-0 flex-1">
           <span className="block truncate">{displayTitle}</span>
-          <span className="text-muted-foreground block truncate text-[10px]">
-            {new Date(conversation.updated_at || conversation.created_at).toLocaleDateString(
-              undefined,
-              { month: "short", day: "numeric" },
-            )}
-          </span>
         </div>
       )}
 
@@ -222,11 +253,19 @@ function ConversationList({
   const t = useTranslations("chat");
   const [view, setView] = useState<ConversationView>("active");
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const all = conversations ?? [];
   const activeCount = all.filter((c) => !c.is_archived).length;
   const archivedCount = all.filter((c) => c.is_archived).length;
-  const visible = all.filter((c) => (view === "active" ? !c.is_archived : c.is_archived));
+  const filtered = all.filter((c) => (view === "active" ? !c.is_archived : c.is_archived));
+  const q = query.trim().toLowerCase();
+  const visible = q
+    ? filtered.filter((c) => (c.title || "").toLowerCase().includes(q))
+    : filtered;
+
+  // Date-grouped history (Terra spec): TODAY / YESTERDAY / THIS WEEK / OLDER.
+  const groups = groupByDate(visible);
 
   const handleSelect = (id: string) => {
     onSelect(id);
@@ -242,19 +281,40 @@ function ConversationList({
 
   return (
     <>
+      {/* Full-width terracotta "New conversation" button with ⌘N hint. */}
       <div className="px-3 pt-3 pb-2">
         <button
           type="button"
           onClick={handleNewChat}
-          className="text-muted-foreground hover:text-foreground hover:bg-secondary flex h-9 w-full items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
+          className="bg-primary text-primary-foreground hover:bg-[#a8421f] flex h-10 w-full items-center justify-between gap-2 rounded-xl px-3.5 text-sm font-medium shadow-sm transition-colors"
         >
-          <SquarePen className="h-4 w-4 shrink-0" />
-          {t("newChat")}
+          <span className="inline-flex items-center gap-2">
+            <SquarePen className="h-4 w-4 shrink-0" />
+            {t("newChat")}
+          </span>
+          <kbd className="text-primary-foreground/70 font-mono text-[10px] tracking-wider">
+            ⌘N
+          </kbd>
         </button>
       </div>
 
+      {/* Search chats */}
       <div className="px-3 pb-2">
-        <div className="bg-secondary/50 flex rounded-lg p-0.5">
+        <div className="relative">
+          <Search className="text-muted-foreground/60 pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2" />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search chats"
+            aria-label="Search chats"
+            className="border-border bg-background/70 placeholder:text-muted-foreground/60 focus:border-primary/40 h-8.5 w-full rounded-lg border pr-3 pl-8 text-[13px] outline-none transition-colors sm:h-9"
+          />
+        </div>
+      </div>
+
+      <div className="px-3 pb-2">
+        <div className="bg-background/60 border-border/60 flex rounded-lg border p-0.5">
           <ViewTab
             label="Active"
             count={activeCount}
@@ -298,27 +358,45 @@ function ConversationList({
               )}
             </span>
             <p className="text-foreground text-sm font-medium">
-              {isArchivedView ? "No archived conversations" : t("noConversations")}
+              {isArchivedView ? "No archived conversations" : q ? "No matches" : t("noConversations")}
             </p>
             <p className="text-muted-foreground mt-1 text-xs">
-              {isArchivedView ? "Conversations you archive will appear here." : t("startNewChat")}
+              {isArchivedView
+                ? "Conversations you archive will appear here."
+                : q
+                  ? "Try a different search."
+                  : t("startNewChat")}
             </p>
           </div>
         ) : (
-          <div className="space-y-1">
-            {visible.map((conversation) => (
-              <ConversationItem
-                key={conversation.id}
-                conversation={conversation}
-                isActive={conversation.id === currentConversationId}
-                onSelect={() => handleSelect(conversation.id)}
-                onDelete={() => onDelete(conversation.id)}
-                onArchive={() => onArchive(conversation.id)}
-                onUnarchive={() => onUnarchive(conversation.id)}
-                onRename={(title) => onRename(conversation.id, title)}
-                onShare={() => setShareConversationId(conversation.id)}
-              />
-            ))}
+          <div>
+            {GROUP_ORDER.map((label) => {
+              const rows = groups.get(label);
+              if (!rows || rows.length === 0) return null;
+              return (
+                <div key={label} className="pb-1">
+                  {/* Tracked-caps date group header (Terra spec) */}
+                  <p className="text-muted-foreground/70 px-2 pt-3 pb-1 font-mono text-[10px] font-medium tracking-[0.16em] uppercase">
+                    {label}
+                  </p>
+                  <div className="space-y-0.5">
+                    {rows.map((conversation) => (
+                      <ConversationItem
+                        key={conversation.id}
+                        conversation={conversation}
+                        isActive={conversation.id === currentConversationId}
+                        onSelect={() => handleSelect(conversation.id)}
+                        onDelete={() => onDelete(conversation.id)}
+                        onArchive={() => onArchive(conversation.id)}
+                        onUnarchive={() => onUnarchive(conversation.id)}
+                        onRename={(title) => onRename(conversation.id, title)}
+                        onShare={() => setShareConversationId(conversation.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -390,6 +468,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
   // when the user loads (the auth store initializes async — the user might
   // be null on first render, which prevents the React Query from running).
   const authUserId = useAuthStore((s) => s.user?.id);
+  const user = useAuthStore((s) => s.user);
 
   useEffect(() => {
     fetchConversations();
@@ -419,7 +498,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     return (
       <div
         className={cn(
-          "bg-background hidden w-12 flex-col items-center border-r py-4 md:flex",
+          "bg-secondary hidden w-12 flex-col items-center border-r py-4 md:flex",
           className,
         )}
       >
@@ -449,7 +528,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
   return (
     <>
       <aside
-        className={cn("bg-background hidden shrink-0 flex-col border-r md:flex relative overflow-visible", className)}
+        className={cn("bg-secondary hidden shrink-0 flex-col border-r md:flex relative overflow-visible", className)}
         style={{ width: `${convSidebarWidth}px` }}
       >
         {/* Resize handle on the right edge */}
@@ -461,56 +540,82 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
           aria-orientation="vertical"
           aria-label="Resize conversations sidebar"
         >
+          {/* Invisible wider hit area for easier grabbing */}
           <div className="absolute inset-y-0 -inset-x-2" />
         </div>
-        <div className="flex h-12 shrink-0 items-center justify-between border-b px-4 py-3">
-          <h2 className="text-sm font-semibold">{t("conversations")}</h2>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0"
-            onClick={() => setIsCollapsed(true)}
-            aria-label="Collapse conversations sidebar"
-          >
-            <ChevronLeft className="h-4 w-4" aria-hidden />
-          </Button>
-        </div>
+          <div className="flex h-11 shrink-0 items-center justify-between px-4 pt-1">
+            <h2 className="font-display text-[15px] font-semibold tracking-tight">{t("conversations")}</h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0"
+              onClick={() => setIsCollapsed(true)}
+              aria-label="Collapse conversations sidebar"
+            >
+              <ChevronLeft className="h-4 w-4" aria-hidden />
+            </Button>
+          </div>
         <ConversationList {...listProps} />
-        {/* Footer: Settings — shrink-0 so it's always visible */}
-        <div className="flex shrink-0 items-center gap-1 border-t px-3 py-2">
+        {/* Account row pinned to the base (Terra spec): ink initial avatar +
+            name + plan + gear. */}
+        <div className="flex shrink-0 items-center gap-2.5 border-t px-3 py-2.5">
+          <span
+            aria-hidden
+            className="bg-foreground text-background flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+          >
+            {accountInitials(user)}
+          </span>
+          <div className="min-w-0 flex-1 leading-tight">
+            <p className="truncate text-[13px] font-medium text-foreground">
+              {user?.full_name || user?.email || "Guest"}
+            </p>
+            <p className="text-muted-foreground truncate text-[10px]">Free plan</p>
+          </div>
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 flex-1 justify-start gap-2 text-sm"
-            onClick={() => router.push("/en/settings/config")}
+            className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
+            onClick={() => router.push("/en/settings")}
             title="Settings"
+            aria-label="Settings"
           >
             <Settings className="h-4 w-4" />
-            Settings
           </Button>
         </div>
       </aside>
 
       <Sheet open={isOpen} onOpenChange={close}>
-        <SheetContent side="left" className="w-80 p-0 flex flex-col">
+        <SheetContent side="left" className="w-80 p-0 flex flex-col bg-secondary">
           <SheetHeader className="h-12 shrink-0 px-4">
-            <SheetTitle>{t("conversations")}</SheetTitle>
+            <SheetTitle className="font-display tracking-tight">{t("conversations")}</SheetTitle>
             <SheetClose onClick={close} />
           </SheetHeader>
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <ConversationList {...listProps} onNavigate={close} />
           </div>
-          {/* Footer: Settings — shrink-0 so it's always visible */}
-          <div className="flex shrink-0 items-center gap-1 border-t px-3 py-2">
+          {/* Account row pinned to the base */}
+          <div className="flex shrink-0 items-center gap-2.5 border-t px-3 py-2.5">
+            <span
+              aria-hidden
+              className="bg-foreground text-background flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+            >
+              {accountInitials(user)}
+            </span>
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="truncate text-[13px] font-medium text-foreground">
+                {user?.full_name || user?.email || "Guest"}
+              </p>
+              <p className="text-muted-foreground truncate text-[10px]">Free plan</p>
+            </div>
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 flex-1 justify-start gap-2 text-sm"
-              onClick={() => { router.push("/en/settings/config"); close(); }}
+              className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
+              onClick={() => { router.push("/en/settings"); close(); }}
               title="Settings"
+              aria-label="Settings"
             >
               <Settings className="h-4 w-4" />
-              Settings
             </Button>
           </div>
         </SheetContent>

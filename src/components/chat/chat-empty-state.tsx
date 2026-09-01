@@ -23,7 +23,7 @@ const PROMPTS = [
     icon: Globe,
     title: "Search the web",
     prompt: "Search the web for the latest news about AI agents and summarize the top 3 results.",
-    color: "text-purple-500",
+    color: "text-primary",
   },
   {
     icon: Brain,

@@ -45,7 +45,7 @@ export function CardBlock({ props, children, streaming, renderChildren }: GenUIC
     accent === "green" ? "border-l-emerald-500" :
     accent === "blue" ? "border-l-blue-500" :
     accent === "red" ? "border-l-red-500" :
-    accent === "purple" ? "border-l-purple-500" : "";
+    accent === "purple" ? "border-l-primary" : "";
   const inner = (
     <Card className={cn("bg-card relative overflow-hidden", accentBorder && "border-l-2", accentBorder)}>
       <CardContent className="p-4">

@@ -80,7 +80,7 @@ function badgeColorForModel(name: string): string {
   if (n.includes("gpt") || n.startsWith("o1") || n.startsWith("o3") || n.startsWith("o4")) return "bg-emerald-500";
   if (n.includes("claude") || n.includes("anthropic")) return "bg-orange-500";
   if (n.includes("llama") || n.includes("mistral") || n.includes("qwen") || n.includes("deepseek") || n.includes("yi") || n.includes("gemma")) return "bg-blue-500";
-  if (n.includes("dall") || n.includes("stable") || n.includes("flux") || n.includes("sdxl")) return "bg-purple-500";
+  if (n.includes("dall") || n.includes("stable") || n.includes("flux") || n.includes("sdxl")) return "bg-[#c4552f]";
   if (n.includes("mimo") || n.includes("xiaomi")) return "bg-teal-500";
   if (n.includes("step") || n.includes("fun")) return "bg-rose-500";
   return "bg-muted-foreground/60";

@@ -10,9 +10,8 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { Bot, ChevronDown, ChevronUp, FileText, Globe, Loader2, RefreshCw, User, Wrench } from "lucide-react";
-import Image from "next/image";
-import { useAuthStore } from "@/stores";
+import { ChevronDown, FileText, Globe, Loader2, RefreshCw, Wrench } from "lucide-react";
+import { RatingButtons } from "./rating-buttons";
 import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
@@ -94,10 +93,10 @@ function ReasoningPanel({
   return (
     <div
       className={cn(
-        "reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-2xl rounded-tl-sm border transition-colors duration-300",
+        "reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-xl border border-border transition-colors duration-300",
         variant === "thinking"
-          ? "border-foreground/10 bg-muted/50"
-          : "border-foreground/10 border-dashed bg-muted/40",
+          ? "bg-secondary/50"
+          : "border-dashed bg-secondary/40",
         // Subtle elevation when streaming — reads as "active".
         isStreaming && "ring-1 ring-primary/15",
       )}
@@ -230,16 +229,20 @@ function TextBubble({
   const { segments } = useGenUIFromText(text);
 
   if (isUser) {
+    // User turn — right-aligned soft-terracotta card with a small tail
+    // (Terra spec: #F0E3D5 fill, #EAD6C4 hairline, ink text, rounded-tr-sm).
     return (
       <div
         className={cn(
-          "relative max-w-full break-words rounded-2xl px-3 py-2 sm:px-4 sm:py-2.5 rounded-tr-sm",
+          "relative max-w-full break-words rounded-2xl rounded-tr-sm border px-3.5 py-2.5 sm:px-4",
         )}
         style={{
-          backgroundColor: "var(--chat-user-bg, var(--color-foreground))",
+          backgroundColor: "var(--chat-user-bg, var(--color-accent))",
+          borderColor: "var(--chat-user-border, var(--color-border))",
+          color: "var(--chat-user-fg, var(--color-foreground))",
         }}
       >
-        <p className="text-background text-sm break-words whitespace-pre-wrap overflow-wrap-anywhere">{text}</p>
+        <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">{text}</p>
       </div>
     );
   }
@@ -252,21 +255,15 @@ function TextBubble({
       ? { nodes: genuiNodes }
       : null;
 
-  // If no segments and no persisted spec, just render the full text as markdown
+  // If no segments and no persisted spec, just render the full text as markdown.
+  // Assistant turns are FRAMELESS (Terra spec) — no bubble, editorial text on
+  // the cream canvas with serif-numeral ordered lists.
   if (segments.length === 0 && !persistedSpec) {
     return (
-      <div
-        className={cn(
-          "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
-          isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
-        )}
-        style={{
-          backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
-        }}
-      >
+      <div className="relative w-full max-w-full break-words">
         <div
           className={cn(
-            "prose-sm max-w-none break-words text-sm",
+            "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
             !isStreaming && "prose-sm-static",
             isStreaming && "stream-reveal stream-batch-fade",
           )}
@@ -293,15 +290,7 @@ function TextBubble({
   const lastTextIdx = renderSegments.map((s) => s.type).lastIndexOf("text");
 
   return (
-    <div
-      className={cn(
-        "relative max-w-full break-words rounded-2xl rounded-tl-sm w-full px-3 py-2 sm:px-4 sm:py-2.5",
-        isStreaming && showCursor && "streaming-glow streaming-shimmer streaming-border",
-      )}
-      style={{
-        backgroundColor: "var(--chat-assistant-bg, var(--color-muted))",
-      }}
-    >
+    <div className="relative w-full max-w-full break-words">
       {renderSegments.map((seg, i) => {
         if (seg.type === "text") {
           const isLast = i === lastTextIdx;
@@ -309,7 +298,7 @@ function TextBubble({
             <div
               key={i}
               className={cn(
-                "prose-sm max-w-none break-words text-sm",
+                "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
                 i > 0 && "mt-3",
                 !isStreaming && "prose-sm-static",
                 isStreaming && "stream-reveal stream-batch-fade",
@@ -388,20 +377,27 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
 
   return (
     <div className="mb-2">
-      {/* Collapsed bar */}
+      {/* Collapsed bar — matches the element-style tool card chrome. */}
       <button
         type="button"
         onClick={() => setExpanded((e) => !e)}
         className={cn(
-          "flex w-full items-center gap-3 rounded-lg border px-4 py-2.5 text-left transition-all duration-200",
+          "flex w-full items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all duration-200",
           anyRunning
-            ? "border-primary/10 bg-primary/5"
-            : "border-foreground/8 bg-muted/30 hover:bg-muted/50",
+            ? "border-primary/25 bg-primary/[0.06]"
+            : "border-border bg-secondary/50 hover:bg-secondary/70",
         )}
       >
+        <ChevronDown
+          className={cn(
+            "text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform duration-200",
+            expanded && "rotate-180",
+          )}
+          aria-hidden
+        />
         <div
           className={cn(
-            "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
             anyRunning ? "bg-primary/10" : "bg-foreground/5",
           )}
         >
@@ -412,7 +408,7 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
           )}
         </div>
         <span className="text-foreground/90 text-sm font-medium">
-          {toolParts.length} Tool Calls
+          {toolParts.length} tool calls
         </span>
         {errorCount > 0 && (
           <span className="text-destructive text-xs font-medium">
@@ -424,18 +420,11 @@ function CollapsibleToolGroup({ parts }: { parts: import("@/types/chat").Message
             <span /> <span /> <span />
           </span>
         )}
-        <div className="ml-auto text-muted-foreground">
-          {expanded ? (
-            <ChevronUp className="h-4 w-4" />
-          ) : (
-            <ChevronDown className="h-4 w-4" />
-          )}
-        </div>
       </button>
 
       {/* Expanded tool cards */}
       {expanded && (
-        <div className="mt-2 space-y-2 pl-2 border-l-2 border-foreground/8">
+        <div className="mt-2 space-y-2 border-l-2 border-border pl-2">
           {toolParts.map((part) => (
             <div key={part.id} className="w-full">
               <ToolCallCard toolCall={part.toolCall!} />
@@ -456,7 +445,6 @@ export const MessageItem = React.memo(function MessageItem({
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
   const openSources = useSourcesPanelStore((s) => s.open);
-  const { user: authUser, avatarVersion } = useAuthStore();
   const isGrouped = groupPosition && groupPosition !== "single";
 
   // PERF: Memoize extractSources + parts filtering so they don't re-run on
@@ -506,55 +494,35 @@ export const MessageItem = React.memo(function MessageItem({
   return (
     <div
       className={cn(
-        "group relative flex gap-2 overflow-visible sm:gap-4",
-        isGrouped ? "py-2 sm:py-3" : "py-3 sm:py-4",
-        isUser && "flex-row-reverse",
+        "group relative flex overflow-visible",
+        isGrouped ? "py-1.5 sm:py-2" : "py-3 sm:py-4",
+        // Terra asymmetric turns: user right-aligned, assistant left/frameless.
+        isUser ? "justify-end" : "justify-start",
         // Entrance animation: AI messages blur+fade in from top, user
         // messages slide in from the right. Both use spring easing.
         isUser ? "bubble-user-in" : "bubble-ai-in",
       )}
     >
-      {" "}
-      {isGrouped && !isUser && (
-        <div
-          className="bg-border absolute left-[15px] w-0.5 sm:left-[17px]"
-          style={
-            groupPosition === "first"
-              ? { top: "24px", bottom: "0" }
-              : groupPosition === "last"
-                ? { top: "0", height: "24px" }
-                : { top: "0", bottom: "0" }
-          }
-        />
-      )}
       <div
         className={cn(
-          "z-10 flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-full sm:h-9 sm:w-9",
-          isUser ? "bg-foreground text-background" : "bg-muted text-foreground",
-          isGrouped && !isUser && "ring-background ring-2",
+          "min-w-0 space-y-2",
+          isUser
+            ? "flex max-w-[90%] flex-col items-end sm:max-w-[85%]"
+            : "w-full max-w-full",
         )}
       >
-        {isUser && authUser?.avatar_url ? (
-          <Image
-            src={`/api/users/avatar/${authUser.id}?v=${avatarVersion}`}
-            alt=""
-            width={36}
-            height={36}
-            className="h-full w-full object-cover"
-            unoptimized
-          />
-        ) : isUser ? (
-          <User className="h-4 w-4" />
-        ) : (
-          <Bot className="h-4 w-4 sm:h-5 sm:w-5" />
+        {/* Assistant identity — small terracotta mark + serif-italic name
+            (Terra spec). Only on the first message of a consecutive group. */}
+        {!isUser && (!isGrouped || groupPosition === "first") && (
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex h-4 w-4 items-center justify-center text-primary" aria-hidden>
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
+                <path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" />
+              </svg>
+            </span>
+            <span className="assistant-name text-[15px] leading-none">OnyxAgent</span>
+          </div>
         )}
-      </div>
-      <div
-        className={cn(
-          "min-w-0 flex-1 space-y-2",
-          isUser ? "max-w-[90%] sm:max-w-[85%] flex flex-col items-end" : "w-full max-w-full",
-        )}
-      >
         {isUser &&
           (() => {
             const attachments: AttachmentDisplay[] =
@@ -608,7 +576,7 @@ export const MessageItem = React.memo(function MessageItem({
             <>
               {showPlaceholder && (
                 <div
-                  className="reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-2xl rounded-tl-sm border border-foreground/10 bg-muted/50 ring-1 ring-primary/15"
+                  className="reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-xl border border-border bg-secondary/50 ring-1 ring-primary/15"
                   role="status"
                   aria-live="polite"
                 >
@@ -788,9 +756,16 @@ export const MessageItem = React.memo(function MessageItem({
             multi-round response, after all parts are complete. Hidden for
             non-last grouped messages (showFooter=false from MessageList). */}
         {showFooter && !message.isStreaming && (message.content || (message.parts ?? []).some((p) => p.type === "text" && p.content)) && (
-          <div className={cn("flex flex-wrap items-center gap-1.5", isUser && "flex-row-reverse")}>
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-0.5 transition-opacity duration-150",
+              // Subtle hover action row (Terra spec) — always visible on touch.
+              "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100",
+              isUser && "flex-row-reverse",
+            )}
+          >
             {message.timestamp && (
-              <span className="text-muted-foreground text-[10px]">
+              <span className="text-muted-foreground mr-1 text-[10px]">
                 {new Date(message.timestamp).toLocaleTimeString([], {
                   hour: "2-digit",
                   minute: "2-digit",
@@ -805,18 +780,31 @@ export const MessageItem = React.memo(function MessageItem({
                   .map((p) => p.content)
                   .join("\n\n")
               }
-              className={cn(
-                "h-7 w-7 rounded-md",
-                isUser ? "bg-secondary hover:bg-secondary/80" : "bg-muted hover:bg-muted/80",
-              )}
+              className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground h-7 w-7 rounded-md bg-transparent"
             />
+            {!isUser && message.conversationId && (
+              <RatingButtons
+                messageId={message.id}
+                conversationId={message.conversationId}
+                currentRating={message.user_rating ?? null}
+                ratingCount={message.rating_count ?? undefined}
+                onRatingChange={(d) =>
+                  updateMessage(message.id, (m) => ({
+                    ...m,
+                    user_rating: d.rating,
+                    rating_count: d.rating_count,
+                  }))
+                }
+                isAssistant
+              />
+            )}
             {!isUser && onRegenerate && (
               <button
                 type="button"
                 onClick={onRegenerate}
                 title="Regenerate response"
                 aria-label="Regenerate response"
-                className="bg-muted hover:bg-muted/80 text-foreground/70 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </button>

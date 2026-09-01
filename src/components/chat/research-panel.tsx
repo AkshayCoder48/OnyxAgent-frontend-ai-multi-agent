@@ -120,7 +120,7 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
         {busy ? (
           <Loader2 className="text-primary h-3.5 w-3.5 shrink-0 animate-spin" />
         ) : (
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-primary" />
         )}
         {todoTotal > 0 && <Progress value={pct} className="mx-1 h-1.5 min-w-0 flex-1" />}
         <span className="flex-1" />
@@ -150,7 +150,7 @@ const TODO_STATUS_BORDER: Record<ResearchTodo["status"], string> = {
 function StatusIcon({ status }: { status: ResearchTodo["status"] }) {
   switch (status) {
     case "completed":
-      return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />;
+      return <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-primary" />;
     case "in_progress":
       return <Loader2 className="text-primary h-3.5 w-3.5 shrink-0 animate-spin" />;
     case "blocked":

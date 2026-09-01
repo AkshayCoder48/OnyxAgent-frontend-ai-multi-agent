@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { MessageSquare, type LucideIcon } from "lucide-react";
+import { Feather, MessageSquare, type LucideIcon } from "lucide-react";
 import { useActiveRoute } from "@/lib/active-route";
 import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
@@ -25,8 +25,11 @@ export function Header() {
             href={ROUTES.CHAT}
             className="flex items-center gap-2 pr-1"
           >
-            {/* Decorated text logo — "OnyxAgent" with gradient + special O */}
-            <span className="onyx-logo-text text-lg font-bold tracking-tight sm:text-xl">
+            {/* Terra editorial wordmark — terracotta feather + serif type */}
+            <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-primary/10">
+              <Feather className="h-3.5 w-3.5 text-primary" aria-hidden />
+            </span>
+            <span className="onyx-logo-text text-lg sm:text-xl">
               <span className="onyx-logo-o">O</span>nyx<span className="onyx-logo-agent">Agent</span>
             </span>
           </Link>

@@ -46,18 +46,29 @@ const SHARED_COMPONENTS = {
       typeof codeElement?.props?.children === "string" ? codeElement.props.children : "";
     const lang = languageLabel(codeElement?.props?.className);
 
+    // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
+    // strip with language/filename on the left and a Copy affordance on the
+    // right; muted warm syntax tones come from the `.chat-code` hljs scope.
     return (
-      <div className="group border-border bg-muted my-3 max-w-full overflow-hidden rounded-xl border">
+      <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
         {(lang || codeContent) && (
-          <div className="border-foreground/8 text-foreground/55 flex items-center justify-between border-b px-3 py-1.5 font-mono text-[10px] tracking-wider uppercase">
-            <span>{lang ?? "text"}</span>
+          <div
+            className="flex items-center justify-between px-3.5 py-2 font-mono text-[11px] normal-case tracking-normal"
+            style={{ backgroundColor: "var(--chat-code-header-bg)", color: "#a5947c" }}
+          >
+            <span>{lang ?? "code"}</span>
             {codeContent && (
-              <CopyButton text={codeContent} className="opacity-100 transition-opacity" />
+              <CopyButton
+                text={codeContent}
+                label="Copy"
+                className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
+              />
             )}
           </div>
         )}
         <pre
           className="scrollbar-thin max-w-full overflow-x-auto p-3.5 text-[12.5px] leading-relaxed"
+          style={{ color: "var(--chat-code-fg)" }}
           {...props}
         >
           {children}
@@ -68,9 +79,10 @@ const SHARED_COMPONENTS = {
   code({ className, children, ...props }: React.ComponentPropsWithoutRef<"code">) {
     const isInline = !className;
     if (isInline) {
+      // Inline code = paper chip with deep-terracotta text (Terra spec).
       return (
         <code
-          className="bg-foreground/8 text-foreground rounded px-1.5 py-0.5 font-mono text-[0.85em]"
+          className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[0.85em] text-[#a8421f] dark:text-[#e39b6e]"
           {...props}
         >
           {children}

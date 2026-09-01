@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
  *   - csv/xls/xlsx → green
  *   - py/js/ts/json → blue
  *   - md/txt → gray
- *   - png/jpg/svg → purple
+ *   - png/jpg/svg → terracotta
  *   - pdf/doc → red
  *   - default → gray
  */
@@ -54,7 +54,7 @@ function badgeColorFor(ext: string): string {
   }
   // Purple: images
   if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(e)) {
-    return "bg-purple-500 text-white";
+    return "bg-[#c4552f] text-white";
   }
   // Red: documents
   if (["pdf", "doc", "docx"].includes(e)) {
