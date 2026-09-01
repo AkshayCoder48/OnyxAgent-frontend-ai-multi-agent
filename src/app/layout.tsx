@@ -1,5 +1,4 @@
 import type { Metadata, Viewport } from "next";
-import { Bricolage_Grotesque, Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { defaultLocale } from "@/i18n";
 import { SITE } from "@/lib/seo";
@@ -7,26 +6,8 @@ import { SITE } from "@/lib/seo";
 // Prevent static generation errors (React Query needs a provider at runtime)
 export const dynamic = "force-dynamic";
 
-const display = Bricolage_Grotesque({
-  subsets: ["latin"],
-  variable: "--font-display",
-  weight: ["700", "800"],
-  display: "swap",
-});
-
-const body = Inter({
-  subsets: ["latin"],
-  variable: "--font-body",
-  weight: ["400", "500", "600", "700"],
-  display: "swap",
-});
-
-const mono = Geist_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  weight: ["400", "500"],
-  display: "swap",
-});
+// Terra editorial typefaces (Fraunces / Inter / JetBrains Mono) are
+// self-hosted via Fontsource and imported at the top of globals.css.
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.url),
@@ -76,8 +57,8 @@ export const viewport: Viewport = {
   // used by the mobile bottom tab bar.
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#0d4029" },
+    { media: "(prefers-color-scheme: light)", color: "#faf6f0" },
+    { media: "(prefers-color-scheme: dark)", color: "#211a13" },
   ],
 };
 
@@ -87,11 +68,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang={defaultLocale}
-      suppressHydrationWarning
-      className={`${display.variable} ${body.variable} ${mono.variable}`}
-    >
+    <html lang={defaultLocale} suppressHydrationWarning>
       <body className="font-body">{children}</body>
     </html>
   );

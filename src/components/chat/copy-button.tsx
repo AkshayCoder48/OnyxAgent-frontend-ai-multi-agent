@@ -13,9 +13,11 @@ interface CopyButtonProps {
    *  the legacy opacity-0 + group-hover:opacity-100 pattern (hidden until
    *  the parent .group element is hovered). */
   alwaysVisible?: boolean;
+  /** Optional text label rendered next to the icon ("Copy" affordance). */
+  label?: string;
 }
 
-export function CopyButton({ text, className, size = "sm", alwaysVisible = true }: CopyButtonProps) {
+export function CopyButton({ text, className, size = "sm", alwaysVisible = true, label }: CopyButtonProps) {
   const { copy, copied } = useCopyToClipboard();
 
   const handleCopy = async (e: React.MouseEvent) => {
@@ -28,7 +30,8 @@ export function CopyButton({ text, className, size = "sm", alwaysVisible = true 
       variant="ghost"
       size={size}
       className={cn(
-        "h-6 w-6 p-0 transition-opacity",
+        "h-6 p-0 transition-opacity",
+        label ? "w-auto gap-1 px-1.5" : "w-6",
         !alwaysVisible && "opacity-0 group-hover:opacity-100",
         className,
       )}
@@ -41,6 +44,7 @@ export function CopyButton({ text, className, size = "sm", alwaysVisible = true 
       ) : (
         <Copy className="h-3.5 w-3.5" aria-hidden />
       )}
+      {label && <span className="text-[11px] leading-none">{copied ? "Copied" : label}</span>}
     </Button>
   );
 }

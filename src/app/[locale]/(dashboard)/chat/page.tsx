@@ -7,8 +7,10 @@ import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useResizableSidebar } from "@/components/ui/resize-handle";
-import { useChatSidebarStore } from "@/stores";
-import { FolderOpen, Menu, Bot, X } from "lucide-react";
+import { useChatSidebarStore, useConversationStore } from "@/stores";
+import { useConversations } from "@/hooks";
+import { ShareDialog } from "@/components/chat/share-dialog";
+import { FolderOpen, Menu, Bot, X, Share2, History } from "lucide-react";
 
 /** Resizable right sidebar wrapper — drag the left edge to resize. */
 function ResizableRightPanel({
@@ -75,7 +77,12 @@ type RightPanel = "files" | "subagents" | null;
 export default function ChatPage() {
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [mobilePanel, setMobilePanel] = useState<RightPanel>(null);
+  const [shareOpen, setShareOpen] = useState(false);
   const { open: openChatSidebar } = useChatSidebarStore();
+  const currentConversationId = useConversationStore((s) => s.currentConversationId);
+  const { conversations } = useConversations();
+  const conversationTitle =
+    conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
   const togglePanel = (panel: RightPanel) => {
     if (window.innerWidth >= 768) {
@@ -89,9 +96,10 @@ export default function ChatPage() {
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <ConversationSidebar />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Sub-toolbar: conversation menu (mobile) + Files/Agents toggles. */}
-        <div className="glass flex h-11 shrink-0 items-center justify-between border-b px-2 sm:px-3">
-          <div className="flex items-center gap-1">
+        {/* Glass top bar (Terra spec): serif conversation title on the left,
+            history / share / more affordances on the right, over a hairline. */}
+        <div className="glass-header flex h-12 shrink-0 items-center justify-between border-b px-2 sm:px-4">
+          <div className="flex min-w-0 items-center gap-1.5">
             <Button
               variant="ghost"
               size="sm"
@@ -102,30 +110,51 @@ export default function ChatPage() {
             >
               <Menu className="h-4 w-4" />
             </Button>
-            <div className="hidden md:block w-8" />
+            <h1 className="font-display truncate text-[17px] font-medium tracking-tight sm:text-lg">
+              {conversationTitle || "New conversation"}
+            </h1>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={openChatSidebar}
+              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+              title="Chat history"
+              aria-label="Chat history"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShareOpen(true)}
+              disabled={!currentConversationId}
+              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground disabled:opacity-40"
+              title="Share conversation"
+              aria-label="Share conversation"
+            >
+              <Share2 className="h-4 w-4" />
+            </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => togglePanel("subagents")}
-              className={rightPanel === "subagents" ? "h-8 gap-2 px-3 text-xs font-medium bg-foreground/5" : "h-8 gap-2 px-3 text-xs font-medium"}
+              className={rightPanel === "subagents" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
               title="Subagent chat"
               aria-label="Toggle subagent panel"
             >
               <Bot className="h-4 w-4" />
-              <span>Agents</span>
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={() => togglePanel("files")}
-              className={rightPanel === "files" ? "h-8 gap-2 px-3 text-xs font-medium bg-foreground/5" : "h-8 gap-2 px-3 text-xs font-medium"}
+              className={rightPanel === "files" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
               title="Show files"
               aria-label="Toggle files panel"
             >
               <FolderOpen className="h-4 w-4" />
-              <span>Files</span>
             </Button>
           </div>
         </div>
@@ -168,6 +197,15 @@ export default function ChatPage() {
           <SubAgentSidebar open onClose={() => setMobilePanel(null)} />
         </SheetContent>
       </Sheet>
+
+      {/* Share current conversation (top-bar share icon) */}
+      {currentConversationId && (
+        <ShareDialog
+          conversationId={currentConversationId}
+          open={shareOpen}
+          onOpenChange={setShareOpen}
+        />
+      )}
     </div>
   );
 }

@@ -53,56 +53,87 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
 }
 
-const NAV_ITEMS: NavItem[] = [
+interface NavGroup {
+  id: string;
+  label: string;
+  items: NavItem[];
+}
+
+/**
+ * Settings consolidated into three tidy groups (task requirement: "sort all
+ * similar settings into one and make it less messy"). NAV_ITEMS stays flat
+ * for lookups; NAV_GROUPS drives the grouped nav rendering.
+ */
+const NAV_GROUPS: NavGroup[] = [
   {
-    id: "providers",
-    label: "AI Providers",
-    description: "BYO-key model providers",
-    icon: Bot,
+    id: "ai",
+    label: "AI & Models",
+    items: [
+      {
+        id: "providers",
+        label: "AI Providers",
+        description: "BYO-key model providers",
+        icon: Bot,
+      },
+      {
+        id: "agent",
+        label: "Agent Settings",
+        description: "Default model, temperature, system prompt",
+        icon: Sliders,
+      },
+    ],
   },
   {
-    id: "agent",
-    label: "Agent Settings",
-    description: "Default model, temperature, system prompt",
-    icon: Sliders,
+    id: "extensions",
+    label: "Extensions",
+    items: [
+      {
+        id: "slash",
+        label: "Slash Commands",
+        description: "Built-in & custom prompts",
+        icon: Terminal,
+      },
+      {
+        id: "mcp",
+        label: "MCP Servers",
+        description: "Model Context Protocol over HTTP/SSE",
+        icon: Server,
+      },
+      {
+        id: "tools",
+        label: "Custom Tools",
+        description: "Webhook & Python tool integrations",
+        icon: Plug,
+      },
+      {
+        id: "skills",
+        label: "Skills",
+        description: "Reusable prompt + tool bundles",
+        icon: Sparkles,
+      },
+    ],
   },
   {
-    id: "slash",
-    label: "Slash Commands",
-    description: "Built-in & custom prompts",
-    icon: Terminal,
-  },
-  {
-    id: "e2b",
-    label: "Sandbox (E2B)",
-    description: "Remote code execution sandbox",
-    icon: Cloud,
-  },
-  {
-    id: "mcp",
-    label: "MCP Servers",
-    description: "Model Context Protocol over HTTP/SSE",
-    icon: Server,
-  },
-  {
-    id: "tools",
-    label: "Custom Tools",
-    description: "Webhook & Python tool integrations",
-    icon: Plug,
-  },
-  {
-    id: "skills",
-    label: "Skills",
-    description: "Reusable prompt + tool bundles",
-    icon: Sparkles,
-  },
-  {
-    id: "appearance",
-    label: "Appearance",
-    description: "Theme, brand color, font size",
-    icon: Palette,
+    id: "workspace",
+    label: "Workspace",
+    items: [
+      {
+        id: "e2b",
+        label: "Sandbox (E2B)",
+        description: "Remote code execution sandbox",
+        icon: Cloud,
+      },
+      {
+        id: "appearance",
+        label: "Appearance",
+        description: "Theme, brand color, font size",
+        icon: Palette,
+      },
+    ],
   },
 ];
+
+const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
 function ThemeToggle() {
   const { resolvedTheme, setTheme } = useTheme();
@@ -144,42 +175,52 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
 
       {/* Body: sidebar nav + content */}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        {/* Desktop vertical nav */}
-        <nav className="bg-card/40 hidden w-64 shrink-0 border-r md:block">
+        {/* Desktop vertical nav — grouped with tracked-caps headers so
+            similar settings live together (less messy). */}
+        <nav className="bg-secondary/50 hidden w-64 shrink-0 border-r md:block">
           <ScrollArea className="h-full">
-            <ul className="flex flex-col gap-0.5 p-3">
-              {NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                const isActive = item.id === active;
-                return (
-                  <li key={item.id}>
-                    <button
-                      type="button"
-                      onClick={() => setActive(item.id)}
-                      className={cn(
-                        "group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
-                        isActive
-                          ? "bg-accent text-accent-foreground"
-                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-                      )}
-                    >
-                      <Icon
-                        className={cn(
-                          "mt-0.5 size-4 shrink-0",
-                          isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground",
-                        )}
-                      />
-                      <span className="flex min-w-0 flex-col">
-                        <span className="font-medium leading-tight">{item.label}</span>
-                        <span className="text-muted-foreground truncate text-xs leading-tight">
-                          {item.description}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="flex flex-col gap-4 p-3">
+              {NAV_GROUPS.map((group) => (
+                <div key={group.id}>
+                  <p className="px-3 pb-1.5 font-mono text-[10px] font-medium tracking-[0.16em] text-muted-foreground/70 uppercase">
+                    {group.label}
+                  </p>
+                  <ul className="flex flex-col gap-0.5">
+                    {group.items.map((item) => {
+                      const Icon = item.icon;
+                      const isActive = item.id === active;
+                      return (
+                        <li key={item.id}>
+                          <button
+                            type="button"
+                            onClick={() => setActive(item.id)}
+                            className={cn(
+                              "group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
+                              isActive
+                                ? "bg-accent text-accent-foreground border border-[#ead6c4] dark:border-[#4c3d2a]"
+                                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent",
+                            )}
+                          >
+                            <Icon
+                              className={cn(
+                                "mt-0.5 size-4 shrink-0",
+                                isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
+                              )}
+                            />
+                            <span className="flex min-w-0 flex-col">
+                              <span className="font-medium leading-tight">{item.label}</span>
+                              <span className="text-muted-foreground truncate text-xs leading-tight">
+                                {item.description}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
           </ScrollArea>
         </nav>
 
@@ -216,10 +257,10 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
         {/* Right content */}
         <main className="bg-background min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-4xl px-4 py-6 md:px-8 md:py-8">
-            <div className="mb-6 flex items-center gap-2">
-              <activeItem.icon className="text-muted-foreground size-5" />
+            <div className="mb-6 flex items-center gap-2.5">
+              <activeItem.icon className="text-primary size-5" />
               <div>
-                <h2 className="text-lg font-semibold leading-tight">{activeItem.label}</h2>
+                <h2 className="font-display text-xl font-semibold leading-tight tracking-tight">{activeItem.label}</h2>
                 <p className="text-muted-foreground text-xs">{activeItem.description}</p>
               </div>
             </div>

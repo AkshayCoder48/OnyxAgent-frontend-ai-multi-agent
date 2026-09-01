@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
-import { Loader2, Paperclip, Send, Square, Sparkles, Zap } from "lucide-react";
+import { ArrowUp, Loader2, Paperclip, Square, Sparkles, Zap } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {
   BUILTIN_COMMANDS,
@@ -263,7 +263,7 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            placeholder="Ask anything, or type / for commands..."
+            placeholder="Reply to OnyxAgent… or type / for commands"
             disabled={disabled}
             rows={1}
             className={cn(
@@ -300,25 +300,26 @@ export function ChatInput({
               type="button"
               size="icon"
               onClick={onStop}
-              className="h-9 w-9 shrink-0 rounded-xl"
+              className="h-9 w-9 shrink-0 rounded-full"
               title="Stop generating"
               aria-label="Stop generating"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
             </Button>
           ) : (
+            /* Round terracotta send button with arrow-up (Terra spec). */
             <Button
               type="submit"
               size="icon"
               disabled={disabled || !canSend}
               className={cn(
-                "h-9 w-9 shrink-0 rounded-xl transition-all",
+                "h-9 w-9 shrink-0 rounded-full bg-primary text-primary-foreground transition-all hover:bg-[#a8421f] disabled:opacity-40",
                 canSend && !disabled && "shadow-sm",
               )}
               title="Send message"
               aria-label="Send message"
             >
-              <Send className="h-4 w-4" />
+              <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
             </Button>
           )}
         </div>

@@ -20,7 +20,7 @@ import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { useSingleRoundMode } from "@/hooks/use-single-round-mode";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
-import { Bot, Zap } from "lucide-react";
+import { Zap } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
 
@@ -399,7 +399,8 @@ function ChatUI({
   const tc = useTranslations("common");
   return (
     <div className="flex h-full w-full">
-      <div className="mx-auto flex h-full max-w-5xl min-w-0 flex-1 flex-col">
+      {/* Centered ~760px message thread column (Terra editorial spec). */}
+      <div className="mx-auto flex h-full w-full max-w-[760px] min-w-0 flex-1 flex-col">
         <div
           ref={scrollContainerRef}
           className="flex-1 scrollbar-thin overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
@@ -418,22 +419,18 @@ function ChatUI({
               Uses the same Bot avatar as the streaming message for visual
               continuity. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
-            <div className="flex items-center gap-3 px-2 py-3 animate-slide-up-fade">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted">
-                <Bot className="h-4 w-4 sm:h-5 sm:w-5" />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">Thinking</span>
-                  <span className="streaming-dots">
-                    <span /> <span /> <span />
-                  </span>
-                </div>
-                <div className="flex gap-1.5">
-                  <div className="shimmer h-2 w-32 rounded-full" />
-                  <div className="shimmer h-2 w-20 rounded-full" />
-                </div>
-              </div>
+            /* Terracotta typing indicator (Terra spec): brand mark + serif
+               name + three bouncing dots covering the loading state. */
+            <div className="animate-slide-up-fade flex items-center gap-2 px-1 py-3">
+              <span className="inline-flex h-4 w-4 items-center justify-center text-primary" aria-hidden>
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
+                  <path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" />
+                </svg>
+              </span>
+              <span className="assistant-name text-[15px] leading-none">OnyxAgent</span>
+              <span className="streaming-dots ml-1" aria-hidden="true" role="status" aria-label="Assistant is typing">
+                <span /> <span /> <span />
+              </span>
             </div>
           )}
           {/* Loading state: show empty state until the AI generates its first
@@ -499,7 +496,7 @@ function ChatUI({
                 >
                   <span
                     className={`inline-block h-1.5 w-1.5 rounded-full ${
-                      isConnected ? "bg-emerald-500" : "bg-destructive"
+                      isConnected ? "bg-primary" : "bg-destructive"
                     }`}
                   />
                   {isConnected ? tc("live") : tc("offline")}
@@ -512,6 +509,10 @@ function ChatUI({
                 )}
               </div>
               <div className="flex min-w-0 items-center gap-1">
+                {/* "⏎ to send" hint (Terra spec) */}
+                <kbd className="mr-1 hidden select-none font-mono text-[10px] text-muted-foreground/60 sm:inline-flex">
+                  ⏎ to send
+                </kbd>
                 <ChatControls
                   onModelChange={onModelChange}
                   onProviderSelect={(p) => onProviderChange?.(p ? p.id : null)}
@@ -521,8 +522,9 @@ function ChatUI({
               </div>
             </div>
           </div>
-          <p className="text-foreground/40 mt-1.5 text-center font-mono text-[9px] tracking-wider uppercase sm:text-[10px]">
-            AI can make mistakes. Verify important information.
+          {/* Centered disclaimer below the composer card (Terra spec). */}
+          <p className="text-muted-foreground/80 mt-2 text-center text-[11px]">
+            OnyxAgent can make mistakes. Double-check important information.
           </p>
         </div>
       </div>
@@ -533,32 +535,31 @@ function ChatUI({
 }
 
 function ConversationSkeleton() {
-  // Two faux message bubbles — left (assistant) and right (user) — at the rough
-  // proportions a real exchange has, so the layout doesn't pop when messages
-  // arrive. Just enough motion to signal "loading", no shimmer chrome.
+  // Two faux turns — a frameless assistant turn (left) and a soft-terracotta
+  // user card (right) — matching the Terra editorial message layout, so the
+  // exchange doesn't pop when messages arrive.
   return (
     <div className="space-y-6 py-4 sm:py-6">
-      <div className="flex gap-2 sm:gap-4">
-        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
-        <div className="flex max-w-[85%] flex-1 flex-col gap-2">
-          <div className="bg-foreground/10 h-4 w-1/3 animate-pulse rounded-md" />
-          <div className="bg-foreground/8 h-4 w-4/5 animate-pulse rounded-md" />
-          <div className="bg-foreground/8 h-4 w-2/3 animate-pulse rounded-md" />
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <div className="bg-primary/30 h-4 w-4 animate-pulse rounded" />
+          <div className="bg-foreground/10 h-3.5 w-24 animate-pulse rounded-md" />
         </div>
+        <div className="bg-foreground/10 h-4 w-1/3 animate-pulse rounded-md" />
+        <div className="bg-foreground/8 h-4 w-4/5 animate-pulse rounded-md" />
+        <div className="bg-foreground/8 h-4 w-2/3 animate-pulse rounded-md" />
       </div>
-      <div className="flex flex-row-reverse gap-2 sm:gap-4">
-        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
-        <div className="flex max-w-[85%] flex-1 flex-col items-end gap-2">
-          <div className="bg-foreground/10 h-4 w-1/4 animate-pulse rounded-md" />
-          <div className="bg-foreground/8 h-4 w-3/5 animate-pulse rounded-md" />
-        </div>
+      <div className="flex flex-col items-end gap-2">
+        <div className="bg-accent border-border/60 h-10 w-1/3 animate-pulse rounded-2xl rounded-tr-sm border" />
+        <div className="bg-accent border-border/60 h-10 w-1/5 animate-pulse rounded-2xl rounded-tr-sm border" />
       </div>
-      <div className="flex gap-2 sm:gap-4">
-        <div className="bg-foreground/10 h-8 w-8 shrink-0 animate-pulse rounded-full sm:h-9 sm:w-9" />
-        <div className="flex max-w-[85%] flex-1 flex-col gap-2">
-          <div className="bg-foreground/8 h-4 w-3/4 animate-pulse rounded-md" />
-          <div className="bg-foreground/8 h-4 w-1/2 animate-pulse rounded-md" />
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <div className="bg-primary/30 h-4 w-4 animate-pulse rounded" />
+          <div className="bg-foreground/10 h-3.5 w-24 animate-pulse rounded-md" />
         </div>
+        <div className="bg-foreground/8 h-4 w-3/4 animate-pulse rounded-md" />
+        <div className="bg-foreground/8 h-4 w-1/2 animate-pulse rounded-md" />
       </div>
     </div>
   );

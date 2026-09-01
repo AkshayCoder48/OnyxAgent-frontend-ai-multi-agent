@@ -30,14 +30,17 @@ interface BrandPreset {
   swatch: string;
 }
 
-// Carefully chosen to avoid indigo/blue (hue 200–280 excluded).
+// Warm-first preset list. Terracotta is the app default (Terra editorial
+// design); no purple/violet/indigo presets, per the design spec. Picking
+// Terracotta clears the overrides so the design tokens from globals.css
+// take over again.
 const BRAND_PRESETS: BrandPreset[] = [
   {
-    id: "neutral",
-    label: "Neutral",
-    primary: "oklch(0.205 0 0)",
-    primaryForeground: "oklch(0.985 0 0)",
-    swatch: "oklch(0.4 0 0)",
+    id: "terracotta",
+    label: "Terracotta",
+    primary: "#c4552f",
+    primaryForeground: "#faf6f0",
+    swatch: "#c4552f",
   },
   {
     id: "emerald",
@@ -67,13 +70,6 @@ const BRAND_PRESETS: BrandPreset[] = [
     primaryForeground: "oklch(0.985 0 0)",
     swatch: "oklch(0.62 0.24 16)",
   },
-  {
-    id: "fuchsia",
-    label: "Fuchsia",
-    primary: "oklch(0.62 0.27 312)",
-    primaryForeground: "oklch(0.985 0 0)",
-    swatch: "oklch(0.62 0.27 312)",
-  },
 ];
 
 const FONT_SIZE_MAP: Record<FontSize, string> = {
@@ -85,21 +81,29 @@ const FONT_SIZE_MAP: Record<FontSize, string> = {
 const BRAND_KEY = "settings.brand";
 const FONT_KEY = "settings.font-size";
 
+/** CSS vars the picker overrides (Tailwind v4 token names). */
+const BRAND_OVERRIDES = [
+  "--color-primary",
+  "--color-primary-foreground",
+  "--color-brand",
+  "--color-brand-hover",
+  "--color-ring",
+  "--color-chart",
+] as const;
+
 function applyBrand(preset: BrandPreset) {
   const root = document.documentElement;
-  if (preset.id === "neutral") {
+  if (preset.id === "terracotta") {
     // Restore theme defaults by removing inline overrides.
-    root.style.removeProperty("--primary");
-    root.style.removeProperty("--primary-foreground");
-    root.style.removeProperty("--sidebar-primary");
-    root.style.removeProperty("--sidebar-primary-foreground");
+    for (const prop of BRAND_OVERRIDES) root.style.removeProperty(prop);
     return;
   }
-  root.style.setProperty("--primary", preset.primary);
-  root.style.setProperty("--primary-foreground", preset.primaryForeground);
-  // Also propagate to sidebar primary so the sidebar follows brand.
-  root.style.setProperty("--sidebar-primary", preset.primary);
-  root.style.setProperty("--sidebar-primary-foreground", preset.primaryForeground);
+  root.style.setProperty("--color-primary", preset.primary);
+  root.style.setProperty("--color-primary-foreground", preset.primaryForeground);
+  root.style.setProperty("--color-brand", preset.primary);
+  root.style.setProperty("--color-brand-hover", preset.primary);
+  root.style.setProperty("--color-ring", preset.primary);
+  root.style.setProperty("--color-chart", preset.primary);
 }
 
 function applyFont(size: FontSize) {
@@ -109,12 +113,17 @@ function applyFont(size: FontSize) {
 export function SectionAppearance() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = React.useState(false);
-  const [brand, setBrand] = React.useState<string>("neutral");
+  const [brand, setBrand] = React.useState<string>("terracotta");
   const [fontSize, setFontSize] = React.useState<FontSize>("base");
 
   React.useEffect(() => {
     setMounted(true);
-    const savedBrand = localStorage.getItem(BRAND_KEY) ?? "neutral";
+    // Map the legacy "neutral"/unknown ids onto the terracotta default.
+    const rawSaved = localStorage.getItem(BRAND_KEY) ?? "terracotta";
+    const savedBrand =
+      rawSaved === "neutral" || !BRAND_PRESETS.some((p) => p.id === rawSaved)
+        ? "terracotta"
+        : rawSaved;
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
     setBrand(savedBrand);
     setFontSize(savedFont);
@@ -212,7 +221,7 @@ export function SectionAppearance() {
           variant="outline"
           size="sm"
           onClick={() => handleBrand(BRAND_PRESETS[0]!)}
-          disabled={brand === "neutral"}
+          disabled={brand === "terracotta"}
         >
           Reset to default
         </Button>

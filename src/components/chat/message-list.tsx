@@ -63,6 +63,44 @@ function useGroupPositions(messages: ChatMessage[]): Map<string, "first" | "midd
   }, [messages]);
 }
 
+/** Terra date separator: "TODAY · 2:14 PM" flanked by hairlines. */
+function DateSeparator({ date }: { date: Date }) {
+  const now = new Date();
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dayDiff = Math.floor(
+    (startOfDay(now).getTime() - startOfDay(date).getTime()) / 86_400_000,
+  );
+  const dayLabel =
+    dayDiff <= 0
+      ? "Today"
+      : dayDiff === 1
+        ? "Yesterday"
+        : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const timeLabel = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  return (
+    <div className="flex items-center gap-3 py-3 first:pt-0" role="separator" aria-label={`${dayLabel}, ${timeLabel}`}>
+      <span className="border-border flex-1 border-t" />
+      <span className="text-muted-foreground/70 font-mono text-[10px] font-medium tracking-[0.16em] uppercase">
+        {dayLabel} · {timeLabel}
+      </span>
+      <span className="border-border flex-1 border-t" />
+    </div>
+  );
+}
+
+/** True when two messages fall on different calendar days (or first in list). */
+function isNewDay(prev: ChatMessage | undefined, current: ChatMessage): boolean {
+  if (!prev) return true;
+  const a = new Date(prev.timestamp);
+  const b = new Date(current.timestamp);
+  return (
+    a.getFullYear() !== b.getFullYear() ||
+    a.getMonth() !== b.getMonth() ||
+    a.getDate() !== b.getDate()
+  );
+}
+
 export function MessageList({ messages, onRegenerate }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
 
@@ -80,19 +118,25 @@ export function MessageList({ messages, onRegenerate }: MessageListProps) {
       {messages.map((message, index) => {
         const groupPos = groupPositions.get(message.id);
         const isLastInGroup = !groupPos || groupPos === "last" || groupPos === "single";
+        const prev = messages[index - 1];
 
         return (
-          <div key={message.id} className="animate-message-in">
-            <MessageItem
-              message={message}
-              groupPosition={groupPos}
-              showFooter={isLastInGroup}
-              onRegenerate={
-                onRegenerate && index === lastAssistantIndex && !message.isStreaming
-                  ? () => onRegenerate(message.id)
-                  : undefined
-              }
-            />
+          <div key={message.id}>
+            {isNewDay(prev, message) && (
+              <DateSeparator date={new Date(message.timestamp)} />
+            )}
+            <div className="animate-message-in">
+              <MessageItem
+                message={message}
+                groupPosition={groupPos}
+                showFooter={isLastInGroup}
+                onRegenerate={
+                  onRegenerate && index === lastAssistantIndex && !message.isStreaming
+                    ? () => onRegenerate(message.id)
+                    : undefined
+                }
+              />
+            </div>
           </div>
         );
       })}

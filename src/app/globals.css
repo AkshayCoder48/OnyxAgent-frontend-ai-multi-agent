@@ -1,3 +1,10 @@
+/* Self-hosted variable fonts (Fontsource) — Fraunces serif display, Inter
+   body, JetBrains Mono code. Self-hosting keeps the Terra editorial type
+   system intact offline and in every deployment environment. */
+@import "@fontsource-variable/fraunces/wght.css";
+@import "@fontsource-variable/fraunces/wght-italic.css";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "tailwindcss";
 
 /* =========================================================================
@@ -8,43 +15,44 @@
 
 @theme {
   /* ============================================================
-     Brand — green palette (#1ec677).
-     Single brand var drives the whole app: change `--brand-h` /
-     `--brand-c` / `--brand-l` to retheme. Users can override at
-     runtime via the in-app picker (/settings/appearance), which
-     writes CSS variables on `<html>`.
+     Brand — warm terracotta "editorial" palette (Terra spec).
+     A cream/paper canvas (#FAF6F0), near-black ink (#1A1A1A) and
+     ONE warm accent: terracotta (#C4552F, deep #A8421F on hover /
+     inline code). No purple / indigo / violet anywhere.
+     Single brand var drives the whole app; the in-app picker
+     (/settings/appearance) can still override on `<html>`.
      ============================================================ */
-  /* Preset: GREEN (OnyxAgent — #1ec677). Brand vars drive the in-app picker */
+  /* Preset: TERRACOTTA (#C4552F). Brand vars drive the in-app picker */
   --brand-h: 264.376;
   --brand-c: 0.243;
   --brand-l: 48.8%;
-  --color-brand-foreground: #ffffff;
+  --color-brand-foreground: #faf6f0;
 
-  --color-brand: oklch(0.488 0.243 264.376);
-  --color-brand-hover: oklch(0.553 0.195 264.376);
-  --color-brand-muted: oklch(0.704 0.191 264.376);
-  /* Chart strokes/fills — darker brand variant for readability on light bg. */
-  --color-chart: oklch(0.546 0.245 262.881);
+  --color-brand: #c4552f;
+  --color-brand-hover: #a8421f;
+  --color-brand-muted: #d98d68;
+  /* Chart strokes/fills — darker terracotta for readability on cream bg. */
+  --color-chart: #a8421f;
 
-  /* Light theme — white background, dark-green text, green tint accents */
-  --color-background: oklch(98.5% 0 0);
-  --color-foreground: oklch(14.5% 0 0);          /* dark green */
-  --color-card: oklch(98.5% 0 0);
-  --color-card-foreground: oklch(14.5% 0 0);
-  --color-popover: oklch(98.5% 0 0);
-  --color-popover-foreground: oklch(14.5% 0 0);
-  --color-primary: oklch(0.488 0.243 264.376);            /* green */
-  --color-primary-foreground: oklch(98.5% 0 0);
-  --color-secondary: oklch(96.1% 0 0);          /* light green tint */
-  --color-secondary-foreground: oklch(14.5% 0 0);
-  --color-muted: oklch(96.1% 0 0);              /* light green tint */
-  --color-muted-foreground: oklch(45% 0 0);   /* muted dark-green */
-  --color-accent: oklch(96.1% 0 0);             /* light green tint */
-  --color-accent-foreground: oklch(14.5% 0 0);
-  --color-destructive: oklch(57.7% 0.245 27.325);
-  --color-destructive-foreground: oklch(98.5% 0 0);
-  --color-border: oklch(89.8% 0 0);             /* soft green-tinted border */
-  --color-input: oklch(89.8% 0 0);              /* soft green-tinted input */
+  /* Light theme — cream canvas, near-black ink, terracotta accents */
+  --color-background: #faf6f0;                /* cream / paper canvas */
+  --color-foreground: #1a1a1a;                /* near-black ink */
+  --color-card: #fffdf9;                      /* lifted cream card */
+  --color-card-foreground: #1a1a1a;
+  --color-popover: #fffdf9;
+  --color-popover-foreground: #1a1a1a;
+  --color-primary: #c4552f;                   /* terracotta */
+  --color-primary-foreground: #faf6f0;
+  --color-secondary: #f4ece1;                 /* paper surface */
+  --color-secondary-foreground: #1a1a1a;
+  --color-muted: #f4ece1;                     /* paper surface */
+  --color-muted-foreground: #7c6b5b;          /* warm taupe on cream */
+  --color-accent: #f0e3d5;                    /* soft terracotta */
+  --color-accent-foreground: #1a1a1a;
+  --color-destructive: #a63a22;               /* deep warm red */
+  --color-destructive-foreground: #faf6f0;
+  --color-border: #e7dccc;                    /* hairline */
+  --color-input: #e7dccc;                     /* hairline input */
   --color-ring: var(--color-brand);
 
   /* Radius */
@@ -52,11 +60,13 @@
   --radius-card: 1rem;
   --radius-pill: 999px;
 
-  /* Typography */
-  --font-display: var(--font-display), "Bricolage Grotesque", system-ui, sans-serif;
-  --font-body: var(--font-body), "Inter", system-ui, sans-serif;
-  --font-accent: var(--font-display), "Bricolage Grotesque", system-ui, sans-serif;
-  --font-mono: var(--font-mono), "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /* Typography — Fraunces (serif display) for brand voice, Inter for
+     body/UI, JetBrains Mono for code. Variable fonts are self-hosted via
+     Fontsource (imported at the top of this file). */
+  --font-display: "Fraunces Variable", "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-accent: "Fraunces Variable", "Fraunces", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -70,45 +80,58 @@
    When a custom color scheme is applied (via JS inline styles), the
    .custom-scheme class is added to <html> to PREVENT this media query
    from overriding the inline styles. */
+/* Dark theme — warm charcoal counterpart of the Terra cream canvas.
+   Keeps the same terracotta accent so both themes share one voice.
+   When a custom color scheme is applied (via JS inline styles), the
+   .custom-scheme class is added to <html> to PREVENT this media query
+   from overriding the inline styles. */
 @media (prefers-color-scheme: dark) {
   :root:not(.light):not(.custom-scheme) {
-    --color-background: oklch(14.5% 0 0);          /* dark green */
-    --color-foreground: oklch(98.5% 0 0);          /* light green tint */
-    --color-card: oklch(20% 0 0);                /* dark green surface */
-    --color-card-foreground: oklch(98.5% 0 0);
-    --color-popover: oklch(20% 0 0);             /* dark green surface */
-    --color-popover-foreground: oklch(98.5% 0 0);
-    --color-primary: oklch(0.488 0.243 264.376);             /* same green */
-    --color-primary-foreground: oklch(98.5% 0 0);
-    --color-secondary: #0f3520;           /* dark green */
-    --color-secondary-foreground: oklch(98.5% 0 0);
-    --color-muted: #0f3520;               /* dark green */
-    --color-muted-foreground: #a8d4bb;    /* muted light green */
-    --color-accent: #0f3520;              /* dark green */
-    --color-accent-foreground: oklch(98.5% 0 0);
-    --color-border: oklch(35% 0 0);              /* dark green border */
-    --color-input: oklch(35% 0 0);               /* dark green input */
+    --color-background: #211a13;                 /* deep warm charcoal */
+    --color-foreground: #f4ece1;                 /* warm cream text */
+    --color-card: #2a2119;                       /* warm charcoal surface */
+    --color-card-foreground: #f4ece1;
+    --color-popover: #2a2119;
+    --color-popover-foreground: #f4ece1;
+    --color-primary: #d4693f;                    /* slightly lifted terracotta */
+    --color-primary-foreground: #211a13;
+    --color-secondary: #2f261c;                  /* dark warm surface */
+    --color-secondary-foreground: #f4ece1;
+    --color-muted: #2f261c;
+    --color-muted-foreground: #b3a28d;           /* muted warm taupe */
+    --color-accent: #39301f;                     /* warm dim accent */
+    --color-accent-foreground: #f4ece1;
+    --color-destructive: #d05b3f;
+    --color-destructive-foreground: #211a13;
+    --color-border: #453a2b;                     /* warm hairline */
+    --color-input: #453a2b;
+    --color-brand: #d4693f;
+    --color-brand-hover: #e07c50;
     --color-chart: var(--color-brand);
   }
 }
 
 :root.dark:not(.custom-scheme) {
-  --color-background: oklch(14.5% 0 0);            /* dark green */
-  --color-foreground: oklch(98.5% 0 0);            /* light green tint */
-  --color-card: oklch(20% 0 0);                  /* dark green surface */
-  --color-card-foreground: oklch(98.5% 0 0);
-  --color-popover: oklch(20% 0 0);               /* dark green surface */
-  --color-popover-foreground: oklch(98.5% 0 0);
-  --color-primary: oklch(0.488 0.243 264.376);               /* same green */
-  --color-primary-foreground: oklch(98.5% 0 0);
-  --color-secondary: #0f3520;             /* dark green */
-  --color-secondary-foreground: oklch(98.5% 0 0);
-  --color-muted: #0f3520;                 /* dark green */
-  --color-muted-foreground: #a8d4bb;      /* muted light green */
-  --color-accent: #0f3520;                /* dark green */
-  --color-accent-foreground: oklch(98.5% 0 0);
-  --color-border: oklch(35% 0 0);                /* dark green border */
-  --color-input: oklch(35% 0 0);                 /* dark green input */
+  --color-background: #211a13;
+  --color-foreground: #f4ece1;
+  --color-card: #2a2119;
+  --color-card-foreground: #f4ece1;
+  --color-popover: #2a2119;
+  --color-popover-foreground: #f4ece1;
+  --color-primary: #d4693f;
+  --color-primary-foreground: #211a13;
+  --color-secondary: #2f261c;
+  --color-secondary-foreground: #f4ece1;
+  --color-muted: #2f261c;
+  --color-muted-foreground: #b3a28d;
+  --color-accent: #39301f;
+  --color-accent-foreground: #f4ece1;
+  --color-destructive: #d05b3f;
+  --color-destructive-foreground: #211a13;
+  --color-border: #453a2b;
+  --color-input: #453a2b;
+  --color-brand: #d4693f;
+  --color-brand-hover: #e07c50;
   --color-chart: var(--color-brand);
 }
 
@@ -120,8 +143,23 @@
    these var() fallbacks take over.
    ========================================================================= */
 :root {
-  --chat-user-bg: var(--color-foreground);
-  --chat-assistant-bg: var(--color-muted);
+  /* User turn = soft-terracotta card with ink text (Terra spec). */
+  --chat-user-bg: #f0e3d5;
+  --chat-user-fg: #1a1a1a;
+  --chat-user-border: #ead6c4;
+  /* Assistant turn = frameless (no bubble) — flat editorial text. */
+  --chat-assistant-bg: transparent;
+  --chat-assistant-fg: var(--color-foreground);
+  /* Warm charcoal code block — used by the chat markdown `pre` renderer. */
+  --chat-code-bg: #262019;
+  --chat-code-header-bg: #1f1a15;
+  --chat-code-fg: #e8decc;
+}
+:root.dark:not(.custom-scheme) {
+  --chat-user-bg: #3b2e20;
+  --chat-user-fg: #f4ece1;
+  --chat-user-border: #4c3d2a;
+  --chat-assistant-bg: transparent;
 }
 
 /* =========================================================================
@@ -130,23 +168,23 @@
    ========================================================================= */
 
 .theme-light {
-  --color-background: oklch(98.5% 0 0);
-  --color-foreground: oklch(14.5% 0 0);
-  --color-card: oklch(98.5% 0 0);
-  --color-card-foreground: oklch(14.5% 0 0);
-  --color-muted: oklch(96.1% 0 0);
-  --color-muted-foreground: oklch(45% 0 0);
-  --color-border: oklch(89.8% 0 0);
+  --color-background: #faf6f0;
+  --color-foreground: #1a1a1a;
+  --color-card: #fffdf9;
+  --color-card-foreground: #1a1a1a;
+  --color-muted: #f4ece1;
+  --color-muted-foreground: #7c6b5b;
+  --color-border: #e7dccc;
 }
 
 .theme-dark {
-  --color-background: oklch(14.5% 0 0);
-  --color-foreground: oklch(98.5% 0 0);
-  --color-card: oklch(20% 0 0);
-  --color-card-foreground: oklch(98.5% 0 0);
-  --color-muted: #0f3520;
-  --color-muted-foreground: #a8d4bb;
-  --color-border: oklch(35% 0 0);
+  --color-background: #211a13;
+  --color-foreground: #f4ece1;
+  --color-card: #2a2119;
+  --color-card-foreground: #f4ece1;
+  --color-muted: #2f261c;
+  --color-muted-foreground: #b3a28d;
+  --color-border: #453a2b;
   --color-chart: var(--color-brand);
 }
 
@@ -1112,79 +1150,80 @@
     padding: 3px 5px;
   }
 
-  /* Light mode (default) — also applies when .custom-scheme is light */
+  /* Light mode (default) — warm editorial tones on cream/paper. */
   .hljs {
-    color: #24292e;
+    color: #1a1a1a;
   }
   .hljs-comment,
   .hljs-quote {
-    color: #6a737d;
+    color: #8a7e6c;
     font-style: italic;
   }
   .hljs-keyword,
   .hljs-selector-tag,
   .hljs-literal {
-    color: #d73a49;
+    color: #a8421f;
   }
   .hljs-name,
   .hljs-tag {
-    color: #22863a;
+    color: #7c4a1e;
   }
   .hljs-attr,
   .hljs-attribute {
-    color: #6f42c1;
+    color: #9a5f33;
   }
   .hljs-variable,
   .hljs-template-variable,
   .hljs-regexp,
   .hljs-link {
-    color: #005cc5;
+    color: #8a5a20;
   }
   .hljs-string,
   .hljs-symbol,
   .hljs-bullet {
-    color: #032f62;
+    color: #6f5a2c;
   }
   .hljs-number {
-    color: #005cc5;
+    color: #b36a1f;
   }
   .hljs-meta,
   .hljs-built_in,
   .hljs-builtin-name,
   .hljs-type,
   .hljs-params {
-    color: #e36209;
+    color: #a3582c;
   }
   .hljs-function .hljs-title {
-    color: #6f42c1;
+    color: #a8421f;
   }
   .hljs-addition {
-    color: #22863a;
-    background-color: #f0fff4;
+    color: #52701e;
+    background-color: #eef3e0;
   }
   .hljs-deletion {
-    color: #b31d28;
-    background-color: #ffeef0;
+    color: #a63a22;
+    background-color: #f7e4d8;
   }
 
-  /* Dark mode — applies to .dark, .theme-dark, AND .custom-scheme.
-     For custom schemes, the dark colors are bright enough to be visible
-     on both light and dark backgrounds (they're medium-saturation colors
-     like #ff7b72, #a5d6ff, etc. that have good contrast on both light
-     and dark backgrounds). The base text color uses color-mix with the
-     theme's foreground variable so it always adapts. */
+  /* Dark mode — warm charcoal code tones (#262019 canvas). Applies to
+     .dark, .theme-dark, .custom-scheme, AND `.chat-code` blocks, which are
+     warm charcoal in EVERY theme (per the Terra design spec: "a warm
+     charcoal code block … never neon"). */
   .dark .hljs,
   .theme-dark .hljs,
-  .custom-scheme .hljs {
-    color: color-mix(in srgb, var(--color-foreground) 90%, transparent);
+  .custom-scheme .hljs,
+  .chat-code .hljs {
+    color: #e8decc;
   }
   .dark .hljs-comment,
   .dark .hljs-quote,
   .theme-dark .hljs-comment,
   .theme-dark .hljs-quote,
   .custom-scheme .hljs-comment,
-  .custom-scheme .hljs-quote {
-    color: color-mix(in srgb, var(--color-foreground) 45%, transparent);
+  .custom-scheme .hljs-quote,
+  .chat-code .hljs-comment,
+  .chat-code .hljs-quote {
+    color: #8a7e6c;
     font-style: italic;
   }
   .dark .hljs-keyword,
@@ -1195,24 +1234,31 @@
   .theme-dark .hljs-literal,
   .custom-scheme .hljs-keyword,
   .custom-scheme .hljs-selector-tag,
-  .custom-scheme .hljs-literal {
-    color: #ff7b72;
+  .custom-scheme .hljs-literal,
+  .chat-code .hljs-keyword,
+  .chat-code .hljs-selector-tag,
+  .chat-code .hljs-literal {
+    color: #e39b6e;
   }
   .dark .hljs-name,
   .dark .hljs-tag,
   .theme-dark .hljs-name,
   .theme-dark .hljs-tag,
   .custom-scheme .hljs-name,
-  .custom-scheme .hljs-tag {
-    color: #7ee787;
+  .custom-scheme .hljs-tag,
+  .chat-code .hljs-name,
+  .chat-code .hljs-tag {
+    color: #d8b88c;
   }
   .dark .hljs-attr,
   .dark .hljs-attribute,
   .theme-dark .hljs-attr,
   .theme-dark .hljs-attribute,
   .custom-scheme .hljs-attr,
-  .custom-scheme .hljs-attribute {
-    color: #d2a8ff;
+  .custom-scheme .hljs-attribute,
+  .chat-code .hljs-attr,
+  .chat-code .hljs-attribute {
+    color: #d8b88c;
   }
   .dark .hljs-string,
   .dark .hljs-symbol,
@@ -1222,13 +1268,17 @@
   .theme-dark .hljs-bullet,
   .custom-scheme .hljs-string,
   .custom-scheme .hljs-symbol,
-  .custom-scheme .hljs-bullet {
-    color: #a5d6ff;
+  .custom-scheme .hljs-bullet,
+  .chat-code .hljs-string,
+  .chat-code .hljs-symbol,
+  .chat-code .hljs-bullet {
+    color: #c9b78e;
   }
   .dark .hljs-number,
   .theme-dark .hljs-number,
-  .custom-scheme .hljs-number {
-    color: #79c0ff;
+  .custom-scheme .hljs-number,
+  .chat-code .hljs-number {
+    color: #d8a15f;
   }
   .dark .hljs-variable,
   .dark .hljs-template-variable,
@@ -1241,8 +1291,12 @@
   .custom-scheme .hljs-variable,
   .custom-scheme .hljs-template-variable,
   .custom-scheme .hljs-regexp,
-  .custom-scheme .hljs-link {
-    color: #79c0ff;
+  .custom-scheme .hljs-link,
+  .chat-code .hljs-variable,
+  .chat-code .hljs-template-variable,
+  .chat-code .hljs-regexp,
+  .chat-code .hljs-link {
+    color: #d8a15f;
   }
   .dark .hljs-meta,
   .dark .hljs-built_in,
@@ -1258,25 +1312,33 @@
   .custom-scheme .hljs-built_in,
   .custom-scheme .hljs-builtin-name,
   .custom-scheme .hljs-type,
-  .custom-scheme .hljs-params {
-    color: #ffa657;
+  .custom-scheme .hljs-params,
+  .chat-code .hljs-meta,
+  .chat-code .hljs-built_in,
+  .chat-code .hljs-builtin-name,
+  .chat-code .hljs-type,
+  .chat-code .hljs-params {
+    color: #e39b6e;
   }
   .dark .hljs-function .hljs-title,
   .theme-dark .hljs-function .hljs-title,
-  .custom-scheme .hljs-function .hljs-title {
-    color: #d2a8ff;
+  .custom-scheme .hljs-function .hljs-title,
+  .chat-code .hljs-function .hljs-title {
+    color: #ead9be;
   }
   .dark .hljs-addition,
   .theme-dark .hljs-addition,
-  .custom-scheme .hljs-addition {
-    color: #aff5b4;
-    background-color: #033a16;
+  .custom-scheme .hljs-addition,
+  .chat-code .hljs-addition {
+    color: #b8d98a;
+    background-color: #2a331a;
   }
   .dark .hljs-deletion,
   .theme-dark .hljs-deletion,
-  .custom-scheme .hljs-deletion {
-    color: #ffdcd7;
-    background-color: #67060c;
+  .custom-scheme .hljs-deletion,
+  .chat-code .hljs-deletion {
+    color: #e8a08c;
+    background-color: #3d231a;
   }
 }
 
@@ -1865,17 +1927,17 @@ body.sidebar-open {
   100% { opacity: 1; filter: blur(0); transform: translateX(0) scale(1); }
 }
 
-/* --- Streaming dot trail (3 dots that chase) --- */
+/* --- Streaming dot trail (3 bouncing terracotta dots — typing indicator) --- */
 .streaming-dots {
   display: inline-flex;
-  gap: 3px;
+  gap: 4px;
   align-items: center;
 }
 .streaming-dots span {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--color-primary) 70%, transparent);
+  background: var(--color-brand);
   animation: streaming-dot-chase 1.4s ease-in-out infinite;
 }
 .streaming-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -1883,6 +1945,27 @@ body.sidebar-open {
 @keyframes streaming-dot-chase {
   0%, 60%, 100% { transform: scale(0.6); opacity: 0.4; }
   30% { transform: scale(1); opacity: 1; }
+}
+
+/* --- Agent elements (assistant-ui–style tool cards) keyframes --- */
+@keyframes element-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@keyframes element-label-in {
+  from { opacity: 0; filter: blur(3px); }
+  to { opacity: 1; filter: blur(0); }
+}
+@keyframes line-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="element-shimmer"],
+  [class*="line-in"],
+  [class*="element-label-in"] {
+    animation: none !important;
+  }
 }
 
 /* --- Gradient border flow (for active panels) --- */
@@ -2121,32 +2204,54 @@ body.sidebar-open {
   }
 }
 
-/* ==================== OnyxAgent Text Logo ====================
-   A decorated text-based logo — "OnyxAgent" with a gradient on the "O",
-   a slightly different weight on "Agent", and a subtle glow. No image. */
+/* ==================== OnyxAgent Wordmark (Terra editorial) =============
+   Serif wordmark in Fraunces: the "O" is set in italic terracotta, the
+   rest of the name in plain ink — a quiet, typeset brand mark instead of
+   the old gradient/glow treatment. */
 .onyx-logo-text {
-  font-family: var(--font-display), "Bricolage Grotesque", system-ui, sans-serif;
-  font-weight: 800;
-  letter-spacing: -0.03em;
+  font-family: var(--font-display), "Fraunces", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1;
   display: inline-flex;
   align-items: baseline;
   gap: 0;
 }
 .onyx-logo-o {
-  background: linear-gradient(135deg, var(--color-primary), var(--color-brand, var(--color-primary)));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  font-size: 1.15em;
-  font-weight: 900;
+  color: var(--color-brand);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.08em;
   text-shadow: none;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--color-primary) 30%, transparent));
 }
 .onyx-logo-agent {
+  font-weight: 500;
+  opacity: 0.62;
+  font-style: italic;
+  letter-spacing: 0;
+}
+
+/* ==================== Terra editorial prose ============================
+   Ordered-list numerals in Fraunces terracotta + terracotta bullet dots,
+   so assistant answers read as typeset editorial copy. Applied to the chat
+   markdown scopes (`.prose-sm` / `.prose-sm-static`). */
+.prose-sm ol > li::marker,
+.prose-sm-static ol > li::marker,
+.assistant-prose ol > li::marker {
+  font-family: var(--font-display), "Fraunces", Georgia, serif;
   font-weight: 600;
-  opacity: 0.75;
-  letter-spacing: -0.01em;
+  font-style: italic;
+  color: var(--color-brand);
+}
+.prose-sm ul > li::marker,
+.prose-sm-static ul > li::marker,
+.assistant-prose ul > li::marker {
+  color: var(--color-brand);
+}
+.assistant-name {
+  font-family: var(--font-display), "Fraunces", Georgia, serif;
+  font-style: italic;
+  color: var(--color-brand);
 }
 
 /* --- Streaming text throttle animation (batched fade) --- */

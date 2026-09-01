@@ -1,8 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { notFound } from "next/navigation";
-import { Sparkles, Trash2 } from "lucide-react";
+import {
+  FileSearch as FileSearchIcon,
+  PenLine as PenLineIcon,
+  Sparkles,
+  Terminal as TerminalIcon,
+  Trash2,
+} from "lucide-react";
+import {
+  AgentHandoff,
+  AgentPlan,
+  AgentStatus,
+  ArtifactCard,
+  CheckpointHistory,
+  CodeDiff,
+  FileTree,
+  GenerationLoader,
+  MessagePair,
+  StreamingText,
+  StoppedRun,
+  SubagentList,
+  TodoList,
+  ToolCall,
+  ToolTimeline,
+} from "@/components/assistant-ui/elements";
 
 import { PageHeader } from "@/components/dashboard/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -134,6 +157,171 @@ function Gallery() {
           onConfirm={() => setConfirmOpen(false)}
         />
       </Section>
+
+      <AgentElementsShowcase />
     </div>
   );
+}
+
+/* ---------------------------------------------------------------------------
+ * Agent "elements" showcase — assistant-ui–style tool cards re-themed to the
+ * Terra palette. Mirrors the live treatments used in chat for tool calls,
+ * todos, reasoning, and streaming text.
+ * ------------------------------------------------------------------------- */
+function AgentElementsShowcase() {
+  const [toolOpen, setToolOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(true);
+  const [currentId, setCurrentId] = useState("3");
+
+  return (
+    <Section title="Agent elements (tool cards)">
+      <div className="grid w-full max-w-3xl gap-5">
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Tool call + tool timeline</p>
+          <ToolCall
+            label="Searched the docs"
+            activeLabel="Searching the docs"
+            query="draft persistence"
+            request='{"query": "draft persistence"}'
+            result="3 matches, best hit /docs/runtime/drafts"
+            running={false}
+            open={toolOpen}
+            onOpenChange={setToolOpen}
+          />
+          <ToolTimeline
+            steps={[
+              { verb: "Read", chip: "thread.tsx", icon: FileSearchIcon },
+              { verb: "Ran", chip: "pnpm vitest", icon: TerminalIcon },
+              { verb: "Edited", chip: "composer.tsx", icon: PenLineIcon },
+            ]}
+            visibleSteps={3}
+            streaming={false}
+            open={timelineOpen}
+            onOpenChange={setTimelineOpen}
+            restingLabel="3 steps · 1 file changed"
+            activeLabel="Working"
+            stats={[{ file: "composer.tsx", added: 14, removed: 3 }]}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Code diff + file tree</p>
+          <CodeDiff
+            filename="composer.tsx"
+            additions={2}
+            deletions={1}
+            cycle={0}
+            lines={[
+              { kind: "context", text: "export function Composer() {" },
+              { kind: "removed", text: '  const [draft, setDraft] = useState("");' },
+              { kind: "added", text: "  const draft = useDraft(threadId);" },
+            ]}
+          />
+          <FileTree
+            nodes={[
+              { path: "core", name: "packages/core/src", depth: 0, kind: "folder" },
+              { path: "core/convert", name: "convertMessages.ts", depth: 1, kind: "file", additions: 24, deletions: 6 },
+              { path: "core/test", name: "convertMessages.test.ts", depth: 1, kind: "file", additions: 41 },
+              { path: "changeset", name: ".changeset/tidy-pans-shave.md", depth: 0, kind: "file", additions: 5 },
+            ]}
+            visibleCount={4}
+            totalAdditions={70}
+            totalDeletions={6}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Agent plan + subagent list + status</p>
+          <AgentPlan
+            steps={[
+              "Read existing composer state",
+              "Design the draft store",
+              "Wire runtime persistence",
+              "Add regression tests",
+            ]}
+            activeIndex={2}
+          />
+          <SubagentList
+            agents={[
+              { name: "Explore the runtime", model: "haiku" },
+              { name: "Fix composer types", model: "sonnet" },
+              { name: "Write regression tests", model: "sonnet" },
+            ]}
+            completedCount={2}
+            progress={[100, 100, 45]}
+            showSummary
+            summaryAgent={{ name: "Summarize findings", model: "haiku" }}
+          />
+          <div className="flex flex-wrap gap-2">
+            <AgentStatus state="working" label="Refactoring composer" elapsed="0:04" />
+            <AgentStatus state="waiting" label="Waiting for approval" elapsed="3s" />
+            <AgentStatus state="done" label="Finished, 2 files changed" />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Artifact + todo + handoff + checkpoints</p>
+          <ArtifactCard title="Draft persistence RFC" meta="Document · v3 · just now" />
+          <TodoList
+            revision={2}
+            items={[
+              { id: "1", text: "Read the failing test", status: "done" },
+              { id: "2", text: "Fix the converter", status: "active" },
+              { id: "3", text: "Re-run the suite", status: "pending" },
+            ]}
+          />
+          <AgentHandoff
+            from="Router"
+            to="Billing"
+            reason="Question is about a refund, not routing."
+            carried={["order #48213", "customer tier: pro"]}
+            settled={false}
+          />
+          <CheckpointHistory
+            checkpoints={[
+              { id: "1", label: "Initial scaffold", at: "10:02", files: 4 },
+              { id: "2", label: "Added auth", at: "10:19", files: 7 },
+              { id: "3", label: "Fixed layout bug", at: "10:41", files: 2 },
+            ]}
+            currentId={currentId}
+            onRestore={setCurrentId}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Loader + streaming text + stopped run</p>
+          <LoaderPreview />
+          <StreamingText
+            segments={[
+              { text: "The response streams in as" },
+              { text: "useAuiState", mono: true },
+              { text: "resolves each part." },
+            ]}
+            count={7}
+            streaming
+          />
+          <MessagePair
+            userMessage="What's the capital of France?"
+            words={["Paris", "is", "the", "capital", "of", "France."]}
+            visibleWords={6}
+            streaming={false}
+          />
+          <StoppedRun
+            words={["The", "composer", "reads", "the", "draft"]}
+            reason="stopped by you"
+          />
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/** Small interactive ticking loader for the gallery. */
+function LoaderPreview() {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 120);
+    return () => clearInterval(id);
+  }, []);
+  return <GenerationLoader label="Generating" tick={tick} />;
 }

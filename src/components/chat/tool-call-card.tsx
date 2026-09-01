@@ -1,14 +1,14 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { Card, CardContent, Button } from "@/components/ui";
+import { Button } from "@/components/ui";
 import type { ToolCall } from "@/types";
 import {
   Wrench,
+  Check,
   Clock,
   Search,
   Globe,
-  ChevronDown,
-  ChevronUp,
+  ChevronRight,
   Code2,
   MessageCircleQuestion,
   Loader2,
@@ -17,6 +17,7 @@ import {
   Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ShimmerLabel, chipClass } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { WritingCursor } from "./writing-cursor";
 import { ChartMessage, parseChartResult } from "./chart-message";
@@ -276,14 +277,18 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   const liveCaption = toolCaption(toolCall.name);
 
   return (
-    <Card
+    /* assistant-ui "Tool call" element anatomy, Terra retheme:
+       chevron · shimmering label (while running) · primary-arg chip ·
+       checkmark once settled · request/result disclosure panel. */
+    <div
+      data-slot="tool-call"
       className={cn(
-        "step-card-in overflow-hidden border border-foreground/8 transition-all duration-200",
+        "step-card-in overflow-hidden rounded-xl border transition-all duration-200",
         isRunning
-          ? "bg-primary/5 ring-1 ring-primary/10"
+          ? "border-primary/25 bg-primary/[0.06]"
           : isError
-            ? "bg-destructive/5"
-            : "bg-muted/30 hover:bg-muted/50",
+            ? "border-destructive/25 bg-destructive/[0.05]"
+            : "border-border bg-secondary/50 hover:bg-secondary/70",
       )}
     >
       <div
@@ -297,12 +302,21 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             toggleExpanded();
           }
         }}
-        className="flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors"
+        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors"
       >
+        {/* Disclosure chevron */}
+        <ChevronRight
+          className={cn(
+            "text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform duration-200",
+            expanded && "rotate-90",
+          )}
+          aria-hidden
+        />
+
         {/* Icon container — rounded, subtle background */}
         <div
           className={cn(
-            "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors",
+            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors",
             isRunning
               ? "bg-primary/10"
               : isError
@@ -311,50 +325,41 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           )}
         >
           {isRunning ? (
-            <Loader2 className="h-4 w-4 animate-spin text-primary" aria-label="Running" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" aria-label="Running" />
           ) : isError ? (
-            <XCircle className="h-4 w-4 text-destructive" aria-label="Failed" />
+            <XCircle className="h-3.5 w-3.5 text-destructive" aria-label="Failed" />
           ) : (
             <ToolIcon
               className={cn(
-                "h-4 w-4",
+                "h-3.5 w-3.5",
                 hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
               )}
             />
           )}
         </div>
 
-        {/* Content — name + hint */}
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {/* Content — label + primary-arg chip */}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {isRunning ? (
-            <div className="flex items-center gap-2">
-              <span className="text-foreground/90 truncate text-sm font-medium">
-                {liveCaption}
-              </span>
-              <span className="streaming-dots shrink-0" aria-hidden="true">
-                <span /> <span /> <span />
-              </span>
-            </div>
+            <ShimmerLabel className="truncate text-sm font-medium">{liveCaption}</ShimmerLabel>
           ) : (
             <span className="text-foreground/90 truncate text-sm font-medium">
               {friendlyName}
             </span>
           )}
           {inputHint && !isRunning ? (
-            <span className="text-muted-foreground truncate text-xs">
-              {inputHint}
-            </span>
+            <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
           ) : null}
         </div>
 
-        {/* Right actions */}
+        {/* Right actions — settle state + raw toggle */}
         <div className="flex shrink-0 items-center gap-1">
           {!isRunning && (
             <>
               {isError ? (
                 <span className="text-destructive text-xs font-medium">Failed</span>
               ) : (
-                <span className="text-muted-foreground text-xs font-medium">Done</span>
+                <Check className="text-primary h-3.5 w-3.5" aria-label="Done" />
               )}
               <Button
                 variant="ghost"
@@ -369,20 +374,13 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
               >
                 <Code2 className="h-3.5 w-3.5" />
               </Button>
-              <div className="text-muted-foreground">
-                {expanded ? (
-                  <ChevronUp className="h-4 w-4" />
-                ) : (
-                  <ChevronDown className="h-4 w-4" />
-                )}
-              </div>
             </>
           )}
         </div>
       </div>
 
       {expanded && (
-        <CardContent className="px-3 pt-0 pb-3">
+        <div className="px-3 pt-0 pb-3">
           {showRaw ? (
             <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isRunning ? (
@@ -420,9 +418,9 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           ) : isListSkills ? null : (
             <GenericToolResult toolCall={toolCall} resultText={resultText} />
           )}
-        </CardContent>
+        </div>
       )}
-    </Card>
+    </div>
   );
 }
 
