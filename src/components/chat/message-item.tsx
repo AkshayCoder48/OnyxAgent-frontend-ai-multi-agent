@@ -16,6 +16,10 @@ import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
+import {
+  ThinkingIndicator,
+  ThinkingReasoning,
+} from "@/components/assistant-ui/elements";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { segmentText } from "@/lib/genui/stream-parser";
@@ -48,27 +52,16 @@ function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
 /**
  * ThinkingBlock / ReasoningBlock — collapsible reasoning display.
  *
- * Visual design goals:
- *   - Match the polished "empty-state Thinking bar" look (Bot avatar +
- *     shimmer skeleton bars + streaming dots) so the filled reasoning
- *     panel doesn't feel like a step down in quality.
- *   - When `text` is empty but `isStreaming` is true, render the same
- *     shimmer-skeleton placeholder the chat shows before the first token.
- *   - When `text` arrives, seamlessly cross-fade from the shimmer
- *     placeholder into the real content (no jarring swap).
- *   - Stronger contrast than the old `text-foreground/55` dull look —
- *     use `text-foreground/80` for the label and `text-foreground/90`
- *     for content so the panel reads as a first-class surface, not a
- *     faded footnote.
- *
- * The empty → filled transition is driven by `reasoning-panel-fill` /
- * `reasoning-skeleton-out` keyframes (defined in globals.css) which
- * animate opacity + a subtle scale so the swap reads as a single
- * fluid motion instead of a hard cut.
+ * Built on the assistant-ui "ThinkingReasoning" element (AICSS recipe): a
+ * shimmering label expands to reveal the agent's reasoning sentences, then
+ * folds into a "Thought for Ns" / "Reasoned for Ns" summary once the turn
+ * settles. Frameless basic-text UI — no card, no border — per the reference
+ * design. Elapsed seconds are measured locally from the moment streaming
+ * starts until it ends.
  */
 function ReasoningPanel({
   text,
-  open,
+  open: _open,
   isStreaming,
   variant,
 }: {
@@ -77,120 +70,60 @@ function ReasoningPanel({
   isStreaming: boolean;
   variant: "thinking" | "reasoning";
 }) {
-  const [internalOpen, setInternalOpen] = React.useState(open);
-  React.useEffect(() => {
-    if (isStreaming) setInternalOpen(true);
-  }, [isStreaming]);
-  // Once the user collapses/expands, respect their choice.
-  React.useEffect(() => {
-    setInternalOpen(open);
-  }, [open]);
+  const isThinking = variant === "thinking";
 
-  const label = variant === "thinking" ? "Thinking" : "Reasoning";
-  const isEmpty = !text || text.trim().length === 0;
-  const showSkeleton = isStreaming && isEmpty;
+  // Split the (possibly still-streaming) reasoning text into sentences —
+  // the element reveals them row by row with a 40px row height.
+  const sentences = React.useMemo(() => {
+    const trimmed = (text ?? "").trim();
+    if (!trimmed) return [] as string[];
+    return trimmed
+      .split(/(?<=[.!?;])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }, [text]);
+
+  // Measure how long the block has been / was streaming so the settled
+  // summary can say "Thought for Ns".
+  const startedAtRef = React.useRef<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+  React.useEffect(() => {
+    if (isStreaming) {
+      if (startedAtRef.current === null) startedAtRef.current = Date.now();
+      const id = window.setInterval(() => {
+        if (startedAtRef.current !== null) {
+          setElapsedSeconds((Date.now() - startedAtRef.current) / 1000);
+        }
+      }, 500);
+      return () => window.clearInterval(id);
+    }
+    if (startedAtRef.current !== null) {
+      setElapsedSeconds((Date.now() - startedAtRef.current) / 1000);
+      startedAtRef.current = null;
+    }
+  }, [isStreaming]);
+
+  // While streaming with no text yet, show the bare thinking indicator
+  // line instead of an empty collapsible.
+  if (sentences.length === 0) {
+    if (!isStreaming) return null;
+    return (
+      <ThinkingIndicator
+        label={isThinking ? "Thinking" : "Reasoning"}
+        className="mb-2"
+      />
+    );
+  }
 
   return (
-    <div
-      className={cn(
-        "reasoning-panel group relative mb-2 block w-full overflow-hidden rounded-xl border border-border transition-colors duration-300",
-        variant === "thinking"
-          ? "bg-secondary/50"
-          : "border-dashed bg-secondary/40",
-        // Subtle elevation when streaming — reads as "active".
-        isStreaming && "ring-1 ring-primary/15",
-      )}
-      style={{ width: "100%" }}
-    >
-      {/* Header — always visible. Clicking toggles the body. */}
-      <button
-        type="button"
-        onClick={() => setInternalOpen((o) => !o)}
-        className="flex w-full items-center gap-2.5 px-3 py-2 text-left sm:px-4"
-        aria-expanded={internalOpen}
-      >
-        <span
-          className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
-          aria-hidden="true"
-        >
-          <span
-            className={cn(
-              "inline-block h-1.5 w-1.5 rounded-full transition-colors duration-300",
-              isStreaming ? "bg-primary" : "bg-foreground/40",
-              isStreaming && "animate-pulse",
-            )}
-          />
-        </span>
-        <span className="text-foreground/80 font-mono text-[10px] font-medium tracking-wider uppercase">
-          {label}
-        </span>
-        {isStreaming && (
-          <span className="streaming-dots" aria-hidden="true">
-            <span /> <span /> <span />
-          </span>
-        )}
-        <span className="ml-auto flex items-center gap-2">
-          {text && (
-            <span className="text-foreground/45 font-mono text-[10px] tabular-nums">
-              {text.length} chars
-            </span>
-          )}
-          <ChevronDown
-            className={cn(
-              "text-foreground/50 h-3.5 w-3.5 transition-transform duration-300",
-              internalOpen && "rotate-180",
-            )}
-          />
-        </span>
-      </button>
-
-      {/* Body — two layers that cross-fade:
-          1. Skeleton shimmer (only while streaming + empty).
-          2. Real content (fades in once `text` arrives). */}
-      <div className="relative block w-full">
-        {/* Skeleton layer */}
-        <div
-          className={cn(
-            "px-3 pb-3 sm:px-4 sm:pb-4",
-            showSkeleton
-              ? "reasoning-skeleton-in"
-              : isEmpty
-                ? "hidden"
-                : "reasoning-skeleton-out",
-          )}
-          aria-hidden={!showSkeleton}
-        >
-          <div className="flex flex-col gap-1.5">
-            <div className="shimmer h-2 w-[90%] rounded-full" />
-            <div className="shimmer h-2 w-[75%] rounded-full" />
-            <div className="shimmer h-2 w-[82%] rounded-full" />
-            <div className="shimmer h-2 w-[60%] rounded-full" />
-          </div>
-        </div>
-
-        {/* Content layer — text centered within the box */}
-        {!isEmpty && (
-          <div
-            className={cn(
-              "reasoning-panel-fill border-foreground/8 flex w-full items-center justify-center border-t",
-              internalOpen ? "flex" : "hidden",
-            )}
-            style={{ width: "100%" }}
-          >
-            <pre
-              className="text-foreground/85 m-0 block max-h-80 w-full max-w-full overflow-y-auto px-3 py-2.5 text-left font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words sm:px-4"
-              style={{
-                width: "100%",
-                textAlign: "left",
-                margin: 0,
-                maxWidth: "100%",
-              }}
-            >
-              {text}
-            </pre>
-          </div>
-        )}
-      </div>
+    <div className="mb-2 min-w-0 max-w-full">
+      <ThinkingReasoning
+        sentences={sentences}
+        phase={isStreaming ? "thinking" : "done"}
+        elapsedSeconds={elapsedSeconds}
+        verb={isThinking ? "Thought" : "Reasoned"}
+        activeLabel={isThinking ? "Thinking…" : "Reasoning…"}
+      />
     </div>
   );
 }
@@ -272,6 +205,7 @@ function TextBubble({
             content={stripFunctionCallTags(text)}
             onCiteClick={onCiteClick}
             showCursor={showCursor}
+            streaming={isStreaming}
           />
         </div>
       </div>
@@ -308,6 +242,7 @@ function TextBubble({
                 content={stripFunctionCallTags(seg.text || "")}
                 onCiteClick={onCiteClick}
                 showCursor={showCursor && isLast}
+                streaming={isStreaming && isLast}
               />
             </div>
           );

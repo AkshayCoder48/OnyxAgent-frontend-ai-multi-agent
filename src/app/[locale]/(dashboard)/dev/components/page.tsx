@@ -19,9 +19,12 @@ import {
   FileTree,
   GenerationLoader,
   MessagePair,
+  Orb,
   StreamingText,
   StoppedRun,
   SubagentList,
+  ThinkingIndicator,
+  ThinkingReasoning,
   TodoList,
   ToolCall,
   ToolTimeline,
@@ -310,6 +313,30 @@ function AgentElementsShowcase() {
             words={["The", "composer", "reads", "the", "draft"]}
             reason="stopped by you"
           />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Thinking indicator + thinking reasoning + orbs</p>
+          <ThinkingIndicator label="Reading thread.tsx" elapsed="12s" />
+          <ThinkingReasoning
+            sentences={[
+              "Reading the request and the current selection, then locating the jwt.verify call inside the auth middleware.",
+              "The verify call sets no algorithms allowlist, so a token signed with 'none' or a weak cipher could be accepted.",
+              "Tracing where the signing secret is loaded from and confirming it is never logged or sent back to the client.",
+              "Planning to pin the algorithm to HS256 and to validate the issuer and audience claims on every incoming request.",
+              "Scanning the existing tests around the middleware so the fix stays covered and nothing downstream regresses.",
+            ]}
+            phase="done"
+            elapsedSeconds={5}
+          />
+          <div className="flex flex-wrap items-center gap-4 pt-1">
+            <Orb variant="S1" />
+            <Orb variant="S2" />
+            <Orb variant="S3" />
+            <Orb variant="S4" />
+            <Orb variant="S5" />
+            <Orb variant="S1" label="Working" pill />
+          </div>
         </div>
       </div>
     </Section>

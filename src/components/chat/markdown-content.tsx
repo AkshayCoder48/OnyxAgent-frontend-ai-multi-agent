@@ -8,6 +8,10 @@ export interface MarkdownContentProps {
   /** When true, renders the writing cursor inline at the end of the last
    *  paragraph — right next to the last letter, NOT on a new line below. */
   showCursor?: boolean;
+  /** True while the message is actively streaming. Enables the blue→ink
+   *  word tint on the newest words of the trailing paragraph (the
+   *  "StreamingText" streamer effect). */
+  streaming?: boolean;
 }
 
 /**
@@ -30,6 +34,13 @@ const MarkdownContentImpl = dynamic(
   },
 );
 
-export function MarkdownContent({ content, onCiteClick, showCursor }: MarkdownContentProps) {
-  return <MarkdownContentImpl content={content} onCiteClick={onCiteClick} showCursor={showCursor} />;
+export function MarkdownContent({ content, onCiteClick, showCursor, streaming }: MarkdownContentProps) {
+  return (
+    <MarkdownContentImpl
+      content={content}
+      onCiteClick={onCiteClick}
+      showCursor={showCursor}
+      streaming={streaming}
+    />
+  );
 }

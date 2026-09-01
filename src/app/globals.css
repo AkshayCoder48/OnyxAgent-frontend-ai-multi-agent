@@ -22,10 +22,12 @@
      Single brand var drives the whole app; the in-app picker
      (/settings/appearance) can still override on `<html>`.
      ============================================================ */
-  /* Preset: TERRACOTTA (#C4552F). Brand vars drive the in-app picker */
-  --brand-h: 264.376;
-  --brand-c: 0.243;
-  --brand-l: 48.8%;
+  /* Preset: TERRACOTTA (#C4552F). Brand vars drive the in-app picker.
+     h/c/l are the oklch coordinates of #C4552F so picker-derived colors
+     match the hex tokens below exactly (oklch(58.5% 0.152 38.8)). */
+  --brand-h: 38.8;
+  --brand-c: 0.152;
+  --brand-l: 58.5%;
   --color-brand-foreground: #faf6f0;
 
   --color-brand: #c4552f;

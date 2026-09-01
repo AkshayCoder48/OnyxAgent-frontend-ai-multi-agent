@@ -9,6 +9,10 @@ export interface TodoItem {
   id: string;
   text: string;
   status: "pending" | "active" | "done";
+  /** Optional nesting depth (0 = root). Rows indent by depth × 1.1rem —
+   *  a backward-compatible extension for hierarchical agent plans; items
+   *  without a depth render exactly per the reference anatomy. */
+  depth?: number;
 }
 
 /**
@@ -48,6 +52,11 @@ export function TodoList({
           <li
             key={item.id}
             className="animate-[line-in_0.2s_ease-out_both] flex items-center gap-2.5 text-sm"
+            style={
+              item.depth
+                ? { paddingLeft: `${item.depth * 1.1}rem` }
+                : undefined
+            }
           >
             {item.status === "done" ? (
               <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[4px] bg-primary text-primary-foreground">

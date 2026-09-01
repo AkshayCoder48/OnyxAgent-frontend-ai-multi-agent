@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -20,9 +20,34 @@ import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { useSingleRoundMode } from "@/hooks/use-single-round-mode";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
+import { Orb, ThinkingIndicator } from "@/components/assistant-ui/elements";
 import { Zap } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
+
+/**
+ * Thinking status line shown between send and first token: the Orb lattice
+ * glyph + the ThinkingIndicator element (pulsing dot, shimmering label,
+ * ticking elapsed badge). Mounts fresh per turn, so the elapsed clock
+ * starts from zero each time.
+ */
+function ThinkingStatus() {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const startedAt = Date.now();
+    const id = window.setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <>
+      <Orb variant="S1" />
+      <ThinkingIndicator label="Thinking" elapsed={`${elapsed}s`} />
+    </>
+  );
+}
 
 export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void } = {}) {
   const {
@@ -416,22 +441,21 @@ function ChatUI({
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
               stays until the AI generates its first character/tool call.
-              Uses the same Bot avatar as the streaming message for visual
-              continuity. */}
+              assistant-ui "ThinkingIndicator" + "Orb" elements: a pulsing
+              dot + shimmering label + ticking elapsed badge, led by the Orb
+              lattice indicator. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
-            /* Terracotta typing indicator (Terra spec): brand mark + serif
-               name + three bouncing dots covering the loading state. */
-            <div className="animate-slide-up-fade flex items-center gap-2 px-1 py-3">
-              <span className="inline-flex h-4 w-4 items-center justify-center text-primary" aria-hidden>
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
-                  <path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" />
-                </svg>
-              </span>
-              <span className="assistant-name text-[15px] leading-none">OnyxAgent</span>
-              <span className="streaming-dots ml-1" aria-hidden="true" role="status" aria-label="Assistant is typing">
-                <span /> <span /> <span />
-              </span>
+            <div className="animate-slide-up-fade flex items-center gap-2.5 px-1 py-3">
+              <ThinkingStatus />
             </div>
+          )}
+          {/* Todo tool: live plan panel rendered INLINE IN THE RESPONSE FLOW
+              (on the ai response bar — not a stuck card above the prompt
+              box). The agent emits `todo_event` WS frames for every plan
+              mutation; this panel renders the live TodoList-element
+              checklist with a progress bar and a "Cut" button. */}
+          {onTodoAction && (
+            <ResearchPanel onDismiss={() => onTodoAction("dismiss")} />
           )}
           {/* Loading state: show empty state until the AI generates its first
               letter. When the user sends the first message, we keep the empty
@@ -459,14 +483,9 @@ function ChatUI({
             />
           </div>
         )}
-        {/* Todo tool: live plan panel — same slot as QuestionPrompt. The agent
-         * emits `todo_event` WS frames for every plan mutation; this panel
-         * renders the live checklist with a progress bar and a "Cut" button. */}
-        {onTodoAction && (
-          <div className="px-2 pb-2 sm:px-4 sm:pb-2">
-            <ResearchPanel onDismiss={() => onTodoAction("dismiss")} />
-          </div>
-        )}
+        {/* Single-round mode indicator + queued messages live next to the
+            composer; the todo plan panel now lives INSIDE the scroll
+            container (inline in the response flow) above. */}
         <div className="px-2 pb-2 sm:px-4 sm:pb-4">
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />

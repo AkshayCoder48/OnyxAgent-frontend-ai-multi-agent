@@ -30,6 +30,129 @@ function preprocessCitations(content: string): string {
   return content.replace(/\[(\d{1,3})\](?![\(:])/g, (_, n) => `[[${n}]](#cite-${n})`);
 }
 
+// Streaming state for the blue→ink word tint (the "StreamingText" streamer
+// effect): while the message streams, the trailing paragraph's newest two
+// words render tinted `text-blue-500` and settle back to ink over ~700ms
+// (via `transition-colors duration-700` + stable word-index keys).
+// Delivered through React context so the module-scoped paragraph component
+// can read it WITHOUT mutation during render (React Compiler lint) and
+// WITHOUT lagging a render behind (an effect-synced ref would render the
+// tint one delta late, which makes the trailing-paragraph check fail).
+const StreamTintContext = React.createContext<{ streaming: boolean; lastWord: string }>({
+  streaming: false,
+  lastWord: "",
+});
+
+/** Extract the last non-whitespace word of a string, lowercased + stripped
+ *  of markdown punctuation — used to detect the trailing paragraph. */
+function lastPlainWord(s: string): string {
+  const words = s.replace(/[*_`~[\]]/g, " ").split(/\s+/).filter(Boolean);
+  const last = words.length ? words[words.length - 1] : undefined;
+  return last ? last.toLowerCase() : "";
+}
+
+/**
+ * Split the trailing plain-string child of a paragraph into word spans with
+ * the blue→ink tint on the newest two words. Returns a new children array, or
+ * null when the paragraph is not the trailing one (its text does not end with
+ * the stream's last word) — in that case the caller renders as usual.
+ *
+ * Stable keys by token index mean a word that leaves the two-word "fresh"
+ * window only gets a className change, which `transition-colors` animates
+ * back to ink — exactly the reference StreamingText behavior.
+ */
+function tintStreamingParagraph(
+  children: React.ReactNode,
+  stream: { streaming: boolean; lastWord: string },
+): React.ReactNode[] | null {
+  if (!stream.streaming || !stream.lastWord) return null;
+
+  const parts: React.ReactNode[] = Array.isArray(children) ? children : [children];
+  let lastStrIdx = -1;
+  let paraText = "";
+  for (let i = 0; i < parts.length; i++) {
+    const child = parts[i];
+    if (typeof child === "string") {
+      if (child.trim().length > 0) lastStrIdx = i;
+      paraText += child;
+    }
+  }
+  if (lastStrIdx < 0) return null;
+
+  const norm = paraText.replace(/\s+/g, " ").trim().toLowerCase();
+  const lastWord = stream.lastWord.toLowerCase();
+  // Only the paragraph that currently ENDS the streamed content gets the
+  // tint — earlier paragraphs don't end with the content's last word.
+  if (!norm || !norm.endsWith(lastWord)) return null;
+
+  const raw = parts[lastStrIdx] as string;
+  // Preserve the exact inter-word whitespace by splitting with separators.
+  const tokens = raw.split(/(\s+)/);
+  const wordIdx: number[] = [];
+  tokens.forEach((t, i) => {
+    if (t.trim().length > 0) wordIdx.push(i);
+  });
+  const fresh = new Set(wordIdx.slice(-2));
+
+  const out = parts.slice();
+  out[lastStrIdx] = tokens.map((t, i) => {
+    if (t.trim().length === 0) return t;
+    const isFresh = fresh.has(i);
+    return (
+      <span
+        key={i}
+        className={
+          "transition-colors duration-700 " +
+          (isFresh ? "text-blue-500" : "text-foreground")
+        }
+      >
+        {t}
+      </span>
+    );
+  });
+  return out;
+}
+
+/** Strip any CURSOR markers that leaked into paragraph children.
+ *  Defensive — the content should already be cleaned before parsing,
+ *  but this catches any residual markers. */
+function stripCursorMarkers(child: React.ReactNode): React.ReactNode {
+  if (typeof child === "string") {
+    return child
+      .replaceAll("\u0000CURSOR\u0000", "")
+      .replaceAll(/\u0000?CURSOR\u0000?/g, "")
+      .replaceAll(":CURSOR:", "");
+  }
+  if (Array.isArray(child)) {
+    return child.map(stripCursorMarkers);
+  }
+  return child;
+}
+
+/**
+ * Paragraph renderer with the streaming tint: when the message is streaming
+ * and this paragraph is the trailing one, its newest two words land in blue
+ * and settle into ink (StreamingText recipe). Otherwise renders as usual
+ * (with defensive CURSOR-marker stripping). An uppercase component so it can
+ * read StreamTintContext via useContext per the rules-of-hooks lint.
+ */
+function TintedParagraph({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
+  const stream = React.useContext(StreamTintContext);
+  const tinted = tintStreamingParagraph(children, stream);
+  if (tinted) {
+    return (
+      <p className="mb-3 leading-relaxed last:mb-0" {...props}>
+        {tinted}
+      </p>
+    );
+  }
+  return (
+    <p className="mb-3 leading-relaxed last:mb-0" {...props}>
+      {stripCursorMarkers(children)}
+    </p>
+  );
+}
+
 /**
  * Memoized component override map — the `components` object is passed to
  * `<ReactMarkdown>` on every render, and since ReactMarkdown does a shallow
@@ -130,28 +253,7 @@ const SHARED_COMPONENTS = {
       </a>
     );
   },
-  p({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
-    // Strip any CURSOR markers that leaked into paragraph children.
-    // Defensive — the content should already be cleaned before parsing,
-    // but this catches any residual markers.
-    function stripMarker(child: React.ReactNode): React.ReactNode {
-      if (typeof child === "string") {
-        return child
-          .replaceAll("\u0000CURSOR\u0000", "")
-          .replaceAll(/\u0000?CURSOR\u0000?/g, "")
-          .replaceAll(":CURSOR:", "");
-      }
-      if (Array.isArray(child)) {
-        return child.map(stripMarker);
-      }
-      return child;
-    }
-    return (
-      <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-        {stripMarker(children)}
-      </p>
-    );
-  },
+  p: TintedParagraph,
   ul({ children, ...props }: React.ComponentPropsWithoutRef<"ul">) {
     return (
       <ul
@@ -364,6 +466,7 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   content,
   onCiteClick,
   showCursor,
+  streaming,
 }: MarkdownContentProps) {
   // Keep the ref in sync so the shared `a` override can call the latest
   // onCiteClick without forcing a re-creation of the components map.
@@ -375,6 +478,12 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   React.useEffect(() => {
     showCursorRef.current = showCursor ?? false;
   });
+  // Streaming tint state for the trailing paragraph — computed fresh each
+  // render and provided via context (no ref mutation, no render lag).
+  const streamTint = {
+    streaming: !!streaming,
+    lastWord: streaming ? lastPlainWord(content) : "",
+  };
 
   // Defer the markdown re-parse: React will render a stale version (the
   // previous `deferredContent`) during urgent frames and catch up during
@@ -399,25 +508,29 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // cursor flows right after the last letter.
   if (!showCursor) {
     return (
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
-      >
-        {processed}
-      </ReactMarkdown>
+      <StreamTintContext.Provider value={streamTint}>
+        <ReactMarkdown
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
+          components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
+        >
+          {processed}
+        </ReactMarkdown>
+      </StreamTintContext.Provider>
     );
   }
 
   return (
     <div className="streaming-cursor-wrapper">
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
-      >
-        {processed}
-      </ReactMarkdown>
+      <StreamTintContext.Provider value={streamTint}>
+        <ReactMarkdown
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
+          components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
+        >
+          {processed}
+        </ReactMarkdown>
+      </StreamTintContext.Provider>
       <WritingCursor size="0.9em" />
     </div>
   );
@@ -425,5 +538,10 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // Short-circuit: if the content string AND showCursor are identical, skip
   // re-render. This handles the case where a parent re-rendered but the
   // `content` prop didn't change (e.g. another message updated).
-  return prev.content === next.content && prev.onCiteClick === next.onCiteClick && prev.showCursor === next.showCursor;
+  return (
+    prev.content === next.content &&
+    prev.onCiteClick === next.onCiteClick &&
+    prev.showCursor === next.showCursor &&
+    prev.streaming === next.streaming
+  );
 });

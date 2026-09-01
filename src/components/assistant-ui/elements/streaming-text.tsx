@@ -24,10 +24,11 @@ function splitSegments(segments: readonly Segment[]): Word[] {
 }
 
 /**
- * StreamingText — tokens arrive softly: the newest handful of words tint
- * terracotta and settle into ink over ~700ms, with a caret at the end
- * while streaming (assistant-ui `elements-streaming-text` recipe, Terra
- * retheme; the trailing tint uses the brand terracotta, not blue).
+ * StreamingText — tokens arrive softly: the newest words land in blue and
+ * settle into ink (assistant-ui `elements-streaming-text` recipe). The
+ * trailing tint and the caret are fixed to `text-blue-500` / `bg-blue-500`
+ * per the reference ("add this blue to white streamer"); older words fade
+ * back to plain over ~700ms rather than snapping.
  */
 export function StreamingText({
   segments,
@@ -58,7 +59,7 @@ export function StreamingText({
               className={cn(
                 "transition-colors duration-700",
                 word.mono && "rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]",
-                isFresh ? "text-primary" : "text-foreground",
+                isFresh ? "text-blue-500" : "text-foreground",
               )}
             >
               {word.text}
@@ -67,7 +68,7 @@ export function StreamingText({
         );
       })}
       {streaming && shown > 0 && (
-        <span aria-hidden className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-primary align-middle" />
+        <span aria-hidden className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-blue-500 align-middle" />
       )}
     </p>
   );

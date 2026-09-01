@@ -26,3 +26,6 @@ export { GenerationLoader } from "./loading-state";
 export { StreamingText, type Segment } from "./streaming-text";
 export { MessagePair } from "./message-pair";
 export { StoppedRun } from "./stopped-run";
+export { ThinkingIndicator } from "./thinking-indicator";
+export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";
+export { Orb, type OrbProps, type OrbVariant, type LatticeVariant } from "./orb";
