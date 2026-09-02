@@ -120,6 +120,7 @@ export function useChat(options: UseChatOptions = {}) {
   const {
     messages,
     addMessage,
+    removeMessage,
     updateMessage,
     replaceMessageId,
     appendTextDelta,
@@ -141,6 +142,11 @@ export function useChat(options: UseChatOptions = {}) {
   // without waiting for React's batched re-render. The handler never causes a
   // re-render based on this id, so state isn't needed.
   const currentMessageIdRef = useRef<string | null>(null);
+  /** Temp id of the user message the CURRENT turn is processing. The
+   *  `user_prompt` event swaps it for the real Dexie row id (same pattern as
+   *  `message_saved` for assistant messages) so regenerate can delete the
+   *  exact DB row, and ratings/exports key on the persisted id. */
+  const currentUserMessageIdRef = useRef<string | null>(null);
   const setCurrentMessageId = useCallback((id: string | null) => {
     currentMessageIdRef.current = id;
   }, []);
@@ -415,6 +421,25 @@ export function useChat(options: UseChatOptions = {}) {
             (msg) => ({ ...msg, conversationId: conversation_id }),
           );
           onConversationCreated?.(conversation_id);
+          break;
+        }
+
+        case "user_prompt": {
+          // The runtime persisted the user's message — swap the optimistic
+          // temp nanoid in the chat store for the real Dexie row id. Same
+          // pattern as `message_saved` below (generation-guarded so a stale
+          // turn's event can't hijack the current one). Without this swap the
+          // store's user message id never matched its DB row, which broke the
+          // regenerate path (it deletes rows by id).
+          if (!isFromActiveGeneration()) {
+            break;
+          }
+          const { message_id } = wsEvent.data as { message_id: string };
+          const tempUserId = currentUserMessageIdRef.current;
+          if (tempUserId && tempUserId !== message_id) {
+            replaceMessageId(tempUserId, message_id);
+            currentUserMessageIdRef.current = message_id;
+          }
           break;
         }
 
@@ -1134,9 +1159,17 @@ export function useChat(options: UseChatOptions = {}) {
         });
         return null;
       }
+      // SINGLE SOURCE OF TRUTH (model-desync PRD): the chat store's
+      // `selectedModel` / `selectedProviderId` are authoritative. The refs are
+      // a fast mirror kept in sync by setModel/setProviderId — read both with
+      // the store winning so a selection made through ANY writer (popover,
+      // restore, subagent) is what this request actually uses.
+      const storeSelection = useChatStore.getState();
+      const modelOverride = storeSelection.selectedModel ?? modelRef.current;
+      const providerOverrideId = storeSelection.selectedProviderId ?? providerIdRef.current;
       const selectedProvider =
-        providerIdRef.current != null
-          ? (providers.find((p) => p.id === providerIdRef.current) ?? providers[0])
+        providerOverrideId != null
+          ? (providers.find((p) => p.id === providerOverrideId) ?? providers[0])
           : providers[0];
       if (!selectedProvider) {
         handleAgentEvent({
@@ -1146,7 +1179,15 @@ export function useChat(options: UseChatOptions = {}) {
         return null;
       }
       const apiKey = await aiProviderService.getDecryptedApiKey(selectedProvider.id);
-      const model = modelRef.current ?? selectedProvider.models[0] ?? "";
+      const model = modelOverride ?? selectedProvider.models[0] ?? "";
+
+      // Dev instrumentation (PRD §15): verify UI model == runtime model ==
+      // request model. Visible in the console during development only.
+      if (process.env.NODE_ENV !== "production") {
+        console.debug(
+          `[useChat] turn provider=${selectedProvider.name} model=${model || "(provider default)"}`,
+        );
+      }
 
       // Load user settings (system prompt, framework, auto-approve, etc.)
       const settings = await settingsService.get(userId);
@@ -1198,6 +1239,8 @@ export function useChat(options: UseChatOptions = {}) {
       }
 
       const userMessageId = nanoid();
+      // Track for the `user_prompt` id swap (see its handler above).
+      currentUserMessageIdRef.current = userMessageId;
       // A new AI response is starting with this user message — pick this
       // response's random orb ONCE (25 variants, no immediate repeat). The
       // selection stays stable for the whole response (never per chunk) and
@@ -1316,6 +1359,78 @@ export function useChat(options: UseChatOptions = {}) {
     messageQueueRef.current = [];
     setQueuedMessages([]);
   }, []);
+
+  /**
+   * REGENERATE (PRD §6) — re-run the turn that produced an assistant message.
+   *
+   * The old implementation just re-sent the user's text via `sendMessage`,
+   * which APPENDED a duplicate user bubble + a second response and left the
+   * original pair in the thread (and double-persisted the user message in
+   * Dexie). This implementation:
+   *   1. Guards against a busy agent (no duplicate/queued regenerations).
+   *   2. Finds the user prompt that produced the target response.
+   *   3. Removes BOTH the assistant response and its user prompt from the
+   *      chat store AND from Dexie (ids are the persisted DB ids — the
+   *      `user_prompt` / `message_saved` handlers swapped the temp nanoids).
+   *   4. Re-runs the turn via doSend with the original content + files, using
+   *      the CURRENTLY selected model/provider (buildTurnOptions reads the
+   *      authoritative chat-store selection).
+   * The streaming UI takes over from there — the thread shows the user
+   * message once, followed by the fresh response.
+   */
+  const regenerate = useCallback(
+    (assistantMessageId: string) => {
+      if (isProcessing) return; // already generating — ignore (button is also disabled)
+
+      const msgs = useChatStore.getState().messages;
+      const idx = msgs.findIndex((m) => m.id === assistantMessageId);
+      if (idx < 0) return;
+
+      // Find the user prompt immediately before this assistant response.
+      let userIdx = -1;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (msgs[i]?.role === "user") {
+          userIdx = i;
+          break;
+        }
+      }
+      if (userIdx < 0) return; // no prompt to re-run — nothing to regenerate from
+      const userMsg = msgs[userIdx]!;
+      const targetMsg = msgs[idx]!;
+
+      const convId = targetMsg.conversationId ?? conversationId ?? null;
+      if (!convId) return; // unsaved chat — nothing persisted to regenerate
+
+      // 1. Drop both messages from the live store (instant visual removal).
+      removeMessage(targetMsg.id);
+      removeMessage(userMsg.id);
+
+      // 2. Delete both rows (tool calls + ratings cascade) from Dexie so a
+      //    reload doesn't resurrect the old pair. Ids are the DB ids; a temp
+      //    id (shouldn't happen for completed turns) is skipped — best effort.
+      void (async () => {
+        try {
+          const { conversationService } = await import("@/lib/services");
+          if (!targetMsg.isTemporaryId) {
+            await conversationService.deleteMessage(convId, targetMsg.id);
+          }
+          if (!userMsg.isTemporaryId) {
+            await conversationService.deleteMessage(convId, userMsg.id);
+          }
+        } catch (err) {
+          // Non-fatal: the store already dropped the pair; the DB copy (if
+          // the delete failed) is cleaned up on the next full reload path.
+          console.warn("[useChat] regenerate: failed to delete old rows from Dexie", err);
+        }
+      })();
+
+      // 3. Re-run the turn with the original prompt. doSend re-adds the user
+      //    message and the runtime re-persists it — the thread ends up with
+      //    exactly ONE user prompt + ONE fresh response.
+      void doSend(userMsg.content, userMsg.fileIds, userMsg.files);
+    },
+    [isProcessing, conversationId, removeMessage, doSend],
+  );
 
   const sendAskUserResponses = useCallback((answers: AskUserAnswer[]) => {
     setPendingQuestions(null);
@@ -1452,6 +1567,7 @@ export function useChat(options: UseChatOptions = {}) {
     connect,
     disconnect,
     sendMessage: sendChatMessage,
+    regenerate,
     stopGeneration,
     clearMessages,
     queuedMessages,

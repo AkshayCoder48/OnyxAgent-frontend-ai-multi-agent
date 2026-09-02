@@ -221,6 +221,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     isConnected,
     isProcessing,
     sendMessage,
+    regenerate,
     stopGeneration,
     clearMessages,
     queuedMessages,
@@ -326,9 +327,14 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       // typed in the previous conversation's context, sending them into a
       // different conversation would surprise the user.
       clearQueued();
-      // Reset model + provider selection so it doesn't leak into the new chat.
-      setModel(null);
-      setProviderId(null);
+      // NOTE: the model + provider selection is deliberately NOT reset here.
+      // Resetting it (the old `setModel(null); setProviderId(null);`) was the
+      // model-desync bug: ChatControls' local state kept showing the user's
+      // pick while the runtime silently fell back to the provider default,
+      // so the NEXT request used a different model than the UI claimed. The
+      // selection is now session-level state owned by the chat store (single
+      // source of truth) and survives conversation switches — PRD §12/§17:
+      // "navigate between chats … the selected model must remain".
     }
 
     // Reset the loaded-conversation tracker so the load-effect re-loads
@@ -342,7 +348,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     setPersistedConversationId(currId);
 
     prevConversationIdRef.current = currId;
-  }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId, isProcessing, stopGeneration, restorePersisted]);
+  }, [currentConversationId, clearMessages, clearQueued, isProcessing, stopGeneration, restorePersisted]);
 
   // Load DB messages into the chat store when a conversation's messages arrive.
   //
@@ -421,19 +427,15 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
 
   const { commands: slashCommands } = useSlashCommands();
 
+  // REGENERATE: delegated to use-chat's `regenerate` — it drops the old
+  // assistant response + its user prompt from the store AND Dexie, then
+  // re-runs the turn with the currently selected model/provider (the old
+  // version re-sent the prompt via sendMessage, duplicating the pair).
   const handleRegenerate = useCallback(
     (assistantMessageId: string) => {
-      const idx = messages.findIndex((m) => m.id === assistantMessageId);
-      if (idx < 0) return;
-      for (let i = idx - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m?.role === "user") {
-          sendMessage(m.content, m.fileIds, m.files);
-          return;
-        }
-      }
+      regenerate(assistantMessageId);
     },
-    [messages, sendMessage],
+    [regenerate],
   );
 
   // Slash command handlers — passed down to ChatInput so the / palette can
@@ -578,6 +580,7 @@ function ChatUI({
               messages={messages}
               onRegenerate={onRegenerate}
               onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
+              isRegenerating={isProcessing}
             />
           )}
           {/* Thinking bar — shows as soon as the user sends a message and

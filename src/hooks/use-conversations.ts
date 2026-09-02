@@ -131,7 +131,12 @@ export function useConversations() {
       setUrlParam("id", id);
       setError(null);
       try {
-        const msgs = await conversationService.getMessages(id);
+        // Pass the user id so rating hydration (`user_rating`) prefers the
+        // signed-in user's own 👍/👎 rows when rebuilding the thread.
+        const msgs = await conversationService.getMessages(
+          id,
+          useAuthStore.getState().user?.id,
+        );
         // Guard against a superseded request resolving after a newer select.
         if (controller.signal.aborted || selectRequestIdRef.current !== myRequestId) {
           return;

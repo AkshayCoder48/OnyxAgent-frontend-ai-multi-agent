@@ -286,12 +286,14 @@ export const conversationService = {
     await db.conversations.delete(id);
   },
 
-  async getMessages(conversationId: string): Promise<ConversationMessage[]> {
+  async getMessages(conversationId: string, userId?: string): Promise<ConversationMessage[]> {
     const rows = await db.messages
       .where("conversation_id")
       .equals(conversationId)
       .sortBy("created_at");
-    // Load tool calls for all these messages in one query.
+    // Load tool calls AND ratings for all these messages in one query each.
+    // Rating hydration: `user_rating` (the caller's own 👍/👎, so the selected
+    // thumb is restored on reload) + `rating_count` (likes/dislikes).
     const messageIds = rows.map((r) => r.id);
     const toolRows = messageIds.length > 0
       ? await db.tool_calls.where("message_id").anyOf(messageIds).toArray()
@@ -302,13 +304,34 @@ export const conversationService = {
       arr.push(tr);
       toolsByMessage.set(tr.message_id, arr);
     }
+    const ratingRows = messageIds.length > 0
+      ? await db.message_ratings.where("message_id").anyOf(messageIds).toArray()
+      : [];
+    const ratingsByMessage = new Map<string, typeof ratingRows>();
+    for (const rr of ratingRows) {
+      const arr = ratingsByMessage.get(rr.message_id) ?? [];
+      arr.push(rr);
+      ratingsByMessage.set(rr.message_id, arr);
+    }
     return rows.map((m) => {
       const myTools = toolsByMessage.get(m.id) ?? [];
+      const myRatings = ratingsByMessage.get(m.id) ?? [];
+      // Single-user local app: prefer the caller's row, fall back to the
+      // first row. The fallback matters because the caller's id can be the
+      // transient pre-auth "local-user" while the row was written with the
+      // post-init id (page reloads hydrate conversations before auth init
+      // resolves) — without it the selected 👍/👍 never restored on reload.
+      const ownRow = myRatings.find((r) => r.user_id === userId) ?? myRatings[0];
       return {
         ...m,
         thinking: m.thinking ?? null,
         reasoning: m.reasoning ?? null,
         parts: m.parts, // keep persisted parts (JSON array)
+        user_rating: ownRow ? ownRow.rating : null,
+        rating_count: {
+          likes: myRatings.filter((r) => r.rating === RatingValue.LIKE).length,
+          dislikes: myRatings.filter((r) => r.rating === RatingValue.DISLIKE).length,
+        },
         tool_calls: myTools.map((t) => ({
           id: t.id,
           message_id: t.message_id,
@@ -606,16 +629,23 @@ export const ratingService = {
     if (existing) await db.message_ratings.delete(existing.id);
   },
 
-  async getMessageRatings(messageId: string): Promise<{
+  async getMessageRatings(
+    messageId: string,
+    userId?: string,
+  ): Promise<{
     likes: number;
     dislikes: number;
     user_rating: RatingValue | null;
   }> {
     const rows = await db.message_ratings.where("message_id").equals(messageId).toArray();
+    // Same single-user semantics as getMessages: prefer the caller's row,
+    // otherwise the first row (the caller's id may be the transient
+    // pre-auth "local-user" while rows carry the post-init id).
+    const ownRow = rows.find((r) => r.user_id === userId) ?? rows[0];
     return {
       likes: rows.filter((r) => r.rating === RatingValue.LIKE).length,
       dislikes: rows.filter((r) => r.rating === RatingValue.DISLIKE).length,
-      user_rating: null,
+      user_rating: ownRow ? ownRow.rating : null,
     };
   },
 };

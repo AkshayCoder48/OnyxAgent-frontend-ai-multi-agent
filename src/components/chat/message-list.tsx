@@ -10,6 +10,9 @@ interface MessageListProps {
   onRegenerate?: (messageId: string) => void;
   /** Wired to the INLINE todo plan panel's "Cut" button. */
   onTodoDismiss?: () => void;
+  /** True while an agent turn (send OR regenerate) is running — disables the
+   *  regenerate action so it can't double-fire (PRD §6). */
+  isRegenerating?: boolean;
 }
 
 /**
@@ -111,7 +114,7 @@ function hasResearchPart(message: ChatMessage): boolean {
   );
 }
 
-export function MessageList({ messages, onRegenerate, onTodoDismiss }: MessageListProps) {
+export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerating = false }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
 
   // PERF: Find the last assistant message index once (O(n) single pass)
@@ -165,6 +168,7 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss }: MessageLi
                     ? () => onRegenerate(message.id)
                     : undefined
                 }
+                isRegenerating={isRegenerating}
               />
             </div>
           </div>

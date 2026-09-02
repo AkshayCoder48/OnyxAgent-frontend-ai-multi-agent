@@ -26,6 +26,17 @@ interface RatingButtonsProps {
   isAssistant: boolean;
 }
 
+/**
+ * Message rating (👍 / 👎) — LOCAL-FIRST persistence.
+ *
+ * The app is backendless (Dexie/IndexedDB): the old implementation POSTed to
+ * `/api/conversations/:id/messages/:id/rate`, a REST endpoint that does not
+ * exist in this architecture — every rating 404'd, so nothing was ever stored
+ * and the UI only ever showed transient hover feedback ("the button reacts but
+ * nothing happens"). Ratings now go through `ratingService` (Dexie
+ * `message_ratings` table) and the visual state is applied ONLY after the
+ * write actually succeeded (PRD: never confirm an action that didn't happen).
+ */
 export function RatingButtons({
   messageId,
   conversationId,
@@ -60,30 +71,26 @@ export function RatingButtons({
     [ratingCount],
   );
 
-  // submitRating must be declared before handleRate since handleRate uses it
+  // submitRating must be declared before handleRate since handleRate uses it.
+  // Persisted via the LOCAL rating service (Dexie) — see the component doc
+  // comment. The UI callback (`onRatingChange`) fires only on success.
   const submitRating = useCallback(
     async (rating: RatingValue, commentText: string | null) => {
+      const { ratingService } = await import("@/lib/services");
+      const { useAuthStore } = await import("@/stores");
+      const userId = useAuthStore.getState().user?.id;
+      if (!userId) {
+        toast.error(t("ratingFailed"));
+        return;
+      }
+
       setIsLoading(true);
       try {
-        const response = await fetch(
-          `/api/conversations/${conversationId}/messages/${messageId}/rate`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-              rating,
-              comment: commentText,
-            }),
-          },
-        );
-
-        if (!response.ok) {
-          const error = await response.json().catch(() => ({ message: "Unknown error" }));
-          throw new Error(error.message || "Failed to submit rating");
-        }
+        await ratingService.rate(messageId, userId, rating, commentText ?? undefined);
 
         const newCounts = calculateNewCounts(currentRating, rating);
+        // Success FIRST, visual state AFTER — the selected thumb now reflects
+        // a rating that genuinely lives in the database.
         onRatingChange?.({ rating, rating_count: newCounts });
         toast.success(t("thankYouFeedback"));
         setShowCommentDialog(false);
@@ -94,7 +101,7 @@ export function RatingButtons({
         setIsLoading(false);
       }
     },
-    [conversationId, messageId, currentRating, calculateNewCounts, onRatingChange, t],
+    [messageId, currentRating, calculateNewCounts, onRatingChange, t],
   );
 
   const handleRate = useCallback(
@@ -105,21 +112,17 @@ export function RatingButtons({
       }
 
       if (currentRating === rating) {
+        // Toggle OFF: remove the stored rating, then update the UI.
+        const { ratingService } = await import("@/lib/services");
+        const { useAuthStore } = await import("@/stores");
+        const userId = useAuthStore.getState().user?.id;
+        if (!userId) {
+          toast.error("Failed to remove rating");
+          return;
+        }
         setIsLoading(true);
         try {
-          const response = await fetch(
-            `/api/conversations/${conversationId}/messages/${messageId}/rate`,
-            {
-              method: "DELETE",
-              credentials: "include",
-            },
-          );
-
-          if (!response.ok) {
-            const error = await response.json().catch(() => ({ message: "Unknown error" }));
-            throw new Error(error.message || "Failed to remove rating");
-          }
-
+          await ratingService.remove(messageId, userId);
           const newCounts = calculateNewCounts(currentRating, null);
           onRatingChange?.({ rating: null, rating_count: newCounts });
           toast.success(t("ratingRemoved"));
@@ -133,7 +136,7 @@ export function RatingButtons({
         if (rating === RatingValue.DISLIKE) {
           setShowCommentDialog(true);
         } else {
-          submitRating(rating, null);
+          void submitRating(rating, null);
         }
       }
     },
@@ -147,14 +150,18 @@ export function RatingButtons({
 
   if (!isAssistant) return null;
 
-  // Disable rating if conversationId is not set (e.g., new conversation not yet saved)
+  // Disable rating if conversationId is not set (e.g. new conversation not yet saved)
   const isMissingConversationId = !conversationId || conversationId === "";
 
   return (
     <>
       <div className="flex items-center gap-1">
         <button
-          onClick={() => handleRate(RatingValue.LIKE)}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleRate(RatingValue.LIKE);
+          }}
           disabled={isLoading || isMissingConversationId}
           className={cn(
             "inline-flex items-center rounded-md p-1.5 transition-colors",
@@ -165,6 +172,8 @@ export function RatingButtons({
             isMissingConversationId && "cursor-not-allowed opacity-50",
           )}
           title={isMissingConversationId ? t("saveConversationToRate") : t("helpful")}
+          aria-pressed={currentRating === RatingValue.LIKE}
+          aria-label={t("helpful")}
         >
           {isLoading && currentRating !== RatingValue.DISLIKE ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -177,7 +186,11 @@ export function RatingButtons({
         </button>
 
         <button
-          onClick={() => handleRate(RatingValue.DISLIKE)}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleRate(RatingValue.DISLIKE);
+          }}
           disabled={isLoading || isMissingConversationId}
           className={cn(
             "inline-flex items-center rounded-md p-1.5 transition-colors",
@@ -187,6 +200,8 @@ export function RatingButtons({
             isMissingConversationId && "cursor-not-allowed opacity-50",
           )}
           title={isMissingConversationId ? t("saveConversationToRate") : t("notHelpful")}
+          aria-pressed={currentRating === RatingValue.DISLIKE}
+          aria-label={t("notHelpful")}
         >
           {isLoading && currentRating !== RatingValue.LIKE ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -221,14 +236,14 @@ export function RatingButtons({
               </Button>
               <Button
                 variant="outline"
-                onClick={() => submitRating(pendingRating, null)}
+                onClick={() => void submitRating(pendingRating, null)}
                 disabled={isLoading}
               >
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 {t("skipComment")}
               </Button>
               <Button
-                onClick={() => submitRating(pendingRating, comment.trim() || null)}
+                onClick={() => void submitRating(pendingRating, comment.trim() || null)}
                 disabled={isLoading}
               >
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}

@@ -6,7 +6,7 @@ import { Check, ChevronDown, Cpu, Search, Settings2, Sliders } from "lucide-reac
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
-import { useConversationStore } from "@/stores";
+import { useConversationStore, useChatStore } from "@/stores";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -30,6 +30,31 @@ interface ChatControlsProps {
   onProviderSelect?: (provider: CustomProvider | null) => void;
 }
 
+/** localStorage persistence for the model preference (PRD §14): saved on
+ *  every pick, restored + validated against the live provider list on mount. */
+const MODEL_PREF_KEY = "onyx:selected-model";
+
+function saveModelPref(providerId: string | null, model: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MODEL_PREF_KEY, JSON.stringify({ providerId, model }));
+  } catch {
+    // Storage unavailable (private mode / quota) — non-fatal, session-only selection.
+  }
+}
+
+function loadModelPref(): { providerId: string | null; model: string | null } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MODEL_PREF_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { providerId?: string | null; model?: string | null };
+    return { providerId: parsed.providerId ?? null, model: parsed.model ?? null };
+  } catch {
+    return null;
+  }
+}
+
 const EFFORT_OPTIONS: { label: string; value: ThinkingEffort; hint: string }[] = [
   { label: "Off", value: "off", hint: "Direct answer, no reasoning" },
   { label: "Low", value: "low", hint: "Quick reasoning" },
@@ -51,15 +76,21 @@ export function ChatControls({
   const [tab, setTab] = useState<Tab>("model");
   const { currentConversationId } = useConversationStore();
 
+  // ── SINGLE SOURCE OF TRUTH (model-desync PRD §10) ──
+  // The selection state lives in the chat store — the SAME state the send /
+  // regenerate paths read via buildTurnOptions. The old local useState pair
+  // here desynced from the runtime refs: after a conversation switch reset
+  // the runtime model, the popover still displayed the user's pick while
+  // requests silently used the provider default ("UI shows Model B, requests
+  // use Model A"). Subscribing to the store makes the selector a pure view
+  // of the authoritative state.
+  const selectedModel = useChatStore((s) => s.selectedModel);
+  const selectedProviderId = useChatStore((s) => s.selectedProviderId);
+
   const [availableModels] = useState<{ value: string; label: string }[]>([
     { value: "", label: "Default" },
   ]);
   const [providers, setProviders] = useState<CustomProvider[]>([]);
-  const [selectedModel, setSelectedModel] = useState<{ value: string; label: string }>({
-    value: "",
-    label: "Default",
-  });
-  const [selectedProvider, setSelectedProvider] = useState<CustomProvider | null>(null);
 
   useEffect(() => {
     // Load AI providers from IndexedDB (backendless — no API route).
@@ -88,17 +119,71 @@ export function ChatControls({
           is_active: p.is_active,
         }));
         setProviders(customProviders);
-        // Auto-select the active provider's first model
-        const activeProvider = customProviders.find((p) => p.is_active) || customProviders[0];
-        if (activeProvider && activeProvider.models.length > 0) {
-          const defaultModel = activeProvider.models[0]!;
-          setSelectedModel({
-            value: `${activeProvider.id}::${defaultModel}`,
-            label: `${activeProvider.name} · ${defaultModel}`,
-          });
-          setSelectedProvider(activeProvider);
-          onProviderSelect?.(activeProvider);
-          onModelChange?.(defaultModel);
+
+        // ── SELECTION RESOLUTION (PRD §12–§14) ────────────────────────────
+        // Initialize ONLY when there is no valid selection — never overwrite
+        // one. Order: live store (session) → persisted preference → default.
+        // A fresh page load starts the store at null/null, which is
+        // indistinguishable from an explicit "Default" pick — so the
+        // persisted localStorage preference (saved on every pick) decides.
+        const store = useChatStore.getState();
+        /** "default" = explicit no-selection; "valid" = usable; null = gone.
+         *  Validation is provider-existence only: a model id NOT in the
+         *  provider's list is still valid — the "Custom model ID" input
+         *  intentionally sends arbitrary ids to the provider, and the
+         *  runtime surfaces a provider error if the id is genuinely dead. */
+        const validate = (
+          providerId: string | null | undefined,
+          model: string | null | undefined,
+        ): "default" | "valid" | null => {
+          if (providerId == null && (model == null || model === "")) return "default";
+          const p = customProviders.find((x) => x.id === providerId);
+          if (!p) return null; // provider disappeared → selection unusable
+          return "valid";
+        };
+
+        let nextProviderId: string | null = store.selectedProviderId;
+        let nextModel: string | null = store.selectedModel;
+        const storeStatus = validate(nextProviderId, nextModel);
+
+        if (storeStatus !== "valid") {
+          const persisted = loadModelPref();
+          if (persisted && validate(persisted.providerId, persisted.model) !== null) {
+            // Restored preference — covers an explicit "Default" pick too
+            // ({null, null} validates as "default", not null).
+            nextProviderId = persisted.providerId;
+            nextModel = persisted.model;
+          } else if (persisted === null) {
+            // No preference was EVER saved → first-visit initialization: the
+            // active provider's first model. This is the ONLY path that
+            // picks a model on the user's behalf (PRD §12: initialization
+            // happens only when the active model is genuinely undefined).
+            const activeProvider =
+              customProviders.find((p) => p.is_active) || customProviders[0];
+            if (activeProvider && activeProvider.models.length > 0) {
+              nextProviderId = activeProvider.id;
+              nextModel = activeProvider.models[0]!;
+            } else {
+              nextProviderId = null;
+              nextModel = null;
+            }
+          }
+          // else: a persisted preference EXISTS but is invalid (provider or
+          // model removed since it was saved) → fall back to the "Default"
+          // no-selection; buildTurnOptions's provider-default fallback keeps
+          // requests working, and the UI honestly shows "Default".
+        }
+
+        // Apply ONLY when it differs from what the store already holds — a
+        // valid existing selection is never touched, and the runtime refs
+        // (modelRef/providerIdRef) are synced by the same setters.
+        if (nextProviderId !== store.selectedProviderId || nextModel !== store.selectedModel) {
+          const provider = nextProviderId
+            ? customProviders.find((x) => x.id === nextProviderId) ?? null
+            : null;
+          onProviderSelect?.(provider);
+          onModelChange?.(nextModel);
+          saveModelPref(nextProviderId, nextModel);
         }
       } catch {
         // Vault locked or DB unavailable — model list stays empty
@@ -113,12 +198,12 @@ export function ChatControls({
 
   const triggerSummary = useMemo(() => {
     const parts: string[] = [];
-    if (selectedModel.value) parts.push(selectedModel.value);
+    if (selectedModel) parts.push(selectedModel);
     if (settingsOverridden) parts.push("Custom");
     return parts.length ? parts.join(" · ") : "Controls";
   }, [selectedModel, settingsOverridden]);
 
-  const hasOverrides = selectedModel.value !== "" || settingsOverridden;
+  const hasOverrides = (selectedModel != null && selectedModel !== "") || settingsOverridden;
 
   return (
     <Popover>
@@ -169,19 +254,19 @@ export function ChatControls({
             <ModelPanel
               models={availableModels}
               providers={providers}
-              selected={selectedModel}
-              selectedProvider={selectedProvider}
+              selectedModel={selectedModel}
+              selectedProviderId={selectedProviderId}
               onPickDefault={(m) => {
-                setSelectedModel(m);
-                setSelectedProvider(null);
+                // Write through the authoritative setters (they update the
+                // store AND the runtime refs) + persist the pick.
                 onProviderSelect?.(null);
                 onModelChange?.(m.value || null);
+                saveModelPref(null, m.value || null);
               }}
               onPickProviderModel={(p, modelId) => {
-                setSelectedModel({ value: `${p.id}::${modelId}`, label: `${p.name} · ${modelId}` });
-                setSelectedProvider(p);
                 onProviderSelect?.(p);
                 onModelChange?.(modelId);
+                saveModelPref(p.id, modelId);
               }}
             />
           )}
@@ -244,19 +329,20 @@ function TabButton({
   );
 }
 
-/** Model picker panel. */
+/** Model picker panel. `selectedModel` + `selectedProviderId` come from the
+ *  authoritative chat store — this panel is a pure view of that state. */
 function ModelPanel({
   models,
   providers,
-  selected,
-  selectedProvider,
+  selectedModel,
+  selectedProviderId,
   onPickDefault,
   onPickProviderModel,
 }: {
   models: { value: string; label: string }[];
   providers: CustomProvider[];
-  selected: { value: string; label: string };
-  selectedProvider: CustomProvider | null;
+  selectedModel: string | null;
+  selectedProviderId: string | null;
   onPickDefault: (m: { value: string; label: string }) => void;
   onPickProviderModel: (p: CustomProvider, modelId: string) => void;
 }) {
@@ -315,7 +401,12 @@ function ModelPanel({
       {filteredModels.length > 0 && (
         <ul className="space-y-1 mb-4">
           {filteredModels.map((m) => {
-            const isActive = !selectedProvider && selected.value === m.value;
+            // "Default" is active only when there is NO provider/model
+            // selection (the store's null/null state).
+            const isActive =
+              selectedProviderId == null &&
+              (selectedModel == null || selectedModel === "") &&
+              m.value === "";
             return (
               <li key={m.value || "default"}>
                 <button
@@ -357,10 +448,10 @@ function ModelPanel({
               ) : (
                 <ul className="space-y-1">
                   {p.models.map((modelId) => {
-                    const value = `${p.id}::${modelId}`;
-                    const isActive = selected.value === value;
+                    const isActive =
+                      selectedProviderId === p.id && selectedModel === modelId;
                     return (
-                      <li key={value}>
+                      <li key={`${p.id}::${modelId}`}>
                         <button
                           type="button"
                           onClick={() => onPickProviderModel(p, modelId)}

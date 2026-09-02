@@ -78,6 +78,10 @@ interface ChatState {
   restorePersisted: () => void;
 
   addMessage: (message: ChatMessage) => void;
+  /** Remove a single message from the store (regenerate path: the old
+   *  assistant response + its user prompt are dropped before re-running
+   *  the turn). Dexie cleanup is the caller's responsibility. */
+  removeMessage: (id: string) => void;
   updateMessage: (id: string, updater: (msg: ChatMessage) => ChatMessage) => void;
   updateMessagesWhere: (
     predicate: (msg: ChatMessage) => boolean,
@@ -160,6 +164,13 @@ export const useChatStore = create<ChatState>((set) => ({
   addMessage: (message) =>
     set((state) => {
       const messages = [...state.messages, message];
+      savePersisted(messages);
+      return { messages };
+    }),
+
+  removeMessage: (id) =>
+    set((state) => {
+      const messages = state.messages.filter((msg) => msg.id !== id);
       savePersisted(messages);
       return { messages };
     }),

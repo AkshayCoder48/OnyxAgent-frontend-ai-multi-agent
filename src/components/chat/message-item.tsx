@@ -10,7 +10,7 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronDown, FileText, Globe, RefreshCw } from "lucide-react";
+import { ChevronDown, FileText, Globe, Loader2, RefreshCw } from "lucide-react";
 import { RatingButtons } from "./rating-buttons";
 import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
@@ -26,7 +26,7 @@ import { currentResponseOrb } from "@/components/assistant-ui/elements/response-
 import { ResearchPanel } from "./research-panel";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
-import { extractGenUINodes } from "@/lib/genui/stream-parser";
+import { extractGenUINodes, buildTextSegments } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
 
@@ -328,6 +328,10 @@ interface MessageItemProps {
   /** Wired to the inline todo panel's "Cut" (dismiss) button. */
   onTodoDismiss?: () => void;
   onRegenerate?: () => void;
+  /** True while a (re)generation turn is running — disables the regenerate
+   *  button and swaps its icon for a spinner (PRD §6: the button must show
+   *  a loading state and never fire a duplicate regeneration). */
+  isRegenerating?: boolean;
 }
 
 /**
@@ -603,6 +607,7 @@ export const MessageItem = React.memo(function MessageItem({
   showTodoPanel = false,
   onTodoDismiss,
   onRegenerate,
+  isRegenerating = false,
 }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
@@ -633,6 +638,29 @@ export const MessageItem = React.memo(function MessageItem({
       ),
     [message.parts],
   );
+
+  // COPY TEXT (PRD §4: "copy the actual message text, not rendered HTML or
+  // hidden UI content"). GenUI widget specs live inline in the raw content
+  // between <<<genui>>> … <<</genui>>> sentinels — the clipboard gets the
+  // plain text the user actually SEES, with the raw JSON specs stripped.
+  const copyText = React.useMemo(() => {
+    const raw =
+      message.content ||
+      (message.parts ?? [])
+        .filter((p) => p.type === "text" && p.content)
+        .map((p) => p.content)
+        .join("\n\n");
+    if (!raw) return "";
+    if (raw.includes("<<<genui>>>")) {
+      const segments = buildTextSegments(raw, undefined, true);
+      return segments
+        .filter((s) => s.type === "text")
+        .map((s) => s.text ?? "")
+        .join("\n\n")
+        .trim();
+    }
+    return raw;
+  }, [message.content, message.parts]);
 
   // Id of the LAST research/todo tool part in the original parts order —
   // the inline plan panel renders exactly there ("on the response bar where
@@ -1075,13 +1103,7 @@ export const MessageItem = React.memo(function MessageItem({
               </span>
             )}
             <CopyButton
-              text={
-                message.content ||
-                (message.parts ?? [])
-                  .filter((p) => p.type === "text" && p.content)
-                  .map((p) => p.content)
-                  .join("\n\n")
-              }
+              text={copyText}
               className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground h-7 w-7 rounded-md bg-transparent"
             />
             {!isUser && message.conversationId && (
@@ -1104,11 +1126,19 @@ export const MessageItem = React.memo(function MessageItem({
               <button
                 type="button"
                 onClick={onRegenerate}
-                title="Regenerate response"
-                aria-label="Regenerate response"
-                className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
+                disabled={isRegenerating}
+                title={isRegenerating ? "Regenerating…" : "Regenerate response"}
+                aria-label={isRegenerating ? "Regenerating response" : "Regenerate response"}
+                className={cn(
+                  "text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors",
+                  isRegenerating && "cursor-not-allowed opacity-60",
+                )}
               >
-                <RefreshCw className="h-3.5 w-3.5" />
+                {isRegenerating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+                )}
               </button>
             )}
           </div>
@@ -1138,11 +1168,17 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.parts === next.message.parts &&
     prev.message.toolCalls === next.message.toolCalls &&
     prev.message.genui === next.message.genui &&
+    // Rating feedback mutates ONLY these two fields — without them in the
+    // comparator the memo blocked the re-render and the selected thumb never
+    // appeared (the "rating does nothing" half of the actions bug).
+    prev.message.user_rating === next.message.user_rating &&
+    prev.message.rating_count === next.message.rating_count &&
     prev.groupPosition === next.groupPosition &&
     prev.showFooter === next.showFooter &&
     prev.showTodoPanel === next.showTodoPanel &&
     prev.onTodoDismiss === next.onTodoDismiss &&
-    prev.onRegenerate === next.onRegenerate
+    prev.onRegenerate === next.onRegenerate &&
+    prev.isRegenerating === next.isRegenerating
   );
 });
 
