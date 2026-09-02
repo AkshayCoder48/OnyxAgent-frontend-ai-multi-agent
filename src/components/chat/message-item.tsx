@@ -19,6 +19,7 @@ import { FileCard, FileCardImage } from "./file-card";
 import {
   AgentStatus,
   FileTree,
+  SimpleToolTimeline,
   ThinkingIndicator,
   ThinkingReasoning,
   Orb,
@@ -29,6 +30,8 @@ import {
   deriveTimeline,
   formatClock,
 } from "@/lib/agent-tool-steps";
+import { friendlyStep } from "@/lib/agent-friendly-steps";
+import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
@@ -367,18 +370,25 @@ function CollapsibleToolGroup({
   turnId?: string | null;
 }) {
   const [expanded, setExpanded] = React.useState(false);
+  // Display mode — simple renders the plain-sentence timeline (no verbs,
+  // chips, or +/- stats), technical renders the verb/chip trace.
+  const displayMode = useToolDisplayStore((s) => s.mode);
+  const isSimple = displayMode === "simple";
 
   // Derive the timeline (steps + aggregated file stats) from the group's
   // tool calls, memoized on the parts array so streaming flushes don't
-  // re-walk the list.
-  const { toolParts, steps, stats, filesChanged, errorCount, anyRunning } =
+  // re-walk the list. Friendly steps derived in the same pass.
+  const { toolParts, steps, friendlySteps, stats, filesChanged, errorCount, anyRunning } =
     React.useMemo(() => {
       const tp = parts.filter((p) => p.type === "tool" && p.toolCall);
       const tcs = tp.map((p) => p.toolCall!);
       const derived = deriveTimeline(tcs);
       return {
         toolParts: tp,
-        ...derived,
+        steps: derived.steps,
+        friendlySteps: tcs.map(friendlyStep),
+        stats: derived.stats,
+        filesChanged: derived.filesChanged,
         errorCount: tcs.filter((tc) => tc.status === "error").length,
         anyRunning: tcs.some(
           (tc) => tc.status === "running" || tc.status === "pending",
@@ -388,25 +398,41 @@ function CollapsibleToolGroup({
 
   const stepWord = steps.length === 1 ? "step" : "steps";
   const fileWord = filesChanged === 1 ? "file" : "files";
+  // Simple mode narrates in plain words — "steps" not tool calls, and a
+  // failed step is something that "didn't work", not a stack-trace word.
   const restingLabel =
     steps.length === 0
-      ? `${toolParts.length} tool call${toolParts.length === 1 ? "" : "s"}`
+      ? isSimple
+        ? "Working"
+        : `${toolParts.length} tool call${toolParts.length === 1 ? "" : "s"}`
       : errorCount > 0
-        ? `${steps.length} ${stepWord} · ${errorCount} failed`
+        ? `${steps.length} ${stepWord} · ${isSimple ? `${errorCount} didn't work` : `${errorCount} failed`}`
         : `${steps.length} ${stepWord}${filesChanged > 0 ? ` · ${filesChanged} ${fileWord} changed` : ""}`;
 
   return (
     <div className="mb-1.5">
-      <ToolTimeline
-        steps={steps}
-        visibleSteps={steps.length}
-        streaming={anyRunning}
-        open={expanded}
-        onOpenChange={setExpanded}
-        restingLabel={restingLabel}
-        activeLabel="Working"
-        stats={stats}
-      />
+      {isSimple ? (
+        <SimpleToolTimeline
+          steps={friendlySteps}
+          streaming={anyRunning}
+          open={expanded}
+          onOpenChange={setExpanded}
+          restingLabel={restingLabel}
+          activeLabel="Working"
+          filesChanged={filesChanged}
+        />
+      ) : (
+        <ToolTimeline
+          steps={steps}
+          visibleSteps={steps.length}
+          streaming={anyRunning}
+          open={expanded}
+          onOpenChange={setExpanded}
+          restingLabel={restingLabel}
+          activeLabel="Working"
+          stats={stats}
+        />
+      )}
 
       {/* The full tool cards — the trace above summarizes; these carry the
           specialized renderers (charts, search results, diffs). */}
@@ -798,9 +824,12 @@ export const MessageItem = React.memo(function MessageItem({
   // this run touched, as a tree with per-file churn — rendered once the
   // turn completes AND at least 2 distinct files changed (a single file's
   // story is already told by its tool card / CodeDiff, so the tree would
-  // only repeat it).
+  // only repeat it). Technical mode only — simple mode's timeline already
+  // narrates "Updated N files" without paths and +/- counts.
+  const displayMode = useToolDisplayStore((s) => s.mode);
+  const isSimpleMode = displayMode === "simple";
   const fileTree = React.useMemo(() => {
-    if (isUser || message.isStreaming) return null;
+    if (isUser || isSimpleMode || message.isStreaming) return null;
     const toolCalls = message.parts?.length
       ? message.parts
           .filter((p) => p.type === "tool" && p.toolCall)
@@ -808,7 +837,7 @@ export const MessageItem = React.memo(function MessageItem({
       : (message.toolCalls ?? []);
     if (toolCalls.length === 0) return null;
     return deriveFileTree(toolCalls);
-  }, [isUser, message.isStreaming, message.parts, message.toolCalls]);
+  }, [isUser, isSimpleMode, message.isStreaming, message.parts, message.toolCalls]);
 
   return (
     <div

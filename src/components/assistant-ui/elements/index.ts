@@ -13,6 +13,10 @@ export {
 } from "./surfaces";
 export { ToolCall } from "./tool-call";
 export { ToolTimeline, type TimelineStep, type TimelineStat } from "./tool-timeline";
+export {
+  SimpleToolTimeline,
+  type SimpleToolTimelineProps,
+} from "./simple-tool-timeline";
 export { CodeDiff, type DiffLine } from "./code-diff";
 export { FileTree, type FileTreeNode } from "./file-tree";
 export { AgentPlan } from "./agent-plan";

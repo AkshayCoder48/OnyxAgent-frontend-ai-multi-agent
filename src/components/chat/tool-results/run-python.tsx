@@ -43,9 +43,13 @@ function parseResult(text: string): Parsed {
 export function RunPythonResult({
   toolCall,
   resultText,
+  simple = false,
 }: {
   toolCall: ToolCall;
   resultText: string;
+  /** Simple display mode: no code block, no mono output box — the answer
+   *  renders as plain prose (the code stays available in technical mode). */
+  simple?: boolean;
 }) {
   const code = typeof toolCall.args?.code === "string" ? toolCall.args.code.trim() : null;
   const isRunning = toolCall.status !== "completed" && !resultText;
@@ -56,6 +60,28 @@ export function RunPythonResult({
 
   const { stdout, result, error } = parseResult(resultText);
   const outputText = [stdout, result ? `result: ${result}` : null].filter(Boolean).join("\n\n");
+
+  // Simple mode — plain language only: no code, no mono boxes, no raw
+  // error dump. A finished run with no output is just "Done.";
+  // `result: 42` style lines collapse into the answer text.
+  if (simple) {
+    const answer = outputText.replace(/^result: /, "");
+    return (
+      <div className="space-y-2 pt-1">
+        {error && (
+          <p className="text-destructive/90 text-[13px] leading-relaxed">
+            This calculation didn&apos;t work — the agent will try another way.
+          </p>
+        )}
+        {answer && (
+          <p className="text-foreground/80 scrollbar-thin max-h-40 overflow-y-auto text-[13px] leading-relaxed break-words whitespace-pre-wrap">
+            {answer}
+          </p>
+        )}
+        {!error && !answer && <p className="text-foreground/70 py-1 text-[13px]">Done.</p>}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2 pt-1">

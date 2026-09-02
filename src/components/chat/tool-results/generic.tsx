@@ -66,6 +66,51 @@ export function RawToolView({ toolCall, resultText }: { toolCall: ToolCall; resu
   );
 }
 
+/** Simple-mode result (tool-display-store "simple"): plain language only.
+ *  Plain-text output renders as readable prose; JSON output carries no
+ *  prose, so it collapses to a friendly "Done." line. Arguments are never
+ *  shown. Errors render as one reassuring sentence — the agent narrates the
+ *  retry, not the stack trace. */
+export function SimpleToolResult({
+  toolCall,
+  resultText,
+}: {
+  toolCall: ToolCall;
+  resultText: string;
+}) {
+  if (toolCall.status === "error") {
+    return (
+      <p className="text-destructive/90 py-2 text-[13px] leading-relaxed">
+        This step didn&apos;t work — the agent will try another way.
+      </p>
+    );
+  }
+  if (toolCall.status !== "completed" || !resultText) {
+    return (
+      <p className="text-muted-foreground py-2 text-[13px] italic">Working…</p>
+    );
+  }
+  // JSON results (objects/arrays) have no readable prose → friendly done.
+  let isJson = false;
+  try {
+    const parsed = JSON.parse(resultText);
+    isJson = parsed !== null && typeof parsed === "object";
+  } catch {
+    /* plain text */
+  }
+  if (isJson) {
+    return <p className="text-foreground/70 py-2 text-[13px]">Done.</p>;
+  }
+  // Plain-text output — readable prose, capped so huge dumps stay sane.
+  const clipped =
+    resultText.length > 600 ? `${resultText.slice(0, 600).trimEnd()}…` : resultText;
+  return (
+    <p className="text-foreground/80 scrollbar-thin max-h-40 overflow-y-auto py-2 text-[13px] leading-relaxed break-words whitespace-pre-wrap">
+      {clipped}
+    </p>
+  );
+}
+
 /** Default formatted view for any tool without a specialized renderer.
  *  Pretty-prints JSON output, otherwise shows readable wrapped text — so a
  *  newly added backend tool renders sensibly with no frontend changes. */

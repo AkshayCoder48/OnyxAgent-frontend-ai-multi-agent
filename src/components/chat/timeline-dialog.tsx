@@ -3,8 +3,13 @@
 import { useMemo, useState } from "react";
 import type { ToolCall } from "@/types";
 import { useChatStore } from "@/stores/chat-store";
-import { ToolTimeline } from "@/components/assistant-ui/elements";
+import { useToolDisplayStore } from "@/stores/tool-display-store";
+import {
+  SimpleToolTimeline,
+  ToolTimeline,
+} from "@/components/assistant-ui/elements";
 import { deriveTimeline } from "@/lib/agent-tool-steps";
+import { friendlyStep } from "@/lib/agent-friendly-steps";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +25,9 @@ import {
  * turn becomes one step; file-affecting tools also produce stats chips.
  * The verb/chip/stat derivation lives in `agent-tool-steps.ts` so the chat
  * message flow (CollapsibleToolGroup) and this dialog share one truth.
+ *
+ * In "simple" display mode the same session is retold as plain sentences
+ * (agent-friendly-steps.ts) — no verbs, chips, or +/- stats.
  */
 
 export function TimelineDialog({
@@ -30,9 +38,11 @@ export function TimelineDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const messages = useChatStore((s) => s.messages);
+  const displayMode = useToolDisplayStore((s) => s.mode);
+  const isSimple = displayMode === "simple";
   const [expanded, setExpanded] = useState(true);
 
-  const { steps, stats, filesChanged } = useMemo(() => {
+  const { steps, friendlySteps, stats, filesChanged } = useMemo(() => {
     const all: ToolCall[] = [];
     for (const msg of messages) {
       if (msg.role !== "assistant") continue;
@@ -44,7 +54,13 @@ export function TimelineDialog({
         : (msg.toolCalls ?? []);
       all.push(...toolCalls);
     }
-    return deriveTimeline(all);
+    const derived = deriveTimeline(all);
+    return {
+      steps: derived.steps,
+      friendlySteps: all.map(friendlyStep),
+      stats: derived.stats,
+      filesChanged: derived.filesChanged,
+    };
   }, [messages]);
 
   const restingLabel =
@@ -62,7 +78,9 @@ export function TimelineDialog({
             Tool timeline
           </DialogTitle>
           <DialogDescription className="text-muted-foreground text-[12px] leading-relaxed">
-            The whole session as verbs, targets, and file changes.
+            {isSimple
+              ? "The whole session, told in plain words."
+              : "The whole session as verbs, targets, and file changes."}
           </DialogDescription>
         </DialogHeader>
         <div className="px-2 py-3">
@@ -70,6 +88,17 @@ export function TimelineDialog({
             <p className="text-muted-foreground px-3 py-6 text-center text-[13px]">
               The agent hasn&apos;t used any tools in this conversation yet.
             </p>
+          ) : isSimple ? (
+            <SimpleToolTimeline
+              steps={friendlySteps}
+              streaming={false}
+              open={expanded}
+              onOpenChange={setExpanded}
+              restingLabel={restingLabel}
+              activeLabel="Working"
+              filesChanged={filesChanged}
+              className="max-w-none"
+            />
           ) : (
             <ToolTimeline
               steps={steps}

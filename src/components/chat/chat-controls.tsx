@@ -7,6 +7,7 @@ import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
 import { useConversationStore, useChatStore } from "@/stores";
+import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display-store";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -536,7 +537,7 @@ function ModelPanel({
   );
 }
 
-/** Chat settings panel — temperature + thinking effort. */
+/** Chat settings panel — temperature + thinking effort + tool display. */
 function SettingsPanel({
   temperature,
   effort,
@@ -550,6 +551,8 @@ function SettingsPanel({
 }) {
   return (
     <div className="space-y-6">
+      <ToolDisplayToggle />
+
       <div className="space-y-2.5">
         <div className="flex items-baseline justify-between">
           <label htmlFor="chat-temp" className="text-foreground text-sm font-semibold">
@@ -618,6 +621,61 @@ function SettingsPanel({
       <p className="text-foreground/45 text-[10px] leading-relaxed">
         Settings persist for the current chat session. Some controls are no-ops on models that
         don&apos;t support them.
+      </p>
+    </div>
+  );
+}
+
+const TOOL_DISPLAY_OPTIONS: {
+  value: ToolDisplayMode;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "simple",
+    label: "Simple",
+    hint: "Plain language — no code, no tool names, no raw output",
+  },
+  {
+    value: "technical",
+    label: "Technical",
+    hint: "Full detail — tool names, code, diffs, and raw output",
+  },
+];
+
+/** Tool activity display — how the agent's tool work is shown. "Simple"
+ *  retells every tool call as a plain sentence (for people who don't read
+ *  code); "Technical" shows the full cards. Persisted per browser. */
+function ToolDisplayToggle() {
+  const mode = useToolDisplayStore((s) => s.mode);
+  const setMode = useToolDisplayStore((s) => s.setMode);
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-baseline justify-between">
+        <span className="text-foreground text-sm font-semibold">Tool activity</span>
+        <span className="text-foreground/45 text-[10px]">applies everywhere</span>
+      </div>
+      <div className="grid grid-cols-2 gap-1">
+        {TOOL_DISPLAY_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={mode === opt.value}
+            onClick={() => setMode(opt.value)}
+            className={cn(
+              "rounded-lg px-2 py-1.5 font-mono text-[11px] tracking-wider uppercase transition-colors",
+              mode === opt.value
+                ? "bg-foreground text-background"
+                : "border border-foreground/15 text-foreground/55 hover:text-foreground",
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-foreground/55 text-[11px]">
+        {TOOL_DISPLAY_OPTIONS.find((o) => o.value === mode)?.hint}
       </p>
     </div>
   );
