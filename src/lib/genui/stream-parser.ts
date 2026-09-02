@@ -23,16 +23,29 @@ import {
   type GenUISpec,
   type ProcessTextDeltaResult,
 } from "./types";
+import { validateSpec } from "./validate";
 
 /**
  * Walk a (possibly incomplete) JSON string and patch it so it parses.
  *
  * Patches applied:
  *   1. If we're inside a string when the input ends, append a closing `"`.
- *   2. Strip trailing commas inside objects/arrays (`,]` → `]`, `,}` → `}`).
- *   3. Close every unclosed `[` and `{` at the end.
- *   4. If a value was truncated mid-token (e.g. `"key": tru`), drop the
+ *   2. RAW CONTROL CHARACTERS inside strings (literal newlines, tabs, CR)
+ *      are escaped to `\n` / `\t` / `\r` — strict JSON.parse rejects raw
+ *      control chars, and models frequently emit multi-line `html`/`js`
+ *      strings with REAL newlines. Without this, the whole block fails to
+ *      parse and the user sees raw `<<<genui>>>` JSON as plain text.
+ *   3. Strip trailing commas inside objects/arrays (`,]` → `]`, `,}` → `}`).
+ *   4. Close every unclosed `[` and `{` at the end.
+ *   5. If a value was truncated mid-token (e.g. `"key": tru`), drop the
  *      partial token so we don't get a parse error on the whole object.
+ *   6. TRAILING GARBAGE TRUNCATION: when the root container is already
+ *      closed and non-whitespace follows (the model emitted the WRONG
+ *      closing sentinel — `<<<genui>>>` instead of `<<</genui>>>` — or any
+ *      stray text after the JSON), everything after the root's closing
+ *      brace is cut. This is the #1 cause of "the card never renders / raw
+ *      JSON shows after refresh": `{...valid json...}\n<<<genui>>>` fails
+ *      JSON.parse on trailing characters and the whole block was dropped.
  *
  * Returns the patched string. Always returns a string — never throws.
  */
@@ -44,18 +57,30 @@ export function repairJson(input: string): string {
   const stack: Array<"{" | "["> = [];
   let inString = false;
   let escape = false;
+  // Index of the character that CLOSED the root container (stack hit 0).
+  let rootClosedIdx = -1;
 
   while (i < input.length) {
     const ch = input[i]!;
 
     if (inString) {
-      out += ch;
       if (escape) {
         escape = false;
+        out += ch;
       } else if (ch === "\\") {
         escape = true;
+        out += ch;
       } else if (ch === '"') {
         inString = false;
+        out += ch;
+      } else if (ch === "\n") {
+        out += "\\n";
+      } else if (ch === "\r") {
+        out += "\\r";
+      } else if (ch === "\t") {
+        out += "\\t";
+      } else {
+        out += ch;
       }
       i++;
       continue;
@@ -85,6 +110,8 @@ export function repairJson(input: string): string {
           (ch === "]" && top === "[")
         ) {
           stack.pop();
+          // Root container just closed — remember where.
+          if (stack.length === 0) rootClosedIdx = out.length;
         }
       }
       out += ch;
@@ -130,7 +157,56 @@ export function repairJson(input: string): string {
     out += top === "{" ? "}" : "]";
   }
 
+  // TRAILING GARBAGE: the root object closed but junk follows (wrong
+  // `<<<genui>>>` close sentinel, stray prose, a duplicated marker…). Cut
+  // everything after the root's closing character — the JSON itself is
+  // complete and valid up to that point.
+  if (stack0Closed(rootClosedIdx, out)) {
+    // rootClosedIdx points at the `}`/`]` position in `out` BEFORE
+    // trimPartialValue may have trimmed content — recompute it safely by
+    // scanning for the last balanced root close.
+    const cut = findRootEnd(out);
+    if (cut !== -1 && cut < out.length) {
+      let trimmed = out.slice(0, cut + 1);
+      // Also strip trailing commas / whitespace at the root level.
+      trimmed = trimmed.replace(/[\s,]+$/, "");
+      out = trimmed;
+    }
+  }
+
   return out;
+}
+
+/** True when a root container was seen closing during the walk. */
+function stack0Closed(rootClosedIdx: number, _out: string): boolean {
+  void _out;
+  return rootClosedIdx !== -1;
+}
+
+/** Find the index of the character that closes the ROOT container (the
+ *  position where bracket depth returns to zero for the last time). Returns
+ *  -1 when the root never closes. Ignores brackets inside strings. */
+function findRootEnd(s: string): number {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let rootEnd = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) rootEnd = i;
+    }
+  }
+  return rootEnd;
 }
 
 /**
@@ -281,104 +357,241 @@ export function parseTolerant<T = unknown>(jsonish: string): T | null {
   }
 }
 
-/** Normalize a raw parsed value into a `GenUISpec`. */
-function toSpec(raw: unknown, streaming: boolean): GenUISpec | null {
+/** Extract nodes from a parsed GenUI JSON payload (several accepted shapes). */
+function nodesFromRaw(raw: unknown): unknown[] | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
-
-  // Accept either `{nodes: [...]}` or a bare `[...]` or a single node object.
-  // Also handle `{"type":"root","children":[...]}` — a wrapper the AI
-  // sometimes emits. We treat it as a passthrough: extract children.
-  let nodes: unknown;
-  if (Array.isArray(obj.nodes)) {
-    nodes = obj.nodes;
-  } else if (obj.type === "root" && Array.isArray(obj.children)) {
-    // Root wrapper — use its children directly
-    nodes = obj.children;
-  } else if (Array.isArray(raw)) {
-    nodes = raw;
-  } else if (typeof obj.type === "string") {
-    // Single node — wrap it.
-    nodes = [obj];
-  } else {
-    return null;
-  }
-
-  const normalized = (nodes as unknown[])
-    .filter((n): n is Record<string, unknown> => !!n && typeof n === "object")
-    .map((n: Record<string, unknown>, idx: number) => normalizeNode(n, "", idx, streaming));
-  if (normalized.length === 0) return null;
-  return { nodes: normalized };
+  if (Array.isArray(obj.nodes)) return obj.nodes;
+  if (obj.type === "root" && Array.isArray(obj.children)) return obj.children;
+  if (Array.isArray(raw)) return raw;
+  if (typeof obj.type === "string") return [obj];
+  return null;
 }
 
-/** Ensure a node has an `id` and that `meta.streaming` is set correctly.
- *
- * CRITICAL: The AI often emits nodes with props at the TOP LEVEL (not nested
- * in a `props` field), e.g. `{"type":"header","title":"..."}`. We must collect
- * all unknown keys (everything except `type`, `id`, `children`, `meta`, `props`)
- * into the `props` object so validateSpec + the renderers can find them.
- *
- * STREAMING KEY STABILITY (PRD §14): fallback ids are derived from the node's
- * position path (`${parentPath}${idx}-${type}`), which is stable across
- * re-parses of the growing partial JSON — the same node keeps the same id,
- * so React reconciles instead of remounting (the flicker fix). Including the
- * parent path also prevents id collisions between siblings at different
- * depths (previously a child `card` at index 0 collided with a top-level
- * `card` at index 0 — duplicate React keys).
- */
-function normalizeNode(
-  raw: Record<string, unknown>,
-  parentPath: string,
-  idx: number,
-  streaming: boolean,
-): GenUINode {
-  const type = typeof raw.type === "string" ? raw.type : "unknown";
-  const path = `${parentPath}${idx}-`;
-  const id =
-    typeof raw.id === "string" && raw.id.length > 0
-      ? raw.id
-      : `genui-${path}${type}`;
+// ---------------------------------------------------------------------------
+// WRONG-CLOSE-MARKER RECOVERY + COMPLETE-MODE SEGMENTATION
+//
+// The #1 GenUI failure observed in the wild: the model emits the OPENING
+// sentinel correctly, streams a complete JSON spec, then writes the WRONG
+// closing marker — `<<<genui>>>` instead of `<<</genui>>>`. The block never
+// "closes", so (a) live rendering stays in streaming mode forever, (b) after
+// a refresh the raw JSON text leaks into the chat as markdown, and (c) the
+// custom_html iframe never mounts (it waits for streaming=false).
+//
+// Recovery, applied consistently in ONE place (segmentText + the shared
+// buildTextSegments below):
+//   • FAKE CLOSE — a second `<<<genui>>>` encountered while inside a block is
+//     treated as the close marker (when no real `<<</genui>>>` comes first).
+//   • COMPLETE MODE — when the message is no longer streaming, an
+//     unterminated block is treated as CLOSED at end-of-text; combined with
+//     repairJson's trailing-garbage truncation the JSON parses and the card
+//     renders exactly as the user saw live.
+// ---------------------------------------------------------------------------
 
-  // Collect props from BOTH `raw.props` (proper format) AND top-level keys
-  // (flat format that the AI naturally emits). Top-level keys take precedence
-  // only if `raw.props` doesn't have them (so explicit props win).
-  const RESERVED_KEYS = new Set(["type", "id", "children", "meta", "props"]);
-  const flatProps: Record<string, unknown> = {};
-  for (const key of Object.keys(raw)) {
-    if (!RESERVED_KEYS.has(key)) {
-      flatProps[key] = raw[key];
+/** Find the end of the current GenUI block: the real close sentinel, a fake
+ *  close (second `<<<genui>>>`), or end-of-text in complete mode.
+ *  Returns [endIndex, isClosed] where endIndex is the position of the close
+ *  marker start (or -1 / text end when unterminated). */
+function findBlockEnd(
+  fullText: string,
+  jsonStart: number,
+  complete: boolean,
+): { closeIdx: number; closed: boolean } {
+  const realClose = fullText.indexOf(GENUI_CLOSE, jsonStart);
+  // Fake close: another OPEN sentinel while we're inside a block — the model
+  // wrote `<<<genui>>>` where `<<</genui>>>` belonged.
+  const fakeClose = fullText.indexOf(GENUI_OPEN, jsonStart);
+  if (realClose !== -1 && (fakeClose === -1 || realClose < fakeClose)) {
+    return { closeIdx: realClose, closed: true };
+  }
+  if (fakeClose !== -1) {
+    return { closeIdx: fakeClose, closed: true };
+  }
+  // No close marker at all. In complete mode (message finished) the block
+  // ends at end-of-text; while still streaming it stays open.
+  return { closeIdx: complete ? fullText.length : -1, closed: complete };
+}
+
+/** Normalize wrong closing sentinels: walk the text tracking block state;
+ *  any `<<<genui>>>` seen while INSIDE a block is rewritten to
+ *  `<<</genui>>>`. Correct blocks pass through unchanged. Used by the agent
+ *  runtime before persisting content so the DB copy (and the history sent
+ *  back to the provider) carries well-formed sentinels. */
+export function normalizeGenUISentinels(text: string): string {
+  if (!text || !text.includes(GENUI_OPEN)) return text;
+  let out = "";
+  let cursor = 0;
+  let inBlock = false;
+  while (cursor < text.length) {
+    const openIdx = text.indexOf(GENUI_OPEN, cursor);
+    const closeIdx = text.indexOf(GENUI_CLOSE, cursor);
+    if (openIdx === -1 && closeIdx === -1) {
+      out += text.slice(cursor);
+      break;
+    }
+    // Which comes first?
+    if (closeIdx !== -1 && (openIdx === -1 || closeIdx < openIdx)) {
+      // A close marker — valid only inside a block; outside a block it's
+      // stray (leave it — nothing to do about it here).
+      out += text.slice(cursor, closeIdx + GENUI_CLOSE.length);
+      cursor = closeIdx + GENUI_CLOSE.length;
+      inBlock = false;
+      continue;
+    }
+    // An open marker comes first.
+    if (!inBlock) {
+      out += text.slice(cursor, openIdx + GENUI_OPEN.length);
+      cursor = openIdx + GENUI_OPEN.length;
+      inBlock = true;
+      continue;
+    }
+    // OPEN marker while already inside a block → this was meant to be the
+    // CLOSE marker. Rewrite it.
+    out += text.slice(cursor, openIdx) + GENUI_CLOSE;
+    cursor = openIdx + GENUI_OPEN.length;
+    inBlock = false;
+  }
+  return out;
+}
+
+export interface TextSegmentUI {
+  type: "text" | "genui";
+  text?: string;
+  spec?: GenUISpec;
+  streaming?: boolean;
+}
+
+/** Build ordered text/genui segments from the full message text in ONE walk
+ *  — shared by the live streaming hook and the persisted-message renderer
+ *  so both behave identically.
+ *
+ *  `complete` — true when the message is no longer streaming. Unterminated
+ *  blocks are then treated as closed (their JSON parses via the tolerant
+ *  parser + trailing-garbage truncation) and custom_html iframes mount.
+ *
+ *  `cache` — last-good spec per block ordinal (streaming flicker guard; see
+ *  useGenUIStream). Optional.
+ */
+export function buildTextSegments(
+  fullText: string,
+  cache?: Map<number, GenUISpec>,
+  complete: boolean = false,
+): TextSegmentUI[] {
+  if (!fullText || !fullText.includes(GENUI_OPEN)) {
+    if (cache && cache.size > 0) cache.clear();
+    return [];
+  }
+  const segments: TextSegmentUI[] = [];
+  let cursor = 0;
+  let blockOrdinal = 0;
+
+  while (cursor < fullText.length) {
+    const openIdx = fullText.indexOf(GENUI_OPEN, cursor);
+    if (openIdx === -1) {
+      // No more blocks — remaining text is a text segment
+      const text = fullText.slice(cursor);
+      if (text.trim()) segments.push({ type: "text", text });
+      break;
+    }
+
+    // Text before this block
+    const textBefore = fullText.slice(cursor, openIdx);
+    if (textBefore.trim()) segments.push({ type: "text", text: textBefore });
+
+    const jsonStart = openIdx + GENUI_OPEN.length;
+    const { closeIdx, closed } = findBlockEnd(fullText, jsonStart, complete);
+    const isStreaming = !closed;
+
+    // Open block → parse the partial JSON; closed block → parse complete JSON.
+    const jsonText = closed
+      ? fullText.slice(jsonStart, closeIdx)
+      : fullText.slice(jsonStart);
+
+    let pushed = false;
+    const raw = parseTolerant(jsonText);
+    if (raw) {
+      const nodes = nodesFromRaw(raw);
+      if (nodes && nodes.length > 0) {
+        let spec = validateSpec({ nodes: nodes as GenUINode[] });
+        if (isStreaming && spec.nodes.length > 0) {
+          spec = pruneStreamingArtifacts(spec);
+        }
+        if (spec.nodes.length > 0) {
+          segments.push({ type: "genui", spec, streaming: isStreaming });
+          cache?.set(blockOrdinal, spec);
+          pushed = true;
+        }
+      }
+    }
+    if (!pushed && isStreaming) {
+      // Parse failed or produced nothing — keep the last GOOD render for
+      // this block (the card never blanks mid-stream).
+      const cached = cache?.get(blockOrdinal);
+      if (cached) {
+        segments.push({ type: "genui", spec: cached, streaming: true });
+        pushed = true;
+      }
+    }
+
+    if (isStreaming) {
+      blockOrdinal++;
+      break;
+    }
+    // Closed block: drop the cache entry only if it re-parsed to nothing.
+    if (!pushed) cache?.delete(blockOrdinal);
+    blockOrdinal++;
+    cursor = Math.min(closeIdx + GENUI_CLOSE.length, fullText.length);
+    if (cursor <= jsonStart) break; // safety — never loop forever
+  }
+
+  // Drop cache entries for blocks that no longer exist (text changed above).
+  if (cache && cache.size > blockOrdinal) {
+    for (const k of [...cache.keys()]) {
+      if (k >= blockOrdinal) cache.delete(k);
     }
   }
 
-  const nestedProps =
-    raw.props && typeof raw.props === "object"
-      ? (raw.props as Record<string, unknown>)
-      : {};
-
-  // Merge: flat props first, then nested props (nested wins on conflict)
-  const props = { ...flatProps, ...nestedProps };
-
-  const children = Array.isArray(raw.children)
-    ? raw.children
-        .filter(
-          (c): c is Record<string, unknown> => !!c && typeof c === "object",
-        )
-        .map((c, i) => normalizeNode(c, path, i, streaming))
-    : undefined;
-
-  const metaRaw =
-    raw.meta && typeof raw.meta === "object"
-      ? (raw.meta as Record<string, unknown>)
-      : undefined;
-  const meta: GenUINode["meta"] = {
-    streaming,
-    ...(metaRaw && typeof metaRaw.source === "string"
-      ? { source: metaRaw.source }
-      : {}),
-  };
-
-  return { id, type, props, children, meta };
+  return segments;
 }
+
+/** Extract + validate GenUI nodes from a message's full text — used by the
+ *  persistence path (message.genui) with COMPLETE semantics: unterminated
+ *  blocks (wrong close marker) parse via the tolerant fallbacks. */
+export function extractGenUINodes(fullText: string): GenUINode[] | null {
+  if (!fullText || !fullText.includes(GENUI_OPEN)) return null;
+  const segments = buildTextSegments(fullText, undefined, true);
+  const allNodes: GenUINode[] = [];
+  for (const seg of segments) {
+    if (seg.type === "genui" && seg.spec) allNodes.push(...seg.spec.nodes);
+  }
+  return allNodes.length > 0 ? allNodes : null;
+}
+
+/** While a block is still STREAMING, a node whose `type` is not a known kind
+ *  is almost always a MID-STREAM ARTIFACT. Drop them recursively; a genuinely
+ *  unknown type on a CLOSED block still renders the fallback by design. */
+function pruneStreamingArtifacts(spec: GenUISpec): GenUISpec {
+  const pruneNodes = (nodes: GenUINode[]): GenUINode[] => {
+    const out: GenUINode[] = [];
+    for (const n of nodes) {
+      if (n.type === "unknown_json") continue; // partial type string — skip
+      if (n.children && n.children.length > 0) {
+        const pruned = pruneNodes(n.children);
+        out.push(pruned.length > 0 ? { ...n, children: pruned } : omitChildren(n));
+      } else {
+        out.push(n);
+      }
+    }
+    return out;
+  };
+  return { nodes: pruneNodes(spec.nodes) };
+}
+
+const omitChildren = (n: GenUINode): GenUINode => {
+  const { children: _children, ...rest } = n;
+  void _children;
+  return rest as GenUINode;
+};
 
 /** One parsed segment of the text. */
 export interface TextSegment {
@@ -390,6 +603,15 @@ export interface TextSegment {
   inGenUI: boolean;
   /** Text after the last CLOSED `<<</genui>>>`. Empty while streaming. */
   after: string;
+}
+
+/** Normalize a raw parsed value into a `GenUISpec` (validation included). */
+function specFromRaw(raw: unknown, streaming: boolean): GenUISpec | null {
+  void streaming; // kept for API symmetry; validation is streaming-agnostic
+  const nodes = nodesFromRaw(raw);
+  if (!nodes || nodes.length === 0) return null;
+  const spec = validateSpec({ nodes: nodes as GenUINode[] });
+  return spec.nodes.length > 0 ? spec : null;
 }
 
 /**
@@ -437,13 +659,14 @@ export function segmentText(full: string): TextSegment {
     // Move past the opening sentinel.
     const jsonStart = openIdx + GENUI_OPEN.length;
 
-    // Find the matching close.
-    const closeIdx = full.indexOf(GENUI_CLOSE, jsonStart);
-    if (closeIdx === -1) {
+    // Find the matching close — real close, or FAKE close (a second
+    // `<<<genui>>>` the model wrote where `<<</genui>>>` belonged).
+    const { closeIdx, closed } = findBlockEnd(full, jsonStart, false);
+    if (!closed) {
       // Open block — parse the partial JSON tolerantly.
       const partial = full.slice(jsonStart);
       const raw = parseTolerant(partial);
-      const spec = raw ? toSpec(raw, true) : null;
+      const spec = raw ? specFromRaw(raw, true) : null;
       if (spec) blocks.push(spec);
       inGenUI = true;
       cursor = full.length;
@@ -453,10 +676,10 @@ export function segmentText(full: string): TextSegment {
     // Closed block — parse the complete JSON.
     const jsonText = full.slice(jsonStart, closeIdx);
     const raw = parseTolerant(jsonText);
-    const spec = raw ? toSpec(raw, false) : null;
+    const spec = raw ? specFromRaw(raw, false) : null;
     if (spec) blocks.push(spec);
     firstBlockSeen = true;
-    cursor = closeIdx + GENUI_CLOSE.length;
+    cursor = Math.min(closeIdx + GENUI_CLOSE.length, full.length);
   }
 
   // Strip wrapping code fences around GenUI blocks.

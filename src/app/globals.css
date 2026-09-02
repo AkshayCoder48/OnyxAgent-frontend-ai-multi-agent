@@ -529,6 +529,21 @@
     }
   }
 
+  /* Soft opacity breathing for the todo plan's active-row status rail —
+     quieter than Tailwind's animate-pulse (which halves opacity). */
+  @keyframes pulse-soft {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+  .animate-pulse-soft {
+    animation: pulse-soft 1.8s ease-in-out infinite;
+  }
+
   /* Tiny fade+scale entrance for popovers / dropdowns. */
   @keyframes lsFadeIn {
     from {

@@ -129,6 +129,7 @@ export function useChat(options: UseChatOptions = {}) {
     updateToolCallPart,
     appendToolStreamingOutput,
     endRound: endRoundPart,
+    endReasoning: endReasoningPart,
     clearMessages,
   } = useChatStore();
   const { setCurrentTurnId: setCurrentTodoTurnId, reset: resetTodoTurn } = useResearchStore();
@@ -193,6 +194,18 @@ export function useChat(options: UseChatOptions = {}) {
       if (messageId) endRoundPart(messageId, round);
     },
     [endRoundPart],
+  );
+
+  /** Settle the round's reasoning the moment its stream stops — the panel
+   *  flips to "Thought for Ns" + auto-collapses immediately (PRD: reasoning
+   *  is "-ing" only while reasoning_content is actually arriving, never
+   *  until the round ends). */
+  const endActiveReasoning = useCallback(
+    (round: number) => {
+      const messageId = currentMessageIdRef.current;
+      if (messageId) endReasoningPart(messageId, round);
+    },
+    [endReasoningPart],
   );
 
   // ── STREAMING BUFFERS ──────────────────────────────────────────────
@@ -567,6 +580,15 @@ export function useChat(options: UseChatOptions = {}) {
         case "llm_completed": {
           // LLM lifecycle events — optionally show status. A new provider
           // request also clears any stale rate-limit note.
+          //
+          // REASONING SETTLEMENT (instant "-ed"): the LLM stream for this
+          // round just ended — any thinking/reasoning that was streaming is
+          // done NOW. Stamp it so the panel collapses immediately instead
+          // of shimmering "Thinking…" until the whole turn finishes.
+          if (wsEvent.type === "llm_completed" && currentMessageIdRef.current) {
+            flushTextDelta();
+            endActiveReasoning(activeRoundRef.current);
+          }
           setRateLimitStatus(null);
           break;
         }
@@ -1069,6 +1091,7 @@ export function useChat(options: UseChatOptions = {}) {
       updateToolCallPart,
       appendToolStreamingOutput,
       endActiveRound,
+      endActiveReasoning,
       attachConversation,
       setCurrentMessageId,
       onConversationCreated,

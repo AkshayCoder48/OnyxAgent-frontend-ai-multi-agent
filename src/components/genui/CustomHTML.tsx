@@ -16,6 +16,12 @@ import { readChatTheme, genuiThemeCssVars } from "@/lib/genui/theme";
  * Props:
  *   - html (string, required) — HTML content. Can be a full document or a
  *     fragment (we wrap fragments in a basic HTML document with reset styles).
+ *   - js / javascript / script (string) — SEPARATE JavaScript payload. Models
+ *     often split markup and logic across `html` + `js` props; the script is
+ *     appended at the END of the body (after all markup exists) and wrapped
+ *     in try/catch + an error surface so a JS bug shows in-card instead of
+ *     silently killing the widget.
+ *   - css / style (string) — SEPARATE stylesheet appended into <head>.
  *   - title (string) — optional label above the iframe
  *   - height (number, default 300) — iframe height in px
  *   - width (string, default "100%") — iframe width
@@ -35,8 +41,55 @@ import { readChatTheme, genuiThemeCssVars } from "@/lib/genui/theme";
  * the chat's background/foreground, so generated widgets belong to the
  * chat instead of rendering as an unrelated white/black HTML surface.
  */
+/** Pull the separate JS payload out of the props (js | javascript | script). */
+function extractJs(props: Record<string, unknown>): string {
+  for (const key of ["js", "javascript", "script"]) {
+    const v = props[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/** Pull the separate CSS payload out of the props (css | style). */
+function extractCss(props: Record<string, unknown>): string {
+  for (const key of ["css", "style"]) {
+    const v = props[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/** Build the script payload: the JS wrapped in try/catch + an error
+ *  surface. A plain <script> with a runtime error fails SILENTLY in an
+ *  iframe — the widget looks dead with no clue why. The wrapper catches
+ *  errors (sync + async) and paints them at the top of the card so the
+ *  user can see what broke. */
+function wrapJs(js: string): string {
+  return `
+window.__genuiError = function (err) {
+  try {
+    var box = document.getElementById('__genui-err');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = '__genui-err';
+      box.style.cssText = 'position:relative;z-index:99;margin:0 0 8px;padding:6px 10px;border-radius:6px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.35);color:#b91c1c;font:600 11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;';
+      document.body.insertBefore(box, document.body.firstChild);
+    }
+    box.textContent = 'Script error: ' + (err && err.message ? err.message : String(err));
+  } catch (e) { /* last-resort — never loop */ }
+};
+window.addEventListener('error', function (e) { window.__genuiError(e.error || e.message); });
+window.addEventListener('unhandledrejection', function (e) { window.__genuiError(e.reason); });
+try {
+${js}
+} catch (err) { window.__genuiError(err); }
+`;
+}
+
 export function CustomHTML({ props, streaming }: GenUIComponentProps) {
   const html = str(props.html);
+  const js = extractJs(props);
+  const css = extractCss(props);
   const title = str(props.title);
   const height = num(props.height, 300);
   const width = str(props.width, "100%");
@@ -51,7 +104,7 @@ export function CustomHTML({ props, streaming }: GenUIComponentProps) {
     );
   }
 
-  if (!html) return null;
+  if (!html && !js) return null;
 
   // Live theme read at render time — reflects background changes WITHOUT a
   // page refresh (each finished card picks up the theme current at its
@@ -59,16 +112,33 @@ export function CustomHTML({ props, streaming }: GenUIComponentProps) {
   const theme = readChatTheme();
   const themeVars = genuiThemeCssVars(theme);
 
+  const customStyle = css ? `<style>\n${css}\n</style>\n` : "";
+  const customScript = js ? `<script>\n${wrapJs(js)}\n</script>\n` : "";
+
   // Wrap bare HTML fragments in a full document with base styles.
-  // If the AI provides a complete <html> doc, inject the theme vars into its
-  // <head> so the same tokens are available either way.
+  // If the AI provides a complete <html> doc, inject the theme vars + the
+  // separate css/js payloads into it so both formats behave identically.
   const isFullDoc = /<html[\s>]/i.test(html);
   const docContent = isFullDoc
-    ? html.replace(
-        /<head(\s[^>]*)?>/i,
-        (m) =>
-          `${m}<style>:root{${themeVars}}body{background:var(--chat-background);color:var(--chat-foreground);}</style>`,
-      )
+    ? (() => {
+        let doc = html;
+        // Inject theme vars + custom css into <head> (or create one).
+        const headInject = `<style>:root{${themeVars}}body{background:var(--chat-background);color:var(--chat-foreground);}</style>${customStyle}`;
+        if (/<head(\s[^>]*)?>/i.test(doc)) {
+          doc = doc.replace(/<head(\s[^>]*)?>/i, (m) => `${m}${headInject}`);
+        } else {
+          doc = doc.replace(/<html(\s[^>]*)?>/i, (m) => `${m}<head>${headInject}</head>`);
+        }
+        // Append the custom script right before </body> (markup exists by then).
+        if (customScript) {
+          if (/<\/body>/i.test(doc)) {
+            doc = doc.replace(/<\/body>/i, `${customScript}</body>`);
+          } else {
+            doc += customScript;
+          }
+        }
+        return doc;
+      })()
     : `<!DOCTYPE html>
 <html>
 <head>
@@ -99,10 +169,10 @@ export function CustomHTML({ props, streaming }: GenUIComponentProps) {
   }
   canvas { max-width: 100%; height: auto; }
 </style>
-</head>
+${customStyle}</head>
 <body>
 ${html}
-</body>
+${customScript}</body>
 </html>`;
 
   return (

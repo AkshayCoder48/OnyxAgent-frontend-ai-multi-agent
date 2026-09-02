@@ -107,6 +107,12 @@ export interface MessagePart {
   /** Epoch ms when the round ended (stamped when the next round starts or
    *  the turn completes). Frozen thereafter — completed round timing stays. */
   roundEndedAt?: number;
+  /** Epoch ms when THIS part's thinking/reasoning stream STOPPED — stamped
+   *  the moment the first text delta or tool call arrives after reasoning,
+   *  or when the LLM round completes. The reasoning panel flips from
+   *  "Thinking…" to "Thought for Ns" and auto-collapses IMMEDIATELY at this
+   *  point — it does NOT wait for the whole round/turn to finish. */
+  reasoningEndedAt?: number;
 }
 
 export interface MapMarker {

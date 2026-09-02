@@ -94,6 +94,12 @@ interface ChatState {
    *  when the next round starts or the turn completes. Completed round
    *  timing stays frozen forever (PRD §12). */
   endRound: (messageId: string, round: number, endedAt?: number) => void;
+  /** Stamp `reasoningEndedAt` on the round's thinking/reasoning parts that
+   *  lack it — called the moment the first text delta / tool call / LLM
+   *  completion arrives after reasoning. The reasoning panel settles
+   *  ("Thought for Ns" + auto-collapse) INSTANTLY instead of waiting for
+   *  the round to end. Idempotent — already-stamped parts are untouched. */
+  endReasoning: (messageId: string, round: number, endedAt?: number) => void;
   updateToolCallPart: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
   appendToolStreamingOutput: (
     messageId: string,
@@ -227,6 +233,30 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
+      // REASONING SETTLEMENT: text arriving after reasoning means the
+      // model finished thinking — stamp reasoningEndedAt so the panel
+      // flips to "Thought for Ns" + auto-collapses right now (not when
+      // the round ends). Only parts of the SAME round + not yet stamped.
+      if (parts.length > 0) {
+        const roundKey = round ?? 0;
+        let reasoningSettled = false;
+        const stamped = parts.map((p) => {
+          if (
+            !reasoningSettled &&
+            (p.type === "thinking" || p.type === "reasoning") &&
+            p.reasoningEndedAt === undefined
+          ) {
+            // Only settle reasoning of the SAME round (or legacy parts with
+            // no round stamp — treat as this round).
+            if ((p.round ?? 0) === roundKey) {
+              reasoningSettled = true;
+              return { ...p, reasoningEndedAt: Date.now() };
+            }
+          }
+          return p;
+        });
+        if (reasoningSettled) parts.splice(0, parts.length, ...stamped);
+      }
       const last = parts[parts.length - 1];
       // CHRONOLOGICAL TEXT PLACEMENT (timeline PRD §3–§9: EVENT SEQUENCE =
       // VISUAL SEQUENCE). Text merges into an earlier text part ONLY when
@@ -362,10 +392,21 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const msg = state.messages[idx]!;
       const messages = [...state.messages];
+      // REASONING SETTLEMENT: a tool call arriving after reasoning means the
+      // model finished thinking — stamp reasoningEndedAt on the same round's
+      // unstamped thinking/reasoning parts so the panel settles instantly.
+      const roundKey = round ?? 0;
+      const baseParts = (msg.parts ?? []).map((p) =>
+        (p.type === "thinking" || p.type === "reasoning") &&
+        p.reasoningEndedAt === undefined &&
+        (p.round ?? 0) === roundKey
+          ? { ...p, reasoningEndedAt: Date.now() }
+          : p,
+      );
       messages[idx] = {
         ...msg,
         parts: [
-          ...(msg.parts ?? []),
+          ...baseParts,
           {
             id: newPartId(),
             type: "tool" as const,
@@ -394,6 +435,34 @@ export const useChatStore = create<ChatState>((set) => ({
         if (p.round === round && p.roundEndedAt === undefined) {
           changed = true;
           return { ...p, roundEndedAt: at };
+        }
+        return p;
+      });
+      if (!changed) return state;
+
+      const messages = [...state.messages];
+      messages[idx] = { ...msg, parts };
+      savePersisted(messages);
+      return { messages };
+    }),
+
+  endReasoning: (messageId, round, endedAt) =>
+    set((state) => {
+      const idx = state.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return state;
+
+      const msg = state.messages[idx]!;
+      if (!msg.parts) return state;
+      const at = endedAt ?? Date.now();
+      let changed = false;
+      const parts = msg.parts.map((p) => {
+        if (
+          (p.type === "thinking" || p.type === "reasoning") &&
+          p.reasoningEndedAt === undefined &&
+          p.round === round
+        ) {
+          changed = true;
+          return { ...p, reasoningEndedAt: at };
         }
         return p;
       });

@@ -15,6 +15,9 @@ import { readChatTheme, genuiThemeCssVars } from "@/lib/genui/theme";
  * Props:
  *   - title (string) — card title
  *   - html (string, required) — HTML content for the iframe body
+ *   - js / javascript / script (string) — separate JS payload, appended
+ *     after the markup and wrapped in try/catch + an in-card error surface
+ *   - css / style (string) — separate stylesheet injected into <head>
  *   - body / description / text (string) — optional description below title
  *   - icon (string) — emoji or short label
  *   - height (number, default 250) — iframe height in px
@@ -27,9 +30,29 @@ import { readChatTheme, genuiThemeCssVars } from "@/lib/genui/theme";
  * app theme is injected as --chat-* CSS variables with the body defaulting
  * to the chat background/foreground (PRD §6/§7/§13/§20–22).
  */
+/** Pull the separate JS payload (js | javascript | script). */
+function extractJs(props: Record<string, unknown>): string {
+  for (const key of ["js", "javascript", "script"]) {
+    const v = props[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/** Pull the separate CSS payload (css | style). */
+function extractCss(props: Record<string, unknown>): string {
+  for (const key of ["css", "style"]) {
+    const v = props[key];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
 export function CustomCard({ props, streaming }: GenUIComponentProps) {
   const title = str(props.title);
   const html = str(props.html || props.content);
+  const js = extractJs(props);
+  const css = extractCss(props);
   const body = str(props.body || props.description || props.text);
   const icon = str(props.icon);
   const height = num(props.height, 250);
@@ -45,10 +68,15 @@ export function CustomCard({ props, streaming }: GenUIComponentProps) {
     );
   }
 
-  if (!html) return null;
+  if (!html && !js) return null;
 
   const theme = readChatTheme();
   const themeVars = genuiThemeCssVars(theme);
+
+  const customStyle = css ? `<style>\n${css}\n</style>\n` : "";
+  const customScript = js
+    ? `<script>\nwindow.__genuiError=function(err){try{var b=document.getElementById('__genui-err');if(!b){b=document.createElement('div');b.id='__genui-err';b.style.cssText='position:relative;z-index:99;margin:0 0 8px;padding:6px 10px;border-radius:6px;background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.35);color:#b91c1c;font:600 11px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;';document.body.insertBefore(b,document.body.firstChild);}b.textContent='Script error: '+(err&&err.message?err.message:String(err));}catch(e){}}\nwindow.addEventListener('error',function(e){window.__genuiError(e.error||e.message)});\nwindow.addEventListener('unhandledrejection',function(e){window.__genuiError(e.reason)});\ntry{\n${js}\n}catch(err){window.__genuiError(err)}\n</script>\n`
+    : "";
 
   const docContent = `<!DOCTYPE html>
 <html>
@@ -80,10 +108,10 @@ export function CustomCard({ props, streaming }: GenUIComponentProps) {
   }
   canvas { max-width: 100%; height: auto; }
 </style>
-</head>
+${customStyle}</head>
 <body>
 ${html}
-</body>
+${customScript}</body>
 </html>`;
 
   return (

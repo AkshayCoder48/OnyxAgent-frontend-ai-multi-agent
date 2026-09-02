@@ -44,6 +44,7 @@ import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { conversationService, settingsService } from "@/lib/services";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
+import { normalizeGenUISentinels } from "@/lib/genui/stream-parser";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -1426,11 +1427,15 @@ Read it FIRST with \`read_file\` (path: \`agent.md\`) before using any tools. If
 ## Generative UI (GenUI)
 GenUI lets you render rich interactive UI components — cards, tables, charts, games, calculators, educational widgets — directly in the chat by emitting a \`<<<genui>>>...<<</genui>>>\` block with a JSON spec. **No tool calls needed** — just emit the spec as text and it renders live.
 
-**FULL documentation** (all 33 node types, props, use cases, examples, custom HTML components) is in \`agent.md\` under the "Generative UI (GenUI)" section. Read it with \`read_file\` (path: \`agent.md\`) before emitting GenUI blocks.
+**CRITICAL — THE CLOSING MARKER:** the block ends with \`<<</genui>>>\` (WITH a slash, like \`</div>\`). NEVER close with another \`<<<genui>>>\` — a wrong close marker breaks rendering and leaks raw JSON after refresh. Open: \`<<<genui>>>\` · Close: \`<<</genui>>>\`.
+
+**JSON escaping:** the content between sentinels is ONE JSON document. Escape newlines in strings as \`\\n\` (never raw line breaks), use single quotes in HTML attributes, keep brackets balanced.
+
+**FULL documentation** (all 33 node types, props, use cases, examples, custom HTML components) is in \`agent.md\` under the "Generative UI (GenUI)" section. Read it with \`read_file\` (path: \`agent.md\`) before emitting GenUI blocks — it contains the rules that make specs render correctly on the first try.
 
 Quick reference — available types: header, text_block, card, card_grid, stat, stats_row, badge, progress, sparkline, key_value, quote, code_block, comparison_table, image, image_grid, list, checklist, timeline, stepper, divider, columns, tabs, accordion, callout, terminal_card, agent_card, weather_card, stock_ticker, suggestion_chips, sources_panel, **custom_html**, **custom_card**.
 
-The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. See agent.md for details and examples.
+The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. They accept \`html\`, \`css\`, and \`js\` props (markup, stylesheet, script — the script runs after the markup exists; script errors surface in-card instead of silently killing the widget). Set \`height\` to fit your content. See agent.md for complete examples.
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 
@@ -1757,6 +1762,16 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     }
 
     if (roundResult.usage) lastUsage = roundResult.usage;
+    // GENUI SENTINEL NORMALIZATION: models sometimes write the WRONG closing
+    // marker — `<<<genui>>>` instead of `<<</genui>>>`. Rewrite any open-marker
+    // that appears while a block is already open into a proper close marker
+    // BEFORE the content is persisted / sent back as history, so refresh
+    // rendering and provider context both see well-formed blocks. Well-formed
+    // blocks pass through unchanged.
+    roundResult.content = normalizeGenUISentinels(roundResult.content);
+    if (roundResult.textBeforeTools) {
+      roundResult.textBeforeTools = normalizeGenUISentinels(roundResult.textBeforeTools);
+    }
     lastAssistantContent = roundResult.content;
     lastAssistantTextBeforeTools = roundResult.textBeforeTools;
     lastAssistantThinking = roundResult.thinking;

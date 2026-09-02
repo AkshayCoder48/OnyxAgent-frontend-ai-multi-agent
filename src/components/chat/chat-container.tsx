@@ -196,9 +196,25 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   const { fetchConversations } = useConversations();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
-  const handleConversationCreated = useCallback(() => {
-    fetchConversations();
-  }, [fetchConversations]);
+  const handleConversationCreated = useCallback(
+    (conversationId?: string) => {
+      // NEW-CHAT TRANSITION GUARD: remember the id the RUNTIME just created
+      // (conversation_created). The clear-effect below only treats a null → ID
+      // transition as "a new chat being saved" when the ID matches THIS
+      // marker — navigating back to an EXISTING chat from the "new chat"
+      // (null) state must NOT be misclassified, or the load-effect skips the
+      // DB paint and the chat renders empty until the user switches away and
+      // back (the "tap new chat → open same chat → blank" bug).
+      if (conversationId) {
+        runtimeCreatedConvIdRef.current = conversationId;
+      }
+      fetchConversations();
+    },
+    [fetchConversations],
+  );
+  // The conversation id the runtime JUST created this turn (null once
+  // consumed). See handleConversationCreated above.
+  const runtimeCreatedConvIdRef = useRef<string | null>(null);
 
   const {
     messages,
@@ -249,7 +265,6 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   useEffect(() => {
     const prevId = prevConversationIdRef.current;
     const currId = currentConversationId;
-
     // Skip initial mount
     if (prevId === undefined) {
       prevConversationIdRef.current = currId;
@@ -276,7 +291,19 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
 
     // Track whether this is a null → ID transition (new chat being saved).
     // The load-effect reads this to decide whether to skip loading.
-    wasNewChatTransitionRef.current = (prevId === null && currId !== null);
+    // CRITICAL: ONLY a runtime-created id counts as "a new chat being saved"
+    // (see handleConversationCreated). A user navigating BACK to an existing
+    // chat from the new-chat (null) state is a normal selection — the DB
+    // load-effect must run and paint its messages.
+    const isRuntimeCreatedTransition =
+      prevId === null &&
+      currId !== null &&
+      runtimeCreatedConvIdRef.current === currId;
+    wasNewChatTransitionRef.current = isRuntimeCreatedTransition;
+    if (isRuntimeCreatedTransition) {
+      // Consume the marker — the transition is being handled.
+      runtimeCreatedConvIdRef.current = null;
+    }
 
     // Clear messages when:
     // 1. Going from a conversation to null (new chat)

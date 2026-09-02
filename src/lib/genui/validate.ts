@@ -68,9 +68,13 @@ const ALLOWED_PROPS_BY_TYPE: Record<string, string[]> = {
   terminal_card: ["title", "lines", "prompt", "commands", "output"],
   weather_card: ["location", "city", "temperature", "temp", "unit", "condition", "icon", "high", "low", "humidity", "wind"],
   stock_ticker: ["symbol", "name", "price", "currency", "change", "changePercent", "changePct", "spark", "sparkline", "trend", "change_percent"],
-  // Custom component types — allow arbitrary HTML/JSX content.
-  custom_html: ["html", "title", "height", "width", "sandbox"],
-  custom_card: ["title", "html", "body", "description", "icon", "height", "content"],
+  // Custom component types — allow arbitrary HTML/JSX content. `js` and
+  // `css` are SEPARATE script/style payloads the model often emits instead
+  // of inlining them into `html` — the renderers assemble them into the
+  // iframe document (script wrapped in try/catch so errors surface in-card
+  // instead of silently killing the widget).
+  custom_html: ["html", "title", "height", "width", "sandbox", "js", "javascript", "script", "css", "style"],
+  custom_card: ["title", "html", "body", "description", "icon", "height", "content", "js", "javascript", "script", "css", "style"],
   // Root wrapper — the AI sometimes emits {"type":"root","children":[...]}.
   // Treated as a passthrough: no props, just renders children.
   root: [],

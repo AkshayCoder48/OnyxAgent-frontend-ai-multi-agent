@@ -26,8 +26,7 @@ import { currentResponseOrb } from "@/components/assistant-ui/elements/response-
 import { ResearchPanel } from "./research-panel";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
-import { segmentText } from "@/lib/genui/stream-parser";
-import { validateSpec } from "@/lib/genui/validate";
+import { extractGenUINodes } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
 
@@ -35,6 +34,11 @@ import { useChatStore } from "@/stores/chat-store";
  * Extract + validate GenUI nodes from a message's full text (content + parts).
  * Returns null if no `<<<genui>>>` sentinel is present. Used to populate
  * `message.genui` for persistence when streaming completes.
+ *
+ * COMPLETE-MODE: uses the shared parser with complete=true, so a block whose
+ * closing marker was written incorrectly (`<<<genui>>>` instead of
+ * `<<</genui>>>`) still parses — the raw JSON never leaks into the chat
+ * after a refresh.
  */
 function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
   const text = message.content ||
@@ -45,12 +49,7 @@ function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
           .join("\n\n")
       : "");
   if (!text || !text.includes("<<<genui>>>")) return null;
-  const seg = segmentText(text);
-  if (seg.blocks.length === 0) return null;
-  const allNodes: GenUINode[] = [];
-  for (const b of seg.blocks) for (const n of b.nodes) allNodes.push(n);
-  const validated = validateSpec({ nodes: allNodes });
-  return validated.nodes.length > 0 ? validated.nodes : null;
+  return extractGenUINodes(text);
 }
 
 /**
@@ -182,7 +181,13 @@ function TextBubble({
   // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
   // (text / genui / text / genui / ...) so interleaved text between multiple
   // GenUI blocks is preserved.
-  const { segments } = useGenUIFromText(text);
+  //
+  // COMPLETE-MODE: while this text is streaming, unterminated blocks stay
+  // open (waiting for the close marker). Once streaming ends — including
+  // persisted messages re-rendered after a refresh — an unterminated block
+  // is treated as CLOSED so a wrongly-written close marker still renders
+  // the card instead of leaking raw `<<<genui>>>` JSON as markdown.
+  const { segments } = useGenUIFromText(text, !isStreaming);
 
   if (isUser) {
     // User turn — right-aligned soft-terracotta card with a small tail
@@ -436,7 +441,6 @@ interface RoundSegmentData {
   /** Render items (tool / toolGroup / text / todoPanel) of this round. */
   items: RoundRenderItem[];
 }
-
 type RoundRenderItem =
   | { kind: "text"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
   | { kind: "tool"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
@@ -472,6 +476,35 @@ function RoundPanel({
   const active = isStreaming && isLastSegment && segment.endedAt === undefined;
   const elapsedSeconds = useRoundElapsed(segment.startedAt, segment.endedAt, active);
 
+  // REASONING SETTLEMENT (instant "-ed"): the thinking panel is in
+  // "Thinking…" phase ONLY while reasoning is genuinely still streaming —
+  // i.e. the round is active AND the round's thinking parts haven't been
+  // stamped `reasoningEndedAt` (the store stamps it the moment the first
+  // text delta / tool call / llm_completed arrives after reasoning). As
+  // soon as it's stamped, the panel flips to "Thought for Ns" and
+  // auto-collapses with the 360ms fold — never waiting for the round to
+  // end. Legacy parts without the stamp keep the old behavior.
+  const reasoningSettled = segment.thinkingParts.some(
+    (p) => p.reasoningEndedAt !== undefined,
+  );
+  const reasoningActive = active && !reasoningSettled;
+  // The reasoning duration freezes at reasoningEndedAt — not at round end —
+  // so "Thought for Ns" reports how long the model was actually thinking.
+  const reasoningEnd = (() => {
+    for (let i = segment.thinkingParts.length - 1; i >= 0; i--) {
+      const t = segment.thinkingParts[i]?.reasoningEndedAt;
+      if (t !== undefined) return t;
+    }
+    return undefined;
+  })();
+  const reasoningStart = segment.startedAt;
+  const reasoningElapsed = React.useMemo(() => {
+    if (reasoningEnd !== undefined && reasoningStart !== undefined) {
+      return Math.max(0, (reasoningEnd - reasoningStart) / 1000);
+    }
+    return elapsedSeconds;
+  }, [reasoningEnd, reasoningStart, elapsedSeconds]);
+
   // Split the (possibly still-streaming) reasoning text into sentences for
   // the ThinkingReasoning element. Each round's reasoning merges into one
   // panel — but NEVER across rounds.
@@ -505,8 +538,8 @@ function RoundPanel({
       {sentences.length > 0 ? (
         <ThinkingReasoning
           sentences={sentences}
-          phase={active ? "thinking" : "done"}
-          elapsedSeconds={elapsedSeconds}
+          phase={reasoningActive ? "thinking" : "done"}
+          elapsedSeconds={reasoningElapsed}
           verb="Thought"
           activeLabel="Thinking…"
         />
@@ -925,10 +958,15 @@ export const MessageItem = React.memo(function MessageItem({
                       {/* Reasoning/Thinking block (single) */}
                       {thinkingParts.map((part, j) => {
                         const isLast = j === thinkingParts.length - 1 && flowParts.length === 0;
+                        // REASONING SETTLEMENT: same rule as RoundPanel — the
+                        // panel stays "-ing" only while this part's reasoning
+                        // stream is genuinely open (no reasoningEndedAt stamp).
+                        const partReasoningActive =
+                          isLastStreaming && part.reasoningEndedAt === undefined;
                         if (part.type === "thinking") {
-                          return <ThinkingBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
+                          return <ThinkingBlock key={part.id} text={part.content ?? ""} open={partReasoningActive && isLast} isStreaming={partReasoningActive} />;
                         }
-                        return <ReasoningBlock key={part.id} text={part.content ?? ""} open={isLastStreaming && isLast} isStreaming={isLastStreaming} />;
+                        return <ReasoningBlock key={part.id} text={part.content ?? ""} open={partReasoningActive && isLast} isStreaming={partReasoningActive} />;
                       })}
 
                       {/* Tool calls + text in chronological order, with the

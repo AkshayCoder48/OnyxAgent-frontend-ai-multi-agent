@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
@@ -85,15 +85,21 @@ export default function ChatPage() {
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
-  // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15): `use-chat` flips
-  // `sidebarOpen` on the subagent store the moment a sub-agent tool call
-  // starts — mirror it into the local panel state (both desktop and mobile)
-  // so the sidebar opens automatically and streams the sub-agent's progress.
-  // Closing the panel (header Bot button, X, or Sheet onOpenChange) writes
-  // false back to the store so a NEW invocation re-opens it.
   const subagentSidebarOpen = useSubagentStore((s) => s.sidebarOpen);
   const setSubagentSidebarOpen = useSubagentStore((s) => s.setSidebarOpen);
-  useEffect(() => {
+  // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15): `use-chat` flips `sidebarOpen` on
+  // the subagent store the moment a sub-agent tool call starts — mirror it
+  // into the local panel state (both desktop and mobile) so the sidebar
+  // opens automatically and streams the sub-agent's progress. Closing the
+  // panel (header Bot button, X, or Sheet onOpenChange) writes false back
+  // to the store so a NEW invocation re-opens it.
+  //
+  // Uses the render-time "adjust state when a prop changes" pattern from
+  // the React docs instead of a useEffect + setState (which triggers
+  // cascading renders and is flagged by the React Compiler lint).
+  const [prevSubagentOpen, setPrevSubagentOpen] = useState(subagentSidebarOpen);
+  if (subagentSidebarOpen !== prevSubagentOpen) {
+    setPrevSubagentOpen(subagentSidebarOpen);
     if (subagentSidebarOpen) {
       setRightPanel("subagents");
       setMobilePanel("subagents");
@@ -101,7 +107,7 @@ export default function ChatPage() {
       setRightPanel((p) => (p === "subagents" ? null : p));
       setMobilePanel((p) => (p === "subagents" ? null : p));
     }
-  }, [subagentSidebarOpen]);
+  }
 
   const closeSubagentSidebar = useCallback(() => {
     setSubagentSidebarOpen(false);

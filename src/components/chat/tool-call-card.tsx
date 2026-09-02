@@ -65,7 +65,6 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       ((toolCall.name === "send_file" || toolCall.name === "send_folder") &&
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
-      (toolCall.name === "show_todo" && toolCall.status === "completed") ||
       isAnyDDGSearch,
   );
   const [showRaw, setShowRaw] = useState(false);
@@ -423,6 +422,19 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         </span>
       </button>
 
+      {/* INLINE TODO PLAN (show_todo): the todo list UI renders directly in
+          the MAIN RESPONSE — always visible beneath the tool bar, never
+          hidden inside the disclosure. Enlarging (expanding) the bar reveals
+          the PARSED CODE (raw JSON) via the panel below. */}
+      {isShowTodo && toolCall.status === "completed" && (
+        <TodoPreview
+          turnId={turnId ?? undefined}
+          todoIds={showTodoIds}
+          fallbackTodos={parsedTodo?.todos}
+          className="px-1.5 sm:px-2"
+        />
+      )}
+
       {/* Disclosure panel — the request/result and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -461,14 +473,10 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           ) : isRunPython ? (
             <RunPythonResult toolCall={toolCall} resultText={resultText} />
           ) : isShowTodo && toolCall.status === "completed" ? (
-            // Todo tools get a specialized renderer (PRD §19): the todo
-            // TABLE rides directly beneath the tool-call bar — the raw
-            // request/result stay available behind the </> toggle above.
-            <TodoPreview
-              turnId={turnId ?? undefined}
-              todoIds={showTodoIds}
-              fallbackTodos={parsedTodo?.todos}
-            />
+            // Enlarging the show_todo tool shows the PARSED CODE (raw JSON
+            // request/result) — the todo LIST UI itself renders inline above
+            // (outside this panel), always visible in the main response.
+            <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isManageTodo && toolCall.status === "completed" && parsedTodo?.todos.length ? (
             // One-row preview of the affected todo (create/update) with its
             // live status.

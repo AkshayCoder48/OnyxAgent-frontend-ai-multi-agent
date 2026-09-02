@@ -25,6 +25,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { Sandbox } from "@e2b/code-interpreter";
+// FULL agent.md (tool guide + complete GenUI reference) bundled as a module
+// so it ships with the serverless bundle — the system prompt tells the AI
+// to read the "Generative UI (GenUI)" section from this file, so the sandbox
+// MUST receive the full document, not a short stub.
+import { AGENT_MD } from "@/lib/agent/agent-md";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,7 +85,17 @@ interface CacheEntry {
   /** Set to true after a liveness check has confirmed the sandbox is alive.
    *  Prevents redundant pings on every call. Reset on cache lookup miss. */
   verifiedAliveAt?: number;
+  /** Which agent.md version this sandbox received. Bump AGENT_MD_VERSION
+   *  whenever agent.md meaningfully changes — cached/reconnected sandboxes
+   *  then get the updated documentation on their next use. */
+  agentMdVersion?: number;
 }
+
+/** Bump when agent.md (→ src/lib/agent/agent-md.ts) changes meaningfully.
+ *  Version 2 = the FULL GenUI reference (previously sandboxes received a
+ *  short stub with NO GenUI docs at all — the root cause of malformed
+ *  `<<<genui>>>` specs). */
+const AGENT_MD_VERSION = 2;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -458,80 +473,13 @@ async function createAndCacheSandbox(
     }
   }
 
-  // Write agent.md to the sandbox — contains the complete tool usage guide.
-  // The system prompt tells the AI to read this file first. This keeps the
-  // system prompt small (doesn't bloat context) while giving the AI access
-  // to detailed tool documentation.
+  // Write agent.md to the sandbox — contains the complete tool usage guide
+  // AND the full GenUI reference (all 33 node types, custom_html/custom_card
+  // deep guide, the common-mistakes table, worked examples). The system
+  // prompt promises this documentation — the sandbox must actually receive
+  // it, or the model improvises GenUI specs and produces broken markers/JS.
   try {
-    const agentMd = `# Agent.md — Tool Usage Guide
-
-## Pre-Execution: ALWAYS analyze workspace first
-Before starting ANY task, call analyze_workspace to understand the project. NEVER blindly modify files.
-
-## File Management
-- list_folder: List directory contents. Discover what files exist.
-- read_file: Read a text file. Returns full content (no truncation).
-- read_file_section: Read specific line range. For large files or verification.
-- create_file: Create a new file (200 lines or fewer). Refuses overwrite unless overwrite: true.
-- write_file: Write/overwrite a file. Replace entire content.
-- edit_file: Edit by finding and replacing text. For targeted edits.
-- delete_file: Delete a file.
-- create_folder / delete_folder: Create/delete directories.
-- move_file / rename_file: Move or rename files.
-- send_file / send_folder: Download files/folders as data URLs/ZIPs.
-
-## Incremental File Writing (files >200 lines)
-NEVER generate an entire large file in one operation. Use:
-1. verify_path: Create directories + empty file
-2. create_file_chunk (mode="create"): First chunk (2-4 KB, 50-200 lines)
-3. create_file_chunk (mode="append"): Subsequent chunks
-4. Split on: functions, classes, interfaces, components. NEVER split mid-function/JSON/JSX.
-
-## Code Execution
-- run_python: Python 3 code. Data analysis, calculations, ML, web scraping. 60s timeout.
-- run_terminal: Shell commands. File ops, git, npm/pip installs, system queries. 120s timeout.
-
-## Web and Search
-- web_search: Search the web (LangSearch if API key configured, else Miklium).
-- image_search / video_search: Search via Miklium (Yahoo-based).
-- web_fetch: Read full content of a URL. Use AFTER web_search.
-
-## Subagent Orchestration
-- spawn_subagent: Create a subagent. Use disposable: true for one-off tasks.
-- set_subagent_config: Assign AI provider/model to a subagent.
-- query_subagent: Send a message and get a reply.
-- list_subagents / complete_subagent / cancel_subagent / steer_subagent.
-
-## Other Tools
-- memory: Store/retrieve persistent facts about the user.
-- todos: Create a live task checklist for multi-step tasks.
-- get_current_datetime: Get current date/time.
-- create_chart_tool: Create data visualizations.
-- preview_image: Display an image inline.
-- ocr_image: Extract text from an image (screenshot, photo, scan). Accepts image_url or image_base64.
-- ocr_pdf: Extract text from a PDF. Accepts pdf_url or pdf_base64.
-- load_skill / list_skills: Use installed skills.
-- create_tool: Create custom HTTP/Python tools.
-
-## Task Complexity
-- Tiny: No tools or single answer. No sub-agents.
-- Small: One file change. Usually no sub-agents.
-- Medium: 2-4 files. Optional sub-agents.
-- Large: 5-10+ files. Spawn specialists.
-- Massive: Repository-wide. Multi-agent workflow.
-
-## Error Recovery
-- Directory missing: verify_path auto-creates with mkdir -p.
-- Write fails: Retry only the failed chunk, never regenerate previous chunks.
-- If all writes fail: Save to ./useless/ as fallback. Never discard content.
-
-## Tool Calling Rules
-- ALWAYS use the function-calling API (tool_calls mechanism).
-- NEVER write "Thought:", "Action:", "Input:" as text.
-- Call tools in parallel when independent.
-- Chain tools when output feeds into the next.
-`;
-    await sandbox.files.write("/home/user/agent.md", agentMd);
+    await sandbox.files.write("/home/user/agent.md", AGENT_MD);
   } catch {
     // best-effort — file may already exist or write may fail
   }
@@ -543,6 +491,7 @@ NEVER generate an entire large file in one operation. Use:
     createdAt: Date.now(),
     key,
     verifiedAliveAt: Date.now(),
+    agentMdVersion: AGENT_MD_VERSION,
   };
   getCache(mode).set(key, entry);
   return sandbox;
@@ -559,6 +508,17 @@ async function getSandbox(
   // 1. Check the in-memory cache first.
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
+    // AGENT.MD REFRESH: cached sandboxes created before an agent.md update
+    // still carry the old documentation. Re-write it (best-effort) when the
+    // version differs so the AI always reads the current GenUI reference.
+    if (cached.agentMdVersion !== AGENT_MD_VERSION) {
+      try {
+        await cached.sandbox.files.write("/home/user/agent.md", AGENT_MD);
+        cached.agentMdVersion = AGENT_MD_VERSION;
+      } catch {
+        // best-effort — a dead sandbox falls through the liveness path
+      }
+    }
     // ROTATION SAFETY NET: if the cached sandbox is >23h old, rotate it
     // (backup → kill → create → restore) before use. The client-side
     // `ensureFreshSandbox` is the primary trigger; this is a fallback for
@@ -605,6 +565,14 @@ async function getSandbox(
         key,
         verifiedAliveAt: Date.now(), // trust it's alive
       };
+      // Reconnected sandboxes may predate the current agent.md — refresh it
+      // best-effort so the AI's GenUI documentation is always current.
+      try {
+        await sandbox.files.write("/home/user/agent.md", AGENT_MD);
+        entry.agentMdVersion = AGENT_MD_VERSION;
+      } catch {
+        // best-effort — the next action will surface dead-sandbox errors
+      }
       getCache(mode).set(key, entry);
       return sandbox;
     } catch {
