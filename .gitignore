@@ -53,7 +53,7 @@ server.log
 # Skills directory
 /skills/
 # scratch/tool output
-tool-results/
+/tool-results/
 
 # zscripts runtime
 # .zscripts/ (real scripts — only ignore .pid)

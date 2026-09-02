@@ -10,18 +10,26 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronDown, FileText, Globe, Loader2, RefreshCw } from "lucide-react";
+import { FileText, Globe, Loader2, RefreshCw } from "lucide-react";
 import { RatingButtons } from "./rating-buttons";
 import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
 import {
-  ShimmerLabel,
+  AgentStatus,
+  FileTree,
   ThinkingIndicator,
   ThinkingReasoning,
   Orb,
+  ToolTimeline,
 } from "@/components/assistant-ui/elements";
+import {
+  deriveFileTree,
+  deriveTimeline,
+  formatClock,
+} from "@/lib/agent-tool-steps";
+import { toolCaption } from "@/lib/agent-step-captions";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
 import { GenUIBlock } from "@/components/genui/GenUIBlock";
@@ -332,15 +340,24 @@ interface MessageItemProps {
    *  button and swaps its icon for a spinner (PRD §6: the button must show
    *  a loading state and never fire a duplicate regeneration). */
   isRegenerating?: boolean;
+  /** Wired to the AgentStatus pill's pause button while this message
+   *  streams — stops the running generation (chat container's
+   *  stopGeneration). Keeps the pill's trailing control honest: it pauses
+   *  for real, never a dead button. */
+  onStop?: () => void;
 }
 
 /**
  * CollapsibleToolGroup — when 2+ consecutive tool calls happen without any
- * text between them, they're collapsed into a single disclosure line showing
- * "N tool calls" with an expand chevron. Click to expand/collapse.
+ * text between them, they collapse into ONE assistant-ui "Tool timeline"
+ * element: a single line summarizing the whole working session —
+ * "N steps · N files changed" — that expands into the vertical trace
+ * (a verb, an icon, and a chip per step, ending in file-change stats),
+ * followed by the full tool cards for detail.
  *
- * Design: matches the simple tool-name disclosure style — no card chrome,
- * just a chevron, a quiet label, and a failure count when present.
+ * While any tool in the group runs: the trigger shimmers "Working", the
+ * LAST visible step shimmers (the one in flight), and steps appear as the
+ * calls arrive (visibleSteps tracks steps.length).
  */
 function CollapsibleToolGroup({
   parts,
@@ -350,46 +367,51 @@ function CollapsibleToolGroup({
   turnId?: string | null;
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  const toolParts = parts.filter((p) => p.type === "tool" && p.toolCall);
-  const anyRunning = toolParts.some((p) => p.toolCall?.status === "running" || p.toolCall?.status === "pending");
-  const errorCount = toolParts.filter((p) => p.toolCall?.status === "error").length;
+
+  // Derive the timeline (steps + aggregated file stats) from the group's
+  // tool calls, memoized on the parts array so streaming flushes don't
+  // re-walk the list.
+  const { toolParts, steps, stats, filesChanged, errorCount, anyRunning } =
+    React.useMemo(() => {
+      const tp = parts.filter((p) => p.type === "tool" && p.toolCall);
+      const tcs = tp.map((p) => p.toolCall!);
+      const derived = deriveTimeline(tcs);
+      return {
+        toolParts: tp,
+        ...derived,
+        errorCount: tcs.filter((tc) => tc.status === "error").length,
+        anyRunning: tcs.some(
+          (tc) => tc.status === "running" || tc.status === "pending",
+        ),
+      };
+    }, [parts]);
+
+  const stepWord = steps.length === 1 ? "step" : "steps";
+  const fileWord = filesChanged === 1 ? "file" : "files";
+  const restingLabel =
+    steps.length === 0
+      ? `${toolParts.length} tool call${toolParts.length === 1 ? "" : "s"}`
+      : errorCount > 0
+        ? `${steps.length} ${stepWord} · ${errorCount} failed`
+        : `${steps.length} ${stepWord}${filesChanged > 0 ? ` · ${filesChanged} ${fileWord} changed` : ""}`;
 
   return (
     <div className="mb-1.5">
-      {/* Collapsed line — simple disclosure row, same anatomy as a single
-          tool call: chevron · label · status. */}
-      <button
-        type="button"
-        onClick={() => setExpanded((e) => !e)}
-        aria-expanded={expanded}
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left text-sm transition-colors hover:bg-accent/40"
-      >
-        <ChevronDown
-          className={cn(
-            "text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform duration-200",
-            expanded && "rotate-180",
-          )}
-          aria-hidden
-        />
-        {anyRunning ? (
-          <ShimmerLabel className="text-sm font-medium text-foreground/90">
-            {toolParts.length} tool calls
-          </ShimmerLabel>
-        ) : (
-          <span className="text-foreground/90 text-sm font-medium">
-            {toolParts.length} tool calls
-          </span>
-        )}
-        {errorCount > 0 && (
-          <span className="text-destructive text-xs font-medium">
-            {errorCount} failed
-          </span>
-        )}
-      </button>
+      <ToolTimeline
+        steps={steps}
+        visibleSteps={steps.length}
+        streaming={anyRunning}
+        open={expanded}
+        onOpenChange={setExpanded}
+        restingLabel={restingLabel}
+        activeLabel="Working"
+        stats={stats}
+      />
 
-      {/* Expanded tool disclosures */}
+      {/* The full tool cards — the trace above summarizes; these carry the
+          specialized renderers (charts, search results, diffs). */}
       {expanded && (
-        <div className="mt-1 space-y-1 border-l border-border/70 pl-2">
+        <div className="mt-1 ml-1.5 space-y-1 border-l border-border/70 pl-3">
           {toolParts.map((part) => (
             <div key={part.id} className="w-full">
               <ToolCallCard toolCall={part.toolCall!} turnId={turnId} />
@@ -431,9 +453,31 @@ function useRoundElapsed(
   return Math.max(0, (end - start) / 1000);
 }
 
-function roundElapsedLabel(seconds: number): string {
-  const s = Math.max(1, Math.round(seconds));
-  return `${s}s`;
+/** Live label for an active round's AgentStatus pill (assistant-ui "Agent
+ * status": one pill that always answers what it's doing, and for how long):
+ * the caption of the round's LAST still-running/pending tool — e.g.
+ * "Searching the web" — falling back to "Working". */
+function liveToolLabel(items: RoundRenderItem[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (!item) continue;
+    if (item.kind === "tool" && item.part.toolCall) {
+      const st = item.part.toolCall.status;
+      if (st === "running" || st === "pending") {
+        return toolCaption(item.part.toolCall.name);
+      }
+      continue;
+    }
+    if (item.kind === "toolGroup") {
+      for (let j = item.parts.length - 1; j >= 0; j--) {
+        const tc = item.parts[j]?.toolCall;
+        if (tc && (tc.status === "running" || tc.status === "pending")) {
+          return toolCaption(tc.name);
+        }
+      }
+    }
+  }
+  return "Working";
 }
 
 interface RoundSegmentData {
@@ -467,6 +511,7 @@ function RoundPanel({
   onCiteClick,
   genuiNodes,
   onTodoDismiss,
+  onStop,
 }: {
   segment: RoundSegmentData;
   isLastSegment: boolean;
@@ -476,6 +521,8 @@ function RoundPanel({
   onCiteClick?: (index: number) => void;
   genuiNodes?: GenUINode[];
   onTodoDismiss?: () => void;
+  /** Wired to the AgentStatus pill's pause button — stops the running turn. */
+  onStop?: () => void;
 }) {
   const active = isStreaming && isLastSegment && segment.endedAt === undefined;
   const elapsedSeconds = useRoundElapsed(segment.startedAt, segment.endedAt, active);
@@ -528,14 +575,18 @@ function RoundPanel({
       .filter((s) => s.length > 0);
   }, [reasoningText]);
 
+  // Live narration for the pill — see liveToolLabel.
+  const liveStatusLabel = liveToolLabel(segment.items);
+
   return (
     <div className="round-in mb-1 min-w-0 max-w-full">
       {/* Round header — the ThinkingReasoning panel header ("Thought for
           Ns" / shimmering "Thinking…") when reasoning text exists. While the
-          round is ACTIVE with no reasoning yet, a live "Working" row (orb +
-          shimmering label + ticking elapsed). Once a round with no reasoning
+          round is ACTIVE with no reasoning yet, a live AgentStatus pill
+          (state dot + crossfading label + ticking m:ss elapsed + pause
+          wired to stopGeneration). Once a round with no reasoning
           completes, NO header renders at all — its tool cards and text speak
-          for themselves; a bare elapsed chip ("4s") floating between panels
+          for themselves; a bare elapsed chip floating between panels
           reads as a random orphaned timer (timeline PRD §5: timers belong to
           thinking segments). Rounds are NOT labeled "Round N" — each round
           simply reads as its own thought session. */}
@@ -550,10 +601,11 @@ function RoundPanel({
       ) : active ? (
         <div className="flex min-h-8 items-center gap-2.5 px-1" role="status" aria-live="polite">
           <ResponseOrbGlyph />
-          <ThinkingIndicator
-            label="Working"
-            elapsed={roundElapsedLabel(elapsedSeconds)}
-            showDot={false}
+          <AgentStatus
+            state="working"
+            label={liveStatusLabel}
+            elapsed={formatClock(elapsedSeconds)}
+            onPauseClick={onStop}
           />
         </div>
       ) : null}
@@ -608,6 +660,7 @@ export const MessageItem = React.memo(function MessageItem({
   onTodoDismiss,
   onRegenerate,
   isRegenerating = false,
+  onStop,
 }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
@@ -733,6 +786,30 @@ export const MessageItem = React.memo(function MessageItem({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id, message.isStreaming, message.content, message.parts, isUser]);
 
+  // Elapsed for the pre-first-token "Thinking" AgentStatus pill — ticks
+  // from the message's timestamp while it streams.
+  const placeholderElapsed = useRoundElapsed(
+    message.timestamp ? new Date(message.timestamp).getTime() : undefined,
+    undefined,
+    Boolean(message.isStreaming),
+  );
+
+  // End-of-turn FILE TREE (assistant-ui "File tree" element): everything
+  // this run touched, as a tree with per-file churn — rendered once the
+  // turn completes AND at least 2 distinct files changed (a single file's
+  // story is already told by its tool card / CodeDiff, so the tree would
+  // only repeat it).
+  const fileTree = React.useMemo(() => {
+    if (isUser || message.isStreaming) return null;
+    const toolCalls = message.parts?.length
+      ? message.parts
+          .filter((p) => p.type === "tool" && p.toolCall)
+          .map((p) => p.toolCall!)
+      : (message.toolCalls ?? []);
+    if (toolCalls.length === 0) return null;
+    return deriveFileTree(toolCalls);
+  }, [isUser, message.isStreaming, message.parts, message.toolCalls]);
+
   return (
     <div
       className={cn(
@@ -827,7 +904,12 @@ export const MessageItem = React.memo(function MessageItem({
                   aria-live="polite"
                 >
                   <ResponseOrbGlyph />
-                  <ThinkingIndicator label="Thinking" showDot={false} />
+                  <AgentStatus
+                    state="working"
+                    label="Thinking"
+                    elapsed={formatClock(placeholderElapsed)}
+                    onPauseClick={onStop}
+                  />
                 </div>
               )}
 
@@ -972,6 +1054,7 @@ export const MessageItem = React.memo(function MessageItem({
                             onCiteClick={onCiteClick}
                             genuiNodes={!message.isStreaming ? message.genui : undefined}
                             onTodoDismiss={onTodoDismiss}
+                            onStop={onStop}
                           />
                         ))}
                       </>
@@ -983,6 +1066,30 @@ export const MessageItem = React.memo(function MessageItem({
                   const thinkingParts = segments[0]?.thinkingParts ?? [];
                   return (
                     <>
+                      {/* LIVE STATUS (single-round path — assistant-ui "Agent
+                          status" element): while the round streams with NO
+                          reasoning header of its own, the pill answers "what
+                          is it doing, and for how long" — the running tool's
+                          caption + ticking m:ss + pause wired to
+                          stopGeneration. Mirrors the multi-round RoundPanel
+                          row so both paths always answer the same question.
+                          Once the round completes, no header renders. */}
+                      {isLastStreaming && thinkingParts.length === 0 && (
+                        <div
+                          className="flex min-h-8 items-center gap-2.5 px-1"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <ResponseOrbGlyph />
+                          <AgentStatus
+                            state="working"
+                            label={liveToolLabel(renderItems)}
+                            elapsed={formatClock(placeholderElapsed)}
+                            onPauseClick={onStop}
+                          />
+                        </div>
+                      )}
+
                       {/* Reasoning/Thinking block (single) */}
                       {thinkingParts.map((part, j) => {
                         const isLast = j === thinkingParts.length - 1 && flowParts.length === 0;
@@ -1082,6 +1189,20 @@ export const MessageItem = React.memo(function MessageItem({
           </div>
         )}
 
+        {/* FILE TREE — everything this run touched, as a tree with the
+            churn spelled out per file (assistant-ui "File tree" element).
+            Renders once the turn completes and ≥2 distinct files changed. */}
+        {fileTree && fileTree.fileCount >= 2 && (
+          <div className="mt-2">
+            <FileTree
+              nodes={fileTree.nodes}
+              visibleCount={fileTree.nodes.length}
+              totalAdditions={fileTree.totalAdditions}
+              totalDeletions={fileTree.totalDeletions}
+            />
+          </div>
+        )}
+
         {/* Footer (copy/timestamp/regenerate) — only shown ONCE for the entire
             multi-round response, after all parts are complete. Hidden for
             non-last grouped messages (showFooter=false from MessageList). */}
@@ -1178,7 +1299,8 @@ export const MessageItem = React.memo(function MessageItem({
     prev.showTodoPanel === next.showTodoPanel &&
     prev.onTodoDismiss === next.onTodoDismiss &&
     prev.onRegenerate === next.onRegenerate &&
-    prev.isRegenerating === next.isRegenerating
+    prev.isRegenerating === next.isRegenerating &&
+    prev.onStop === next.onStop
   );
 });
 

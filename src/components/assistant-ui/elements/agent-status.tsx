@@ -17,12 +17,21 @@ export function AgentStatus({
   state,
   label,
   elapsed,
+  onPauseClick,
   className,
   ...props
 }: {
   state: AgentState;
   label: string;
   elapsed?: string;
+  /**
+   * Wired by hosts that can actually pause/stop the agent (e.g. the chat's
+   * stopGeneration). Per the assistant-ui recipe the trailing button is
+   * presentational in the standalone element — hosts "fork the component
+   * or attach a handler to it directly"; this is that hook. When omitted
+   * the button stays presentational exactly as specified.
+   */
+  onPauseClick?: () => void;
   className?: string;
 } & Omit<React.ComponentPropsWithoutRef<"div">, "children">) {
   const done = state === "done";
@@ -61,7 +70,11 @@ export function AgentStatus({
         type="button"
         aria-label={done ? "Run again" : "Pause agent"}
         title={done ? "Run again" : "Pause agent"}
-        className="-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
+        onClick={onPauseClick}
+        className={cn(
+          "-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground",
+          onPauseClick ? "cursor-pointer" : "cursor-default",
+        )}
       >
         {done ? <RotateCcw className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
       </button>

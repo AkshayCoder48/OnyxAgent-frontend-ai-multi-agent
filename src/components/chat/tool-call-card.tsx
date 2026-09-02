@@ -15,6 +15,8 @@ import {
   Download,
   ListChecks,
   ListTodo,
+  PenLine,
+  Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ShimmerLabel, chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
@@ -30,6 +32,9 @@ import { AskUserResult } from "./tool-results/ask-user";
 import { GenericToolResult, RawToolView } from "./tool-results/generic";
 import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
+import { EditFileDiff } from "./tool-results/edit-diff";
+import { MemoryResult } from "./tool-results/memory";
+import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
   ImageSearchResults as DDGImageResults,
@@ -65,7 +70,11 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       ((toolCall.name === "send_file" || toolCall.name === "send_folder") &&
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
-      isAnyDDGSearch,
+      isAnyDDGSearch ||
+      // edit_file: the CodeDiff is the payload — expand when it landed.
+      (toolCall.name === "edit_file" &&
+        toolCall.status === "completed" &&
+        deriveEditDiff(toolCall) !== null),
   );
   const [showRaw, setShowRaw] = useState(false);
 
@@ -149,6 +158,15 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isAskUser = toolCall.name === "ask_user";
   const isLoadSkill = toolCall.name === "load_skill";
   const isListSkills = toolCall.name === "list_skills";
+  // edit_file — the find/replace pair renders as a CodeDiff (assistant-ui
+  // "Code diff" element) once the edit completes successfully.
+  const isEditFile = toolCall.name === "edit_file";
+  // Memory tools — the chips render via the MemoryChips element, with the
+  // forget button deleting the real OPFS file the save tool wrote.
+  const isMemorySave = toolCall.name === "memory_save";
+  const isMemoryList = toolCall.name === "memory_list";
+  const isMemorySearch = toolCall.name === "memory_search";
+  const isMemoryTool = isMemorySave || isMemoryList || isMemorySearch;
   // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
   // todos drive the TodoPreview table; memoized so streaming deltas don't
   // re-parse on every render.
@@ -241,20 +259,31 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [toolCall.name, toolCall.status, toolCall.result],
   );
   const isFileDownload = fileDownloadSpec !== null;
+  // edit_file CodeDiff — memoized so streaming deltas don't re-derive the
+  // find/replace lines on every render (the store swaps the toolCall object
+  // immutably on every status/result change, so identity is the right dep).
+  const editDiffSpec = useMemo(
+    () =>
+      isEditFile && toolCall.status === "completed"
+        ? deriveEditDiff(toolCall)
+        : null,
+    [isEditFile, toolCall],
+  );
+  const isEditDiff = editDiffSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
   // Same for file_download cards. Uses the same render-time adjustment
   // pattern as the running auto-expand above (no effect → no cascading
   // render).
   const [prevAutoExpand, setPrevAutoExpand] = useState(false);
-  const autoExpand = isChart || isFileDownload;
+  const autoExpand = isChart || isFileDownload || isEditDiff;
   if (autoExpand !== prevAutoExpand) {
     setPrevAutoExpand(autoExpand);
     if (autoExpand) setExpanded(true);
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemoryTool;
   const friendlyName = isDateTime
     ? "Current Date & Time"
     : isRAGSearch
@@ -269,7 +298,15 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               ? "Video Search"
               : isChart
           ? "Chart"
-          : isShowTodo
+          : isEditDiff
+            ? "Edit File"
+            : isMemorySave
+              ? "Memory"
+              : isMemoryList
+                ? "Memories"
+                : isMemorySearch
+                  ? "Memory Search"
+                  : isShowTodo
             ? "Show Todo"
             : isManageTodo
               ? "Manage Todo"
@@ -299,7 +336,11 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         ? Globe
         : isChart
           ? BarChart3
-          : isShowTodo
+          : isEditDiff
+            ? PenLine
+            : isMemoryTool
+              ? Brain
+              : isShowTodo
             ? ListChecks
             : isManageTodo
               ? ListTodo
@@ -435,6 +476,16 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         />
       )}
 
+      {/* INLINE MEMORY CHIPS (memory_save / memory_list): what the agent
+          now remembers renders directly in the MAIN RESPONSE — always
+          visible beneath the tool bar, never hidden inside the disclosure
+          (same placement rule as the todo preview). The forget button
+          deletes the real OPFS file memory_save wrote. Enlarging the bar
+          reveals the raw JSON via the panel below. */}
+      {(isMemorySave || isMemoryList) && toolCall.status === "completed" && (
+        <MemoryResult toolCall={toolCall} />
+      )}
+
       {/* Disclosure panel — the request/result and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -485,6 +536,15 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               todoIds={parsedTodo.todos.map((t) => t.id)}
               fallbackTodos={parsedTodo.todos}
             />
+          ) : isEditDiff ? (
+            // edit_file → the find/replace pair as a unified CodeDiff
+            // (assistant-ui "Code diff" element) — tinted, gutter-marked,
+            // line-staggered.
+            <EditFileDiff toolCall={toolCall} />
+          ) : isMemorySearch && toolCall.status === "completed" ? (
+            // memory_search → the matching memories as chips behind the
+            // disclosure (search results can be many; not auto-shown).
+            <MemoryResult toolCall={toolCall} />
           ) : isLoadSkill ? (
             <LoadSkillResult resultText={resultText} status={toolCall.status} />
           ) : isListSkills ? null : (

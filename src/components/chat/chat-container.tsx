@@ -17,7 +17,9 @@ import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-st
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
-import { Orb, ThinkingIndicator } from "@/components/assistant-ui/elements";
+import { Orb } from "@/components/assistant-ui/elements";
+import { AgentStatus } from "@/components/assistant-ui/elements";
+import { formatClock } from "@/lib/agent-tool-steps";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { Hourglass } from "lucide-react";
@@ -153,18 +155,19 @@ function useChatScrollController(
 
 /**
  * Thinking status line shown between send and first token: the Orb lattice
- * glyph leading the ThinkingIndicator element (shimmering label + ticking
- * elapsed badge, dot suppressed so the orb is the single indicator).
+ * glyph leading the AgentStatus element (state dot + crossfading label +
+ * ticking m:ss elapsed + pause wired to stopGeneration — the assistant-ui
+ * "Agent status" recipe, so the trailing control actually stops the turn).
  * Mounts fresh per turn, so the elapsed clock starts from zero each time.
  *
  * ORB (PRD §23–§28): the orb is the response's RANDOM pick (one of the full
  * 25-variant collection, chosen once when the response began — never per
- * chunk), noticeably LARGER than before (28px, up from 18px), and the label
+ * chunk), noticeably LARGER than before (28px, up from 18px), and the pill
  * shares ONE flex row with `items-center` so the text sits exactly on the
  * lattice's midline at any font size — no fixed offsets, no baseline drift,
  * stable while the label changes and the orb animates.
  */
-function ThinkingStatus() {
+function ThinkingStatus({ onStop }: { onStop?: () => void }) {
   const [elapsed, setElapsed] = useState(0);
   // Read once per mount — the module singleton holds the response's orb; a
   // remount (next turn) re-reads it, and nothing else re-renders from this.
@@ -180,7 +183,12 @@ function ThinkingStatus() {
   return (
     <span className="flex min-h-8 w-fit items-center gap-2.5">
       <Orb variant={orbVariant} size={28} className="shrink-0" />
-      <ThinkingIndicator label="Thinking" elapsed={`${elapsed}s`} showDot={false} />
+      <AgentStatus
+        state="working"
+        label="Thinking"
+        elapsed={formatClock(elapsed)}
+        onPauseClick={onStop}
+      />
     </span>
   );
 }
@@ -581,6 +589,7 @@ function ChatUI({
               onRegenerate={onRegenerate}
               onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
               isRegenerating={isProcessing}
+              onStop={onStop}
             />
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
@@ -590,7 +599,7 @@ function ChatUI({
               items-center flex row — vertically centered, no drift. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
             <div className="animate-slide-up-fade px-1 py-2">
-              <ThinkingStatus />
+              <ThinkingStatus onStop={onStop} />
             </div>
           )}
           {/* Rate-limit backoff (PRD §7): the runtime is retrying with

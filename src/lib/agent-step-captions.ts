@@ -50,6 +50,10 @@ const EXACT_CAPTIONS: Record<string, string> = {
   manage_todo: "Managing todos",
   manage_todos: "Managing todos",
   show_todo: "Showing the todo list",
+  // Long-term memory (OPFS) — surfaced by the AgentStatus live pill.
+  memory_save: "Saving a memory",
+  memory_list: "Reading memories",
+  memory_search: "Searching memories",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */
