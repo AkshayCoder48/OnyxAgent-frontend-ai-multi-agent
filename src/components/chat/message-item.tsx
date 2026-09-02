@@ -491,17 +491,17 @@ function RoundPanel({
       .filter((s) => s.length > 0);
   }, [reasoningText]);
 
-  const hasToolItems = segment.items.some(
-    (it) => it.kind === "tool" || it.kind === "toolGroup",
-  );
-
   return (
     <div className="round-in mb-1 min-w-0 max-w-full">
       {/* Round header — the ThinkingReasoning panel header ("Thought for
-          Ns" / shimmering "Thinking…") when reasoning text exists, or a bare
-          status row otherwise. Rounds are NOT labeled "Round N" — each round
-          simply reads as its own thought session (user request: no visible
-          round numbering in thought sessions). */}
+          Ns" / shimmering "Thinking…") when reasoning text exists. While the
+          round is ACTIVE with no reasoning yet, a live "Working" row (orb +
+          shimmering label + ticking elapsed). Once a round with no reasoning
+          completes, NO header renders at all — its tool cards and text speak
+          for themselves; a bare elapsed chip ("4s") floating between panels
+          reads as a random orphaned timer (timeline PRD §5: timers belong to
+          thinking segments). Rounds are NOT labeled "Round N" — each round
+          simply reads as its own thought session. */}
       {sentences.length > 0 ? (
         <ThinkingReasoning
           sentences={sentences}
@@ -510,30 +510,16 @@ function RoundPanel({
           verb="Thought"
           activeLabel="Thinking…"
         />
-      ) : (
+      ) : active ? (
         <div className="flex min-h-8 items-center gap-2.5 px-1" role="status" aria-live="polite">
-          {active ? (
-            <>
-              <ResponseOrbGlyph />
-              <ThinkingIndicator
-                label="Working"
-                elapsed={roundElapsedLabel(elapsedSeconds)}
-                showDot={false}
-              />
-            </>
-          ) : (
-            <>
-              <CheckRoundDone />
-              <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
-                {roundElapsedLabel(elapsedSeconds)}
-              </span>
-              {segment.thinkingParts.length === 0 && !hasToolItems && (
-                <span className="sr-only">completed</span>
-              )}
-            </>
-          )}
+          <ResponseOrbGlyph />
+          <ThinkingIndicator
+            label="Working"
+            elapsed={roundElapsedLabel(elapsedSeconds)}
+            showDot={false}
+          />
         </div>
-      )}
+      ) : null}
 
       {/* The round's tool stack + text, in order. Tools get a left hairline
           so the stack reads as belonging to this round (PRD §16). */}
@@ -574,21 +560,6 @@ function RoundPanel({
         );
       })}
     </div>
-  );
-}
-
-function CheckRoundDone() {
-  return (
-    <svg viewBox="0 0 16 16" className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden>
-      <path
-        d="M3 8.5 6.2 11.5 13 4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 
@@ -839,9 +810,23 @@ export const MessageItem = React.memo(function MessageItem({
                     const isLast = i === flowParts.length - 1;
                     const round = part.round ?? 0;
                     if (part.type === "tool" && part.toolCall) {
-                      // Start collecting consecutive tool parts
+                      // Start collecting consecutive tool parts — but ONLY
+                      // within the SAME round. Consecutive tools from
+                      // different rounds (round N's last tool followed
+                      // directly by round N+1's tools, with no text between)
+                      // must NOT merge: the group's parts all land in one
+                      // round's panel, so a cross-round group would drag
+                      // round N+1's tool cards into round N's segment while
+                      // round N+1's thinking renders elsewhere — splitting
+                      // the round's panel from its own tools (timeline PRD
+                      // §7: a tool call belongs to the round that made it).
+                      const groupRound = part.round ?? 0;
                       const group: typeof flowParts = [];
-                      while (i < flowParts.length && flowParts[i]!.type === "tool") {
+                      while (
+                        i < flowParts.length &&
+                        flowParts[i]!.type === "tool" &&
+                        (flowParts[i]!.round ?? 0) === groupRound
+                      ) {
                         group.push(flowParts[i]!);
                         i++;
                       }

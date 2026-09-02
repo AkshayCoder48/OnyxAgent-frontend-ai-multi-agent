@@ -72,6 +72,10 @@ interface ChatState {
 
   setSelectedProviderId: (id: string | null) => void;
   setSelectedModel: (model: string | null) => void;
+  /** One-shot post-hydration restore of the sessionStorage-persisted
+   *  messages (see the restorePersisted body for why it is NOT done in
+   *  create()). Called from ChatContainer's mount effect. */
+  restorePersisted: () => void;
 
   addMessage: (message: ChatMessage) => void;
   updateMessage: (id: string, updater: (msg: ChatMessage) => ChatMessage) => void;
@@ -119,14 +123,33 @@ if (typeof window !== "undefined") {
   });
 }
 
+// One-shot guard for restorePersisted — survives Fast Refresh double-mounts
+// and StrictMode's double effect invocation.
+let persistedRestored = false;
+
 export const useChatStore = create<ChatState>((set) => ({
-  messages: loadPersisted(),
+  // Empty on the FIRST render — server AND client. sessionStorage is
+  // client-only, so the server always renders the empty chat; restoring
+  // persisted messages synchronously here made the client's hydration
+  // render diverge from the server HTML (hydration mismatch + full tree
+  // re-render on every revisit-with-persisted-messages). The restore now
+  // happens post-hydration via restorePersisted() from ChatContainer's
+  // mount effect — same visual result, no mismatch.
+  messages: [],
   isStreaming: false,
   selectedProviderId: null,
   selectedModel: null,
 
   setSelectedProviderId: (id) => set({ selectedProviderId: id }),
   setSelectedModel: (model) => set({ selectedModel: model }),
+
+  restorePersisted: () =>
+    set((state) => {
+      if (persistedRestored || state.messages.length > 0) return state;
+      persistedRestored = true;
+      const persisted = loadPersisted();
+      return persisted.length > 0 ? { messages: persisted } : state;
+    }),
 
   addMessage: (message) =>
     set((state) => {
@@ -205,44 +228,49 @@ export const useChatStore = create<ChatState>((set) => ({
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
       const last = parts[parts.length - 1];
-      // ROUND STAMP (GenUI PRD §14): text parts created mid-round get the
-      // active round so a text part + the round's thinking parts land in the
-      // SAME round segment. Without this, an unstamped text part (round 0)
-      // followed by stamped thinking (round 1) flipped the message between
-      // the single-segment and multi-round layouts mid-stream — remounting
-      // the TextBubble (and any GenUI card inside it) once per turn.
-      // If the last part is "text", append to it (normal streaming case).
-      if (last && last.type === "text") {
+      // CHRONOLOGICAL TEXT PLACEMENT (timeline PRD §3–§9: EVENT SEQUENCE =
+      // VISUAL SEQUENCE). Text merges into an earlier text part ONLY when
+      // that part belongs to the SAME agent round — a continuation within
+      // one round. Text arriving in a NEW round (e.g. the final answer after
+      // the last round's thinking) must create a NEW part at the END of the
+      // parts array, i.e. at its chronological position.
+      //
+      // The old rule ("text after thinking appends to the last text part
+      // ANYWHERE") moved later-round text INTO an earlier round's text part
+      // — so the final answer rendered ABOVE thinking that streamed before
+      // it, while that thinking (and its round's tools) stayed at the bottom
+      // looking "stuck". With round-aware placement, each round's text stays
+      // inside that round's segment.
+      const roundKey = round ?? 0;
+      const isThinkingPart = (p: MessagePart) => p.type === "thinking" || p.type === "reasoning";
+      if (last && last.type === "text" && (last.round ?? 0) === roundKey) {
+        // Same round, text after text → continue the same text part.
         parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
-      } else {
-        // The last part is NOT text (could be thinking, reasoning, or tool).
-        // We need to decide: append to an existing text part, or create new?
-        //
-        // If the last part is a TOOL call, we should create a NEW text part
-        // — this is text AFTER a tool call (post-tool text), which is a
-        // separate text block from the pre-tool text.
-        //
-        // If the last part is thinking/reasoning, we should append to the
-        // LAST text part (text was streaming, thinking interleaved, now
-        // more text arrives — it should go into the same text bubble).
-        if (last && (last.type === "thinking" || last.type === "reasoning")) {
-          // Find the last text part — append to it.
-          const lastTextIdx = parts.reduce(
-            (acc, p, i) => (p.type === "text" ? i : acc),
-            -1,
-          );
-          if (lastTextIdx >= 0) {
-            parts[lastTextIdx] = {
-              ...parts[lastTextIdx]!,
-              content: (parts[lastTextIdx]!.content ?? "") + text,
-            };
-          } else {
-            parts.push({ id: newPartId(), type: "text" as const, content: text, round });
+      } else if (last && isThinkingPart(last)) {
+        // Text after thinking/reasoning. If a text part of the SAME round
+        // exists (within-round text → thinking → text interleave), append to
+        // it — it renders in the same round segment, under the round's
+        // thinking header. Otherwise create a NEW part AFTER the thinking
+        // (chronological position; never merge across rounds).
+        let lastTextIdx = -1;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          if (parts[i]!.type === "text") {
+            lastTextIdx = i;
+            break;
           }
+        }
+        if (lastTextIdx >= 0 && (parts[lastTextIdx]!.round ?? 0) === roundKey) {
+          parts[lastTextIdx] = {
+            ...parts[lastTextIdx]!,
+            content: (parts[lastTextIdx]!.content ?? "") + text,
+          };
         } else {
-          // Last part is tool (or empty) — create new text part.
           parts.push({ id: newPartId(), type: "text" as const, content: text, round });
         }
+      } else {
+        // Last part is a DIFFERENT-round text, a tool call, or no parts —
+        // create a NEW text part at the end (post-tool / new-round text).
+        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
       }
 
       const messages = [...state.messages];

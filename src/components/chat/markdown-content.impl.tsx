@@ -4,7 +4,7 @@ import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ExternalLink } from "lucide-react";
+import { ChevronDown, ExternalLink } from "lucide-react";
 
 import { CopyButton } from "./copy-button";
 import { OrbCursor } from "@/components/assistant-ui/elements";
@@ -15,6 +15,99 @@ function languageLabel(className: string | undefined): string | null {
   if (!className) return null;
   const match = /(?:^|\s)language-([a-z0-9+\-]+)/i.exec(className);
   return match && match[1] ? match[1].toLowerCase() : null;
+}
+
+// ── HTML <details>/<summary> COLLAPSIBLES ────────────────────────────────────
+// Models frequently wrap answer sections in raw HTML details blocks:
+//   <details><summary>Why it matters →</summary>…markdown…</details>
+// react-markdown escapes raw HTML (no rehype-raw — XSS-safe by default), so
+// these rendered as literal tags. We pre-split COMPLETE blocks out of the
+// markdown and render them as native <details> collapsibles (Terra-styled);
+// the body renders as markdown inside. Incomplete blocks (still streaming,
+// no closing tag) keep rendering as plain text until they complete — the
+// same one-shot completion model GenUI blocks use.
+
+type MdSegment =
+  | { kind: "md"; text: string }
+  | { kind: "details"; summary: string; body: string };
+
+const DETAILS_BLOCK_RE =
+  /<details\b[^>]*>\s*<summary\b[^>]*>([\s\S]*?)<\/summary\s*>([\s\S]*?)<\/details\s*>/gi;
+
+/** Split markdown (already citation-preprocessed) into md + details segments. */
+function splitHtmlDetails(content: string): MdSegment[] {
+  DETAILS_BLOCK_RE.lastIndex = 0;
+  const segs: MdSegment[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = DETAILS_BLOCK_RE.exec(content)) !== null) {
+    if (m.index > last) segs.push({ kind: "md", text: content.slice(last, m.index) });
+    segs.push({
+      kind: "details",
+      summary: decodeHtmlEntities(stripInlineHtmlTags(m[1] ?? "")),
+      body: (m[2] ?? "").trim(),
+    });
+    last = m.index + m[0].length;
+  }
+  if (segs.length === 0) return [{ kind: "md", text: content }];
+  if (last < content.length) segs.push({ kind: "md", text: content.slice(last) });
+  return segs;
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+  rarr: "\u2192", larr: "\u2190", uarr: "\u2191", darr: "\u2193", harr: "\u2194",
+  mdash: "\u2014", ndash: "\u2013", hellip: "\u2026", bull: "\u2022", middot: "\u00B7",
+  copy: "\u00A9", reg: "\u00AE", trade: "\u2122", deg: "\u00B0", times: "\u00D7",
+  divide: "\u00F7", plusmn: "\u00B1", laquo: "\u00AB", raquo: "\u00BB",
+  ldquo: "\u201C", rdquo: "\u201D", lsquo: "\u2018", rsquo: "\u2019",
+};
+
+function safeCodePoint(cp: number): string {
+  if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) return "";
+  try {
+    return String.fromCodePoint(cp);
+  } catch {
+    return "";
+  }
+}
+
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => safeCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d: string) => safeCodePoint(parseInt(d, 10)))
+    .replace(/&([a-z][a-z0-9]*);/gi, (m, name: string) => HTML_ENTITIES[name.toLowerCase()] ?? m);
+}
+
+function stripInlineHtmlTags(s: string): string {
+  // Drop tags but keep a space where they stood so "a<b>b</b>c" → "a b c",
+  // then collapse the whitespace runs that creates.
+  return s
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Native <details> collapsible, Terra-styled — matches the tool-name
+ *  disclosure anatomy (chevron · quiet label) and animates via the marker
+ *  rotation. No JS state: the browser owns open/close. */
+function HtmlDetailsBlock({ summary, children }: { summary: string; children: React.ReactNode }) {
+  return (
+    <details className="border-foreground/10 bg-foreground/[0.015] group my-3 rounded-xl border">
+      <summary
+        className="hover:text-foreground flex cursor-pointer list-none items-center gap-2 px-3.5 py-2.5 text-sm font-medium text-foreground/75 transition-colors [&::-webkit-details-marker]:hidden"
+      >
+        <ChevronDown
+          className="text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform duration-200 group-open:rotate-180"
+          aria-hidden
+        />
+        {summary || "Details"}
+      </summary>
+      <div className="border-foreground/10 border-t px-3.5 pt-3 pb-3.5 text-[15px] leading-[1.68]">
+        {children}
+      </div>
+    </details>
+  );
 }
 
 /**
@@ -501,36 +594,53 @@ export const MarkdownContent = React.memo(function MarkdownContent({
     .replaceAll(":CURSOR:", "");
   const processed = onCiteClick ? preprocessCitations(cleanContent) : cleanContent;
 
-  // When cursor is off, render ReactMarkdown directly (no wrapper div, no
-  // cursor) — this prevents the wrapper div from adding block-level spacing
-  // and the cursor from remaining in completed messages.
+  // Split COMPLETE <details><summary>…</summary>…</details> blocks out of the
+  // markdown → native collapsibles. Fast path: no "<details" in the content →
+  // single ReactMarkdown render (zero overhead for normal messages).
+  const segments = React.useMemo(
+    () => (processed.includes("<details") ? splitHtmlDetails(processed) : null),
+    [processed],
+  );
+
+  // The markdown body: either the segment list (alternating markdown +
+  // collapsibles) or the whole content in one ReactMarkdown.
+  const mdProps = {
+    remarkPlugins: REMARK_PLUGINS,
+    rehypePlugins: REHYPE_PLUGINS,
+    components: SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"],
+  };
+  const rendered: React.ReactNode = segments
+    ? segments.map((seg, i) =>
+        seg.kind === "md" ? (
+          seg.text.trim() ? (
+            <ReactMarkdown key={`md-${i}`} {...mdProps}>
+              {seg.text}
+            </ReactMarkdown>
+          ) : null
+        ) : (
+          <HtmlDetailsBlock key={`details-${i}`} summary={seg.summary}>
+            <ReactMarkdown {...mdProps}>{seg.body}</ReactMarkdown>
+          </HtmlDetailsBlock>
+        ),
+      )
+    : (
+      <ReactMarkdown {...mdProps}>{processed}</ReactMarkdown>
+    );
+
+  // When cursor is off, render directly (no wrapper div, no cursor) — this
+  // prevents the wrapper div from adding block-level spacing and the cursor
+  // from remaining in completed messages.
   // When cursor is on, wrap in a div that makes the last <p> inline so the
   // cursor flows right after the last letter.
   if (!showCursor) {
     return (
-      <StreamTintContext.Provider value={streamTint}>
-        <ReactMarkdown
-          remarkPlugins={REMARK_PLUGINS}
-          rehypePlugins={REHYPE_PLUGINS}
-          components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
-        >
-          {processed}
-        </ReactMarkdown>
-      </StreamTintContext.Provider>
+      <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
     );
   }
 
   return (
     <div className="streaming-cursor-wrapper">
-      <StreamTintContext.Provider value={streamTint}>
-        <ReactMarkdown
-          remarkPlugins={REMARK_PLUGINS}
-          rehypePlugins={REHYPE_PLUGINS}
-          components={SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"]}
-        >
-          {processed}
-        </ReactMarkdown>
-      </StreamTintContext.Provider>
+      <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
       <OrbCursor variant="C2" size={14} />
     </div>
   );

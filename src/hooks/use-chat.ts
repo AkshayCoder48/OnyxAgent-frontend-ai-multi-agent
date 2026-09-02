@@ -758,32 +758,66 @@ export function useChat(options: UseChatOptions = {}) {
             // The runtime pre-emits tool_call events during streaming (as soon
             // as the tool name is known) so the card appears immediately. We
             // need to find and UPDATE that card instead of creating a duplicate.
+            //
+            // MATCHING RULES (timeline PRD §7/§8 — a tool call is anchored to
+            // its own card; tool results update THAT card in place):
+            //   1. EXACT tool_call_id match — always safe. Pre-emit + final
+            //      events for the same call share the id (standard providers
+            //      AND nanoid fallbacks — both come from the same accumulator
+            //      entry).
+            //   2. Placeholder-id fallback — ONLY for pending cards whose id
+            //      is a placeholder (`dsml_*` real-time parse ids, `pending-*`
+            //      composing ids). DSML ids are time-based, so the final event
+            //      can never match them by id; the rebind gives the card its
+            //      real id.
+            // A card with a REAL provider id — pending, running, OR completed —
+            // must NEVER be name-matched to a different tool_call_id. The old
+            // name+pending matcher (which also treated a lingering
+            // `args._streaming` as "pending") rebound every later same-name
+            // tool call onto the FIRST card: parallel same-name tools
+            // collapsed into one card, and a completed card's id was
+            // overwritten so later tool_results never landed on any card.
             const msgs = useChatStore.getState().messages;
             const msg = msgs.find((m) => m.id === currentMessageIdRef.current);
-            // Match by tool_call_id first (most reliable), then by name+pending.
+            // Match by tool_call_id first (most reliable).
             let existingTc = msg?.toolCalls?.find(
               (t) => t.id === tool_call_id,
             );
             if (!existingTc) {
+              // Placeholder-id pending card awaiting its real id (DSML
+              // real-time pre-emits / "Composing…" cards).
               existingTc = msg?.toolCalls?.find(
-                (t) => (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined) && t.name === tool_name,
+                (t) =>
+                  t.status === "pending" &&
+                  t.name === tool_name &&
+                  (t.id.startsWith("dsml_") || t.id.startsWith("pending-")),
+              );
+            }
+            if (!existingTc && (!tool_name || tool_name === "tool" || tool_name.startsWith("pending-"))) {
+              // The incoming event is itself a placeholder pre-emit — it may
+              // adopt any still-pending placeholder card.
+              existingTc = msg?.toolCalls?.find(
+                (t) =>
+                  t.status === "pending" &&
+                  (!t.name || t.name === "tool" || t.name.startsWith("pending-")),
               );
             }
 
             if (existingTc) {
               // Replace the pre-emitted/pending tool call — NO duplicate.
-              // PRESERVE the streaming args: if the existing card has
-              // _streaming args AND the new args are empty/pre-emit, keep
-              // the _streaming args visible until the tool completes.
+              // The FINAL tool_call event's parsed args are authoritative —
+              // use them even when they're an EMPTY object ({}), so the
+              // `_streaming` placeholder from the pre-emit is cleared once
+              // the call is real. A lingering `_streaming` args marker made
+              // completed cards keep matching "pending-ish" matchers forever
+              // (the card-hijack root cause). Pre-emit events keep the
+              // streaming args visible until the final event lands.
               const existingArgs = existingTc.args as { _streaming?: string };
               const hasStreamingArgs = existingArgs?._streaming !== undefined;
               const isPreemit = !!data._preemit;
               updateToolCallPart(currentMessageIdRef.current, existingTc.id, {
                 id: tool_call_id,
-                // If this is the FINAL tool_call (not pre-emit) with real
-                // parsed args, use them. If it's a pre-emit or the args
-                // are empty, keep the streaming args visible.
-                args: (!isPreemit && Object.keys(args).length > 0)
+                args: !isPreemit
                   ? args
                   : (hasStreamingArgs ? existingTc.args : args),
                 status: isPreemit ? "pending" : "running",

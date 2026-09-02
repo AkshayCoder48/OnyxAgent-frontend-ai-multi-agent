@@ -192,7 +192,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     hydratedConversationId,
     isLoading: isConversationLoading,
   } = useConversationStore();
-  const { addMessage: addChatMessage } = useChatStore();
+  const { addMessage: addChatMessage, restorePersisted } = useChatStore();
   const { fetchConversations } = useConversations();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
@@ -258,6 +258,12 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       // messages from the PREVIOUS chat (still in sessionStorage) leak
       // into the new chat / no-chat state after a page refresh.
       reconcilePersisted(currId);
+      // POST-HYDRATION RESTORE: the chat store starts empty so the first
+      // client render matches the server HTML (sessionStorage is
+      // client-only). Now that hydration has completed, restore the
+      // persisted messages — reconcilePersisted above already wiped them
+      // when they belong to a different conversation.
+      restorePersisted();
       return;
     }
 
@@ -309,7 +315,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     setPersistedConversationId(currId);
 
     prevConversationIdRef.current = currId;
-  }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId, isProcessing, stopGeneration]);
+  }, [currentConversationId, clearMessages, clearQueued, setModel, setProviderId, isProcessing, stopGeneration, restorePersisted]);
 
   // Load DB messages into the chat store when a conversation's messages arrive.
   //
