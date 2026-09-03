@@ -10,7 +10,7 @@ import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
-import { TimelineDialog } from "@/components/chat/timeline-dialog";
+import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { FolderOpen, Menu, Bot, X, ListTree, History } from "lucide-react";
 
 /** Resizable right sidebar wrapper — drag the left edge to resize. */
@@ -73,12 +73,11 @@ function ResizableRightPanel({
   );
 }
 
-type RightPanel = "files" | "subagents" | null;
+type RightPanel = "files" | "subagents" | "timeline" | null;
 
 export default function ChatPage() {
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [mobilePanel, setMobilePanel] = useState<RightPanel>(null);
-  const [timelineOpen, setTimelineOpen] = useState(false);
   const { open: openChatSidebar } = useChatSidebarStore();
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
   const { conversations } = useConversations();
@@ -164,14 +163,14 @@ export default function ChatPage() {
             >
               <History className="h-4 w-4" />
             </Button>
-            {/* Tool timeline (assistant-ui "Tool timeline") — replaces the old
-                share button: one glance at the whole working session as verbs,
-                targets, and file stats. */}
+            {/* Tool timeline — a DOCKED SIDEBAR (not a popup): the whole
+                working session as a fixed, scrollable, real-time panel on
+                the right. */}
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setTimelineOpen(true)}
-              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+              onClick={() => togglePanel("timeline")}
+              className={rightPanel === "timeline" || mobilePanel === "timeline" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
               title="Tool timeline"
               aria-label="Show tool timeline"
             >
@@ -204,7 +203,8 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Desktop right panel — files or subagents (resizable) */}
+      {/* Desktop right panel — files, subagents, or the tool timeline
+          (each resizable, each a docked sidebar rather than a popup). */}
       {rightPanel === "files" && (
         <ResizableRightPanel storageKey="file-sidebar-width" defaultWidth={320} minWidth={240} maxWidth={600}>
           <FileSidebar />
@@ -213,6 +213,11 @@ export default function ChatPage() {
       {rightPanel === "subagents" && (
         <ResizableRightPanel storageKey="subagent-sidebar-width" defaultWidth={360} minWidth={280} maxWidth={600}>
           <SubAgentSidebar open onClose={closeSubagentSidebar} />
+        </ResizableRightPanel>
+      )}
+      {rightPanel === "timeline" && (
+        <ResizableRightPanel storageKey="timeline-sidebar-width" defaultWidth={340} minWidth={280} maxWidth={600}>
+          <TimelineSidebar onClose={() => setRightPanel(null)} />
         </ResizableRightPanel>
       )}
 
@@ -247,8 +252,15 @@ export default function ChatPage() {
         </SheetContent>
       </Sheet>
 
-      {/* Tool timeline (header button) */}
-      <TimelineDialog open={timelineOpen} onOpenChange={setTimelineOpen} />
+      {/* Mobile sheet — tool timeline (the sidebar's own header X closes it) */}
+      <Sheet
+        open={mobilePanel === "timeline"}
+        onOpenChange={(o) => !o && setMobilePanel(null)}
+      >
+        <SheetContent side="right" className="w-[85vw] max-w-sm p-0">
+          <TimelineSidebar onClose={() => setMobilePanel(null)} />
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

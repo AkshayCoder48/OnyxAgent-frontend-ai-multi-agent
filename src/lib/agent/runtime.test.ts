@@ -243,7 +243,7 @@ describe("chat store streaming integrity", () => {
     expect(thinkingParts[0]!.content).toBe("think A think B");
   });
 
-  it("text after a tool call becomes a separate part INSIDE the same message", () => {
+  it("same-round text after a tool call merges into the round's text part (no mid-sentence cuts)", () => {
     resetStore();
     const id = addAssistant();
     const store = useChatStore.getState();
@@ -257,14 +257,40 @@ describe("chat store streaming integrity", () => {
     });
     store.appendTextDelta(id, "After tools.");
 
-    // Still ONE message containing [text, tool, text] in order.
+    // ONE message, ONE text part for the round: the message content is a
+    // single narrative that precedes its tool calls — even when the provider
+    // interleaves content deltas around tool_call deltas. The old behavior
+    // ([text, tool, text]) cut sentences in half and pushed the tail below
+    // the tool cards.
     const msgs = useChatStore.getState().messages;
     expect(msgs).toHaveLength(1);
     const partTypes = get(id).parts!.map((p) => p.type);
+    expect(partTypes).toEqual(["text", "tool"]);
+    const textParts = get(id).parts!.filter((p) => p.type === "text");
+    expect(textParts).toHaveLength(1);
+    expect(textParts[0]!.content).toBe("Before tools. After tools.");
+  });
+
+  it("NEW-ROUND text lands below the previous round's tools (chronological)", () => {
+    resetStore();
+    const id = addAssistant();
+    const store = useChatStore.getState();
+
+    store.appendTextDelta(id, "Round one. ", 1);
+    store.addToolCallPart(
+      id,
+      { id: "tc-1", name: "run_python", args: { code: "print(1)" }, status: "completed" },
+      1,
+    );
+    // Round 2's text (the model's post-tool narration).
+    store.appendTextDelta(id, "Round two answer.", 2);
+
+    const partTypes = get(id).parts!.map((p) => p.type);
     expect(partTypes).toEqual(["text", "tool", "text"]);
     const textParts = get(id).parts!.filter((p) => p.type === "text");
-    expect(textParts[0]!.content).toBe("Before tools. ");
-    expect(textParts[1]!.content).toBe("After tools.");
+    expect(textParts[0]!.content).toBe("Round one. ");
+    expect(textParts[1]!.content).toBe("Round two answer.");
+    expect(textParts[1]!.round).toBe(2);
   });
 
   it("appendTextDelta appends to the same text bubble when reasoning interleaves", () => {

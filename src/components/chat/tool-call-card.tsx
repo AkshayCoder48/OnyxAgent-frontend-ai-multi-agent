@@ -27,7 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ShimmerLabel, chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
-import { friendlySentence } from "@/lib/agent-friendly-steps";
+import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
@@ -37,21 +37,11 @@ import { RAGSearchResults } from "./tool-results/rag";
 import { WebSearchResults, parseWebSearch } from "./tool-results/web-search";
 import { LoadSkillResult, formatSkillName } from "./tool-results/skills";
 import { AskUserResult } from "./tool-results/ask-user";
-import { GenericToolResult, RawToolView, SimpleToolResult } from "./tool-results/generic";
+import { GenericToolResult, RawToolView } from "./tool-results/generic";
 import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
-import {
-  FileCreatedCard,
-  FileDeletedCard,
-  FileMoveCard,
-  FileReadCard,
-  FolderCreatedCard,
-  FolderListCard,
-  PathVerifyCard,
-  WebFetchCard,
-} from "./tool-results/file-ops";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
@@ -66,17 +56,237 @@ interface ToolCallCardProps {
   turnId?: string | null;
 }
 
+/**
+ * ToolCallCard — ONE card per tool call, in exactly ONE style per display
+ * mode (the "no duplicates" rule):
+ *
+ *   simple    → a single non-expandable plain-language line (plus inline
+ *               content payloads like the todo plan, memory chips, charts,
+ *               downloads). No chevron, no disclosure, no raw output —
+ *               nothing about it can be expanded.
+ *
+ *   technical → the classic disclosure line (chevron · tool name · primary
+ *               arg chip · status · raw `</>` toggle). Collapsed by default;
+ *               expanding shows the tool's ARGUMENTS and OUTPUT (the raw
+ *               view) or a specialized renderer when one exists (CodeDiff,
+ *               web-search results, charts…).
+ */
 export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
-  // Display mode — "simple" renders plain-language sentences with no tool
-  // names, no code, and no raw output (for people who don't read code);
-  // "technical" is the full detail view. The header sentence, the raw
-  // toggle, and the body renderers all branch on this one preference.
   const displayMode = useToolDisplayStore((s) => s.mode);
-  const isSimple = displayMode === "simple";
+  if (displayMode === "simple") {
+    return <SimpleToolCallCard toolCall={toolCall} turnId={turnId} />;
+  }
+  return <TechnicalToolCallCard toolCall={toolCall} turnId={turnId} />;
+}
 
+// ---------------------------------------------------------------------------
+// SIMPLE MODE — one non-expandable friendly line per tool call.
+// ---------------------------------------------------------------------------
+
+function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
+  const isRunning =
+    toolCall.status === "running" || toolCall.status === "pending";
+  const isError = toolCall.status === "error";
+  const isCompleted = toolCall.status === "completed";
+  // The friendly narration for the settled line ("Searched the web for
+  // "weather"") and its glyph, both from the shared plain-language rules.
+  const step = useMemo(() => friendlyStep(toolCall), [toolCall]);
+  const ToolIcon = step.icon;
+  const liveCaption = toolCaption(toolCall.name);
+
+  // ── Inline payloads ──────────────────────────────────────────────────
+  // A few tools produce CONTENT (not chrome) that belongs in the main
+  // response: the todo plan, remembered-memory chips, charts, images,
+  // downloads, Q&A transcripts. Those still render beneath the line —
+  // everything else is just the sentence.
+  const parsedTodo = useMemo(
+    () =>
+      (toolCall.name === "show_todo" || toolCall.name === "manage_todo" || toolCall.name === "manage_todos")
+        ? parseTodoResult(toolCall.result)
+        : null,
+    [toolCall.name, toolCall.result],
+  );
+  const showTodoIds = useMemo(() => {
+    if (toolCall.name !== "show_todo") return undefined;
+    const ids =
+      (Array.isArray(toolCall.args?.todo_ids) && toolCall.args.todo_ids) ||
+      (Array.isArray(toolCall.args?.todoIds) && toolCall.args.todoIds) ||
+      [];
+    if (toolCall.args?.all === true || ids.length === 0) return undefined;
+    return ids.map((v) => String(v));
+  }, [toolCall.name, toolCall.args]);
+  const chartSpec = useMemo(
+    () =>
+      toolCall.name === "create_chart" && isCompleted
+        ? parseChartResult(toolCall.result)
+        : null,
+    [toolCall.name, isCompleted, toolCall.result],
+  );
+  const fileDownloadSpec = useMemo(
+    () =>
+      (toolCall.name === "send_file" || toolCall.name === "send_folder") && isCompleted
+        ? parseFileDownloadResult(toolCall.result)
+        : null,
+    [toolCall.name, isCompleted, toolCall.result],
+  );
+  const imagePreviewSpec = useMemo(() => {
+    if (toolCall.name !== "preview_image" || !isCompleted || !toolCall.result) return null;
+    const extract = (obj: Record<string, unknown>): { url: string; alt?: string; error?: string } | null => {
+      const output = obj.output as Record<string, unknown> | undefined;
+      if (output && typeof output === "object") {
+        const url = String(output.url || "");
+        if (url || output.error) {
+          return { url, alt: output.alt as string | undefined, error: output.error as string | undefined };
+        }
+      }
+      const url2 = String(obj.url || "");
+      if (url2 || obj.error) {
+        return { url: url2, alt: obj.alt as string | undefined, error: obj.error as string | undefined };
+      }
+      return null;
+    };
+    if (typeof toolCall.result === "object") return extract(toolCall.result as Record<string, unknown>);
+    if (typeof toolCall.result === "string") {
+      try {
+        const obj = JSON.parse(toolCall.result) as Record<string, unknown>;
+        const spec = extract(obj);
+        if (spec) return spec;
+      } catch {
+        if (toolCall.result.startsWith("http") || toolCall.result.startsWith("data:image/")) {
+          return { url: toolCall.result, alt: "" };
+        }
+      }
+    }
+    return null;
+  }, [toolCall.name, isCompleted, toolCall.result]);
+  const runPythonAnswer = useMemo(() => {
+    if (toolCall.name !== "run_python" || !isCompleted) return null;
+    const resultText =
+      typeof toolCall.result === "string"
+        ? toolCall.result
+        : (() => {
+            try {
+              return JSON.stringify(toolCall.result, null, 2);
+            } catch {
+              return String(toolCall.result ?? "");
+            }
+          })();
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(resultText);
+    } catch {
+      /* not JSON */
+    }
+    const obj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    const output = typeof obj?.stdout === "string" ? obj.stdout : "";
+    return output ? output.replace(/^result: /, "").trim() || null : null;
+  }, [toolCall.name, isCompleted, toolCall.result]);
+
+  const isShowTodo = toolCall.name === "show_todo";
+  const isManageTodo = toolCall.name === "manage_todo" || toolCall.name === "manage_todos";
+  const isMemorySave = toolCall.name === "memory_save";
+  const isMemoryList = toolCall.name === "memory_list";
+  const isMemorySearch = toolCall.name === "memory_search";
+  const isAskUser = toolCall.name === "ask_user";
+
+  return (
+    <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
+      {/* The line — NOT a button, NOT expandable. Plain sentence + status. */}
+      <div
+        className="flex min-h-7 w-full items-center gap-2 rounded-lg px-1 py-1"
+        role="status"
+        aria-live="polite"
+      >
+        <ToolIcon
+          className={cn("h-3.5 w-3.5 shrink-0", isError ? "text-destructive/70" : "text-muted-foreground")}
+          aria-hidden
+        />
+        {isRunning ? (
+          <>
+            <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
+              {liveCaption}
+            </ShimmerLabel>
+            <span className="streaming-dots" aria-hidden="true">
+              <span /> <span /> <span />
+            </span>
+          </>
+        ) : (
+          <>
+            <span
+              className={cn(
+                "min-w-0 truncate text-sm font-medium",
+                isError ? "text-destructive/90" : "text-foreground/90",
+              )}
+            >
+              {isError
+                ? `${step.past.replace(/^([A-Z])/, (m) => m.toLowerCase())} — but it didn't work`
+                : step.past}
+              {step.detail && !isError && (
+                <>
+                  {" "}
+                  <span className="font-normal text-foreground/55">{step.detail}</span>
+                </>
+              )}
+            </span>
+            {isCompleted && (
+              <Check className="text-primary/70 ml-auto h-3.5 w-3.5 shrink-0" aria-label="Done" />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Inline content payloads (content, never chrome). */}
+      {isShowTodo && isCompleted && (
+        <TodoPreview
+          turnId={turnId ?? undefined}
+          todoIds={showTodoIds}
+          fallbackTodos={parsedTodo?.todos}
+          className="px-1.5 sm:px-2"
+        />
+      )}
+      {isManageTodo && isCompleted && parsedTodo?.todos.length ? (
+        <TodoPreview
+          turnId={turnId ?? undefined}
+          todoIds={parsedTodo.todos.map((t) => t.id)}
+          fallbackTodos={parsedTodo.todos}
+        />
+      ) : null}
+      {(isMemorySave || isMemoryList || isMemorySearch) && isCompleted && (
+        <MemoryResult toolCall={toolCall} />
+      )}
+      {chartSpec && <ChartMessage spec={chartSpec} />}
+      {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
+      {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
+      {isAskUser && (
+        <AskUserResult
+          args={toolCall.args}
+          resultText={
+            toolCall.result !== undefined
+              ? typeof toolCall.result === "string"
+                ? toolCall.result
+                : JSON.stringify(toolCall.result, null, 2)
+              : ""
+          }
+        />
+      )}
+      {runPythonAnswer && (
+        <p className="text-foreground/80 px-1.5 py-1.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap sm:px-2">
+          {runPythonAnswer.length > 600
+            ? `${runPythonAnswer.slice(0, 600).trimEnd()}…`
+            : runPythonAnswer}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TECHNICAL MODE — the disclosure line: arguments + output when expanded.
+// ---------------------------------------------------------------------------
+
+function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // Collapsed by default — the bar acts as the toggle. `showRaw` swaps the
-  // formatted view for args + raw output (the </> button — technical mode
-  // only; the button is hidden in simple mode). Charts are the
+  // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.
   const isRunPython = toolCall.name === "run_python";
   // DDG search tools — detect and auto-expand
@@ -97,11 +307,9 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
       isAnyDDGSearch ||
-      // edit_file: the CodeDiff is the payload — expand when it landed AND
-      // the technical view is active (simple mode has no diff to show).
+      // edit_file: the CodeDiff is the payload — expand when it landed.
       (toolCall.name === "edit_file" &&
         toolCall.status === "completed" &&
-        !isSimple &&
         deriveEditDiff(toolCall) !== null),
   );
   const [showRaw, setShowRaw] = useState(false);
@@ -189,42 +397,11 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // edit_file — the find/replace pair renders as a CodeDiff (assistant-ui
   // "Code diff" element) once the edit completes successfully.
   const isEditFile = toolCall.name === "edit_file";
-  // Workspace file & web tools — each gets a parsed "nice UI" card
-  // (tool-results/file-ops.tsx) built from the real result, in technical
-  // display mode. Terminal/command tools are deliberately excluded: their
-  // output is freeform, so they keep the live log view.
-  const isCreateFile =
-    toolCall.name === "create_file" ||
-    toolCall.name === "write_file" ||
-    toolCall.name === "create_file_chunk";
-  const isReadFile =
-    toolCall.name === "read_file" || toolCall.name === "read_file_section";
-  const isVerifyPath = toolCall.name === "verify_path";
-  const isListFolder =
-    toolCall.name === "list_folder" ||
-    toolCall.name === "list_files" ||
-    toolCall.name === "list_workspace_files";
-  const isDeleteFile =
-    toolCall.name === "delete_file" || toolCall.name === "delete_folder";
-  const isCreateFolder = toolCall.name === "create_folder";
-  const isMoveFile =
-    toolCall.name === "move_file" || toolCall.name === "rename_file";
-  const isWebFetch = toolCall.name === "web_fetch" || toolCall.name === "fetch_url";
-  const isFileOp =
-    isCreateFile ||
-    isReadFile ||
-    isVerifyPath ||
-    isListFolder ||
-    isDeleteFile ||
-    isCreateFolder ||
-    isMoveFile ||
-    isWebFetch;
   // Memory tools — the chips render via the MemoryChips element, with the
-  // forget button deleting the real OPFS file the save tool wrote.
+  // forget button deleting the real OPFS file memory_save wrote.
   const isMemorySave = toolCall.name === "memory_save";
   const isMemoryList = toolCall.name === "memory_list";
   const isMemorySearch = toolCall.name === "memory_search";
-  const isMemoryTool = isMemorySave || isMemoryList || isMemorySearch;
   // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
   // todos drive the TodoPreview table; memoized so streaming deltas don't
   // re-parse on every render.
@@ -258,19 +435,12 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   );
   const isChart = chartSpec !== null;
 
-  // Parse image preview result — same pattern as chartSpec. The tool result
-  // may be a JSON string (not a parsed object), so we parse it here.
-  // The tool returns { success: true, output: { kind: "image_preview", url, alt } }
-  // so the actual spec is at `.output`, not the top level.
+  // Parse image preview result — same pattern as chartSpec.
   const imagePreviewSpec = useMemo(() => {
     if (toolCall.name !== "preview_image" || toolCall.status !== "completed") return null;
     const result = toolCall.result;
     if (!result) return null;
-
-    // Helper to extract spec from a parsed object — handles both
-    // { output: { kind, url } } (full ToolResult) and { kind, url } (bare spec)
     const extractSpec = (obj: Record<string, unknown>): { url: string; alt?: string; error?: string } | null => {
-      // Case 1: full ToolResult wrapper { success, output: { kind, url } }
       const output = obj.output as Record<string, unknown> | undefined;
       if (output && typeof output === "object") {
         const url = String(output.url || "");
@@ -278,26 +448,21 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           return { url, alt: output.alt as string | undefined, error: output.error as string | undefined };
         }
       }
-      // Case 2: bare spec { kind, url }
       const url2 = String(obj.url || "");
       if (url2 || obj.error) {
         return { url: url2, alt: obj.alt as string | undefined, error: obj.error as string | undefined };
       }
       return null;
     };
-
-    // If already an object, use directly.
     if (typeof result === "object") {
       return extractSpec(result as Record<string, unknown>);
     }
-    // If a string, try JSON.parse.
     if (typeof result === "string") {
       try {
         const obj = JSON.parse(result) as Record<string, unknown>;
         const spec = extractSpec(obj);
         if (spec) return spec;
       } catch {
-        // not JSON — maybe it's a raw URL
         if (result.startsWith("http://") || result.startsWith("https://") || result.startsWith("data:image/")) {
           return { url: result, alt: "" };
         }
@@ -328,51 +493,20 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [isEditFile, toolCall],
   );
   const isEditDiff = editDiffSpec !== null;
-  // The parsed card for workspace file / web tools (technical mode only —
-  // simple mode keeps its plain sentences). Memoized so streaming deltas
-  // don't re-derive; each card component itself returns null when the call
-  // didn't land or has nothing presentable, so the branch below also gates
-  // on status and falls through to the generic renderer otherwise.
-  const fileOpElement = useMemo(() => {
-    if (isSimple || !isFileOp || toolCall.status !== "completed") return null;
-    if (isCreateFile) return <FileCreatedCard toolCall={toolCall} />;
-    if (isReadFile) return <FileReadCard toolCall={toolCall} />;
-    if (isVerifyPath) return <PathVerifyCard toolCall={toolCall} />;
-    if (isListFolder) return <FolderListCard toolCall={toolCall} />;
-    if (isDeleteFile) return <FileDeletedCard toolCall={toolCall} />;
-    if (isCreateFolder) return <FolderCreatedCard toolCall={toolCall} />;
-    if (isMoveFile) return <FileMoveCard toolCall={toolCall} />;
-    if (isWebFetch) return <WebFetchCard toolCall={toolCall} />;
-    return null;
-  }, [
-    isSimple,
-    isFileOp,
-    isCreateFile,
-    isReadFile,
-    isVerifyPath,
-    isListFolder,
-    isDeleteFile,
-    isCreateFolder,
-    isMoveFile,
-    isWebFetch,
-    toolCall,
-  ]);
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
-  // Same for file_download cards and the file-op payload cards (the card IS
-  // the content, like the edit_file diff). Uses the same render-time
-  // adjustment pattern as the running auto-expand above (no effect → no
-  // cascading render).
+  // Same for file_download cards and the edit_file diff (the card IS the
+  // content). Uses the same render-time adjustment pattern as the running
+  // auto-expand above (no effect → no cascading render).
   const [prevAutoExpand, setPrevAutoExpand] = useState(false);
-  const autoExpand =
-    isChart || isFileDownload || (isEditDiff && !isSimple) || fileOpElement !== null;
+  const autoExpand = isChart || isFileDownload || isEditDiff;
   if (autoExpand !== prevAutoExpand) {
     setPrevAutoExpand(autoExpand);
     if (autoExpand) setExpanded(true);
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemoryTool || isFileOp;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview;
   const friendlyName = isDateTime
     ? "Current Date & Time"
     : isRAGSearch
@@ -411,25 +545,25 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                   : "Load Skill"
                 : isListSkills
                   ? "Available Skills"
-                  : isCreateFile
+                  : toolCall.name === "create_file" || toolCall.name === "write_file" || toolCall.name === "create_file_chunk"
                     ? toolCall.name === "create_file"
                       ? "Create File"
                       : "Write File"
-                    : isReadFile
+                    : toolCall.name === "read_file" || toolCall.name === "read_file_section"
                       ? "Read File"
-                      : isVerifyPath
+                      : toolCall.name === "verify_path"
                         ? "Path Check"
-                        : isListFolder
+                        : toolCall.name === "list_folder" || toolCall.name === "list_files" || toolCall.name === "list_workspace_files"
                           ? "Folder Contents"
-                          : isDeleteFile
+                          : toolCall.name === "delete_file" || toolCall.name === "delete_folder"
                             ? "Delete File"
-                            : isCreateFolder
+                            : toolCall.name === "create_folder"
                               ? "Create Folder"
-                              : isMoveFile
+                              : toolCall.name === "move_file" || toolCall.name === "rename_file"
                                 ? toolCall.name === "move_file"
                                   ? "Move File"
                                   : "Rename File"
-                                : isWebFetch
+                                : toolCall.name === "web_fetch" || toolCall.name === "fetch_url"
                                   ? "Web Page"
                                   : toolCall.name === "run_python"
                     ? "Run Python"
@@ -447,7 +581,7 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           ? BarChart3
           : isEditDiff
             ? PenLine
-            : isMemoryTool
+            : isMemorySave || isMemoryList || isMemorySearch
               ? Brain
               : isShowTodo
             ? ListChecks
@@ -459,19 +593,19 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                   ? Download
                   : isRunPython
                     ? Code2
-                    : isCreateFile
+                    : toolCall.name === "create_file" || toolCall.name === "write_file" || toolCall.name === "create_file_chunk"
                       ? FilePlus
-                      : isReadFile || isVerifyPath
+                      : toolCall.name === "read_file" || toolCall.name === "read_file_section" || toolCall.name === "verify_path"
                         ? FileSearch
-                        : isListFolder
+                        : toolCall.name === "list_folder" || toolCall.name === "list_files" || toolCall.name === "list_workspace_files"
                           ? FolderOpen
-                          : isDeleteFile
+                          : toolCall.name === "delete_file" || toolCall.name === "delete_folder"
                             ? FileMinus
-                            : isCreateFolder
+                            : toolCall.name === "create_folder"
                               ? FolderPlus
-                              : isMoveFile
+                              : toolCall.name === "move_file" || toolCall.name === "rename_file"
                                 ? ArrowRight
-                                : isWebFetch
+                                : toolCall.name === "web_fetch" || toolCall.name === "fetch_url"
                                   ? Globe
                                   : Wrench;
 
@@ -489,22 +623,18 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     setExpanded(true);
   };
 
-  // While still running: narrate what the agent is doing instead of the finished label,
-  // and swap the chevron/raw toggle for a spinner — the header becomes a step caption.
-  // (Note: `isRunning` is declared up top so the auto-expand render-time adjustment can read it.)
+  // While still running: narrate what the agent is doing instead of the
+  // finished label, and swap the chevron/raw toggle for a spinner — the
+  // header becomes a step caption. (Note: `isRunning` is declared up top so
+  // the auto-expand render-time adjustment can read it.)
   const isError = toolCall.status === "error";
   const liveCaption = toolCaption(toolCall.name);
 
-  // Simple mode swaps the tool name for a plain sentence — "Searched the
-  // web for “weather in Mumbai”" — with the friendly detail inline (normal
-  // font, never the mono chip).
-  const settledLabel = isSimple ? friendlySentence(toolCall) : friendlyName;
-
   return (
     /* assistant-ui "Tool call" element anatomy — SIMPLE TOOL NAME line, no
-       card chrome: chevron · shimmering label (while running) · primary-arg
-       chip · checkmark once settled, with the request/result tucked behind
-       the disclosure. Tapping the line collapses / enlarges it. */
+       card chrome: chevron · label (while running, shimmering) · primary-arg
+       chip · checkmark once settled, with the ARGUMENTS + OUTPUT tucked
+       behind the disclosure. Tapping the line collapses / enlarges it. */
     <div
       data-slot="tool-call"
       className={cn(
@@ -530,8 +660,8 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           aria-hidden
         />
 
-        {/* Simple tool name — a small muted glyph for recognition, then the
-            label. NO icon box, NO card border: just the name on the line. */}
+        {/* Tool name — a small muted glyph for recognition, then the label.
+            NO icon box, NO card border: just the name on the line. */}
         {isRunning ? (
           <>
             <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -549,18 +679,16 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               aria-hidden
             />
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
-              {settledLabel}
+              {friendlyName}
             </span>
           </>
         )}
-        {/* The mono argument chip is technical-mode only — simple mode
-            carries the detail inside the sentence itself. */}
-        {inputHint && !isRunning && !isSimple ? (
+        {/* The mono argument chip — the primary arg rides next to the label. */}
+        {inputHint && !isRunning ? (
           <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
         ) : null}
 
-        {/* Right actions — settle state + raw toggle (technical mode only;
-            simple mode never offers raw output). */}
+        {/* Right actions — settle state + raw toggle. */}
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
           {!isRunning && (
             <>
@@ -569,28 +697,26 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               ) : (
                 <Check className="text-primary h-3.5 w-3.5" aria-label="Done" />
               )}
-              {!isSimple && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={toggleRaw}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      toggleRaw(e as unknown as MouseEvent);
-                    }
-                  }}
-                  title={showRaw ? "Show formatted view" : "Show details"}
-                  aria-label={showRaw ? "Show formatted view" : "Show details"}
-                  className={cn(
-                    "text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                    showRaw && "text-primary",
-                  )}
-                >
-                  <Code2 className="h-3.5 w-3.5" />
-                </span>
-              )}
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={toggleRaw}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleRaw(e as unknown as MouseEvent);
+                  }
+                }}
+                title={showRaw ? "Show formatted view" : "Show details"}
+                aria-label={showRaw ? "Show formatted view" : "Show details"}
+                className={cn(
+                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+                  showRaw && "text-primary",
+                )}
+              >
+                <Code2 className="h-3.5 w-3.5" />
+              </span>
             </>
           )}
         </span>
@@ -611,15 +737,14 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
 
       {/* INLINE MEMORY CHIPS (memory_save / memory_list): what the agent
           now remembers renders directly in the MAIN RESPONSE — always
-          visible beneath the tool bar, never hidden inside the disclosure
-          (same placement rule as the todo preview). The forget button
-          deletes the real OPFS file memory_save wrote. Enlarging the bar
-          reveals the raw JSON via the panel below. */}
+          visible beneath the tool bar (same placement rule as the todo
+          preview). The forget button deletes the real OPFS file
+          memory_save wrote. */}
       {(isMemorySave || isMemoryList) && toolCall.status === "completed" && (
         <MemoryResult toolCall={toolCall} />
       )}
 
-      {/* Disclosure panel — the request/result and every specialized
+      {/* Disclosure panel — the ARGUMENTS/OUTPUT and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
       <CollapsePanel open={expanded}>
@@ -627,20 +752,13 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           {showRaw ? (
             <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isRunning ? (
-            // Simple mode: spinner + the plain-language caption only — no
-            // arguments, no code, no live log tail. Technical mode keeps the
-            // full running panel below.
-            isSimple ? (
-              <FriendlyRunningPanel caption={liveCaption} />
-            ) : (
-              // While the tool is still running, show a prominent "Running…"
-              // panel regardless of the tool's specialized renderer — the
-              // renderer branches below all gate on `status === "completed"` and
-              // would otherwise render an empty body. The panel surfaces the
-              // tool's command/args so the user can see exactly what's
-              // executing (e.g. the shell command for `run_terminal`).
-              <RunningToolPanel toolCall={toolCall} />
-            )
+            // While the tool is still running, show a prominent "Running…"
+            // panel regardless of the tool's specialized renderer — the
+            // renderer branches below all gate on `status === "completed"`
+            // and would otherwise render an empty body. The panel surfaces
+            // the tool's command/args so the user can see exactly what's
+            // executing (e.g. the shell command for `run_terminal`).
+            <RunningToolPanel toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (
@@ -662,13 +780,12 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           ) : isAskUser ? (
             <AskUserResult args={toolCall.args} resultText={resultText} />
           ) : isRunPython ? (
-            <RunPythonResult toolCall={toolCall} resultText={resultText} simple={isSimple} />
+            <RunPythonResult toolCall={toolCall} resultText={resultText} />
           ) : isShowTodo && toolCall.status === "completed" ? (
             // Enlarging the show_todo tool shows the PARSED CODE (raw JSON
             // request/result) — the todo LIST UI itself renders inline above
             // (outside this panel), always visible in the main response.
-            // Simple mode already has the list UI — nothing more to show.
-            isSimple ? null : <RawToolView toolCall={toolCall} resultText={resultText} />
+            <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isManageTodo && toolCall.status === "completed" && parsedTodo?.todos.length ? (
             // One-row preview of the affected todo (create/update) with its
             // live status.
@@ -680,54 +797,22 @@ export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           ) : isEditDiff ? (
             // edit_file → the find/replace pair as a unified CodeDiff
             // (assistant-ui "Code diff" element) — tinted, gutter-marked,
-            // line-staggered. Simple mode shows one reassuring sentence
-            // instead: the header already said which file changed.
-            isSimple ? (
-              <p className="text-foreground/70 py-2 text-[13px] leading-relaxed">
-                The file was updated.
-              </p>
-            ) : (
-              <EditFileDiff toolCall={toolCall} />
-            )
+            // line-staggered. The `</>` toggle above swaps to the raw
+            // arguments/output view.
+            <EditFileDiff toolCall={toolCall} />
           ) : isMemorySearch && toolCall.status === "completed" ? (
             // memory_search → the matching memories as chips behind the
             // disclosure (search results can be many; not auto-shown).
             <MemoryResult toolCall={toolCall} />
-          ) : fileOpElement ? (
-            // Workspace file & web tools → the parsed "nice UI" cards
-            // (FileCreatedCard / FileReadCard / FolderListCard / …) built
-            // from the real result. Technical mode only — simple mode keeps
-            // its plain sentences (the memo already returned null).
-            fileOpElement
           ) : isLoadSkill ? (
             <LoadSkillResult resultText={resultText} status={toolCall.status} />
-          ) : isListSkills ? null : isSimple ? (
-            // Simple mode — plain language for every tool without a
-            // specialized friendly renderer: no arguments, no JSON dumps.
-            <SimpleToolResult toolCall={toolCall} resultText={resultText} />
-          ) : (
+          ) : isListSkills ? null : (
+            // Default: arguments + output (pretty-printed). Expanding the
+            // card shows exactly what went in and what came out.
             <GenericToolResult toolCall={toolCall} resultText={resultText} />
           )}
         </div>
       </CollapsePanel>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// FriendlyRunningPanel — the simple-mode running body: spinner + the
-// plain-language caption. Deliberately shows NO arguments, NO code, and NO
-// live log tail — non-coders watch the sentence, not the stream.
-// ---------------------------------------------------------------------------
-
-function FriendlyRunningPanel({ caption }: { caption: string }) {
-  return (
-    <div className="flex items-center gap-2.5 py-2" role="status" aria-live="polite">
-      <Loader2 className="text-primary h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
-      <span className="text-foreground/90 text-sm font-medium">{caption}</span>
-      <span className="streaming-dots" aria-hidden="true">
-        <span /> <span /> <span />
-      </span>
     </div>
   );
 }
@@ -780,16 +865,6 @@ function RunningToolPanel({
   const stderr = toolCall.streamingError ?? "";
   const hasLiveOutput = stdout.length > 0 || stderr.length > 0;
 
-  // PERF+UX: Show "Writing tool_name…" for ALL tools (including custom tools)
-  // during BOTH the pending phase (LLM composing args) AND the running phase
-  // (tool executing). Previously only write_file/create_file showed "Writing"
-  // because their large `content` args kept them in "pending" longer. Other
-  // tools flashed through pending too fast to see the label, then showed only
-  // the liveCaption (e.g. "Running a terminal command…") during execution.
-  // Now every tool shows "Writing tool_name…" with the streaming cursor +
-  // spinner, so the user always sees what's being composed/executed.
-  // If the tool name is a "pending-N" placeholder (LLM sent args before the
-  // function name), show "Composing…" instead of the raw placeholder.
   const liveCaptionForPanel = toolCaption(toolCall.name);
 
   return (
@@ -846,9 +921,6 @@ function RunningToolPanel({
               <span className="text-destructive">{tailText(stderr)}</span>
             )}
             {stdout && <span>{tailText(stdout)}</span>}
-            {!hasLiveOutput && (
-              <span className="text-muted-foreground italic">Waiting for output…</span>
-            )}
           </pre>
         </div>
       )}

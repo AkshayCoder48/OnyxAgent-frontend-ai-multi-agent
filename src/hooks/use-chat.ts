@@ -23,6 +23,8 @@ import { setUrlParam } from "@/lib/utils";
 import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
+import { useBackgroundRunStore } from "@/stores/background-run-store";
+import { startBackgroundTurn, resumeBackgroundTurn, type BackgroundTurnHandle } from "@/lib/agent/background-turn";
 import { beginResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 
 /** A message the user typed while the agent was busy. Held outside the chat
@@ -296,6 +298,10 @@ export function useChat(options: UseChatOptions = {}) {
   // The active agent turn's abort controller. Held in a ref so the various
   // `stopGeneration` / unmount handlers can abort the in-flight SSE stream.
   const abortRef = useRef<AbortController | null>(null);
+
+  // The active BACKGROUND agent turn (E2B sandbox job), when the turn runs
+  // in background mode. Stopping the generation kills the sandbox job too.
+  const backgroundHandleRef = useRef<BackgroundTurnHandle | null>(null);
 
   // Track the active conversation id in the research store so todo events
   // route to the right turn bucket. Reset the bucket when going to a new chat.
@@ -1319,6 +1325,40 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
+      // ── BACKGROUND RUN (E2B) ──────────────────────────────────────────
+      // When enabled (Settings → "Continue in background") AND an E2B key
+      // is configured, the turn executes INSIDE the sandbox as a background
+      // command — it keeps working after the browser closes, stops, or
+      // minimizes; on return we reconnect and replay the progress. Falls
+      // back to the in-browser runtime when the launch fails or no key.
+      if (useBackgroundRunStore.getState().enabled) {
+        let e2bKey: string | null = null;
+        try {
+          e2bKey = await settingsService.getDecryptedSandboxKey(userId);
+        } catch {
+          e2bKey = null;
+        }
+        if (e2bKey) {
+          const handle = await startBackgroundTurn({
+            turn: opts,
+            e2bApiKey: e2bKey,
+            userId,
+            conversationId: opts.conversationId,
+            emit: handleAgentEvent,
+            onFinished: () => {
+              setIsProcessing(false);
+              abortRef.current = null;
+              backgroundHandleRef.current = null;
+            },
+          });
+          if (handle) {
+            backgroundHandleRef.current = handle;
+            return; // the background job owns this turn now
+          }
+          // Launch failed — fall through to the in-browser runtime.
+        }
+      }
+
       // Fire-and-forget the turn. Errors inside the runtime are caught and
       // emitted as `error` events via the `emit` callback; we don't need to
       // await here. Awaiting would block the UI until the full turn completes
@@ -1440,6 +1480,14 @@ export function useChat(options: UseChatOptions = {}) {
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    // BACKGROUND RUN: killing the generation kills the sandbox job (and its
+    // poller). Just closing the tab does NOT — the job keeps running on E2B
+    // until it finishes or its timeout expires.
+    if (backgroundHandleRef.current) {
+      const handle = backgroundHandleRef.current;
+      backgroundHandleRef.current = null;
+      void handle.stop();
+    }
     if (currentMessageIdRef.current) {
       const msgId = currentMessageIdRef.current;
       // Mark the message as not streaming + mark ALL tool calls as "stopped"
@@ -1484,6 +1532,51 @@ export function useChat(options: UseChatOptions = {}) {
     setIsProcessing(false);
     setPendingQuestions(null);
   }, [updateMessage, setCurrentMessageId, updateToolCallPart, flushTextDelta]);
+
+  // BACKGROUND RUN RESUME: if the active conversation has an unfinished E2B
+  // background job (the user closed/stopped/minimized the browser while the
+  // agent was working), reconnect and replay what ran while they were away —
+  // then keep streaming until the turn finishes. The job itself never paused:
+  // it kept executing inside the sandbox the whole time.
+  useEffect(() => {
+    const turnId = currentConversationIdFromStore ?? conversationId ?? null;
+    if (!turnId) return;
+    if (!useBackgroundRunStore.getState().enabled) return;
+    if (backgroundHandleRef.current) return;
+    let cancelled = false;
+    void (async () => {
+      const userId = useAuthStore.getState().user?.id;
+      if (!userId || cancelled) return;
+      let e2bKey: string | null = null;
+      try {
+        e2bKey = await settingsService.getDecryptedSandboxKey(userId);
+      } catch {
+        return;
+      }
+      if (!e2bKey || cancelled) return;
+      const handle = await resumeBackgroundTurn({
+        e2bApiKey: e2bKey,
+        userId,
+        conversationId: turnId,
+        emit: handleAgentEvent,
+        onFinished: () => {
+          setIsProcessing(false);
+          backgroundHandleRef.current = null;
+        },
+      }).catch(() => null);
+      if (cancelled) {
+        if (handle) void handle.stop();
+        return;
+      }
+      if (handle) {
+        backgroundHandleRef.current = handle;
+        setIsProcessing(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentConversationIdFromStore, conversationId, handleAgentEvent]);
 
   /**
    * Local-only todo action controls. The runtime has no equivalent channel —

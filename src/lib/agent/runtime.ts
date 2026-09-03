@@ -996,11 +996,22 @@ function buildAssistantParts(
   if (reasoning && reasoning.trim()) {
     parts.push({ id: `p-reason-${Date.now()}`, type: "reasoning", content: reasoning });
   }
-  // Text that came BEFORE the first tool call goes ABOVE the tool cards.
-  // This prevents the response from looking "cut" — half text above, half
-  // below the tool card. Without this, ALL text gets pushed after the tools.
-  if (textBeforeTools && textBeforeTools.trim()) {
-    parts.push({ id: `p-text-pre-${Date.now()}`, type: "text", content: textBeforeTools });
+  // ONE text block per round — the message content precedes its tool calls.
+  // A provider that interleaves content deltas and tool_call deltas in the
+  // stream (kilo-auto & friends) still produces ONE assistant message whose
+  // content is a single narrative; splitting it "before/after tools" cut
+  // sentences in half and pushed the tail BELOW the tool cards (the
+  // "response looks cut" bug). Prefer the full content when it's a superset
+  // of the pre-tool prefix; fall back to the pre-tool text when the content
+  // was rewritten (DSML stripping etc.).
+  const fullText =
+    textBeforeTools && content.trim()
+      ? content.startsWith(textBeforeTools)
+        ? content
+        : textBeforeTools
+      : content;
+  if (fullText && fullText.trim()) {
+    parts.push({ id: `p-text-${Date.now()}`, type: "text", content: fullText });
   }
   for (const tc of toolCalls) {
     parts.push({
@@ -1018,18 +1029,6 @@ function buildAssistantParts(
           | "error",
       },
     });
-  }
-  // Text AFTER tools: push only the text that came AFTER the tool calls.
-  // If textBeforeTools was set, content includes both pre+post text — we
-  // need to extract just the post-text (everything after textBeforeTools).
-  if (content && content.trim()) {
-    let postText = content;
-    if (textBeforeTools && content.startsWith(textBeforeTools)) {
-      postText = content.slice(textBeforeTools.length);
-    }
-    if (postText.trim()) {
-      parts.push({ id: `p-text-${Date.now()}`, type: "text", content: postText });
-    }
   }
   return parts;
 }
@@ -1804,8 +1803,23 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         assistantParts.push({ id: `p-reason-${Date.now()}-${round}`, type: "reasoning", content: roundResult.reasoning, round, roundStartedAt: roundStart });
       }
     }
-    if (roundResult.textBeforeTools && roundResult.textBeforeTools.trim()) {
-      assistantParts.push({ id: `p-text-pre-${Date.now()}-${round}`, type: "text", content: roundResult.textBeforeTools, round, roundStartedAt: roundStart });
+    // ONE text block per round (the round's message content precedes its
+    // tool calls — see buildAssistantParts). Models that interleave content
+    // and tool_call deltas in one stream produce ONE message; splitting it
+    // pre/post-tools cut sentences in half with the tail below the cards.
+    const roundText =
+      roundResult.textBeforeTools && roundResult.content.trim()
+        ? roundResult.content.startsWith(roundResult.textBeforeTools)
+          ? roundResult.content
+          : roundResult.textBeforeTools
+        : roundResult.content || roundResult.textBeforeTools;
+    if (roundText && roundText.trim()) {
+      const lastPart = assistantParts[assistantParts.length - 1];
+      if (lastPart && lastPart.type === "text" && lastPart.content && lastPart.round === round) {
+        lastPart.content += roundText;
+      } else {
+        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: roundText, round, roundStartedAt: roundStart });
+      }
     }
     for (const tc of roundResult.toolCalls) {
       assistantParts.push({
@@ -1820,25 +1834,6 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         round,
         roundStartedAt: roundStart,
       });
-    }
-    // Post-tool text (content minus textBeforeTools).
-    // Only split if textBeforeTools is a clean prefix of content. If the
-    // content was modified (DSML stripping, etc.), don't split — put all
-    // remaining text as one part. This prevents single words/periods from
-    // ending up as separate parts below the tool call.
-    if (roundResult.content && roundResult.content.trim()) {
-      if (roundResult.textBeforeTools && roundResult.content.startsWith(roundResult.textBeforeTools)) {
-        const postText = roundResult.content.slice(roundResult.textBeforeTools.length);
-        if (postText.trim()) {
-          assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: postText, round, roundStartedAt: roundStart });
-        }
-      } else if (!roundResult.textBeforeTools) {
-        // No text-before-tools → all content is post-tool text
-        assistantParts.push({ id: `p-text-${Date.now()}-${round}`, type: "text", content: roundResult.content, round, roundStartedAt: roundStart });
-      }
-      // If textBeforeTools exists but doesn't match content prefix (DSML
-      // stripping changed it), the text was already pushed as textBeforeTools
-      // — don't push a duplicate.
     }
 
     // No tool calls → final result.

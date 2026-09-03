@@ -13,9 +13,6 @@ interface MessageListProps {
   /** True while an agent turn (send OR regenerate) is running — disables the
    *  regenerate action so it can't double-fire (PRD §6). */
   isRegenerating?: boolean;
-  /** Wired to the streaming message's AgentStatus pause button — stops the
-   *  running generation. */
-  onStop?: () => void;
 }
 
 /**
@@ -117,7 +114,7 @@ function hasResearchPart(message: ChatMessage): boolean {
   );
 }
 
-export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerating = false, onStop }: MessageListProps) {
+export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerating = false }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
 
   // PERF: Find the last assistant message index once (O(n) single pass)
@@ -172,7 +169,6 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerat
                     : undefined
                 }
                 isRegenerating={isRegenerating}
-                onStop={onStop}
               />
             </div>
           </div>

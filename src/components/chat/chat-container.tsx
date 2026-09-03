@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -18,8 +18,7 @@ import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import { Orb } from "@/components/assistant-ui/elements";
-import { AgentStatus } from "@/components/assistant-ui/elements";
-import { formatClock } from "@/lib/agent-tool-steps";
+import { ShimmerLabel } from "@/components/assistant-ui/elements";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { Hourglass } from "lucide-react";
@@ -155,40 +154,25 @@ function useChatScrollController(
 
 /**
  * Thinking status line shown between send and first token: the Orb lattice
- * glyph leading the AgentStatus element (state dot + crossfading label +
- * ticking m:ss elapsed + pause wired to stopGeneration — the assistant-ui
- * "Agent status" recipe, so the trailing control actually stops the turn).
- * Mounts fresh per turn, so the elapsed clock starts from zero each time.
+ * glyph leading a shimmering "Thinking" label on one baseline-aligned row.
+ * No status pill, no elapsed clock, no pause button — the composer's stop
+ * button stops the turn.
  *
- * ORB (PRD §23–§28): the orb is the response's RANDOM pick (one of the full
- * 25-variant collection, chosen once when the response began — never per
- * chunk), noticeably LARGER than before (28px, up from 18px), and the pill
- * shares ONE flex row with `items-center` so the text sits exactly on the
+ * Mounts fresh per turn. The orb is the response's RANDOM pick (one of the
+ * full 25-variant collection, chosen once when the response began — never
+ * per chunk), noticeably LARGER than before (28px), and the label shares
+ * ONE flex row with `items-center` so the text sits exactly on the
  * lattice's midline at any font size — no fixed offsets, no baseline drift,
- * stable while the label changes and the orb animates.
+ * stable while the orb animates.
  */
-function ThinkingStatus({ onStop }: { onStop?: () => void }) {
-  const [elapsed, setElapsed] = useState(0);
+function ThinkingStatus() {
   // Read once per mount — the module singleton holds the response's orb; a
   // remount (next turn) re-reads it, and nothing else re-renders from this.
   const orbVariant = useMemo(() => currentResponseOrb(), []);
-  useEffect(() => {
-    const startedAt = Date.now();
-    const id = window.setInterval(
-      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
-      1000,
-    );
-    return () => window.clearInterval(id);
-  }, []);
   return (
     <span className="flex min-h-8 w-fit items-center gap-2.5">
       <Orb variant={orbVariant} size={28} className="shrink-0" />
-      <AgentStatus
-        state="working"
-        label="Thinking"
-        elapsed={formatClock(elapsed)}
-        onPauseClick={onStop}
-      />
+      <ShimmerLabel className="text-sm font-medium">Thinking</ShimmerLabel>
     </span>
   );
 }
@@ -589,7 +573,6 @@ function ChatUI({
               onRegenerate={onRegenerate}
               onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
               isRegenerating={isProcessing}
-              onStop={onStop}
             />
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
@@ -599,7 +582,7 @@ function ChatUI({
               items-center flex row — vertically centered, no drift. */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
             <div className="animate-slide-up-fade px-1 py-2">
-              <ThinkingStatus onStop={onStop} />
+              <ThinkingStatus />
             </div>
           )}
           {/* Rate-limit backoff (PRD §7): the runtime is retrying with

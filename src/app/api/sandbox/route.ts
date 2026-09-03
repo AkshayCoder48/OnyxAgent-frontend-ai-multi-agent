@@ -30,6 +30,9 @@ import { Sandbox } from "@e2b/code-interpreter";
 // to read the "Generative UI (GenUI)" section from this file, so the sandbox
 // MUST receive the full document, not a short stub.
 import { AGENT_MD } from "@/lib/agent/agent-md";
+// Background agent runner (see src/lib/e2b/bg-agent-script.ts) — the
+// self-contained script executed INSIDE the sandbox as a background command.
+import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -1263,6 +1266,128 @@ export async function POST(req: NextRequest) {
         const key = cacheKey(apiKey, conversationId, sandboxMode);
         evictCacheEntry(sandboxMode, key);
         return NextResponse.json({ ok: true });
+      }
+
+      // ── BACKGROUND AGENT (E2B-documented pattern) ──────────────────────
+      // Sandboxes are SERVER-SIDE VMs: they keep running after the browser
+      // disconnects. We run the agent loop as a BACKGROUND COMMAND inside
+      // the sandbox (`commands.run(..., { background: true })`) writing its
+      // progress to a state file; the browser can close/minimize/leave and
+      // reconnect later ("bg_status" uses Sandbox.connect, which also
+      // auto-resumes a paused sandbox). The job keeps the sandbox busy for
+      // as long as its timeout window allows (1h max on the Hobby plan).
+      case "bg_start": {
+        const state = (args.state as Record<string, unknown>) ?? {};
+        const maxRounds = (args.maxRounds as number) ?? 12;
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // Full window for the background run — resets the timeout countdown.
+        try {
+          await sandbox.setTimeout(3_600_000);
+        } catch {
+          // best-effort — the default 1h window still applies
+        }
+        // Write the runner script (idempotent — same script every time).
+        await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
+        // Write the job state the script consumes.
+        const initial = {
+          ...state,
+          maxRounds,
+          status: "starting",
+          events: [],
+          content: "",
+          startedAt: new Date().toISOString(),
+        };
+        await sandbox.files.write(BG_STATE_PATH, JSON.stringify(initial));
+        // Launch as a BACKGROUND command — returns immediately with a pid;
+        // the process keeps running inside the sandbox after we (and the
+        // browser) disconnect. stdout/stderr land in a log file (per the
+        // E2B docs, streamed output of a background command is only
+        // delivered to the process that started it — files are durable).
+        const handle = await sandbox.commands.run(
+          `node ${BG_SCRIPT_PATH} > /home/user/.onyx/bg-agent.log 2>&1`,
+          { background: true, timeoutMs: 0, cwd: DEFAULT_CWD },
+        );
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          pid: handle.pid,
+        });
+      }
+
+      case "bg_status": {
+        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
+        if (!bgSandboxId) {
+          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
+        }
+        // Reconnect — works from ANY serverless instance, and auto-resumes
+        // a paused sandbox (per the E2B docs any SDK call wakes it).
+        let sandbox: Sandbox;
+        try {
+          sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            sandboxId: bgSandboxId,
+            status: "unreachable",
+            error: `Background sandbox unreachable: ${errMsg}`,
+          });
+        }
+        // Activity extends the window while the user watches (per docs the
+        // explicit setTimeout resets the countdown to the new value).
+        try {
+          await sandbox.setTimeout(3_600_000);
+        } catch {
+          // best-effort
+        }
+        try {
+          const raw = await sandbox.files.read(BG_STATE_PATH);
+          const state = JSON.parse(raw) as {
+            status: string;
+            events?: unknown[];
+            content?: string;
+            error?: string;
+            startedAt?: string;
+          };
+          return NextResponse.json({
+            sandboxId: bgSandboxId,
+            status: state.status ?? "running",
+            events: state.events ?? [],
+            content: state.content ?? "",
+            error: state.error ?? null,
+            startedAt: state.startedAt ?? null,
+          });
+        } catch {
+          return NextResponse.json({
+            sandboxId: bgSandboxId,
+            status: "running",
+            events: [],
+            content: "",
+            error: null,
+          });
+        }
+      }
+
+      case "bg_stop": {
+        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
+        if (!bgSandboxId) {
+          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
+        }
+        try {
+          const sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
+          const cmds = await sandbox.commands.list();
+          // Kill every running command in this sandbox — the background
+          // agent included. The sandbox itself (and its files) stays.
+          for (const c of cmds) {
+            try {
+              await sandbox.commands.kill(c.pid);
+            } catch {
+              // already exited
+            }
+          }
+          return NextResponse.json({ sandboxId: bgSandboxId, ok: true });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({ error: errMsg }, { status: 500 });
+        }
       }
 
       case "keepalive": {

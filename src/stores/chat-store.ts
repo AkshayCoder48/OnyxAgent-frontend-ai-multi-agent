@@ -269,49 +269,72 @@ export const useChatStore = create<ChatState>((set) => ({
         if (reasoningSettled) parts.splice(0, parts.length, ...stamped);
       }
       const last = parts[parts.length - 1];
-      // CHRONOLOGICAL TEXT PLACEMENT (timeline PRD §3–§9: EVENT SEQUENCE =
-      // VISUAL SEQUENCE). Text merges into an earlier text part ONLY when
-      // that part belongs to the SAME agent round — a continuation within
-      // one round. Text arriving in a NEW round (e.g. the final answer after
-      // the last round's thinking) must create a NEW part at the END of the
-      // parts array, i.e. at its chronological position.
-      //
-      // The old rule ("text after thinking appends to the last text part
-      // ANYWHERE") moved later-round text INTO an earlier round's text part
-      // — so the final answer rendered ABOVE thinking that streamed before
-      // it, while that thinking (and its round's tools) stayed at the bottom
-      // looking "stuck". With round-aware placement, each round's text stays
-      // inside that round's segment.
+      // WHOLE-SENTENCE TEXT (no mid-sentence cuts): ONE agent round = ONE
+      // LLM message, and a message's content is a single narrative block
+      // that semantically PRECEDES its tool calls — even when the provider
+      // interleaves content deltas and tool_call deltas in the stream
+      // (kilo-auto & friends stream text → tool args → more text). So
+      // same-round text ALWAYS merges into that round's text part (which
+      // renders above the round's tool cards), instead of creating a NEW
+      // text part after the tools. The old behavior split a sentence in
+      // half at the first tool-call delta and rendered the tail BELOW the
+      // tool cards — the "response looks cut" bug. Text in a NEW round (the
+      // model's post-tool narration) still lands at its chronological
+      // position at the end.
       const roundKey = round ?? 0;
       const isThinkingPart = (p: MessagePart) => p.type === "thinking" || p.type === "reasoning";
-      if (last && last.type === "text" && (last.round ?? 0) === roundKey) {
-        // Same round, text after text → continue the same text part.
-        parts[parts.length - 1] = { ...last, content: (last.content ?? "") + text };
-      } else if (last && isThinkingPart(last)) {
-        // Text after thinking/reasoning. If a text part of the SAME round
-        // exists (within-round text → thinking → text interleave), append to
-        // it — it renders in the same round segment, under the round's
-        // thinking header. Otherwise create a NEW part AFTER the thinking
-        // (chronological position; never merge across rounds).
-        let lastTextIdx = -1;
-        for (let i = parts.length - 1; i >= 0; i--) {
-          if (parts[i]!.type === "text") {
-            lastTextIdx = i;
-            break;
-          }
+      // Last text part of the SAME round (search backwards — it may sit
+      // above this round's tool parts).
+      let lastTextIdx = -1;
+      for (let i = parts.length - 1; i >= 0; i--) {
+        if (parts[i]!.type === "text") {
+          lastTextIdx = i;
+          break;
         }
-        if (lastTextIdx >= 0 && (parts[lastTextIdx]!.round ?? 0) === roundKey) {
-          parts[lastTextIdx] = {
-            ...parts[lastTextIdx]!,
-            content: (parts[lastTextIdx]!.content ?? "") + text,
-          };
-        } else {
-          parts.push({ id: newPartId(), type: "text" as const, content: text, round });
-        }
-      } else {
-        // Last part is a DIFFERENT-round text, a tool call, or no parts —
-        // create a NEW text part at the end (post-tool / new-round text).
+      }
+      if (lastTextIdx >= 0 && (parts[lastTextIdx]!.round ?? 0) === roundKey) {
+        // Same round → continue the same text part (whole sentence stays
+        // whole, above the round's tool cards).
+        parts[lastTextIdx] = {
+          ...parts[lastTextIdx]!,
+          content: (parts[lastTextIdx]!.content ?? "") + text,
+        };
+      } else if (
+        lastTextIdx >= 0 &&
+        (parts[lastTextIdx]!.round ?? 0) !== roundKey &&
+        !parts.some((p) => p.type === "tool" && (p.round ?? 0) === roundKey)
+      ) {
+        // Text after a DIFFERENT round's text with no same-round tools yet —
+        // a new round's text at its chronological position (push at end).
         parts.push({ id: newPartId(), type: "text" as const, content: text, round });
+      } else if (
+        lastTextIdx === -1 &&
+        last &&
+        isThinkingPart(last) &&
+        (last.round ?? 0) === roundKey
+      ) {
+        // No text yet this round, thinking/reasoning streaming → new text
+        // part after the thinking (chronological, same round).
+        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
+      } else if (
+        !parts.some((p) => p.type === "tool" && (p.round ?? 0) === roundKey)
+      ) {
+        // No same-round text, no same-round tools → new round's opening
+        // text at the end (after earlier rounds' parts).
+        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
+      } else {
+        // Same round has tool parts but no text part yet — the message
+        // content precedes its tool calls: INSERT the text part ABOVE the
+        // round's first tool part so the sentence renders whole.
+        const insertAt = parts.findIndex(
+          (p) => p.type === "tool" && (p.round ?? 0) === roundKey,
+        );
+        parts.splice(insertAt === -1 ? parts.length : insertAt, 0, {
+          id: newPartId(),
+          type: "text" as const,
+          content: text,
+          round,
+        });
       }
 
       const messages = [...state.messages];

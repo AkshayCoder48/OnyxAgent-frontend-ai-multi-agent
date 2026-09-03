@@ -33,6 +33,7 @@ export function ToolTimeline({
   activeLabel,
   stats,
   className,
+  embedded,
 }: {
   steps: readonly TimelineStep[];
   visibleSteps: number;
@@ -43,30 +44,35 @@ export function ToolTimeline({
   activeLabel: string;
   stats: TimelineStat[];
   className?: string;
+  /** Embedded (e.g. inside the timeline sidebar): hide the collapse trigger
+   *  and always show the trace — the host provides its own header. */
+  embedded?: boolean;
 }) {
   const shown = Math.max(0, Math.min(Math.floor(visibleSteps) || 0, steps.length));
 
   return (
     <div data-slot="tool-timeline" className={cn("max-w-md", className)}>
-      <button
-        type="button"
-        onClick={() => onOpenChange(!open)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
-      >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-            open && "rotate-90",
+      {embedded ? null : (
+        <button
+          type="button"
+          onClick={() => onOpenChange(!open)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
+        >
+          <ChevronRight
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
+              open && "rotate-90",
+            )}
+          />
+          {streaming ? (
+            <ShimmerLabel className="text-sm font-medium">{activeLabel}</ShimmerLabel>
+          ) : (
+            <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
           )}
-        />
-        {streaming ? (
-          <ShimmerLabel className="text-sm font-medium">{activeLabel}</ShimmerLabel>
-        ) : (
-          <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
-        )}
-      </button>
-      <CollapsePanel open={open}>
+        </button>
+      )}
+      <CollapsePanel open={embedded ? true : open}>
         <div className="space-y-1 px-6 pt-1 pb-2">
           {Array.from({ length: shown }, (_, i) => {
             const step = steps[i]!;

@@ -37,28 +37,31 @@ export function SimpleToolTimeline({
   activeLabel,
   filesChanged,
   className,
-}: SimpleToolTimelineProps) {
+  embedded,
+}: SimpleToolTimelineProps & { embedded?: boolean }) {
   return (
     <div data-slot="simple-tool-timeline" className={cn("max-w-md", className)}>
-      <button
-        type="button"
-        onClick={() => onOpenChange(!open)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
-      >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-            open && "rotate-90",
+      {embedded ? null : (
+        <button
+          type="button"
+          onClick={() => onOpenChange(!open)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
+        >
+          <ChevronRight
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
+              open && "rotate-90",
+            )}
+          />
+          {streaming ? (
+            <ShimmerLabel className="text-sm font-medium">{activeLabel}</ShimmerLabel>
+          ) : (
+            <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
           )}
-        />
-        {streaming ? (
-          <ShimmerLabel className="text-sm font-medium">{activeLabel}</ShimmerLabel>
-        ) : (
-          <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
-        )}
-      </button>
-      <CollapsePanel open={open}>
+        </button>
+      )}
+      <CollapsePanel open={embedded ? true : open}>
         <div className="space-y-1 px-6 pt-1 pb-2">
           {steps.map((step, i) => {
             // Only the LAST step can be in flight, and only while streaming.

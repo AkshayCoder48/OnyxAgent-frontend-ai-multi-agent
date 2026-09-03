@@ -8,6 +8,7 @@ import type { LucideIcon } from "lucide-react";
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
 import { useConversationStore, useChatStore } from "@/stores";
 import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display-store";
+import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -553,6 +554,8 @@ function SettingsPanel({
     <div className="space-y-6">
       <ToolDisplayToggle />
 
+      <BackgroundRunToggle />
+
       <div className="space-y-2.5">
         <div className="flex items-baseline justify-between">
           <label htmlFor="chat-temp" className="text-foreground text-sm font-semibold">
@@ -642,6 +645,58 @@ const TOOL_DISPLAY_OPTIONS: {
     hint: "Full detail — tool names, code, diffs, and raw output",
   },
 ];
+
+/** Background runs — when enabled (and an E2B key is configured), agent
+ *  turns execute INSIDE the E2B sandbox as background commands: the work
+ *  continues after the browser is closed, stopped, or minimized, and the
+ *  chat catches up (replays the progress) when the user returns. Persisted
+ *  per browser. */
+function BackgroundRunToggle() {
+  const enabled = useBackgroundRunStore((s) => s.enabled);
+  const setEnabled = useBackgroundRunStore((s) => s.setEnabled);
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-baseline justify-between">
+        <span className="text-foreground text-sm font-semibold">Continue in background</span>
+        <span className="text-foreground/45 text-[10px]">E2B sandbox</span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={() => setEnabled(!enabled)}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-lg border p-2.5 text-left transition-colors",
+          enabled
+            ? "border-primary/40 bg-primary/[0.06]"
+            : "border-foreground/12 hover:border-foreground/25",
+        )}
+      >
+        <span
+          className={cn(
+            "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+            enabled ? "bg-primary" : "bg-foreground/20",
+          )}
+        >
+          <span
+            className={cn(
+              "absolute h-4 w-4 rounded-full bg-background shadow transition-transform",
+              enabled ? "translate-x-4" : "translate-x-0.5",
+            )}
+          />
+        </span>
+        <span className="min-w-0">
+          <span className="text-foreground/80 block text-[12px] leading-tight">
+            Keep working when I close the browser
+          </span>
+          <span className="text-foreground/50 block text-[11px] leading-tight">
+            Turns run inside the E2B sandbox and catch up when you return. Requires an E2B API key — falls back to in-browser turns otherwise.
+          </span>
+        </span>
+      </button>
+    </div>
+  );
+}
 
 /** Tool activity display — how the agent's tool work is shown. "Simple"
  *  retells every tool call as a plain sentence (for people who don't read
