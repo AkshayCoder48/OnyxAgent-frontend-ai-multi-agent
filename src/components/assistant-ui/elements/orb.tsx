@@ -60,7 +60,19 @@ const RING_ONLY: ReadonlySet<string> = new Set(["S3", "S5", "C1", "C2", "C3", "C
 
 const N = 3; // lattice is N×N
 const PITCH = 6; // centre-to-centre spacing in stage px; the dot size is CSS
+const CELL = 4; // dot edge in stage px — kept in sync with .cell in Orb.module.css
 const MID = (N - 1) / 2;
+
+/** The N×N grid spans (N-1)·PITCH + CELL px — 16 of the 28px stage. OFFSET
+ * recenters the grid inside the stage so the dot CLUSTER's visual centre
+ * lands on the glyph BOX's centre. The old top-left-corner placement left
+ * the cluster's centre 6px up-left of the box centre, so any text sharing
+ * an `items-center` row with the orb (the "Thinking" line) centred on the
+ * BOX and ended up ~6px below the dots. Because .lattice scales the whole
+ * coordinate space (--orb-k, origin 0 0), the offset scales with the size —
+ * the cluster stays centred at every rendered size. */
+const GRID_SPAN = (N - 1) * PITCH + CELL; // 16
+const OFFSET = (STAGE - GRID_SPAN) / 2; // 6 — recentring margin
 
 /** Clockwise walk of the lattice perimeter — the track comets run on. */
 const RING: [number, number][] = (() => {
@@ -219,8 +231,8 @@ function latticeCells(v: LatticeVariant): Cell[] {
       const [bx, by] = swirl(x, y, SWIRL);
       cells.push({
         key: x + "," + y,
-        left: x * PITCH,
-        top: y * PITCH,
+        left: OFFSET + x * PITCH,
+        top: OFFSET + y * PITCH,
         delay: cellDelay(v, x, y),
         ax,
         ay,

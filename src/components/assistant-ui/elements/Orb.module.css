@@ -94,13 +94,15 @@
 }
 
 /* Cursor form — the orb flows INLINE with the streaming text, sitting
-   right after the latest generated letter (vertical-align drops the
-   lattice onto the text baseline; line-height 0 keeps it from stretching
-   the line box). */
+   right after the latest generated letter. The lattice is centred in its
+   box, so the box's centre IS the cluster's centre; vertical-align drops
+   the lattice onto the text's x-height zone and line-height 0 keeps it
+   from stretching the line box. margin-left is trimmed because the
+   centred cluster's leading edge sits ~0.21×size inside the box. */
 .cursorInline {
   display: inline-block;
   vertical-align: -0.24em;
-  margin-left: 0.14em;
+  margin-left: 0.07em;
   line-height: 0;
 }
 
