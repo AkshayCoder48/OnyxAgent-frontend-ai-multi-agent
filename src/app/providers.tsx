@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, useEffect, type ReactNode } from "react";
 import { Toaster } from "sonner";
 import { ThemeProvider } from "@/components/theme";
+import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
 
 interface ProvidersProps {
@@ -73,6 +74,7 @@ export function Providers({ children }: ProvidersProps) {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <ColorSchemeInitializer />
+        <ExperimentalUiSync />
         <TooltipProvider>{children}</TooltipProvider>
         <Toaster richColors position="bottom-right" />
       </ThemeProvider>

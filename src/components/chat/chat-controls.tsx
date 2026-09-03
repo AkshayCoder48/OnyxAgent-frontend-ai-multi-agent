@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, ChevronDown, Cpu, Search, Settings2, Sliders } from "lucide-react";
+import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
 import { useConversationStore, useChatStore } from "@/stores";
 import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display-store";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
+import { useExperimentalStore } from "@/stores/experimental-store";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -556,6 +557,8 @@ function SettingsPanel({
 
       <BackgroundRunToggle />
 
+      <ExperimentalSection />
+
       <div className="space-y-2.5">
         <div className="flex items-baseline justify-between">
           <label htmlFor="chat-temp" className="text-foreground text-sm font-semibold">
@@ -695,6 +698,71 @@ function BackgroundRunToggle() {
         </span>
       </button>
     </div>
+  );
+}
+
+/** EXPERIMENTAL — work-in-progress looks we are trying out. One card per
+ *  experiment flag (see `experimental-store.ts`); everything here is
+ *  opt-in, off by default, and safe to flip back at any time. */
+function ExperimentalSection() {
+  return (
+    <div className="border-foreground/10 space-y-2.5 border-t pt-4">
+      <div className="flex items-baseline justify-between">
+        <span className="text-foreground inline-flex items-center gap-1.5 text-sm font-semibold">
+          <FlaskConical className="h-3 w-3" aria-hidden />
+          Experimental
+        </span>
+        <span className="text-foreground/45 text-[10px]">work in progress</span>
+      </div>
+      <GlassButtonsToggle />
+    </div>
+  );
+}
+
+/** Glass buttons — the liquid-glass skin for EVERY button in the app
+ *  (gradient glass fill, animated edge ring, shine sweep, 3D press).
+ *  Colour-aware: follows the light/dark theme and the brand colour.
+ *  Persisted per browser, default OFF. The toggle card itself is a
+ *  button, so flipping it on previews the effect instantly. */
+function GlassButtonsToggle() {
+  const enabled = useExperimentalStore((s) => s.glassButtons);
+  const setEnabled = useExperimentalStore((s) => s.setGlassButtons);
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label="Glass buttons"
+      onClick={() => setEnabled(!enabled)}
+      className={cn(
+        "flex w-full items-center gap-3 rounded-lg border p-2.5 text-left transition-colors",
+        enabled
+          ? "border-primary/40 bg-primary/[0.06]"
+          : "border-foreground/12 hover:border-foreground/25",
+      )}
+    >
+      <span
+        className={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+          enabled ? "bg-primary" : "bg-foreground/20",
+        )}
+      >
+        <span
+          className={cn(
+            "absolute h-4 w-4 rounded-full bg-background shadow transition-transform",
+            enabled ? "translate-x-4" : "translate-x-0.5",
+          )}
+        />
+      </span>
+      <span className="min-w-0">
+        <span className="text-foreground/80 block text-[12px] leading-tight">
+          Glass buttons
+        </span>
+        <span className="text-foreground/50 block text-[11px] leading-tight">
+          Liquid-glass style for every button — follows your theme. Early experiment; toggle off anytime.
+        </span>
+      </span>
+    </button>
   );
 }
 
