@@ -43,6 +43,7 @@ import type {
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { conversationService, settingsService } from "@/lib/services";
+import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
 import { normalizeGenUISentinels } from "@/lib/genui/stream-parser";
 
@@ -475,6 +476,110 @@ function parseDSMLToolCalls(text: string): {
   return { toolCalls, cleanText };
 }
 
+// ---------------------------------------------------------------------------
+// Fenced tool-call parser (```tool_call JSON blocks in TEXT content).
+//
+// Several free-gateway upstreams (freeaixyz4all's toolbaz/ua providers, other
+// OpenAI-compatible gateways) do NOT emit the standard delta.tool_calls SSE
+// chunks. Instead the model writes the tool call as a fenced code block in
+// the plain text stream:
+//
+//   ```tool_call
+//   [{"name":"get_weather","arguments":{"city":"Tokyo"}}]
+//   ```
+//
+// This parser detects the block, converts it into the standard tool_calls
+// shape (arguments stringified like the API would), and strips the block
+// from the visible text. Handles: JSON array or single object, arguments
+// as object OR string, multiple fences, and an unterminated fence (mid-
+// streaming) — everything after the opener is treated as the body.
+// ---------------------------------------------------------------------------
+
+/** A complete fence opener: ```tool_call / ```tool_calls / ```tool-call /
+ *  ```function_call (case-insensitive, optional trailing newline). */
+const FENCE_OPEN_RE = /```(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?/i;
+/** All complete fence blocks (opener … closing ```). */
+const FENCE_FULL_RE = /```(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?([\s\S]*?)```/gi;
+
+function parseFencedToolCalls(text: string): {
+  toolCalls: Array<{ index: number; id: string; name: string; arguments: string }>;
+  cleanText: string;
+} | null {
+  if (!FENCE_OPEN_RE.test(text)) return null;
+
+  const toolCalls: Array<{ index: number; id: string; name: string; arguments: string }> = [];
+  let index = 0;
+
+  const consume = (body: string): void => {
+    const trimmed = body.trim();
+    if (!trimmed) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return; // incomplete/malformed JSON — ignore
+    }
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of arr) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as {
+        name?: string;
+        arguments?: unknown;
+        function?: { name?: string; arguments?: unknown };
+      };
+      const name = obj.name ?? obj.function?.name;
+      if (typeof name !== "string" || !name) continue;
+      const rawArgs = obj.arguments ?? obj.function?.arguments ?? {};
+      const argumentsStr =
+        typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs);
+      toolCalls.push({
+        index: index++,
+        id: `fence_${Date.now()}_${index}`,
+        name,
+        arguments: argumentsStr,
+      });
+    }
+  };
+
+  const fullMatches = [...text.matchAll(FENCE_FULL_RE)];
+  let cleanText: string;
+  if (fullMatches.length > 0) {
+    for (const m of fullMatches) consume(m[1] ?? "");
+    cleanText = text.replace(FENCE_FULL_RE, "").trim();
+  } else {
+    // Unterminated fence (streaming or a provider that never closes it):
+    // the body runs from just after the opener to the end of the text.
+    const open = FENCE_OPEN_RE.exec(text);
+    if (!open || open.index < 0) return null;
+    consume(text.slice(open.index + open[0].length));
+    cleanText = text.slice(0, open.index).trim();
+  }
+
+  if (toolCalls.length === 0) {
+    // A fence exists but nothing parsed yet — report the cleaned text with
+    // zero calls so callers can still strip the raw block from the UI.
+    return { toolCalls, cleanText };
+  }
+  return { toolCalls, cleanText };
+}
+
+/**
+ * While streaming, hold back the tail of the accumulated text if it could be
+ * the START of a tool-call fence opener — e.g. "…answer. ``" or "…```tool_ca".
+ * Returns the index up to which text is safe to render immediately.
+ */
+function fenceSafeEmitIndex(s: string, from: number): number {
+  const lastTick = s.lastIndexOf("```", s.length - 1);
+  if (lastTick === -1 || lastTick < from) return s.length;
+  const tail = s.slice(lastTick + 3).toLowerCase();
+  if (tail === "") return lastTick; // bare "```" — might be the opener start
+  const openers = ["tool_call", "tool_calls", "tool-call", "tool-calls", "function_call", "function_calls"];
+  for (const op of openers) {
+    if (op.startsWith(tail)) return lastTick; // partial keyword match
+  }
+  return s.length; // normal markdown fence (```python etc.) — safe to emit
+}
+
 function extractUsage(chunk: Record<string, unknown>): {
   promptTokens?: number;
   completionTokens?: number;
@@ -586,6 +691,11 @@ async function streamRound(
   // instead of silently dying. Retries are inherently single-flight (this
   // loop is sequential within the turn) and the abort signal is honored
   // during the wait.
+  //
+  // TRANSIENT 5xx RESILIENCE: gateways like freeaixyz4all wrap upstream
+  // failures (e.g. "upstream_error" 502 "The edge runtime does not support
+  // Node.js 'crypto' module") — these are usually TRANSIENT, so we retry
+  // 502/503/504 with the same backoff instead of killing the whole turn.
   const MAX_RATE_LIMIT_RETRIES = 3;
   const parseRetryAfterMs = (resp: Response): number | null => {
     const ra = resp.headers.get("retry-after");
@@ -631,14 +741,16 @@ async function streamRound(
 
     const status = response.status;
     let isRateLimited = status === 429 || status === 529;
-    if (!isRateLimited && status >= 400) {
+    const isTransient5xx = status === 502 || status === 503 || status === 504;
+    if (!isRateLimited && !isTransient5xx && status >= 400) {
       // Some providers/proxies normalize 429 to an error-body with another
       // status — sniff the body BEFORE deciding.
       const text = await response.clone().text().catch(() => "");
       isRateLimited = /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(text);
     }
 
-    if (isRateLimited && rateLimitAttempts < MAX_RATE_LIMIT_RETRIES) {
+    const shouldRetry = isRateLimited || isTransient5xx;
+    if (shouldRetry && rateLimitAttempts < MAX_RATE_LIMIT_RETRIES) {
       rateLimitAttempts += 1;
       const headerMs = parseRetryAfterMs(response);
       const backoffMs = Math.min(1000 * 2 ** (rateLimitAttempts - 1), 8000);
@@ -688,6 +800,12 @@ async function streamRound(
     } catch {
       // ignore
     }
+    // A 404 from an HTML page almost always means the Base URL points at the
+    // site root instead of the API root (the app appends /chat/completions).
+    // Give the user an actionable hint instead of a wall of HTML.
+    if (response.status === 404) {
+      detail = `${detail.slice(0, 200)} — endpoint not found. Check the provider Base URL: the app calls {base}/chat/completions, so gateways like freeaixyz4all need the base "https://freeaixyz4all.vercel.app/api/v1" (not the site root).`;
+    }
     throw new Error(detail);
   }
 
@@ -717,6 +835,13 @@ async function streamRound(
   // Track whether we've already pre-emitted DSML tool calls (from FreeGPT
   // providers that send tool calls as XML text instead of delta.tool_calls).
   let dsmlPreEmitted = false;
+  // FENCE (```tool_call) streaming state — free-gateway upstreams (e.g.
+  // freeaixyz4all's toolbaz/ua providers) write tool calls as fenced JSON in
+  // the TEXT stream. Once the opener is detected, all text from it onward is
+  // swallowed here and parsed into real tool calls after the stream ends.
+  let fenceMode = false;
+  let fencePreEmitted = false;
+  let emittedTextLen = 0; // how much of `content` has been emitted as text_delta
   let finishReason: string | null = null;
   let usage: RoundResult["usage"];
   let aborted = false;
@@ -729,16 +854,64 @@ async function streamRound(
       if (delta) {
         if (delta.text) {
           content += delta.text;
-          // Strip DSML tags from streaming text so the user never sees the
-          // raw <｜｜DSML｜｜...> XML. The tags are parsed into tool_calls
-          // after the stream ends (in the post-stream DSML parser above).
-          const cleanText = delta.text.replace(/<｜｜DSML｜｜[^>]*>/g, "").replace(/<\/｜｜DSML｜｜[^>]*>/g, "");
-          if (cleanText) {
-            emit({
-              type: "text_delta",
-              data: { index: roundIndex, content: cleanText },
-              timestamp: nowISO(),
-            });
+          if (fenceMode) {
+            // Inside a ```tool_call block — swallow the text; the block is
+            // parsed into tool calls after the stream ends.
+            emittedTextLen = content.length;
+          } else {
+            // Check whether the ACCUMULATED content now contains a complete
+            // fence opener (it can span multiple deltas).
+            const fenceOpen = FENCE_OPEN_RE.exec(content);
+            if (fenceOpen && fenceOpen.index >= 0 && fenceOpen.index >= emittedTextLen) {
+              // Emit the visible text between what we've emitted and the
+              // opener start (strip DSML tags like before).
+              const before = content
+                .slice(emittedTextLen, fenceOpen.index)
+                .replace(/<｜｜DSML｜｜[^>]*>/g, "")
+                .replace(/<\/｜｜DSML｜｜[^>]*>/g, "");
+              if (before) {
+                emit({
+                  type: "text_delta",
+                  data: { index: roundIndex, content: before },
+                  timestamp: nowISO(),
+                });
+              }
+              emittedTextLen = fenceOpen.index;
+              fenceMode = true;
+              // Pre-emit a composing card so the user sees tool activity
+              // immediately (same UX as the DSML path).
+              if (!fencePreEmitted) {
+                fencePreEmitted = true;
+                emit({
+                  type: "tool_call",
+                  data: {
+                    tool_name: "tool",
+                    args: { _streaming: "Composing tool call…" } as Record<string, unknown>,
+                    tool_call_id: `fence_composing_${Date.now()}`,
+                    _preemit: true,
+                  },
+                  timestamp: nowISO(),
+                });
+              }
+            } else {
+              // No opener yet — emit the safe prefix, holding back a tail that
+              // could be the START of a fence opener ("``", "```tool_ca"…).
+              const safe = fenceSafeEmitIndex(content, emittedTextLen);
+              if (safe > emittedTextLen) {
+                const chunkText = content
+                  .slice(emittedTextLen, safe)
+                  .replace(/<｜｜DSML｜｜[^>]*>/g, "")
+                  .replace(/<\/｜｜DSML｜｜[^>]*>/g, "");
+                if (chunkText) {
+                  emit({
+                    type: "text_delta",
+                    data: { index: roundIndex, content: chunkText },
+                    timestamp: nowISO(),
+                  });
+                }
+                emittedTextLen = safe;
+              }
+            }
           }
           // REAL-TIME DSML DETECTION: When we detect the DSML tool_calls
           // open tag in the accumulated content, try to parse any complete
@@ -908,6 +1081,34 @@ async function streamRound(
     const dsmlResult = parseDSMLToolCalls(content);
     if (dsmlResult) {
       content = dsmlResult.cleanText;
+    }
+  }
+
+  // FENCE PARSER: free-gateway upstreams (freeaixyz4all's toolbaz/ua
+  // providers) don't emit delta.tool_calls — the model writes the call as a
+  // ```tool_call fenced JSON block in the TEXT. Convert it into real tool
+  // calls (same contract as the DSML parser above) and strip the block.
+  if (toolCalls.length === 0) {
+    const fenceResult = parseFencedToolCalls(content);
+    if (fenceResult && fenceResult.toolCalls.length > 0) {
+      content = fenceResult.cleanText;
+      for (const tc of fenceResult.toolCalls) {
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.arguments) as Record<string, unknown>;
+        } catch {
+          args = { _raw: tc.arguments };
+        }
+        toolCalls.push({ id: tc.id, name: tc.name, args });
+      }
+      if (!finishReason) finishReason = "tool_calls";
+    }
+  } else {
+    // Even with standard tool_calls, strip any leaked ```tool_call blocks
+    // from the text content (some providers mix formats).
+    const fenceResult = parseFencedToolCalls(content);
+    if (fenceResult) {
+      content = fenceResult.cleanText;
     }
   }
 
@@ -1117,7 +1318,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
       // but also when forceLocal was true (also correct), however the ternary
       // returned null in both cases which masked fetch errors.
       const decryptedKey = (!sandboxApiKey && !forceLocal)
-        ? await settingsService.getDecryptedSandboxKey(opts.userId)
+        ? await getEffectiveE2BKey(opts.userId)
         : null;
       const decryptedEnv = envVars === undefined
         ? await settingsService.getDecryptedEnvVars(opts.userId)

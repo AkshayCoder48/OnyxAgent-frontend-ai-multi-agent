@@ -1209,10 +1209,17 @@ export const settingsService = {
   },
 
   /** Decrypt + return the E2B sandbox API key, or null if none is stored.
-   *  Tries to restore the vault from session before decrypting. */
+   *  Tries to restore the vault from session before decrypting. Falls back
+   *  to the legacy localStorage copy (kept in sync by the API-keys settings
+   *  page) when the vault is unavailable — without this, a locked vault
+   *  silently disabled the "Continue in background" feature. */
   async getDecryptedSandboxKey(userId: string): Promise<string | null> {
+    const legacyLocal =
+      typeof window !== "undefined" ? window.localStorage.getItem("e2b_api_key") : null;
     const row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row || !row.e2b_api_key_encrypted) return null;
+    if (!row || !row.e2b_api_key_encrypted) {
+      return legacyLocal ?? null;
+    }
     try {
       // Try to restore vault from session if not already unlocked.
       if (!isVaultUnlocked()) {
@@ -1221,7 +1228,7 @@ export const settingsService = {
       }
       return await vaultDecrypt(row.e2b_api_key_encrypted);
     } catch {
-      return null;
+      return legacyLocal ?? null;
     }
   },
 

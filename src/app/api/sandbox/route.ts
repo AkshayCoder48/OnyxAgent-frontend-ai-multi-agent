@@ -441,7 +441,23 @@ async function createAndCacheSandbox(
     // see them too. Per-execution envs (commands.run / runCode opts) are the
     // always-fresh authoritative source — this create-time set is a
     // best-effort baseline for connected sandboxes.
-    sandbox = await Sandbox.create({ apiKey, timeoutMs: 3_600_000, envs }); // 1 hour (E2B max)
+    //
+    // LIFECYCLE (background-turn critical): onTimeout "pause" + autoResume.
+    // Without this E2B's default KILLS the sandbox when its timeout expires —
+    // including any background agent job running inside it. With it, the
+    // sandbox auto-PAUSES at timeout (full memory + filesystem preserved,
+    // background processes frozen mid-flight) and any later Sandbox.connect
+    // (e.g. the bg_status poll when the user reopens the app) AUTO-RESUMES it,
+    // continuing the job exactly where it froze. Verified live against E2B:
+    // a paused sandbox's background pulse process resumed with a single gap
+    // covering the pause window. (Hobby plan: 1h max continuous runtime; the
+    // limit RESETS after each pause/resume cycle.)
+    sandbox = await Sandbox.create({
+      apiKey,
+      timeoutMs: 3_600_000, // 1 hour (E2B Hobby max continuous runtime)
+      envs,
+      lifecycle: { onTimeout: "pause", autoResume: true },
+    });
   } catch (createErr) {
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
@@ -453,7 +469,12 @@ async function createAndCacheSandbox(
       sharedCache.clear();
       separateCache.clear();
       // Retry the create — should succeed now that the account has 0 sandboxes.
-      sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000, envs });
+      sandbox = await Sandbox.create({
+        apiKey,
+        timeoutMs: 3_600_000,
+        envs,
+        lifecycle: { onTimeout: "pause", autoResume: true },
+      });
     } else {
       throw createErr;
     }
@@ -600,6 +621,30 @@ interface RequestBody {
   sandboxId?: string | null;
 }
 
+/** Sentinel the client sends when the user has no key stored locally but
+ *  the server reported E2B_API_KEY is set in the environment (see GET).
+ *  The REAL key never leaves the server — the client only ever holds this
+ *  placeholder. */
+const ENV_KEY_SENTINEL = "USE_SERVER_ENV";
+
+function resolveApiKey(clientKey: unknown): string {
+  const k = typeof clientKey === "string" ? clientKey.trim() : "";
+  // Real client-held key (vault/localStorage) wins.
+  if (k && k !== ENV_KEY_SENTINEL) return k;
+  // Otherwise fall back to the server's env key when configured.
+  const envKey = process.env.E2B_API_KEY?.trim();
+  if (envKey) return envKey;
+  // Neither — return whatever we got so the SDK surfaces a proper error.
+  return k;
+}
+
+// GET — capability probe: does the server have E2B_API_KEY configured?
+// The client uses this to enable sandbox features (background turns, file
+// tools) without the key ever crossing the wire.
+export async function GET(): Promise<NextResponse> {
+  return NextResponse.json({ hasEnvKey: !!process.env.E2B_API_KEY?.trim() });
+}
+
 export async function POST(req: NextRequest) {
   let body: RequestBody;
   try {
@@ -608,7 +653,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { apiKey, action, args = {}, conversationId = null, sandboxMode = "shared", sandboxId: clientSandboxId } = body;
+  const { action, args = {}, conversationId = null, sandboxMode = "shared", sandboxId: clientSandboxId } = body;
+
+  // Resolve the E2B key: client-held key → server env fallback.
+  const apiKey = resolveApiKey(body.apiKey);
 
   if (!apiKey) {
     return NextResponse.json({ error: "Missing apiKey" }, { status: 401 });

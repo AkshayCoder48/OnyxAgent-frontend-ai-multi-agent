@@ -67,7 +67,7 @@ const KEY_ROWS: KeyRowConfig[] = [
       </>
     ),
     placeholder: "e2b_…",
-    clearable: false,
+    clearable: true,
   },
   {
     field: "langsearch",
@@ -223,7 +223,20 @@ export default function ApiKeysSettingsPage() {
     if (!user) return;
     setSavingField(field);
     try {
-      if (field === "skillsmp") {
+      if (field === "e2b") {
+        await settingsService.setSandboxKey(user.id, null);
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem("e2b_api_key");
+        }
+        try {
+          const { evictAllE2BClients } = await import("@/lib/e2b/client");
+          evictAllE2BClients();
+        } catch {
+          // best-effort — the next turn re-reads the key anyway
+        }
+        setHasKey((h) => ({ ...h, e2b: false }));
+        toast.success("E2B key cleared — sandbox features fall back to the server key when configured");
+      } else if (field === "skillsmp") {
         await settingsService.setSkillsMPApiKey(user.id, null);
         setHasKey((h) => ({ ...h, skillsmp: false }));
         setValue("skillsmp", "");

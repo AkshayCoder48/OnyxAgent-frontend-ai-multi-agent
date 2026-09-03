@@ -8,6 +8,7 @@ import {
   type AgentTurnOptions,
 } from "@/lib/agent/runtime";
 import { aiProviderService, settingsService } from "@/lib/services";
+import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { useChatStore, useAuthStore } from "@/stores";
 import type {
   AskUserAnswer,
@@ -846,6 +847,20 @@ export function useChat(options: UseChatOptions = {}) {
                   (t.id.startsWith("dsml_") || t.id.startsWith("pending-")),
               );
             }
+            if (!existingTc) {
+              // Composing cards (name "tool") from the FENCE (```tool_call) and
+              // DSML open-tag detectors: the real name only exists AFTER the
+              // post-stream parse, so these placeholder-prefix cards are
+              // rebound by prefix + pending status, not by name. Only the
+              // composing_* prefixes match — real fence_ ids belong to their
+              // own cards and must never be name/prefix-hijacked.
+              existingTc = msg?.toolCalls?.find(
+                (t) =>
+                  t.status === "pending" &&
+                  (t.id.startsWith("fence_composing_") ||
+                    t.id.startsWith("dsml_composing_")),
+              );
+            }
             if (!existingTc && (!tool_name || tool_name === "tool" || tool_name.startsWith("pending-"))) {
               // The incoming event is itself a placeholder pre-emit — it may
               // adopt any still-pending placeholder card.
@@ -1033,6 +1048,17 @@ export function useChat(options: UseChatOptions = {}) {
             } else {
               updateMessage(id, (msg) => ({ ...msg, content: msg.content + errText }));
             }
+            updateMessage(id, (msg) => ({ ...msg, isStreaming: false }));
+          } else {
+            // NO streaming message exists — the turn failed before the first
+            // model_request_start (e.g. the very first LLM request 4xx'd:
+            // "You have reached the maximum prompt length limit", 404 from a
+            // wrong base URL, 401 bad key…). Create the assistant message NOW
+            // so the error is VISIBLE in the chat instead of silently
+            // vanishing ("the app did nothing" — the invisible-error bug).
+            const { message } = wsEvent.data as { message: string };
+            const errText = `❌ Error: ${message || "Unknown error"}`;
+            const id = createNewMessage(errText);
             updateMessage(id, (msg) => ({ ...msg, isStreaming: false }));
           }
           setIsProcessing(false);
@@ -1334,7 +1360,7 @@ export function useChat(options: UseChatOptions = {}) {
       if (useBackgroundRunStore.getState().enabled) {
         let e2bKey: string | null = null;
         try {
-          e2bKey = await settingsService.getDecryptedSandboxKey(userId);
+          e2bKey = await getEffectiveE2BKey(userId);
         } catch {
           e2bKey = null;
         }
@@ -1549,7 +1575,7 @@ export function useChat(options: UseChatOptions = {}) {
       if (!userId || cancelled) return;
       let e2bKey: string | null = null;
       try {
-        e2bKey = await settingsService.getDecryptedSandboxKey(userId);
+        e2bKey = await getEffectiveE2BKey(userId);
       } catch {
         return;
       }

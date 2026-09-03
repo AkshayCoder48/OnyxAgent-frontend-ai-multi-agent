@@ -236,6 +236,104 @@ const TOOLS = [
 ];
 
 // ── The agent loop ──────────────────────────────────────────────────────
+// Text-embedded tool-call normalizers. Some gateway upstreams (freeaixyz4all's
+// toolbaz/ua providers) return tool calls INSIDE message.content as a fenced
+// code block:
+//   ~~~tool_call
+//   [{"name":"get_weather","arguments":{"city":"Tokyo"}}]
+//   ~~~
+// (where ~~~ stands for three backticks). Others use DeepSeek-style DSML XML
+// tags. Both are converted here into the standard message.tool_calls shape so
+// the loop below is format-agnostic.
+// NOTE: backticks are written as \x60 (their char code) in the regexes
+// below because this whole script is embedded inside a backtick-delimited
+// template literal — a literal backtick would terminate it.
+const FENCE_OPEN = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?/i;
+const FENCE_FULL = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?([\s\S]*?)[\x60]{3}/gi;
+
+function parseFenceCalls(text) {
+  if (!FENCE_OPEN.test(text)) return null;
+  const calls = [];
+  const consume = (body) => {
+    const trimmed = String(body ?? "").trim();
+    if (!trimmed) return;
+    let parsed;
+    try { parsed = JSON.parse(trimmed); } catch { return; }
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    for (const it of arr) {
+      if (!it || typeof it !== "object") continue;
+      const name = it.name ?? (it.function && it.function.name);
+      if (typeof name !== "string" || !name) continue;
+      let args = it.arguments ?? (it.function && it.function.arguments) ?? {};
+      if (args && typeof args === "object") args = JSON.stringify(args);
+      calls.push({ id: "fence_" + calls.length + "_" + Date.now(), type: "function", function: { name, arguments: String(args ?? "") } });
+    }
+  };
+  let clean;
+  const full = [...text.matchAll(FENCE_FULL)];
+  if (full.length) {
+    for (const m of full) consume(m[1]);
+    clean = text.replace(FENCE_FULL, "").trim();
+  } else {
+    const open = FENCE_OPEN.exec(text);
+    if (!open) return null;
+    consume(text.slice(open.index + open[0].length));
+    clean = text.slice(0, open.index).trim();
+  }
+  if (!calls.length) return null;
+  return { calls, clean };
+}
+
+function parseDSMLCalls(text) {
+  if (!text.includes("DSML")) return null;
+  const blockRe = /<｜｜DSML｜｜tool_calls>([\s\S]*?)(?:<\/｜｜DSML｜｜tool_calls>|$)/;
+  const m = blockRe.exec(text);
+  if (!m) return null;
+  const calls = [];
+  const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)">([\s\S]*?)(?:<\/｜｜DSML｜｜invoke>|$)/g;
+  let im;
+  while ((im = invokeRe.exec(m[1])) !== null) {
+    const args = {};
+    const paramRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+    let pm;
+    while ((pm = paramRe.exec(im[2])) !== null) args[pm[1]] = pm[2].trim();
+    calls.push({ id: "dsml_" + calls.length + "_" + Date.now(), type: "function", function: { name: im[1], arguments: JSON.stringify(args) } });
+  }
+  if (!calls.length) return null;
+  return { calls, clean: (text.slice(0, m.index) + (m[0].endsWith("</｜｜DSML｜｜tool_calls>") ? text.slice(blockRe.lastIndex) : "")).trim() };
+}
+
+/** Normalize a provider message: extract text-embedded tool calls (fence /
+ *  DSML) into the standard tool_calls array and strip them from content. */
+function normalizeMessage(msg) {
+  let toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  const content = String(msg.content ?? "");
+  let clean = content;
+  if (toolCalls.length === 0 && content) {
+    const fence = parseFenceCalls(content);
+    if (fence) { toolCalls = fence.calls; clean = fence.clean; }
+    else {
+      const dsml = parseDSMLCalls(content);
+      if (dsml) { toolCalls = dsml.calls; clean = dsml.clean; }
+    }
+  } else if (content) {
+    // Standard tool_calls present — still strip any leaked embedded blocks.
+    const fence = parseFenceCalls(content);
+    if (fence) clean = fence.clean;
+    else {
+      const dsml = parseDSMLCalls(content);
+      if (dsml) clean = dsml.clean;
+    }
+  }
+  return { ...msg, content: clean, tool_calls: toolCalls };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Call the LLM with retries — gateway upstreams flap (502 "edge runtime
+ *  crypto" errors, 503 UPSTREAM_UNAVAILABLE, network blips) and a single
+ *  transient failure must NOT kill the whole background run. 5xx/429/network
+ *  errors retry up to 4 times with exponential backoff; 4xx fails fast. */
 async function callLLM(state) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
@@ -246,21 +344,38 @@ async function callLLM(state) {
     temperature: p.temperature ?? 0.7,
   };
   if (state.toolsEnabled !== false) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!res.ok) {
+
+  const MAX_ATTEMPTS = 4;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (e) {
+      lastErr = new Error("LLM network error: " + String(e?.message ?? e));
+      if (attempt < MAX_ATTEMPTS) { await sleep(2000 * attempt); continue; }
+      throw lastErr;
+    }
+    if (res.ok) {
+      const json = await res.json();
+      return normalizeMessage(json.choices?.[0]?.message ?? {});
+    }
     const detail = await res.text().catch(() => "");
-    throw new Error("LLM HTTP " + res.status + " " + cap(detail, 500));
+    lastErr = new Error("LLM HTTP " + res.status + " " + cap(detail, 500));
+    const retryable = res.status >= 500 || res.status === 429;
+    if (retryable && attempt < MAX_ATTEMPTS) { await sleep(2000 * attempt); continue; }
+    throw lastErr;
   }
-  const json = await res.json();
-  return json.choices?.[0]?.message ?? {};
+  throw lastErr ?? new Error("LLM call failed after retries");
 }
 
 async function main() {

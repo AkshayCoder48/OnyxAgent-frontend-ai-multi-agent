@@ -166,7 +166,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         } catch {
           unreachableCount++;
           if (unreachableCount >= MAX_UNREACHABLE_POLLS) {
-            emit("error", { message: "The background run became unreachable on E2B." });
+            emit("error", { message: "Lost the connection to the background sandbox on E2B (network error). The job itself is unaffected — reopening or reloading this page reconnects and resumes it." });
             clearJob(assistantMessageId);
             ctx.onFinished();
             return;
@@ -176,7 +176,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         if (status.status === "unreachable") {
           unreachableCount++;
           if (unreachableCount >= MAX_UNREACHABLE_POLLS) {
-            emit("error", { message: status.error ?? "Background sandbox unreachable." });
+            emit("error", { message: status.error ?? "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically." });
             clearJob(assistantMessageId);
             ctx.onFinished();
             return;
