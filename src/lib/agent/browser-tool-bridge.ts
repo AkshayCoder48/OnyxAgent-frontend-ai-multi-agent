@@ -35,17 +35,27 @@ export interface BrowserToolCall {
   userId: string;
   /** Provider API key (some tools read ctx.aiApiKey). */
   aiApiKey?: string | null;
-  /** Tool call id from the model. */
+  /** Tool call id from the model. NOTE: some gateways (kilo-auto and
+   *  friends) reuse ids like "call_0_0" across rounds — the id is NOT
+   *  unique per call, which is why the dedup key uses eventSeq. */
   callId: string;
   name: string;
   args: Record<string, unknown>;
+  /** The browser_tool_call EVENT's seq — unique + monotonic per run, used
+   *  as the dedup key (the call id alone collides across rounds). */
+  eventSeq?: number;
   /** The WSEvent pipeline (same emit the in-browser runtime uses). */
   emit: (e: WSEvent) => void;
   signal?: AbortSignal;
 }
 
-function bridgeDoneKey(call: { runId?: string; sandboxId: string; callId: string }): string {
-  return (call.runId ? call.runId + ":" : call.sandboxId + ":") + call.callId;
+function bridgeDoneKey(call: { runId?: string; sandboxId: string; callId: string; name: string; eventSeq?: number }): string {
+  // Prefer the EVENT SEQ (unique per run — gateways reuse tool-call ids like
+  // "call_0_0" across rounds, so runId+callId alone collides and wrongly
+  // skipped later calls). Fallback for seq-less events: id + name.
+  const scope = call.runId ?? call.sandboxId;
+  if (typeof call.eventSeq === "number") return scope + ":s" + call.eventSeq;
+  return scope + ":" + call.callId + ":" + call.name;
 }
 
 /** Reload-safe dedup: consumeRun replays events from seq 0 after a reload, so

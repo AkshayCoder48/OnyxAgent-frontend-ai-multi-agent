@@ -178,7 +178,9 @@ async function consumeRun(ctx: {
             // tool to this browser. Fire-and-forget: NEVER block the replay
             // loop (a long ask_user wait must not stall event consumption —
             // the runner serializes tool ordering on its side). Reload-safe
-            // dedup lives inside handleBrowserToolCall (localStorage marks).
+            // dedup lives inside handleBrowserToolCall (localStorage marks,
+            // keyed by the EVENT SEQ — gateways like kilo-auto reuse tool-call
+            // ids such as call_0_0 across rounds, so the id alone collides).
             void handleBrowserToolCall({
               e2bApiKey,
               sandboxId: job.sandboxId,
@@ -189,6 +191,7 @@ async function consumeRun(ctx: {
               callId: String(ev.id ?? ""),
               name: String(ev.name ?? ""),
               args: (ev.args ?? {}) as Record<string, unknown>,
+              eventSeq: typeof ev.seq === "number" ? ev.seq : undefined,
               emit: bridgeEmit,
               signal: ctx.bridgeAbort?.signal,
             }).catch(() => {
