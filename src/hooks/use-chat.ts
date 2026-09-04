@@ -230,19 +230,19 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   // ── STREAMING BUFFERS ──────────────────────────────────────────────
-  // Every delta type is buffered + flushed on a timer so React doesn't
-  // re-render the whole message tree on every single token. Previously
-  // text_delta had NO batching (0ms) which caused "4 lines at once",
-  // stuttering, and full app freezes on long responses. Now every delta
-  // type goes through the same buffer+flush pattern.
+  // Buffers exist ONLY to collapse same-tick delivery batches into one React
+  // render pass (each bg_wait poll delivers a burst of token-level events;
+  // flushing them one-by-one would re-render the message tree per TOKEN).
+  // They NEVER delay content beyond the next tick:
   //
-  //   text_delta      → 30ms  (real-time feel, ~33 updates/sec)
-  //   thinking_delta  → 100ms (less critical, heavier markdown)
-  //   reasoning_delta → 100ms
-  //   tool_call_delta → 30ms  (args streaming)
+  //   text_delta      → 1ms   (flush on the very next tick)
+  //   thinking_delta  → 16ms  (~60fps live reasoning)
+  //   reasoning_delta → 16ms  (~60fps live reasoning)
+  //   tool_call_delta → 16ms  (args streaming)
   //
-  // 30ms is the sweet spot: feels instant to humans (film is 24fps / 41ms)
-  // but lets React batch 3-5 SSE tokens into a single render pass.
+  // The delay is a RENDER-scheduling detail, not content batching: whatever
+  // arrived in a poll burst appears together in the next frame, and nothing
+  // waits for a sentence/paragraph/response boundary.
   const textDeltaBuffer = useRef<string>("");
   const textDeltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Origin timestamp of the FIRST delta in the current text buffer (runner
@@ -602,9 +602,10 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "thinking_delta": {
-          // Reasoning trace — batch like text deltas to prevent lag.
-          // GENERATION GUARD: same as text_delta — drop stale, NO fallback
-          // createNewMessage (prevents phantom thinking bars).
+          // Reasoning trace — 16ms flush (one React render per delivery
+          // batch, ~60fps live thinking). GENERATION GUARD: same as
+          // text_delta — drop stale, NO fallback createNewMessage
+          // (prevents phantom thinking bars).
           if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const d = wsEvent.data as { index: number; content: string; ts?: number };
@@ -619,7 +620,7 @@ export function useChat(options: UseChatOptions = {}) {
                     thinkingAtRef.current = null;
                   }
                   thinkingTimer.current = null;
-                }, 100); // 100ms batch for thinking
+                }, 16); // 16ms — one render per delivery batch (~60fps)
               }
             }
           }
@@ -627,8 +628,9 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         case "reasoning_delta": {
-          // DeepSeek/Moonshot/g4f-style reasoning — batch to prevent lag.
-          // GENERATION GUARD: same as text_delta — drop stale, NO fallback.
+          // DeepSeek/Moonshot/g4f-style reasoning — 16ms flush like thinking
+          // so the panel streams live. GENERATION GUARD: same as text_delta
+          // — drop stale, NO fallback.
           if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
             const d = wsEvent.data as { index: number; content: string; ts?: number };
@@ -643,7 +645,7 @@ export function useChat(options: UseChatOptions = {}) {
                     reasoningAtRef.current = null;
                   }
                   reasoningTimer.current = null;
-                }, 100);
+                }, 16); // 16ms — one render per delivery batch (~60fps)
               }
             }
           }

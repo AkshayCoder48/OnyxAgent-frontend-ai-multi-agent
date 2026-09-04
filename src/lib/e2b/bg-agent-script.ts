@@ -17,8 +17,8 @@
  *      multibyte UTF-8, [DONE] handling, idle watchdog).
  *   2. Fine-grained events: `reasoning_delta` / `text_delta` /
  *      `tool_call_delta` / `tool_call` / `tool_result` / `status` / `done` /
- *      `error`, batched at 60ms (text) / 100ms (reasoning) — never the full
- *      response in one event.
+ *      `error`, emitted 1:1 with each upstream SSE delta (NO coalescing —
+ *      the provider's native chunk granularity flows through unchanged).
  *   3. A LIVE think-region router mirrors the in-browser runtime: models
  *      that think inside `content` (think tags, or the "Reasoning: …
  *      Answer: …" prefix style) stream into reasoning_delta WHILE the
@@ -120,51 +120,23 @@ async function setTerminal(status, contentOrError) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ── DeltaBatcher: small latency-oriented accumulator ────────────────────
-// Deltas coalesce for at most minMs (60ms text / 100ms reasoning) or until
-// maxChars — then flush. NEVER holds the whole response.
-class DeltaBatcher {
-  constructor(minMs, maxChars, flush) {
-    this.minMs = minMs;
-    this.maxChars = maxChars;
-    this.flush = flush;
-    this.buf = "";
-    this.timer = null;
-  }
-  push(s) {
-    if (!s) return;
-    this.buf += s;
-    if (this.buf.length >= this.maxChars) {
-      this._flushNow();
-      return;
-    }
-    if (!this.timer) {
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        this._flushNow();
-      }, this.minMs);
-    }
-  }
-  _flushNow() {
-    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    const out = this.buf;
-    this.buf = "";
-    if (out) {
-      try { this.flush(out); } catch {}
-    }
-  }
-  async settle() {
-    this._flushNow();
-    await emitChain; // wait for the last append to land
-  }
-}
+// ── Delta emitters: TOKEN-FAITHFUL pass-through ───────────────────────
+// The previous DeltaBatcher (60ms/400c text, 100ms/500c reasoning) coalesced
+// the upstream's word-level SSE bursts into sentence/paragraph-sized events
+// — the root cause of "paragraph at once" streaming. There is now ZERO
+// coalescing on the text/reasoning path: each extracted SSE delta becomes
+// an event the moment it arrives. (No render-spam risk: delivery batches
+// events per bg_wait poll and the frontend flushes once per batch.)
+// Each appendFile is one atomic line write; the chain keeps STRICT call
+// order in the log (seq == file order). settle = await emitChain.
 
 // ── Live think-region router ────────────────────────────────────────────
 // Models that think INSIDE content. Two shapes:
 //   A) Tag regions:  … 
 //      Text before the opener streams as text; the region streams as
-//      reasoning_delta LIVE; the closer returns to text mode. A 24-char
-//      tail is held back while streaming so a split tag isn't cut in half.
+//      reasoning_delta LIVE; the closer returns to text mode. The tail is
+//      held ONLY while it could still become a (split) tag — exact prefix
+//      matching, so a tail with no tag prefix emits immediately.
 //   B) Prefix style: the round's first text starts with "Reasoning:" — all
 //      text is held until an "Answer:"-family marker; pre-marker text
 //      streams as reasoning, post-marker as text. If the stream ends with
@@ -172,7 +144,22 @@ class DeltaBatcher {
 const THINK_OPEN_RE = /<(?:think|thinking|thought|reasoning)>/i;
 const THINK_CLOSE_RE = /<\/(?:think|thinking|thought|reasoning)>/i;
 const ANSWER_MARK_RE = /(?:^|\n)[ \t]*(?:final[ \t]+)?(?:answer|response|conclusion|result)[ \t]*[:\-\u2013]\s*/i;
-const HOLD = 24; // chars held back while streaming (partial tag protection)
+const OPEN_TAGS = ["<think>", "<thinking>", "<thought>", "<reasoning>"];
+const CLOSE_TAGS = ["</think>", "</thinking>", "</thought>", "</reasoning>"];
+const MAX_TAG_LEN = 12; // "</reasoning>" — the longest possible tag
+/** Hold-back length for a buffer tail: 0 unless the tail is a PREFIX of a
+ *  known tag (e.g. "<thi", "</rea") — split-tag protection without the old
+ *  blanket 24-char lag that merged word-level deltas into paragraphs. */
+function tagPrefixHold(buf, tags) {
+  const tail = buf.slice(Math.max(0, buf.length - MAX_TAG_LEN));
+  const lt = tail.lastIndexOf("<");
+  if (lt === -1) return 0;
+  const suf = tail.slice(lt).toLowerCase();
+  for (const t of tags) {
+    if (t.startsWith(suf)) return suf.length;
+  }
+  return 0;
+}
 
 class ThinkRouter {
   constructor() {
@@ -196,8 +183,10 @@ class ThinkRouter {
         this.mode = "text";
         this._drainText(onText, onThink);
       } else {
-        // stay in think mode — emit everything except the hold-back tail
-        const safeLen = Math.max(0, this.buf.length - HOLD);
+        // stay in think mode — emit everything except a tail that could
+        // still become a split close tag (exact prefix match, no blanket lag)
+        const hold = tagPrefixHold(this.buf, CLOSE_TAGS);
+        const safeLen = this.buf.length - hold;
         if (safeLen > 0) {
           onThink(this.buf.slice(0, safeLen));
           this.buf = this.buf.slice(safeLen);
@@ -205,12 +194,22 @@ class ThinkRouter {
       }
       return;
     }
-    // text mode — prefix decision first (needs 14 trimmed chars)
+    // text mode — prefix decision first. Fast path: anything not starting
+    // with "r/R" can NEVER be the "Reasoning:" prefix style — decide
+    // immediately (zero hold). Only an "r…" start needs the 14-char window.
     if (!this.decided) {
       const trimmed = this.buf.trimStart();
-      if (trimmed.length < 14) return; // hold — not enough to decide
-      this.decided = true;
-      this.prefix = /^reasoning\b\s*[:\-\u2013]/i.test(trimmed);
+      if (trimmed.length === 0) return;
+      const c = trimmed[0].toLowerCase();
+      if (c !== "r") {
+        this.decided = true;
+        this.prefix = false;
+      } else if (trimmed.length < 14) {
+        return; // "r…" start — hold a few more chars to decide
+      } else {
+        this.decided = true;
+        this.prefix = /^reasoning\b\s*[:\-\u2013]/i.test(trimmed);
+      }
     }
     if (this.prefix) {
       const mark = ANSWER_MARK_RE.exec(this.buf);
@@ -244,21 +243,13 @@ class ThinkRouter {
       }
       return;
     }
-    // hold back a tail that could be a split tag opener ("<th", "<thi"…)
-    const safe = this._safeEmitLen(this.buf);
+    // hold back a tail that could be a split tag opener ("<th", "<thi"…) —
+    // exact prefix match, so ordinary prose with "<" still emits immediately
+    const safe = this.buf.length - tagPrefixHold(this.buf, OPEN_TAGS);
     if (safe > 0) {
       onText(this.buf.slice(0, safe));
       this.buf = this.buf.slice(safe);
     }
-  }
-  /** How much of the buffer can be emitted without cutting a possible
-   *  partial tag opener. Everything after the last "<" (when near the end)
-   *  is held; a "<" far from the end is prose. */
-  _safeEmitLen(buf) {
-    const lt = buf.lastIndexOf("<");
-    if (lt === -1) return buf.length;
-    if (buf.length - lt < HOLD) return lt;
-    return buf.length;
   }
   /** End of stream: flush every hold as its current mode's kind. */
   finish(onText, onThink) {
@@ -482,9 +473,9 @@ async function streamRoundEvents(state, round) {
   };
   if (state.toolsEnabled !== false) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
 
-  // Batcher-backed emitters (fire-and-forget; settle() awaits at round end).
-  const textBatch = new DeltaBatcher(60, 400, (d) => { emitEvent({ t: "text_delta", round, content: d }); });
-  const reasonBatch = new DeltaBatcher(100, 500, (d) => { emitEvent({ t: "reasoning_delta", round, content: d }); });
+  // Pass-through emitters (1:1 with the provider's native SSE deltas).
+  const emitTextDelta = (d) => { if (d) emitEvent({ t: "text_delta", round, content: d }); };
+  const emitReasonDelta = (d) => { if (d) emitEvent({ t: "reasoning_delta", round, content: d }); };
 
   let content = "";      // visible text (post router; includes fence text)
   let reasoning = "";    // reasoning text (all sources)
@@ -519,7 +510,7 @@ async function streamRoundEvents(state, round) {
         // (content already includes every chunk received so far).
         bareMode = false;
         content = accHold;
-        textBatch.push(accHold);
+        emitTextDelta(accHold);
         emittedLen = accHold.length;
         return;
       }
@@ -529,20 +520,20 @@ async function streamRoundEvents(state, round) {
     const open = FENCE_OPEN.exec(acc);
     if (open && open.index >= emittedLen) {
       const before = acc.slice(emittedLen, open.index);
-      if (before) textBatch.push(before);
+      if (before) emitTextDelta(before);
       emittedLen = acc.length;
       content = acc;
       fenceMode = true;
       return;
     }
     content = acc;
-    textBatch.push(chunkText);
+    emitTextDelta(chunkText);
     emittedLen = content.length;
   };
   const onThink = (chunkThink) => {
     if (!chunkThink) return;
     reasoning += chunkThink;
-    reasonBatch.push(chunkThink);
+    emitReasonDelta(chunkThink);
   };
 
   const markFirstToken = () => {
@@ -557,7 +548,7 @@ async function streamRoundEvents(state, round) {
     if (d.reasoning) {
       markFirstToken();
       reasoning += d.reasoning;
-      reasonBatch.push(d.reasoning);
+      emitReasonDelta(d.reasoning);
     }
     if (d.text) {
       markFirstToken();
@@ -601,13 +592,12 @@ async function streamRoundEvents(state, round) {
         toolAcc.set(toolAcc.size, { id: "bare_" + Date.now(), name: bare.name, args: bare.argsStr });
         content = "";
       } else {
-        textBatch.push(content);
+        emitTextDelta(content);
         emittedLen = content.length;
       }
       bareMode = false;
     }
-    await textBatch.settle();
-    await reasonBatch.settle();
+    await emitChain; // wait for the last append to land
     // Finalize accumulated tool calls (parse args JSON).
     const calls = [];
     for (const [idx, tc] of toolAcc) {
@@ -628,8 +618,8 @@ async function streamRoundEvents(state, round) {
   };
 
   const resetForRetry = () => {
-    textBatch._flushNow();
-    reasonBatch._flushNow();
+    // Pass-through emitters hold nothing — retries never duplicate deltas
+    // (retry loop only runs BEFORE any content arrived).
     content = "";
     reasoning = "";
     emittedLen = 0;

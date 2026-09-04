@@ -653,11 +653,16 @@ async function resolveBgRunDir(
 }
 
 /** Read a run's snapshot (events after the seq cursor + terminal status).
- *  Tolerates partial mid-append lines (the next poll re-reads them). */
+ *  Tolerates partial mid-append lines (the next poll re-reads them).
+ *  `fastPath` (bg_wait): read the event log FIRST and return immediately
+ *  when new events exist — skips the state.json round-trip while the stream
+ *  is active (halves per-poll latency during streaming; the follow-up idle
+ *  poll reads state.json for the authoritative terminal status). */
 async function readBackgroundRun(
   sandbox: Sandbox,
   args: Record<string, unknown>,
   afterSeq = 0,
+  fastPath = false,
 ): Promise<BgRunSnapshot> {
   const runDir = await resolveBgRunDir(sandbox, args);
   if (runDir === "__legacy__") {
@@ -692,26 +697,9 @@ async function readBackgroundRun(
   if (!runDir) {
     return { status: "running", events: [], content: "", error: null, startedAt: null, done: false };
   }
-  // Read state.json (status mirror) + events.jsonl (append-only log).
-  let status = "running";
-  let content = "";
-  let error: string | null = null;
-  let startedAt: string | null = null;
-  try {
-    const raw = await sandbox.files.read(runDir + "/state.json");
-    const st = JSON.parse(raw) as {
-      status?: string;
-      content?: string;
-      error?: string;
-      startedAt?: string;
-    };
-    status = st.status ?? "running";
-    content = st.content ?? "";
-    error = st.error ?? null;
-    startedAt = st.startedAt ?? null;
-  } catch {
-    // state.json not written yet — the run is booting.
-  }
+  // Read events.jsonl (append-only log) FIRST — during active streaming this
+  // single read is all bg_wait needs (fastPath): each token-level delta is
+  // delivered the moment it lands, without waiting for a state.json read.
   const events: unknown[] = [];
   let nextSeq = afterSeq;
   try {
@@ -732,6 +720,38 @@ async function readBackgroundRun(
     }
   } catch {
     // events.jsonl not written yet.
+  }
+  if (fastPath && events.length > 0) {
+    return {
+      status: "running",
+      events,
+      content: "",
+      error: null,
+      startedAt: null,
+      done: false,
+      nextSeq,
+    };
+  }
+  // Read state.json (status mirror) — needed for the terminal status when
+  // no new events exist (and always for bg_status).
+  let status = "running";
+  let content = "";
+  let error: string | null = null;
+  let startedAt: string | null = null;
+  try {
+    const raw = await sandbox.files.read(runDir + "/state.json");
+    const st = JSON.parse(raw) as {
+      status?: string;
+      content?: string;
+      error?: string;
+      startedAt?: string;
+    };
+    status = st.status ?? "running";
+    content = st.content ?? "";
+    error = st.error ?? null;
+    startedAt = st.startedAt ?? null;
+  } catch {
+    // state.json not written yet — the run is booting.
   }
   return {
     status,
@@ -1546,12 +1566,14 @@ export async function POST(req: NextRequest) {
 
       // ── v2 STREAMING DELIVERY ─────────────────────────────────────────
       // bg_wait — LONG-POLL: holds the HTTP request open server-side,
-      // watching the run's events.jsonl every 250ms. Returns the moment
-      // events NEWER than the client's seq cursor exist (or the run
-      // reaches a terminal status, or the max wait elapses). This gives
-      // ~250-600ms event latency with ONE connection per ~12s segment —
-      // versus the old fixed 2.5s browser poll that made everything feel
-      // chunky. Vercel-safe: maxDuration=300 >> the 12s segment cap.
+      // watching the run's events.jsonl every 120ms (fast-path read: the
+      // event log alone while events flow — the state.json round-trip is
+      // skipped until the stream goes idle). Returns the moment events NEWER
+      // than the client's seq cursor exist (or the run reaches a terminal
+      // status, or the max wait elapses). With token-level events on the
+      // runner side this delivers word-by-word progress at ~100-250ms
+      // latency with ONE connection per ~12s segment. Vercel-safe:
+      // maxDuration=300 >> the 12s segment cap.
       case "bg_wait": {
         const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
         if (!bgSandboxId) {
@@ -1580,7 +1602,7 @@ export async function POST(req: NextRequest) {
         }
         const deadline = Date.now() + maxWaitMs;
         for (;;) {
-          const snap = await readBackgroundRun(sandbox, args, afterSeq);
+          const snap = await readBackgroundRun(sandbox, args, afterSeq, true);
           if (snap.events.length > 0 || snap.done || Date.now() >= deadline) {
             return NextResponse.json({
               sandboxId: bgSandboxId,
@@ -1588,7 +1610,7 @@ export async function POST(req: NextRequest) {
               afterSeq: snap.nextSeq ?? afterSeq,
             });
           }
-          await new Promise((r) => setTimeout(r, 250));
+          await new Promise((r) => setTimeout(r, 120));
         }
       }
 
