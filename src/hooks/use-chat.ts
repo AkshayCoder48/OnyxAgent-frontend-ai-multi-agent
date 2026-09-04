@@ -57,6 +57,17 @@ const DEFAULT_SYSTEM_PROMPT =
 // made it look like the AI wasn't calling tools at all. All presets now
 // explicitly say: "NEVER write tool calls as text. ALWAYS use the function-
 // calling API."
+// Beta V1.2 — mandatory web research + inline citations. Appended to every
+// turn's system prompt so the agent ALWAYS grounds factual answers in a live
+// web search and cites sources with [n] markers that the UI renders as
+// superscript chips + a numbered source footer.
+const WEB_RESEARCH_DIRECTIVE = `## Web Research & Citations (MANDATORY)
+- For EVERY user message that involves facts, current events, technology, documentation, versions, prices, names, or anything verifiable, you MUST call the web_search tool BEFORE answering. NEVER answer such questions purely from memory — search first, then answer from the results.
+- The web_search results are NUMBERED (1, 2, 3 …). Cite them inline in your answer with bracket markers like [1] or [2], placed immediately after the claim they support. Example: "Transformers scale well with data and compute[1], though attention is quadratic[2]."
+- Every non-trivial factual claim in your answer should carry at least one [n] citation marker. Never invent citation numbers — only cite numbers that exist in the search results you received.
+- Use web_fetch to deep-read a promising result when a short snippet is not enough.
+- Purely creative tasks (write a story, refactor this file) do not need citations — but anything you state as fact does.`;
+
 const FRAMEWORK_PROMPTS: Record<string, string> = {
   default: DEFAULT_SYSTEM_PROMPT,
   pydantic_ai: `You are an AI agent built with PydanticAI. You have access to tools that you can call to help the user.
@@ -369,8 +380,16 @@ export function useChat(options: UseChatOptions = {}) {
         }
         const newMsgId = nanoid();
         // Use current conversationId from store to avoid closure issues.
+        // Read via getState() AT EVENT TIME: the runtime's `emit` closure is
+        // captured at turn start, so for a NEW conversation the hook value
+        // here is still null even though `conversation_created` (emitted
+        // first) already attached the id — the lazily-created assistant
+        // message would carry no conversationId, breaking the live
+        // TodoPreview merge (and any per-conversation message routing).
         const effectiveConversationId =
-          currentConversationIdFromStore || conversationId || undefined;
+          useConversationStore.getState().currentConversationId ||
+          conversationId ||
+          undefined;
         addMessage({
           id: newMsgId,
           role: "assistant",
@@ -1100,7 +1119,17 @@ export function useChat(options: UseChatOptions = {}) {
               (t) => t && typeof t === "object" && "title" in (t as Record<string, unknown>),
             );
             if (isNewShape) {
-              const turnId = currentConversationIdFromStore || conversationId || "default";
+              // Read the store id AT EVENT TIME (zustand getState is always
+              // fresh). The runtime's `emit` closure is captured at turn
+              // start — for a NEW conversation its captured
+              // `currentConversationIdFromStore` is still null even after
+              // `conversation_created` attached the id, which keyed every
+              // todo_event to a stale "default" bucket and starved the live
+              // TodoPreview of status updates.
+              const turnId =
+                useConversationStore.getState().currentConversationId ||
+                conversationId ||
+                "default";
               useResearchStore.getState().setAgentTodos(turnId, all_todos as unknown as Todo[]);
               break;
             }
@@ -1152,7 +1181,10 @@ export function useChat(options: UseChatOptions = {}) {
       attachConversation,
       setCurrentMessageId,
       onConversationCreated,
-      currentConversationIdFromStore,
+      // NOTE: currentConversationIdFromStore is intentionally omitted — the
+      // runtime's `emit` closure is captured at turn start, so the hook
+      // value would be stale for new conversations. Both consumers inside
+      // the handler read useConversationStore.getState() at event time.
       conversationId,
     ],
   );
@@ -1227,10 +1259,17 @@ export function useChat(options: UseChatOptions = {}) {
       // System prompt: user override (if enabled) → framework preset → default
       const framework = settings.ai_framework ?? "default";
       const frameworkPrompt = FRAMEWORK_PROMPTS[framework] ?? FRAMEWORK_PROMPTS.default;
-      const systemPrompt =
+      const basePrompt =
         (settings.system_prompt_enabled && settings.system_prompt
           ? settings.system_prompt
           : frameworkPrompt) ?? "";
+      // Beta V1.2 — web research + inline citations directive. Appended to
+      // EVERY turn (both the in-browser runtime and the E2B background
+      // runner consume this same prompt): the agent searches the web for
+      // anything factual and cites its sources with [n] markers.
+      const systemPrompt = basePrompt.trim()
+        ? `${basePrompt.trim()}\n\n${WEB_RESEARCH_DIRECTIVE}`
+        : WEB_RESEARCH_DIRECTIVE;
 
       // Abort controller for stop / unmount.
       const controller = new AbortController();

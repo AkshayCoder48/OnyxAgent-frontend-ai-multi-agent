@@ -9,6 +9,7 @@ import { ChevronDown, ExternalLink } from "lucide-react";
 import { CopyButton } from "./copy-button";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
+import type { SourceItem } from "@/lib/chat-sources";
 
 /** Parse `language-xyz` from a `<code>` className that rehype-highlight emits. */
 function languageLabel(className: string | undefined): string | null {
@@ -113,7 +114,8 @@ function HtmlDetailsBlock({ summary, children }: { summary: string; children: Re
 /**
  * Pre-process markdown to turn bare citation markers [N] into markdown links
  * with a special `#cite-N` href. The `a` component override below detects this
- * and renders an interactive CitationBadge instead of a regular link.
+ * and renders a superscript citation chip (Beta V1.2, AICSS "Inline
+ * Citations" recipe) with a hover tooltip naming the source.
  *
  * Only replaces [N] that is NOT followed by `(` (already a link) or `:` (link
  * reference definition). Code spans/blocks are left as-is because the regex
@@ -135,6 +137,16 @@ const StreamTintContext = React.createContext<{ streaming: boolean; lastWord: st
   streaming: false,
   lastWord: "",
 });
+
+// Citation sources for THIS message (Beta V1.2). Provided by MarkdownContent
+// per render so the module-scoped `a` override can look up the source title
+// for the superscript chip's tooltip — same context pattern as the tint.
+const CiteSourcesContext = React.createContext<readonly SourceItem[]>([]);
+
+/** Find the source a [n] marker points at (first web match by index). */
+function findSource(sources: readonly SourceItem[], n: number): SourceItem | undefined {
+  return sources.find((s) => s.index === n && s.type === "web") ?? sources.find((s) => s.index === n);
+}
 
 /** Extract the last non-whitespace word of a string, lowercased + stripped
  *  of markdown punctuation — used to detect the trailing paragraph. */
@@ -312,22 +324,10 @@ const SHARED_COMPONENTS = {
     );
   },
   a({ href, children, ...props }: React.ComponentPropsWithoutRef<"a">) {
-    if (href?.startsWith("#cite-") && onCiteClickRef.current) {
+    if (href?.startsWith("#cite-")) {
       const n = parseInt(href.slice(6), 10);
       if (!Number.isNaN(n)) {
-        return (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              onCiteClickRef.current?.(n);
-            }}
-            className="bg-foreground/10 text-foreground/70 hover:bg-foreground/20 mx-0.5 inline-flex h-[1.1em] cursor-pointer items-center rounded px-1 align-middle font-mono text-[0.72em] font-semibold tabular-nums transition-colors"
-            title={`Source [${n}]`}
-          >
-            {n}
-          </button>
-        );
+        return <CitationChip n={n}>{children}</CitationChip>;
       }
     }
     const isExternal = !!href && /^https?:\/\//i.test(href);
@@ -537,9 +537,49 @@ const SHARED_COMPONENTS = {
 const onCiteClickRef = React.createRef<((index: number) => void) | null>();
 const showCursorRef = React.createRef<boolean>();
 
+/** Superscript citation chip (Beta V1.2 — AICSS "Inline Citations").
+ *  Rendered for every `#cite-N` link: a small raised chip with the source
+ *  number, a hover tooltip naming the source, and a click that opens the
+ *  sources panel (or the source URL directly when no panel is wired). */
+function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
+  const sources = React.useContext(CiteSourcesContext);
+  const source = findSource(sources, n);
+  const tip = source
+    ? source.title + (source.subtitle ? " · " + source.subtitle : "")
+    : `Source [${n}]`;
+  const label = `Source ${n}: ${tip}`;
+  return (
+    <span className="group/cite relative mx-[1px] inline-block align-super">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          const click = onCiteClickRef.current;
+          if (click) click(n);
+          else if (source?.url) window.open(source.url, "_blank", "noopener,noreferrer");
+        }}
+        className="border-foreground/15 bg-foreground/[0.06] text-foreground/75 hover:border-primary/45 hover:bg-primary/15 hover:text-primary inline-flex h-[1.2em] min-w-[1.2em] cursor-pointer items-center justify-center rounded-full px-[0.3em] font-mono text-[0.62em] font-semibold leading-none tabular-nums transition-colors"
+        aria-label={label}
+      >
+        {n}
+      </button>
+      <span
+        role="tooltip"
+        className="bg-foreground text-background pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 max-w-[240px] -translate-x-1/2 truncate rounded-md px-2 py-1 text-[10px] font-normal tracking-normal whitespace-nowrap opacity-0 shadow-md transition-opacity duration-150 group-hover/cite:opacity-100"
+      >
+        {tip}
+      </span>
+    </span>
+  );
+}
+
 // Shared plugin arrays — stable references so ReactMarkdown's memoization works.
 const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS = [rehypeHighlight];
+
+// Stable empty array for the sources context default (avoids a new [] per
+// render, which would churn every consumer).
+const EMPTY_SOURCES: readonly SourceItem[] = [];
 
 /**
  * MarkdownContent — the heavy markdown renderer (react-markdown +
@@ -558,6 +598,7 @@ const REHYPE_PLUGINS = [rehypeHighlight];
 export const MarkdownContent = React.memo(function MarkdownContent({
   content,
   onCiteClick,
+  sources,
   showCursor,
   streaming,
 }: MarkdownContentProps) {
@@ -592,7 +633,10 @@ export const MarkdownContent = React.memo(function MarkdownContent({
     .replaceAll("\u0000CURSOR\u0000", "")
     .replaceAll(/\u0000?CURSOR\u0000?/g, "")
     .replaceAll(":CURSOR:", "");
-  const processed = onCiteClick ? preprocessCitations(cleanContent) : cleanContent;
+  // Beta V1.2: citations ALWAYS preprocess — the [n] markers render as
+  // superscript chips while the answer streams (Perplexity-style), not only
+  // after the turn completes.
+  const processed = preprocessCitations(cleanContent);
 
   // Split COMPLETE <details><summary>…</summary>…</details> blocks out of the
   // markdown → native collapsibles. Fast path: no "<details" in the content →
@@ -632,15 +676,21 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // from remaining in completed messages.
   // When cursor is on, wrap in a div that makes the last <p> inline so the
   // cursor flows right after the last letter.
+  // Both paths provide the citation sources context (Beta V1.2) so the
+  // superscript chips can resolve their tooltips.
   if (!showCursor) {
     return (
-      <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
+      <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
+        <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
+      </CiteSourcesContext.Provider>
     );
   }
 
   return (
     <div className="streaming-cursor-wrapper">
-      <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
+      <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
+        <StreamTintContext.Provider value={streamTint}>{rendered}</StreamTintContext.Provider>
+      </CiteSourcesContext.Provider>
       <OrbCursor variant="C2" size={14} />
     </div>
   );
@@ -651,6 +701,7 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   return (
     prev.content === next.content &&
     prev.onCiteClick === next.onCiteClick &&
+    prev.sources === next.sources &&
     prev.showCursor === next.showCursor &&
     prev.streaming === next.streaming
   );

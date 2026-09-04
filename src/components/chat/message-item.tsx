@@ -10,20 +10,20 @@ import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronRight, FileText, Globe, Loader2, RefreshCw } from "lucide-react";
+import { ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import { RatingButtons } from "./rating-buttons";
 import { getFileUrl } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
+import { CitationsFooter } from "./citations";
+import { StreamingFileTree, deriveStreamingTree } from "./streaming-file-tree";
 import {
-  FileTree,
   Orb,
   ShimmerLabel,
   ThinkingIndicator,
   ThinkingReasoning,
 } from "@/components/assistant-ui/elements";
-import { deriveFileTree } from "@/lib/agent-tool-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
@@ -166,6 +166,7 @@ function TextBubble({
   showCursor,
   isUser,
   onCiteClick,
+  sources,
   genuiNodes,
   isStreaming,
 }: {
@@ -173,6 +174,8 @@ function TextBubble({
   showCursor: boolean;
   isUser: boolean;
   onCiteClick?: (index: number) => void;
+  /** Beta V1.2: sources for the citation chips' tooltips. */
+  sources?: readonly SourceItem[];
   /** Persisted GenUI nodes (set when streaming completes). When present AND
    *  the text no longer contains sentinels, these are used to render the
    *  GenUI block. During streaming, the live-parsed spec takes precedence. */
@@ -235,6 +238,7 @@ function TextBubble({
           <MarkdownContent
             content={stripFunctionCallTags(text)}
             onCiteClick={onCiteClick}
+            sources={sources}
             showCursor={showCursor}
             streaming={isStreaming}
           />
@@ -272,6 +276,7 @@ function TextBubble({
               <MarkdownContent
                 content={stripFunctionCallTags(seg.text || "")}
                 onCiteClick={onCiteClick}
+                sources={sources}
                 showCursor={showCursor && isLast}
                 streaming={isStreaming && isLast}
               />
@@ -289,34 +294,9 @@ function TextBubble({
   );
 }
 
-function SourcesButton({ sources, onClick }: { sources: SourceItem[]; onClick: () => void }) {
-  const ragCount = sources.filter((s) => s.type === "rag").length;
-  const webCount = sources.filter((s) => s.type === "web").length;
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="border-foreground/15 bg-background hover:border-foreground/30 hover:bg-foreground/5 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 transition-colors"
-    >
-      <span className="flex -space-x-1">
-        {ragCount > 0 && (
-          <span className="bg-muted border-background inline-flex h-4 w-4 items-center justify-center rounded-full border">
-            <FileText className="text-foreground/60 h-2.5 w-2.5" />
-          </span>
-        )}
-        {webCount > 0 && (
-          <span className="bg-muted border-background inline-flex h-4 w-4 items-center justify-center rounded-full border">
-            <Globe className="text-foreground/60 h-2.5 w-2.5" />
-          </span>
-        )}
-      </span>
-      <span className="text-foreground/60 text-[11px] font-medium">
-        {sources.length} source{sources.length !== 1 ? "s" : ""}
-      </span>
-    </button>
-  );
-}
+/* SourcesButton — replaced by the Beta V1.2 CitationsFooter (the compact
+ * numbered source list under the answer). Kept out of the tree; the chip
+ * click + the panel zoom survive via onCiteClick. */
 
 interface MessageItemProps {
   message: ChatMessage;
@@ -506,6 +486,7 @@ function RoundPanel({
   isUser,
   turnId,
   onCiteClick,
+  sources,
   genuiNodes,
   onTodoDismiss,
 }: {
@@ -515,6 +496,7 @@ function RoundPanel({
   isUser: boolean;
   turnId?: string | null;
   onCiteClick?: (index: number) => void;
+  sources?: readonly SourceItem[];
   genuiNodes?: GenUINode[];
   onTodoDismiss?: () => void;
 }) {
@@ -620,6 +602,7 @@ function RoundPanel({
             showCursor={active && isLastItem && item.isLast}
             isUser={isUser}
             onCiteClick={onCiteClick}
+            sources={sources}
             genuiNodes={!isStreaming ? genuiNodes : undefined}
             isStreaming={active && isLastItem}
           />
@@ -762,24 +745,22 @@ export const MessageItem = React.memo(function MessageItem({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id, message.isStreaming, message.content, message.parts, isUser]);
 
-  // End-of-turn FILE TREE (assistant-ui "File tree" element): everything
-  // this run touched, as a tree with per-file churn — rendered once the
-  // turn completes AND at least 2 distinct files changed (a single file's
-  // story is already told by its tool card / CodeDiff, so the tree would
-  // only repeat it). Technical mode only — simple mode's timeline already
-  // narrates "Updated N files" without paths and +/- counts.
-  const displayMode = useToolDisplayStore((s) => s.mode);
-  const isSimpleMode = displayMode === "simple";
-  const fileTree = React.useMemo(() => {
-    if (isUser || isSimpleMode || message.isStreaming) return null;
+  // STREAMING FILE TREE (Beta V1.2, streamui "Tree" recipe): everything this
+  // run touches, as a nested animated tree that grows WHILE the agent works —
+  // in-flight writes show a shimmering “writing…” node, the card wears a blue
+  // border while streaming and settles green when the turn completes. Any
+  // file creation (≥1 file) gets the card, in both display modes.
+  const streamTree = React.useMemo(() => {
+    if (isUser) return null;
     const toolCalls = message.parts?.length
       ? message.parts
           .filter((p) => p.type === "tool" && p.toolCall)
           .map((p) => p.toolCall!)
       : (message.toolCalls ?? []);
     if (toolCalls.length === 0) return null;
-    return deriveFileTree(toolCalls);
-  }, [isUser, isSimpleMode, message.isStreaming, message.parts, message.toolCalls]);
+    const derived = deriveStreamingTree(toolCalls);
+    return derived.fileCount > 0 ? derived : null;
+  }, [isUser, message.parts, message.toolCalls]);
 
   return (
     <div
@@ -1018,6 +999,7 @@ export const MessageItem = React.memo(function MessageItem({
                             isUser={isUser}
                             turnId={message.conversationId}
                             onCiteClick={onCiteClick}
+                            sources={sources}
                             genuiNodes={!message.isStreaming ? message.genui : undefined}
                             onTodoDismiss={onTodoDismiss}
                           />
@@ -1076,6 +1058,7 @@ export const MessageItem = React.memo(function MessageItem({
                             showCursor={isLastStreaming && item.isLast && lastPart?.type === "text"}
                             isUser={isUser}
                             onCiteClick={onCiteClick}
+                            sources={sources}
                             genuiNodes={!message.isStreaming ? message.genui : undefined}
                             isStreaming={isLastStreaming && item.isLast}
                           />
@@ -1107,6 +1090,7 @@ export const MessageItem = React.memo(function MessageItem({
                       showCursor={!isUser && Boolean(message.isStreaming)}
                       isUser={isUser}
                       onCiteClick={onCiteClick}
+                      sources={sources}
                       genuiNodes={!message.isStreaming ? message.genui : undefined}
                       isStreaming={Boolean(message.isStreaming)}
                     />
@@ -1124,22 +1108,24 @@ export const MessageItem = React.memo(function MessageItem({
           );
         })()}
 
+        {/* Beta V1.2 — compact source footer (AICSS "Inline Citations"): a
+            numbered `n · Title · host ↗` list under the answer. Web rows open
+            the source directly; RAG rows open the sources panel. */}
         {hasSources && !isUser && (
-          <div className="mt-1">
-            <SourcesButton sources={sources} onClick={() => openSources(sources, null)} />
-          </div>
+          <CitationsFooter sources={sources} onOpenPanel={(i) => openSources(sources, i)} />
         )}
 
-        {/* FILE TREE — everything this run touched, as a tree with the
-            churn spelled out per file (assistant-ui "File tree" element).
-            Renders once the turn completes and ≥2 distinct files changed. */}
-        {fileTree && fileTree.fileCount >= 2 && (
+        {/* STREAMING FILE TREE — Beta V1.2: the animated workspace tree that
+            grows while the agent creates files (blue border while streaming,
+            green when complete). */}
+        {streamTree && (
           <div className="mt-2">
-            <FileTree
-              nodes={fileTree.nodes}
-              visibleCount={fileTree.nodes.length}
-              totalAdditions={fileTree.totalAdditions}
-              totalDeletions={fileTree.totalDeletions}
+            <StreamingFileTree
+              nodes={streamTree.root}
+              fileCount={streamTree.fileCount}
+              totalAdditions={streamTree.totalAdditions}
+              totalDeletions={streamTree.totalDeletions}
+              isStreaming={Boolean(message.isStreaming)}
             />
           </div>
         )}

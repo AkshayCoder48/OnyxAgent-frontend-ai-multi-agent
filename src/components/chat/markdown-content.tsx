@@ -1,10 +1,15 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import type { SourceItem } from "@/lib/chat-sources";
 
 export interface MarkdownContentProps {
   content: string;
   onCiteClick?: (index: number) => void;
+  /** Web/RAG sources for this message (Beta V1.2). Drives the superscript
+   *  citation chips' hover tooltips — the marker itself comes from the
+   *  text's [n] tokens, so chips render even while streaming. */
+  sources?: readonly SourceItem[];
   /** When true, renders the writing cursor inline at the end of the last
    *  paragraph — right next to the last letter, NOT on a new line below. */
   showCursor?: boolean;
@@ -34,11 +39,12 @@ const MarkdownContentImpl = dynamic(
   },
 );
 
-export function MarkdownContent({ content, onCiteClick, showCursor, streaming }: MarkdownContentProps) {
+export function MarkdownContent({ content, onCiteClick, sources, showCursor, streaming }: MarkdownContentProps) {
   return (
     <MarkdownContentImpl
       content={content}
       onCiteClick={onCiteClick}
+      sources={sources}
       showCursor={showCursor}
       streaming={streaming}
     />

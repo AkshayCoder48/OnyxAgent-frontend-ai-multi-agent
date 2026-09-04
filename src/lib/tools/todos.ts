@@ -119,6 +119,33 @@ async function emitTodoEvent(
 }
 
 // ---------------------------------------------------------------------------
+// Mutation lock — the runtime executes sibling tool calls of ONE round in
+// parallel (results stream as each finishes). manage_todo is a
+// load → mutate → save cycle, so two parallel calls (e.g. create + create,
+// or update + create + show_todo) each load the SAME base list and the last
+// save silently erases the other's write. Serialize all todo handlers per
+// conversation: each handler runs only after the previous one settles, in
+// the order the tool_calls were emitted.
+// ---------------------------------------------------------------------------
+
+const convQueues = new Map<string, Promise<unknown>>();
+
+function withTodoLock<T>(convId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = convQueues.get(convId) ?? Promise.resolve();
+  const run = prev.then(fn, fn); // run regardless of the previous outcome
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  convQueues.set(convId, tail);
+  // Drop the queue entry once the tail settles so the map never grows.
+  tail.then(() => {
+    if (convQueues.get(convId) === tail) convQueues.delete(convId);
+  });
+  return run;
+}
+
+// ---------------------------------------------------------------------------
 // Shared handler — registered under BOTH "manage_todo" and "manage_todos"
 // (the model may call either singular or plural; both must work).
 // ---------------------------------------------------------------------------
@@ -167,6 +194,15 @@ const MANAGE_SCHEMA = {
 } as const;
 
 async function manageTodoHandler(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  return withTodoLock(ctx.conversationId ?? "", () =>
+    manageTodoLocked(args, ctx),
+  );
+}
+
+async function manageTodoLocked(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
@@ -290,6 +326,19 @@ Use after creating or updating todos so the user can see the current plan and st
     additionalProperties: false,
   } as const,
   async (args: Record<string, unknown>, ctx): Promise<ToolResult> => {
+    // Serialized against manage_todo mutations (see withTodoLock) so a
+    // show_todo emitted in the SAME round as create/update calls reads the
+    // list AFTER those writes land — not the stale pre-round snapshot.
+    return withTodoLock(ctx.conversationId ?? "", () =>
+      showTodoLocked(args, ctx),
+    );
+  },
+);
+
+async function showTodoLocked(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
     const convId = ctx.conversationId ?? "";
     const todos = await loadTodos(convId);
 
@@ -331,5 +380,4 @@ Use after creating or updating todos so the user can see the current plan and st
         ...(missing.length > 0 ? { not_found: missing } : {}),
       },
     };
-  },
-);
+  }

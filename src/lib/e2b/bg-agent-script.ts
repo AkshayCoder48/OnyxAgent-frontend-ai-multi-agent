@@ -233,6 +233,160 @@ const TOOLS = [
       } catch (e) { return { error: "Fetch failed: " + e.message }; }
     },
   },
+  {
+    // Beta V1.2 — web search from inside the sandbox (Miklium direct; the
+    // sandbox has outbound internet). Numbered results + citation guidance
+    // so the model cites [n] markers the UI renders as superscript chips.
+    name: "web_search",
+    description: "Search the web (Yahoo-based index). Returns NUMBERED results: results[0].index=1, results[1].index=2, ... each {index, title, url, content}. ALWAYS call this BEFORE answering factual questions; cite sources in your answer with [n] markers matching the index numbers.",
+    parameters: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+    run: async (args) => {
+      try {
+        const query = String(args.query ?? "");
+        const limit = Math.min(Number(args.limit) || 10, 20);
+        const res = await fetch("https://miklium.vercel.app/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ search: [query], type: "default", maxSmallSnippets: limit, maxLargeSnippets: 0 }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!res.ok) return { error: "Search HTTP " + res.status };
+        const data = await res.json().catch(() => null);
+        if (!data) return { error: "Search returned invalid JSON" };
+        const raw = Array.isArray(data.results) ? data.results : [];
+        const byUrl = new Map();
+        for (const item of raw) {
+          const url = String((item && item.url) || "");
+          if (!url) continue;
+          const snippet = String((item && item.snippet) || "");
+          const existing = byUrl.get(url);
+          if (!existing) {
+            let host = url;
+            try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
+            byUrl.set(url, { title: host, url, content: snippet });
+          } else if (snippet.length > existing.content.length) {
+            existing.content = snippet;
+          }
+        }
+        const results = Array.from(byUrl.values()).slice(0, limit);
+        if (!results.length) return { query, kind: "web_search", results: [], count: 0, note: "no results" };
+        const numbered = results.map((r, i) => ({ index: i + 1, title: r.title, url: r.url, content: cap(r.content, 1200) }));
+        return {
+          query,
+          kind: "web_search",
+          results: numbered,
+          count: numbered.length,
+          note: "Cite these results in your answer with [n] markers matching each result index.",
+        };
+      } catch (e) {
+        return { error: "Search failed: " + (e && e.message ? e.message : String(e)) };
+      }
+    },
+  },
+  {
+    // Beta V1.2 — todo plan tools in background mode. Same wire shapes as the
+    // in-browser registry (lib/tools/todos.ts) so the chat UI's TodoPreview
+    // renders identically: create → { success, output: { todo, total } },
+    // update → { success, output: { todo, previous } }, list/show →
+    // { success, output: { todos } }. Todos persist in state.json (per-run,
+    // crash-safe) and execution is sequential (the runner awaits each tool
+    // in order), so the load→mutate→save cycle cannot race.
+    name: "manage_todo",
+    description: "Manage the todo list for the current task. Actions: create (requires title), update (requires todo_id; optional title/status), delete (requires todo_id), list, clear. status must be one of: not_planned, in_progress, done, not_done. ALWAYS quote the todo ID from a create result in later update/delete calls.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "update", "delete", "list", "clear"] },
+        title: { type: "string" },
+        content: { type: "string" },
+        todo_id: { type: "string" },
+        status: { type: "string", enum: ["not_planned", "in_progress", "done", "not_done"] },
+      },
+      required: ["action"],
+    },
+    run: async (args) => {
+      try {
+        const state = await readState();
+        const todos = Array.isArray(state.todos) ? state.todos : [];
+        const action = String(args.action ?? "").toLowerCase();
+        const now = Date.now();
+        const newId = () => "todo_" + Math.random().toString(16).slice(2, 6).padStart(4, "0");
+        if (action === "create") {
+          const title = String(args.title ?? args.content ?? "").trim();
+          if (!title) return { error: "title is required for create" };
+          const todo = { id: newId(), title, status: "not_planned", createdAt: now, updatedAt: now };
+          todos.push(todo);
+          state.todos = todos;
+          await writeState(state);
+          return { success: true, output: { todo, total: todos.length } };
+        }
+        if (action === "update") {
+          const id = String(args.todo_id ?? "");
+          const idx = todos.findIndex((t) => t.id === id);
+          if (idx === -1) return { error: "todo not found: " + (id || "(missing todo_id)") };
+          const previous = { ...todos[idx] };
+          const next = { ...todos[idx], updatedAt: now };
+          const title = String(args.title ?? args.content ?? "").trim();
+          if (title) next.title = title;
+          if (args.status !== undefined) {
+            const s = String(args.status);
+            if (!["not_planned", "in_progress", "done", "not_done"].includes(s)) {
+              return { error: 'invalid status "' + s + '" — use not_planned | in_progress | done | not_done' };
+            }
+            next.status = s;
+          }
+          todos[idx] = next;
+          state.todos = todos;
+          await writeState(state);
+          return { success: true, output: { todo: next, previous } };
+        }
+        if (action === "delete") {
+          const id = String(args.todo_id ?? "");
+          const idx = todos.findIndex((t) => t.id === id);
+          if (idx === -1) return { error: "todo not found: " + (id || "(missing todo_id)") };
+          const deleted = todos.splice(idx, 1)[0];
+          state.todos = todos;
+          await writeState(state);
+          return { success: true, output: { deleted } };
+        }
+        if (action === "list") return { success: true, output: { todos } };
+        if (action === "clear") {
+          state.todos = [];
+          await writeState(state);
+          return { success: true, output: { cleared: true } };
+        }
+        return { error: "Unknown action: " + action };
+      } catch (e) {
+        return { error: "Todo tool failed: " + (e && e.message ? e.message : String(e)) };
+      }
+    },
+  },
+  {
+    name: "show_todo",
+    description: "Display the todo list to the user as a visual to-do card in the chat. Use after creating or updating todos so the user can see the current plan and statuses (Not planned / In progress / Done / Not done). Pass todo IDs (from manage_todo results) to show specific todos, or all=true (or no IDs) to show every todo.",
+    parameters: {
+      type: "object",
+      properties: {
+        todo_ids: { type: "array", items: { type: "string" } },
+        all: { type: "boolean" },
+      },
+    },
+    run: async (args) => {
+      try {
+        const state = await readState();
+        const todos = Array.isArray(state.todos) ? state.todos : [];
+        const rawIds = Array.isArray(args.todo_ids) ? args.todo_ids.map((v) => String(v)) : [];
+        const wantAll = args.all === true || rawIds.length === 0;
+        if (wantAll) return { success: true, output: { todos } };
+        const found = todos.filter((t) => rawIds.includes(t.id));
+        const missing = rawIds.filter((id) => !todos.some((t) => t.id === id));
+        if (!found.length) return { error: "todo not found: " + (missing.join(", ") || "(none)") };
+        return { success: true, output: { todos: found, ...(missing.length ? { not_found: missing } : {}) } };
+      } catch (e) {
+        return { error: "Todo tool failed: " + (e && e.message ? e.message : String(e)) };
+      }
+    },
+  },
 ];
 
 // ── The agent loop ──────────────────────────────────────────────────────

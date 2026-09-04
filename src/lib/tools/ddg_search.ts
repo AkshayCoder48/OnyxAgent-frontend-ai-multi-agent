@@ -80,6 +80,9 @@ registerTool(
       return {
         success: true,
         output: {
+          // `kind` lets the citation extractor recognize this payload in any
+          // wrapper shape (Beta V1.2 inline citations).
+          kind: "web_search",
           query,
           type: "web",
           results,

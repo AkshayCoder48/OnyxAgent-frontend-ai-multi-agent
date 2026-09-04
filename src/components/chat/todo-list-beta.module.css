@@ -1,0 +1,345 @@
+/* Beta V1.2 — Cursor-style To-do List (AICSS "To-do List" recipe, Terra tokens)
+ *
+ * States: idle (list icon) → running (dashed pie ring) → all done (filled check).
+ * Rows roll between dashed / arrow / check glyphs; the count rolls per digit.
+ * Every colour comes from the app's theme tokens (light / dark / custom brand).
+ */
+
+.todo {
+  --todo-accent: var(--color-primary);
+  --todo-fg: var(--color-foreground);
+  --todo-mut: var(--color-muted-foreground);
+  --todo-line: color-mix(in oklab, var(--color-foreground) 12%, transparent);
+  --todo-card: color-mix(in oklab, var(--color-foreground) 2.5%, var(--color-background));
+  --todo-ok: var(--color-primary);
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 42rem;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--todo-line);
+  border-radius: 0.75rem;
+  background: var(--todo-card);
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+.todoHead {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  border: 0;
+  background: transparent;
+  color: var(--todo-fg);
+  font: inherit;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+
+.todoHead:hover {
+  background: color-mix(in oklab, var(--color-foreground) 4%, transparent);
+}
+
+.todoHead:focus-visible {
+  outline: 2px solid var(--todo-accent);
+  outline-offset: -2px;
+  border-radius: 0.75rem;
+}
+
+.todoHeadIcon {
+  position: relative;
+  display: inline-flex;
+  height: 1.25rem;
+  width: 1.25rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--todo-mut);
+}
+
+.todoListIcon {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.todoChevron {
+  position: absolute;
+  right: -0.35rem;
+  bottom: -0.3rem;
+  height: 0.65rem;
+  width: 0.65rem;
+  color: var(--todo-mut);
+  opacity: 0.75;
+  transform: rotate(0deg);
+  transition: transform 0.22s ease, opacity 0.2s ease;
+}
+
+.todo.isCollapsed .todoChevron {
+  transform: rotate(-90deg);
+}
+
+/* Dashed pie ring — the "running" header icon. --todo-pie drives the inner
+ * conic fill (percent of steps finished). */
+.todoHeadPie {
+  position: relative;
+  display: inline-flex;
+  height: 1.05rem;
+  width: 1.05rem;
+  align-items: center;
+  justify-content: center;
+  color: var(--todo-accent);
+}
+
+.todoHeadPieRing {
+  height: 1.05rem;
+  width: 1.05rem;
+  animation: todoSpin 9s linear infinite;
+}
+
+.todoHeadPie::after {
+  content: "";
+  position: absolute;
+  inset: 0.28rem;
+  border-radius: 999px;
+  background: conic-gradient(var(--todo-accent) var(--todo-pie, 0%), transparent 0%);
+  transition: background 0.3s ease;
+}
+
+@keyframes todoSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.todoHeadCheck {
+  color: var(--todo-accent);
+  animation: todoPop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+
+@keyframes todoPop {
+  from {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.todoTitle {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--todo-fg);
+}
+
+.todoCount {
+  flex: none;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--todo-mut);
+}
+
+/* ── Rolling count digits ──────────────────────────────────────────── */
+
+.rollCount {
+  display: inline-flex;
+}
+
+.rollDigit {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  height: 1em;
+  line-height: 1;
+  vertical-align: bottom;
+}
+
+.rollInner {
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.34s cubic-bezier(0.3, 0.9, 0.3, 1);
+  will-change: transform;
+}
+
+.rollInner.on {
+  transform: translateY(-50%);
+}
+
+.rollInner span {
+  height: 1em;
+  display: block;
+}
+
+/* ── Collapsible body ──────────────────────────────────────────────── */
+
+.todoCollapsible {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.3s ease;
+}
+
+.todo.isCollapsed .todoCollapsible {
+  grid-template-rows: 0fr;
+}
+
+.todoInner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.todoList {
+  margin: 0;
+  padding: 0.15rem 0.55rem 0.55rem 0.55rem;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+/* ── Rows ──────────────────────────────────────────────────────────── */
+
+.todoItem {
+  --todo-item-delay: calc(var(--i, 0) * 45ms);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.28rem 0.3rem;
+  border-radius: 0.4rem;
+  animation: todoItemIn 0.28s ease both;
+  animation-delay: var(--todo-item-delay);
+}
+
+@keyframes todoItemIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The glyph box — three icons stacked; state classes cross-fade them. */
+.todoIconWrap {
+  position: relative;
+  display: inline-flex;
+  height: 1rem;
+  width: 1rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.todoIcon {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--todo-mut);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.2, 1.2, 0.4, 1), color 0.22s ease;
+}
+
+.todoIcon.on {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.todoIcon.strong {
+  color: var(--todo-accent);
+}
+
+/* Active arrow bobs gently while the step works. */
+.todoIcon.strong.on {
+  animation: todoNudge 1.6s ease-in-out infinite;
+}
+
+@keyframes todoNudge {
+  0%,
+  100% {
+    transform: scale(1) translateX(0);
+  }
+  50% {
+    transform: scale(1) translateX(1.5px);
+  }
+}
+
+.todoFailed .todoIcon.strong.on {
+  color: var(--color-destructive);
+  animation: none;
+}
+
+.todoLabel {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--todo-fg);
+  overflow-wrap: anywhere;
+}
+
+/* The strike line grows across done labels. */
+.todoLabel::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 55%;
+  height: 1px;
+  width: 0;
+  background: color-mix(in oklab, var(--todo-fg) 45%, transparent);
+  transition: width 0.32s ease 0.05s;
+}
+
+.done .todoLabel {
+  color: var(--todo-mut);
+}
+
+.done .todoLabel::after {
+  width: 100%;
+}
+
+.active .todoLabel {
+  color: var(--todo-fg);
+  font-weight: 500;
+}
+
+.todoFailed .todoLabel {
+  color: var(--todo-mut);
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .todoHeadPieRing {
+    animation: none;
+  }
+  .todoIcon.strong.on,
+  .todoHeadCheck {
+    animation: none;
+  }
+  .todoItem {
+    animation: none;
+  }
+  .rollInner {
+    transition: none;
+  }
+  .todoCollapsible {
+    transition: none;
+  }
+}
