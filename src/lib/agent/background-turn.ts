@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import type { AgentTurnOptions } from "./runtime";
 import type { WSEvent } from "@/types";
 import { useChatStore } from "@/stores/chat-store";
+import { useResearchStore } from "@/stores";
 import { conversationService } from "@/lib/services";
 import {
   launchBackgroundTurn,
@@ -264,7 +265,27 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     const assistantMessageId = `bgmsg-${nanoid(10)}`;
     emit("message_saved", { message_id: assistantMessageId });
 
-    // 4. Launch the sandbox background job.
+    // 4. Launch the sandbox background job. The current todo plan (live
+    //    store snapshot) rides along as seedTodos — the runner restores it
+    //    into the sandbox's shared todos.json when the sandbox was recreated
+    //    (PRD FR-1: todos persist across tool calls, turns, sessions).
+    const seedTodos = (() => {
+      try {
+        const bucket = useResearchStore.getState().byTurn[conversationId ?? ""];
+        const todos = bucket?.agentTodos;
+        return Array.isArray(todos) && todos.length > 0
+          ? todos.map((t) => ({
+              id: t.id,
+              title: t.title,
+              status: t.status,
+              createdAt: t.createdAt,
+              updatedAt: t.updatedAt,
+            }))
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
       provider: {
@@ -279,6 +300,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       history: buildHistory(ctx.turn),
       assistantMessageId,
       conversationId,
+      seedTodos,
     });
 
     // 5. Consume the run's event stream until it finishes. The consumer
@@ -400,6 +422,20 @@ function replayEvent(
         });
       }
       // "boot" and unknown kinds carry no UI state — ignored.
+      break;
+    }
+    case "todo_event": {
+      // Live todo snapshot from the sandbox's shared todos.json — feeds the
+      // same todo_event pipeline the in-browser tools use, so the
+      // TodoPreview statuses update IN REAL TIME in background mode too.
+      if (Array.isArray(ev.todos)) {
+        emit("todo_event", {
+          event_type: "snapshot",
+          todo: null,
+          all_todos: ev.todos,
+          ts,
+        });
+      }
       break;
     }
     case "done":

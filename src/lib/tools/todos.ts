@@ -66,6 +66,16 @@ export async function restoreTodos(convId: string): Promise<Todo[]> {
   return loadTodos(convId);
 }
 
+/** Persist a todo snapshot (e.g. a live todo_event from the BACKGROUND
+ *  runner) into the same Dexie table the in-browser tools write — so the
+ *  plan survives page refreshes identically on both paths (PRD FR-1). */
+export async function persistTodos(
+  convId: string,
+  todos: Todo[],
+): Promise<void> {
+  await saveTodos(convId, todos);
+}
+
 const VALID_STATUSES: readonly TodoStatus[] = [
   "not_planned",
   "in_progress",

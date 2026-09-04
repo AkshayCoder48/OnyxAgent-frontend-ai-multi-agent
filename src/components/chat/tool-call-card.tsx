@@ -31,6 +31,7 @@ import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
+import { ToolDurationBadge, ToolLiveElapsed } from "./tool-duration";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
@@ -206,6 +207,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
               {liveCaption}
             </ShimmerLabel>
+            <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
             <span className="streaming-dots" aria-hidden="true">
               <span /> <span /> <span />
             </span>
@@ -229,7 +231,10 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               )}
             </span>
             {isCompleted && (
-              <Check className="text-primary/70 ml-auto h-3.5 w-3.5 shrink-0" aria-label="Done" />
+              <>
+                <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} className="ml-1" />
+                <Check className="text-primary/70 ml-auto h-3.5 w-3.5 shrink-0" aria-label="Done" />
+              </>
             )}
           </>
         )}
@@ -688,10 +693,13 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
         ) : null}
 
-        {/* Right actions — settle state + raw toggle. */}
+        {/* Right actions — duration badge + settle state + raw toggle. */}
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
-          {!isRunning && (
+          {isRunning ? (
+            <ToolLiveElapsed startedAt={toolCall.startedAt} />
+          ) : (
             <>
+              <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} />
               {isError ? (
                 <span className="text-destructive text-xs font-medium">Failed</span>
               ) : (

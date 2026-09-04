@@ -1482,7 +1482,7 @@ export async function POST(req: NextRequest) {
       // as long as its timeout window allows (1h max on the Hobby plan).
       case "bg_start": {
         const state = (args.state as Record<string, unknown>) ?? {};
-        const maxRounds = (args.maxRounds as number) ?? 12;
+        const maxRounds = (args.maxRounds as number) ?? 30;
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         // Full window for the background run — resets the timeout countdown.
         try {

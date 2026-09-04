@@ -22,6 +22,13 @@ import { cn } from "@/lib/utils";
 import { FILE_TOOLS } from "@/lib/agent-tool-steps";
 import type { ToolCall } from "@/types";
 
+// ── FilesFooter (Beta V1.3) ─────────────────────────────────────────────────
+// The end-of-turn FILES card — visually identical in language to the
+// CitationsFooter ("Sources"): a compact bordered card with a mono
+// uppercase header + tight rows, rendered ONLY after the turn completes
+// (never while streaming). Nested folders collapse into a compact tree
+// with a scroll cap so a 50-file run still fits the UI.
+
 /**
  * StreamingFileTree — Beta V1.2 (streamui "Tree" recipe).
  *
@@ -501,5 +508,174 @@ export function StreamingFileTree({
         </CardContent>
       </Card>
     </Stream.Root>
+  );
+}
+
+// ── FilesFooter — the compact end-of-turn card (CitationsFooter style) ──────
+
+/** Compact file glyph by extension (3px smaller than the live tree's). */
+function FooterNodeGlyph({ icon, className }: { icon: string; className?: string }) {
+  switch (icon) {
+    case "folder":
+      return <Folder className={className} />;
+    case "file-code":
+      return <FileCode className={className} />;
+    case "file-text":
+      return <FileText className={className} />;
+    case "file-minus":
+      return <FileMinus className={className} />;
+    case "image":
+      return <ImageIcon className={className} />;
+    default:
+      return <File className={className} />;
+  }
+}
+
+function FooterFolder({
+  node,
+  depth,
+  defaultOpen,
+}: {
+  node: StreamingTreeNode;
+  depth: number;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = React.useState(defaultOpen);
+  const children = node.children ?? [];
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="hover:bg-foreground/[0.05] flex w-full cursor-pointer items-center gap-1 rounded-md px-1.5 py-[3px] text-left transition-colors"
+        style={{ paddingLeft: depth * 14 + 6 }}
+      >
+        <ChevronRight
+          className={cn(
+            "text-muted-foreground/70 h-3 w-3 shrink-0 transition-transform duration-150",
+            open && "rotate-90",
+          )}
+          aria-hidden
+        />
+        <FooterNodeGlyph icon="folder" className="text-amber-500/80 dark:text-amber-400/80 h-3 w-3 shrink-0" />
+        <span className="text-foreground/75 truncate text-[11.5px] font-medium">{node.label}</span>
+      </button>
+      {open && (
+        <div role="group">
+          {children.map((child) => (
+            <FooterNode key={child.id} node={child} depth={depth + 1} defaultOpen={defaultOpen} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function FooterFile({ node, depth }: { node: StreamingTreeNode; depth: number }) {
+  const failed = node.state === "error";
+  const deleted = node.state === "deleted";
+  // Description carries "+N −M" churn (from deriveStreamingTree).
+  const m = node.description?.match(/^\+(\d+)(?:\s*−(\d+))?$/);
+  const additions = m ? Number(m[1]) : null;
+  const deletions = m && m[2] ? Number(m[2]) : null;
+  return (
+    <div
+      className="hover:bg-foreground/[0.05] group flex w-full items-center gap-1 rounded-md px-1.5 py-[3px] transition-colors"
+      style={{ paddingLeft: depth * 14 + 6 }}
+      title={node.id}
+    >
+      {/* Spacer aligning with the folder chevron column. */}
+      <span className="h-3 w-3 shrink-0" aria-hidden />
+      <FooterNodeGlyph
+        icon={node.icon ?? "file"}
+        className={cn("h-3 w-3 shrink-0", deleted ? "text-muted-foreground/50" : "text-muted-foreground")}
+      />
+      <span
+        className={cn(
+          "truncate text-[11.5px]",
+          failed ? "text-destructive/90" : deleted ? "text-muted-foreground/60 line-through" : "text-foreground/80",
+        )}
+      >
+        {node.label}
+      </span>
+      <span className="text-muted-foreground/50 group-hover:text-muted-foreground ml-auto shrink-0 pl-2 font-mono text-[10px] tabular-nums">
+        {failed ? (
+          <span className="text-destructive/80">failed</span>
+        ) : deleted ? (
+          <span>deleted</span>
+        ) : additions !== null ? (
+          <>
+            <span className="text-emerald-600 dark:text-emerald-400">+{additions}</span>
+            {deletions ? <span className="text-destructive/70"> −{deletions}</span> : null}
+          </>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+function FooterNode({
+  node,
+  depth,
+  defaultOpen,
+}: {
+  node: StreamingTreeNode;
+  depth: number;
+  defaultOpen: boolean;
+}) {
+  if (node.children?.length) {
+    return <FooterFolder node={node} depth={depth} defaultOpen={defaultOpen} />;
+  }
+  return <FooterFile node={node} depth={depth} />;
+}
+
+/**
+ * FilesFooter — the settled end-of-turn files card. Rendered ONLY after
+ * `isStreaming` flips false (same gate as the sources footer), styled
+ * exactly like the CitationsFooter: compact bordered card, mono uppercase
+ * "Files · N" header, tight 11.5px rows, scroll-capped tree.
+ */
+export function FilesFooter({
+  nodes,
+  fileCount,
+  totalAdditions,
+  totalDeletions,
+  className,
+}: {
+  nodes: readonly StreamingTreeNode[];
+  fileCount: number;
+  totalAdditions: number;
+  totalDeletions: number;
+  className?: string;
+}) {
+  if (fileCount === 0) return null;
+  // Deep trees stay compact: folders default-collapsed past 10 files.
+  const defaultOpen = fileCount <= 10;
+  return (
+    <div
+      data-slot="files-footer"
+      className={cn(
+        "border-foreground/10 bg-foreground/[0.015] mt-1 rounded-xl border px-2.5 py-2",
+        className,
+      )}
+      aria-label={`Files — ${fileCount} total`}
+    >
+      <div className="text-muted-foreground mb-1 flex items-center gap-1.5 px-0.5 font-mono text-[9.5px] font-medium tracking-[0.12em] uppercase">
+        <span>Files</span>
+        <span className="text-foreground/50 tabular-nums">{fileCount}</span>
+        {(totalAdditions > 0 || totalDeletions > 0) && (
+          <span className="ml-auto font-mono text-[10px] tabular-nums">
+            <span className="text-emerald-600 dark:text-emerald-400">+{totalAdditions}</span>
+            {totalDeletions > 0 && <span className="text-destructive/70"> −{totalDeletions}</span>}
+          </span>
+        )}
+      </div>
+      <div className="scrollbar-thin max-h-72 min-w-0 space-y-0 overflow-y-auto pr-0.5">
+        {nodes.map((node) => (
+          <FooterNode key={node.id} node={node} depth={0} defaultOpen={defaultOpen} />
+        ))}
+      </div>
+    </div>
   );
 }

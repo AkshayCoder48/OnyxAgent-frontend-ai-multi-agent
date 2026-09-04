@@ -450,13 +450,15 @@ export const useChatStore = create<ChatState>((set) => ({
           {
             id: newPartId(),
             type: "tool" as const,
-            toolCall,
+            // Stamp the start time (event `ts` in bg mode, runner clock) for
+            // the live elapsed timer + settled duration badge.
+            toolCall: { ...toolCall, startedAt: toolCall.startedAt ?? at ?? Date.now() },
             // Stamp the round so tool calls stack under their round's panel.
             round,
             roundStartedAt: at ?? Date.now(),
           },
         ],
-        toolCalls: [...(msg.toolCalls || []), toolCall],
+        toolCalls: [...(msg.toolCalls || []), { ...toolCall, startedAt: toolCall.startedAt ?? at ?? Date.now() }],
       };
       savePersisted(messages);
       return { messages };
@@ -521,15 +523,21 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const msg = state.messages[idx]!;
       const messages = [...state.messages];
+      // Terminal transitions stamp endedAt (once) — the settled duration
+      // badge reads it next to the status mark.
+      const isTerminal =
+        (update.status === "completed" || update.status === "error") &&
+        update.endedAt === undefined;
+      const withEnd = isTerminal ? { ...update, endedAt: Date.now() } : update;
       messages[idx] = {
         ...msg,
         parts: msg.parts?.map((p) =>
           p.type === "tool" && p.toolCall && p.toolCall.id === toolCallId
-            ? { ...p, toolCall: { ...p.toolCall, ...update } }
+            ? { ...p, toolCall: { ...p.toolCall, ...withEnd } }
             : p,
         ),
         toolCalls: msg.toolCalls?.map((tc) =>
-          tc.id === toolCallId ? { ...tc, ...update } : tc,
+          tc.id === toolCallId ? { ...tc, ...withEnd } : tc,
         ),
       };
       savePersisted(messages);

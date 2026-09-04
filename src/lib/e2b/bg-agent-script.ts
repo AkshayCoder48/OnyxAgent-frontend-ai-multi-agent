@@ -82,9 +82,34 @@ const safePath = (p) => {
 };
 
 async function readState() {
-  const raw = await fs.readFile(STATE_FILE, "utf8");
-  return JSON.parse(raw);
+  // BOOT RESILIENCE (PRD "System Not Found Error"): a crash-recovery resume
+  // can point at a run dir whose state.json was never written (killed
+  // between mkdir and write), and a half-written file must never crash the
+  // runner with a raw ENOENT. Missing/corrupt → a minimal boot state; the
+  // first writeState recreates the file.
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return { status: "running", messages: [] };
+  }
 }
+
+/** Friendly fs error text — raw Node codes ("ENOENT") and platform phrasings
+ *  ("The system cannot find the file specified") become actionable tool
+ *  errors the model can actually reason about (PRD TR-2). */
+const friendlyErr = (e) => {
+  const code = e && typeof e.code === "string" ? e.code : "";
+  if (code === "ENOENT") return "not found (no such file or folder)";
+  if (code === "EISDIR") return "path is a folder, not a file";
+  if (code === "ENOTDIR") return "path is not a folder (a parent segment is a file)";
+  if (code === "EEXIST") return "already exists";
+  if (code === "EACCES" || code === "EPERM") return "permission denied";
+  if (code) return code;
+  const msg = e && e.message ? String(e.message) : "";
+  if (/ENOENT|cannot find the file/i.test(msg)) return "not found (no such file or folder)";
+  return cap(msg || "unknown error", 160);
+};
 
 async function writeState(state) {
   const tmp = STATE_FILE + ".tmp";
@@ -461,7 +486,7 @@ const IDLE_TIMEOUT_MS = 240_000;
  * returns the normalized round result: { content, reasoning, toolCalls, error }.
  * toolCalls elements: { id, type, function: {name, arguments}, _args }.
  */
-async function streamRoundEvents(state, round) {
+async function streamRoundEvents(state, round, finalRound) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
@@ -471,7 +496,11 @@ async function streamRoundEvents(state, round) {
     temperature: p.temperature ?? 0.7,
     stream: true,
   };
-  if (state.toolsEnabled !== false) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  // The final wrap-up round runs WITHOUT tools — the model must compose its
+  // final answer (the cap ends the turn in done, never the old terminal
+  // max-rounds error). Fence/DSML "tool_call" text on the final round is
+  // parsed too — nothing executes; the text stays text.
+  if (state.toolsEnabled !== false && finalRound !== true) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
 
   // Pass-through emitters (1:1 with the provider's native SSE deltas).
   const emitTextDelta = (d) => { if (d) emitEvent({ t: "text_delta", round, content: d }); };
@@ -832,6 +861,38 @@ async function feedCompleteMessage(msg, round, feedDeltas, finishStream) {
   return result;
 }
 
+// ── Shared todo store (cross-run persistence, PRD FR-1) ─────────────────
+// One file per SANDBOX (= per conversation): /home/user/.onyx/todos.json.
+// Survives every turn/run for the sandbox's lifetime, seeded from the
+// client's live store on boot when the sandbox had to be recreated.
+const TODOS_FILE = path.join(STATE_DIR, "todos.json");
+
+/** Load the shared todo list (missing/corrupt file → empty list). */
+async function loadSharedTodos() {
+  try {
+    const raw = await fs.readFile(TODOS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Atomic write of the shared todo list (tmp + rename — never a torn file). */
+async function saveSharedTodos(todos) {
+  const tmp = TODOS_FILE + ".tmp";
+  await fs.writeFile(tmp, JSON.stringify(todos));
+  await fs.rename(tmp, TODOS_FILE);
+}
+
+/** Emit a todo_event snapshot — the replay path feeds it into the WSEvent
+ *  pipeline so the live TodoPreview updates IN REAL TIME in background
+ *  mode (previously the UI only saw settled tool results). */
+async function emitTodoEvent(todos) {
+  const list = Array.isArray(todos) ? todos : [];
+  await emitEvent({ t: "todo_event", todos: list });
+}
+
 // ── Sandbox-side tool implementations ──────────────────────────────────
 const TOOLS = [
   {
@@ -846,7 +907,7 @@ const TOOLS = [
         return content.length > 128 * 1024
           ? { content: content.slice(0, 128 * 1024), truncated: true }
           : { content };
-      } catch (e) { return { error: "Failed to read: " + e.code }; }
+      } catch (e) { return { error: "Failed to read: " + friendlyErr(e) }; }
     },
   },
   {
@@ -892,7 +953,7 @@ const TOOLS = [
         const updated = all ? original.split(args.find).join(args.replace) : original.replace(args.find, args.replace);
         await fs.writeFile(p, updated);
         return { path: args.path, replacements: all ? original.split(args.find).length - 1 : 1 };
-      } catch (e) { return { error: "Failed to edit: " + e.code }; }
+      } catch (e) { return { error: "Failed to edit: " + friendlyErr(e) }; }
     },
   },
   {
@@ -922,7 +983,7 @@ const TOOLS = [
           out.push({ name: e.name, path: path.relative(HOME, full), type: e.isDirectory() ? "directory" : "file", size });
         }
         return { entries: out, path: path.relative(HOME, p) || "." };
-      } catch (e) { return { error: "Failed to list: " + e.code }; }
+      } catch (e) { return { error: "Failed to list: " + friendlyErr(e) }; }
     },
   },
   {
@@ -1056,11 +1117,16 @@ const TOOLS = [
     },
   },
   {
-    // Beta V1.2 — todo plan tools in background mode. Same wire shapes as the
+    // Beta V1.3 — todo plan tools in background mode. Same wire shapes as the
     // in-browser registry (lib/tools/todos.ts) so the chat UI's TodoPreview
-    // renders identically. Todos persist in the run's state.json
-    // (crash-safe) and execution is sequential, so the load→mutate→save
-    // cycle cannot race.
+    // renders identically. PERSISTENCE FIX (PRD "Todo Persistence Failure"):
+    // todos live in a SHARED file (.onyx/todos.json) that survives across
+    // runs/turns for as long as the conversation's sandbox lives — state.json
+    // is per-run and was wiped on every new turn, which is exactly why
+    // created todos "disappeared" on the next tool call. The client seeds the
+    // file on boot when the sandbox was recreated (seedTodos from the live
+    // store), the sandbox's own file always wins once it exists, and every
+    // mutation emits a todo_event snapshot so the UI updates in real time.
     name: "manage_todo",
     description: "Manage the todo list for the current task. Actions: create (requires title), update (requires todo_id; optional title/status), delete (requires todo_id), list, clear. status must be one of: not_planned, in_progress, done, not_done. ALWAYS quote the todo ID from a create result in later update/delete calls.",
     parameters: {
@@ -1076,58 +1142,56 @@ const TOOLS = [
     },
     run: async (args) => {
       try {
-        const state = await readState();
-        const todos = Array.isArray(state.todos) ? state.todos : [];
+        const todos = await loadSharedTodos();
         const action = String(args.action ?? "").toLowerCase();
         const now = Date.now();
         const newId = () => "todo_" + Math.random().toString(16).slice(2, 6).padStart(4, "0");
+        let next = todos;
+        let out;
         if (action === "create") {
           const title = String(args.title ?? args.content ?? "").trim();
           if (!title) return { error: "title is required for create" };
           const todo = { id: newId(), title, status: "not_planned", createdAt: now, updatedAt: now };
-          todos.push(todo);
-          state.todos = todos;
-          await writeState(state);
-          return { success: true, output: { todo, total: todos.length } };
-        }
-        if (action === "update") {
+          next = [...todos, todo];
+          out = { success: true, output: { todo, total: next.length } };
+        } else if (action === "update") {
           const id = String(args.todo_id ?? "");
           const idx = todos.findIndex((t) => t.id === id);
           if (idx === -1) return { error: "todo not found: " + (id || "(missing todo_id)") };
           const previous = { ...todos[idx] };
-          const next = { ...todos[idx], updatedAt: now };
+          const updated = { ...todos[idx], updatedAt: now };
           const title = String(args.title ?? args.content ?? "").trim();
-          if (title) next.title = title;
+          if (title) updated.title = title;
           if (args.status !== undefined) {
             const s = String(args.status);
             if (!["not_planned", "in_progress", "done", "not_done"].includes(s)) {
               return { error: 'invalid status "' + s + '" — use not_planned | in_progress | done | not_done' };
             }
-            next.status = s;
+            updated.status = s;
           }
-          todos[idx] = next;
-          state.todos = todos;
-          await writeState(state);
-          return { success: true, output: { todo: next, previous } };
-        }
-        if (action === "delete") {
+          next = [...todos];
+          next[idx] = updated;
+          out = { success: true, output: { todo: updated, previous } };
+        } else if (action === "delete") {
           const id = String(args.todo_id ?? "");
           const idx = todos.findIndex((t) => t.id === id);
           if (idx === -1) return { error: "todo not found: " + (id || "(missing todo_id)") };
           const deleted = todos.splice(idx, 1)[0];
-          state.todos = todos;
-          await writeState(state);
-          return { success: true, output: { deleted } };
+          next = todos;
+          out = { success: true, output: { deleted } };
+        } else if (action === "list") {
+          return { success: true, output: { todos } };
+        } else if (action === "clear") {
+          next = [];
+          out = { success: true, output: { cleared: true } };
+        } else {
+          return { error: "Unknown action: " + action };
         }
-        if (action === "list") return { success: true, output: { todos } };
-        if (action === "clear") {
-          state.todos = [];
-          await writeState(state);
-          return { success: true, output: { cleared: true } };
-        }
-        return { error: "Unknown action: " + action };
+        await saveSharedTodos(next);
+        await emitTodoEvent(next);
+        return out;
       } catch (e) {
-        return { error: "Todo tool failed: " + (e && e.message ? e.message : String(e)) };
+        return { error: "Todo tool failed: " + friendlyErr(e) };
       }
     },
   },
@@ -1143,17 +1207,20 @@ const TOOLS = [
     },
     run: async (args) => {
       try {
-        const state = await readState();
-        const todos = Array.isArray(state.todos) ? state.todos : [];
+        const todos = await loadSharedTodos();
         const rawIds = Array.isArray(args.todo_ids) ? args.todo_ids.map((v) => String(v)) : [];
         const wantAll = args.all === true || rawIds.length === 0;
-        if (wantAll) return { success: true, output: { todos } };
+        if (wantAll) {
+          await emitTodoEvent(todos);
+          return { success: true, output: { todos } };
+        }
         const found = todos.filter((t) => rawIds.includes(t.id));
         const missing = rawIds.filter((id) => !todos.some((t) => t.id === id));
         if (!found.length) return { error: "todo not found: " + (missing.join(", ") || "(none)") };
+        await emitTodoEvent(todos);
         return { success: true, output: { todos: found, ...(missing.length ? { not_found: missing } : {}) } };
       } catch (e) {
-        return { error: "Todo tool failed: " + (e && e.message ? e.message : String(e)) };
+        return { error: "Todo tool failed: " + friendlyErr(e) };
       }
     },
   },
@@ -1189,6 +1256,14 @@ async function main() {
   EVENTS_FILE = path.join(runDir, "events.jsonl");
 
   const state = await readState();
+  // A run with no provider config cannot stream anything — a readable,
+  // actionable terminal (never a raw TypeError) per PRD TR-2.
+  if (!state || !state.provider || !state.provider.baseUrl) {
+    const msg = "Run state is missing its provider configuration (state.json was lost or never written). Restarting the turn will fix it.";
+    await emitEvent({ t: "error", message: msg });
+    await setTerminal("error", msg);
+    return;
+  }
   // seq continuity — a crash-relaunch must not reuse seq numbers.
   try {
     const raw = await fs.readFile(EVENTS_FILE, "utf8");
@@ -1203,15 +1278,42 @@ async function main() {
   } catch {}
 
   state.status = "running";
+  // TODO SEED (PRD FR-1): when the sandbox was recreated (fresh filesystem),
+  // the client's seedTodos (the live store snapshot at launch) restores the
+  // conversation's plan. The sandbox's OWN todos.json always wins once it
+  // exists — a stale client snapshot never clobbers sandbox state.
+  if (Array.isArray(state.seedTodos)) {
+    let exists = true;
+    try { await fs.access(TODOS_FILE); } catch { exists = false; }
+    if (!exists) {
+      await saveSharedTodos(state.seedTodos);
+      if (state.seedTodos.length > 0) {
+        await emitTodoEvent(state.seedTodos);
+      }
+    }
+    delete state.seedTodos;
+  }
   await writeState(state);
   await emitEvent({ t: "status", kind: "boot" });
 
-  const maxRounds = state.maxRounds ?? 12;
+  // MAX-ROUNDS (PRD TR-3): the cap is higher (30) and, crucially, the LAST
+  // round is a WRAP-UP round — a system note tells the model to answer now
+  // and tools are withheld from the request, so hitting the cap ends the
+  // turn with a real answer instead of the old terminal
+  // "Background run hit the max-rounds cap" error.
+  const maxRounds = state.maxRounds ?? 30;
   for (let round = 1; round <= maxRounds; round++) {
+    const isFinalRound = round === maxRounds;
+    if (isFinalRound && state.toolsEnabled !== false) {
+      state.messages.push({
+        role: "system",
+        content: "You have used your last available tool round. Provide your final answer to the user now. Do not request any more tools.",
+      });
+    }
     await emitEvent({ t: "round_start", round });
     let result;
     try {
-      result = await streamRoundEvents(state, round);
+      result = await streamRoundEvents(state, round, isFinalRound);
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);
       await emitEvent({ t: "error", message: msg });
@@ -1224,14 +1326,20 @@ async function main() {
       return;
     }
     const toolCalls = (result.toolCalls ?? []).filter((tc) => tc && tc.function && tc.function.name);
-    if (!toolCalls.length) {
-      if (!result.content.trim() && !result.reasoning.trim()) {
+    if (!toolCalls.length || isFinalRound) {
+      // FINAL ROUND (or a plain answer): end the turn as done. On the wrap-up
+      // round the model had no tools — any parsed "tool call" text is treated
+      // as the answer it is; the turn NEVER ends in the max-rounds error.
+      const content = result.content.trim() || (isFinalRound
+        ? "I reached the tool-call limit after completing the work steps — here is where things stand. Ask me to continue and I'll pick up from the plan."
+        : "");
+      if (!content && !result.reasoning.trim()) {
         await emitEvent({ t: "error", message: "The model returned an empty response." });
         await setTerminal("error", "The model returned an empty response.");
         return;
       }
-      await emitEvent({ t: "done", content: result.content });
-      await setTerminal("done", result.content);
+      await emitEvent({ t: "done", content });
+      await setTerminal("done", content);
       return;
     }
     // ONE assistant message carrying content + tool_calls (protocol shape).
@@ -1250,15 +1358,17 @@ async function main() {
       let toolResult;
       try {
         toolResult = tool ? await tool.run(args) : { error: "Unknown tool in background mode: " + fn.name };
-      } catch (e) { toolResult = { error: String(e && e.message ? e.message : e) }; }
+      } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
       const resultStr = cap(JSON.stringify(toolResult), 64 * 1024);
       await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
       state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
     }
     await writeState(state); // persist the conversation per round
   }
-  await emitEvent({ t: "error", message: "Background run hit the max-rounds cap (" + maxRounds + ")" });
-  await setTerminal("error", "Background run hit the max-rounds cap (" + maxRounds + ")");
+  // Unreachable in the normal path (the final round always ends via done),
+  // kept as a defensive terminal so the run can never hang open.
+  await emitEvent({ t: "done", content: "" });
+  await setTerminal("done", "");
 }
 
 main().catch(async (e) => {

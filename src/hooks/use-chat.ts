@@ -21,7 +21,7 @@ import type {
 } from "@/types";
 import { getGenerationId } from "@/types";
 import { setUrlParam } from "@/lib/utils";
-import { restoreTodos } from "@/lib/tools/todos";
+import { restoreTodos, persistTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
@@ -1158,6 +1158,13 @@ export function useChat(options: UseChatOptions = {}) {
                 conversationId ||
                 "default";
               useResearchStore.getState().setAgentTodos(turnId, all_todos as unknown as Todo[]);
+              // PERSIST (PRD FR-1): the snapshot lands in Dexie (the same
+              // table the in-browser tools write) so background-mode todos
+              // survive page refreshes exactly like foreground ones. Fire-
+              // and-forget — a failed write never blocks the live UI.
+              if (turnId !== "default") {
+                void persistTodos(turnId, all_todos as unknown as Todo[]).catch(() => {});
+              }
               break;
             }
           }

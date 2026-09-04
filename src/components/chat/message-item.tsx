@@ -17,7 +17,8 @@ import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
 import { CitationsFooter } from "./citations";
-import { StreamingFileTree, deriveStreamingTree } from "./streaming-file-tree";
+import { FilesFooter, deriveStreamingTree } from "./streaming-file-tree";
+import { formatDuration, useLiveElapsed } from "./tool-duration";
 import {
   Orb,
   ShimmerLabel,
@@ -318,14 +319,17 @@ interface MessageItemProps {
 }
 
 /**
- * CollapsibleToolGroup — when 2+ consecutive tool calls happen without any
- * text between them, they collapse into ONE line summarizing the whole
- * working session — "N steps · N files changed" — that expands into the
- * tool call cards themselves (ONE UI per tool call, in the display mode's
- * style). No separate step-trace above the cards: the trace and the card
- * lines said the same thing twice, which read as duplicated UI.
+ * CollapsibleToolGroup — TOOL STACKING (Beta V1.3): when 2+ consecutive tool
+ * calls happen without any text between them, they collapse into ONE stack
+ * line — "N steps · N files changed · 12s" — with a row of per-tool pills
+ * (icon + short name + status dot; first 3 + "+N") so the group tells its
+ * story WITHOUT expanding. Expanding reveals the tool call cards themselves
+ * (ONE UI per tool call, in the display mode's style), stacked under a
+ * timeline rail.
  *
- * While any tool in the group runs, the trigger shimmers "Working".
+ * The stack AUTO-EXPANDS while any tool in it runs (visibility into live
+ * work), then auto-collapses when everything settles — unless the user
+ * toggled it manually (their choice wins for the lifetime of the group).
  */
 function CollapsibleToolGroup({
   parts,
@@ -334,16 +338,49 @@ function CollapsibleToolGroup({
   parts: import("@/types/chat").MessagePart[];
   turnId?: string | null;
 }) {
-  const [expanded, setExpanded] = React.useState(false);
+  const [expanded, setExpanded] = React.useState(() =>
+    // Settled pages (reload/restore) with a content-payload tool mount OPEN.
+    parts.some(
+      (p) =>
+        p.type === "tool" &&
+        p.toolCall &&
+        (p.toolCall.name === "show_todo" ||
+          p.toolCall.name === "create_chart" ||
+          p.toolCall.name === "send_file" ||
+          p.toolCall.name === "send_folder" ||
+          p.toolCall.name === "preview_image" ||
+          p.toolCall.name === "ask_user"),
+    ),
+  );
+  const [userToggled, setUserToggled] = React.useState(false);
   // Display mode wording — simple narrates in plain words ("steps", "didn't
   // work"), technical counts tool calls and failures.
   const displayMode = useToolDisplayStore((s) => s.mode);
   const isSimple = displayMode === "simple";
 
-  const { toolParts, filesChanged, errorCount, anyRunning } =
+  const { toolParts, filesChanged, errorCount, anyRunning, settledCount, hasInlinePayload } =
     React.useMemo(() => {
       const tp = parts.filter((p) => p.type === "tool" && p.toolCall);
       const tcs = tp.map((p) => p.toolCall!);
+      // Content-payload tools (todo plan, charts, downloads, Q&A, image
+      // previews) render their payload INSIDE the stack — a group holding
+      // one must not auto-collapse at settle, or the payload disappears.
+      const hasInlinePayload = tcs.some(
+        (tc) =>
+          tc.name === "show_todo" ||
+          ((tc.name === "manage_todo" || tc.name === "manage_todos") &&
+            typeof tc.result === "string" &&
+            tc.result.includes('"todos"')) ||
+          (tc.name === "manage_todo" &&
+            typeof tc.result === "object" &&
+            tc.result !== null &&
+            "todos" in (tc.result as Record<string, unknown>)) ||
+          tc.name === "create_chart" ||
+          tc.name === "send_file" ||
+          tc.name === "send_folder" ||
+          tc.name === "preview_image" ||
+          tc.name === "ask_user",
+      );
       return {
         toolParts: tp,
         filesChanged: new Set(
@@ -369,8 +406,47 @@ function CollapsibleToolGroup({
         anyRunning: tcs.some(
           (tc) => tc.status === "running" || tc.status === "pending",
         ),
+        settledCount: tcs.filter(
+          (tc) => tc.status === "completed" || tc.status === "error",
+        ).length,
+        hasInlinePayload,
       };
     }, [parts]);
+
+  // AUTO-EXPAND/COLLAPSE (render-time adjustment pattern — no effect, no
+  // cascading renders): expand the moment work starts, collapse when it all
+  // settles — UNLESS the group carries a content payload (todo plan, chart,
+  // download…), which must stay visible, or the user toggled it manually
+  // (their choice wins for the lifetime of the group).
+  const autoTarget = anyRunning ? true : hasInlinePayload;
+  const [prevAuto, setPrevAuto] = React.useState(autoTarget);
+  if (autoTarget !== prevAuto) {
+    setPrevAuto(autoTarget);
+    if (!userToggled) setExpanded(autoTarget);
+  }
+
+  // Total span of the stack: first call's start → last settled call's end
+  // (ticks live while running via the shared elapsed hook).
+  const { spanStart, spanEnd } = React.useMemo(() => {
+    let start: number | undefined;
+    let end: number | undefined;
+    for (const p of toolParts) {
+      const tc = p.toolCall!;
+      if (tc.startedAt !== undefined && (start === undefined || tc.startedAt < start)) start = tc.startedAt;
+      if (tc.endedAt !== undefined && (end === undefined || tc.endedAt > end)) end = tc.endedAt;
+    }
+    return { spanStart: start, spanEnd: end };
+  }, [toolParts]);
+  const liveNow = useLiveElapsed(spanStart, anyRunning);
+  const spanMs =
+    spanStart === undefined
+      ? null
+      : anyRunning
+        ? Math.max(0, liveNow - spanStart)
+        : spanEnd !== undefined
+          ? spanEnd - spanStart
+          : null;
+  const spanLabel = spanMs !== null ? formatDuration(spanMs) : null;
 
   const count = toolParts.length;
   const stepWord = isSimple
@@ -388,13 +464,31 @@ function CollapsibleToolGroup({
         ? `${count} ${stepWord} · ${isSimple ? `${errorCount} didn't work` : `${errorCount} failed`}`
         : `${count} ${stepWord}${filesChanged > 0 ? ` · ${filesChanged} ${fileWord} changed` : ""}`;
 
+  // Per-tool pills: icon + short name + status tint. First 3, then "+N".
+  const pills = React.useMemo(() => {
+    const tcs = toolParts.map((p) => p.toolCall!);
+    return tcs.map((tc) => {
+      const short = shortToolLabel(tc);
+      return {
+        id: tc.id,
+        label: short,
+        status: tc.status,
+      };
+    });
+  }, [toolParts]);
+  const shownPills = pills.slice(0, 3);
+  const restPills = pills.length - shownPills.length;
+
   return (
     <div className="mb-1.5">
       {/* ONE trigger line — expands into the tool call cards. */}
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded((o) => !o)}
+        onClick={() => {
+          setUserToggled(true);
+          setExpanded((o) => !o);
+        }}
         className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
       >
         <ChevronRight
@@ -405,15 +499,60 @@ function CollapsibleToolGroup({
           aria-hidden
         />
         {anyRunning ? (
-          <ShimmerLabel className="text-sm font-medium">Working</ShimmerLabel>
+          <ShimmerLabel className="text-sm font-medium">
+            {settledCount > 0 ? `Working · ${settledCount}/${count} done` : "Working"}
+          </ShimmerLabel>
         ) : (
           <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
         )}
+        {spanLabel && (
+          <span className="text-muted-foreground/70 shrink-0 font-mono text-[10px] tabular-nums">
+            {spanLabel}
+          </span>
+        )}
       </button>
+
+      {/* STACK PILLS — the at-a-glance story of the group (status dots +
+          tool names), visible without expanding. */}
+      {!expanded && pills.length > 0 && (
+        <div className="mb-0.5 ml-[26px] flex flex-wrap items-center gap-1">
+          {shownPills.map((pill) => (
+            <span
+              key={pill.id}
+              className={cn(
+                "border-foreground/10 bg-foreground/[0.04] inline-flex max-w-[10rem] items-center gap-1 rounded-full border px-1.5 py-[2px]",
+                pill.status === "error" && "border-destructive/30 bg-destructive/[0.07]",
+              )}
+              title={pill.label}
+            >
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  pill.status === "running" || pill.status === "pending"
+                    ? "bg-primary animate-pulse"
+                    : pill.status === "error"
+                      ? "bg-destructive/70"
+                      : "bg-emerald-500/70",
+                )}
+                aria-hidden
+              />
+              <span className="text-muted-foreground truncate text-[10.5px] font-medium">
+                {pill.label}
+              </span>
+            </span>
+          ))}
+          {restPills > 0 && (
+            <span className="text-muted-foreground/70 shrink-0 font-mono text-[10.5px] tabular-nums">
+              +{restPills}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* The tool call cards — exactly one UI per tool call, in the current
           display mode's style (simple: non-expandable friendly lines;
-          technical: disclosure cards with args + output). */}
+          technical: disclosure cards with args + output), stacked under a
+          timeline rail. */}
       {expanded && (
         <div className="mt-1 ml-1.5 space-y-1 border-l border-border/70 pl-3">
           {toolParts.map((part) => (
@@ -425,6 +564,16 @@ function CollapsibleToolGroup({
       )}
     </div>
   );
+}
+
+/** Short label for a stack pill — tool name without the _noise, 22 chars. */
+function shortToolLabel(tc: import("@/types").ToolCall): string {
+  const raw = tc.name || "tool";
+  const cleaned = raw
+    .replace(/^(pending-)/, "")
+    .replace(/_/g, " ")
+    .trim();
+  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -745,13 +894,14 @@ export const MessageItem = React.memo(function MessageItem({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id, message.isStreaming, message.content, message.parts, isUser]);
 
-  // STREAMING FILE TREE (Beta V1.2, streamui "Tree" recipe): everything this
-  // run touches, as a nested animated tree that grows WHILE the agent works —
-  // in-flight writes show a shimmering “writing…” node, the card wears a blue
-  // border while streaming and settles green when the turn completes. Any
-  // file creation (≥1 file) gets the card, in both display modes.
+  // END-OF-TURN FILES FOOTER (Beta V1.3): the compact "Files · N" card in
+  // the CitationsFooter visual language — derived from the turn's file tool
+  // calls but rendered ONLY after the turn settles (never while streaming,
+  // same gate as the sources footer). The live growing tree was retired:
+  // the story of "what changed" belongs at the end, compact, not a growing
+  // panel that fights the streaming answer for space.
   const streamTree = React.useMemo(() => {
-    if (isUser) return null;
+    if (isUser || message.isStreaming) return null;
     const toolCalls = message.parts?.length
       ? message.parts
           .filter((p) => p.type === "tool" && p.toolCall)
@@ -760,7 +910,7 @@ export const MessageItem = React.memo(function MessageItem({
     if (toolCalls.length === 0) return null;
     const derived = deriveStreamingTree(toolCalls);
     return derived.fileCount > 0 ? derived : null;
-  }, [isUser, message.parts, message.toolCalls]);
+  }, [isUser, message.isStreaming, message.parts, message.toolCalls]);
 
   return (
     <div
@@ -1115,19 +1265,16 @@ export const MessageItem = React.memo(function MessageItem({
           <CitationsFooter sources={sources} onOpenPanel={(i) => openSources(sources, i)} />
         )}
 
-        {/* STREAMING FILE TREE — Beta V1.2: the animated workspace tree that
-            grows while the agent creates files (blue border while streaming,
-            green when complete). */}
+        {/* FILES FOOTER — Beta V1.3: the compact end-of-turn "Files · N" card
+            (same visual language + same post-stream gate as the sources
+            footer). Never appears while streaming. */}
         {streamTree && (
-          <div className="mt-2">
-            <StreamingFileTree
-              nodes={streamTree.root}
-              fileCount={streamTree.fileCount}
-              totalAdditions={streamTree.totalAdditions}
-              totalDeletions={streamTree.totalDeletions}
-              isStreaming={Boolean(message.isStreaming)}
-            />
-          </div>
+          <FilesFooter
+            nodes={streamTree.root}
+            fileCount={streamTree.fileCount}
+            totalAdditions={streamTree.totalAdditions}
+            totalDeletions={streamTree.totalDeletions}
+          />
         )}
 
         {/* Footer (copy/timestamp/regenerate) — only shown ONCE for the entire

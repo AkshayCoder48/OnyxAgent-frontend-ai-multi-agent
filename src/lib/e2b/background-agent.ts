@@ -28,6 +28,7 @@ export interface BgEvent {
     | "tool_call_delta"
     | "tool_result"
     | "status"
+    | "todo_event"
     | "done"
     | "error"
     /** v1 legacy monolithic events (runs started by the pre-streaming
@@ -50,6 +51,9 @@ export interface BgEvent {
   }>;
   result?: string;
   message?: string;
+  /** todo_event: the full todo-list snapshot (wire shape matches the
+   *  in-browser registry so the live TodoPreview renders identically). */
+  todos?: unknown[];
   /** status events: "boot" | "first_token" | "retry" | "llm_end" */
   kind?: string;
   attempt?: number;
@@ -88,6 +92,10 @@ export interface BgTurnOptions {
   history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
   assistantMessageId: string;
   conversationId: string | null;
+  /** Current agent todos (live store snapshot) — seeds the sandbox's shared
+   *  todos.json when the sandbox had to be recreated, so the plan survives
+   * across turns AND across sandbox recreations (PRD FR-1). */
+  seedTodos?: Array<{ id: string; title: string; status: string; createdAt?: number; updatedAt?: number }>;
 }
 
 const JOBS_KEY = "onyx-bg-jobs";
@@ -175,6 +183,9 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
       noPrefix: opts.provider.noPrefix,
     },
     toolsEnabled: opts.provider.toolsEnabled,
+    // Client-side todo snapshot — the runner seeds the sandbox's shared
+    // todos.json ONLY when that file doesn't exist (fresh/recreated sandbox).
+    ...(opts.seedTodos && opts.seedTodos.length > 0 ? { seedTodos: opts.seedTodos } : {}),
     messages: [
       ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
       ...opts.history,

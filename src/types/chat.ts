@@ -86,6 +86,12 @@ export interface ToolCall {
   streamingOutput?: string;
   /** Live stderr chunks, streamed separately so the UI can color them. */
   streamingError?: string;
+  /** Epoch ms when the call STARTED (event `ts` when available — the runner
+   *  clock in background mode) — drives the live elapsed timer. */
+  startedAt?: number;
+  /** Epoch ms when the call SETTLED (completed/error) — drives the settled
+   *  "2.4s" duration badge next to the status mark. */
+  endedAt?: number;
 }
 
 export type MessagePartType = "thinking" | "text" | "tool" | "reasoning";
