@@ -149,7 +149,14 @@ async function sandboxCall<T>(
     body: JSON.stringify({ apiKey: e2bApiKey, action, args }),
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok || (data && typeof data === "object" && "error" in data && data.error && action !== "bg_status")) {
+  // The `error` field means TRANSPORT failure only for actions that don't
+  // carry run-level state. bg_status AND bg_wait legitimately return the
+  // RUN's terminal error string (state.json's error mirror) in `error` —
+  // treating that as a transport failure made every post-error poll throw,
+  // which surfaced as a bogus "Lost the connection" after 5 retries instead
+  // of replaying the real error event.
+  const carriesRunState = action === "bg_status" || action === "bg_wait";
+  if (!res.ok || (data && typeof data === "object" && "error" in data && data.error && !carriesRunState)) {
     throw new Error((data as { error?: string }).error ?? `Sandbox ${action} failed (${res.status})`);
   }
   return data as T;
