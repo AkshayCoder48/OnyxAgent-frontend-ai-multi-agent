@@ -207,11 +207,12 @@ export function useChat(options: UseChatOptions = {}) {
   const activeRoundRef = useRef(1);
 
   /** Freeze the given round's timing on the streaming message (no-op when
-   *  the message or round doesn't exist). */
+   *  the message or round doesn't exist). `at` = the event's origin
+   *  timestamp (runner wall-clock on background turns). */
   const endActiveRound = useCallback(
-    (round: number) => {
+    (round: number, at?: number) => {
       const messageId = currentMessageIdRef.current;
-      if (messageId) endRoundPart(messageId, round);
+      if (messageId) endRoundPart(messageId, round, at);
     },
     [endRoundPart],
   );
@@ -221,9 +222,9 @@ export function useChat(options: UseChatOptions = {}) {
    *  is "-ing" only while reasoning_content is actually arriving, never
    *  until the round ends). */
   const endActiveReasoning = useCallback(
-    (round: number) => {
+    (round: number, at?: number) => {
       const messageId = currentMessageIdRef.current;
-      if (messageId) endReasoningPart(messageId, round);
+      if (messageId) endReasoningPart(messageId, round, at);
     },
     [endReasoningPart],
   );
@@ -244,11 +245,17 @@ export function useChat(options: UseChatOptions = {}) {
   // but lets React batch 3-5 SSE tokens into a single render pass.
   const textDeltaBuffer = useRef<string>("");
   const textDeltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Origin timestamp of the FIRST delta in the current text buffer (runner
+   *  wall-clock on background turns) — passed into the store so duration
+   *  badges stamp with when the model actually started answering. */
+  const textAtRef = useRef<number | null>(null);
 
   const thinkingBuffer = useRef<string>("");
   const thinkingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thinkingAtRef = useRef<number | null>(null);
   const reasoningBuffer = useRef<string>("");
   const reasoningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reasoningAtRef = useRef<number | null>(null);
 
   const toolArgBuffer = useRef<Map<number, { id: string; name: string; args: string }>>(new Map());
   const toolArgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -267,18 +274,21 @@ export function useChat(options: UseChatOptions = {}) {
       // Round-stamp new text parts (activeRoundRef) so text + thinking of
       // the same round land in one round segment — prevents the mid-stream
       // single→multi-round layout flip that remounted the TextBubble.
-      appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current);
+      appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current, textAtRef.current ?? undefined);
       textDeltaBuffer.current = "";
+      textAtRef.current = null;
     }
     if (thinkingTimer.current) { clearTimeout(thinkingTimer.current); thinkingTimer.current = null; }
     if (thinkingBuffer.current && currentMessageIdRef.current) {
-      appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current);
+      appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current, thinkingAtRef.current ?? undefined);
       thinkingBuffer.current = "";
+      thinkingAtRef.current = null;
     }
     if (reasoningTimer.current) { clearTimeout(reasoningTimer.current); reasoningTimer.current = null; }
     if (reasoningBuffer.current && currentMessageIdRef.current) {
-      appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current);
+      appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current, reasoningAtRef.current ?? undefined);
       reasoningBuffer.current = "";
+      reasoningAtRef.current = null;
     }
     if (toolArgTimer.current) { clearTimeout(toolArgTimer.current); toolArgTimer.current = null; }
     toolArgBuffer.current.clear();
@@ -543,7 +553,10 @@ export function useChat(options: UseChatOptions = {}) {
             const roundChanged = eventRound !== null ? eventRound !== activeRoundRef.current : true;
             if (roundChanged) {
               flushTextDelta();
-              endActiveRound(activeRoundRef.current);
+              // `ts` = runner wall-clock on background turns — freeze the
+              // old round with when the model ACTUALLY started the new one.
+              const at = (wsEvent.data as { ts?: number }).ts;
+              endActiveRound(activeRoundRef.current, typeof at === "number" ? at : undefined);
               activeRoundRef.current = eventRound ?? activeRoundRef.current + 1;
             }
           }
@@ -569,14 +582,16 @@ export function useChat(options: UseChatOptions = {}) {
           // ref comes back, but a stale delta never creates a phantom bubble).
           if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
-            const content = (wsEvent.data as { index: number; content: string }).content;
-            if (content) {
-              textDeltaBuffer.current += content;
+            const d = wsEvent.data as { index: number; content: string; ts?: number };
+            if (d.content) {
+              if (!textDeltaBuffer.current) textAtRef.current = typeof d.ts === "number" ? d.ts : Date.now();
+              textDeltaBuffer.current += d.content;
               if (!textDeltaTimer.current) {
                 textDeltaTimer.current = setTimeout(() => {
                   if (textDeltaBuffer.current && currentMessageIdRef.current) {
-                    appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current);
+                    appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current, textAtRef.current ?? undefined);
                     textDeltaBuffer.current = "";
+                    textAtRef.current = null;
                   }
                   textDeltaTimer.current = null;
                 }, 1); // 1ms — flush immediately (next tick), no batching delay
@@ -592,16 +607,20 @@ export function useChat(options: UseChatOptions = {}) {
           // createNewMessage (prevents phantom thinking bars).
           if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
-            const content = (wsEvent.data as { index: number; content: string }).content;
-            thinkingBuffer.current += content;
-            if (!thinkingTimer.current) {
-              thinkingTimer.current = setTimeout(() => {
-                if (thinkingBuffer.current && currentMessageIdRef.current) {
-                  appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current);
-                  thinkingBuffer.current = "";
-                }
-                thinkingTimer.current = null;
-              }, 100); // 100ms batch for thinking
+            const d = wsEvent.data as { index: number; content: string; ts?: number };
+            if (d.content) {
+              if (!thinkingBuffer.current) thinkingAtRef.current = typeof d.ts === "number" ? d.ts : Date.now();
+              thinkingBuffer.current += d.content;
+              if (!thinkingTimer.current) {
+                thinkingTimer.current = setTimeout(() => {
+                  if (thinkingBuffer.current && currentMessageIdRef.current) {
+                    appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current, thinkingAtRef.current ?? undefined);
+                    thinkingBuffer.current = "";
+                    thinkingAtRef.current = null;
+                  }
+                  thinkingTimer.current = null;
+                }, 100); // 100ms batch for thinking
+              }
             }
           }
           break;
@@ -612,16 +631,20 @@ export function useChat(options: UseChatOptions = {}) {
           // GENERATION GUARD: same as text_delta — drop stale, NO fallback.
           if (!isFromActiveGeneration()) break;
           if (currentMessageIdRef.current) {
-            const content = (wsEvent.data as { index: number; content: string }).content;
-            reasoningBuffer.current += content;
-            if (!reasoningTimer.current) {
-              reasoningTimer.current = setTimeout(() => {
-                if (reasoningBuffer.current && currentMessageIdRef.current) {
-                  appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current);
-                  reasoningBuffer.current = "";
-                }
-                reasoningTimer.current = null;
-              }, 100);
+            const d = wsEvent.data as { index: number; content: string; ts?: number };
+            if (d.content) {
+              if (!reasoningBuffer.current) reasoningAtRef.current = typeof d.ts === "number" ? d.ts : Date.now();
+              reasoningBuffer.current += d.content;
+              if (!reasoningTimer.current) {
+                reasoningTimer.current = setTimeout(() => {
+                  if (reasoningBuffer.current && currentMessageIdRef.current) {
+                    appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current, reasoningAtRef.current ?? undefined);
+                    reasoningBuffer.current = "";
+                    reasoningAtRef.current = null;
+                  }
+                  reasoningTimer.current = null;
+                }, 100);
+              }
             }
           }
           break;
@@ -638,7 +661,8 @@ export function useChat(options: UseChatOptions = {}) {
           // of shimmering "Thinking…" until the whole turn finishes.
           if (wsEvent.type === "llm_completed" && currentMessageIdRef.current) {
             flushTextDelta();
-            endActiveReasoning(activeRoundRef.current);
+            const at = (wsEvent.data as { ts?: number }).ts;
+            endActiveReasoning(activeRoundRef.current, typeof at === "number" ? at : undefined);
           }
           setRateLimitStatus(null);
           break;
@@ -796,6 +820,7 @@ export function useChat(options: UseChatOptions = {}) {
               args: Record<string, unknown>;
               tool_call_id: string;
               _preemit?: boolean;
+              ts?: number;
             };
             const { tool_name, args, tool_call_id } = data;
             // Pre-emit tool calls (sent during streaming before args are
@@ -911,10 +936,10 @@ export function useChat(options: UseChatOptions = {}) {
               });
             } else if (data._preemit) {
               // Pre-emit with no existing card — add as pending.
-              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current);
+              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current, typeof data.ts === "number" ? data.ts : undefined);
             } else {
               // Normal (non-preemit) tool_call with no existing — add new.
-              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current);
+              addToolCallPart(currentMessageIdRef.current, toolCall, activeRoundRef.current, typeof data.ts === "number" ? data.ts : undefined);
             }
           }
           break;

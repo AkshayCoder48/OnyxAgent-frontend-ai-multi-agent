@@ -90,10 +90,10 @@ interface ChatState {
   replaceMessageId: (oldId: string, newId: string) => void;
   addToolCall: (messageId: string, toolCall: ToolCall) => void;
   updateToolCall: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
-  appendTextDelta: (messageId: string, text: string, round?: number) => void;
-  appendThinkingDelta: (messageId: string, text: string, round?: number) => void;
-  appendReasoningDelta: (messageId: string, text: string, round?: number) => void;
-  addToolCallPart: (messageId: string, toolCall: ToolCall, round?: number) => void;
+  appendTextDelta: (messageId: string, text: string, round?: number, at?: number) => void;
+  appendThinkingDelta: (messageId: string, text: string, round?: number, at?: number) => void;
+  appendReasoningDelta: (messageId: string, text: string, round?: number, at?: number) => void;
+  addToolCallPart: (messageId: string, toolCall: ToolCall, round?: number, at?: number) => void;
   /** Stamp `roundEndedAt` on every part of `round` that lacks it — called
    *  when the next round starts or the turn completes. Completed round
    *  timing stays frozen forever (PRD §12). */
@@ -237,7 +237,7 @@ export const useChatStore = create<ChatState>((set) => ({
   // messages array. This is the hot path during streaming (called for every
   // text delta). Using a direct mutation pattern with a shallow copy of just
   // the changed message + its parent array.
-  appendTextDelta: (messageId, text, round) =>
+  appendTextDelta: (messageId, text, round, at) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -248,6 +248,9 @@ export const useChatStore = create<ChatState>((set) => ({
       // model finished thinking — stamp reasoningEndedAt so the panel
       // flips to "Thought for Ns" + auto-collapses right now (not when
       // the round ends). Only parts of the SAME round + not yet stamped.
+      // `at` is the event's origin timestamp (runner wall-clock for
+      // background turns) so the duration reflects WHEN the model
+      // switched from thinking to answering.
       if (parts.length > 0) {
         const roundKey = round ?? 0;
         let reasoningSettled = false;
@@ -261,7 +264,7 @@ export const useChatStore = create<ChatState>((set) => ({
             // no round stamp — treat as this round).
             if ((p.round ?? 0) === roundKey) {
               reasoningSettled = true;
-              return { ...p, reasoningEndedAt: Date.now() };
+              return { ...p, reasoningEndedAt: at ?? Date.now() };
             }
           }
           return p;
@@ -343,7 +346,7 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  appendThinkingDelta: (messageId, text, round) =>
+  appendThinkingDelta: (messageId, text, round, at) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -373,7 +376,10 @@ export const useChatStore = create<ChatState>((set) => ({
           type: "thinking" as const,
           content: text,
           round,
-          roundStartedAt: Date.now(),
+          // `at` = origin timestamp (runner wall-clock on background turns)
+          // — the "Thought for Ns" badge measures THINKING time in the
+          // sandbox, not browser-poll reception time.
+          roundStartedAt: at ?? Date.now(),
         });
       }
 
@@ -383,7 +389,7 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  appendReasoningDelta: (messageId, text, round) =>
+  appendReasoningDelta: (messageId, text, round, at) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -409,7 +415,7 @@ export const useChatStore = create<ChatState>((set) => ({
           type: "reasoning" as const,
           content: text,
           round,
-          roundStartedAt: Date.now(),
+          roundStartedAt: at ?? Date.now(),
         });
       }
 
@@ -419,7 +425,7 @@ export const useChatStore = create<ChatState>((set) => ({
       return { messages };
     }),
 
-  addToolCallPart: (messageId, toolCall, round) =>
+  addToolCallPart: (messageId, toolCall, round, at) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return state;
@@ -434,7 +440,7 @@ export const useChatStore = create<ChatState>((set) => ({
         (p.type === "thinking" || p.type === "reasoning") &&
         p.reasoningEndedAt === undefined &&
         (p.round ?? 0) === roundKey
-          ? { ...p, reasoningEndedAt: Date.now() }
+          ? { ...p, reasoningEndedAt: at ?? Date.now() }
           : p,
       );
       messages[idx] = {
@@ -447,7 +453,7 @@ export const useChatStore = create<ChatState>((set) => ({
             toolCall,
             // Stamp the round so tool calls stack under their round's panel.
             round,
-            roundStartedAt: Date.now(),
+            roundStartedAt: at ?? Date.now(),
           },
         ],
         toolCalls: [...(msg.toolCalls || []), toolCall],

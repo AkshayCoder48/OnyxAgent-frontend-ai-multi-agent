@@ -1529,10 +1529,15 @@
    Switches are EXCLUDED: they're `<button role="switch">` elements whose
    pill geometry is designed at h-6 (24px) — forcing 40px on them made the
    thumb float in an oversized track so every toggle read as a circle
-   (the "deformed pills" bug). A 44×24 pill is already touch-friendly. */
+   (the "deformed pills" bug). A 44×24 pill is already touch-friendly.
+   `.cite-chip` (the inline citation badge) is EXCLUDED too: the blanket
+   40×40 made the 18px badge balloon into a huge circle that dominated
+   every line (the "citation circle too big" bug). The chip keeps its
+   compact 18px visual and stays tappable via its ::before hit-area
+   extension (-inset-2 ≈ 34px total). */
 @media (max-width: 768px) {
-  button:not([role="switch"]),
-  [role="button"],
+  button:not([role="switch"]):not(.cite-chip),
+  [role="button"]:not(.cite-chip),
   a {
     min-height: 40px;
     min-width: 40px;

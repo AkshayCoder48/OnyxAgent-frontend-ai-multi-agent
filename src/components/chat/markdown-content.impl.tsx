@@ -538,9 +538,18 @@ const onCiteClickRef = React.createRef<((index: number) => void) | null>();
 const showCursorRef = React.createRef<boolean>();
 
 /** Superscript citation chip (Beta V1.2 — AICSS "Inline Citations").
- *  Rendered for every `#cite-N` link: a small raised chip with the source
- *  number, a hover tooltip naming the source, and a click that opens the
- *  sources panel (or the source URL directly when no panel is wired). */
+ *  Rendered for every `#cite-N` link: a compact 18px circular badge with the
+ *  source number, a hover tooltip naming the source, and a click that opens
+ *  the sources panel (or the source URL directly when no panel is wired).
+ *
+ *  SIZING (citation-circle fix): the badge is a FIXED 18px (h-[18px]
+ *  min-w-[18px], 10px font) regardless of the surrounding text size — it
+ *  stays compact inside paragraphs AND headings, never inflates line
+ *  height (vertical-align: middle, no align-super box-raising), never
+ *  pushes text apart, and stays independent of how long the citation
+ *  metadata is (the tooltip truncates). The ::before pseudo-element
+ *  extends the hit area ~6px in every direction so the 18px badge remains
+ *  comfortably tappable on touch devices. */
 function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
   const sources = React.useContext(CiteSourcesContext);
   const source = findSource(sources, n);
@@ -549,7 +558,7 @@ function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
     : `Source [${n}]`;
   const label = `Source ${n}: ${tip}`;
   return (
-    <span className="group/cite relative mx-[1px] inline-block align-super">
+    <span className="group/cite relative mx-[2px] inline-flex align-middle">
       <button
         type="button"
         onClick={(e) => {
@@ -558,7 +567,7 @@ function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
           if (click) click(n);
           else if (source?.url) window.open(source.url, "_blank", "noopener,noreferrer");
         }}
-        className="border-foreground/15 bg-foreground/[0.06] text-foreground/75 hover:border-primary/45 hover:bg-primary/15 hover:text-primary inline-flex h-[1.2em] min-w-[1.2em] cursor-pointer items-center justify-center rounded-full px-[0.3em] font-mono text-[0.62em] font-semibold leading-none tabular-nums transition-colors"
+        className="cite-chip relative inline-flex h-[18px] min-w-[18px] cursor-pointer select-none items-center justify-center rounded-full border border-foreground/15 bg-foreground/[0.055] px-[3px] font-mono text-[10px] font-semibold leading-none text-foreground/70 tabular-nums transition-colors before:absolute before:-inset-2 before:rounded-full before:content-[''] hover:border-primary/45 hover:bg-primary/10 hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
         aria-label={label}
       >
         {n}

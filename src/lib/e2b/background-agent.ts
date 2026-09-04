@@ -20,20 +20,53 @@
  */
 
 export interface BgEvent {
-  t: "round_start" | "text" | "reasoning" | "tool_call" | "tool_result" | "done" | "error";
+  t:
+    | "round_start"
+    | "text_delta"
+    | "reasoning_delta"
+    | "tool_call"
+    | "tool_call_delta"
+    | "tool_result"
+    | "status"
+    | "done"
+    | "error"
+    /** v1 legacy monolithic events (runs started by the pre-streaming
+     *  bundle) — still replayed as single big deltas. */
+    | "text"
+    | "reasoning";
   round?: number;
-  /** text / reasoning content */
+  /** text / reasoning / text_delta / reasoning_delta content */
   content?: string;
   /** tool_call / tool_result id */
   id?: string;
   name?: string;
   args?: Record<string, unknown>;
+  /** tool_call_delta fragments — flattened {index, id?, name?, arguments?} */
+  tool_calls?: Array<{
+    index: number;
+    id?: string;
+    name?: string;
+    arguments?: string;
+  }>;
   result?: string;
   message?: string;
+  /** status events: "boot" | "first_token" | "retry" | "llm_end" */
+  kind?: string;
+  attempt?: number;
+  delayMs?: number;
+  reason?: string;
+  /** Runner wall-clock (Date.now() inside the sandbox) — duration badges
+   *  stamp with WHEN THINGS ACTUALLY HAPPENED, not browser-poll time. */
+  ts?: number;
+  /** Monotonic event sequence (cursor for bg_wait long-polling). */
+  seq?: number;
 }
 
 export interface BgJob {
   sandboxId: string;
+  /** v2 per-run id — the run directory (.onyx/runs/<runId>/) the runner
+   *  streams its events.jsonl into. */
+  runId?: string;
   pid?: number;
   conversationId: string | null;
   assistantMessageId: string;
@@ -140,7 +173,7 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
       ...opts.history,
     ],
   };
-  const res = await sandboxCall<{ sandboxId: string; pid: number; error?: string }>(
+  const res = await sandboxCall<{ sandboxId: string; pid: number; runId?: string; error?: string }>(
     opts.e2bApiKey,
     "bg_start",
     { state, conversationId: opts.conversationId },
@@ -150,6 +183,7 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
   }
   const job: BgJob = {
     sandboxId: res.sandboxId,
+    runId: res.runId,
     pid: res.pid,
     conversationId: opts.conversationId,
     assistantMessageId: opts.assistantMessageId,
@@ -166,14 +200,38 @@ export interface BgStatus {
   content: string;
   error: string | null;
   startedAt: string | null;
+  /** v2 fields (bg_wait / runDir-aware bg_status). */
+  done?: boolean;
+  /** The seq cursor to send back on the next bg_wait call. */
+  afterSeq?: number;
 }
 
 /** Reconnect to the background sandbox and read its progress. */
 export async function pollBackgroundTurn(
   e2bApiKey: string,
   sandboxId: string,
+  runId?: string,
 ): Promise<BgStatus> {
-  return sandboxCall<BgStatus>(e2bApiKey, "bg_status", { sandboxId });
+  return sandboxCall<BgStatus>(e2bApiKey, "bg_status", { sandboxId, runId });
+}
+
+/** v2 LONG-POLL delivery: the server watches the run's append-only event
+ *  log for up to `maxWaitMs` and returns the moment new events exist past
+ *  `afterSeq` — one HTTP request per ~12s segment replaces the old fixed
+ *  2.5s browser poll. */
+export async function waitBackgroundTurn(
+  e2bApiKey: string,
+  sandboxId: string,
+  runId: string | undefined,
+  afterSeq: number,
+  maxWaitMs?: number,
+): Promise<BgStatus> {
+  return sandboxCall<BgStatus>(e2bApiKey, "bg_wait", {
+    sandboxId,
+    runId,
+    afterSeq,
+    maxWaitMs,
+  });
 }
 
 /** Stop the background runner (kills its processes; files stay). */

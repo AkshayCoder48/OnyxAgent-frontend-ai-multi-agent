@@ -7,7 +7,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { conversationService } from "@/lib/services";
 import {
   launchBackgroundTurn,
-  pollBackgroundTurn,
+  waitBackgroundTurn,
   stopBackgroundTurn,
   clearJob,
   getActiveJob,
@@ -19,23 +19,39 @@ import {
  * Background agent turn — runs the agent loop INSIDE the E2B sandbox as a
  * background command, so the turn keeps working after the browser closes,
  * stops, or minimizes (E2B sandboxes are server-side VMs; background
- * commands "keep running inside the sandbox even after the SDK
- * disconnects" — per the E2B docs).
+ * commands "keep running inside the sandbox even after the SDK disconnects"
+ * — per the E2B docs).
  *
- * The runner script inside the sandbox writes an event log to a state file.
- * This orchestrator polls it (every 2.5s while the browser is open) and
- * replays every event through the SAME `emit` pipeline the in-browser
- * runtime uses — so the chat UI, store updates, tool cards, and persistence
- * behave exactly like a normal turn. On reload, `resumeBackgroundTurn`
- * picks the persisted job back up and continues replaying from where it
- * left off: whatever ran while the browser was closed appears in the chat.
+ * v2 STREAMING DELIVERY: the sandbox runner streams fine-grained events
+ * (reasoning_delta / text_delta / tool_call_delta / tool_call / tool_result
+ * / status / done) into an append-only per-run log
+ * (.onyx/runs/<runId>/events.jsonl, every event carrying ts + seq). This
+ * orchestrator consumes that log through `bg_wait` — a SERVER-SIDE LONG
+ * POLL (~250ms poll granularity inside one ~12s HTTP request) driven by a
+ * seq cursor — and replays every event through the SAME `emit` pipeline
+ * the in-browser runtime uses. Latency from runner→UI is ~250-600ms, and
+ * thinking/text/tools update PROGRESSIVELY exactly like a foreground turn.
+ *
+ * Every event carries the RUNNER's wall-clock (`ts`), which flows into the
+ * WSEvent timestamp + `data.ts` — duration badges ("Reasoned for Ns") stamp
+ * with when things actually happened inside the sandbox, not when this
+ * browser happened to receive them.
+ *
+ * On reload, `resumeBackgroundTurn` picks the persisted job back up and
+ * continues consuming from its seq cursor: whatever ran while the browser
+ * was closed replays into the chat exactly once.
  */
 
-const POLL_INTERVAL_MS = 2500;
-const MAX_UNREACHABLE_POLLS = 5;
+/** One bg_wait segment — the HTTP request stays open up to ~11s, then the
+ *  client immediately re-issues. Well under the route's maxDuration=300. */
+const WAIT_SEGMENT_MS = 11_000;
+/** Network-level failures (fetch throws / unreachable) before giving up. */
+const MAX_UNREACHABLE = 5;
+/** Pause between unreachable retries. */
+const UNREACHABLE_PAUSE_MS = 1_000;
 
 export interface BackgroundTurnHandle {
-  /** Stop the background job + the poller. */
+  /** Stop the background job + the consumer. */
   stop: () => Promise<void>;
 }
 
@@ -96,6 +112,88 @@ async function persistCheckpoint(
 }
 
 /**
+ * Consume one background run: seq-cursor long-poll loop. Returns when the
+ * run reaches a terminal status (done/error) or the consumer is stopped.
+ * Shared by start + resume so both paths replay identically.
+ */
+async function consumeRun(ctx: {
+  e2bApiKey: string;
+  job: BgJob;
+  conversationId: string;
+  userId: string;
+  emit: (type: WSEvent["type"], data: Record<string, unknown>) => void;
+  onFinished: () => void;
+  isStopped: () => boolean;
+}): Promise<void> {
+  const { e2bApiKey, job } = ctx;
+  let cursor = 0;
+  let unreachable = 0;
+
+  for (;;) {
+    if (ctx.isStopped()) return;
+    let resp;
+    try {
+      resp = await waitBackgroundTurn(e2bApiKey, job.sandboxId, job.runId, cursor, WAIT_SEGMENT_MS);
+      unreachable = 0;
+    } catch {
+      unreachable++;
+      if (unreachable >= MAX_UNREACHABLE) {
+        ctx.emit("error", {
+          message:
+            "Lost the connection to the background sandbox on E2B (network error). The job itself is unaffected — reopening or reloading this page reconnects and resumes it.",
+        });
+        clearJob(job.assistantMessageId);
+        ctx.onFinished();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
+      continue;
+    }
+    if (resp.status === "unreachable") {
+      unreachable++;
+      if (unreachable >= MAX_UNREACHABLE) {
+        ctx.emit("error", {
+          message:
+            resp.error ??
+            "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically.",
+        });
+        clearJob(job.assistantMessageId);
+        ctx.onFinished();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
+      continue;
+    }
+
+    // Replay new events through the pipeline (seq order == file order).
+    const events = resp.events ?? [];
+    let finished = false;
+    for (const ev of events) {
+      if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
+      replayEvent(ctx.emit, ev);
+      if (ev.t === "done" || ev.t === "error") finished = true;
+    }
+    if (typeof resp.afterSeq === "number" && resp.afterSeq > cursor) cursor = resp.afterSeq;
+    if (resp.done) finished = true;
+
+    // Checkpoint after every batch (so a reload mid-run shows progress).
+    try {
+      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished);
+    } catch {
+      // best-effort
+    }
+    if (finished) {
+      ctx.emit("complete", {});
+      clearJob(job.assistantMessageId);
+      ctx.onFinished();
+      return;
+    }
+    // Immediately loop — bg_wait holds the next request open server-side
+    // until new events exist (no fixed-tick sleep).
+  }
+}
+
+/**
  * Run one turn in the background sandbox. Returns the handle, or null when
  * the launch failed (caller falls back to the in-browser runtime).
  */
@@ -150,64 +248,23 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       conversationId,
     });
 
-    // 5. Poll + replay until done. The poller lives only as long as this
-    //    browser tab is open; the JOB itself keeps running regardless.
+    // 5. Consume the run's event stream until it finishes. The consumer
+    //    lives only as long as this browser tab is open; the JOB itself
+    //    keeps running regardless.
     let stopped = false;
     void (async () => {
-      let processed = 0;
-      let unreachableCount = 0;
-      for (;;) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        if (stopped) return;
-        let status;
-        try {
-          status = await pollBackgroundTurn(ctx.e2bApiKey, job.sandboxId);
-          unreachableCount = 0;
-        } catch {
-          unreachableCount++;
-          if (unreachableCount >= MAX_UNREACHABLE_POLLS) {
-            emit("error", { message: "Lost the connection to the background sandbox on E2B (network error). The job itself is unaffected — reopening or reloading this page reconnects and resumes it." });
-            clearJob(assistantMessageId);
-            ctx.onFinished();
-            return;
-          }
-          continue;
-        }
-        if (status.status === "unreachable") {
-          unreachableCount++;
-          if (unreachableCount >= MAX_UNREACHABLE_POLLS) {
-            emit("error", { message: status.error ?? "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically." });
-            clearJob(assistantMessageId);
-            ctx.onFinished();
-            return;
-          }
-          continue;
-        }
-        // Replay new events through the pipeline.
-        const events = status.events ?? [];
-        let finished = false;
-        while (processed < events.length) {
-          const ev = events[processed]!;
-          processed++;
-          replayEvent(emit, ev);
-          if (ev.t === "done" || ev.t === "error") finished = true;
-        }
-        // Checkpoint after every batch (so a reload mid-run shows progress).
-        try {
-          await persistCheckpoint(conversationId!, ctx.userId, assistantMessageId, !finished);
-        } catch {
-          // best-effort
-        }
-        if (finished) {
-          emit("complete", {});
-          clearJob(assistantMessageId);
-          ctx.onFinished();
-          return;
-        }
-      }
+      await consumeRun({
+        e2bApiKey: ctx.e2bApiKey,
+        job,
+        conversationId: conversationId!,
+        userId: ctx.userId,
+        emit,
+        onFinished: ctx.onFinished,
+        isStopped: () => stopped,
+      });
     })().catch(() => {
-      // The poller died unexpectedly — surface as a normal turn error.
-      emit("error", { message: "The background poller stopped unexpectedly." });
+      // The consumer died unexpectedly — surface as a normal turn error.
+      emit("error", { message: "The background stream consumer stopped unexpectedly." });
       clearJob(assistantMessageId);
       ctx.onFinished();
     });
@@ -239,23 +296,43 @@ function replayEvent(
   ev: BgEvent,
 ): void {
   const round = ev.round ?? 1;
+  // Runner wall-clock flows into the event data (`ts`) so the chat store
+  // stamps durations with when things ACTUALLY happened in the sandbox.
+  const ts = typeof ev.ts === "number" ? ev.ts : Date.now();
   switch (ev.t) {
     case "round_start":
-      emit("model_request_start", { round });
+      emit("model_request_start", { round, ts });
       break;
     case "reasoning":
-      emit("reasoning_delta", { content: ev.content ?? "", round });
+      // v1 legacy monolithic reasoning — one big delta.
+      emit("reasoning_delta", { content: ev.content ?? "", round, ts });
+      break;
+    case "reasoning_delta":
+      emit("reasoning_delta", { content: ev.content ?? "", round, ts });
       break;
     case "text":
-      emit("text_delta", { content: ev.content ?? "", round });
+      // v1 legacy monolithic text — one big delta.
+      emit("text_delta", { content: ev.content ?? "", round, ts });
       break;
-    case "tool_call":
+    case "text_delta":
+      emit("text_delta", { content: ev.content ?? "", round, ts });
+      break;
+    case "tool_call_delta":
+      if (ev.tool_calls?.length) {
+        emit("tool_call_delta", { tool_calls: ev.tool_calls, ts });
+      }
+      break;
+    case "tool_call": {
+      const preemit = (ev as { _preemit?: boolean })._preemit === true;
       emit("tool_call", {
         tool_call_id: ev.id ?? `bg-${round}-${ev.name}`,
         tool_name: ev.name ?? "unknown",
         args: ev.args ?? {},
+        ts,
+        ...(preemit ? { _preemit: true } : {}),
       });
       break;
+    }
     case "tool_result": {
       // The runner stringifies the result; parse it back so the cards get
       // real objects (matching the in-browser tool_result shape).
@@ -270,11 +347,30 @@ function replayEvent(
       emit("tool_result", {
         tool_call_id: ev.id ?? "unknown",
         content: result,
+        ts,
       });
       break;
     }
+    case "status": {
+      const kind = ev.kind ?? "";
+      if (kind === "first_token") {
+        emit("llm_started", { ts });
+      } else if (kind === "llm_end") {
+        emit("llm_completed", { round, ts });
+      } else if (kind === "retry") {
+        emit("rate_limited", {
+          retryAfterMs: ev.delayMs ?? 2_000,
+          attempt: ev.attempt ?? 1,
+          maxAttempts: 4,
+          status: 429,
+          ts,
+        });
+      }
+      // "boot" and unknown kinds carry no UI state — ignored.
+      break;
+    }
     case "done":
-      emit("llm_completed", { round });
+      emit("llm_completed", { round, ts });
       emit("final_result", { output: ev.content ?? "" });
       break;
     case "error":
@@ -286,7 +382,7 @@ function replayEvent(
 /**
  * Resume the persisted background job for a conversation after a reload:
  * replays any events that ran while the browser was closed, then keeps
- * polling until the turn finishes. Returns the handle, or null when there
+ * consuming until the turn finishes. Returns the handle, or null when there
  * is nothing to resume.
  */
 export async function resumeBackgroundTurn(ctx: {
@@ -311,45 +407,15 @@ export async function resumeBackgroundTurn(ctx: {
 
   let stopped = false;
   void (async () => {
-    let processed = 0;
-    let unreachableCount = 0;
-    while (!stopped) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      if (stopped) return;
-      let status;
-      try {
-        status = await pollBackgroundTurn(ctx.e2bApiKey, job.sandboxId);
-        unreachableCount = 0;
-      } catch {
-        unreachableCount++;
-        if (unreachableCount >= MAX_UNREACHABLE_POLLS) return;
-        continue;
-      }
-      if (status.status === "unreachable") {
-        unreachableCount++;
-        if (unreachableCount >= MAX_UNREACHABLE_POLLS) return;
-        continue;
-      }
-      const events = status.events ?? [];
-      let finished = false;
-      while (processed < events.length) {
-        const ev = events[processed]!;
-        processed++;
-        replayEvent(emit, ev);
-        if (ev.t === "done" || ev.t === "error") finished = true;
-      }
-      try {
-        await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished);
-      } catch {
-        // best-effort
-      }
-      if (finished) {
-        emit("complete", {});
-        clearJob(job.assistantMessageId);
-        ctx.onFinished();
-        return;
-      }
-    }
+    await consumeRun({
+      e2bApiKey: ctx.e2bApiKey,
+      job,
+      conversationId: ctx.conversationId,
+      userId: ctx.userId,
+      emit,
+      onFinished: ctx.onFinished,
+      isStopped: () => stopped,
+    });
   })().catch(() => {
     // best-effort — the next reload resumes again.
   });

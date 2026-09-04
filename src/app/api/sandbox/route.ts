@@ -32,7 +32,7 @@ import { Sandbox } from "@e2b/code-interpreter";
 import { AGENT_MD } from "@/lib/agent/agent-md";
 // Background agent runner (see src/lib/e2b/bg-agent-script.ts) — the
 // self-contained script executed INSIDE the sandbox as a background command.
-import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
+import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH, BG_RUNS_PREFIX } from "@/lib/e2b/bg-agent-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -606,6 +606,142 @@ async function getSandbox(
 
   // 3. Create a new sandbox.
   return await createAndCacheSandbox(apiKey, conversationId, mode);
+}
+
+// ── v2 background-run reading helpers ─────────────────────────────────────
+// The runner writes an APPEND-ONLY event log per run
+// (.onyx/runs/<runId>/events.jsonl, one JSON line per event, every event
+// carrying ts + seq) plus a state.json mirror (status/content/error).
+// Both bg_status and bg_wait read through this single snapshot helper.
+
+interface BgRunSnapshot {
+  status: string;
+  events: unknown[];
+  content: string;
+  error: string | null;
+  startedAt: string | null;
+  done: boolean;
+  /** The highest seq in the returned events (cursor for bg_wait). */
+  nextSeq?: number;
+}
+
+/** Resolve the run dir: explicit runId → legacy pointer → null. */
+async function resolveBgRunDir(
+  sandbox: Sandbox,
+  args: Record<string, unknown>,
+): Promise<string | null> {
+  const runId = typeof args.runId === "string" ? args.runId.trim() : "";
+  if (runId) return BG_RUNS_PREFIX + runId;
+  try {
+    const raw = await sandbox.files.read(BG_STATE_PATH);
+    const p = JSON.parse(raw) as {
+      activeRun?: string;
+      runs?: string[];
+      status?: string;
+      events?: unknown[];
+    };
+    // v2 pointer shape.
+    const id = p.activeRun ?? (Array.isArray(p.runs) && p.runs.length ? p.runs[p.runs.length - 1] : null);
+    if (id) return BG_RUNS_PREFIX + id;
+    // v1 shape (the whole state lived in bg-state.json with an events
+    // array) — handled by the caller via the legacy snapshot path.
+    if (Array.isArray(p.events)) return "__legacy__";
+  } catch {
+    // No pointer file — fall through.
+  }
+  return null;
+}
+
+/** Read a run's snapshot (events after the seq cursor + terminal status).
+ *  Tolerates partial mid-append lines (the next poll re-reads them). */
+async function readBackgroundRun(
+  sandbox: Sandbox,
+  args: Record<string, unknown>,
+  afterSeq = 0,
+): Promise<BgRunSnapshot> {
+  const runDir = await resolveBgRunDir(sandbox, args);
+  if (runDir === "__legacy__") {
+    // v1 run (started by the pre-streaming bundle): the whole state is in
+    // bg-state.json. Return it in the new snapshot shape so old clients
+    // and the new pipeline both understand it.
+    try {
+      const raw = await sandbox.files.read(BG_STATE_PATH);
+      const state = JSON.parse(raw) as {
+        status?: string;
+        events?: Array<{ seq?: number }>;
+        content?: string;
+        error?: string;
+        startedAt?: string;
+      };
+      const events = (state.events ?? []).filter(
+        (ev) => typeof (ev as { seq?: number }).seq !== "number" || (ev as { seq?: number }).seq! > afterSeq,
+      );
+      const status = state.status ?? "running";
+      return {
+        status,
+        events,
+        content: state.content ?? "",
+        error: state.error ?? null,
+        startedAt: state.startedAt ?? null,
+        done: status === "done" || status === "error",
+      };
+    } catch {
+      return { status: "running", events: [], content: "", error: null, startedAt: null, done: false };
+    }
+  }
+  if (!runDir) {
+    return { status: "running", events: [], content: "", error: null, startedAt: null, done: false };
+  }
+  // Read state.json (status mirror) + events.jsonl (append-only log).
+  let status = "running";
+  let content = "";
+  let error: string | null = null;
+  let startedAt: string | null = null;
+  try {
+    const raw = await sandbox.files.read(runDir + "/state.json");
+    const st = JSON.parse(raw) as {
+      status?: string;
+      content?: string;
+      error?: string;
+      startedAt?: string;
+    };
+    status = st.status ?? "running";
+    content = st.content ?? "";
+    error = st.error ?? null;
+    startedAt = st.startedAt ?? null;
+  } catch {
+    // state.json not written yet — the run is booting.
+  }
+  const events: unknown[] = [];
+  let nextSeq = afterSeq;
+  try {
+    const raw = await sandbox.files.read(runDir + "/events.jsonl");
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      let ev: { seq?: number };
+      try {
+        ev = JSON.parse(t) as { seq?: number };
+      } catch {
+        continue; // partial mid-append line — the next poll re-reads it
+      }
+      if (typeof ev.seq === "number" && ev.seq > afterSeq) {
+        events.push(ev);
+        if (ev.seq > nextSeq) nextSeq = ev.seq;
+      }
+    }
+  } catch {
+    // events.jsonl not written yet.
+  }
+  return {
+    status,
+    events,
+    content,
+    error,
+    startedAt,
+    done: status === "done" || status === "error",
+    nextSeq,
+  };
 }
 
 interface RequestBody {
@@ -1336,28 +1472,43 @@ export async function POST(req: NextRequest) {
         }
         // Write the runner script (idempotent — same script every time).
         await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
-        // Write the job state the script consumes.
+        // v2 STREAMING RUN LAYOUT: each run gets its own directory —
+        //   .onyx/runs/<runId>/state.json   (boot state + status + todos +
+        //                                    conversation, rewritten per round)
+        //   .onyx/runs/<runId>/events.jsonl (APPEND-ONLY event log, O(1)
+        //                                    appends, ts+seq on every event)
+        //   .onyx/bg-state.json             (pointer for crash-recovery +
+        //                                    stale-bundle bg_status)
+        // Concurrent turns can no longer clobber each other's state file.
+        const runId =
+          "run_" + Date.now().toString(36) + "_" +
+          Math.random().toString(36).slice(2, 8);
+        const runDir = BG_RUNS_PREFIX + runId;
         const initial = {
           ...state,
           maxRounds,
           status: "starting",
-          events: [],
           content: "",
           startedAt: new Date().toISOString(),
         };
-        await sandbox.files.write(BG_STATE_PATH, JSON.stringify(initial));
+        await sandbox.files.write(runDir + "/state.json", JSON.stringify(initial));
+        await sandbox.files.write(runDir + "/events.jsonl", "");
+        await sandbox.files.write(
+          BG_STATE_PATH,
+          JSON.stringify({ activeRun: runId, runs: [runId], status: "starting", startedAt: initial.startedAt }),
+        );
         // Launch as a BACKGROUND command — returns immediately with a pid;
         // the process keeps running inside the sandbox after we (and the
-        // browser) disconnect. stdout/stderr land in a log file (per the
-        // E2B docs, streamed output of a background command is only
-        // delivered to the process that started it — files are durable).
+        // browser) disconnect. The runId argument tells the runner which
+        // run dir to execute (crash-relaunch reads the pointer fallback).
         const handle = await sandbox.commands.run(
-          `node ${BG_SCRIPT_PATH} > /home/user/.onyx/bg-agent.log 2>&1`,
+          `node ${BG_SCRIPT_PATH} ${runId} > /home/user/.onyx/bg-agent.log 2>&1`,
           { background: true, timeoutMs: 0, cwd: DEFAULT_CWD },
         );
         return NextResponse.json({
           sandboxId: sandbox.sandboxId,
           pid: handle.pid,
+          runId,
         });
       }
 
@@ -1386,31 +1537,58 @@ export async function POST(req: NextRequest) {
         } catch {
           // best-effort
         }
+        const snap = await readBackgroundRun(sandbox, args);
+        return NextResponse.json({
+          sandboxId: bgSandboxId,
+          ...snap,
+        });
+      }
+
+      // ── v2 STREAMING DELIVERY ─────────────────────────────────────────
+      // bg_wait — LONG-POLL: holds the HTTP request open server-side,
+      // watching the run's events.jsonl every 250ms. Returns the moment
+      // events NEWER than the client's seq cursor exist (or the run
+      // reaches a terminal status, or the max wait elapses). This gives
+      // ~250-600ms event latency with ONE connection per ~12s segment —
+      // versus the old fixed 2.5s browser poll that made everything feel
+      // chunky. Vercel-safe: maxDuration=300 >> the 12s segment cap.
+      case "bg_wait": {
+        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
+        if (!bgSandboxId) {
+          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
+        }
+        const afterSeq = Number(args.afterSeq ?? 0) || 0;
+        const maxWaitMs = Math.min(Math.max(Number(args.maxWaitMs ?? 11_000) || 11_000, 1_000), 25_000);
+        let sandbox: Sandbox;
         try {
-          const raw = await sandbox.files.read(BG_STATE_PATH);
-          const state = JSON.parse(raw) as {
-            status: string;
-            events?: unknown[];
-            content?: string;
-            error?: string;
-            startedAt?: string;
-          };
+          sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           return NextResponse.json({
             sandboxId: bgSandboxId,
-            status: state.status ?? "running",
-            events: state.events ?? [],
-            content: state.content ?? "",
-            error: state.error ?? null,
-            startedAt: state.startedAt ?? null,
-          });
-        } catch {
-          return NextResponse.json({
-            sandboxId: bgSandboxId,
-            status: "running",
+            status: "unreachable",
+            error: `Background sandbox unreachable: ${errMsg}`,
             events: [],
-            content: "",
-            error: null,
+            done: false,
+            afterSeq,
           });
+        }
+        try {
+          await sandbox.setTimeout(3_600_000);
+        } catch {
+          // best-effort
+        }
+        const deadline = Date.now() + maxWaitMs;
+        for (;;) {
+          const snap = await readBackgroundRun(sandbox, args, afterSeq);
+          if (snap.events.length > 0 || snap.done || Date.now() >= deadline) {
+            return NextResponse.json({
+              sandboxId: bgSandboxId,
+              ...snap,
+              afterSeq: snap.nextSeq ?? afterSeq,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 250));
         }
       }
 

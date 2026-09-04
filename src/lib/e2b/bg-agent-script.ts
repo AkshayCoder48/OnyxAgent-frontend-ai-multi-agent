@@ -1,31 +1,64 @@
 /**
- * The background agent runner — a self-contained Node ESM script that runs
- * INSIDE the E2B sandbox as a background command
+ * The background agent runner v2 — TRUE TOKEN STREAMING. A self-contained
+ * Node ESM script that runs INSIDE the E2B sandbox as a background command
  * (`commands.run("node …", { background: true, timeoutMs: 0 })`).
  *
  * Why inside the sandbox? E2B sandboxes are server-side VMs: they keep
- * running after the browser disconnects (per the E2B docs — "a sandbox is
- * not session-scoped", and a background command "keeps running inside the
- * sandbox even after the SDK disconnects"). The agent loop therefore
- * CONTINUES while the browser is closed, minimized, or cut off; when the
- * user comes back, the app reconnects (Sandbox.connect) and reads the
- * progress this script wrote to /home/user/.onyx/bg-state.json.
+ * running after the browser disconnects. The agent loop CONTINUES while the
+ * browser is closed; when the user comes back, the app reconnects and
+ * replays the progress this script wrote.
  *
- * The script implements the sandbox-side tool subset (files, terminal,
- * python, web fetch) and calls the user's OpenAI-compatible provider
- * directly (the sandbox has outbound internet). Every step appends an
- * event to the state file so the browser can replay the turn incrementally.
+ * v2 — the streaming rewrite (the old runner awaited `res.json()` and wrote
+ * ONE monolithic "reasoning" + ONE "text" event per round, which made the
+ * UI render whole rounds at once):
+ *   1. The LLM call is STREAMING (stream:true + Accept: text/event-stream)
+ *      with an incremental SSE parser (persistent buffer, \n\n and
+ *      \r\n\r\n frame boundaries, TextDecoder stream:true for split
+ *      multibyte UTF-8, [DONE] handling, idle watchdog).
+ *   2. Fine-grained events: `reasoning_delta` / `text_delta` /
+ *      `tool_call_delta` / `tool_call` / `tool_result` / `status` / `done` /
+ *      `error`, batched at 60ms (text) / 100ms (reasoning) — never the full
+ *      response in one event.
+ *   3. A LIVE think-region router mirrors the in-browser runtime: models
+ *      that think inside `content` (think tags, or the "Reasoning: …
+ *      Answer: …" prefix style) stream into reasoning_delta WHILE the
+ *      tokens arrive — the panel grows live, not at round end.
+ *   4. The event log is APPEND-ONLY (`.onyx/runs/<runId>/events.jsonl` —
+ *      O(1) appends, crash-relaunchable via seq continuity) with a tiny
+ *      state.json mirror (status + conversation + todos) and a legacy
+ *      bg-state.json pointer.
+ *   5. Every event carries `ts` (runner wall-clock) + `seq` (monotonic), so
+ *      duration badges reflect when things ACTUALLY happened inside the
+ *      sandbox, not when the browser happened to poll.
+ *   6. Providers that reject stream:true with 4xx (or answer
+ *      Content-Type: application/json) fall back to a non-streaming call
+ *      whose complete message is re-fed through the SAME delta pipeline —
+ *      one honest bulk delivery, no fake typing.
+ *   7. Retries (5xx/429/network, exponential backoff) happen BEFORE any
+ *      content streams — no duplicate deltas. Mid-stream failures flush the
+ *      partial content and preserve it.
  */
 
 export const BG_AGENT_SCRIPT = String.raw`
-// OnyxAgent background runner — executes INSIDE the E2B sandbox.
+// OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
+// Started as: node bg-agent.mjs <runId>
 import fs from "node:fs/promises";
 import { exec } from "node:child_process";
 import path from "node:path";
 
 const HOME = "/home/user";
 const STATE_DIR = path.join(HOME, ".onyx");
-const STATE_FILE = path.join(STATE_DIR, "bg-state.json");
+const RUNS_DIR = path.join(STATE_DIR, "runs");
+const LEGACY_POINTER = path.join(STATE_DIR, "bg-state.json");
+
+let STATE_FILE = "";
+let EVENTS_FILE = "";
+let SEQ = 0;
+// Serialized event appends — each appendFile is one atomic line write; the
+// chain keeps STRICT call order in the log (seq == file order).
+let emitChain = Promise.resolve();
+
+const cap = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "\n... (truncated)" : s);
 
 const safePath = (p) => {
   if (typeof p !== "string" || !p.trim()) return null;
@@ -41,24 +74,697 @@ async function readState() {
 }
 
 async function writeState(state) {
-  await fs.mkdir(STATE_DIR, { recursive: true });
   const tmp = STATE_FILE + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(state));
   await fs.rename(tmp, STATE_FILE);
 }
 
-async function appendEvent(ev) {
-  const state = await readState();
-  state.events.push(ev);
-  if (ev.t === "done" || ev.t === "error") {
-    state.status = ev.t === "done" ? "done" : "error";
-    if (ev.t === "done") state.content = ev.content ?? "";
-    if (ev.t === "error") state.error = ev.message ?? "Unknown error";
-  }
-  await writeState(state);
+/** Append one event to the run's append-only log (O(1), order-serialized). */
+function emitEvent(ev) {
+  ev.ts = Date.now();
+  ev.seq = ++SEQ;
+  emitChain = emitChain
+    .then(() => fs.appendFile(EVENTS_FILE, JSON.stringify(ev) + "\n"))
+    .catch(() => {});
+  return emitChain;
 }
 
-const cap = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "\n... (truncated)" : s);
+/** Terminal status → state.json mirror + legacy pointer. */
+async function setTerminal(status, contentOrError) {
+  try {
+    const state = await readState();
+    state.status = status;
+    if (status === "done") state.content = contentOrError ?? "";
+    if (status === "error") state.error = contentOrError ?? "Unknown error";
+    await writeState(state);
+  } catch {}
+  try {
+    const p = JSON.parse(await fs.readFile(LEGACY_POINTER, "utf8"));
+    p.status = status;
+    await fs.writeFile(LEGACY_POINTER, JSON.stringify(p));
+  } catch {}
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── DeltaBatcher: small latency-oriented accumulator ────────────────────
+// Deltas coalesce for at most minMs (60ms text / 100ms reasoning) or until
+// maxChars — then flush. NEVER holds the whole response.
+class DeltaBatcher {
+  constructor(minMs, maxChars, flush) {
+    this.minMs = minMs;
+    this.maxChars = maxChars;
+    this.flush = flush;
+    this.buf = "";
+    this.timer = null;
+  }
+  push(s) {
+    if (!s) return;
+    this.buf += s;
+    if (this.buf.length >= this.maxChars) {
+      this._flushNow();
+      return;
+    }
+    if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = null;
+        this._flushNow();
+      }, this.minMs);
+    }
+  }
+  _flushNow() {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    const out = this.buf;
+    this.buf = "";
+    if (out) {
+      try { this.flush(out); } catch {}
+    }
+  }
+  async settle() {
+    this._flushNow();
+    await emitChain; // wait for the last append to land
+  }
+}
+
+// ── Live think-region router ────────────────────────────────────────────
+// Models that think INSIDE content. Two shapes:
+//   A) Tag regions:  … 
+//      Text before the opener streams as text; the region streams as
+//      reasoning_delta LIVE; the closer returns to text mode. A 24-char
+//      tail is held back while streaming so a split tag isn't cut in half.
+//   B) Prefix style: the round's first text starts with "Reasoning:" — all
+//      text is held until an "Answer:"-family marker; pre-marker text
+//      streams as reasoning, post-marker as text. If the stream ends with
+//      no marker, everything is reasoning. (Held text is never lost.)
+const THINK_OPEN_RE = /<(?:think|thinking|thought|reasoning)>/i;
+const THINK_CLOSE_RE = /<\/(?:think|thinking|thought|reasoning)>/i;
+const ANSWER_MARK_RE = /(?:^|\n)[ \t]*(?:final[ \t]+)?(?:answer|response|conclusion|result)[ \t]*[:\-\u2013]\s*/i;
+const HOLD = 24; // chars held back while streaming (partial tag protection)
+
+class ThinkRouter {
+  constructor() {
+    this.mode = "text"; // "text" | "think"
+    this.decided = false; // prefix decision made?
+    this.prefix = false; // "Reasoning:" prefix style active
+    this.buf = ""; // routing buffer
+    this.finished = false;
+  }
+  /** Route an incoming text delta; onText/onThink receive emission-ready
+   *  chunks (hold-back-adjusted). */
+  push(s, onText, onThink) {
+    if (!s || this.finished) return;
+    this.buf += s;
+    if (this.mode === "think") {
+      const close = THINK_CLOSE_RE.exec(this.buf);
+      if (close) {
+        const head = this.buf.slice(0, close.index);
+        if (head) onThink(head);
+        this.buf = this.buf.slice(close.index + close[0].length);
+        this.mode = "text";
+        this._drainText(onText, onThink);
+      } else {
+        // stay in think mode — emit everything except the hold-back tail
+        const safeLen = Math.max(0, this.buf.length - HOLD);
+        if (safeLen > 0) {
+          onThink(this.buf.slice(0, safeLen));
+          this.buf = this.buf.slice(safeLen);
+        }
+      }
+      return;
+    }
+    // text mode — prefix decision first (needs 14 trimmed chars)
+    if (!this.decided) {
+      const trimmed = this.buf.trimStart();
+      if (trimmed.length < 14) return; // hold — not enough to decide
+      this.decided = true;
+      this.prefix = /^reasoning\b\s*[:\-\u2013]/i.test(trimmed);
+    }
+    if (this.prefix) {
+      const mark = ANSWER_MARK_RE.exec(this.buf);
+      if (mark) {
+        const head = this.buf.slice(0, mark.index);
+        if (head) onThink(head);
+        this.buf = this.buf.slice(mark.index + mark[0].length);
+        this.prefix = false;
+        this._drainText(onText, onThink);
+      }
+      // no marker yet → keep holding (flushed as reasoning at finish)
+      return;
+    }
+    this._drainText(onText, onThink);
+  }
+  _drainText(onText, onThink) {
+    if (this.mode !== "text" || this.finished) return;
+    const open = THINK_OPEN_RE.exec(this.buf);
+    if (open) {
+      const head = this.buf.slice(0, open.index);
+      if (head) onText(head);
+      this.buf = this.buf.slice(open.index + open[0].length);
+      this.mode = "think";
+      const close = THINK_CLOSE_RE.exec(this.buf);
+      if (close) {
+        const inner = this.buf.slice(0, close.index);
+        if (inner) onThink(inner);
+        this.buf = this.buf.slice(close.index + close[0].length);
+        this.mode = "text";
+        this._drainText(onText, onThink);
+      }
+      return;
+    }
+    // hold back a tail that could be a split tag opener ("<th", "<thi"…)
+    const safe = this._safeEmitLen(this.buf);
+    if (safe > 0) {
+      onText(this.buf.slice(0, safe));
+      this.buf = this.buf.slice(safe);
+    }
+  }
+  /** How much of the buffer can be emitted without cutting a possible
+   *  partial tag opener. Everything after the last "<" (when near the end)
+   *  is held; a "<" far from the end is prose. */
+  _safeEmitLen(buf) {
+    const lt = buf.lastIndexOf("<");
+    if (lt === -1) return buf.length;
+    if (buf.length - lt < HOLD) return lt;
+    return buf.length;
+  }
+  /** End of stream: flush every hold as its current mode's kind. */
+  finish(onText, onThink) {
+    if (this.finished) return;
+    this.finished = true;
+    const rest = this.buf;
+    this.buf = "";
+    if (!rest) return;
+    if (this.prefix) {
+      onThink(rest);
+    } else if (this.mode === "think") {
+      onThink(rest);
+    } else {
+      onText(rest);
+    }
+  }
+}
+
+// ── Fence (\x60\x60\x60tool_call) + DSML normalizers ────────────────────
+// Kept from v1: some gateways return tool calls INSIDE message.content as a
+// fenced block or DSML XML tags. During streaming the fence opener is
+// detected live (text after it is swallowed); at stream end the collected
+// content is normalized into real tool_calls.
+// NOTE: backticks are written as \x60 (char code) because this whole script
+// is embedded inside a backtick-delimited template literal.
+const FENCE_OPEN = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?/i;
+const FENCE_FULL = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?([\s\S]*?)[\x60]{3}/gi;
+
+function parseFenceCalls(text) {
+  if (!FENCE_OPEN.test(text)) return null;
+  const calls = [];
+  const consume = (body) => {
+    const trimmed = String(body ?? "").trim();
+    if (!trimmed) return;
+    let parsed;
+    try { parsed = JSON.parse(trimmed); } catch { return; }
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    for (const it of arr) {
+      if (!it || typeof it !== "object") continue;
+      const name = it.name ?? (it.function && it.function.name);
+      if (typeof name !== "string" || !name) continue;
+      let args = it.arguments ?? (it.function && it.function.arguments) ?? {};
+      if (args && typeof args === "object") args = JSON.stringify(args);
+      calls.push({ id: "fence_" + calls.length + "_" + Date.now(), type: "function", function: { name, arguments: String(args ?? "") } });
+    }
+  };
+  let clean;
+  const full = [...text.matchAll(FENCE_FULL)];
+  if (full.length) {
+    for (const m of full) consume(m[1]);
+    clean = text.replace(FENCE_FULL, "").trim();
+  } else {
+    const open = FENCE_OPEN.exec(text);
+    if (!open) return null;
+    consume(text.slice(open.index + open[0].length));
+    clean = text.slice(0, open.index).trim();
+  }
+  if (!calls.length) return null;
+  return { calls, clean };
+}
+
+function parseDSMLCalls(text) {
+  if (!text.includes("DSML")) return null;
+  const blockRe = /<｜｜DSML｜｜tool_calls>([\s\S]*?)(?:<\/｜｜DSML｜｜tool_calls>|$)/;
+  const m = blockRe.exec(text);
+  if (!m) return null;
+  const calls = [];
+  const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)">([\s\S]*?)(?:<\/｜｜DSML｜｜invoke>|$)/g;
+  let im;
+  while ((im = invokeRe.exec(m[1])) !== null) {
+    const args = {};
+    const paramRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
+    let pm;
+    while ((pm = paramRe.exec(im[2])) !== null) args[pm[1]] = pm[2].trim();
+    calls.push({ id: "dsml_" + calls.length + "_" + Date.now(), type: "function", function: { name: im[1], arguments: JSON.stringify(args) } });
+  }
+  if (!calls.length) return null;
+  return { calls, clean: (text.slice(0, m.index) + (m[0].endsWith("</｜｜DSML｜｜tool_calls>") ? text.slice(blockRe.lastIndex) : "")).trim() };
+}
+
+/** Normalize a completed message: extract text-embedded tool calls (fence /
+ *  DSML) into the standard tool_calls array and strip them from content. */
+function normalizeMessage(msg) {
+  let toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  const content = String(msg.content ?? "");
+  let clean = content;
+  if (toolCalls.length === 0 && content) {
+    const fence = parseFenceCalls(content);
+    if (fence) { toolCalls = fence.calls; clean = fence.clean; }
+    else {
+      const dsml = parseDSMLCalls(content);
+      if (dsml) { toolCalls = dsml.calls; clean = dsml.clean; }
+    }
+  } else if (content) {
+    const fence = parseFenceCalls(content);
+    if (fence) clean = fence.clean;
+    else {
+      const dsml = parseDSMLCalls(content);
+      if (dsml) clean = dsml.clean;
+    }
+  }
+  return { ...msg, content: clean, tool_calls: toolCalls };
+}
+
+// ── Incremental SSE frame parser ────────────────────────────────────────
+/** Extract every COMPLETE SSE frame from a buffer. Returns the parsed JSON
+ *  payloads + the remainder (partial frame kept for the next chunk). Handles
+ *  \n\n and \r\n\r\n separators, multi-line data:, [DONE], keep-alive
+ *  comments, and malformed frames (skipped, never fatal). */
+function parseSSEFrames(buffer) {
+  const events = [];
+  let rest = buffer;
+  for (;;) {
+    let idx = -1;
+    let len = 0;
+    const nl = rest.indexOf("\n\n");
+    const crlf = rest.indexOf("\r\n\r\n");
+    if (crlf !== -1 && (nl === -1 || crlf < nl)) { idx = crlf; len = 4; }
+    else if (nl !== -1) { idx = nl; len = 2; }
+    else break;
+    const frame = rest.slice(0, idx);
+    rest = rest.slice(idx + len);
+    const data = [];
+    for (const line of frame.split("\n")) {
+      const l = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (l.startsWith("data:")) data.push(l.slice(5).replace(/^ /, ""));
+    }
+    if (!data.length) continue; // comment/keep-alive/empty
+    const payload = data.join("\n").trim();
+    if (!payload || payload === "[DONE]") continue;
+    try { events.push(JSON.parse(payload)); } catch { /* malformed frame */ }
+  }
+  return { events, rest };
+}
+
+/** Pull content / reasoning / tool-call fragments out of one streamed chunk
+ *  (mirrors the in-browser runtime's extractDelta, INCLUDING the flattened
+ *  tool-call shape {index, id, name, arguments} the UI pipeline expects). */
+function extractDeltas(chunk) {
+  const choices = Array.isArray(chunk.choices) ? chunk.choices : null;
+  if (!choices || !choices.length) {
+    return { error: chunk.error ?? null };
+  }
+  const choice = choices[0];
+  if (!choice) return { error: null };
+  const delta = choice.delta && typeof choice.delta === "object" ? choice.delta : {};
+  const out = { error: null };
+  if (typeof delta.content === "string" && delta.content.length > 0) out.text = delta.content;
+  const reasoning = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
+  if (typeof reasoning === "string" && reasoning.length > 0) out.reasoning = reasoning;
+  const rawToolCalls = delta.tool_calls;
+  if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+    out.toolCalls = rawToolCalls.map((tc) => {
+      const fn = (tc && tc.function && typeof tc.function === "object") ? tc.function : {};
+      return {
+        index: typeof tc.index === "number" ? tc.index : 0,
+        id: typeof tc.id === "string" ? tc.id : undefined,
+        name: typeof fn.name === "string" ? fn.name : undefined,
+        arguments: typeof fn.arguments === "string" ? fn.arguments
+          : (fn.arguments && typeof fn.arguments === "object" ? JSON.stringify(fn.arguments) : undefined),
+      };
+    });
+  }
+  return out;
+}
+
+/** reader.read() with an idle timeout — the losing promise's eventual
+ *  rejection is always handled (no unhandled-rejection crash). */
+function readWithTimeout(reader, ms) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("idle")), ms);
+    reader.read().then(
+      (r) => { clearTimeout(t); resolve(r); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+// ── The streaming LLM call ──────────────────────────────────────────────
+const MAX_ATTEMPTS = 4;
+const IDLE_TIMEOUT_MS = 240_000;
+
+/**
+ * Streams ONE round. Emits live events (status:first_token, reasoning_delta,
+ * text_delta, tool_call_delta, pre-emitted tool_call, status:llm_end) and
+ * returns the normalized round result: { content, reasoning, toolCalls, error }.
+ * toolCalls elements: { id, type, function: {name, arguments}, _args }.
+ */
+async function streamRoundEvents(state, round) {
+  const p = state.provider;
+  let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
+  if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
+  const body = {
+    model: p.model,
+    messages: state.messages,
+    temperature: p.temperature ?? 0.7,
+    stream: true,
+  };
+  if (state.toolsEnabled !== false) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+
+  // Batcher-backed emitters (fire-and-forget; settle() awaits at round end).
+  const textBatch = new DeltaBatcher(60, 400, (d) => { emitEvent({ t: "text_delta", round, content: d }); });
+  const reasonBatch = new DeltaBatcher(100, 500, (d) => { emitEvent({ t: "reasoning_delta", round, content: d }); });
+
+  let content = "";      // visible text (post router; includes fence text)
+  let reasoning = "";    // reasoning text (all sources)
+  let fenceMode = false; // inside a \x60\x60\x60tool_call block — swallow
+  let emittedLen = 0;    // cursor of content already emitted as text_delta
+  const toolAcc = new Map(); // index → { id, name, args }
+  const preEmitted = new Set(); // indexes already pre-emitted as tool_call
+  let firstToken = false;
+  let router = new ThinkRouter();
+
+  const onText = (chunkText) => {
+    if (!chunkText) return;
+    if (fenceMode) { content += chunkText; return; } // swallowed; parsed at end
+    // LIVE FENCE DETECTION: check the accumulated visible text for an opener.
+    const acc = content + chunkText;
+    const open = FENCE_OPEN.exec(acc);
+    if (open && open.index >= emittedLen) {
+      const before = acc.slice(emittedLen, open.index);
+      if (before) textBatch.push(before);
+      emittedLen = acc.length;
+      content = acc;
+      fenceMode = true;
+      return;
+    }
+    content = acc;
+    textBatch.push(chunkText);
+    emittedLen = content.length;
+  };
+  const onThink = (chunkThink) => {
+    if (!chunkThink) return;
+    reasoning += chunkThink;
+    reasonBatch.push(chunkThink);
+  };
+
+  const markFirstToken = () => {
+    if (!firstToken) {
+      firstToken = true;
+      emitEvent({ t: "status", kind: "first_token", round });
+    }
+  };
+
+  const feedDeltas = (d) => {
+    if (!d) return;
+    if (d.reasoning) {
+      markFirstToken();
+      reasoning += d.reasoning;
+      reasonBatch.push(d.reasoning);
+    }
+    if (d.text) {
+      markFirstToken();
+      router.push(d.text, onText, onThink);
+    }
+    if (d.toolCalls) {
+      markFirstToken();
+      for (const tc of d.toolCalls) {
+        const idx = typeof tc.index === "number" ? tc.index : toolAcc.size;
+        const existing = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
+        if (tc.id) existing.id = tc.id;
+        if (tc.name) existing.name = tc.name;
+        if (tc.arguments) existing.args += tc.arguments;
+        toolAcc.set(idx, existing);
+      }
+      // Forward the fragments so the UI shows streaming tool args live.
+      emitEvent({ t: "tool_call_delta", round, tool_calls: d.toolCalls });
+      // Pre-emit the card the moment we know the tool's name/id.
+      for (const [idx, tc] of toolAcc) {
+        if ((tc.name || tc.id) && !preEmitted.has(idx)) {
+          preEmitted.add(idx);
+          emitEvent({
+            t: "tool_call", round,
+            id: tc.id || "bg_" + round + "_" + idx,
+            name: tc.name || "pending-" + idx,
+            args: { _streaming: tc.args },
+            _preemit: true,
+          });
+        }
+      }
+    }
+  };
+
+  const finishStream = async () => {
+    router.finish(onText, onThink);
+    await textBatch.settle();
+    await reasonBatch.settle();
+    // Finalize accumulated tool calls (parse args JSON).
+    const calls = [];
+    for (const [idx, tc] of toolAcc) {
+      let args = {};
+      try { args = JSON.parse(tc.args || "{}"); } catch { args = { _raw: tc.args }; }
+      calls.push({ id: tc.id || "bg_" + round + "_" + idx, type: "function", function: { name: tc.name || "unknown", arguments: tc.args || "{}" }, _args: args });
+    }
+    // Post-stream normalize: fence/DSML tool calls embedded in content.
+    const norm = normalizeMessage({ content, tool_calls: calls });
+    const normCalls = Array.isArray(norm.tool_calls) ? norm.tool_calls : [];
+    const finalCalls = normCalls.map((tc) => {
+      let args = {};
+      const raw = tc.function ? tc.function.arguments : "{}";
+      try { args = JSON.parse(raw || "{}"); } catch { args = { _raw: raw }; }
+      return { ...tc, _args: args };
+    });
+    return { content: norm.content, reasoning, toolCalls: finalCalls };
+  };
+
+  const resetForRetry = () => {
+    textBatch._flushNow();
+    reasonBatch._flushNow();
+    content = "";
+    reasoning = "";
+    emittedLen = 0;
+    fenceMode = false;
+    firstToken = false;
+    router = new ThinkRouter();
+    toolAcc.clear();
+    preEmitted.clear();
+  };
+
+  // Retry loop — only BEFORE any content arrived (no duplicate deltas).
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let res = null;
+    let fetchErr = null;
+    const ac = new AbortController();
+    const hardTimer = setTimeout(() => { try { ac.abort(); } catch {} }, 600_000);
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream",
+          ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
+    } catch (e) {
+      fetchErr = e && e.message ? e.message : String(e);
+    }
+    if (res && !res.ok) {
+      const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
+      if (retryable && attempt < MAX_ATTEMPTS) {
+        const delay = Math.min(2000 * attempt, 15_000);
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "HTTP " + res.status });
+        await sleep(delay);
+        clearTimeout(hardTimer);
+        continue;
+      }
+      const detail = await res.text().catch(() => "");
+      clearTimeout(hardTimer);
+      // 4xx on stream:true → MAY be "streaming not supported" — one
+      // non-streaming fallback attempt before giving up.
+      if (res.status < 500 && res.status !== 429 && res.status !== 408) {
+        return await nonStreamFallback(state, round, feedDeltas, finishStream);
+      }
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cap(detail, 500) };
+    }
+    if (!res || !res.body) {
+      if (fetchErr && attempt < MAX_ATTEMPTS) {
+        const delay = Math.min(2000 * attempt, 15_000);
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "network: " + fetchErr });
+        await sleep(delay);
+        clearTimeout(hardTimer);
+        continue;
+      }
+      clearTimeout(hardTimer);
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM network error: " + (fetchErr ?? "no response body") };
+    }
+    // Some gateways ignore stream:true and answer plain JSON — route that
+    // through the same delta pipeline (one honest bulk delivery).
+    const ct = String(res.headers.get("content-type") || "");
+    if (ct.includes("application/json")) {
+      clearTimeout(hardTimer);
+      try {
+        const json = await res.json();
+        const msg = json.choices?.[0]?.message ?? {};
+        return await feedCompleteMessage(msg, round, feedDeltas, finishStream);
+      } catch (e) {
+        return { content: "", reasoning: "", toolCalls: [], error: "LLM JSON parse failed: " + (e && e.message ? e.message : String(e)) };
+      }
+    }
+
+    // TRUE SSE — read incrementally.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuf = "";
+    let streamError = null;
+    try {
+      for (;;) {
+        let readResult;
+        try {
+          readResult = await readWithTimeout(reader, IDLE_TIMEOUT_MS);
+        } catch (e) {
+          streamError = e && e.message === "idle"
+            ? "Idle timeout (" + Math.round(IDLE_TIMEOUT_MS / 1000) + "s without a chunk)"
+            : "Stream read failed: " + (e && e.message ? e.message : String(e));
+          break;
+        }
+        const { value, done } = readResult;
+        if (done) break;
+        sseBuf += decoder.decode(value, { stream: true });
+        const parsed = parseSSEFrames(sseBuf);
+        sseBuf = parsed.rest;
+        for (const ev of parsed.events) {
+          const d = extractDeltas(ev);
+          if (d && d.error) {
+            const msg = d.error && d.error.message ? d.error.message : JSON.stringify(d.error);
+            streamError = "Provider stream error: " + cap(String(msg), 500);
+            break;
+          }
+          if (d && (d.text || d.reasoning || d.toolCalls)) feedDeltas(d);
+        }
+        if (streamError) break;
+      }
+      if (!streamError) {
+        sseBuf += decoder.decode();
+        const parsed = parseSSEFrames(sseBuf + "\n\n"); // flush trailing frame
+        for (const ev of parsed.events) {
+          const d = extractDeltas(ev);
+          if (d && d.error) {
+            const msg = d.error && d.error.message ? d.error.message : JSON.stringify(d.error);
+            streamError = "Provider stream error: " + cap(String(msg), 500);
+            break;
+          }
+          if (d && (d.text || d.reasoning || d.toolCalls)) feedDeltas(d);
+        }
+      }
+    } catch (e) {
+      streamError = streamError ?? (e && e.message ? e.message : String(e));
+    } finally {
+      clearTimeout(hardTimer);
+      try { ac.abort(); } catch {} // release the connection
+    }
+    if (streamError && !content && !reasoning && toolAcc.size === 0) {
+      // Nothing streamed yet — a retry is duplicate-free.
+      if (attempt < MAX_ATTEMPTS) {
+        const delay = Math.min(2000 * attempt, 15_000);
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: streamError });
+        resetForRetry();
+        await sleep(delay);
+        continue;
+      }
+      return { content: "", reasoning: "", toolCalls: [], error: streamError };
+    }
+    // Mid-stream failure: the partial text is ALREADY streamed + preserved
+    // in the UI — end the round in an ERROR state so the user knows the
+    // answer is truncated (PRD §26: partial response → error state, never
+    // a silent "done", never a blank replacement).
+    const result = await finishStream();
+    emitEvent({ t: "status", kind: "llm_end", round });
+    if (streamError) {
+      return { ...result, error: streamError };
+    }
+    return result;
+  }
+  const r = await finishStream();
+  emitEvent({ t: "status", kind: "llm_end", round });
+  return r;
+}
+
+/** Providers that reject stream:true — one non-streaming call, re-fed
+ *  through the SAME delta pipeline (no fake pacing, honest bulk delivery). */
+async function nonStreamFallback(state, round, feedDeltas, finishStream) {
+  const p = state.provider;
+  let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
+  if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
+  const nb = { model: p.model, messages: state.messages, temperature: p.temperature ?? 0.7 };
+  if (state.toolsEnabled !== false) nb.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
+      },
+      body: JSON.stringify(nb),
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cap(detail, 500) };
+    }
+    const json = await res.json();
+    const msg = json.choices?.[0]?.message ?? {};
+    return await feedCompleteMessage(msg, round, feedDeltas, finishStream);
+  } catch (e) {
+    return { content: "", reasoning: "", toolCalls: [], error: "LLM non-stream fallback failed: " + (e && e.message ? e.message : String(e)) };
+  }
+}
+
+/** Feed a COMPLETE message (non-stream shape) through the same delta
+ *  pipeline so reasoning/text/tool events emit identically. */
+async function feedCompleteMessage(msg, round, feedDeltas, finishStream) {
+  const reasoningField = msg.reasoning_content ?? msg.reasoning ?? msg.thinking;
+  if (typeof reasoningField === "string" && reasoningField) {
+    feedDeltas({ reasoning: reasoningField });
+  }
+  if (typeof msg.content === "string" && msg.content) {
+    feedDeltas({ text: msg.content });
+  }
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+    feedDeltas({
+      toolCalls: msg.tool_calls.map((tc, i) => {
+        const fn = (tc.function && typeof tc.function === "object") ? tc.function : {};
+        return {
+          index: i,
+          id: typeof tc.id === "string" ? tc.id : undefined,
+          name: typeof fn.name === "string" ? fn.name : undefined,
+          arguments: typeof fn.arguments === "string" ? fn.arguments
+            : (fn.arguments && typeof fn.arguments === "object" ? JSON.stringify(fn.arguments) : undefined),
+        };
+      }),
+    });
+  }
+  const result = await finishStream();
+  emitEvent({ t: "status", kind: "llm_end", round });
+  return result;
+}
 
 // ── Sandbox-side tool implementations ──────────────────────────────────
 const TOOLS = [
@@ -197,25 +903,25 @@ const TOOLS = [
     parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
     run: (args) =>
       new Promise((resolve) => {
-        const tmp = path.join(HOME, ".onyx", "py-" + Date.now() + ".py");
-        fs.mkdir(STATE_DIR, { recursive: true })
-          .then(() => fs.writeFile(tmp, String(args.code ?? "")))
+        const file = path.join(HOME, ".onyx", "tmp_run.py");
+        fs.mkdir(path.dirname(file), { recursive: true })
+          .then(() => fs.writeFile(file, String(args.code ?? "")))
           .then(() => {
-            exec("python3 " + JSON.stringify(tmp), { cwd: HOME, timeout: 60_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-              fs.rm(tmp, { force: true }).catch(() => {});
+            exec("python3 " + file, { cwd: HOME, timeout: 60_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
               resolve({
                 exit_code: err && err.code ? (typeof err.code === "number" ? err.code : 1) : 0,
                 stdout: cap(String(stdout ?? ""), 256 * 1024),
                 stderr: cap(String(stderr ?? err?.message ?? ""), 256 * 1024),
               });
+              fs.rm(file, { force: true }).catch(() => {});
             });
           })
-          .catch((e) => resolve({ error: String(e) }));
+          .catch((e) => resolve({ error: "Failed to prepare python run: " + (e && e.message ? e.message : String(e)) }));
       }),
   },
   {
     name: "web_fetch",
-    description: "Fetch a web page and return its readable text (tags stripped, 20KB cap).",
+    description: "Fetch a URL and return its readable text (title + body, 20KB cap).",
     parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
     run: async (args) => {
       try {
@@ -286,11 +992,9 @@ const TOOLS = [
   {
     // Beta V1.2 — todo plan tools in background mode. Same wire shapes as the
     // in-browser registry (lib/tools/todos.ts) so the chat UI's TodoPreview
-    // renders identically: create → { success, output: { todo, total } },
-    // update → { success, output: { todo, previous } }, list/show →
-    // { success, output: { todos } }. Todos persist in state.json (per-run,
-    // crash-safe) and execution is sequential (the runner awaits each tool
-    // in order), so the load→mutate→save cycle cannot race.
+    // renders identically. Todos persist in the run's state.json
+    // (crash-safe) and execution is sequential, so the load→mutate→save
+    // cycle cannot race.
     name: "manage_todo",
     description: "Manage the todo list for the current task. Actions: create (requires title), update (requires todo_id; optional title/status), delete (requires todo_id), list, clear. status must be one of: not_planned, in_progress, done, not_done. ALWAYS quote the todo ID from a create result in later update/delete calls.",
     parameters: {
@@ -390,205 +1094,110 @@ const TOOLS = [
 ];
 
 // ── The agent loop ──────────────────────────────────────────────────────
-// Text-embedded tool-call normalizers. Some gateway upstreams (freeaixyz4all's
-// toolbaz/ua providers) return tool calls INSIDE message.content as a fenced
-// code block:
-//   ~~~tool_call
-//   [{"name":"get_weather","arguments":{"city":"Tokyo"}}]
-//   ~~~
-// (where ~~~ stands for three backticks). Others use DeepSeek-style DSML XML
-// tags. Both are converted here into the standard message.tool_calls shape so
-// the loop below is format-agnostic.
-// NOTE: backticks are written as \x60 (their char code) in the regexes
-// below because this whole script is embedded inside a backtick-delimited
-// template literal — a literal backtick would terminate it.
-const FENCE_OPEN = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?/i;
-const FENCE_FULL = /[\x60]{3}(?:tool_calls?|tool-calls?|function[_\s-]*calls?)\s*\n?([\s\S]*?)[\x60]{3}/gi;
-
-function parseFenceCalls(text) {
-  if (!FENCE_OPEN.test(text)) return null;
-  const calls = [];
-  const consume = (body) => {
-    const trimmed = String(body ?? "").trim();
-    if (!trimmed) return;
-    let parsed;
-    try { parsed = JSON.parse(trimmed); } catch { return; }
-    const arr = Array.isArray(parsed) ? parsed : [parsed];
-    for (const it of arr) {
-      if (!it || typeof it !== "object") continue;
-      const name = it.name ?? (it.function && it.function.name);
-      if (typeof name !== "string" || !name) continue;
-      let args = it.arguments ?? (it.function && it.function.arguments) ?? {};
-      if (args && typeof args === "object") args = JSON.stringify(args);
-      calls.push({ id: "fence_" + calls.length + "_" + Date.now(), type: "function", function: { name, arguments: String(args ?? "") } });
-    }
-  };
-  let clean;
-  const full = [...text.matchAll(FENCE_FULL)];
-  if (full.length) {
-    for (const m of full) consume(m[1]);
-    clean = text.replace(FENCE_FULL, "").trim();
-  } else {
-    const open = FENCE_OPEN.exec(text);
-    if (!open) return null;
-    consume(text.slice(open.index + open[0].length));
-    clean = text.slice(0, open.index).trim();
+async function resolveRun() {
+  const arg = process.argv[2];
+  if (arg) {
+    const runDir = path.join(RUNS_DIR, arg);
+    await fs.mkdir(runDir, { recursive: true });
+    return runDir;
   }
-  if (!calls.length) return null;
-  return { calls, clean };
-}
-
-function parseDSMLCalls(text) {
-  if (!text.includes("DSML")) return null;
-  const blockRe = /<｜｜DSML｜｜tool_calls>([\s\S]*?)(?:<\/｜｜DSML｜｜tool_calls>|$)/;
-  const m = blockRe.exec(text);
-  if (!m) return null;
-  const calls = [];
-  const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)">([\s\S]*?)(?:<\/｜｜DSML｜｜invoke>|$)/g;
-  let im;
-  while ((im = invokeRe.exec(m[1])) !== null) {
-    const args = {};
-    const paramRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜｜DSML｜｜parameter>/g;
-    let pm;
-    while ((pm = paramRe.exec(im[2])) !== null) args[pm[1]] = pm[2].trim();
-    calls.push({ id: "dsml_" + calls.length + "_" + Date.now(), type: "function", function: { name: im[1], arguments: JSON.stringify(args) } });
-  }
-  if (!calls.length) return null;
-  return { calls, clean: (text.slice(0, m.index) + (m[0].endsWith("</｜｜DSML｜｜tool_calls>") ? text.slice(blockRe.lastIndex) : "")).trim() };
-}
-
-/** Normalize a provider message: extract text-embedded tool calls (fence /
- *  DSML) into the standard tool_calls array and strip them from content. */
-function normalizeMessage(msg) {
-  let toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-  const content = String(msg.content ?? "");
-  let clean = content;
-  if (toolCalls.length === 0 && content) {
-    const fence = parseFenceCalls(content);
-    if (fence) { toolCalls = fence.calls; clean = fence.clean; }
-    else {
-      const dsml = parseDSMLCalls(content);
-      if (dsml) { toolCalls = dsml.calls; clean = dsml.clean; }
+  try {
+    const p = JSON.parse(await fs.readFile(LEGACY_POINTER, "utf8"));
+    const id = p.activeRun ?? (Array.isArray(p.runs) && p.runs.length ? p.runs[p.runs.length - 1] : null);
+    if (id) {
+      const runDir = path.join(RUNS_DIR, String(id));
+      await fs.mkdir(runDir, { recursive: true });
+      return runDir;
     }
-  } else if (content) {
-    // Standard tool_calls present — still strip any leaked embedded blocks.
-    const fence = parseFenceCalls(content);
-    if (fence) clean = fence.clean;
-    else {
-      const dsml = parseDSMLCalls(content);
-      if (dsml) clean = dsml.clean;
-    }
-  }
-  return { ...msg, content: clean, tool_calls: toolCalls };
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Call the LLM with retries — gateway upstreams flap (502 "edge runtime
- *  crypto" errors, 503 UPSTREAM_UNAVAILABLE, network blips) and a single
- *  transient failure must NOT kill the whole background run. 5xx/429/network
- *  errors retry up to 4 times with exponential backoff; 4xx fails fast. */
-async function callLLM(state) {
-  const p = state.provider;
-  let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
-  if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
-  const body = {
-    model: p.model,
-    messages: state.messages,
-    temperature: p.temperature ?? 0.7,
-  };
-  if (state.toolsEnabled !== false) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-
-  const MAX_ATTEMPTS = 4;
-  let lastErr = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    let res;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(120_000),
-      });
-    } catch (e) {
-      lastErr = new Error("LLM network error: " + String(e?.message ?? e));
-      if (attempt < MAX_ATTEMPTS) { await sleep(2000 * attempt); continue; }
-      throw lastErr;
-    }
-    if (res.ok) {
-      const json = await res.json();
-      return normalizeMessage(json.choices?.[0]?.message ?? {});
-    }
-    const detail = await res.text().catch(() => "");
-    lastErr = new Error("LLM HTTP " + res.status + " " + cap(detail, 500));
-    const retryable = res.status >= 500 || res.status === 429;
-    if (retryable && attempt < MAX_ATTEMPTS) { await sleep(2000 * attempt); continue; }
-    throw lastErr;
-  }
-  throw lastErr ?? new Error("LLM call failed after retries");
+  } catch {}
+  return null;
 }
 
 async function main() {
+  const runDir = await resolveRun();
+  if (!runDir) {
+    console.error("bg-agent: no run to execute or resume");
+    process.exit(1);
+  }
+  STATE_FILE = path.join(runDir, "state.json");
+  EVENTS_FILE = path.join(runDir, "events.jsonl");
+
   const state = await readState();
+  // seq continuity — a crash-relaunch must not reuse seq numbers.
+  try {
+    const raw = await fs.readFile(EVENTS_FILE, "utf8");
+    for (const line of raw.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const ev = JSON.parse(t);
+        if (typeof ev.seq === "number" && ev.seq > SEQ) SEQ = ev.seq;
+      } catch {}
+    }
+  } catch {}
+
   state.status = "running";
-  state.events = state.events ?? [];
   await writeState(state);
+  await emitEvent({ t: "status", kind: "boot" });
 
   const maxRounds = state.maxRounds ?? 12;
   for (let round = 1; round <= maxRounds; round++) {
-    await appendEvent({ t: "round_start", round });
-    let message;
+    await emitEvent({ t: "round_start", round });
+    let result;
     try {
-      message = await callLLM(state);
+      result = await streamRoundEvents(state, round);
     } catch (e) {
-      await appendEvent({ t: "error", message: String(e.message ?? e) });
+      const msg = String(e && e.message ? e.message : e);
+      await emitEvent({ t: "error", message: msg });
+      await setTerminal("error", msg);
       return;
     }
-    // Reasoning tokens (some providers return reasoning_content alongside
-    // the message content + tool calls — capture as an event, never as the
-    // conversation content).
-    if (message.reasoning_content) {
-      await appendEvent({ t: "reasoning", round, content: cap(String(message.reasoning_content), 32 * 1024) });
+    if (result.error) {
+      await emitEvent({ t: "error", message: result.error });
+      await setTerminal("error", result.error);
+      return;
     }
-    const content = String(message.content ?? "");
-    if (content.trim()) {
-      await appendEvent({ t: "text", round, content });
-    }
-    const toolCalls = message.tool_calls ?? [];
+    const toolCalls = (result.toolCalls ?? []).filter((tc) => tc && tc.function && tc.function.name);
     if (!toolCalls.length) {
-      if (!content.trim() && !message.reasoning_content) {
-        await appendEvent({ t: "error", message: "The model returned an empty response." });
+      if (!result.content.trim() && !result.reasoning.trim()) {
+        await emitEvent({ t: "error", message: "The model returned an empty response." });
+        await setTerminal("error", "The model returned an empty response.");
         return;
       }
-      await appendEvent({ t: "done", content });
+      await emitEvent({ t: "done", content: result.content });
+      await setTerminal("done", result.content);
       return;
     }
     // ONE assistant message carrying content + tool_calls (protocol shape).
-    state.messages.push({ role: "assistant", content: content || null, tool_calls: toolCalls });
+    state.messages.push({
+      role: "assistant",
+      content: result.content || null,
+      ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
+      tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } })),
+    });
     for (const tc of toolCalls) {
       const fn = tc.function ?? {};
-      let args = {};
-      try { args = fn.arguments ? JSON.parse(fn.arguments) : {}; } catch { args = { _raw: fn.arguments }; }
-      await appendEvent({ t: "tool_call", round, id: tc.id ?? "bg-" + Math.random().toString(36).slice(2, 10), name: fn.name ?? "unknown", args });
+      const args = tc._args ?? {};
+      const id = tc.id ?? "bg-" + Math.random().toString(36).slice(2, 10);
+      await emitEvent({ t: "tool_call", round, id, name: fn.name ?? "unknown", args });
       const tool = TOOLS.find((x) => x.name === fn.name);
-      let result;
+      let toolResult;
       try {
-        result = tool ? await tool.run(args) : { error: "Unknown tool in background mode: " + fn.name };
-      } catch (e) { result = { error: String(e.message ?? e) }; }
-      const resultStr = cap(JSON.stringify(result), 64 * 1024);
-      await appendEvent({ t: "tool_result", round, id: tc.id ?? "unknown", name: fn.name ?? "unknown", result: resultStr });
-      state.messages.push({ role: "tool", tool_call_id: tc.id, content: resultStr });
+        toolResult = tool ? await tool.run(args) : { error: "Unknown tool in background mode: " + fn.name };
+      } catch (e) { toolResult = { error: String(e && e.message ? e.message : e) }; }
+      const resultStr = cap(JSON.stringify(toolResult), 64 * 1024);
+      await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
+      state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
     }
+    await writeState(state); // persist the conversation per round
   }
-  await appendEvent({ t: "error", message: "Background run hit the max-rounds cap (" + maxRounds + ")" });
+  await emitEvent({ t: "error", message: "Background run hit the max-rounds cap (" + maxRounds + ")" });
+  await setTerminal("error", "Background run hit the max-rounds cap (" + maxRounds + ")");
 }
 
 main().catch(async (e) => {
-  try { await appendEvent({ t: "error", message: String(e?.message ?? e) }); } catch {}
+  try { await emitEvent({ t: "error", message: String(e?.message ?? e) }); } catch {}
+  try { await setTerminal("error", String(e?.message ?? e)); } catch {}
   process.exit(1);
 });
 `;
@@ -596,3 +1205,5 @@ main().catch(async (e) => {
 /** Where the runner script + state live inside the sandbox. */
 export const BG_STATE_PATH = "/home/user/.onyx/bg-state.json";
 export const BG_SCRIPT_PATH = "/home/user/.onyx/bg-agent.mjs";
+/** Per-run directory prefix (state.json + events.jsonl inside). */
+export const BG_RUNS_PREFIX = "/home/user/.onyx/runs/";
