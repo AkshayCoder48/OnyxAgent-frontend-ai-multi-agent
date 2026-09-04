@@ -350,6 +350,29 @@ function normalizeMessage(msg) {
   return { ...msg, content: clean, tool_calls: toolCalls };
 }
 
+/** BARE-JSON TOOL CALL: some gateway/model combos (kilo-auto with a large
+ *  tool set) emit the tool call as ONE bare JSON object in content —
+ *   { "name": "web_search", "arguments": { ... } }
+ * instead of delta.tool_calls. Detected LIVE (the text is held, never shown)
+ * and resolved at stream end: converts to a real tool call when the JSON
+ * parses AND the name matches a registered tool, otherwise the held text is
+ * released untouched as normal text. */
+function parseBareToolCall(text) {
+  const t = String(text ?? "").trim();
+  if (!t.startsWith("{") || !t.endsWith("}")) return null;
+  let parsed;
+  try { parsed = JSON.parse(t); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const name = typeof parsed.name === "string" ? parsed.name
+    : (parsed.function && typeof parsed.function.name === "string" ? parsed.function.name : null);
+  if (!name || !TOOLS.some((x) => x.name === name)) return null;
+  let args = parsed.arguments ?? (parsed.function && parsed.function.arguments) ?? {};
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch { /* keep the string */ }
+  }
+  return { name, args, argsStr: typeof args === "string" ? args : JSON.stringify(args) };
+}
+
 // ── Incremental SSE frame parser ────────────────────────────────────────
 /** Extract every COMPLETE SSE frame from a buffer. Returns the parsed JSON
  *  payloads + the remainder (partial frame kept for the next chunk). Handles
@@ -454,6 +477,8 @@ async function streamRoundEvents(state, round) {
   let reasoning = "";    // reasoning text (all sources)
   let fenceMode = false; // inside a \x60\x60\x60tool_call block — swallow
   let emittedLen = 0;    // cursor of content already emitted as text_delta
+  // BARE-JSON TOOL GUARD state: null = undecided, true = holding, false = off.
+  let bareMode = null;
   const toolAcc = new Map(); // index → { id, name, args }
   const preEmitted = new Set(); // indexes already pre-emitted as tool_call
   let firstToken = false;
@@ -462,6 +487,30 @@ async function streamRoundEvents(state, round) {
   const onText = (chunkText) => {
     if (!chunkText) return;
     if (fenceMode) { content += chunkText; return; } // swallowed; parsed at end
+    // LIVE BARE-JSON TOOL HOLD: while NOTHING has been emitted as text yet,
+    // a stream starting with {"name":… may be a bare-JSON tool call (some
+    // gateways emit those instead of delta.tool_calls). Hold it — resolved
+    // at stream end (tool call, or released as text).
+    if (bareMode !== false && emittedLen === 0) {
+      const accHold = content + chunkText;
+      const t = accHold.trimStart();
+      if (bareMode === null && t.startsWith("{")) bareMode = true;
+      if (bareMode === true) {
+        // < 20 chars = too early to tell; otherwise require {"name": prefix.
+        const looksBare = t.length < 20 || /^\{\s*"name"\s*:/.test(t);
+        if (looksBare) {
+          content = accHold;
+          return; // held — never emitted until resolution
+        }
+        // Clearly not a bare tool call — release the WHOLE held text now
+        // (content already includes every chunk received so far).
+        bareMode = false;
+        content = accHold;
+        textBatch.push(accHold);
+        emittedLen = accHold.length;
+        return;
+      }
+    }
     // LIVE FENCE DETECTION: check the accumulated visible text for an opener.
     const acc = content + chunkText;
     const open = FENCE_OPEN.exec(acc);
@@ -531,6 +580,19 @@ async function streamRoundEvents(state, round) {
 
   const finishStream = async () => {
     router.finish(onText, onThink);
+    // BARE-JSON TOOL RESOLUTION: text held as a possible bare-JSON tool call
+    // converts to a real tool call (never shown as text) or releases.
+    if (bareMode === true && content && emittedLen === 0) {
+      const bare = parseBareToolCall(content);
+      if (bare) {
+        toolAcc.set(toolAcc.size, { id: "bare_" + Date.now(), name: bare.name, args: bare.argsStr });
+        content = "";
+      } else {
+        textBatch.push(content);
+        emittedLen = content.length;
+      }
+      bareMode = false;
+    }
     await textBatch.settle();
     await reasonBatch.settle();
     // Finalize accumulated tool calls (parse args JSON).
@@ -559,6 +621,7 @@ async function streamRoundEvents(state, round) {
     reasoning = "";
     emittedLen = 0;
     fenceMode = false;
+    bareMode = null;
     firstToken = false;
     router = new ThinkRouter();
     toolAcc.clear();
