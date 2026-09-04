@@ -1564,22 +1564,23 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // ── v2 STREAMING DELIVERY ─────────────────────────────────────────
-      // bg_wait — LONG-POLL: holds the HTTP request open server-side,
-      // watching the run's events.jsonl every 120ms (fast-path read: the
-      // event log alone while events flow — the state.json round-trip is
-      // skipped until the stream goes idle). Returns the moment events NEWER
-      // than the client's seq cursor exist (or the run reaches a terminal
-      // status, or the max wait elapses). With token-level events on the
-      // runner side this delivers word-by-word progress at ~100-250ms
-      // latency with ONE connection per ~12s segment. Vercel-safe:
-      // maxDuration=300 >> the 12s segment cap.
+      // ── v2.1 SERVER-PUSH SSE DELIVERY ─────────────────────────────────
+      // bg_wait — STREAMING SSE: the server holds ONE connection open for
+      // the segment, watching the run's events.jsonl (60ms while events
+      // flow, 150ms idle; the fast-path read skips the state.json round
+      // trip until the stream goes idle) and PUSHING each new batch of
+      // token-level events as a data frame the moment it lands. The client
+      // reads the stream incrementally — no per-batch HTTP round trip, so
+      // word-level deltas reach the UI at the server's read cadence
+      // (~60-150ms) instead of a full request-response cycle (~400-800ms).
+      // A ~2.5s keep-alive frame covers idle stretches; the segment cap
+      // (maxWaitMs, default 11s) is far under maxDuration=300.
       case "bg_wait": {
         const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
         if (!bgSandboxId) {
           return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
         }
-        const afterSeq = Number(args.afterSeq ?? 0) || 0;
+        const afterSeq0 = Number(args.afterSeq ?? 0) || 0;
         const maxWaitMs = Math.min(Math.max(Number(args.maxWaitMs ?? 11_000) || 11_000, 1_000), 25_000);
         let sandbox: Sandbox;
         try {
@@ -1592,7 +1593,7 @@ export async function POST(req: NextRequest) {
             error: `Background sandbox unreachable: ${errMsg}`,
             events: [],
             done: false,
-            afterSeq,
+            afterSeq: afterSeq0,
           });
         }
         try {
@@ -1600,18 +1601,116 @@ export async function POST(req: NextRequest) {
         } catch {
           // best-effort
         }
-        const deadline = Date.now() + maxWaitMs;
-        for (;;) {
-          const snap = await readBackgroundRun(sandbox, args, afterSeq, true);
-          if (snap.events.length > 0 || snap.done || Date.now() >= deadline) {
-            return NextResponse.json({
-              sandboxId: bgSandboxId,
-              ...snap,
-              afterSeq: snap.nextSeq ?? afterSeq,
-            });
-          }
-          await new Promise((r) => setTimeout(r, 120));
-        }
+        // ── v2.1 SERVER-PUSH SSE DELIVERY ─────────────────────────────────
+        // The old long-poll returned ONE JSON snapshot per HTTP request, so
+        // every event batch paid a full browser↔server round trip (~2-4 RTTs
+        // ≈ 400-800ms) — the "paragraph at once" cadence. Now the server
+        // holds ONE streaming connection open and PUSHES each batch of new
+        // events the moment its sandbox read lands:
+        //   - active stream: poll the event log every 60ms
+        //   - idle (thinking/boot/retry): every 150ms + a ~2.5s keep-alive
+        //     frame (empty events) so proxies keep the connection open and
+        //     the client keeps yielding
+        //   - segment cap (maxWaitMs): send a timeout frame + close; the
+        //     client re-opens immediately (one amortized RTT per ~11s)
+        const ACTIVE_POLL_MS = 60;
+        const IDLE_POLL_MS = 150;
+        const HEARTBEAT_MS = 2_500;
+        const encoder = new TextEncoder();
+        let cursor = afterSeq0;
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            let closed = false;
+            const send = (obj: Record<string, unknown>) => {
+              if (closed) return;
+              try {
+                controller.enqueue(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
+              } catch {
+                closed = true;
+              }
+            };
+            const sendUnreachable = (message: string) => {
+              send({
+                sandboxId: bgSandboxId,
+                status: "unreachable",
+                error: message,
+                events: [],
+                done: false,
+                afterSeq: cursor,
+              });
+            };
+            try {
+              const deadline = Date.now() + maxWaitMs;
+              let lastBeat = Date.now();
+              for (;;) {
+                const snap = await readBackgroundRun(sandbox, args, cursor, true);
+                if (snap.events.length > 0) {
+                  send({
+                    sandboxId: bgSandboxId,
+                    ...snap,
+                    afterSeq: snap.nextSeq ?? cursor,
+                  });
+                  if (snap.nextSeq) cursor = snap.nextSeq;
+                  if (snap.done) break;
+                  await new Promise((r) => setTimeout(r, ACTIVE_POLL_MS));
+                  continue;
+                }
+                if (snap.done) {
+                  send({
+                    sandboxId: bgSandboxId,
+                    ...snap,
+                    afterSeq: snap.nextSeq ?? cursor,
+                  });
+                  break;
+                }
+                if (Date.now() >= deadline) {
+                  // Segment cap — clean end; the client re-opens immediately.
+                  send({
+                    sandboxId: bgSandboxId,
+                    ...snap,
+                    afterSeq: snap.nextSeq ?? cursor,
+                    timeout: true,
+                  });
+                  break;
+                }
+                if (Date.now() - lastBeat >= HEARTBEAT_MS) {
+                  lastBeat = Date.now();
+                  // Keep-alive DATA frame (empty events): keeps intermediaries
+                  // from closing the connection AND lets the client's for-await
+                  // yield so it can check its stop flag.
+                  send({
+                    sandboxId: bgSandboxId,
+                    status: snap.status,
+                    events: [],
+                    content: "",
+                    error: null,
+                    startedAt: snap.startedAt,
+                    done: false,
+                    afterSeq: cursor,
+                  });
+                }
+                await new Promise((r) => setTimeout(r, IDLE_POLL_MS));
+              }
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              sendUnreachable(`bg_wait stream failed: ${errMsg}`);
+            }
+            try {
+              controller.close();
+            } catch {
+              // already closed by the consumer
+            }
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            // Disable nginx-style proxy buffering (Vercel honors this too).
+            "X-Accel-Buffering": "no",
+          },
+        });
       }
 
       case "bg_stop": {

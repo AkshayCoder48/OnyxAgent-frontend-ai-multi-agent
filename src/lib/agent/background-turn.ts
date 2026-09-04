@@ -7,7 +7,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { conversationService } from "@/lib/services";
 import {
   launchBackgroundTurn,
-  waitBackgroundTurn,
+  streamBackgroundTurn,
   stopBackgroundTurn,
   clearJob,
   getActiveJob,
@@ -22,15 +22,18 @@ import {
  * commands "keep running inside the sandbox even after the SDK disconnects"
  * — per the E2B docs).
  *
- * v2 STREAMING DELIVERY: the sandbox runner streams fine-grained events
+ * v2.1 STREAMING DELIVERY: the sandbox runner streams token-level events
  * (reasoning_delta / text_delta / tool_call_delta / tool_call / tool_result
- * / status / done) into an append-only per-run log
- * (.onyx/runs/<runId>/events.jsonl, every event carrying ts + seq). This
- * orchestrator consumes that log through `bg_wait` — a SERVER-SIDE LONG
- * POLL (~250ms poll granularity inside one ~12s HTTP request) driven by a
- * seq cursor — and replays every event through the SAME `emit` pipeline
- * the in-browser runtime uses. Latency from runner→UI is ~250-600ms, and
- * thinking/text/tools update PROGRESSIVELY exactly like a foreground turn.
+ * / status / done — 1:1 with each upstream SSE delta) into an append-only
+ * per-run log (.onyx/runs/<runId>/events.jsonl, every event carrying ts +
+ * seq). This orchestrator consumes that log through `bg_wait` — a
+ * SERVER-PUSH SSE stream (the server reads the log every 60ms while events
+ * flow and PUSHES each batch as a data frame over ONE connection per ~11s
+ * segment) driven by a seq cursor — and replays every event through the
+ * SAME `emit` pipeline the in-browser runtime uses. Latency from runner→UI
+ * is the server's read cadence (~60-150ms) — no per-batch HTTP round trip —
+ * so thinking/text/tools update word-by-word exactly like a foreground
+ * turn.
  *
  * Every event carries the RUNNER's wall-clock (`ts`), which flows into the
  * WSEvent timestamp + `data.ts` — duration badges ("Reasoned for Ns") stamp
@@ -112,9 +115,13 @@ async function persistCheckpoint(
 }
 
 /**
- * Consume one background run: seq-cursor long-poll loop. Returns when the
- * run reaches a terminal status (done/error) or the consumer is stopped.
- * Shared by start + resume so both paths replay identically.
+ * Consume one background run: seq-cursor SSE segment loop. The server PUSHES
+ * each batch of new events the moment its sandbox read lands (60ms cadence
+ * while the stream is hot); this consumer replays every event through the
+ * SAME `emit` pipeline the in-browser runtime uses and re-opens the segment
+ * when it caps out (~11s, one amortized RTT). Returns when the run reaches a
+ * terminal status (done/error) or the consumer is stopped. Shared by start +
+ * resume so both paths replay identically.
  */
 async function consumeRun(ctx: {
   e2bApiKey: string;
@@ -131,15 +138,61 @@ async function consumeRun(ctx: {
 
   for (;;) {
     if (ctx.isStopped()) return;
-    let resp;
+    let sawFrame = false;
+    let unreachableFrame = false;
+    let unreachableMsg: string | null = null;
     try {
-      resp = await waitBackgroundTurn(e2bApiKey, job.sandboxId, job.runId, cursor, WAIT_SEGMENT_MS);
-      unreachable = 0;
+      for await (const resp of streamBackgroundTurn(e2bApiKey, job.sandboxId, job.runId, cursor, WAIT_SEGMENT_MS)) {
+        sawFrame = true;
+        if (ctx.isStopped()) return; // for-await return → generator's finally cancels the fetch
+        if (resp.status === "unreachable") {
+          unreachableFrame = true;
+          unreachableMsg =
+            resp.error ??
+            "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically.";
+          break;
+        }
+        unreachable = 0;
+        // Replay new events through the pipeline (seq order == file order).
+        const events = resp.events ?? [];
+        let finished = false;
+        for (const ev of events) {
+          if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
+          replayEvent(ctx.emit, ev);
+          if (ev.t === "done" || ev.t === "error") finished = true;
+        }
+        if (typeof resp.afterSeq === "number" && resp.afterSeq > cursor) cursor = resp.afterSeq;
+        if (resp.done) finished = true;
+
+        // Checkpoint after every batch with content (so a reload mid-run
+        // shows progress).
+        if (events.length > 0) {
+          try {
+            await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished);
+          } catch {
+            // best-effort
+          }
+        }
+        if (finished) {
+          ctx.emit("complete", {});
+          clearJob(job.assistantMessageId);
+          ctx.onFinished();
+          return;
+        }
+        // Immediately keep reading — the server pushes the next batch the
+        // moment it lands (no fixed-tick sleep, no per-batch round trip).
+      }
     } catch {
+      // fetch/stream failed mid-segment — treat like an unreachable frame
+      unreachableFrame = true;
+    }
+    if (ctx.isStopped()) return;
+    if (unreachableFrame) {
       unreachable++;
       if (unreachable >= MAX_UNREACHABLE) {
         ctx.emit("error", {
           message:
+            unreachableMsg ??
             "Lost the connection to the background sandbox on E2B (network error). The job itself is unaffected — reopening or reloading this page reconnects and resumes it.",
         });
         clearJob(job.assistantMessageId);
@@ -149,47 +202,27 @@ async function consumeRun(ctx: {
       await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
       continue;
     }
-    if (resp.status === "unreachable") {
+    if (sawFrame) {
+      // Clean segment end (timeout frame) — checkpoint and re-open at once.
+      try {
+        await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, true);
+      } catch {
+        // best-effort
+      }
+    } else {
+      // Generator ended without a single frame — defensive unreachable path.
       unreachable++;
       if (unreachable >= MAX_UNREACHABLE) {
         ctx.emit("error", {
           message:
-            resp.error ??
-            "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically.",
+            "Lost the connection to the background sandbox on E2B (no stream frames). The job itself is unaffected — reopening or reloading this page reconnects and resumes it.",
         });
         clearJob(job.assistantMessageId);
         ctx.onFinished();
         return;
       }
       await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
-      continue;
     }
-
-    // Replay new events through the pipeline (seq order == file order).
-    const events = resp.events ?? [];
-    let finished = false;
-    for (const ev of events) {
-      if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
-      replayEvent(ctx.emit, ev);
-      if (ev.t === "done" || ev.t === "error") finished = true;
-    }
-    if (typeof resp.afterSeq === "number" && resp.afterSeq > cursor) cursor = resp.afterSeq;
-    if (resp.done) finished = true;
-
-    // Checkpoint after every batch (so a reload mid-run shows progress).
-    try {
-      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished);
-    } catch {
-      // best-effort
-    }
-    if (finished) {
-      ctx.emit("complete", {});
-      clearJob(job.assistantMessageId);
-      ctx.onFinished();
-      return;
-    }
-    // Immediately loop — bg_wait holds the next request open server-side
-    // until new events exist (no fixed-tick sleep).
   }
 }
 

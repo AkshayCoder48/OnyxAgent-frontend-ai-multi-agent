@@ -222,23 +222,103 @@ export async function pollBackgroundTurn(
   return sandboxCall<BgStatus>(e2bApiKey, "bg_status", { sandboxId, runId });
 }
 
-/** v2 LONG-POLL delivery: the server watches the run's append-only event
- *  log for up to `maxWaitMs` and returns the moment new events exist past
- *  `afterSeq` — one HTTP request per ~12s segment replaces the old fixed
- *  2.5s browser poll. */
-export async function waitBackgroundTurn(
+/** v2.1 SERVER-PUSH SSE delivery: the server holds ONE streaming connection
+ *  open for the segment and PUSHES each batch of new events the moment its
+ *  sandbox read lands (60ms while events flow). This generator yields one
+ *  BgStatus per data frame, parsed INCREMENTALLY from the response stream —
+ *  the browser↔server round trip is paid once per segment (~11s), not once
+ *  per event batch (the per-batch RTT was the "paragraph at once" cadence).
+ *  The segment ends (generator returns) on the server's timeout frame or
+ *  terminal status; the caller re-opens immediately. */
+export async function* streamBackgroundTurn(
   e2bApiKey: string,
   sandboxId: string,
   runId: string | undefined,
   afterSeq: number,
   maxWaitMs?: number,
-): Promise<BgStatus> {
-  return sandboxCall<BgStatus>(e2bApiKey, "bg_wait", {
-    sandboxId,
-    runId,
-    afterSeq,
-    maxWaitMs,
+  signal?: AbortSignal,
+): AsyncGenerator<BgStatus> {
+  const res = await fetch("/api/sandbox", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiKey: e2bApiKey,
+      action: "bg_wait",
+      args: { sandboxId, runId, afterSeq, maxWaitMs },
+    }),
+    signal,
   });
+  // Non-OK / non-streaming response — surface it as a frame error (the
+  // caller treats a generator that ends without frames as unreachable).
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    let msg = `bg_wait failed (HTTP ${res.status})`;
+    try {
+      const j = JSON.parse(text) as { error?: string; status?: string };
+      if (j.status === "unreachable" && j.error) {
+        yield {
+          sandboxId,
+          status: "unreachable",
+          error: j.error,
+          events: [],
+          content: "",
+          startedAt: null,
+          done: false,
+          afterSeq,
+        } as BgStatus;
+        return;
+      }
+      if (j.error) msg = j.error;
+    } catch {
+      // HTML/plain error body
+    }
+    throw new Error(msg);
+  }
+  if (!res.body) throw new Error("bg_wait returned no stream body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // Parse COMPLETE frames only (protocol buffering, never content
+      // buffering — partial frames stay in `buf` until the next chunk).
+      const frames = buf.split("\n\n");
+      buf = frames.pop() ?? "";
+      for (const frame of frames) {
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data:")) continue; // SSE comments ignored
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            yield JSON.parse(payload) as BgStatus;
+          } catch {
+            // malformed frame — the next one carries the cursor forward
+          }
+        }
+      }
+    }
+    // Flush the trailing partial frame (protocol completeness).
+    buf += decoder.decode();
+    for (const line of buf.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        yield JSON.parse(payload) as BgStatus;
+      } catch {
+        // ignore
+      }
+    }
+  } finally {
+    try {
+      reader.cancel();
+    } catch {
+      // already released
+    }
+  }
 }
 
 /** Stop the background runner (kills its processes; files stay). */
