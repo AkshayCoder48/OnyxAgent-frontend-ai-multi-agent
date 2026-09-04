@@ -59,6 +59,19 @@ let SEQ = 0;
 let emitChain = Promise.resolve();
 
 const cap = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "\n... (truncated)" : s);
+/** Error-detail cleaner: gateways answer 4xx/5xx with HTML error pages —
+ *  strip tags so the user sees a readable one-line reason, not a wall of
+ *  markup. Also adds the base-URL hint for 404s (root-vs-API confusion). */
+const cleanDetail = (s, status) => {
+  let t = String(s ?? "");
+  if (/^\s*(<!DOCTYPE|<html)/i.test(t)) t = "(HTML error page)";
+  t = t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  t = cap(t, 300);
+  if (status === 404 && !t) {
+    t = "endpoint not found — check the provider Base URL (the app calls {base}/chat/completions)";
+  }
+  return t;
+};
 
 const safePath = (p) => {
   if (typeof p !== "string" || !p.trim()) return null;
@@ -664,7 +677,7 @@ async function streamRoundEvents(state, round) {
       if (res.status < 500 && res.status !== 429 && res.status !== 408) {
         return await nonStreamFallback(state, round, feedDeltas, finishStream);
       }
-      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cap(detail, 500) };
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) };
     }
     if (!res || !res.body) {
       if (fetchErr && attempt < MAX_ATTEMPTS) {
@@ -790,7 +803,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cap(detail, 500) };
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) };
     }
     const json = await res.json();
     const msg = json.choices?.[0]?.message ?? {};
