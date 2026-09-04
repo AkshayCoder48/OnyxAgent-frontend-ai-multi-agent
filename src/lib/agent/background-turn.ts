@@ -15,6 +15,11 @@ import {
   type BgEvent,
   type BgJob,
 } from "@/lib/e2b/background-agent";
+import { BG_NATIVE_TOOL_NAMES } from "@/lib/e2b/bg-native-tools";
+import {
+  collectBridgeableTools,
+  handleBrowserToolCall,
+} from "@/lib/agent/browser-tool-bridge";
 
 /**
  * Background agent turn — runs the agent loop INSIDE the E2B sandbox as a
@@ -132,10 +137,19 @@ async function consumeRun(ctx: {
   emit: (type: WSEvent["type"], data: Record<string, unknown>) => void;
   onFinished: () => void;
   isStopped: () => boolean;
+  /** v3 bridge: provider API key + abort signal for browser-side tool calls. */
+  aiApiKey?: string | null;
+  bridgeAbort?: AbortController;
 }): Promise<void> {
   const { e2bApiKey, job } = ctx;
   let cursor = 0;
   let unreachable = 0;
+
+  // WSEvent-emitting wrapper handed to bridged tools (ask_user questions,
+  // tool_output, todo events …) — the same pipeline the runtime uses.
+  const bridgeEmit = (e: WSEvent) => {
+    ctx.emit(e.type, e.data as Record<string, unknown>);
+  };
 
   for (;;) {
     if (ctx.isStopped()) return;
@@ -159,6 +173,29 @@ async function consumeRun(ctx: {
         let finished = false;
         for (const ev of events) {
           if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
+          if (ev.t === "browser_tool_call") {
+            // v3 FULL TOOLSET — the sandbox runner delegated a browser-registry
+            // tool to this browser. Fire-and-forget: NEVER block the replay
+            // loop (a long ask_user wait must not stall event consumption —
+            // the runner serializes tool ordering on its side). Reload-safe
+            // dedup lives inside handleBrowserToolCall (localStorage marks).
+            void handleBrowserToolCall({
+              e2bApiKey,
+              sandboxId: job.sandboxId,
+              runId: job.runId,
+              conversationId: ctx.conversationId,
+              userId: ctx.userId,
+              aiApiKey: ctx.aiApiKey,
+              callId: String(ev.id ?? ""),
+              name: String(ev.name ?? ""),
+              args: (ev.args ?? {}) as Record<string, unknown>,
+              emit: bridgeEmit,
+              signal: ctx.bridgeAbort?.signal,
+            }).catch(() => {
+              // best-effort — the runner's timeout produces a graceful error
+            });
+            continue;
+          }
           replayEvent(ctx.emit, ev);
           if (ev.t === "done" || ev.t === "error") finished = true;
         }
@@ -286,6 +323,30 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         return undefined;
       }
     })();
+
+    // v3 FULL TOOLSET — mirror the in-browser runtime's per-turn loading
+    // sequence (custom tools from IndexedDB + MCP tools), then snapshot every
+    // registry tool that has no native sandbox implementation. The runner
+    // exposes these to the LLM as bridged tools executed back here.
+    let browserTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [];
+    try {
+      const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
+      await loadDynamicTools(ctx.userId);
+    } catch {
+      // Non-fatal — built-ins still bridge.
+    }
+    try {
+      const { loadMCPTools } = await import("@/lib/tools/mcp_tools");
+      await loadMCPTools(ctx.userId);
+    } catch {
+      // Non-fatal — a bad MCP server doesn't block the turn.
+    }
+    try {
+      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES);
+    } catch {
+      browserTools = [];
+    }
+
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
       provider: {
@@ -301,11 +362,13 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       assistantMessageId,
       conversationId,
       seedTodos,
+      browserTools,
     });
 
     // 5. Consume the run's event stream until it finishes. The consumer
     //    lives only as long as this browser tab is open; the JOB itself
     //    keeps running regardless.
+    const bridgeAbort = new AbortController();
     let stopped = false;
     void (async () => {
       await consumeRun({
@@ -316,6 +379,8 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         emit,
         onFinished: ctx.onFinished,
         isStopped: () => stopped,
+        aiApiKey: ctx.turn.provider.apiKey,
+        bridgeAbort,
       });
     })().catch(() => {
       // The consumer died unexpectedly — surface as a normal turn error.
@@ -327,6 +392,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     return {
       stop: async () => {
         stopped = true;
+        bridgeAbort.abort();
         try {
           await stopBackgroundTurn(ctx.e2bApiKey, job.sandboxId);
         } catch {
@@ -474,6 +540,7 @@ export async function resumeBackgroundTurn(ctx: {
   emit("model_request_start", { round: 1 });
   emit("message_saved", { message_id: job.assistantMessageId });
 
+  const bridgeAbort = new AbortController();
   let stopped = false;
   void (async () => {
     await consumeRun({
@@ -484,6 +551,7 @@ export async function resumeBackgroundTurn(ctx: {
       emit,
       onFinished: ctx.onFinished,
       isStopped: () => stopped,
+      bridgeAbort,
     });
   })().catch(() => {
     // best-effort — the next reload resumes again.
@@ -492,6 +560,7 @@ export async function resumeBackgroundTurn(ctx: {
   return {
     stop: async () => {
       stopped = true;
+      bridgeAbort.abort();
       try {
         await stopBackgroundTurn(ctx.e2bApiKey, job.sandboxId);
       } catch {

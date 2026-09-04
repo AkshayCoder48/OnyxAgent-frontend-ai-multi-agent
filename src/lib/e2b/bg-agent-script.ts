@@ -500,7 +500,7 @@ async function streamRoundEvents(state, round, finalRound) {
   // final answer (the cap ends the turn in done, never the old terminal
   // max-rounds error). Fence/DSML "tool_call" text on the final round is
   // parsed too — nothing executes; the text stays text.
-  if (state.toolsEnabled !== false && finalRound !== true) body.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (state.toolsEnabled !== false && finalRound !== true) body.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
 
   // Pass-through emitters (1:1 with the provider's native SSE deltas).
   const emitTextDelta = (d) => { if (d) emitEvent({ t: "text_delta", round, content: d }); };
@@ -808,7 +808,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
   const nb = { model: p.model, messages: state.messages, temperature: p.temperature ?? 0.7 };
-  if (state.toolsEnabled !== false) nb.tools = TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -891,6 +891,153 @@ async function saveSharedTodos(todos) {
 async function emitTodoEvent(todos) {
   const list = Array.isArray(todos) ? todos : [];
   await emitEvent({ t: "todo_event", todos: list });
+}
+
+// ── v3 FULL-TOOLSET helpers (native implementations below) ────────────
+// These mirror the in-browser registry tools' result shapes exactly so the
+// chat UI renders the same cards in background mode as in foreground mode.
+
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
+
+const humanSizeBg = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0, v = bytes;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return (i === 0 ? v : v.toFixed(1)) + " " + units[i];
+};
+
+const MIME_MAP = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  svg: "image/svg+xml", bmp: "image/bmp", pdf: "application/pdf", txt: "text/plain", md: "text/markdown",
+  json: "application/json", csv: "text/csv", tsv: "text/tab-separated-values", js: "text/javascript",
+  ts: "text/plain", tsx: "text/plain", jsx: "text/plain", py: "text/x-python", html: "text/html",
+  css: "text/css", xml: "application/xml", yml: "text/yaml", yaml: "text/yaml", toml: "text/plain",
+  zip: "application/zip", gz: "application/gzip", mp3: "audio/mpeg", mp4: "video/mp4",
+};
+const mimeForNameBg = (name) => {
+  const ext = (String(name).split(".").pop() || "").toLowerCase();
+  return MIME_MAP[ext] || "application/octet-stream";
+};
+
+/** Ensure the parent directory of the given file exists (recursively);
+ *  records the created chain (relative to HOME) into createdDirs. */
+async function ensureParentDir(file, createdDirs) {
+  const parent = path.dirname(file);
+  if (parent === HOME || !parent) return;
+  try {
+    await fs.access(parent);
+    return;
+  } catch {}
+  await fs.mkdir(parent, { recursive: true });
+  let cur = parent;
+  const chain = [];
+  while (cur && cur.startsWith(HOME) && cur !== HOME) {
+    chain.push(path.relative(HOME, cur));
+    cur = path.dirname(cur);
+  }
+  for (const c of chain.reverse()) createdDirs.push(c);
+}
+
+/** Miklium search (images / videos) — mirrors /api/ddg-search's result
+ * mapping so the UI's image/video cards render identically. */
+async function mikliumSearch(args, mikliumType, uiType) {
+  try {
+    const query = String(args.query ?? "");
+    if (!query.trim()) return { success: false, output: null, error: "query is required" };
+    const limit = Math.min(Number(args.limit) || 10, 50);
+    const res = await fetch("https://miklium.vercel.app/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ search: [query], type: mikliumType, maxSmallSnippets: limit, maxLargeSnippets: 0 }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return { success: false, output: null, error: "Search HTTP " + res.status };
+    const data = await res.json().catch(() => null);
+    if (!data || !Array.isArray(data.results)) return { success: false, output: null, error: "Search returned invalid JSON" };
+    const results = [];
+    if (uiType === "image") {
+      const seen = new Set();
+      for (const item of data.results) {
+        if (results.length >= limit) break;
+        const imageUrl = String((item && item.imageUrl) || "");
+        if (!imageUrl || seen.has(imageUrl)) continue;
+        seen.add(imageUrl);
+        const size = item && item.size && typeof item.size === "object" ? item.size : {};
+        const refUrl = String((item && item.referenceUrl) || imageUrl);
+        results.push({
+          title: String((item && item.title) || ""),
+          url: refUrl,
+          domain: hostOf(refUrl),
+          imageUrl,
+          thumbnail: imageUrl,
+          width: typeof size.width === "number" ? size.width : undefined,
+          height: typeof size.height === "number" ? size.height : undefined,
+          source: "Miklium",
+          provider: "miklium",
+        });
+      }
+    } else {
+      const seen = new Set();
+      for (const item of data.results) {
+        if (results.length >= limit) break;
+        const videoUrl = String((item && item.videoUrl) || "");
+        if (!videoUrl || seen.has(videoUrl)) continue;
+        seen.add(videoUrl);
+        const additional = item && item.additionalData && typeof item.additionalData === "object" ? item.additionalData : {};
+        const statistics = additional.statistics && typeof additional.statistics === "object" ? additional.statistics : {};
+        const thumbUrl = String((item && item.thumbUrl) || "");
+        results.push({
+          title: String((item && item.title) || ""),
+          url: videoUrl,
+          domain: hostOf(videoUrl),
+          description: String((item && item.description) || ""),
+          imageUrl: thumbUrl,
+          thumbnail: thumbUrl,
+          videoUrl,
+          thumbUrl,
+          duration: String((item && item.duration) || "") || undefined,
+          source: additional.channelTitle || "Miklium",
+          provider: "miklium",
+          channelTitle: additional.channelTitle,
+          viewCount: statistics.viewCount,
+          likeCount: statistics.likeCount,
+        });
+      }
+    }
+    return { success: true, output: { query, type: uiType, results, count: results.length, provider: "miklium" } };
+  } catch (e) {
+    return { success: false, output: null, error: "Search failed: " + (e && e.message ? e.message : String(e)) };
+  }
+}
+
+/** freeocr.ai OCR — URL (JSON body) or base64 data URI (multipart form).
+ * Mirrors lib/tools/ocr.ts so background results render identically. */
+async function ocrFetch(url, base64DataUri, filename) {
+  const endpoint = "https://freeocr.ai/api/v1/ocr";
+  const parse = async (res) => {
+    const data = await res.json().catch(() => null);
+    if (data && data.error) throw new Error("OCR API error: " + data.error);
+    return String((data && data.text) || "");
+  };
+  if (url) {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_url: url }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) throw new Error("OCR API HTTP " + res.status);
+    return parse(res);
+  }
+  const m = /^data:([^;]+);base64,(.+)$/.exec(String(base64DataUri));
+  if (!m) throw new Error("Invalid base64 data URI format. Expected: data:image/png;base64,...");
+  const bytes = Buffer.from(m[2], "base64");
+  const form = new FormData();
+  form.append("image", new Blob([bytes], { type: m[1] }), filename || "image");
+  const res = await fetch(endpoint, { method: "POST", body: form, signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error("OCR API HTTP " + res.status);
+  return parse(res);
 }
 
 // ── Sandbox-side tool implementations ──────────────────────────────────
@@ -1224,7 +1371,556 @@ const TOOLS = [
       }
     },
   },
+  {
+    // v3 FULL TOOLSET — the AI gets the SAME tool surface in background mode
+    // as the in-browser runtime (Settings → Tools). Tools that can run
+    // server-side in the sandbox are implemented HERE (native); everything
+    // else is bridged back to the browser (see BRIDGE section below).
+    name: "current_datetime",
+    description: "Get the current UTC date and time in ISO 8601 format. Use this whenever the user asks about 'today', 'now', or any time-relative concept.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    run: async () => {
+      const now = new Date();
+      return { utc: now.toISOString(), local: now.toUTCString(), timezone: "UTC" };
+    },
+  },
+  {
+    name: "create_chart",
+    description: "Create a chart (line / bar / pie / area / scatter) from structured data. The chart is rendered inline in the chat. Pass 'data' as an array of objects, 'x_key' as the field for the x-axis, and 'series' as the list of value fields to plot. Optionally pass 'style' for palette/grid/legend/labels/stacked.",
+    parameters: {
+      type: "object",
+      properties: {
+        chart_type: { type: "string", enum: ["line", "bar", "pie", "area", "scatter"] },
+        title: { type: "string", description: "Chart title." },
+        data: { type: "array", items: { type: "object" }, description: "Array of data records." },
+        x_key: { type: "string", description: "Field name in each record to use as the x-axis." },
+        series: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { key: { type: "string" }, label: { type: "string" }, color: { type: "string" } },
+            required: ["key"],
+          },
+          description: "Value series to plot.",
+        },
+        style: {
+          type: "object",
+          properties: {
+            palette: { type: "array", items: { type: "string" } },
+            grid: { type: "boolean" },
+            legend: { type: "boolean" },
+            x_label: { type: "string" },
+            y_label: { type: "string" },
+            stacked: { type: "boolean" },
+          },
+        },
+      },
+      required: ["chart_type", "title", "data", "x_key", "series"],
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const types = ["line", "bar", "pie", "area", "scatter"];
+      if (!types.includes(args.chart_type)) return { error: "chart_type must be one of: " + types.join(", ") };
+      if (!Array.isArray(args.data) || !args.data.length) return { error: "data must be a non-empty array of records" };
+      if (!String(args.x_key ?? "")) return { error: "x_key is required" };
+      const series = Array.isArray(args.series) ? args.series : [];
+      if (!series.length || series.some((s) => !s || !String(s.key ?? ""))) {
+        return { error: "series must be a non-empty list of { key, label?, color? }" };
+      }
+      return {
+        kind: "chart",
+        chart_type: args.chart_type,
+        title: String(args.title ?? ""),
+        data: args.data,
+        x_key: String(args.x_key),
+        series,
+        style: (args.style && typeof args.style === "object" ? args.style : {}),
+      };
+    },
+  },
+  {
+    name: "delete_folder",
+    description: "Delete a folder and its contents from the user's workspace. Refuses to delete the workspace root.",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    run: async (args) => {
+      const p = safePath(args.path);
+      if (!p) return { error: "Invalid path" };
+      if (p === HOME) return { error: "Refusing to delete the workspace root" };
+      try { await fs.access(p); } catch { return { error: "Folder not found: " + args.path }; }
+      await fs.rm(p, { recursive: true, force: true });
+      return { deleted: true, path: args.path };
+    },
+  },
+  {
+    name: "rename_file",
+    description: "Rename a file in the user's workspace. Same as move_file but specifically for renaming.",
+    parameters: { type: "object", properties: { path: { type: "string" }, new_name: { type: "string" } }, required: ["path", "new_name"] },
+    run: async (args) => {
+      const from = safePath(args.path);
+      const newName = String(args.new_name ?? "").replace(/[\\/]+/g, "_").trim();
+      if (!from) return { error: "Invalid path" };
+      if (!newName) return { error: "new_name is required" };
+      const to = safePath(path.join(path.dirname(from), newName));
+      if (!to) return { error: "Invalid destination" };
+      try { await fs.access(from); } catch { return { error: "Source file not found: " + args.path }; }
+      const content = await fs.readFile(from);
+      await ensureParentDir(to, []);
+      await fs.writeFile(to, content);
+      await fs.rm(from, { recursive: true, force: true });
+      return { renamed: true, old_path: args.path, new_path: path.relative(HOME, to), size: content.length };
+    },
+  },
+  {
+    name: "send_file",
+    description: "Send a file from the user's workspace to the chat as a downloadable attachment. The user sees a download card with the file's name, size, and extension. The download URL is a base64 data URL (stateless — survives page reloads and Vercel deployments). If the path is a directory, automatically sends it as a ZIP archive.",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    run: async (args) => {
+      const p = safePath(args.path);
+      if (!p) return { error: "Invalid path" };
+      let st;
+      try { st = await fs.stat(p); } catch { return { error: "not found (no such file or folder): " + args.path }; }
+      if (st.isDirectory()) {
+        const sendFolder = TOOLS.find((t) => t.name === "send_folder");
+        return sendFolder ? sendFolder.run({ path: args.path }) : { error: "send_folder unavailable" };
+      }
+      const MAX_BYTES = 4 * 1024 * 1024;
+      if (st.size > MAX_BYTES) {
+        return { error: "File is too large to send as a download (" + humanSizeBg(st.size) + " > " + humanSizeBg(MAX_BYTES) + " limit). Use read_file in chunks instead." };
+      }
+      const bytes = await fs.readFile(p);
+      const name = path.basename(p);
+      return {
+        kind: "file_download",
+        item_type: "file",
+        name,
+        path: path.relative(HOME, p) || name,
+        size: st.size,
+        size_human: humanSizeBg(st.size),
+        extension: (name.includes(".") ? String(name.split(".").pop()).toLowerCase() : ""),
+        download_url: "data:" + mimeForNameBg(name) + ";base64," + bytes.toString("base64"),
+      };
+    },
+  },
+  {
+    name: "send_folder",
+    description: "Send a folder from the user's workspace to the chat as a downloadable ZIP archive. The user sees a download card; clicking it downloads the folder's contents as '<name>.zip'. The ZIP is returned as a base64 data URL (stateless — survives page reloads and Vercel deployments).",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    run: (args) =>
+      new Promise((resolve) => {
+        const p = safePath(args.path);
+        if (!p) return resolve({ error: "Invalid path" });
+        const zipTmp = path.join(STATE_DIR, "tmp_send_" + Date.now() + ".zip");
+        // Zip with python3 (present in every E2B sandbox) — no zip binary
+        // dependency, deterministic, and skips unreadable files safely.
+        const py =
+          "import sys, zipfile, os\n" +
+          "src, dst = sys.argv[1], sys.argv[2]\n" +
+          "count = 0\n" +
+          "with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as z:\n" +
+          "    for root, dirs, files in os.walk(src):\n" +
+          "        for f in files:\n" +
+          "            fp = os.path.join(root, f)\n" +
+          "            z.write(fp, os.path.relpath(fp, src))\n" +
+          "            count += 1\n" +
+          "print(count)\n";
+        const esc = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+        exec("python3 -c " + esc(py) + " " + esc(p) + " " + esc(zipTmp), { cwd: HOME, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 }, async (err, stdout) => {
+          try {
+            if (err && err.code !== 0) return resolve({ error: "Failed to zip folder: " + (err.message || String(err)) });
+            const fileCount = parseInt(String(stdout ?? "").trim(), 10) || 0;
+            if (fileCount === 0) return resolve({ error: "Folder is empty: " + args.path });
+            const bytes = await fs.readFile(zipTmp);
+            await fs.rm(zipTmp, { force: true }).catch(() => {});
+            if (bytes.length > 4 * 1024 * 1024) {
+              return resolve({ error: "Folder is too large to zip-and-send (" + humanSizeBg(bytes.length) + " > 4 MB). Use list_folder + read_file on individual files instead." });
+            }
+            const name = path.basename(p);
+            return resolve({
+              kind: "file_download",
+              item_type: "folder",
+              name,
+              path: path.relative(HOME, p) || name,
+              size: bytes.length,
+              size_human: humanSizeBg(bytes.length),
+              file_count: fileCount,
+              extension: "zip",
+              download_url: "data:application/zip;base64," + bytes.toString("base64"),
+            });
+          } catch (e) {
+            resolve({ error: "send_folder failed: " + friendlyErr(e) });
+          }
+        });
+      }),
+  },
+  {
+    name: "verify_path",
+    description: "Verify a path exists in the user's workspace, creating directories (and optionally an empty file) as needed. Use this BEFORE create_file_chunk to ensure the parent directory exists. If the path looks like a directory (trailing slash or no file extension), it's treated as a directory; otherwise it's treated as a file (parent dir is created, file is created empty if missing). Returns the existence status, type, and a list of directories that were created.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        create_dirs: { type: "boolean", default: true },
+        create_file: { type: "boolean", default: true },
+      },
+      required: ["path"],
+    },
+    run: async (args) => {
+      const raw = String(args.path ?? "").trim();
+      if (!raw) return { error: "path is required" };
+      const p = safePath(raw);
+      if (!p) return { error: "Invalid path" };
+      const createDirs = args.create_dirs !== false;
+      const createFile = args.create_file !== false;
+      const looksDir = raw.endsWith("/") || !path.basename(p).includes(".");
+      const createdDirs = [];
+      try {
+        const st = await fs.stat(p);
+        return { exists: true, type: st.isDirectory() ? "directory" : "file", created_dirs: createdDirs, path: raw };
+      } catch {}
+      if (looksDir) {
+        if (!createDirs) {
+          return { exists: false, type: "directory", created_dirs: createdDirs, path: raw, error: "Directory does not exist and create_dirs is false: " + raw };
+        }
+        await ensureParentDir(p, createdDirs);
+        await fs.mkdir(p, { recursive: true });
+        createdDirs.push(path.relative(HOME, p) || raw);
+        return { exists: true, type: "directory", created_dirs: createdDirs, path: raw };
+      }
+      await ensureParentDir(p, createdDirs);
+      try {
+        await fs.access(p);
+        return { exists: true, type: "file", created_dirs: createdDirs, path: raw };
+      } catch {}
+      if (!createFile) {
+        return { exists: false, type: "file", created_dirs: createdDirs, path: raw, error: "File does not exist and create_file is false: " + raw };
+      }
+      await fs.writeFile(p, "");
+      return { exists: true, type: "file", created_dirs: createdDirs, path: raw };
+    },
+  },
+  {
+    name: "create_file_chunk",
+    description: "Append (or create) a chunk of content to a file in the user's workspace. For files >200 lines, call verify_path first, then call this with mode='create' for the first chunk (chunk_index=0) and mode='append' for subsequent chunks. Chunk size should be 2-4 KB (50-200 lines). Splits should occur at function/class/component boundaries — never inside JSON, function bodies, classes, or JSX elements. After writing, the file is read back to verify the write succeeded. Returns the chunk index, total chunks, bytes written, file size, and verification status.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "The file path to write to." },
+        content: { type: "string", description: "The chunk content to write/append." },
+        mode: { type: "string", enum: ["create", "append"], default: "append" },
+        chunk_index: { type: "number", default: 0, description: "0-based chunk index." },
+        total_chunks: { type: "number", description: "Total number of chunks (if known)." },
+      },
+      required: ["path", "content"],
+    },
+    run: async (args) => {
+      const raw = String(args.path ?? "").trim();
+      if (!raw) return { error: "path is required" };
+      const p = safePath(raw);
+      if (!p) return { error: "Invalid path" };
+      const content = String(args.content ?? "");
+      const chunkIndex = Number(args.chunk_index ?? 0) || 0;
+      const totalChunks = args.total_chunks !== undefined ? Number(args.total_chunks) : undefined;
+      const mode = String(args.mode ?? "append");
+      const createdDirs = [];
+      const bytesWritten = Buffer.byteLength(content, "utf8");
+      try {
+        await ensureParentDir(p, createdDirs);
+        const shouldOverwrite = mode === "create" && chunkIndex === 0;
+        if (shouldOverwrite) {
+          await fs.writeFile(p, content);
+        } else {
+          await fs.appendFile(p, content);
+        }
+        let verified = false;
+        let fileSize = 0;
+        try {
+          const after = await fs.readFile(p, "utf8");
+          fileSize = Buffer.byteLength(after, "utf8");
+          verified = shouldOverwrite ? after === content : after.endsWith(content);
+        } catch {
+          verified = false;
+        }
+        return { path: raw, chunk_index: chunkIndex, total_chunks: totalChunks, bytes_written: bytesWritten, file_size: fileSize, created_dirs: createdDirs, verified };
+      } catch (e) {
+        return { error: "Failed to write chunk to " + raw + ": " + friendlyErr(e), path: raw, chunk_index: chunkIndex, total_chunks: totalChunks, bytes_written: 0, verified: false };
+      }
+    },
+  },
+  {
+    name: "read_file_section",
+    description: "Read a specific section of a file (by line range, 0-based). Use this to verify previously written chunks before appending the next one, or to resume an interrupted write. Returns the section content, the actual start/end line indices, the total line count, and whether more content exists after the requested section.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        start_line: { type: "number", default: 0 },
+        end_line: { type: "number" },
+      },
+      required: ["path", "start_line"],
+    },
+    run: async (args) => {
+      const p = safePath(args.path);
+      if (!p) return { error: "Invalid path" };
+      try {
+        const content = await fs.readFile(p, "utf8");
+        const lines = content.split("\n");
+        const totalLines = lines.length;
+        const MAX_LINES = 150;
+        const requested = Math.max(0, Math.floor(Number(args.start_line ?? 0) || 0));
+        const clampedStart = Math.min(requested, Math.max(0, totalLines - 1));
+        const endRaw = args.end_line !== undefined ? Math.floor(Number(args.end_line)) : undefined;
+        let clampedEnd =
+          endRaw !== undefined && !Number.isNaN(endRaw)
+            ? Math.max(clampedStart, Math.min(endRaw, clampedStart + MAX_LINES - 1))
+            : clampedStart + MAX_LINES - 1;
+        clampedEnd = Math.min(clampedEnd, totalLines - 1);
+        const slice = lines.slice(clampedStart, clampedEnd + 1).join("\n");
+        return { content: slice, start_line: clampedStart, end_line: clampedEnd, total_lines: totalLines, has_more: clampedEnd < totalLines - 1 };
+      } catch (e) {
+        return { error: "Failed to read section: " + friendlyErr(e) };
+      }
+    },
+  },
+  {
+    name: "search_documents",
+    description: "Search the user's workspace for documents containing the given query string. Returns matching snippets with surrounding context. Use this whenever the user asks about content of files they've uploaded or created in the workspace. Cite sources inline as [1], [2], etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (substring match, case-insensitive)." },
+        limit: { type: "number", description: "Maximum number of snippets to return." },
+      },
+      required: ["query"],
+    },
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { results: [], note: "Empty query" };
+      const limit = Math.min(Number(args.limit) || 20, 50);
+      const TEXT_EXT = new Set([".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".js", ".jsx", ".ts", ".tsx", ".py", ".html", ".htm", ".css", ".scss", ".xml", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".sh", ".bash", ".sql", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".log", ".env"]);
+      const CONTEXT_CHARS = 120;
+      const PER_FILE = 5;
+      const MAX_FILE_BYTES = 512 * 1024;
+      const allHits = [];
+      const walk = async (dir) => {
+        let entries;
+        try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (allHits.length >= limit) return;
+          if (e.name.startsWith(".")) continue; // skip .onyx + dotfiles
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            await walk(full);
+            continue;
+          }
+          if (!TEXT_EXT.has(path.extname(e.name).toLowerCase())) continue;
+          let st;
+          try { st = await fs.stat(full); } catch { continue; }
+          if (st.size > MAX_FILE_BYTES) continue;
+          let content;
+          try { content = await fs.readFile(full, "utf8"); } catch { continue; }
+          const lower = content.toLowerCase();
+          const qLower = query.toLowerCase();
+          let idx = 0;
+          let found = 0;
+          while (found < PER_FILE && allHits.length < limit) {
+            const pos = lower.indexOf(qLower, idx);
+            if (pos === -1) break;
+            const start = Math.max(0, pos - CONTEXT_CHARS);
+            const end = Math.min(content.length, pos + query.length + CONTEXT_CHARS);
+            const snippet =
+              (start > 0 ? "… " : "") +
+              content.slice(start, end).replace(/\s+/g, " ").trim() +
+              (end < content.length ? " …" : "");
+            allHits.push({ index: allHits.length + 1, source: path.relative(HOME, full), content: snippet, score: "1.0" });
+            idx = pos + query.length;
+            found += 1;
+          }
+        }
+      };
+      await walk(HOME);
+      return { results: allHits };
+    },
+  },
+  {
+    name: "image_search",
+    description: "Search for images using Miklium (Yahoo-based). Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants to find pictures, photos, diagrams, or visual content.",
+    parameters: { type: "object", properties: { query: { type: "string", description: "Image search query" }, limit: { type: "number", description: "Max results (default 10, max 50)" } }, required: ["query"], additionalProperties: false },
+    run: async (args) => mikliumSearch(args, "images", "image"),
+  },
+  {
+    name: "video_search",
+    description: "Search for videos using Miklium (Yahoo-based). Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants to find videos, tutorials, or multimedia content.",
+    parameters: { type: "object", properties: { query: { type: "string", description: "Video search query" }, limit: { type: "number", description: "Max results (default 10, max 50)" } }, required: ["query"], additionalProperties: false },
+    run: async (args) => mikliumSearch(args, "videos", "video"),
+  },
+  {
+    name: "preview_image",
+    description: "Display an image inline in the chat. Use this to show the user a visual — a generated image, a screenshot, a diagram URL, a chart from an external service, etc. Accepts: - url: An HTTP/HTTPS URL to an image (e.g. \"https://example.com/chart.png\") - base64: A base64-encoded image with data URI prefix (e.g. \"data:image/png;base64,iVBOR...\") - alt: Optional alt text / caption shown below the image The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "HTTP/HTTPS URL of the image to display." },
+        base64: { type: "string", description: "Base64 data URI of the image (e.g. 'data:image/png;base64,iVBOR...'). Use this when you have the raw image data." },
+        alt: { type: "string", description: "Optional caption / alt text shown below the image." },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const url = String(args.url || args.base64 || "");
+      if (!url) return { error: "Either 'url' or 'base64' must be provided." };
+      if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("data:image/")) {
+        return { error: "URL must start with http://, https://, or data:image/" };
+      }
+      return { kind: "image_preview", url, alt: String(args.alt || "") };
+    },
+  },
+  {
+    name: "ocr_image",
+    description: "Extract text from an image using OCR (Optical Character Recognition). Use this when the user wants to read text from a screenshot, photo, scanned document, or any image containing text. Supports PNG, JPEG, GIF, WebP, and BMP formats. The image can be provided as a URL or base64 data URI.",
+    parameters: {
+      type: "object",
+      properties: {
+        image_url: { type: "string", description: "URL of the image to OCR" },
+        image_base64: { type: "string", description: "Base64 data URI of the image (e.g. 'data:image/png;base64,...')" },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const imageUrl = args.image_url ? String(args.image_url) : "";
+      const imageBase64 = args.image_base64 ? String(args.image_base64) : "";
+      if (!imageUrl && !imageBase64) {
+        return { success: false, output: null, error: "Either 'image_url' or 'image_base64' must be provided." };
+      }
+      try {
+        const text = await ocrFetch(imageUrl, imageBase64, "image");
+        if (!text || !text.trim()) {
+          return { success: true, output: { text: "", message: "No text was detected in the image." } };
+        }
+        return { success: true, output: { text, char_count: text.length } };
+      } catch (e) {
+        return { success: false, output: null, error: e && e.message ? e.message : String(e) };
+      }
+    },
+  },
+  {
+    name: "ocr_pdf",
+    description: "Extract text from a PDF document using OCR. Use this when the user wants to read text from a scanned PDF, or any PDF that doesn't have selectable text. The PDF can be provided as a URL or base64 data URI. For large PDFs, only the first few pages are processed.",
+    parameters: {
+      type: "object",
+      properties: {
+        pdf_url: { type: "string", description: "URL of the PDF to OCR" },
+        pdf_base64: { type: "string", description: "Base64 data URI of the PDF (e.g. 'data:application/pdf;base64,...')" },
+      },
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const pdfUrl = args.pdf_url ? String(args.pdf_url) : "";
+      const pdfBase64 = args.pdf_base64 ? String(args.pdf_base64) : "";
+      if (!pdfUrl && !pdfBase64) {
+        return { success: false, output: null, error: "Either 'pdf_url' or 'pdf_base64' must be provided." };
+      }
+      try {
+        const text = await ocrFetch(pdfUrl, pdfBase64, "document.pdf");
+        if (!text || !text.trim()) {
+          return { success: true, output: { text: "", message: "No text was detected in the PDF." } };
+        }
+        return { success: true, output: { text, char_count: text.length } };
+      } catch (e) {
+        return { success: false, output: null, error: e && e.message ? e.message : String(e) };
+      }
+    },
+  },
+  {
+    name: "counterfactual",
+    description: "Explore a counterfactual ('what if?') scenario. Use this when the user asks 'what if X had been different?' or wants to explore alternative outcomes. Produces a structured analysis with observed facts, hypothetical change, alternative branches, and a recommendation.",
+    parameters: {
+      type: "object",
+      properties: {
+        observed: { type: "string", description: "The observed facts / what actually happened" },
+        hypothetical: { type: "string", description: "The hypothetical change ('what if X')" },
+        branches: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { name: { type: "string" }, outcome: { type: "string" }, reasoning: { type: "string" } },
+            required: ["name", "outcome"],
+          },
+          description: "Alternative outcome branches to explore",
+        },
+        recommendation: { type: "string", description: "Overall synthesis / recommendation based on the analysis" },
+      },
+      required: ["observed", "hypothetical", "branches", "recommendation"],
+    },
+    run: async (args) => {
+      const branches = Array.isArray(args.branches) ? args.branches : [];
+      return {
+        kind: "counterfactual",
+        observed: args.observed,
+        hypothetical: args.hypothetical,
+        branches: branches.map((b, i) => ({ ...(b && typeof b === "object" ? b : {}), index: i + 1 })),
+        recommendation: args.recommendation || "",
+        summary: "Explored " + branches.length + " alternative outcome(s) for: " + args.hypothetical,
+      };
+    },
+  },
 ];
+
+// manage_todos — registry alias (the in-browser registry registers BOTH
+// names; the background surface must match so the model sees the same list
+// as Settings → Tools).
+{
+  const manageTodoEntry = TOOLS.find((t) => t.name === "manage_todo");
+  if (manageTodoEntry) TOOLS.push({ ...manageTodoEntry, name: "manage_todos" });
+}
+
+// ── Browser-tool bridge (v3 FULL TOOLSET) ──────────────────────────────
+// Tools whose implementations live in the BROWSER (Dexie/OPFS stores: chats,
+// memories, skills, MCP configs, custom tools, subagents, ask_user …) are
+// executed there: the runner drops a request file + emits a
+// browser_tool_call event; the connected browser runs the REAL registry
+// handler and writes the result back through /api/sandbox write_file. The
+// runner polls the result file (350 ms) until the per-tool timeout. When no
+// browser is connected the tool fails gracefully with an actionable error
+// and the turn continues with the sandbox-native tools.
+const BRIDGE_DIR = path.join(STATE_DIR, "bridge");
+const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
+const BRIDGE_TIMEOUT_MS = { ask_user: 900_000 };
+
+let ALL_TOOLS = TOOLS;
+
+async function runBridgeTool(callId, name, args) {
+  const token = String(callId || name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
+  const reqPath = path.join(BRIDGE_DIR, token + ".req.json");
+  const resPath = path.join(BRIDGE_DIR, token + ".res.json");
+  await fs.mkdir(BRIDGE_DIR, { recursive: true });
+  await fs.rm(resPath, { force: true }).catch(() => {});
+  await fs.writeFile(reqPath, JSON.stringify({ id: callId, name, args }));
+  await emitEvent({ t: "browser_tool_call", id: callId, name, args });
+  const timeoutMs = BRIDGE_TIMEOUT_MS[name] ?? BRIDGE_DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      await fs.rm(reqPath, { force: true }).catch(() => {});
+      return {
+        error:
+          "The '" + name + "' tool runs in your browser and timed out after " + Math.round(timeoutMs / 1000) +
+          "s (this page was probably closed or asleep). Browser-side tools (chats, memories, skills, MCP configs, subagents, ask_user) need this page open. Continue with the sandbox tools or finish without it, and tell the user to re-run with the page open if that tool is essential.",
+      };
+    }
+    try {
+      const raw = await fs.readFile(resPath, "utf8");
+      const parsed = JSON.parse(raw);
+      await fs.rm(reqPath, { force: true }).catch(() => {});
+      await fs.rm(resPath, { force: true }).catch(() => {});
+      if (parsed && parsed.ok === false) return { error: String(parsed.error ?? "browser tool failed") };
+      if (parsed && parsed.result !== undefined) return parsed.result;
+      return { error: "browser tool returned no result" };
+    } catch {
+      // not there yet — keep polling
+    }
+    await sleep(350);
+  }
+}
 
 // ── The agent loop ──────────────────────────────────────────────────────
 async function resolveRun() {
@@ -1296,6 +1992,44 @@ async function main() {
   await writeState(state);
   await emitEvent({ t: "status", kind: "boot" });
 
+  // FULL TOOLSET (v3): native sandbox tools + the browser registry snapshot
+  // the client seeds into state.browserTools. Bridged tools execute in the
+  // user's browser over the event channel — the AI sees the SAME tool
+  // surface as the in-browser runtime (Settings → Tools).
+  if (Array.isArray(state.browserTools)) {
+    const nativeNames = new Set(TOOLS.map((t) => t.name));
+    const bridged = [];
+    for (const bt of state.browserTools) {
+      if (!bt || typeof bt.name !== "string" || !bt.name || nativeNames.has(bt.name)) continue;
+      if (bridged.some((t) => t.name === bt.name)) continue;
+      bridged.push({
+        name: bt.name,
+        description: String(bt.description ?? ""),
+        parameters: bt.parameters && typeof bt.parameters === "object" ? bt.parameters : { type: "object", properties: {} },
+        bridge: true,
+      });
+    }
+    if (bridged.length) ALL_TOOLS = TOOLS.concat(bridged);
+  }
+  // Tool-list text (the SAME discipline the in-browser runtime uses) so the
+  // model knows its exact surface — prevents hallucinated tool names.
+  if (state.messages.length && state.messages[0] && state.messages[0].role === "system") {
+    const sysMsg = state.messages[0];
+    const content = String(sysMsg.content ?? "");
+    if (!content.includes("## Available Tools (")) {
+      const toolListText =
+        "\n\n## Available Tools (" + ALL_TOOLS.length + " total)\nYou have access to these tools. Use them by calling them through the FUNCTION-CALLING API (the tool_calls mechanism). NEVER write tool calls as plain text (e.g. \"Thought: ... Action: run_terminal Input: {...}\"). ALWAYS use the function-calling mechanism to invoke tools.\n\nUse them by name when the user's request matches:\n" +
+        ALL_TOOLS.map((t) => "- **" + t.name + "** — " + t.description).join("\n") +
+        "\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list.";
+      sysMsg.content = content + toolListText;
+    }
+  }
+  // Fresh run → clear stale bridge requests from earlier runs.
+  try {
+    await fs.rm(BRIDGE_DIR, { recursive: true, force: true });
+    await fs.mkdir(BRIDGE_DIR, { recursive: true });
+  } catch {}
+
   // MAX-ROUNDS (PRD TR-3): the cap is higher (30) and, crucially, the LAST
   // round is a WRAP-UP round — a system note tells the model to answer now
   // and tools are withheld from the request, so hitting the cap ends the
@@ -1354,12 +2088,22 @@ async function main() {
       const args = tc._args ?? {};
       const id = tc.id ?? "bg-" + Math.random().toString(36).slice(2, 10);
       await emitEvent({ t: "tool_call", round, id, name: fn.name ?? "unknown", args });
-      const tool = TOOLS.find((x) => x.name === fn.name);
+      const tool = ALL_TOOLS.find((x) => x.name === fn.name);
       let toolResult;
       try {
-        toolResult = tool ? await tool.run(args) : { error: "Unknown tool in background mode: " + fn.name };
+        toolResult = tool
+          ? tool.bridge
+            ? await runBridgeTool(id, fn.name, args)
+            : await tool.run(args)
+          : { error: "Unknown tool in background mode: " + fn.name };
       } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
-      const resultStr = cap(JSON.stringify(toolResult), 64 * 1024);
+      // Large-payload results (base64 downloads / image previews) get a
+      // bigger cap so their cards stay intact; everything else stays at
+      // 64 KB like before.
+      const isLarge =
+        toolResult && typeof toolResult === "object" &&
+        (toolResult.kind === "file_download" || toolResult.kind === "image_preview" || toolResult.download_url);
+      const resultStr = cap(JSON.stringify(toolResult), isLarge ? 6 * 1024 * 1024 : 64 * 1024);
       await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
       state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
     }
@@ -1383,3 +2127,5 @@ export const BG_STATE_PATH = "/home/user/.onyx/bg-state.json";
 export const BG_SCRIPT_PATH = "/home/user/.onyx/bg-agent.mjs";
 /** Per-run directory prefix (state.json + events.jsonl inside). */
 export const BG_RUNS_PREFIX = "/home/user/.onyx/runs/";
+
+export { BG_NATIVE_TOOL_NAMES } from "./bg-native-tools";

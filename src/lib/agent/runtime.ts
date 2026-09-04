@@ -42,6 +42,7 @@ import type {
 } from "@/types";
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
+import { waitForAskUser, ASK_USER_RESPONSE_EVENT } from "@/lib/agent/ask-user-wait";
 import { conversationService, settingsService } from "@/lib/services";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
@@ -1126,51 +1127,9 @@ async function streamRound(
 
 // ---------------------------------------------------------------------------
 // ask_user — emit `ask_user` and wait for `agent:ask-user-response`.
+// (Implementation moved to ./ask-user-wait.ts so the background-turn
+//  browser-tool bridge can share the exact same mechanism.)
 // ---------------------------------------------------------------------------
-
-const ASK_USER_RESPONSE_EVENT = "agent:ask-user-response";
-
-function waitForAskUser(
-  questions: AskUserQuestion[],
-  emit: (e: WSEvent) => void,
-  signal?: AbortSignal,
-): Promise<Array<{ answer: string; skipped: boolean }>> {
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      window.removeEventListener(ASK_USER_RESPONSE_EVENT, handler);
-      if (abortListener) signal?.removeEventListener("abort", abortListener);
-    };
-    const handler = (event: Event) => {
-      const ce = event as CustomEvent<{
-        answers: Array<{ answer: string; skipped: boolean }>;
-      }>;
-      if (!ce.detail?.answers) return;
-      cleanup();
-      resolve(ce.detail.answers);
-    };
-    let abortListener: (() => void) | null = null;
-    if (signal) {
-      abortListener = () => {
-        cleanup();
-        resolve(questions.map(() => ({ answer: "", skipped: true })));
-      };
-      signal.addEventListener("abort", abortListener);
-    }
-    window.addEventListener(ASK_USER_RESPONSE_EVENT, handler);
-
-    emit({
-      type: "ask_user",
-      data: {
-        questions: questions.map((q) => ({
-          question: q.question,
-          options: q.options,
-          allow_custom: q.allowCustom,
-        })),
-      },
-      timestamp: nowISO(),
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Build a `parts` timeline from the accumulated turn state, so it can be

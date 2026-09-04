@@ -27,6 +27,7 @@ export interface BgEvent {
     | "tool_call"
     | "tool_call_delta"
     | "tool_result"
+    | "browser_tool_call"
     | "status"
     | "todo_event"
     | "done"
@@ -96,6 +97,17 @@ export interface BgTurnOptions {
    *  todos.json when the sandbox had to be recreated, so the plan survives
    * across turns AND across sandbox recreations (PRD FR-1). */
   seedTodos?: Array<{ id: string; title: string; status: string; createdAt?: number; updatedAt?: number }>;
+  /** v3 FULL TOOLSET: browser-registry tools that have no native sandbox
+   * implementation (chats, memories, skills, MCP configs, custom tools,
+   * subagents, ask_user …). The runner exposes them to the LLM as bridged
+   * tools — a call drops a request file + a browser_tool_call event, the
+   * connected browser executes the REAL registry handler and writes the
+   * result back through /api/sandbox write_file. */
+  browserTools?: Array<{
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  }>;
 }
 
 const JOBS_KEY = "onyx-bg-jobs";
@@ -186,6 +198,10 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     // Client-side todo snapshot — the runner seeds the sandbox's shared
     // todos.json ONLY when that file doesn't exist (fresh/recreated sandbox).
     ...(opts.seedTodos && opts.seedTodos.length > 0 ? { seedTodos: opts.seedTodos } : {}),
+    // v3 FULL TOOLSET — the browser-registry snapshot (tools without a native
+    // sandbox implementation). The runner exposes these to the LLM as bridged
+    // tools executed back in the browser.
+    ...(opts.browserTools && opts.browserTools.length > 0 ? { browserTools: opts.browserTools } : {}),
     messages: [
       ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
       ...opts.history,
