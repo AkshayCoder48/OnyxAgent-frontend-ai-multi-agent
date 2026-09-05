@@ -691,7 +691,7 @@ registerTool(
 
 registerTool(
   "move_file",
-  "Move or rename a file in the user's workspace. Works like `mv` — the source is removed and the content is written to the destination path.",
+  "Move OR RENAME a file in the user's workspace. Works like `mv` — pass the full destination path to move it elsewhere, or the same directory + a new filename to rename it. The source is removed and the content is written to the destination path.",
   {
     type: "object",
     properties: {
@@ -736,57 +736,7 @@ registerTool(
   "files",
 );
 
-// ---------------------------------------------------------------------------
-// Tool: rename_file (alias for move_file — some AI models prefer this name).
-// ---------------------------------------------------------------------------
-
-registerTool(
-  "rename_file",
-  "Rename a file in the user's workspace. Same as move_file but specifically for renaming.",
-  {
-    type: "object",
-    properties: {
-      path: { type: "string", description: "Current path of the file." },
-      new_name: { type: "string", description: "New name for the file (just the filename, not the full path)." },
-    },
-    required: ["path", "new_name"],
-    additionalProperties: false,
-  },
-  async (args, ctx) => {
-    const source = safePath(args.path as string);
-    const newName = (args.new_name as string).replace(/[\\/]+/g, "_").trim();
-    if (!newName) return { error: "new_name is required" };
-    // Build destination path: same directory, new filename.
-    const parts = source.split("/");
-    parts.pop(); // remove old filename
-    parts.push(newName); // add new filename
-    const destination = parts.join("/");
-
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    try {
-      const client = getE2BClient(apiKey, null, "shared");
-      // Read source.
-      let content: string;
-      try {
-        content = await client.readFile(source);
-      } catch {
-        return { error: `Source file not found: ${source}` };
-      }
-      // Write to new path.
-      await client.writeFile(destination, content);
-      // Delete old file.
-      try {
-        await client.deleteFile(source);
-      } catch {
-        // best-effort
-      }
-      return { renamed: true, old_path: source, new_path: destination, size: content.length };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { error: `Failed to rename ${source} → ${destination}: ${msg}` };
-    }
-  },
-  false,
-  "files",
-);
+// MERGE NOTE (tool-count cap): rename_file used to be a separate tool that
+// just computed same-directory destinations for move_file — merged away.
+// move_file(path, destination) covers renames (same dir, new filename).
+// (The rename_file registration that lived here was removed.)

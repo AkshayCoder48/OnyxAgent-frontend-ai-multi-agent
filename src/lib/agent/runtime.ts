@@ -126,7 +126,8 @@ const CHAT_PROXY_URL = "/api/chat-proxy";
 const LARGE_ARG_TOOLS = new Set([
   "create_file", "write_file", "edit_file", "create_custom_tool",
   "preview_image", "workflow", "create_file_chunk",
-  "ocr_image", "ocr_pdf",
+  "ocr_image", "ocr_pdf", "ocr_document",
+  "manage_skill", "manage_custom_tool",
 ]);
 
 /** Max length of any single string value in tool args sent to the API. */
@@ -1440,8 +1441,7 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **read_file**: Read the content of a file in the workspace.
 - **edit_file**: Edit a file by finding and replacing text. For large edits, use create_file_chunk with mode='append'.
 - **delete_file**: Remove a file from the workspace.
-- **move_file**: Move or rename a file (source → destination).
-- **rename_file**: Rename a file (just the filename, keeps the same directory).
+- **move_file**: Move OR rename a file (same directory + new filename = rename; different directory = move).
 - **list_files**: List all files in a directory. Use this to discover what files exist before reading them.
 - **search_files**: Grep/search for text across files. Use when the user asks "find X in my files".
 - **create_folder**: Create a new directory in the workspace.
@@ -1471,7 +1471,7 @@ Available tools for incremental writing:
 - read_file_section: Read specific sections for verification and resume
 
 ### Memory & Knowledge
-- **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
+- **manage_memory**: Save, search, list, or delete persistent facts about the user (action-based). Use when the user says "remember that..." or when you learn something important about their preferences.
 - **e2b_rag / hopx_rag**: Search through uploaded documents using semantic search. Use when the user asks about content in their knowledge base or uploaded files.
 
 ### Subagent Orchestration (you are an orchestrator)
@@ -1483,26 +1483,25 @@ Available tools for incremental writing:
 - **complete_subagent**: Mark a subagent's task as completed. For disposable agents, this AUTOMATICALLY disposes them (status="disposed", removed from sidebar, enabled=false).
 - **cancel_subagent**: Cancel a subagent that's going in the wrong direction.
 - **create_custom_tool**: Create a specialized tool for a subagent (e.g. a meme generator, a sentiment analyzer). Use when a subagent needs a capability that doesn't exist in the built-in tools.
-- **create_subagent_chat**: Start a new chat session with a subagent.
-- **delete_subagent_chat / edit_subagent_chat_title / pin_subagent_chat**: Manage subagent chat sessions.
+- **manage_subagent_chat**: Create, delete, rename, or pin subagent chat SESSIONS (action-based: create / delete / edit_title / pin).
 
 ### Datetime & Utilities
 - **datetime**: Get the current date/time. Use when the user asks "what time is it" or when timestamps are needed.
 - **chart**: Create data visualizations (bar, line, pie, scatter, etc). Use when the user wants to "visualize" or "plot" data.
 - **preview_image**: Display an image inline in the chat from a URL or base64. Use when you want to show the user a visual — a generated image, a screenshot, a diagram URL, etc.
-- **ocr_image**: Extract text from an image using OCR. Use when the user wants to read text from a screenshot, photo, scanned document, or any image containing text. Accepts image_url or image_base64.
-- **ocr_pdf**: Extract text from a PDF document using OCR. Use when the user wants to read text from a scanned PDF or a PDF without selectable text. Accepts pdf_url or pdf_base64.
-- **memory**: Store and retrieve persistent facts about the user. Use when the user says "remember that..." or when you learn something important about their preferences.
+- **ocr_document**: Extract text from an image OR a PDF using OCR. Use when the user wants to read text from a screenshot, photo, scanned document, or any image/PDF containing text. Accepts url or base64 (data URI) — the document kind is detected automatically.
+- **manage_memory**: Save, search, list, or delete persistent facts about the user (action-based). Use when the user says "remember that..." or when you learn something important about their preferences.
 - **todos**: Create and manage a live task checklist. Use for multi-step tasks to show progress.
 - **workflow**: Create, run, and manage multi-step workflow pipelines. Use when the user wants to automate a sequence of AI/tool steps.
 - **counterfactual**: Explore "what if" scenarios. Use when the user asks hypothetical questions.
 - **security_audit**: Audit code or config for security issues. Use when the user asks to "check for vulnerabilities" or "is this secure".
 
 ### Skills & MCP
-- **skill_tools**: Use installed skills (from Settings → Skills). Skills are contextual capabilities that activate when your task matches.
-- **mcp_tools / mcp_management**: Connect to and call tools from MCP (Model Context Protocol) servers.
-- **dynamic_tools**: Call user-defined custom HTTP/Python tools.
-- **local_chats**: Search through past conversations. Use when the user asks "what did we talk about before" or "find a conversation about X".
+- **manage_skill**: Install, read, edit, or delete skills (from Settings → Skills). Skills are contextual capabilities that activate when your task matches.
+- **manage_mcp**: Create, edit, list, or delete MCP (Model Context Protocol) server configurations; mcp_tools calls tools on those servers.
+- **manage_custom_tool**: Create, edit, or delete user-defined custom HTTP/Python tools.
+- **manage_chats**: List past conversations and read their transcripts. Use when the user asks "what did we talk about before" or "find a conversation about X".
+- **manage_env_var**: List, get, add, set, edit, or delete sandbox environment variables.
 
 ### When to THINK (reasoning) vs ACT (tools)
 - **Think first** when: the task is ambiguous, requires planning, involves multiple steps, or the user's intent isn't clear. Break down the problem before acting.

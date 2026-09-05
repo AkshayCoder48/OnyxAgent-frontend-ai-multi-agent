@@ -300,8 +300,11 @@ async function manageTodoLocked(
   }
 }
 
+// MERGE/DEDUP NOTE (tool-count cap): `manage_todos` used to be registered as
+// an exact alias of manage_todo (same schema + handler) — a duplicate entry
+// in Settings → Tools AND a wasted tool slot against the model's tool-count
+// cap. Removed; `manage_todo` is the one true name.
 registerTool("manage_todo", MANAGE_DESCRIPTION, MANAGE_SCHEMA, manageTodoHandler);
-registerTool("manage_todos", MANAGE_DESCRIPTION, MANAGE_SCHEMA, manageTodoHandler);
 
 // ---------------------------------------------------------------------------
 // show_todo — display todos to the user. Accepts specific todo IDs (the

@@ -658,6 +658,16 @@ export function ToolResultRenderer({ toolName, ...props }: ResultProps & { toolN
     case "create_mcp":
     case "edit_mcp":
     case "delete_mcp":
+    // Merged multi-function tools (tool-count cap) — same generic rendering
+    // as the families they absorbed.
+    case "manage_chats":
+    case "manage_env_var":
+    case "manage_skill":
+    case "manage_mcp":
+    case "manage_memory":
+    case "manage_custom_tool":
+    case "manage_subagent_chat":
+    case "ocr_document":
       return <GenericToolResult {...props} />;
     case "web_search":
       return <WebSearchResults {...props} />;

@@ -808,6 +808,7 @@ export function useChat(options: UseChatOptions = {}) {
               tn === "spawn_subagent" ||
               tn === "query_subagent" ||
               tn === "create_subagent_chat" ||
+              tn === "manage_subagent_chat" ||
               tn === "steer_subagent" ||
               tn === "complete_subagent" ||
               tn === "cancel_subagent"

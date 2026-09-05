@@ -117,113 +117,108 @@ function buildHandler(
   return null;
 }
 
+// MERGE NOTE (tool-count cap): the three former custom-tool management tools
+// (create_tool / edit_tool / delete_tool) were merged into this single
+// `manage_custom_tool` tool with an `action` parameter. Each action preserves
+// the EXACT result shape of the tool it replaced.
+const MANAGE_CUSTOM_TOOL_DESCRIPTION = `Create, edit, or delete CUSTOM TOOLS that you can call in future turns — one tool for all three operations. A custom tool is defined by a name, description, JSON-schema parameters, and an implementation (either 'http_webhook' — calls a URL with the args as JSON body — or 'python_snippet' — runs a Python function \`run(**params)\` in the sandbox). Pass \`action\` plus the fields that action needs:
+
+- action "create": define a new custom tool. Requires \`name\`, \`description\`, \`parameters\` (JSON Schema), \`impl_kind\`; plus \`http_url\` (+ optional \`http_headers\`) for http_webhook, or \`python_source\` for python_snippet.
+- action "edit": edit an existing custom tool's description / parameters / implementation. Requires \`name\`; all other fields are optional patches.
+- action "delete": delete a custom tool. Requires \`name\`.`;
+
 registerTool(
-  "create_tool",
-  "Create a new custom tool that you can call in future turns. Define the name, description, JSON-schema parameters, and implementation. The implementation is either 'http_webhook' (calls a URL with the args as JSON body) or 'python_snippet' (runs a Python function `run(**params)` in the sandbox).",
+  "manage_custom_tool",
+  MANAGE_CUSTOM_TOOL_DESCRIPTION,
   {
     type: "object",
     properties: {
-      name: { type: "string", description: "Tool name (snake_case, unique)." },
-      description: { type: "string", description: "What the tool does." },
+      action: {
+        type: "string",
+        enum: ["create", "edit", "delete"],
+        description: "Which custom-tool operation to perform.",
+      },
+      name: { type: "string", description: "Custom tool name (snake_case, unique)." },
+      description: { type: "string", description: "What the tool does (create) or new description (edit)." },
       parameters: {
         type: "object",
-        description: "JSON Schema for the tool's parameters (same format as OpenAI function parameters).",
+        description: "JSON Schema for the tool's parameters — same format as OpenAI function parameters (create, or new schema on edit).",
       },
-      impl_kind: { type: "string", enum: ["http_webhook", "python_snippet"] },
+      impl_kind: { type: "string", enum: ["http_webhook", "python_snippet"], description: "Implementation kind." },
       http_url: { type: "string", description: "URL for http_webhook impl." },
       http_headers: { type: "object", description: "Headers for http_webhook impl." },
       python_source: { type: "string", description: "Python source with a run(**params) function for python_snippet impl." },
     },
-    required: ["name", "description", "parameters", "impl_kind"],
+    required: ["action"],
     additionalProperties: false,
   },
   async (args, ctx): Promise<ToolResult> => {
-    const name = args.name as string;
-    if (!name) return { success: false, output: null, error: "name is required" };
-    // Check for conflicts with built-in tools
-    const existing = await customToolService.list(ctx.userId);
-    if (existing.some((t) => t.name === name)) {
-      return { success: false, output: null, error: `Tool '${name}' already exists` };
-    }
-    const tool = await customToolService.create(ctx.userId, {
-      name,
-      description: args.description as string,
-      parameters_schema: args.parameters as Record<string, unknown>,
-      impl_kind: args.impl_kind as "http_webhook" | "python_snippet",
-      http_url: (args.http_url as string) || undefined,
-      http_headers: (args.http_headers as Record<string, string>) || null,
-      python_source: (args.python_source as string) || undefined,
-      is_active: true,
-    });
-    // Hot-register the handler
-    const handler = buildHandler(tool.impl_kind, tool.http_url, tool.http_headers, tool.python_source);
-    if (handler) {
-      dynamicHandlers.set(name, handler);
-      registerTool(name, tool.description, tool.parameters_schema as Record<string, unknown>, handler, false);
-    }
-    return { success: true, output: { created: name, id: tool.id } };
-  },
-);
+    const action = String(args.action ?? "");
+    const name = args.name as string | undefined;
+    if (!name) return { success: false, output: null, error: "name is required for action '" + action + "'" };
 
-registerTool(
-  "edit_tool",
-  "Edit an existing custom tool's code, description, or parameters.",
-  {
-    type: "object",
-    properties: {
-      name: { type: "string", description: "Name of the tool to edit." },
-      description: { type: "string", description: "New description." },
-      parameters: { type: "object", description: "New JSON Schema parameters." },
-      impl_kind: { type: "string", enum: ["http_webhook", "python_snippet"] },
-      http_url: { type: "string" },
-      http_headers: { type: "object" },
-      python_source: { type: "string" },
-    },
-    required: ["name"],
-    additionalProperties: false,
-  },
-  async (args, ctx): Promise<ToolResult> => {
-    const name = args.name as string;
-    const tools = await customToolService.list(ctx.userId);
-    const existing = tools.find((t) => t.name === name);
-    if (!existing) return { success: false, output: null, error: `Tool '${name}' not found` };
-    const patch: Record<string, unknown> = {};
-    if (args.description) patch.description = args.description;
-    if (args.parameters) patch.parameters_schema = args.parameters;
-    if (args.impl_kind) patch.impl_kind = args.impl_kind;
-    if (args.http_url !== undefined) patch.http_url = args.http_url;
-    if (args.http_headers !== undefined) patch.http_headers = args.http_headers;
-    if (args.python_source !== undefined) patch.python_source = args.python_source;
-    await customToolService.update(existing.id, patch);
-    // Re-register
-    const updated = (await customToolService.list(ctx.userId)).find((t) => t.name === name)!;
-    const handler = buildHandler(updated.impl_kind, updated.http_url ?? null, updated.http_headers, updated.python_source ?? null);
-    if (handler) {
-      dynamicHandlers.set(name, handler);
-      registerTool(name, updated.description, updated.parameters_schema as Record<string, unknown>, handler, false);
+    // ---- action: create (was create_tool) ----
+    if (action === "create") {
+      if (!args.description || !args.parameters || !args.impl_kind) {
+        return { success: false, output: null, error: "description, parameters and impl_kind are required for action 'create'" };
+      }
+      // Check for conflicts with existing custom tools
+      const existing = await customToolService.list(ctx.userId);
+      if (existing.some((t) => t.name === name)) {
+        return { success: false, output: null, error: `Tool '${name}' already exists` };
+      }
+      const tool = await customToolService.create(ctx.userId, {
+        name,
+        description: args.description as string,
+        parameters_schema: args.parameters as Record<string, unknown>,
+        impl_kind: args.impl_kind as "http_webhook" | "python_snippet",
+        http_url: (args.http_url as string) || undefined,
+        http_headers: (args.http_headers as Record<string, string>) || null,
+        python_source: (args.python_source as string) || undefined,
+        is_active: true,
+      });
+      // Hot-register the handler
+      const handler = buildHandler(tool.impl_kind, tool.http_url, tool.http_headers, tool.python_source);
+      if (handler) {
+        dynamicHandlers.set(name, handler);
+        registerTool(name, tool.description, tool.parameters_schema as Record<string, unknown>, handler, false);
+      }
+      return { success: true, output: { created: name, id: tool.id } };
     }
-    return { success: true, output: { updated: name } };
-  },
-);
 
-registerTool(
-  "delete_tool",
-  "Delete a custom tool by name.",
-  {
-    type: "object",
-    properties: {
-      name: { type: "string", description: "Name of the tool to delete." },
-    },
-    required: ["name"],
-    additionalProperties: false,
-  },
-  async (args, ctx): Promise<ToolResult> => {
-    const name = args.name as string;
-    const tools = await customToolService.list(ctx.userId);
-    const existing = tools.find((t) => t.name === name);
-    if (!existing) return { success: false, output: null, error: `Tool '${name}' not found` };
-    await customToolService.delete(existing.id);
-    dynamicHandlers.delete(name);
-    return { success: true, output: { deleted: name } };
+    // ---- action: edit (was edit_tool) ----
+    if (action === "edit") {
+      const tools = await customToolService.list(ctx.userId);
+      const existing = tools.find((t) => t.name === name);
+      if (!existing) return { success: false, output: null, error: `Tool '${name}' not found` };
+      const patch: Record<string, unknown> = {};
+      if (args.description) patch.description = args.description;
+      if (args.parameters) patch.parameters_schema = args.parameters;
+      if (args.impl_kind) patch.impl_kind = args.impl_kind;
+      if (args.http_url !== undefined) patch.http_url = args.http_url;
+      if (args.http_headers !== undefined) patch.http_headers = args.http_headers;
+      if (args.python_source !== undefined) patch.python_source = args.python_source;
+      await customToolService.update(existing.id, patch);
+      // Re-register
+      const updated = (await customToolService.list(ctx.userId)).find((t) => t.name === name)!;
+      const handler = buildHandler(updated.impl_kind, updated.http_url ?? null, updated.http_headers, updated.python_source ?? null);
+      if (handler) {
+        dynamicHandlers.set(name, handler);
+        registerTool(name, updated.description, updated.parameters_schema as Record<string, unknown>, handler, false);
+      }
+      return { success: true, output: { updated: name } };
+    }
+
+    // ---- action: delete (was delete_tool) ----
+    if (action === "delete") {
+      const tools = await customToolService.list(ctx.userId);
+      const existing = tools.find((t) => t.name === name);
+      if (!existing) return { success: false, output: null, error: `Tool '${name}' not found` };
+      await customToolService.delete(existing.id);
+      dynamicHandlers.delete(name);
+      return { success: true, output: { deleted: name } };
+    }
+
+    return { success: false, output: null, error: `Unknown action: ${action}` };
   },
 );

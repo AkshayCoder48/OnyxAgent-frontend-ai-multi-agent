@@ -185,9 +185,12 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
 
   const isShowTodo = toolCall.name === "show_todo";
   const isManageTodo = toolCall.name === "manage_todo" || toolCall.name === "manage_todos";
-  const isMemorySave = toolCall.name === "memory_save";
-  const isMemoryList = toolCall.name === "memory_list";
-  const isMemorySearch = toolCall.name === "memory_search";
+  // Merged manage_memory actions keep the old per-tool rendering paths:
+  // save → "added" chip, list → "existing" chips, search → disclosure chips.
+  const memoryAction = toolCall.name === "manage_memory" ? String(toolCall.args?.action ?? "") : null;
+  const isMemorySave = toolCall.name === "memory_save" || memoryAction === "save";
+  const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
+  const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   const isAskUser = toolCall.name === "ask_user";
 
   return (
@@ -398,15 +401,18 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isWebSearch = webResults !== null;
   const isAskUser = toolCall.name === "ask_user";
   const isLoadSkill = toolCall.name === "load_skill";
-  const isListSkills = toolCall.name === "list_skills";
+  const isListSkills = toolCall.name === "list_skills" || (toolCall.name === "manage_skill" && toolCall.args?.action === "list");
   // edit_file — the find/replace pair renders as a CodeDiff (assistant-ui
   // "Code diff" element) once the edit completes successfully.
   const isEditFile = toolCall.name === "edit_file";
   // Memory tools — the chips render via the MemoryChips element, with the
   // forget button deleting the real OPFS file memory_save wrote.
-  const isMemorySave = toolCall.name === "memory_save";
-  const isMemoryList = toolCall.name === "memory_list";
-  const isMemorySearch = toolCall.name === "memory_search";
+  // Merged manage_memory actions keep the old per-tool rendering paths
+  // (see SimpleToolCallCard above for the mapping rationale).
+  const memoryAction = toolCall.name === "manage_memory" ? String(toolCall.args?.action ?? "") : null;
+  const isMemorySave = toolCall.name === "memory_save" || memoryAction === "save";
+  const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
+  const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
   // todos drive the TodoPreview table; memoized so streaming deltas don't
   // re-parse on every render.

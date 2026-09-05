@@ -813,156 +813,144 @@ The tool is immediately available to the specified subagent (or all subagents if
   "orchestration",
 );
 
-// === Tool: create_subagent_chat ===
-// Creates a new chat session with a subagent.
+// === Tool: manage_subagent_chat ===
+// MERGE NOTE (tool-count cap): the four former subagent-chat session tools
+// (create_subagent_chat / delete_subagent_chat / edit_subagent_chat_title /
+// pin_subagent_chat) were merged into this single multi-function tool with an
+// `action` parameter. Each action preserves the EXACT result shape of the
+// tool it replaced.
 registerTool(
-  "create_subagent_chat",
-  `Create a new chat session with a subagent. Use this when you want to start a fresh conversation with a subagent (separate from existing chats). The session persists across page refreshes.
+  "manage_subagent_chat",
+  `Manage chat SESSIONS with subagents — one tool for all session operations. Sessions persist across page refreshes. Pass \`action\` plus the fields that action needs:
 
-Returns the session_id which you can use with query_subagent to continue the conversation.`,
+- action "create": create a new chat session with a subagent (auto-creates the subagent if it doesn't exist). Requires \`subagent_name\`; optional \`title\`, \`description\` + \`specialty\` + \`system_prompt\` (for auto-created subagents). Returns the session_id — send messages via query_subagent.
+- action "delete": delete a session permanently (history is removed). Requires \`session_id\`.
+- action "edit_title": rename a session. Requires \`session_id\` + \`title\`.
+- action "pin": pin (or unpin) a session — pinned chats appear at the top of the list. Requires \`session_id\`; optional \`pinned\` (default true).`,
   {
     type: "object",
     properties: {
+      action: {
+        type: "string",
+        enum: ["create", "delete", "edit_title", "pin"],
+        description: "Which session operation to perform.",
+      },
       subagent_name: {
         type: "string",
-        description: "Name of the subagent to chat with. If it doesn't exist, it will be auto-created.",
+        description: "Name of the subagent to chat with (action 'create'). Auto-created if missing.",
       },
       title: {
         type: "string",
-        description: "Optional title for the chat session.",
+        description: "Session title (create, or the new title for edit_title).",
       },
       description: {
         type: "string",
-        description: "Description for a new subagent (if auto-creating).",
+        description: "Description for a new subagent (action 'create').",
       },
       specialty: {
         type: "string",
         enum: ["research", "code", "analysis", "writing", "general"],
-        description: "Specialty for a new subagent.",
+        description: "Specialty for a new subagent (action 'create').",
         default: "general",
       },
       system_prompt: {
         type: "string",
-        description: "System prompt for a new subagent.",
+        description: "System prompt for a new subagent (action 'create').",
+      },
+      session_id: {
+        type: "string",
+        description: "The chat session id (actions 'delete', 'edit_title', 'pin').",
+      },
+      pinned: {
+        type: "boolean",
+        description: "True to pin, false to unpin (action 'pin', default true).",
+        default: true,
       },
     },
-    required: ["subagent_name"],
+    required: ["action"],
     additionalProperties: false,
   },
   async (args) => {
-    const { useSubagentStore } = await import("@/stores/subagent-store");
-    const store = useSubagentStore.getState();
-    const name = args.subagent_name as string;
-    const title = args.title as string | undefined;
-    const description = args.description as string | undefined;
-    const specialty = (args.specialty as string | undefined) ?? "general";
-    const systemPrompt = args.system_prompt as string | undefined;
+    const action = String(args.action ?? "");
 
-    // Find or create the subagent.
-    let subagent = store.subagents.find((s) => s.name.toLowerCase() === name.toLowerCase());
-    if (!subagent) {
-      subagent = store.createSubagent({
-        name,
-        description: description || `Auto-spawned ${specialty} subagent`,
-        specialty: specialty as "research" | "code" | "analysis" | "writing" | "general",
-        systemPrompt: systemPrompt || `You are ${name}, a ${specialty} subagent. ${description || ""}`,
-      });
+    // ---- action: create (was create_subagent_chat) ----
+    if (action === "create") {
+      const name = args.subagent_name as string | undefined;
+      if (!name) return { error: "subagent_name is required for action 'create'" };
+      const { useSubagentStore } = await import("@/stores/subagent-store");
+      const store = useSubagentStore.getState();
+      const title = args.title as string | undefined;
+      const description = args.description as string | undefined;
+      const specialty = (args.specialty as string | undefined) ?? "general";
+      const systemPrompt = args.system_prompt as string | undefined;
+
+      // Find or create the subagent.
+      let subagent = store.subagents.find((s) => s.name.toLowerCase() === name.toLowerCase());
+      if (!subagent) {
+        subagent = store.createSubagent({
+          name,
+          description: description || `Auto-spawned ${specialty} subagent`,
+          specialty: specialty as "research" | "code" | "analysis" | "writing" | "general",
+          systemPrompt: systemPrompt || `You are ${name}, a ${specialty} subagent. ${description || ""}`,
+        });
+      }
+
+      // Create a new session.
+      const session = store.createSession(subagent.id, title || `Chat with ${name}`);
+      return {
+        session_id: session.id,
+        subagent_id: subagent.id,
+        subagent_name: subagent.name,
+        title: session.title,
+        message: `New chat session created with ${subagent.name}. Use query_subagent with this subagent to send messages.`,
+      };
     }
 
-    // Create a new session.
-    const session = store.createSession(subagent.id, title || `Chat with ${name}`);
-    return {
-      session_id: session.id,
-      subagent_id: subagent.id,
-      subagent_name: subagent.name,
-      title: session.title,
-      message: `New chat session created with ${subagent.name}. Use query_subagent with this subagent to send messages.`,
-    };
-  },
-  false,
-  "orchestration",
-);
-
-// === Tool: delete_subagent_chat ===
-registerTool(
-  "delete_subagent_chat",
-  "Delete a subagent chat session by its ID. The conversation history is permanently removed.",
-  {
-    type: "object",
-    properties: {
-      session_id: { type: "string", description: "The chat session ID to delete." },
-    },
-    required: ["session_id"],
-    additionalProperties: false,
-  },
-  async (args) => {
-    const { useSubagentStore } = await import("@/stores/subagent-store");
-    const store = useSubagentStore.getState();
-    const sessionId = args.session_id as string;
-    const session = store.sessions.find((s) => s.id === sessionId);
-    if (!session) {
-      return { error: `Session ${sessionId} not found.` };
+    // ---- action: delete (was delete_subagent_chat) ----
+    if (action === "delete") {
+      const sessionId = args.session_id as string | undefined;
+      if (!sessionId) return { error: "session_id is required for action 'delete'" };
+      const { useSubagentStore } = await import("@/stores/subagent-store");
+      const store = useSubagentStore.getState();
+      const session = store.sessions.find((s) => s.id === sessionId);
+      if (!session) {
+        return { error: `Session ${sessionId} not found.` };
+      }
+      store.deleteSession(sessionId);
+      return { success: true, deleted: sessionId };
     }
-    store.deleteSession(sessionId);
-    return { success: true, deleted: sessionId };
-  },
-  false,
-  "orchestration",
-);
 
-// === Tool: edit_subagent_chat_title ===
-registerTool(
-  "edit_subagent_chat_title",
-  "Edit the title of a subagent chat session.",
-  {
-    type: "object",
-    properties: {
-      session_id: { type: "string", description: "The chat session ID." },
-      title: { type: "string", description: "The new title." },
-    },
-    required: ["session_id", "title"],
-    additionalProperties: false,
-  },
-  async (args) => {
-    const { useSubagentStore } = await import("@/stores/subagent-store");
-    const store = useSubagentStore.getState();
-    const sessionId = args.session_id as string;
-    const title = args.title as string;
-    const session = store.sessions.find((s) => s.id === sessionId);
-    if (!session) {
-      return { error: `Session ${sessionId} not found.` };
+    // ---- action: edit_title (was edit_subagent_chat_title) ----
+    if (action === "edit_title") {
+      const sessionId = args.session_id as string | undefined;
+      const title = args.title as string | undefined;
+      if (!sessionId || !title) return { error: "session_id and title are required for action 'edit_title'" };
+      const { useSubagentStore } = await import("@/stores/subagent-store");
+      const store = useSubagentStore.getState();
+      const session = store.sessions.find((s) => s.id === sessionId);
+      if (!session) {
+        return { error: `Session ${sessionId} not found.` };
+      }
+      store.updateSessionTitle(sessionId, title);
+      return { success: true, session_id: sessionId, title };
     }
-    store.updateSessionTitle(sessionId, title);
-    return { success: true, session_id: sessionId, title };
-  },
-  false,
-  "orchestration",
-);
 
-// === Tool: pin_subagent_chat ===
-registerTool(
-  "pin_subagent_chat",
-  "Pin or unpin a subagent chat session. Pinned chats appear at the top of the chat list.",
-  {
-    type: "object",
-    properties: {
-      session_id: { type: "string", description: "The chat session ID." },
-      pinned: { type: "boolean", description: "True to pin, false to unpin.", default: true },
-    },
-    required: ["session_id"],
-    additionalProperties: false,
-  },
-  async (args) => {
-    const { useSubagentStore } = await import("@/stores/subagent-store");
-    const store = useSubagentStore.getState();
-    const sessionId = args.session_id as string;
-    const pinned = (args.pinned as boolean) ?? true;
-    const session = store.sessions.find((s) => s.id === sessionId);
-    if (!session) {
-      return { error: `Session ${sessionId} not found.` };
+    // ---- action: pin (was pin_subagent_chat) ----
+    if (action === "pin") {
+      const sessionId = args.session_id as string | undefined;
+      if (!sessionId) return { error: "session_id is required for action 'pin'" };
+      const { useSubagentStore } = await import("@/stores/subagent-store");
+      const store = useSubagentStore.getState();
+      const pinned = (args.pinned as boolean) ?? true;
+      const session = store.sessions.find((s) => s.id === sessionId);
+      if (!session) {
+        return { error: `Session ${sessionId} not found.` };
+      }
+      store.pinSession(sessionId, pinned);
+      return { success: true, session_id: sessionId, pinned };
     }
-    store.pinSession(sessionId, pinned);
-    return { success: true, session_id: sessionId, pinned };
+
+    return { error: `Unknown action: ${action}` };
   },
   false,
   "orchestration",

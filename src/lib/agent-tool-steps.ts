@@ -78,6 +78,17 @@ export const VERB_RULES: Record<string, VerbRule> = {
   memory_search: { verb: "Recalled", icon: Brain },
   get_current_datetime: { verb: "Checked", icon: Clock },
   current_datetime: { verb: "Checked", icon: Clock },
+  // Merged multi-function tools (tool-count cap) — each maps to the old
+  // family it absorbed (verbs stay generic; the action rides the chip via
+  // toolChip()'s args.action fallback).
+  manage_memory: { verb: "Remembered", icon: Brain },
+  manage_env_var: { verb: "Set", icon: Wrench },
+  manage_skill: { verb: "Managed", icon: Wrench },
+  manage_mcp: { verb: "Managed", icon: Globe },
+  manage_custom_tool: { verb: "Built", icon: Wrench },
+  manage_subagent_chat: { verb: "Managed", icon: MessageCircleQuestion },
+  manage_chats: { verb: "Read", icon: FileSearch },
+  ocr_document: { verb: "Read", icon: FileSearch },
 };
 
 /** Tools that change a file in the workspace (feed FileTree + timeline stats). */

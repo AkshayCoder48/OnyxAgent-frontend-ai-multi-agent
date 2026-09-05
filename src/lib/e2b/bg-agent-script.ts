@@ -1145,8 +1145,10 @@ const TOOLS = [
     },
   },
   {
+    // MERGE NOTE (tool-count cap): description widened — this tool also
+    // covers renames (same directory + new filename = a rename).
     name: "move_file",
-    description: "Move or rename a file/folder.",
+    description: "Move OR RENAME a file/folder. Same directory + new filename = rename; different directory = move.",
     parameters: { type: "object", properties: { path: { type: "string" }, new_path: { type: "string" } }, required: ["path", "new_path"] },
     run: async (args) => {
       const from = safePath(args.path), to = safePath(args.new_path);
@@ -1451,25 +1453,8 @@ const TOOLS = [
       return { deleted: true, path: args.path };
     },
   },
-  {
-    name: "rename_file",
-    description: "Rename a file in the user's workspace. Same as move_file but specifically for renaming.",
-    parameters: { type: "object", properties: { path: { type: "string" }, new_name: { type: "string" } }, required: ["path", "new_name"] },
-    run: async (args) => {
-      const from = safePath(args.path);
-      const newName = String(args.new_name ?? "").replace(/[\\/]+/g, "_").trim();
-      if (!from) return { error: "Invalid path" };
-      if (!newName) return { error: "new_name is required" };
-      const to = safePath(path.join(path.dirname(from), newName));
-      if (!to) return { error: "Invalid destination" };
-      try { await fs.access(from); } catch { return { error: "Source file not found: " + args.path }; }
-      const content = await fs.readFile(from);
-      await ensureParentDir(to, []);
-      await fs.writeFile(to, content);
-      await fs.rm(from, { recursive: true, force: true });
-      return { renamed: true, old_path: args.path, new_path: path.relative(HOME, to), size: content.length };
-    },
-  },
+  // MERGE NOTE (tool-count cap): rename_file (same-directory move) was
+  // removed as a separate tool — move_file covers it.
   {
     name: "send_file",
     description: "Send a file from the user's workspace to the chat as a downloadable attachment. The user sees a download card with the file's name, size, and extension. The download URL is a base64 data URL (stateless — survives page reloads and Vercel deployments). If the path is a directory, automatically sends it as a ZIP archive.",
@@ -1775,54 +1760,38 @@ const TOOLS = [
     },
   },
   {
-    name: "ocr_image",
-    description: "Extract text from an image using OCR (Optical Character Recognition). Use this when the user wants to read text from a screenshot, photo, scanned document, or any image containing text. Supports PNG, JPEG, GIF, WebP, and BMP formats. The image can be provided as a URL or base64 data URI.",
+    // MERGE NOTE (tool-count cap): ocr_image + ocr_pdf merged into ONE
+    // ocr_document tool — the document kind is inferred from the source
+    // (data-URI mime or URL suffix). Result shapes preserved.
+    name: "ocr_document",
+    description: "Extract text from an image OR a PDF using OCR (Optical Character Recognition). Use this when the user wants to read text from a screenshot, photo, scanned document, any image containing text, or a PDF without selectable text. Supports PNG, JPEG, GIF, WebP, BMP, and PDF. Provide the source as a URL or a base64 data URI — the document kind is detected automatically. For large PDFs, only the first few pages are processed.",
     parameters: {
       type: "object",
       properties: {
-        image_url: { type: "string", description: "URL of the image to OCR" },
-        image_base64: { type: "string", description: "Base64 data URI of the image (e.g. 'data:image/png;base64,...')" },
+        url: { type: "string", description: "URL of the image or PDF to OCR" },
+        base64: { type: "string", description: "Base64 data URI of the document (e.g. 'data:image/png;base64,...' or 'data:application/pdf;base64,...')" },
       },
       additionalProperties: false,
     },
     run: async (args) => {
-      const imageUrl = args.image_url ? String(args.image_url) : "";
-      const imageBase64 = args.image_base64 ? String(args.image_base64) : "";
-      if (!imageUrl && !imageBase64) {
-        return { success: false, output: null, error: "Either 'image_url' or 'image_base64' must be provided." };
+      const url = args.url ? String(args.url) : "";
+      const base64 = args.base64 ? String(args.base64) : "";
+      if (!url && !base64) {
+        return { success: false, output: null, error: "Either 'url' or 'base64' must be provided." };
       }
+      const isPdf =
+        (base64 && base64.startsWith("data:application/pdf")) ||
+        (url && /\.pdf(\?|$)/i.test(url));
       try {
-        const text = await ocrFetch(imageUrl, imageBase64, "image");
+        const text = await ocrFetch(url, base64, isPdf ? "document.pdf" : "image");
         if (!text || !text.trim()) {
-          return { success: true, output: { text: "", message: "No text was detected in the image." } };
-        }
-        return { success: true, output: { text, char_count: text.length } };
-      } catch (e) {
-        return { success: false, output: null, error: e && e.message ? e.message : String(e) };
-      }
-    },
-  },
-  {
-    name: "ocr_pdf",
-    description: "Extract text from a PDF document using OCR. Use this when the user wants to read text from a scanned PDF, or any PDF that doesn't have selectable text. The PDF can be provided as a URL or base64 data URI. For large PDFs, only the first few pages are processed.",
-    parameters: {
-      type: "object",
-      properties: {
-        pdf_url: { type: "string", description: "URL of the PDF to OCR" },
-        pdf_base64: { type: "string", description: "Base64 data URI of the PDF (e.g. 'data:application/pdf;base64,...')" },
-      },
-      additionalProperties: false,
-    },
-    run: async (args) => {
-      const pdfUrl = args.pdf_url ? String(args.pdf_url) : "";
-      const pdfBase64 = args.pdf_base64 ? String(args.pdf_base64) : "";
-      if (!pdfUrl && !pdfBase64) {
-        return { success: false, output: null, error: "Either 'pdf_url' or 'pdf_base64' must be provided." };
-      }
-      try {
-        const text = await ocrFetch(pdfUrl, pdfBase64, "document.pdf");
-        if (!text || !text.trim()) {
-          return { success: true, output: { text: "", message: "No text was detected in the PDF." } };
+          return {
+            success: true,
+            output: {
+              text: "",
+              message: isPdf ? "No text was detected in the PDF." : "No text was detected in the image.",
+            },
+          };
         }
         return { success: true, output: { text, char_count: text.length } };
       } catch (e) {
@@ -1865,13 +1834,9 @@ const TOOLS = [
   },
 ];
 
-// manage_todos — registry alias (the in-browser registry registers BOTH
-// names; the background surface must match so the model sees the same list
-// as Settings → Tools).
-{
-  const manageTodoEntry = TOOLS.find((t) => t.name === "manage_todo");
-  if (manageTodoEntry) TOOLS.push({ ...manageTodoEntry, name: "manage_todos" });
-}
+// MERGE NOTE (tool-count cap): the manage_todos alias push was removed —
+// the in-browser registry no longer registers manage_todos (it was an exact
+// duplicate of manage_todo), so the background surface must not either.
 
 // ── Browser-tool bridge (v3 FULL TOOLSET) ──────────────────────────────
 // Tools whose implementations live in the BROWSER (Dexie/OPFS stores: chats,

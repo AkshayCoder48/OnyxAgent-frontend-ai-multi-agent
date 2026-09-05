@@ -1,8 +1,9 @@
-// OCR Tools — ocr_image and ocr_pdf using freeocr.ai API.
+// OCR Tool — ocr_document (images AND PDFs) using the freeocr.ai API.
 //
-// These tools let the AI extract text from images and PDFs. They call the
-// freeocr.ai API (https://freeocr.ai/api/v1/ocr) which provides free OCR
-// powered by Tesseract.
+// MERGE NOTE (tool-count cap): the two former OCR tools (ocr_image and
+// ocr_pdf) were merged into this single `ocr_document` tool. The document
+// kind is inferred from the source (URL suffix or the data-URI mime type).
+// Result shapes are preserved exactly.
 //
 // The API accepts:
 //   - POST multipart/form-data with `image` field (file upload)
@@ -16,18 +17,18 @@ import { registerTool } from "./registry";
 import type { ToolResult } from "@/types";
 
 /**
- * Call the freeocr.ai OCR API with an image URL.
+ * Call the freeocr.ai OCR API with a document URL.
  *
- * @param imageUrl - URL of the image to OCR (https://...)
+ * @param sourceUrl - URL of the image/PDF to OCR (https://...)
  * @returns extracted text
  */
-async function ocrImageUrl(imageUrl: string): Promise<string> {
+async function ocrFromUrl(sourceUrl: string): Promise<string> {
   const res = await fetch("https://freeocr.ai/api/v1/ocr", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ image_url: imageUrl }),
+    body: JSON.stringify({ image_url: sourceUrl }),
   });
 
   if (!res.ok) {
@@ -44,17 +45,17 @@ async function ocrImageUrl(imageUrl: string): Promise<string> {
 }
 
 /**
- * Call the freeocr.ai OCR API with a base64-encoded image.
+ * Call the freeocr.ai OCR API with a base64-encoded document (image or PDF).
+ * freeocr.ai uses the 'image' multipart field for all file types.
  *
- * @param base64Data - base64 data URI (e.g. "data:image/png;base64,iVBOR...")
+ * @param base64Data - base64 data URI (e.g. "data:image/png;base64,iVBOR..." or "data:application/pdf;base64,JVBERi...")
+ * @param filename - filename for the multipart upload ("image" or "document.pdf")
  * @returns extracted text
  */
-async function ocrImageBase64(base64Data: string): Promise<string> {
-  // freeocr.ai accepts multipart form data with the image file
-  // Convert base64 to a Blob
+async function ocrFromBase64(base64Data: string, filename: string): Promise<string> {
   const base64Match = base64Data.match(/^data:([^;]+);base64,(.+)$/);
   if (!base64Match) {
-    throw new Error("Invalid base64 data URI format. Expected: data:image/png;base64,...");
+    throw new Error("Invalid base64 data URI format. Expected: data:image/png;base64,... or data:application/pdf;base64,...");
   }
 
   const mimeType = base64Match[1]!;
@@ -66,7 +67,7 @@ async function ocrImageBase64(base64Data: string): Promise<string> {
     bytes[i] = binary.charCodeAt(i);
   }
   const blob = new Blob([bytes], { type: mimeType });
-  const file = new File([blob], "image", { type: mimeType });
+  const file = new File([blob], filename, { type: mimeType });
 
   const formData = new FormData();
   formData.append("image", file);
@@ -89,42 +90,47 @@ async function ocrImageBase64(base64Data: string): Promise<string> {
   return data.text || "";
 }
 
-// ---- ocr_image tool ----
+// ---- ocr_document tool (was ocr_image + ocr_pdf) ----
 registerTool(
-  "ocr_image",
-  "Extract text from an image using OCR (Optical Character Recognition). Use this when the user wants to read text from a screenshot, photo, scanned document, or any image containing text. Supports PNG, JPEG, GIF, WebP, and BMP formats. The image can be provided as a URL or base64 data URI.",
+  "ocr_document",
+  "Extract text from an image OR a PDF using OCR (Optical Character Recognition). Use this when the user wants to read text from a screenshot, photo, scanned document, any image containing text, or a scanned/PDF document without selectable text. Supports PNG, JPEG, GIF, WebP, BMP, and PDF. For large PDFs, only the first few pages are processed. Provide the source as a URL or a base64 data URI — the document kind is detected automatically.",
   {
     type: "object",
     properties: {
-      image_url: {
+      url: {
         type: "string",
-        description: "URL of the image to extract text from (e.g. 'https://example.com/screenshot.png')",
+        description: "URL of the image or PDF to extract text from (e.g. 'https://example.com/screenshot.png' or 'https://example.com/document.pdf')",
       },
-      image_base64: {
+      base64: {
         type: "string",
-        description: "Base64 data URI of the image (e.g. 'data:image/png;base64,iVBOR...'). Use this when the image is already loaded in memory.",
+        description: "Base64 data URI of the document (e.g. 'data:image/png;base64,iVBOR...' or 'data:application/pdf;base64,JVBERi...'). Use this when the file is already loaded in memory.",
       },
     },
     additionalProperties: false,
   },
   async (args): Promise<ToolResult> => {
-    const imageUrl = args.image_url as string | undefined;
-    const imageBase64 = args.image_base64 as string | undefined;
+    const url = args.url as string | undefined;
+    const base64 = args.base64 as string | undefined;
 
-    if (!imageUrl && !imageBase64) {
+    if (!url && !base64) {
       return {
         success: false,
         output: null,
-        error: "Either 'image_url' or 'image_base64' must be provided.",
+        error: "Either 'url' or 'base64' must be provided.",
       };
     }
 
+    // Detect the document kind from the source (for messages + multipart filename).
+    const isPdf =
+      (base64 ? base64.startsWith("data:application/pdf") : false) ||
+      (url ? /\.pdf(\?|$)/i.test(url) : false);
+
     try {
       let text: string;
-      if (imageUrl) {
-        text = await ocrImageUrl(imageUrl);
+      if (url) {
+        text = await ocrFromUrl(url);
       } else {
-        text = await ocrImageBase64(imageBase64!);
+        text = await ocrFromBase64(base64!, isPdf ? "document.pdf" : "image");
       }
 
       if (!text || !text.trim()) {
@@ -132,124 +138,9 @@ registerTool(
           success: true,
           output: {
             text: "",
-            message: "No text was detected in the image.",
-          },
-        };
-      }
-
-      return {
-        success: true,
-        output: {
-          text,
-          char_count: text.length,
-        },
-      };
-    } catch (e) {
-      return {
-        success: false,
-        output: null,
-        error: e instanceof Error ? e.message : String(e),
-      };
-    }
-  },
-  false,
-  "general",
-);
-
-// ---- ocr_pdf tool ----
-registerTool(
-  "ocr_pdf",
-  "Extract text from a PDF document using OCR. Use this when the user wants to read text from a scanned PDF, or a PDF that doesn't have selectable text. The PDF can be provided as a URL or base64 data URI. For large PDFs, only the first few pages are processed.",
-  {
-    type: "object",
-    properties: {
-      pdf_url: {
-        type: "string",
-        description: "URL of the PDF to extract text from (e.g. 'https://example.com/document.pdf')",
-      },
-      pdf_base64: {
-        type: "string",
-        description: "Base64 data URI of the PDF (e.g. 'data:application/pdf;base64,JVBERi...'). Use this when the PDF is already loaded in memory.",
-      },
-    },
-    additionalProperties: false,
-  },
-  async (args): Promise<ToolResult> => {
-    const pdfUrl = args.pdf_url as string | undefined;
-    const pdfBase64 = args.pdf_base64 as string | undefined;
-
-    if (!pdfUrl && !pdfBase64) {
-      return {
-        success: false,
-        output: null,
-        error: "Either 'pdf_url' or 'pdf_base64' must be provided.",
-      };
-    }
-
-    try {
-      let text: string;
-
-      if (pdfBase64) {
-        // Convert base64 PDF to file and send to OCR API
-        const base64Match = pdfBase64.match(/^data:([^;]+);base64,(.+)$/);
-        if (!base64Match) {
-          throw new Error("Invalid base64 data URI format. Expected: data:application/pdf;base64,...");
-        }
-
-        const mimeType = base64Match[1]!;
-        const base64 = base64Match[2]!;
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        const blob = new Blob([bytes], { type: mimeType });
-        const file = new File([blob], "document.pdf", { type: mimeType });
-
-        const formData = new FormData();
-        formData.append("image", file); // freeocr.ai uses 'image' field for all file types
-
-        const res = await fetch("https://freeocr.ai/api/v1/ocr", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(`OCR API HTTP ${res.status}: ${errText.slice(0, 200) || res.statusText}`);
-        }
-
-        const data = await res.json();
-        if (data.error) {
-          throw new Error(`OCR API error: ${data.error}`);
-        }
-        text = data.text || "";
-      } else {
-        // Send PDF URL to OCR API
-        const res = await fetch("https://freeocr.ai/api/v1/ocr", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image_url: pdfUrl }),
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => "");
-          throw new Error(`OCR API HTTP ${res.status}: ${errText.slice(0, 200) || res.statusText}`);
-        }
-
-        const data = await res.json();
-        if (data.error) {
-          throw new Error(`OCR API error: ${data.error}`);
-        }
-        text = data.text || "";
-      }
-
-      if (!text || !text.trim()) {
-        return {
-          success: true,
-          output: {
-            text: "",
-            message: "No text was detected in the PDF.",
+            message: isPdf
+              ? "No text was detected in the PDF."
+              : "No text was detected in the image.",
           },
         };
       }

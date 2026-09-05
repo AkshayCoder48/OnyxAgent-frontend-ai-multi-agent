@@ -149,6 +149,30 @@ const RULES: Record<string, TenseRule> = {
     icon: Download,
   },
   preview_image: { past: "Showed an image", present: "Showing an image", icon: ImageIcon },
+
+  // ── Merged multi-function tools (tool-count cap) ─────────────────────
+  // Each maps to the old family it absorbed; sentences stay generic and
+  // human. The per-action nuance rides the detail chip (args.action).
+  manage_memory: {
+    past: "Worked with its memories",
+    present: "Working with memories",
+    icon: Brain,
+  },
+  manage_env_var: {
+    past: "Managed environment variables",
+    present: "Managing environment variables",
+    icon: Wrench,
+  },
+  manage_skill: { past: "Managed skills", present: "Managing skills", icon: Wrench },
+  manage_mcp: { past: "Managed MCP servers", present: "Managing MCP servers", icon: Globe },
+  manage_custom_tool: { past: "Built a custom tool", present: "Building a custom tool", icon: Wrench },
+  manage_subagent_chat: {
+    past: "Managed a subagent chat",
+    present: "Managing a subagent chat",
+    icon: MessageCircleQuestion,
+  },
+  manage_chats: { past: "Looked up past chats", present: "Looking up past chats", icon: FileSearch },
+  ocr_document: { past: "Read a document", present: "Reading a document", icon: ImageIcon },
 };
 
 function humanize(name: string): string {

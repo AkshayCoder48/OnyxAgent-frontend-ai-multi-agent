@@ -27,12 +27,12 @@ export const BG_NATIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_search",
   "manage_todo",
   "show_todo",
-  // v3 native additions
-  "manage_todos",
+  // v3 native additions (tool-count-cap merge: manage_todos alias removed —
+  // manage_todo is the one true name; rename_file merged into move_file;
+  // ocr_image + ocr_pdf merged into ocr_document)
   "current_datetime",
   "create_chart",
   "delete_folder",
-  "rename_file",
   "send_file",
   "send_folder",
   "verify_path",
@@ -42,7 +42,6 @@ export const BG_NATIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "image_search",
   "video_search",
   "preview_image",
-  "ocr_image",
-  "ocr_pdf",
+  "ocr_document",
   "counterfactual",
 ]);

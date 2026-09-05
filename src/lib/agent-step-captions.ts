@@ -54,6 +54,16 @@ const EXACT_CAPTIONS: Record<string, string> = {
   memory_save: "Saving a memory",
   memory_list: "Reading memories",
   memory_search: "Searching memories",
+  // Merged multi-function tools (tool-count cap) — names map to the old
+  // families they absorbed; live captions stay generic.
+  manage_memory: "Working with memories",
+  manage_env_var: "Managing environment variables",
+  manage_skill: "Managing skills",
+  manage_mcp: "Managing MCP servers",
+  manage_custom_tool: "Managing custom tools",
+  manage_subagent_chat: "Managing a subagent chat",
+  manage_chats: "Looking up past chats",
+  ocr_document: "Reading text from a document",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */
