@@ -66,6 +66,9 @@ interface FormState {
   tools_enabled: boolean;
   thinking_enabled: boolean;
   is_active: boolean;
+  /** Request params to EXCLUDE from request bodies — model routes that
+   *  reject them with HTTP 400 unsupported_parameter (e.g. temperature). */
+  disabled_params: string[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -77,6 +80,7 @@ const EMPTY_FORM: FormState = {
   tools_enabled: true,
   thinking_enabled: false,
   is_active: false,
+  disabled_params: [],
 };
 
 export function SectionProviders() {
@@ -107,6 +111,7 @@ export function SectionProviders() {
       tools_enabled: p.tools_enabled,
       thinking_enabled: (p as { thinking_enabled?: boolean }).thinking_enabled ?? false,
       is_active: p.is_active,
+      disabled_params: (p as { disabled_params?: string[] }).disabled_params ?? [],
     });
     setShowKey(false);
     setDialogOpen(true);
@@ -137,6 +142,7 @@ export function SectionProviders() {
           tools_enabled: form.tools_enabled,
           thinking_enabled: form.thinking_enabled,
           is_active: form.is_active,
+          disabled_params: form.disabled_params,
         };
         if (form.api_key.trim()) patch.api_key = form.api_key.trim();
         await update({ id: editing.id, patch });
@@ -151,6 +157,7 @@ export function SectionProviders() {
           tools_enabled: form.tools_enabled,
           thinking_enabled: form.thinking_enabled,
           is_active: form.is_active,
+          disabled_params: form.disabled_params,
         });
         toast.success("Provider added");
       }
@@ -405,6 +412,81 @@ export function SectionProviders() {
                   id="p-active"
                   checked={form.is_active}
                   onCheckedChange={(v) => setForm({ ...form, is_active: v })}
+                />
+              </div>
+            </div>
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <Label>Request parameters</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Disable parameters this model route rejects (e.g. <code className="text-[10px]">temperature</code>). If a request still fails with{" "}
+                    <code className="text-[10px]">unsupported_parameter</code>, Onyx auto-strips the parameter and retries.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <Label htmlFor="p-temperature">Temperature</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Send <code className="text-[10px]">temperature</code> in request bodies.
+                  </p>
+                </div>
+                <Switch
+                  id="p-temperature"
+                  checked={!form.disabled_params.includes("temperature")}
+                  onCheckedChange={(v) =>
+                    setForm({
+                      ...form,
+                      disabled_params: v
+                        ? form.disabled_params.filter((x) => x !== "temperature")
+                        : [...form.disabled_params, "temperature"],
+                    })
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <Label htmlFor="p-reasoning">Reasoning effort</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Send <code className="text-[10px]">reasoning_effort</code> /{" "}
+                    <code className="text-[10px]">thinking</code> hints (when set in chat).
+                  </p>
+                </div>
+                <Switch
+                  id="p-reasoning"
+                  checked={
+                    !form.disabled_params.includes("reasoning_effort") &&
+                    !form.disabled_params.includes("thinking")
+                  }
+                  onCheckedChange={(v) =>
+                    setForm({
+                      ...form,
+                      disabled_params: v
+                        ? form.disabled_params.filter((x) => x !== "reasoning_effort" && x !== "thinking")
+                        : [...form.disabled_params, "reasoning_effort", "thinking"],
+                    })
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <Label htmlFor="p-streamopts">Stream usage stats</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Send <code className="text-[10px]">stream_options: {"{include_usage: true}"}</code> with streaming requests.
+                  </p>
+                </div>
+                <Switch
+                  id="p-streamopts"
+                  checked={!form.disabled_params.includes("stream_options")}
+                  onCheckedChange={(v) =>
+                    setForm({
+                      ...form,
+                      disabled_params: v
+                        ? form.disabled_params.filter((x) => x !== "stream_options")
+                        : [...form.disabled_params, "stream_options"],
+                    })
+                  }
                 />
               </div>
             </div>

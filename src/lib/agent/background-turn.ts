@@ -359,6 +359,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         temperature: ctx.turn.temperature ?? undefined,
         toolsEnabled: ctx.turn.provider.toolsEnabled,
         noPrefix: ctx.turn.provider.noPrefix,
+        disabledParams: ctx.turn.provider.disabledParams ?? [],
       },
       systemPrompt: ctx.turn.systemPrompt,
       history: buildHistory(ctx.turn),

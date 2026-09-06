@@ -62,6 +62,10 @@ interface AIProvider {
   no_prefix?: boolean;
   /** When true, sends chat_template_kwargs: {enable_thinking: true} */
   thinking_enabled?: boolean;
+  /** Request params to EXCLUDE from request bodies — model routes that
+   *  reject standard params (e.g. temperature) with HTTP 400
+   *  unsupported_parameter. Managed via the "Request parameters" switches. */
+  disabled_params?: string[];
   has_api_key: boolean;
   created_at: string;
   updated_at: string;
@@ -98,6 +102,9 @@ interface ProviderDraft {
   no_prefix?: boolean;
   /** When true, sends chat_template_kwargs: {enable_thinking: true} */
   thinking_enabled?: boolean;
+  /** Request params to EXCLUDE from request bodies (model routes that
+   *  reject them with HTTP 400 unsupported_parameter). */
+  disabled_params: string[];
 }
 
 const EMPTY_DRAFT: ProviderDraft = {
@@ -110,6 +117,7 @@ const EMPTY_DRAFT: ProviderDraft = {
   tools_enabled: true,
   no_prefix: false,
   thinking_enabled: false,
+  disabled_params: [],
 };
 
 function rowToProvider(row: AIProviderRow): AIProvider {
@@ -124,6 +132,7 @@ function rowToProvider(row: AIProviderRow): AIProvider {
     tools_enabled: row.tools_enabled,
     no_prefix: row.no_prefix ?? false,
     thinking_enabled: row.thinking_enabled ?? false,
+    disabled_params: row.disabled_params ?? [],
     has_api_key: !!row.api_key_encrypted,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -178,6 +187,7 @@ export default function ConfigSettingsPage() {
       tools_enabled: p.tools_enabled ?? true,
       no_prefix: p.no_prefix ?? false,
       thinking_enabled: p.thinking_enabled ?? false,
+      disabled_params: [...(p.disabled_params ?? [])],
     });
   };
 
@@ -210,6 +220,7 @@ export default function ConfigSettingsPage() {
         tools_enabled: draft.tools_enabled,
         no_prefix: draft.no_prefix ?? false,
         thinking_enabled: draft.thinking_enabled ?? false,
+        disabled_params: draft.disabled_params ?? [],
       };
       if (editingId) {
         // Pass undefined for api_key when blank so the service keeps the
@@ -733,6 +744,75 @@ function ProviderEditor({
         Sends <code className="font-mono text-xs">{"chat_template_kwargs: {enable_thinking: true}"}</code> in the
         request body. For providers like Poolside that support native reasoning tokens.
       </p>
+
+      {/* Request parameters — some model routes reject standard params
+          (e.g. temperature) with HTTP 400 unsupported_parameter. Users can
+          disable them per provider here; the runtime ALSO self-heals by
+          auto-stripping a rejected param and retrying once. */}
+      <div className="rounded-lg border border-foreground/10 bg-muted/30 p-3 space-y-3">
+        <div className="text-sm font-medium">Request parameters</div>
+        <p className="text-xs text-muted-foreground">
+          Disable parameters this model route rejects. If a request still fails with{" "}
+          <code className="font-mono text-xs">unsupported_parameter</code>, Onyx auto-strips the
+          parameter and retries.
+        </p>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="provider-param-temperature"
+            checked={!(draft.disabled_params ?? []).includes("temperature")}
+            onCheckedChange={(v) =>
+              onChange({
+                ...draft,
+                disabled_params: v
+                  ? (draft.disabled_params ?? []).filter((x) => x !== "temperature")
+                  : [...(draft.disabled_params ?? []), "temperature"],
+              })
+            }
+          />
+          <label htmlFor="provider-param-temperature" className="text-sm cursor-pointer">
+            Temperature
+          </label>
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="provider-param-reasoning"
+            checked={
+              !(draft.disabled_params ?? []).includes("reasoning_effort") &&
+              !(draft.disabled_params ?? []).includes("thinking")
+            }
+            onCheckedChange={(v) =>
+              onChange({
+                ...draft,
+                disabled_params: v
+                  ? (draft.disabled_params ?? []).filter(
+                      (x) => x !== "reasoning_effort" && x !== "thinking",
+                    )
+                  : [...(draft.disabled_params ?? []), "reasoning_effort", "thinking"],
+              })
+            }
+          />
+          <label htmlFor="provider-param-reasoning" className="text-sm cursor-pointer">
+            Reasoning effort
+          </label>
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="provider-param-stream-options"
+            checked={!(draft.disabled_params ?? []).includes("stream_options")}
+            onCheckedChange={(v) =>
+              onChange({
+                ...draft,
+                disabled_params: v
+                  ? (draft.disabled_params ?? []).filter((x) => x !== "stream_options")
+                  : [...(draft.disabled_params ?? []), "stream_options"],
+              })
+            }
+          />
+          <label htmlFor="provider-param-stream-options" className="text-sm cursor-pointer">
+            Stream usage stats
+          </label>
+        </div>
+      </div>
 
       <FormField
         label="API key (optional)"

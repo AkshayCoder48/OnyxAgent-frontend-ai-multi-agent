@@ -1323,6 +1323,7 @@ export function useChat(options: UseChatOptions = {}) {
           toolsEnabled: selectedProvider.tools_enabled,
           noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
           thinkingEnabled: (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
+          disabledParams: (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
         },
         systemPrompt,
         temperature: temperatureRef.current,

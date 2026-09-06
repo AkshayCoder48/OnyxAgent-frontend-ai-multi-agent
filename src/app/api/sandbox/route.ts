@@ -25,11 +25,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { Sandbox } from "@e2b/code-interpreter";
-// FULL agent.md (tool guide + complete GenUI reference) bundled as a module
-// so it ships with the serverless bundle — the system prompt tells the AI
-// to read the "Generative UI (GenUI)" section from this file, so the sandbox
-// MUST receive the full document, not a short stub.
-import { AGENT_MD } from "@/lib/agent/agent-md";
+// FULL Onyx.md (Onyx identity + compressed tool compendium + complete GenUI
+// reference) bundled as a module so it ships with the serverless bundle —
+// the system prompt tells the AI to read the "Generative UI (GenUI)"
+// section from this file, so the sandbox MUST receive the full document,
+// not a short stub.
+import { ONYX_MD } from "@/lib/agent/onyx-md";
 // Background agent runner (see src/lib/e2b/bg-agent-script.ts) — the
 // self-contained script executed INSIDE the sandbox as a background command.
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH, BG_RUNS_PREFIX } from "@/lib/e2b/bg-agent-script";
@@ -88,17 +89,19 @@ interface CacheEntry {
   /** Set to true after a liveness check has confirmed the sandbox is alive.
    *  Prevents redundant pings on every call. Reset on cache lookup miss. */
   verifiedAliveAt?: number;
-  /** Which agent.md version this sandbox received. Bump AGENT_MD_VERSION
-   *  whenever agent.md meaningfully changes — cached/reconnected sandboxes
+  /** Which Onyx.md version this sandbox received. Bump AGENT_MD_VERSION
+   *  whenever Onyx.md meaningfully changes — cached/reconnected sandboxes
    *  then get the updated documentation on their next use. */
   agentMdVersion?: number;
 }
 
-/** Bump when agent.md (→ src/lib/agent/agent-md.ts) changes meaningfully.
+/** Bump when Onyx.md (→ src/lib/agent/onyx-md.ts) changes meaningfully.
  *  Version 2 = the FULL GenUI reference (previously sandboxes received a
  *  short stub with NO GenUI docs at all — the root cause of malformed
- *  `<<<genui>>>` specs). */
-const AGENT_MD_VERSION = 2;
+ *  `<<<genui>>>` specs).
+ *  Version 3 = rename agent.md → Onyx.md with the Onyx identity + the
+ *  compressed 47-tool compendium; stale /home/user/agent.md is purged. */
+const AGENT_MD_VERSION = 3;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -497,13 +500,14 @@ async function createAndCacheSandbox(
     }
   }
 
-  // Write agent.md to the sandbox — contains the complete tool usage guide
-  // AND the full GenUI reference (all 33 node types, custom_html/custom_card
-  // deep guide, the common-mistakes table, worked examples). The system
-  // prompt promises this documentation — the sandbox must actually receive
-  // it, or the model improvises GenUI specs and produces broken markers/JS.
+  // Write Onyx.md to the sandbox — contains the Onyx identity + the
+  // compressed tool compendium AND the full GenUI reference (all 33 node
+  // types, custom_html/custom_card deep guide, the common-mistakes table,
+  // worked examples). The system prompt promises this documentation — the
+  // sandbox must actually receive it, or the model improvises GenUI specs
+  // and produces broken markers/JS.
   try {
-    await sandbox.files.write("/home/user/agent.md", AGENT_MD);
+    await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
   } catch {
     // best-effort — file may already exist or write may fail
   }
@@ -532,12 +536,15 @@ async function getSandbox(
   // 1. Check the in-memory cache first.
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
-    // AGENT.MD REFRESH: cached sandboxes created before an agent.md update
+    // ONYX.MD REFRESH: cached sandboxes created before an Onyx.md update
     // still carry the old documentation. Re-write it (best-effort) when the
-    // version differs so the AI always reads the current GenUI reference.
+    // version differs so the AI always reads the current tool compendium +
+    // GenUI reference — and purge the legacy agent.md so only one guide
+    // exists in the workspace.
     if (cached.agentMdVersion !== AGENT_MD_VERSION) {
       try {
-        await cached.sandbox.files.write("/home/user/agent.md", AGENT_MD);
+        await cached.sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
+        await cached.sandbox.files.remove("/home/user/agent.md");
         cached.agentMdVersion = AGENT_MD_VERSION;
       } catch {
         // best-effort — a dead sandbox falls through the liveness path
@@ -589,10 +596,12 @@ async function getSandbox(
         key,
         verifiedAliveAt: Date.now(), // trust it's alive
       };
-      // Reconnected sandboxes may predate the current agent.md — refresh it
-      // best-effort so the AI's GenUI documentation is always current.
+      // Reconnected sandboxes may predate the current Onyx.md — refresh it
+      // best-effort (and purge any legacy agent.md) so the AI's docs are
+      // always current.
       try {
-        await sandbox.files.write("/home/user/agent.md", AGENT_MD);
+        await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
+        await sandbox.files.remove("/home/user/agent.md");
         entry.agentMdVersion = AGENT_MD_VERSION;
       } catch {
         // best-effort — the next action will surface dead-sandbox errors

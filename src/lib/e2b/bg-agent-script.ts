@@ -73,6 +73,25 @@ const cleanDetail = (s, status) => {
   return t;
 };
 
+/** Parse an HTTP-400 error body naming an unsupported parameter
+ *  ({"error":{"code":"unsupported_parameter","param":"temperature"}} or
+ *  plain text "The parameter 'temperature' is not supported") → the param
+ *  name, or null. Used by the request self-healing retry. */
+const parseUnsupportedParam = (t) => {
+  if (!t) return null;
+  if (!/unsupported[ _-]?param|not supported by this model/i.test(t)) return null;
+  try {
+    const o = JSON.parse(String(t));
+    const e = o && o.error ? o.error : o;
+    if (e && typeof e === "object") {
+      const code = typeof e.code === "string" ? e.code.toLowerCase().replace(/[ _-]/g, "") : "";
+      if ((code === "unsupportedparameter" || code === "invalidparameter") && typeof e.param === "string" && e.param) return e.param;
+    }
+  } catch {}
+  const m = String(t).match(/parameter ['"]([a-z_]+)['"] (?:is )?not supported/i);
+  return m ? m[1] : null;
+};
+
 const safePath = (p) => {
   if (typeof p !== "string" || !p.trim()) return null;
   const cleaned = p.trim().replace(/^\/+/, "");
@@ -89,9 +108,12 @@ async function readState() {
   // first writeState recreates the file.
   try {
     const raw = await fs.readFile(STATE_FILE, "utf8");
-    return JSON.parse(raw);
+    const st = JSON.parse(raw);
+    // Param bans survive state.json round-trips as a plain array.
+    if (!Array.isArray(st.paramBans)) st.paramBans = [];
+    return st;
   } catch {
-    return { status: "running", messages: [] };
+    return { status: "running", messages: [], paramBans: [] };
   }
 }
 
@@ -496,11 +518,19 @@ async function streamRoundEvents(state, round, finalRound) {
     temperature: p.temperature ?? 0.7,
     stream: true,
   };
+  // PARAMETER POLICY: some model routes reject standard params (e.g.
+  // temperature) with HTTP 400 unsupported_parameter. Strip the params the
+  // user disabled for this provider AND the ones auto-learned during this
+  // run (state.paramBans, filled by the self-healing retry below).
+  const disabledParams = Array.isArray(p.disabledParams) ? p.disabledParams : [];
+  if (disabledParams.includes("temperature") || state.paramBans.includes("temperature")) delete body.temperature;
+  if (disabledParams.includes("stream_options") || state.paramBans.includes("stream_options")) delete body.stream_options;
   // The final wrap-up round runs WITHOUT tools — the model must compose its
   // final answer (the cap ends the turn in done, never the old terminal
   // max-rounds error). Fence/DSML "tool_call" text on the final round is
   // parsed too — nothing executes; the text stays text.
   if (state.toolsEnabled !== false && finalRound !== true) body.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (state.paramBans.includes("tools") || disabledParams.includes("tools")) delete body.tools;
 
   // Pass-through emitters (1:1 with the provider's native SSE deltas).
   const emitTextDelta = (d) => { if (d) emitEvent({ t: "text_delta", round, content: d }); };
@@ -680,6 +710,22 @@ async function streamRoundEvents(state, round, finalRound) {
     } catch (e) {
       fetchErr = e && e.message ? e.message : String(e);
     }
+    if (res && res.status === 400) {
+      // PARAMETER SELF-HEALING: the body names the offending param — strip
+      // it, remember the ban for the rest of this run, retry immediately
+      // (this attempt doesn't count as a failure).
+      const detail400 = await res.text().catch(() => "");
+      const badParam = parseUnsupportedParam(detail400);
+      if (badParam && body[badParam] !== undefined && !state.paramBans.includes(badParam)) {
+        state.paramBans.push(badParam);
+        delete body[badParam];
+        if (badParam === "reasoning_effort") delete body.thinking;
+        if (badParam === "thinking") delete body.reasoning_effort;
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "stripped unsupported param '" + badParam + "'" });
+        clearTimeout(hardTimer);
+        continue;
+      }
+    }
     if (res && !res.ok) {
       const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
       if (retryable && attempt < MAX_ATTEMPTS) {
@@ -808,7 +854,10 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
   const nb = { model: p.model, messages: state.messages, temperature: p.temperature ?? 0.7 };
+  const dp = Array.isArray(p.disabledParams) ? p.disabledParams : [];
+  if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;
   if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (dp.includes("tools") || state.paramBans.includes("tools")) delete nb.tools;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -822,6 +871,32 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
+      // Self-heal once: an unsupported-parameter 400 names the offending
+      // field — strip it, remember the ban, retry this single request.
+      const badParam = parseUnsupportedParam(detail);
+      if (badParam && nb[badParam] !== undefined && !state.paramBans.includes(badParam)) {
+        state.paramBans.push(badParam);
+        delete nb[badParam];
+        if (badParam === "reasoning_effort") delete nb.thinking;
+        if (badParam === "thinking") delete nb.reasoning_effort;
+        const retryRes = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
+          },
+          body: JSON.stringify(nb),
+          signal: AbortSignal.timeout(180_000),
+        });
+        if (retryRes.ok) {
+          const json2 = await retryRes.json();
+          const msg2 = json2.choices?.[0]?.message ?? {};
+          return await feedCompleteMessage(msg2, round, feedDeltas, finishStream);
+        }
+        const detail2 = await retryRes.text().catch(() => "");
+        return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + retryRes.status + " " + cleanDetail(detail2, retryRes.status) };
+      }
       return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) };
     }
     const json = await res.json();

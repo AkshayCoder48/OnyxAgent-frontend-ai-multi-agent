@@ -844,6 +844,7 @@ export interface AIProviderInput {
   tools_enabled?: boolean;
   no_prefix?: boolean;
   thinking_enabled?: boolean;
+  disabled_params?: string[];
   is_active?: boolean;
 }
 
@@ -869,6 +870,7 @@ export const aiProviderService = {
       tools_enabled: input.tools_enabled ?? true,
       no_prefix: input.no_prefix ?? false,
       thinking_enabled: input.thinking_enabled ?? false,
+      disabled_params: input.disabled_params ?? [],
       is_active: input.is_active ?? true,
       created_at: ts,
       updated_at: ts,
@@ -888,6 +890,7 @@ export const aiProviderService = {
     if (patch.tools_enabled !== undefined) update.tools_enabled = patch.tools_enabled;
     if (patch.no_prefix !== undefined) update.no_prefix = patch.no_prefix;
     if (patch.thinking_enabled !== undefined) update.thinking_enabled = patch.thinking_enabled;
+    if (patch.disabled_params !== undefined) update.disabled_params = patch.disabled_params;
     if (patch.is_active !== undefined) update.is_active = patch.is_active;
     // api_key: empty string clears, non-empty rotates.
     if (patch.api_key !== undefined) {

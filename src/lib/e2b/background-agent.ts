@@ -88,6 +88,9 @@ export interface BgTurnOptions {
     temperature?: number;
     toolsEnabled?: boolean;
     noPrefix?: boolean;
+    /** Request params to exclude (model routes that reject them with 400
+     *  unsupported_parameter — e.g. temperature). Mirrors the provider row. */
+    disabledParams?: string[];
   };
   systemPrompt: string;
   history: Array<{ role: "user" | "assistant" | "system"; content: string }>;
@@ -193,6 +196,7 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
       temperature: opts.provider.temperature,
       toolsEnabled: opts.provider.toolsEnabled,
       noPrefix: opts.provider.noPrefix,
+      disabledParams: opts.provider.disabledParams ?? [],
     },
     toolsEnabled: opts.provider.toolsEnabled,
     // Client-side todo snapshot — the runner seeds the sandbox's shared

@@ -48,6 +48,11 @@ export interface AIProvider {
   no_prefix?: boolean;
   /** When true, sends `chat_template_kwargs: {"enable_thinking": true}`. */
   thinking_enabled?: boolean;
+  /** Request parameters to EXCLUDE from request bodies (model routes that
+   *  reject e.g. `temperature` with HTTP 400 unsupported_parameter).
+   *  Values: "temperature" | "reasoning_effort" | "thinking" |
+   *  "stream_options" | "chat_template_kwargs" | "tool_choice" | "tools". */
+  disabled_params?: string[];
   is_active: boolean;
   created_at: string;
   updated_at: string;

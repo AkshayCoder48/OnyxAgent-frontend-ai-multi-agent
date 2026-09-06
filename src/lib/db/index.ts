@@ -111,6 +111,10 @@ export interface AIProviderRow {
    *  the request body (for providers like Poolside that support native
    *  thinking/reasoning tokens via this parameter). */
   thinking_enabled?: boolean;
+  /** Request parameters to EXCLUDE from request bodies — for model routes
+   *  that reject standard params (e.g. temperature) with HTTP 400
+   *  unsupported_parameter. Managed in Settings → Config → Edit Provider. */
+  disabled_params?: string[];
   is_active: boolean;
   created_at: string;
   updated_at: string;

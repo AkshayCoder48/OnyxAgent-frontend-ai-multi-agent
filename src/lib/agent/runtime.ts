@@ -47,6 +47,11 @@ import { conversationService, settingsService } from "@/lib/services";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
 import { normalizeGenUISentinels } from "@/lib/genui/stream-parser";
+import {
+  applyParamPolicy,
+  learnParamBan,
+  parseUnsupportedParam,
+} from "@/lib/agent/param-policy";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -74,6 +79,11 @@ export interface AgentTurnOptions {
     /** When true, sends `chat_template_kwargs: {"enable_thinking": true}` in
      *  the request body (for providers like Poolside). */
     thinkingEnabled?: boolean;
+    /** Request parameters to EXCLUDE from the request body — for model
+     *  routes that reject standard params (e.g. temperature) with HTTP 400
+     *  unsupported_parameter. Managed in Settings → Config → Edit Provider;
+     *  also auto-learned at runtime when a provider rejects a param. */
+    disabledParams?: string[];
   };
   /** System prompt (already includes skills/MCP/custom-tools/env sections). */
   systemPrompt: string;
@@ -683,6 +693,18 @@ async function streamRound(
     body.thinking = { type: "enabled", effort: thinkingEffort };
   }
 
+  // PARAMETER POLICY: strip params the user disabled for this provider AND
+  // params auto-learned to be rejected (session scope) — model routes that
+  // reject e.g. `temperature` with HTTP 400 unsupported_parameter.
+  applyParamPolicy(body, {
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    disabledParams: provider.disabledParams,
+  });
+  // Self-healing bookkeeping: params stripped below land here so the loop
+  // can't strip forever.
+  const strippedParams = new Set<string>();
+
   emit({ type: "llm_started", timestamp: nowISO() });
 
   // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + provider rate-limit
@@ -740,6 +762,24 @@ async function streamRound(
       // Prevent browser/proxy from buffering the response.
       cache: "no-store",
     });
+
+    // PARAMETER SELF-HEALING: a 400 `unsupported_parameter` names the exact
+    // offending field — strip it from the body, remember the ban for this
+    // session, and retry immediately (does NOT consume a rate-limit attempt,
+    // capped at 5 unique params per round).
+    if (response.status === 400) {
+      const errText = await response.clone().text().catch(() => "");
+      const badParam = parseUnsupportedParam(errText);
+      if (badParam && !strippedParams.has(badParam) && body[badParam] !== undefined) {
+        strippedParams.add(badParam);
+        learnParamBan(provider.baseUrl, provider.model, badParam);
+        delete body[badParam];
+        if (badParam === "reasoning_effort") delete body.thinking; // paired
+        if (badParam === "thinking") delete body.reasoning_effort; // paired
+        console.warn(`[agent] provider rejected '${badParam}' — stripped it and retrying`);
+        continue;
+      }
+    }
 
     const status = response.status;
     let isRateLimited = status === 429 || status === 529;
@@ -1367,6 +1407,10 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
     : "";
 
   const toolKnowledgeBase = `
+
+## IDENTITY
+You are **Onyx** — the autonomous agent at the heart of OnyxAgent. You are not a chatbot: you are an operator. Action-first and concise: plan, execute, verify, report. Your workspace is an E2B Linux sandbox at /home/user. If the user asks who you are, you are Onyx. Full identity + tool compendium: Onyx.md.
+
 ## CRITICAL: Pre-Execution Workspace Analysis
 Before starting ANY task, you MUST first call \`analyze_workspace\` to understand:
 - Project architecture and file structure
@@ -1571,16 +1615,17 @@ When you detect a large or complex task, automatically spawn subagents to handle
 
 Each subagent shares the same sandbox + file system as you, so they can read/write the same files.
 
-## CRITICAL: Read agent.md for tool usage guide
-A file called \`agent.md\` has been written to the sandbox at \`/home/user/agent.md\`. It contains:
-- Complete use cases for every tool (when to use run_python vs run_terminal, create_file vs create_file_chunk, etc.)
+## CRITICAL: Read Onyx.md for tool usage guide
+A file called \`Onyx.md\` has been written to the sandbox at \`/home/user/Onyx.md\`. It contains:
+- Your Onyx identity (who you are, how you behave)
+- The compressed tool compendium — use cases for every tool (when to use run_python vs run_terminal, create_file vs create_file_chunk, etc.)
 - Incremental file writing policy (for files >200 lines)
 - Task complexity detection guide
 - Subagent orchestration patterns
 - Error recovery procedures
 - Tool calling rules
 
-Read it FIRST with \`read_file\` (path: \`agent.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/agent.md\` as fallback.
+Read it FIRST with \`read_file\` (path: \`Onyx.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/Onyx.md\` as fallback.
 
 ## Generative UI (GenUI)
 GenUI lets you render rich interactive UI components — cards, tables, charts, games, calculators, educational widgets — directly in the chat by emitting a \`<<<genui>>>...<<</genui>>>\` block with a JSON spec. **No tool calls needed** — just emit the spec as text and it renders live.
@@ -1589,11 +1634,11 @@ GenUI lets you render rich interactive UI components — cards, tables, charts, 
 
 **JSON escaping:** the content between sentinels is ONE JSON document. Escape newlines in strings as \`\\n\` (never raw line breaks), use single quotes in HTML attributes, keep brackets balanced.
 
-**FULL documentation** (all 33 node types, props, use cases, examples, custom HTML components) is in \`agent.md\` under the "Generative UI (GenUI)" section. Read it with \`read_file\` (path: \`agent.md\`) before emitting GenUI blocks — it contains the rules that make specs render correctly on the first try.
+**FULL documentation** (all 33 node types, props, use cases, examples, custom HTML components) is in \`Onyx.md\` under the "Generative UI (GenUI)" section. Read it with \`read_file\` (path: \`Onyx.md\`) before emitting GenUI blocks — it contains the rules that make specs render correctly on the first try.
 
 Quick reference — available types: header, text_block, card, card_grid, stat, stats_row, badge, progress, sparkline, key_value, quote, code_block, comparison_table, image, image_grid, list, checklist, timeline, stepper, divider, columns, tabs, accordion, callout, terminal_card, agent_card, weather_card, stock_ticker, suggestion_chips, sources_panel, **custom_html**, **custom_card**.
 
-The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. They accept \`html\`, \`css\`, and \`js\` props (markup, stylesheet, script — the script runs after the markup exists; script errors surface in-card instead of silently killing the widget). Set \`height\` to fit your content. See agent.md for complete examples.
+The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. They accept \`html\`, \`css\`, and \`js\` props (markup, stylesheet, script — the script runs after the markup exists; script errors surface in-card instead of silently killing the widget). Set \`height\` to fit your content. See Onyx.md for complete examples.
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 

@@ -5,6 +5,11 @@ import { useSubagentStore, type SubagentConfig, type SubagentMessage } from "@/s
 import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { listTools } from "@/lib/tools/registry";
+import {
+  applyParamPolicy,
+  learnParamBan,
+  parseUnsupportedParam,
+} from "@/lib/agent/param-policy";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 
 /**
@@ -71,7 +76,16 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   const baseUrl = subagent.baseUrl || provider.base_url;
   const noPrefix = (provider as { no_prefix?: boolean }).no_prefix ?? false;
 
-  return { provider, apiKey, model, baseUrl, noPrefix, toolsEnabled: provider.tools_enabled, thinkingEnabled: (provider as { thinking_enabled?: boolean }).thinking_enabled ?? false };
+  return {
+    provider,
+    apiKey,
+    model,
+    baseUrl,
+    noPrefix,
+    toolsEnabled: provider.tools_enabled,
+    thinkingEnabled: (provider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
+    disabledParams: (provider as { disabled_params?: string[] }).disabled_params ?? [],
+  };
 }
 
 /**
@@ -183,6 +197,13 @@ export async function executeSubagentTurn(
       if (config.thinkingEnabled) {
         body.chat_template_kwargs = { enable_thinking: true };
       }
+      // PARAMETER POLICY: strip params the user disabled for this provider
+      // and params auto-learned from unsupported-parameter 400s.
+      applyParamPolicy(body, {
+        baseUrl: config.baseUrl,
+        model: config.model,
+        disabledParams: config.disabledParams,
+      });
 
       // Use ?url= query param + Accept: text/event-stream + cache: no-store
       // (curl -N equivalent — no buffering anywhere in the pipeline).
@@ -219,6 +240,17 @@ export async function executeSubagentTurn(
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
+        // PARAMETER SELF-HEALING: a 400 unsupported_parameter names the
+        // offending field — learn the ban, strip it, retry once.
+        const badParam = parseUnsupportedParam(errText);
+        if (badParam && body[badParam] !== undefined) {
+          learnParamBan(config.baseUrl, config.model, badParam);
+          delete body[badParam];
+          if (badParam === "reasoning_effort") delete body.thinking;
+          if (badParam === "thinking") delete body.reasoning_effort;
+          console.warn(`[subagent] provider rejected '${badParam}' — stripped and retrying`);
+          continue;
+        }
         throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);
       }
 
