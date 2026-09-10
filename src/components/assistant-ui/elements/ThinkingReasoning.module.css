@@ -126,17 +126,17 @@
   animation: trSentenceIn 240ms ease-out both;
 }
 
-/* ── Streaming tint (PRD §14, assistant-ui "Streaming text") ────────────
+/* ── Streaming tint (onyx butter-streaming, synced with globals.css) ────
    The newest words of the live sentence land in blue and settle into the
-   normal ink over ~700ms — never the whole block, just the trailing
+   normal ink over ~900ms — never the whole block, just the trailing
    window. Words keep their DOM identity (word-index keys) so a word moving
    OUT of the tint window transitions color instead of snapping. */
 .trWord {
-  transition: color 700ms ease;
+  transition: color 900ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .trWordTint {
-  color: #3b82f6; /* blue-500 — the streaming tint (settles to ink) */
+  color: var(--onyx-stream-tint, #3b82f6); /* shared streaming tint */
 }
 
 .trCaret {

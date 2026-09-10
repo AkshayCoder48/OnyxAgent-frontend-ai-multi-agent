@@ -35,15 +35,18 @@ const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
 const FADE = 16; // top/bottom fade once the viewport is capped
 
 /**
- * The live sentence's words: all plain except the newest two, which render
- * tinted blue and settle into the normal ink over 700ms as they leave the
- * trailing window (PRD §14 / assistant-ui "Streaming text"). A caret rides
- * at the end while streaming. Word spans keep stable word-index keys so a
- * word leaving the window transitions color rather than remounting.
+ * The live sentence's words: all plain except the newest few, which render
+ * tinted blue and settle into the normal ink over ~900ms as they leave the
+ * trailing window (onyx butter-streaming — matches the main text recipe).
+ * A caret rides at the end while streaming. Word spans keep stable
+ * word-index keys so a word leaving the window transitions color rather
+ * than remounting.
  */
+const TINT_WINDOW = 5;
+
 function StreamingSentence({ text }: { text: string }) {
   const words = text.split(" ").filter(Boolean);
-  const tintFrom = Math.max(0, words.length - 2);
+  const tintFrom = Math.max(0, words.length - TINT_WINDOW);
   return (
     <>
       {words.map((w, wi) => (

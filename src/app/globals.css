@@ -2590,10 +2590,106 @@ body.sidebar-open {
   50% { opacity: 0.5; transform: scale(0.85); }
 }
 
-/* --- Reduce repaint: disable transitions during streaming --- */
-.streaming-active * {
+/* --- Reduce repaint: disable transitions during streaming ---
+   IMPORTANT: `.onyx-word` (the streaming blue→white fade) is EXCLUDED — the
+   blanket transition kill is what made tinted words SNAP back to ink instead
+   of fading. Color transitions on a handful of trailing word spans are one
+   cheap paint; killing them is what looked janky. */
+.streaming-active *:not(.onyx-word) {
   transition: none !important;
 }
 .streaming-active .prose-sm {
   contain: layout style paint;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   ONYX STREAM POLISH — butter-smooth streaming visuals
+   ═════════════════════════════════════════════════════════════════════════
+   The visual layer of butter streaming: newly streamed content fades
+   blue → normal exactly ONCE (at mount / first paint); stable React keys
+   guarantee later updates never restart or re-animate anything. All
+   effects animate color / background-color / opacity ONLY — no transforms,
+   no layout, no reflow, no scroll jitter. Chunk grouping is structural
+   (word spans / line spans with stable index keys), never per-token DOM
+   churn. Honors prefers-reduced-motion at the bottom of this block. */
+:root {
+  --onyx-stream-tint: #3b82f6;          /* blue-500 — light mode tint */
+  --onyx-stream-tint-bg: rgb(59 130 246 / 0.12);
+}
+.dark {
+  --onyx-stream-tint: #60a5fa;          /* blue-400 — dark mode tint */
+  --onyx-stream-tint-bg: rgb(96 165 250 / 0.14);
+}
+
+/* Words of the trailing paragraph (markdown text): fresh words carry the
+   blue tint; when newer words push them out of the window the class flips
+   and this transition settles them back to the inherited ink — a calm,
+   continuous blue→white comet tail. New words also materialize softly
+   (opacity ramp, runs once per word on mount). */
+.onyx-word {
+  transition: color 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: onyx-word-in 260ms ease-out;
+}
+.onyx-word-fresh {
+  color: var(--onyx-stream-tint);
+}
+@keyframes onyx-word-in {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Streaming code lines: each NEW line flashes a soft blue highlight that
+   drains away over ~800ms — never restarts while the line is still being
+   written, and completed lines are never re-animated. Background-only, so
+   hljs syntax colors stay intact. */
+.onyx-code-line {
+  display: inline;
+  animation: onyx-line-in 800ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Tool output / streaming-args lines: same recipe plus a soft materialize.
+   The `-plain` variant (stderr) skips the blue background so the destructive
+   red stays readable. */
+.onyx-stream-line {
+  display: inline;
+  animation: onyx-line-in 800ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.onyx-stream-line-plain {
+  animation-name: onyx-line-in-plain;
+}
+@keyframes onyx-line-in {
+  from {
+    background-color: var(--onyx-stream-tint-bg);
+    opacity: 0.65;
+  }
+  to {
+    background-color: transparent;
+    opacity: 1;
+  }
+}
+@keyframes onyx-line-in-plain {
+  from {
+    opacity: 0.65;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Reduced motion: content stays fully functional; the animated fades are
+   disabled (instant settle), the blue tint itself may remain as a static
+   color cue — it is color, not motion. */
+@media (prefers-reduced-motion: reduce) {
+  .onyx-word {
+    transition: none;
+    animation: none;
+  }
+  .onyx-code-line,
+  .onyx-stream-line {
+    animation: none;
+  }
 }

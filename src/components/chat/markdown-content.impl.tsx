@@ -127,8 +127,10 @@ function preprocessCitations(content: string): string {
 
 // Streaming state for the blue→ink word tint (the "StreamingText" streamer
 // effect): while the message streams, the trailing paragraph's newest two
-// words render tinted `text-blue-500` and settle back to ink over ~700ms
-// (via `transition-colors duration-700` + stable word-index keys).
+// words render with the onyx blue tint and settle back to ink over ~900ms
+// (via the `.onyx-word` color transition + stable word-index keys). The
+// fresh window is the trailing few words — wider than the old 2-word window
+// so the fade reads as a continuous, calm blue→white comet tail.
 // Delivered through React context so the module-scoped paragraph component
 // can read it WITHOUT mutation during render (React Compiler lint) and
 // WITHOUT lagging a render behind (an effect-synced ref would render the
@@ -156,21 +158,35 @@ function lastPlainWord(s: string): string {
   return last ? last.toLowerCase() : "";
 }
 
+/** How many of the trailing words stay in the blue tint window. A word
+ *  entering the window mounts blue instantly; when newer words push it out,
+ *  the `.onyx-word` color transition settles it back to the inherited ink —
+ *  the butter blue→white fade. */
+const FRESH_WORD_WINDOW = 5;
+
 /**
- * Split the trailing plain-string child of a paragraph into word spans with
- * the blue→ink tint on the newest two words. Returns a new children array, or
- * null when the paragraph is not the trailing one (its text does not end with
- * the stream's last word) — in that case the caller renders as usual.
+ * Split the trailing plain-string child of a paragraph into word spans.
+ * Returns a new children array, or null when there is no plain-string child
+ * to split (or the message isn't streaming).
  *
- * Stable keys by token index mean a word that leaves the two-word "fresh"
- * window only gets a className change, which `transition-colors` animates
- * back to ink — exactly the reference StreamingText behavior.
+ * The fresh (blue) window applies ONLY to the paragraph that currently ENDS
+ * the streamed content — but EVERY paragraph gets the same keyed span
+ * structure while streaming. That structural stability is what keeps the
+ * fade butter-smooth: when the stream moves on to a new paragraph, the old
+ * paragraph's spans persist and only their class flips, so a blue→ink fade
+ * in progress COMPLETES instead of snapping (spans being replaced by plain
+ * text would cut the transition instantly).
+ *
+ * Stable keys by token index mean a word that leaves the fresh window only
+ * gets a className change, which the `.onyx-word` transition animates back
+ * to ink — and newly mounted words softly materialize via
+ * `onyx-word-in` (opacity ramp, plays exactly once per word).
  */
 function tintStreamingParagraph(
   children: React.ReactNode,
   stream: { streaming: boolean; lastWord: string },
 ): React.ReactNode[] | null {
-  if (!stream.streaming || !stream.lastWord) return null;
+  if (!stream.streaming) return null;
 
   const parts: React.ReactNode[] = Array.isArray(children) ? children : [children];
   let lastStrIdx = -1;
@@ -184,11 +200,12 @@ function tintStreamingParagraph(
   }
   if (lastStrIdx < 0) return null;
 
+  // Trailing paragraph = currently ENDS the streamed content → its newest
+  // words carry the blue tint. Earlier paragraphs keep their spans (no
+  // fresh class) so their in-flight fades settle naturally.
   const norm = paraText.replace(/\s+/g, " ").trim().toLowerCase();
   const lastWord = stream.lastWord.toLowerCase();
-  // Only the paragraph that currently ENDS the streamed content gets the
-  // tint — earlier paragraphs don't end with the content's last word.
-  if (!norm || !norm.endsWith(lastWord)) return null;
+  const isTrailing = !!norm && !!lastWord && norm.endsWith(lastWord);
 
   const raw = parts[lastStrIdx] as string;
   // Preserve the exact inter-word whitespace by splitting with separators.
@@ -197,20 +214,13 @@ function tintStreamingParagraph(
   tokens.forEach((t, i) => {
     if (t.trim().length > 0) wordIdx.push(i);
   });
-  const fresh = new Set(wordIdx.slice(-2));
+  const fresh = new Set(isTrailing ? wordIdx.slice(-FRESH_WORD_WINDOW) : []);
 
   const out = parts.slice();
   out[lastStrIdx] = tokens.map((t, i) => {
     if (t.trim().length === 0) return t;
-    const isFresh = fresh.has(i);
     return (
-      <span
-        key={i}
-        className={
-          "transition-colors duration-700 " +
-          (isFresh ? "text-blue-500" : "text-foreground")
-        }
-      >
+      <span key={i} className={"onyx-word" + (fresh.has(i) ? " onyx-word-fresh" : "")}>
         {t}
       </span>
     );
@@ -236,8 +246,8 @@ function stripCursorMarkers(child: React.ReactNode): React.ReactNode {
 
 /**
  * Paragraph renderer with the streaming tint: when the message is streaming
- * and this paragraph is the trailing one, its newest two words land in blue
- * and settle into ink (StreamingText recipe). Otherwise renders as usual
+ * and this paragraph is the trailing one, its newest words land in blue and
+ * settle into ink (onyx butter-streaming recipe). Otherwise renders as usual
  * (with defensive CURSOR-marker stripping). An uppercase component so it can
  * read StreamTintContext via useContext per the rules-of-hooks lint.
  */
@@ -258,6 +268,129 @@ function TintedParagraph({ children, ...props }: React.ComponentPropsWithoutRef<
   );
 }
 
+/** Flatten react-markdown children (possibly nested arrays) into a single
+ *  node list — needed to regroup highlighted code into lines. */
+function flattenChildren(nodes: React.ReactNode): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const walk = (n: React.ReactNode) => {
+    if (n == null || typeof n === "boolean") return;
+    if (Array.isArray(n)) {
+      n.forEach(walk);
+      return;
+    }
+    out.push(n);
+  };
+  walk(nodes);
+  return out;
+}
+
+/** Recursively extract the plain text of a node tree (for the code-block
+ *  Copy button — works for highlighted code, not just raw strings). */
+function extractText(nodes: React.ReactNode): string {
+  if (nodes == null || typeof nodes === "boolean") return "";
+  if (typeof nodes === "string" || typeof nodes === "number") return String(nodes);
+  if (Array.isArray(nodes)) return nodes.map(extractText).join("");
+  if (React.isValidElement(nodes)) {
+    return extractText((nodes.props as { children?: React.ReactNode }).children);
+  }
+  return "";
+}
+
+/**
+ * Regroup a code element's (highlighted) children into per-line inline
+ * spans with stable line-index keys. Each NEW line plays the
+ * `onyx-code-line` blue-highlight fade exactly once when it mounts;
+ * text appended to the current line just extends its span (the animation
+ * never restarts), and completed lines keep their spans at final state —
+ * existing code is never re-animated. The wrappers are `display: inline`
+ * and preserve every "\n", so wrapping is layout-invisible (no shift,
+ * no reflow, no horizontal movement).
+ */
+function wrapCodeLines(children: React.ReactNode): React.ReactNode[] {
+  const nodes = flattenChildren(children);
+  const lines: React.ReactNode[][] = [];
+  let current: React.ReactNode[] = [];
+  const startLine = () => {
+    lines.push(current);
+    current = [];
+  };
+  for (const node of nodes) {
+    if (typeof node === "string") {
+      const segs = node.split("\n");
+      segs.forEach((seg, i) => {
+        if (i > 0) {
+          // Close the current line (keep the newline INSIDE the span so
+          // `white-space: pre` still renders the line break).
+          current.push("\n");
+          startLine();
+        }
+        if (seg) current.push(seg);
+      });
+    } else {
+      current.push(node);
+    }
+  }
+  lines.push(current);
+  return lines.map((lineNodes, i) => (
+    <span key={`cl-${i}`} className="onyx-code-line">
+      {lineNodes}
+    </span>
+  ));
+}
+
+/**
+ * Code block — the warm-charcoal `.chat-code` card (Terra spec). While the
+ * message is STREAMING, the inner code children are regrouped into
+ * line spans (see `wrapCodeLines`) so each new code line fades in with the
+ * soft blue `onyx-code-line` highlight; completed messages render the raw
+ * (highlighted) children untouched.
+ */
+function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre"> & { children?: React.ReactNode }) {
+  const stream = React.useContext(StreamTintContext);
+  const codeElement = children as React.ReactElement<{
+    children?: React.ReactNode;
+    className?: string;
+  }>;
+  const codeChildren = codeElement?.props?.children;
+  const codeContent = typeof codeChildren === "string" ? codeChildren : extractText(codeChildren);
+  const lang = languageLabel(codeElement?.props?.className);
+
+  let inner: React.ReactNode = children;
+  if (stream.streaming && React.isValidElement(codeElement) && codeChildren != null) {
+    inner = React.cloneElement(codeElement, undefined, wrapCodeLines(codeChildren));
+  }
+
+  // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
+  // strip with language/filename on the left and a Copy affordance on the
+  // right; muted warm syntax tones come from the `.chat-code` hljs scope.
+  return (
+    <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
+      {(lang || codeContent) && (
+        <div
+          className="flex items-center justify-between px-3.5 py-2 font-mono text-[11px] normal-case tracking-normal"
+          style={{ backgroundColor: "var(--chat-code-header-bg)", color: "#a5947c" }}
+        >
+          <span>{lang ?? "code"}</span>
+          {codeContent && (
+            <CopyButton
+              text={codeContent}
+              label="Copy"
+              className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
+            />
+          )}
+        </div>
+      )}
+      <pre
+        className="scrollbar-thin max-w-full overflow-x-auto p-3.5 text-[12.5px] leading-relaxed"
+        style={{ color: "var(--chat-code-fg)" }}
+        {...props}
+      >
+        {inner}
+      </pre>
+    </div>
+  );
+}
+
 /**
  * Memoized component override map — the `components` object is passed to
  * `<ReactMarkdown>` on every render, and since ReactMarkdown does a shallow
@@ -265,45 +398,7 @@ function TintedParagraph({ children, ...props }: React.ComponentPropsWithoutRef<
  * memoization. Hoisting it to module scope keeps the reference stable.
  */
 const SHARED_COMPONENTS = {
-  pre({ children, ...props }: React.ComponentPropsWithoutRef<"pre"> & { children?: React.ReactNode }) {
-    const codeElement = children as React.ReactElement<{
-      children?: string;
-      className?: string;
-    }>;
-    const codeContent =
-      typeof codeElement?.props?.children === "string" ? codeElement.props.children : "";
-    const lang = languageLabel(codeElement?.props?.className);
-
-    // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
-    // strip with language/filename on the left and a Copy affordance on the
-    // right; muted warm syntax tones come from the `.chat-code` hljs scope.
-    return (
-      <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
-        {(lang || codeContent) && (
-          <div
-            className="flex items-center justify-between px-3.5 py-2 font-mono text-[11px] normal-case tracking-normal"
-            style={{ backgroundColor: "var(--chat-code-header-bg)", color: "#a5947c" }}
-          >
-            <span>{lang ?? "code"}</span>
-            {codeContent && (
-              <CopyButton
-                text={codeContent}
-                label="Copy"
-                className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
-              />
-            )}
-          </div>
-        )}
-        <pre
-          className="scrollbar-thin max-w-full overflow-x-auto p-3.5 text-[12.5px] leading-relaxed"
-          style={{ color: "var(--chat-code-fg)" }}
-          {...props}
-        >
-          {children}
-        </pre>
-      </div>
-    );
-  },
+  pre: CodeBlock,
   code({ className, children, ...props }: React.ComponentPropsWithoutRef<"code">) {
     const isInline = !className;
     if (isInline) {

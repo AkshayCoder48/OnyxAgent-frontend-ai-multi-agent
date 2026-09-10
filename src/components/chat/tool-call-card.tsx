@@ -855,6 +855,30 @@ function tailText(s: string | undefined, max: number = STREAM_TAIL_BYTES): strin
   return "…" + s.slice(s.length - max);
 }
 
+/** Line-grouped streaming text (onyx butter-streaming): every logical line
+ *  is its own inline span with a stable line-index key, so appended text
+ *  extends the current line's span (the fade never restarts) and each NEW
+ *  line plays the `onyx-stream-line` blue-tint fade exactly once. Inline
+ *  wrappers are layout-invisible — no height/scroll jitter.
+ *  `tint: false` keeps class colors (e.g. stderr red) and fades opacity
+ *  only. */
+function StreamLines({ text, tint = true, className }: { text: string; tint?: boolean; className?: string }) {
+  const lines = text.split("\n");
+  return (
+    <>
+      {lines.map((line, i) => (
+        <span
+          key={i}
+          className={cn("onyx-stream-line", !tint && "onyx-stream-line-plain", className)}
+        >
+          {line}
+          {i < lines.length - 1 ? "\n" : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
 function RunningToolPanel({
   toolCall,
 }: {
@@ -931,10 +955,8 @@ function RunningToolPanel({
             </span>
           </div>
           <pre className="text-foreground/85 max-h-72 scrollbar-thin overflow-y-auto p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
-            {stderr && (
-              <span className="text-destructive">{tailText(stderr)}</span>
-            )}
-            {stdout && <span>{tailText(stdout)}</span>}
+            {stderr && <StreamLines text={tailText(stderr)} tint={false} className="text-destructive" />}
+            {stdout && <StreamLines text={tailText(stdout)} />}
           </pre>
         </div>
       )}
@@ -990,7 +1012,7 @@ function StreamingArgsDisplay({ args }: { args: string }) {
       ref={preRef}
       className="scrollbar-thin max-h-48 overflow-auto border border-foreground/10 bg-background/60 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words"
     >
-      {args.slice(-2000)}
+      <StreamLines text={args.slice(-2000)} />
       <OrbCursor variant="C2" size={12} />
     </pre>
   );

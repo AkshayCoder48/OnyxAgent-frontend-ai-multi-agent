@@ -42,6 +42,11 @@ interface UseChatOptions {
   onConversationCreated?: (conversationId: string) => void;
 }
 
+/** STREAM-START GATE: one-time visual pause (~0.30s) before a response
+ *  begins visibly streaming — the request itself is never delayed. See the
+ *  `streamGateRef` block inside the hook for the full contract. */
+const STREAM_START_DELAY_MS = 300;
+
 const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful AI assistant. You have access to tools — call them using the FUNCTION-CALLING API (the tool_calls mechanism) when they would help answer the user's request. NEVER write tool calls as plain text (e.g. 'Thought: ... Action: run_terminal Input: {...}'). ALWAYS use the tool-calling mechanism. Be concise.";
 
@@ -267,6 +272,40 @@ export function useChat(options: UseChatOptions = {}) {
   const toolOutputBuffer = useRef<Map<string, { stdout: string; stderr: string }>>(new Map());
   const toolOutputTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── STREAM-START GATE (~0.30s visual pause) ─────────────────────────────
+  // Butter-streaming polish: a one-time beat before the response begins
+  // VISIBLY streaming. The API request, SSE parsing and buffering all start
+  // immediately — nothing about the backend is delayed. Only the message's
+  // FIRST flush is held ~300ms: deltas keep accumulating in the buffers, and
+  // when the gate opens everything accumulated lands together, so the stream
+  // then flows at full steady cadence (NO per-token delay). Opened exactly
+  // once per message id; force-flush paths (final_result / error / complete /
+  // llm_completed) bypass it so tails are never held or lost.
+  const streamGateRef = useRef<{ messageId: string | null; opened: boolean }>({
+    messageId: null,
+    opened: false,
+  });
+
+  /** Delay for the NEXT scheduled flush: the start-gate hold for the
+   *  message's very first flush, the caller's steady cadence afterwards. */
+  const gateDelayFor = useCallback((steadyMs: number): number => {
+    const mid = currentMessageIdRef.current;
+    if (!mid) return steadyMs;
+    const gate = streamGateRef.current;
+    if (gate.messageId !== mid) {
+      // First content for a new message — arm the gate for it.
+      gate.messageId = mid;
+      gate.opened = false;
+    }
+    return gate.opened ? steadyMs : STREAM_START_DELAY_MS;
+  }, []);
+
+  /** Mark the stream as visibly started — later flushes use steady cadence. */
+  const openStreamGate = useCallback(() => {
+    const gate = streamGateRef.current;
+    if (gate.messageId && gate.messageId === currentMessageIdRef.current) gate.opened = true;
+  }, []);
+
   // Flush remaining text buffer immediately (called on final_result, error, complete)
   const flushTextDelta = useCallback(() => {
     if (textDeltaTimer.current) { clearTimeout(textDeltaTimer.current); textDeltaTimer.current = null; }
@@ -301,7 +340,10 @@ export function useChat(options: UseChatOptions = {}) {
       }
       toolOutputBuffer.current.clear();
     }
-  }, [appendTextDelta, appendThinkingDelta, appendReasoningDelta, appendToolStreamingOutput]);
+    // A force flush means the turn/round ended — never gate later content of
+    // the same message (multi-round tails stream at full cadence).
+    openStreamGate();
+  }, [appendTextDelta, appendThinkingDelta, appendReasoningDelta, appendToolStreamingOutput, openStreamGate]);
   // Outbound queue: messages typed while a turn is in flight. Held here (not
   // in the chat history) so the UI can surface them as cancellable "pending"
   // entries above the input. The ref is the source of truth for the drainer
@@ -592,9 +634,12 @@ export function useChat(options: UseChatOptions = {}) {
                     appendTextDelta(currentMessageIdRef.current, textDeltaBuffer.current, activeRoundRef.current, textAtRef.current ?? undefined);
                     textDeltaBuffer.current = "";
                     textAtRef.current = null;
+                    // First visible paint of this message — open the start gate
+                    // so every later flush runs at steady next-tick cadence.
+                    openStreamGate();
                   }
                   textDeltaTimer.current = null;
-                }, 1); // 1ms — flush immediately (next tick), no batching delay
+                }, gateDelayFor(1)); // ~300ms start-gate on the first flush, then 1ms (next tick)
               }
             }
           }
@@ -618,9 +663,10 @@ export function useChat(options: UseChatOptions = {}) {
                     appendThinkingDelta(currentMessageIdRef.current, thinkingBuffer.current, activeRoundRef.current, thinkingAtRef.current ?? undefined);
                     thinkingBuffer.current = "";
                     thinkingAtRef.current = null;
+                    openStreamGate();
                   }
                   thinkingTimer.current = null;
-                }, 16); // 16ms — one render per delivery batch (~60fps)
+                }, gateDelayFor(16)); // ~300ms start-gate on the first flush, then 16ms (~60fps)
               }
             }
           }
@@ -643,9 +689,10 @@ export function useChat(options: UseChatOptions = {}) {
                     appendReasoningDelta(currentMessageIdRef.current, reasoningBuffer.current, activeRoundRef.current, reasoningAtRef.current ?? undefined);
                     reasoningBuffer.current = "";
                     reasoningAtRef.current = null;
+                    openStreamGate();
                   }
                   reasoningTimer.current = null;
-                }, 16); // 16ms — one render per delivery batch (~60fps)
+                }, gateDelayFor(16)); // ~300ms start-gate on the first flush, then 16ms (~60fps)
               }
             }
           }
@@ -1213,6 +1260,8 @@ export function useChat(options: UseChatOptions = {}) {
       appendToolStreamingOutput,
       endActiveRound,
       endActiveReasoning,
+      gateDelayFor,
+      openStreamGate,
       attachConversation,
       setCurrentMessageId,
       onConversationCreated,
