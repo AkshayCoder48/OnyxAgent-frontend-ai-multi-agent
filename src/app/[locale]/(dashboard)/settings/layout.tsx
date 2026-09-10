@@ -6,6 +6,7 @@ import {
   Blocks,
   Bot,
   Braces,
+  CloudCog,
   KeyRound,
   Palette,
   Settings,
@@ -52,6 +53,7 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
       // tab can own the KeyRound glyph without the two reading as one.
       { label: "Env vars", href: ROUTES.SETTINGS_ENV, icon: Braces },
       { label: "API Keys", href: ROUTES.SETTINGS_API_KEYS, icon: KeyRound },
+      { label: "Cloud", href: ROUTES.SETTINGS_CLOUD, icon: CloudCog },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },
     ],
   },

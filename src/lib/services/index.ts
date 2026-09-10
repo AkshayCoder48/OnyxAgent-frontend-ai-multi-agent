@@ -1339,6 +1339,14 @@ export const settingsService = {
       row = await db.user_settings.where("user_id").equals(userId).first();
     }
     if (!row) throw new Error("Could not initialize user settings");
+    // Restore the vault from the session JWK when the page was reloaded —
+    // otherwise saving after a refresh would fail with "vault is locked"
+    // even though the key material is available (same pattern as the
+    // decrypt path).
+    if (key && !isVaultUnlocked()) {
+      const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+      await restoreVaultFromSession();
+    }
     const encrypted = key ? await vaultEncrypt(key) : null;
     const extra = { ...(row.extra ?? {}), onyxbase_api_key_encrypted: encrypted };
     await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
