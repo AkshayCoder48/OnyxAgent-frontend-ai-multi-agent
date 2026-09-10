@@ -93,6 +93,8 @@ function reasonLabel(reason: string | undefined): string {
       return "secret — skipped";
     case "excluded_directory":
       return "generated — skipped";
+    case "app_managed_file":
+      return "app-managed";
     case "checksum_mismatch":
       return "integrity failed";
     default:
@@ -355,10 +357,8 @@ export function WorkspaceSyncResult({ toolCall }: { toolCall: ToolCall }) {
         </span>
         <span className="shrink-0 tabular-nums">
           {success
-            ? `✓ Saved to cloud · ${formatWhen(toolCall)}`
-            : neutral
-              ? formatWhen(toolCall)
-              : formatWhen(toolCall)}
+            ? `${isPush ? "✓ Saved to cloud" : "✓ Restored from cloud"} · ${formatWhen(toolCall)}`
+            : formatWhen(toolCall)}
         </span>
       </div>
     </div>

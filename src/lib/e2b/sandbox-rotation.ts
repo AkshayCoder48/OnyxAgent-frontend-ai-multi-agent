@@ -51,6 +51,27 @@ function restoredFlagKey(sandboxId: string): string {
   return `onyxbase-restored:${sandboxId}`;
 }
 
+/** Files present in EVERY fresh E2B sandbox (template + app-managed) — a
+ *  sandbox containing only these is "empty" for auto-restore purposes. */
+const FRESH_SANDBOX_BUILTIN = new Set([
+  ".bash_logout",
+  ".bashrc",
+  ".profile",
+  ".sudo_as_admin_successful",
+  "onyx.md",
+  ".onyxagent_files.json",
+]);
+
+/** True when the sandbox has NO user content (only template + app-managed
+ *  files) — i.e. a cloud snapshot should be restored into it. Syncs the
+ *  ignore rules via a lazy import (avoids a static dependency cycle). */
+async function isFreshEmptySandbox(files: Array<{ path: string }>): Promise<boolean> {
+  const { isExcludedPath } = await import("@/lib/onyxbase/ignore");
+  return !files.some(
+    (f) => !FRESH_SANDBOX_BUILTIN.has(f.path.toLowerCase()) && !isExcludedPath(f.path),
+  );
+}
+
 async function runAutoRestore(apiKey: string): Promise<void> {
   try {
     if (typeof window === "undefined") return;
@@ -73,10 +94,12 @@ async function runAutoRestore(apiKey: string): Promise<void> {
       window.localStorage.setItem(flag, "1");
     } catch { /* ignore */ }
 
-    // Only an EMPTY sandbox gets the cloud snapshot — never clobber live
-    // files (rotation already restored them server-side).
+    // Only a sandbox with NO user content gets the cloud snapshot — never
+    // clobber live files (rotation already restored them server-side).
+    // Fresh sandboxes always contain template dotfiles + the app-written
+    // Onyx.md, so "empty" ignores those (FRESH_SANDBOX_BUILTIN + rules).
     const files = await client.walkFiles();
-    if (files.length > 0) return;
+    if (!(await isFreshEmptySandbox(files))) return;
 
     const settings = await settingsService.get(userId).catch(() => null);
     const baseUrl = settings?.onyxbase_base_url || undefined;

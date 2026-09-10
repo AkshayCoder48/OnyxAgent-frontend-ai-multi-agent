@@ -128,6 +128,9 @@ export function exclusionReason(relPath: string): string | null {
   if (parentDirs.some((d) => EXCLUDED_DIRS.has(d)) || EXCLUDED_DIRS.has(lowerBase)) {
     return "excluded_directory";
   }
+  if (lowerBase === "onyx.md" || lowerBase === ".onyxagent_files.json") {
+    return "app_managed_file";
+  }
   if (EXCLUDED_FILES.has(lowerBase) || /^\.env\./.test(base)) return "secret_file";
   for (const re of EXCLUDED_PATTERNS) {
     if (re.test(base)) return "secret_file";
