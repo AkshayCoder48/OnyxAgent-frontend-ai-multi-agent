@@ -347,6 +347,44 @@ export class E2BClient {
     await this.writeFile(path, text);
   }
 
+  // ---------------------------------------------------------------
+  // Workspace cloud-sync transport (OnyxBase KV push/retrieve).
+  // Binary-safe bulk operations — the sync engine lives in the browser
+  // (src/lib/onyxbase) and calls these to move files in/out of E2B.
+  // ---------------------------------------------------------------
+
+  /** Recursive enumeration of the whole workspace with sizes. Returns
+   *  workspace-relative paths (relative to /home/user). */
+  async walkFiles(): Promise<Array<{ path: string; size: number }>> {
+    const r = await this.call<{ files?: Array<{ path: string; size?: number }> }>("walk_files");
+    return (r.files ?? []).map((f) => ({ path: f.path, size: f.size ?? 0 }));
+  }
+
+  /** Read N files as base64 in ONE HTTP round-trip. Keep batches small
+   *  (≤ ~2 MB cumulative base64) so the JSON response stays under the
+   *  serverless body limit. */
+  async readFilesBatch(
+    paths: string[],
+  ): Promise<{ files: Array<{ path: string; base64: string; size: number }>; errors: Array<{ path: string; error: string }> }> {
+    const r = await this.call<{
+      files?: Array<{ path: string; base64: string; size: number }>;
+      errors?: Array<{ path: string; error: string }>;
+    }>("read_files_batch", { paths });
+    return { files: r.files ?? [], errors: r.errors ?? [] };
+  }
+
+  /** Write N files (base64-encoded content) in ONE HTTP round-trip.
+   *  Binary-safe; parent directories are created implicitly. */
+  async batchWriteBytes(
+    files: Array<{ path: string; base64: string }>,
+  ): Promise<{ written: number; errors: Array<{ path: string; error: string }> }> {
+    const r = await this.call<{ written?: number; errors?: Array<{ path: string; error: string }> }>(
+      "batch_write_bytes",
+      { files },
+    );
+    return { written: r.written ?? 0, errors: r.errors ?? [] };
+  }
+
   async deleteFile(path: string, _recursive = false): Promise<void> {
     await this.call("delete_file", { path });
   }

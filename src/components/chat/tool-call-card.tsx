@@ -43,6 +43,7 @@ import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
+import { WorkspaceSyncResult, isWorkspaceSyncTool } from "./tool-results/workspace-sync";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
@@ -192,6 +193,9 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
   const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   const isAskUser = toolCall.name === "ask_user";
+  // Cloud workspace sync tools get the glassmorphic card in BOTH modes —
+  // they are payloads, not chrome (PRD §19).
+  const isWsSync = isWorkspaceSyncTool(toolCall.name);
 
   return (
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
@@ -263,6 +267,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <MemoryResult toolCall={toolCall} />
       )}
       {chartSpec && <ChartMessage spec={chartSpec} />}
+      {isWsSync && <WorkspaceSyncResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
       {isAskUser && (
@@ -297,6 +302,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.
   const isRunPython = toolCall.name === "run_python";
+  // Cloud workspace sync tools — the glass card is the payload, always
+  // expanded (running panel streams live stage lines inside it).
+  const isWsSync = isWorkspaceSyncTool(toolCall.name);
   // DDG search tools — detect and auto-expand
   const isDDGWebSearch = toolCall.name === "web_search" && toolCall.status === "completed";
   const isDDGImageSearch = toolCall.name === "image_search" && toolCall.status === "completed";
@@ -307,6 +315,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(
     toolCall.name === "ask_user" ||
       (isRunPython && toolCall.status === "completed") ||
+      isWsSync ||
       (toolCall.name === "create_chart" &&
         toolCall.status === "completed" &&
         parseChartResult(toolCall.result) !== null) ||
@@ -773,6 +782,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // the tool's command/args so the user can see exactly what's
             // executing (e.g. the shell command for `run_terminal`).
             <RunningToolPanel toolCall={toolCall} />
+          ) : isWsSync ? (
+            // push_workspace / retrieve_workspace → glassmorphic sync card.
+            // Rendered for ALL statuses (running handled above; settled
+            // statuses parse the structured result). Never raw JSON.
+            <WorkspaceSyncResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

@@ -37,5 +37,6 @@ import "./subagents";
 import "./workspace_analysis";
 import "./image_preview";
 import "./ocr";
+import "./workspace_sync";
 
 export {};

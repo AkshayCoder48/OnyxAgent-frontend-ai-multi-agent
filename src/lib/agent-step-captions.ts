@@ -64,6 +64,9 @@ const EXACT_CAPTIONS: Record<string, string> = {
   manage_subagent_chat: "Managing a subagent chat",
   manage_chats: "Looking up past chats",
   ocr_document: "Reading text from a document",
+  // Cloud workspace sync (OnyxBase KV)
+  push_workspace: "Syncing the workspace to the cloud",
+  retrieve_workspace: "Restoring the workspace from the cloud",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */

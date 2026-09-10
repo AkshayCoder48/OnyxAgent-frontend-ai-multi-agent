@@ -2693,3 +2693,104 @@ body.sidebar-open {
     animation: none;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ONYX WORKSPACE SYNC CARD — glassmorphic surface for push_workspace /
+   retrieve_workspace results (translucent glass, soft blur, thin border,
+   smooth entrance, compact stats). Theme-aware via CSS vars.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.onyx-ws-card {
+  position: relative;
+  /* glass surface: translucent bg + backdrop blur + soft shadow */
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--card) 82%, transparent),
+      color-mix(in oklab, var(--card) 66%, transparent)
+    );
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+  backdrop-filter: blur(14px) saturate(1.25);
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.04),
+    0 8px 24px -12px rgb(0 0 0 / 0.18);
+  transition:
+    background 0.4s ease,
+    border-color 0.4s ease,
+    box-shadow 0.4s ease;
+}
+.onyx-ws-card::before {
+  /* subtle top sheen — the "glass" highlight */
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 38%;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--foreground) 5%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+/* status tints — a whisper of color at the card's edge, never a gradient blob */
+.onyx-ws-card.onyx-ws-ok {
+  border-color: color-mix(in oklab, var(--sky, oklch(0.72 0.14 232)) 36%, transparent);
+}
+.onyx-ws-card.onyx-ws-partial {
+  border-color: color-mix(in oklab, var(--warning, oklch(0.78 0.15 78)) 40%, transparent);
+}
+.onyx-ws-card.onyx-ws-err {
+  border-color: color-mix(in oklab, var(--destructive) 38%, transparent);
+}
+.onyx-ws-card:hover {
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.05),
+    0 12px 32px -14px rgb(0 0 0 / 0.24);
+}
+/* live pulse halo for the in-flight icon */
+.onyx-ws-pulse {
+  background: radial-gradient(
+    circle,
+    color-mix(in oklab, var(--sky, oklch(0.72 0.14 232)) 26%, transparent),
+    transparent 70%
+  );
+  animation: onyx-ws-pulse 2.2s ease-in-out infinite;
+  transform: scale(1.15);
+}
+@keyframes onyx-ws-pulse {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+}
+/* smooth entrance — opacity + 4px rise, GPU-friendly (no layout props) */
+.onyx-ws-enter {
+  animation: onyx-ws-enter 0.5s cubic-bezier(0.21, 0.47, 0.32, 0.98) both;
+}
+@keyframes onyx-ws-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onyx-ws-enter,
+  .onyx-ws-pulse {
+    animation: none;
+  }
+  .onyx-ws-card {
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    transition: none;
+  }
+}

@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Bot,
   Cloud,
+  CloudCog,
   Moon,
   Palette,
   Plug,
@@ -26,6 +27,7 @@ import { SectionProviders } from "./section-providers";
 import { SectionAgentSettings } from "./section-agent-settings";
 import { SectionSlashCommands } from "./section-slash-commands";
 import { SectionE2B } from "./section-e2b";
+import { SectionCloudWorkspace } from "./section-cloud-workspace";
 import { SectionMcp } from "./section-mcp";
 import { SectionCustomTools } from "./section-custom-tools";
 import { SectionSkills } from "./section-skills";
@@ -36,6 +38,7 @@ export type SettingsSectionId =
   | "agent"
   | "slash"
   | "e2b"
+  | "cloud"
   | "mcp"
   | "tools"
   | "skills"
@@ -122,6 +125,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: "Sandbox (E2B)",
         description: "Remote code execution sandbox",
         icon: Cloud,
+      },
+      {
+        id: "cloud",
+        label: "Cloud Workspace",
+        description: "OnyxBase persistent workspace sync",
+        icon: CloudCog,
       },
       {
         id: "appearance",
@@ -269,6 +278,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
             {active === "agent" && <SectionAgentSettings />}
             {active === "slash" && <SectionSlashCommands />}
             {active === "e2b" && <SectionE2B />}
+            {active === "cloud" && <SectionCloudWorkspace />}
             {active === "mcp" && <SectionMcp />}
             {active === "tools" && <SectionCustomTools />}
             {active === "skills" && <SectionSkills />}

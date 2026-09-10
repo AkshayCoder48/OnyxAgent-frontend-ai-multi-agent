@@ -32,6 +32,96 @@ import type { ToolContext } from "@/lib/tools/registry";
 // E2B's max sandbox timeout is 1 hour, so we rotate at 50 min to be safe.
 const ROTATION_AGE_MS = 50 * 60 * 1000;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Cloud-workspace auto-restore (PRD §16/§37).
+//
+// When a BRAND-NEW (empty) E2B sandbox is created and the user has OnyxBase
+// configured with a stored cloud workspace, transparently restore it so the
+// workspace survives sandbox expiry / app reopens / new sessions.
+//
+// SAFETY: restore ONLY runs when the sandbox is EMPTY — a sandbox that
+// already has files (post-rotation backup/restore, uploads, an earlier
+// restore) is NEVER overwritten by an older cloud snapshot. A per-sandbox
+// localStorage flag keeps the check to one localStorage read on every
+// subsequent call. A module-level mutex prevents concurrent restores.
+// ─────────────────────────────────────────────────────────────────────────
+let autoRestorePromise: Promise<void> | null = null;
+
+function restoredFlagKey(sandboxId: string): string {
+  return `onyxbase-restored:${sandboxId}`;
+}
+
+async function runAutoRestore(apiKey: string): Promise<void> {
+  try {
+    if (typeof window === "undefined") return;
+    const { settingsService } = await import("@/lib/services");
+    const { useAuthStore } = await import("@/stores");
+    const userId = useAuthStore.getState().user?.id;
+    if (!userId) return;
+
+    // Unconfigured → silent no-op (never surfaces to the user).
+    const obKey = await settingsService.getDecryptedOnyxBaseApiKey(userId);
+    if (!obKey || !obKey.trim()) return;
+
+    const client = getE2BClient(apiKey, null, "shared");
+    const { id: sandboxId } = await client.createSandbox();
+    const flag = restoredFlagKey(sandboxId);
+    if (window.localStorage.getItem(flag)) return; // already handled
+
+    // Mark ATTEMPTED up-front so a failure never retries in a loop.
+    try {
+      window.localStorage.setItem(flag, "1");
+    } catch { /* ignore */ }
+
+    // Only an EMPTY sandbox gets the cloud snapshot — never clobber live
+    // files (rotation already restored them server-side).
+    const files = await client.walkFiles();
+    if (files.length > 0) return;
+
+    const settings = await settingsService.get(userId).catch(() => null);
+    const baseUrl = settings?.onyxbase_base_url || undefined;
+    const { OnyxBaseKV } = await import("@/lib/onyxbase/kv-client");
+    const { getCloudPointer, retrieveWorkspace } = await import(
+      "@/lib/onyxbase/workspace-sync"
+    );
+    const kv = new OnyxBaseKV(obKey, baseUrl);
+    const pointer = await getCloudPointer(kv);
+    if (!pointer) return; // nothing in the cloud yet
+
+    const result = await retrieveWorkspace({ e2b: client, kv, mode: "restore" });
+
+    // Best-effort notification — the AI-side retrieve_workspace card shows
+    // the detailed glass UI; this toast covers the app-level auto path.
+    const { toast } = await import("sonner");
+    if (result.ok) {
+      toast.success("Cloud workspace restored", {
+        description: `${result.restoredFiles} files · ${
+          result.downloadedBytes >= 1048576
+            ? `${(result.downloadedBytes / 1048576).toFixed(1)} MB`
+            : `${Math.max(1, Math.round(result.downloadedBytes / 1024))} KB`
+        } from OnyxBase`,
+      });
+    } else if (result.status === "partial") {
+      toast.warning("Cloud workspace partially restored", {
+        description: `${result.restoredFiles} files restored — some were skipped.`,
+      });
+    }
+    // full failure: stay quiet here; the agent's own retrieve call will
+    // surface the error through the tool UI.
+  } catch {
+    /* best-effort — never break tool execution */
+  }
+}
+
+/** Fire-and-forget auto-restore guard — called after every sandbox
+ *  freshness check. Cheap (one localStorage read) once handled. */
+function maybeAutoRestoreWorkspace(apiKey: string): void {
+  if (autoRestorePromise) return;
+  autoRestorePromise = runAutoRestore(apiKey).finally(() => {
+    autoRestorePromise = null;
+  });
+}
+
 // localStorage keys (per API key).
 function createdAtKey(apiKey: string): string {
   return `e2b-sandbox-createdAt:${apiKey}`;
@@ -243,5 +333,9 @@ export async function ensureFreshSandboxForCtx(
   const apiKey = await resolveSandboxApiKey(ctx);
   if (!apiKey) return null;
   await ensureFreshSandbox(apiKey);
+  // After the sandbox is known-fresh, opportunistically restore the cloud
+  // workspace into brand-new empty sandboxes (no-op when unconfigured or
+  // already restored — see runAutoRestore).
+  maybeAutoRestoreWorkspace(apiKey);
   return apiKey;
 }

@@ -79,6 +79,19 @@ function normalizePath(p: string | undefined | null): string {
   return `${DEFAULT_CWD}/${trimmed}`;
 }
 
+/** E2B entry type helper — "dir" | "directory" | "FILE_TYPE_DIRECTORY". */
+function isDirType(t: string | undefined): boolean {
+  return t === "dir" || t === "directory" || t === "FILE_TYPE_DIRECTORY";
+}
+
+/** "/home/user/src/app.ts" → "src/app.ts" (workspace-relative path used by
+ *  the OnyxBase cloud sync; anything outside /home/user is kept absolute). */
+function relFromHome(p: string): string {
+  if (p === "/home/user" || p === "/home/user/") return "";
+  if (p.startsWith("/home/user/")) return p.slice("/home/user/".length);
+  return p;
+}
+
 interface CacheEntry {
   sandbox: Sandbox;
   /** API key used to create this sandbox. Stored separately because the
@@ -100,8 +113,10 @@ interface CacheEntry {
  *  short stub with NO GenUI docs at all — the root cause of malformed
  *  `<<<genui>>>` specs).
  *  Version 3 = rename agent.md → Onyx.md with the Onyx identity + the
- *  compressed 47-tool compendium; stale /home/user/agent.md is purged. */
-const AGENT_MD_VERSION = 3;
+ *  compressed 47-tool compendium; stale /home/user/agent.md is purged.
+ *  Version 4 = cloud workspace persistence — push_workspace +
+ *  retrieve_workspace tools + the persistent-workspace policy (49 tools). */
+const AGENT_MD_VERSION = 4;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -1403,6 +1418,95 @@ export async function POST(req: NextRequest) {
           sandboxId: sandbox.sandboxId,
           ok: true,
           written: written.length,
+          errors,
+        });
+      }
+
+      // ─────────────────────────────────────────────────────────────────────
+      // Workspace cloud-sync actions (OnyxBase KV push/retrieve support).
+      // These are TRANSPORT actions only — the OnyxBase API key never comes
+      // near this route; all KV traffic happens in the browser.
+      // ─────────────────────────────────────────────────────────────────────
+
+      case "walk_files": {
+        // Recursive enumeration of the workspace with sizes. One SDK call
+        // via depth: 64 (deeper than any real workspace tree).
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        let entries: Array<{ path: string; type?: string; size?: number }>;
+        try {
+          entries = await sandbox.files.list("/home/user", { depth: 64 });
+        } catch (err) {
+          if (isDeadSandboxError(err)) {
+            const key = cacheKey(apiKey, conversationId, sandboxMode);
+            evictCacheEntry(sandboxMode, key);
+            const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
+            entries = await fresh.files.list("/home/user", { depth: 64 });
+            return NextResponse.json({
+              sandboxId: fresh.sandboxId,
+              ok: true,
+              files: entries
+                .filter((e) => !isDirType(e.type))
+                .map((e) => ({ path: relFromHome(e.path), size: e.size ?? 0 })),
+            });
+          }
+          throw err;
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          ok: true,
+          files: entries
+            .filter((e) => !isDirType(e.type))
+            .map((e) => ({ path: relFromHome(e.path), size: e.size ?? 0 })),
+        });
+      }
+
+      case "read_files_batch": {
+        // Binary-safe batch read: N files → ONE HTTP round-trip, each file
+        // returned as base64. The client keeps request batches small enough
+        // that the JSON response stays well under serverless body limits.
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const paths = (args.paths as string[] | undefined) ?? [];
+        const files: Array<{ path: string; base64: string; size: number }> = [];
+        const errors: Array<{ path: string; error: string }> = [];
+        for (const p of paths.slice(0, 200)) {
+          try {
+            const abs = normalizePath(p);
+            const bytes = await sandbox.files.read(abs, { format: "bytes" });
+            const b64 = Buffer.from(bytes).toString("base64");
+            files.push({ path: p, base64: b64, size: bytes.length });
+          } catch (err) {
+            errors.push({ path: p, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          ok: errors.length === 0,
+          files,
+          errors,
+        });
+      }
+
+      case "batch_write_bytes": {
+        // Binary-safe batch write: files as [{ path, base64 }]. Directories
+        // are created implicitly by the E2B write. Used by cloud restore.
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const files = (args.files as Array<{ path: string; base64: string }> | undefined) ?? [];
+        let written = 0;
+        const errors: Array<{ path: string; error: string }> = [];
+        for (const f of files.slice(0, 400)) {
+          try {
+            const abs = normalizePath(f.path);
+            const bytes = Buffer.from(f.base64, "base64");
+            await sandbox.files.write(abs, new Blob([new Uint8Array(bytes)]));
+            written++;
+          } catch (err) {
+            errors.push({ path: f.path, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          ok: errors.length === 0,
+          written,
           errors,
         });
       }

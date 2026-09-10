@@ -28,6 +28,7 @@ import {
   vaultDecrypt,
   requireVault,
 } from "@/lib/crypto/vault";
+import { ONYXBASE_WORKSPACE_ID } from "@/lib/onyxbase/kv-client";
 // Lazy-load the E2B sandbox client . The class lives at
 // `@/lib/e2b/client` for back-compat with the existing import paths; it
 // now talks to E2B's REST API instead of the old proxy.
@@ -1036,6 +1037,19 @@ export interface UserSettings {
   default_thinking_enabled?: boolean;
   /** Default thinking effort ("low" | "medium" | "high") — stored under `extra`. */
   default_thinking_effort?: "low" | "medium" | "high" | string | null;
+  /** Whether an OnyxBase API key is stored (encrypted under
+   *  `extra.onyxbase_api_key_encrypted`). Powers the persistent cloud
+   *  workspace (push_workspace / retrieve_workspace). */
+  onyxbase_api_key_present?: boolean;
+  /** OnyxBase instance base URL (default https://onyxbase-phi.vercel.app),
+   *  stored under `extra.onyxbase_base_url`. */
+  onyxbase_base_url?: string;
+  /** Fixed workspace identifier — `workspace_default`. NOT a secret; the
+   *  model may know it (PRD §4). */
+  onyxbase_workspace_id?: string;
+  /** ISO timestamp of the last successful push_workspace — stored under
+   *  `extra.onyxbase_last_synced`. */
+  onyxbase_last_synced?: string | null;
 }
 
 export const settingsService = {
@@ -1077,6 +1091,10 @@ export const settingsService = {
       file_system_mode: (row.extra?.file_system_mode as "auto" | "local" | "hopx") ?? "auto",
       sandbox_mode: (row.extra?.sandbox_mode as "shared" | "separate") ?? "shared",
       ai_framework: (row.extra?.ai_framework as string) ?? "default",
+      onyxbase_api_key_present: !!row.extra?.onyxbase_api_key_encrypted,
+      onyxbase_base_url: (row.extra?.onyxbase_base_url as string | undefined) ?? undefined,
+      onyxbase_workspace_id: ONYXBASE_WORKSPACE_ID,
+      onyxbase_last_synced: (row.extra?.onyxbase_last_synced as string | null | undefined) ?? null,
     };
   },
 
@@ -1104,6 +1122,14 @@ export const settingsService = {
     }
     if (patch.default_thinking_effort !== undefined) {
       update.extra = { ...(update.extra ?? row.extra ?? {}), default_thinking_effort: patch.default_thinking_effort };
+    }
+    // OnyxBase cloud-workspace config (base URL + last-synced stamp; the
+    // API key itself goes through setOnyxBaseApiKey for vault encryption).
+    if (patch.onyxbase_base_url !== undefined) {
+      update.extra = { ...(update.extra ?? row.extra ?? {}), onyxbase_base_url: patch.onyxbase_base_url };
+    }
+    if (patch.onyxbase_last_synced !== undefined) {
+      update.extra = { ...(update.extra ?? row.extra ?? {}), onyxbase_last_synced: patch.onyxbase_last_synced };
     }
     // Handle env_vars — the settings page sends Record<string, string>,
     // but the DB stores Record<string, { value, is_secret }> (secrets
@@ -1293,6 +1319,44 @@ export const settingsService = {
     const encrypted = row.extra?.skillsmp_api_key_encrypted;
     if (typeof encrypted !== "string" || !encrypted) return null;
     try {
+      return await vaultDecrypt(encrypted);
+    } catch {
+      return null;
+    }
+  },
+
+  /** Store (or clear, when key is null) the OnyxBase API key, encrypted with
+   *  the user's vault key. Stored under `extra.onyxbase_api_key_encrypted`
+   *  (no schema migration needed — same pattern as SkillsMP).
+   *
+   *  SECURITY (PRD §5): the key is ONLY ever decrypted transiently inside the
+   *  workspace-sync tool layer to construct the KV client. It never enters
+   *  system prompts, tool arguments, E2B, or results. */
+  async setOnyxBaseApiKey(userId: string, key: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    const encrypted = key ? await vaultEncrypt(key) : null;
+    const extra = { ...(row.extra ?? {}), onyxbase_api_key_encrypted: encrypted };
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
+  /** Decrypt + return the OnyxBase API key, or null when unconfigured.
+   *  Mirrors the E2B key flow: tries to restore the vault from session
+   *  before decrypting. */
+  async getDecryptedOnyxBaseApiKey(userId: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return null;
+    const encrypted = row.extra?.onyxbase_api_key_encrypted;
+    if (typeof encrypted !== "string" || !encrypted) return null;
+    try {
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
       return await vaultDecrypt(encrypted);
     } catch {
       return null;

@@ -1347,6 +1347,19 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
     envVars: envVars ?? {},
   };
 
+  // Cloud-workspace status (OnyxBase KV) — the SAFE workspace-availability
+  // contract exposed to the model (PRD §25): workspaceId is a non-secret
+  // identifier; the OnyxBase API key NEVER enters the prompt — only this
+  // presence flag does. Resolved here per-turn so the model knows whether
+  // push_workspace / retrieve_workspace are usable.
+  let cloudConfigured = false;
+  try {
+    const obSettings = await settingsService.get(opts.userId);
+    cloudConfigured = !!obSettings?.onyxbase_api_key_present;
+  } catch {
+    /* non-fatal — prompt falls back to cloudConfigured: false */
+  }
+
   // 1. Persist the user's message + create conversation if needed.
   let conversationId = opts.conversationId;
   if (!conversationId) {
@@ -1627,6 +1640,18 @@ A file called \`Onyx.md\` has been written to the sandbox at \`/home/user/Onyx.m
 
 Read it FIRST with \`read_file\` (path: \`Onyx.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/Onyx.md\` as fallback.
 
+## PERSISTENT WORKSPACE POLICY
+The active E2B workspace is your working environment; the OnyxBase KV cloud workspace is the persistent source of truth (E2B is temporary, the cloud is permanent).
+- Before workspace-dependent work, check workspace availability (see Live Workspace Context below). If unavailable, set expectations honestly — never pretend files were modified.
+- After EVERY meaningful task that changes workspace files, synchronize the COMPLETE workspace with \`push_workspace\` — even small changes. The tool discovers files automatically; no arguments required.
+- NEVER claim the workspace is backed up / synchronized unless \`push_workspace\` returned ok: true.
+- The persistent workspace identifier is \`workspace_default\` — fixed, not a secret. You may reference it to identify the workspace.
+- NEVER request, expose, print, echo, or transmit the user's OnyxBase API key. Authentication is handled entirely by the tool runtime — the key is not in your context, tool arguments, or the sandbox.
+- When a fresh E2B environment starts and persistent restoration is needed, call \`retrieve_workspace\` BEFORE workspace-dependent work (mode "check" probes the cloud, "restore" writes the files).
+- Workspace persistence uses OnyxBase KV (manifest + chunks). Never use OnyxBase file storage for workspace sync, and never try to build your own backup scheme — push_workspace already replaces the cloud state atomically (obsolete files are removed; no backup versions pile up).
+- Files larger than 50 MB and secrets (.env files, private keys, credentials) are excluded from sync by design — never try to smuggle them into the cloud.
+- After restore, dependency rehydration (npm install etc.) is allowed but never run dangerous/arbitrary project commands unprompted.
+
 ## Generative UI (GenUI)
 GenUI lets you render rich interactive UI components — cards, tables, charts, games, calculators, educational widgets — directly in the chat by emitting a \`<<<genui>>>...<<</genui>>>\` block with a JSON spec. **No tool calls needed** — just emit the spec as text and it renders live.
 
@@ -1642,7 +1667,9 @@ The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculator
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 
-  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}`;
+  const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey}\n- workspaceId: workspace_default\n- cloudConfigured: ${cloudConfigured}${cloudConfigured ? "\nCloud workspace sync is ACTIVE — after completing any task that modifies workspace files, you MUST call push_workspace before responding." : "\nCloud workspace sync is not configured — do not call push_workspace / retrieve_workspace; suggest the user add an OnyxBase API key in Settings → Cloud Workspace if persistence matters."}`;
+
+  const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${workspaceStatusText}`;
 
   // CONTEXT WINDOW MANAGEMENT: Always strip tool_calls from history to
   // prevent DEGRADED errors. The AI doesn't need old tool calls to continue.
