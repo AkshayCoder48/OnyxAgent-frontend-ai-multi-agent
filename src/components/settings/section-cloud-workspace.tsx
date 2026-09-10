@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useSettings } from "@/hooks/use-data";
-import { useAuthStore } from "@/stores";
+import { useAuth } from "@/hooks";
 import {
   OnyxBaseKV,
   ONYXBASE_DEFAULT_BASE_URL,
@@ -65,7 +65,11 @@ function formatSynced(iso: string | null | undefined): string {
 
 export function SectionCloudWorkspace() {
   const { settings, loading, setOnyxBaseApiKey, update } = useSettings();
-  const { user } = useAuthStore();
+  // useAuth (not the raw store) — its mount effect runs authStore.init(),
+  // which rehydrates the real user + vault on a cold direct navigation to
+  // /settings/cloud. Without it the store stays on the default local-user
+  // and key saves land on the wrong row (auth-hydration race).
+  const { user } = useAuth();
   const userId = user?.id;
 
   const [key, setKey] = React.useState("");
