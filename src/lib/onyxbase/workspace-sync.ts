@@ -724,7 +724,8 @@ export async function retrieveWorkspace(
   if (!manifest) {
     base.errors.push({
       code: "WORKSPACE_NOT_FOUND",
-      message: "The stored workspace manifest is corrupt or incomplete",
+      message:
+        "The stored workspace manifest is incomplete (a manifest chunk record is missing in cloud). Run push_workspace to re-commit the snapshot, then retrieve again.",
     });
     base.durationMs = Date.now() - t0;
     return base;
@@ -755,33 +756,105 @@ export async function retrieveWorkspace(
   let checksumOk = 0;
   let checksumBad = 0;
 
-  for (const f of manifest.files) {
-    if (opts.signal?.aborted) break;
+  /** Download + verify ONE file. Returns the verified payload or the failure
+   *  reason ("missing_chunk" for 404 holes — cross-instance propagation lag
+   *  or a corrupt snapshot; OnyxBaseError for hard read failures). */
+  const downloadFile = async (
+    f: WorkspaceFileMeta,
+  ): Promise<
+    | { ok: true; path: string; base64: string; size: number }
+    | { ok: false; kind: "missing_chunk" | "error" | "checksum"; message: string }
+  > => {
     try {
       const parts: string[] = [];
       for (let c = 0; c < f.chunkCount; c++) {
         const val = await kv.get(fileChunkKey(f.fileId, sha8(f.sha256), c));
-        if (val === null) throw new Error("missing chunk");
+        if (val === null) {
+          return {
+            ok: false,
+            kind: "missing_chunk",
+            message: `chunk ${c + 1}/${f.chunkCount} record missing in cloud`,
+          };
+        }
         parts.push(val);
       }
       const payload = base64ToBytes(parts.join(""));
       const raw = f.encoding === "gzip" ? ((await gunzipBytes(payload)) ?? payload) : payload;
       const digest = await sha256Hex(raw);
       if (digest !== f.sha256 || raw.length !== f.size) {
-        checksumBad++;
-        skipped.push({ path: f.path, reason: "checksum_mismatch" });
-        continue; // corrupt file — never silently accepted (PRD §33)
+        return { ok: false, kind: "checksum", message: "checksum mismatch — cloud copy is corrupt" };
       }
+      return { ok: true, path: f.path, base64: bytesToBase64(raw), size: f.size };
+    } catch (e) {
+      const code = e instanceof OnyxBaseError ? `${e.code}: ` : "";
+      return {
+        ok: false,
+        kind: "error",
+        message: `${code}${e instanceof Error ? e.message : "chunk read failed"}`,
+      };
+    }
+  };
+
+  /** Files that failed ONLY with missing-chunk 404s get one extra round: the
+   *  read may have hit a cold OnyxBase instance whose local index hadn't
+   *  rehydrated the just-pushed records yet. A short settle delay + one
+   *  retry resolves the transient case; a persistent miss is a real gap. */
+  const missingChunkFiles: WorkspaceFileMeta[] = [];
+
+  const absorb = (
+    r: Awaited<ReturnType<typeof downloadFile>>,
+    f: WorkspaceFileMeta,
+  ): void => {
+    if (r.ok) {
       checksumOk++;
-      verified.push({ path: f.path, base64: bytesToBase64(raw), size: f.size });
+      verified.push({ path: r.path, base64: r.base64, size: r.size });
       if (verified.length % 25 === 0) {
         stage("restoring", `Restoring files… (${verified.length}/${manifest.files.length})`);
       }
-    } catch (e) {
+      return;
+    }
+    if (r.kind === "missing_chunk") {
+      missingChunkFiles.push(f);
+      return;
+    }
+    if (r.kind === "checksum") {
+      checksumBad++;
+      skipped.push({ path: f.path, reason: "checksum_mismatch" });
+      return; // corrupt file — never silently accepted (PRD §33)
+    }
+    errors.push({ path: f.path, code: "KV_READ_FAILED", message: r.message });
+  };
+
+  for (const f of manifest.files) {
+    if (opts.signal?.aborted) break;
+    absorb(await downloadFile(f), f);
+  }
+
+  // Second pass for cross-instance propagation lag (bounded to one round).
+  if (missingChunkFiles.length > 0) {
+    stage("retrieving", `Re-checking ${missingChunkFiles.length} lagging file(s)…`);
+    await new Promise((r) => setTimeout(r, 2000));
+    const stillMissing: WorkspaceFileMeta[] = [];
+    for (const f of missingChunkFiles) {
+      if (opts.signal?.aborted) {
+        stillMissing.push(f);
+        continue;
+      }
+      const r = await downloadFile(f);
+      if (r.ok) {
+        absorb(r, f);
+      } else if (r.kind === "missing_chunk") {
+        stillMissing.push(f);
+      } else {
+        absorb(r, f);
+      }
+    }
+    for (const f of stillMissing) {
       errors.push({
         path: f.path,
-        code: e instanceof OnyxBaseError ? e.code : "KV_READ_FAILED",
-        message: e instanceof Error ? e.message : "chunk read failed",
+        code: "KV_READ_FAILED",
+        message:
+          "chunk record missing in cloud — the snapshot is incomplete or was not fully committed; push_workspace again to re-sync",
       });
     }
   }

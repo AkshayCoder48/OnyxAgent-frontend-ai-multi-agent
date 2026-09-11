@@ -90,24 +90,34 @@ export class OnyxBaseKV {
   // Low-level fetch wrapper.
   // ---------------------------------------------------------------------
 
+  /**
+   * Response envelope with the server's structured error fields extracted, so
+   * every caller can SEE the real reason (rate_limited, auth_backend_unavailable,
+   * insufficient_scope …) instead of an opaque "HTTP 500".
+   */
   private async req<T>(
     method: "GET" | "POST" | "DELETE",
     pathname: string,
     body?: unknown,
     query?: Record<string, string>,
-  ): Promise<{ ok: boolean; status: number; data: T | null }> {
+  ): Promise<{ ok: boolean; status: number; data: T | null; errorDetail?: string; code?: string }> {
     const qs = query
       ? "?" + new URLSearchParams({ collection: ONYXBASE_COLLECTION, ...query }).toString()
       : `?collection=${ONYXBASE_COLLECTION}`;
-    // OnyxBase is multi-instance (SQLite index + Telegram mirror): cold
-    // instances can briefly return 401 for freshly-created keys (auth-cache
-    // staleness) and 502/503 during backend restarts. Retry with backoff —
-    // a genuinely-invalid key still fails after the retries.
-    const MAX_ATTEMPTS = 3;
-    let last: { ok: boolean; status: number; data: T | null } | null = null;
+    // OnyxBase is multi-instance (in-memory index + Telegram mirror): reads
+    // can transiently fail with 500 (auth rehydrate error on a cold instance),
+    // 502/503 (restarts / "durable backend unreachable"), or 429 (per-key
+    // rate caps). 401 can appear briefly for freshly-created keys before an
+    // instance rehydrates its identity manifest. Retry all of these with
+    // backoff — a genuinely-invalid key still fails after the retries, and a
+    // real rate limit is respected via the Retry-After header.
+    const MAX_ATTEMPTS = 4;
+    let last: { ok: boolean; status: number; data: T | null; errorDetail?: string; code?: string } | null =
+      null;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 500 * attempt));
+        const backoff = Math.min(600 * 2 ** (attempt - 1), 4000);
+        await new Promise((r) => setTimeout(r, backoff));
       }
       let res: Response;
       try {
@@ -130,19 +140,56 @@ export class OnyxBaseKV {
         continue;
       }
       let data: T | null = null;
+      let errorDetail: string | undefined;
+      let serverCode: string | undefined;
       const text = await res.text();
       if (text) {
         try {
-          data = JSON.parse(text) as T;
+          const parsed = JSON.parse(text) as {
+            error?: unknown;
+            code?: unknown;
+            value?: unknown;
+            [k: string]: unknown;
+          };
+          data = parsed as T;
+          if (typeof parsed.error === "string") errorDetail = parsed.error;
+          if (typeof parsed.code === "string") serverCode = parsed.code;
         } catch {
           data = null;
+          // Non-JSON body (e.g. an HTML error page) — keep a trimmed hint.
+          errorDetail = text.slice(0, 120).replace(/\s+/g, " ");
         }
       }
-      last = { ok: res.ok, status: res.status, data };
-      const retryable = res.status === 401 || res.status === 502 || res.status === 503;
+      last = { ok: res.ok, status: res.status, data, errorDetail, code: serverCode };
+
+      // Respect Retry-After on 429 (seconds) before the next attempt.
+      if (!res.ok && res.status === 429 && attempt < MAX_ATTEMPTS - 1) {
+        const ra = Number(res.headers.get("retry-after"));
+        if (Number.isFinite(ra) && ra > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(ra * 1000, 15_000)));
+        }
+      }
+
+      const retryable =
+        res.status === 401 ||
+        res.status === 408 ||
+        res.status === 429 ||
+        res.status === 500 ||
+        res.status === 502 ||
+        res.status === 503 ||
+        res.status === 504;
       if (res.ok || !retryable || attempt === MAX_ATTEMPTS - 1) return last;
     }
     return last!;
+  }
+
+  /** Human-readable reason from a failed response, e.g.
+   *  `— rate_limited: Rate limit exceeded (60 req/min)…`. */
+  private reason(r: { errorDetail?: string; code?: string }): string {
+    const parts: string[] = [];
+    if (r.code) parts.push(r.code);
+    if (r.errorDetail) parts.push(r.errorDetail);
+    return parts.length ? ` — ${parts.join(": ")}` : "";
   }
 
   // ---------------------------------------------------------------------
@@ -163,9 +210,19 @@ export class OnyxBaseKV {
       if (r.status === 401) {
         throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
       }
+      // 503 = "durable backend temporarily unreachable" — retryable, not a
+      // write failure. Anything else is a real write failure with the
+      // server's reason attached.
+      if (r.status === 503) {
+        throw new OnyxBaseError(
+          "ONYXBASE_UNAVAILABLE",
+          `OnyxBase is temporarily unreachable${this.reason(r)}`,
+          503,
+        );
+      }
       throw new OnyxBaseError(
         "KV_WRITE_FAILED",
-        `KV write failed for ${key} (HTTP ${r.status})`,
+        `KV write failed for ${key} (HTTP ${r.status})${this.reason(r)}`,
         r.status,
       );
     }
@@ -179,9 +236,16 @@ export class OnyxBaseKV {
       if (r.status === 401) {
         throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
       }
+      if (r.status === 503) {
+        throw new OnyxBaseError(
+          "ONYXBASE_UNAVAILABLE",
+          `OnyxBase is temporarily unreachable${this.reason(r)}`,
+          503,
+        );
+      }
       throw new OnyxBaseError(
         "KV_READ_FAILED",
-        `KV read failed for ${key} (HTTP ${r.status})`,
+        `KV read failed for ${key} (HTTP ${r.status})${this.reason(r)}`,
         r.status,
       );
     }
@@ -195,9 +259,16 @@ export class OnyxBaseKV {
   async delete(key: string): Promise<void> {
     const r = await this.req<{ error?: string }>("DELETE", `/v1/delete/${encodeURIComponent(key)}`);
     if (!r.ok && r.status !== 404) {
+      if (r.status === 503) {
+        throw new OnyxBaseError(
+          "ONYXBASE_UNAVAILABLE",
+          `OnyxBase is temporarily unreachable${this.reason(r)}`,
+          503,
+        );
+      }
       throw new OnyxBaseError(
         "KV_WRITE_FAILED",
-        `KV delete failed for ${key} (HTTP ${r.status})`,
+        `KV delete failed for ${key} (HTTP ${r.status})${this.reason(r)}`,
         r.status,
       );
     }
@@ -220,9 +291,16 @@ export class OnyxBaseKV {
         if (r.status === 401) {
           throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
         }
+        if (r.status === 503) {
+          throw new OnyxBaseError(
+            "ONYXBASE_UNAVAILABLE",
+            `OnyxBase is temporarily unreachable${this.reason(r)}`,
+            503,
+          );
+        }
         throw new OnyxBaseError(
           "KV_READ_FAILED",
-          `KV list failed (HTTP ${r.status})`,
+          `KV list failed (HTTP ${r.status})${this.reason(r)}`,
           r.status,
         );
       }
@@ -258,7 +336,11 @@ export class OnyxBaseKV {
       if (r.status === 401) {
         throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
       }
-      throw new OnyxBaseError("ONYXBASE_UNAVAILABLE", `Unable to connect to OnyxBase (HTTP ${r.status})`, r.status);
+      throw new OnyxBaseError(
+        "ONYXBASE_UNAVAILABLE",
+        `Unable to connect to OnyxBase (HTTP ${r.status})${this.reason(r)}`,
+        r.status,
+      );
     }
     return r.data ?? { ok: true };
   }
@@ -270,7 +352,11 @@ export class OnyxBaseKV {
       if (r.status === 401) {
         throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
       }
-      throw new OnyxBaseError("ONYXBASE_UNAVAILABLE", `OnyxBase health check failed (HTTP ${r.status})`, r.status);
+      throw new OnyxBaseError(
+        "ONYXBASE_UNAVAILABLE",
+        `OnyxBase health check failed (HTTP ${r.status})${this.reason(r)}`,
+        r.status,
+      );
     }
     return r.data ?? {};
   }
