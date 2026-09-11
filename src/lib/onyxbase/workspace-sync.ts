@@ -11,8 +11,10 @@
  * STORAGE MODEL (KV values stay ≤ ~3 KB — comfortably under OnyxBase's ~4 KB
  * record ceiling, leaving room for JSON overhead):
  *
- *   workspace:default:manifest                     ← small atomic POINTER
- *   workspace:default:m:{manifestSha8}:000001…     ← manifest chunks
+ *   workspace:default:manifest                     ← atomic POINTER + INLINE
+ *                                                     manifest when small
+ *   workspace:default:m:{manifestSha8}:000001…     ← manifest chunks (large
+ *   workspace:default:mr:{manifestSha8}:000001…    ←  …mirrored replicas)
  *   workspace:default:f:{fileId}:{sha8}:000001…    ← file content chunks
  *
  *   fileId = sha256(relative path)[:16]   — deterministic per path
@@ -21,8 +23,26 @@
  * ATOMICITY (PRD §12): chunk keys are CONTENT-ADDRESSED, so new/changed
  * files write to NEW keys that the old manifest doesn't reference — a failed
  * push leaves the previously committed state fully intact. The single
- * pointer write at `workspace:default:manifest` is the COMMIT. Obsolete
- * (unreferenced) chunk keys are garbage-collected AFTER a successful commit.
+ * pointer write at `workspace:default:manifest` is the COMMIT.
+ *
+ * DURABILITY (learned the hard way — live incident 2026-09-11): OnyxBase's
+ *   KV is multi-instance: each instance keeps a local index hydrated from
+ *   the Telegram mirror, and a write updates the WRITING instance + the
+ *   mirror — where the mirror write can silently fail (which orphaned a
+ *   committed snapshot whose manifest chunk vanished). Reads hit random
+ *   instances, so a fresh write can be invisible to the next read for a
+ *   while (cold-start rehydrate is the convergence path). Defenses:
+ *   1. Small manifests are INLINED in the pointer record itself — the commit
+ *      carries the manifest, so no separate record can go missing.
+ *   2. Chunked manifests are written to BOTH `m:` and mirrored `mr:` keys,
+ *      with read-back verification (rewrite + settle rounds).
+ *   3. The committed pointer is verified by reading it back through the
+ *      exact retrieve path; an unverifiable commit is KEPT and reported as
+ *      "partial" (read-back failures are usually stale routing, not lost
+ *      writes — rolling back a probably-good commit is worse).
+ *   4. Retrieve retries missing records across several settle rounds before
+ *      declaring a snapshot corrupt (CHECKSUM_MISMATCH + re-push guidance).
+ * Obsolete (unreferenced) chunk keys are garbage-collected AFTER a commit.
  *
  * INCREMENTAL (PRD §32): files whose sha256 matches the committed manifest
  * reuse their existing chunk keys — zero KV writes. Only changed files cost
@@ -68,6 +88,14 @@ const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
  *  chars leaves comfortable JSON overhead (PRD §8 — "2–3 KB, never fill the
  *  limit"). */
 const CHUNK_SIZE = 3000;
+
+/** Max base64 chars of manifest payload embedded directly in the pointer
+ *  record. Keeps the whole pointer JSON ≤ ~2.9 KB — comfortably under
+ *  OnyxBase's ~4 KB record ceiling. Small/medium workspaces (roughly ≤ 150
+ *  files) then commit atomically as ONE self-contained record; larger ones
+ *  fall back to chunked manifest records with mirrored replicas +
+ *  pre-commit read-back verification. */
+const MANIFEST_INLINE_MAX = 2400;
 
 /** Concurrent KV writes (small pool — polite to OnyxBase + Telegram mirror). */
 const KV_CONCURRENCY = 5;
@@ -133,6 +161,12 @@ export interface WorkspacePointer {
   manifestSha256: string;
   /** Number of manifest chunk records. */
   manifestChunks: number;
+  /** Inline manifest payload — base64(gzip(manifest JSON)) when it fits in
+   *  the pointer record. Makes the atomic commit self-contained: the
+   *  manifest can never go missing on its own (see DURABILITY above). */
+  manifestInline?: string;
+  /** Encoding of `manifestInline` — "gzip" when compression helped. */
+  manifestEncoding?: "gzip" | "identity";
 }
 
 export interface SkippedFile {
@@ -187,6 +221,9 @@ export interface SyncOptions {
   kv: OnyxBaseKV;
   onStage?: (ev: StageEvent) => void;
   signal?: AbortSignal;
+  /** Skip post-commit garbage collection (used by the live integration
+   *  test so it never deletes pre-existing records it didn't create). */
+  skipGc?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +320,12 @@ function manifestChunkKey(sha8: string, index: number): string {
   return `${NS}:m:${sha8}:${padIndex(index)}`;
 }
 
+/** Mirrored replica of a manifest chunk — OnyxBase is multi-instance and a
+ *  single record can lose durability; reads fall back to the replica. */
+function manifestReplicaKey(sha8: string, index: number): string {
+  return `${NS}:mr:${sha8}:${padIndex(index)}`;
+}
+
 export const POINTER_KEY = `${NS}:manifest`;
 
 function sha8(shaHex: string): string {
@@ -291,7 +334,11 @@ function sha8(shaHex: string): string {
 
 /** Only delete keys that parse as OUR chunk records — the GC guard. */
 function isManagedChunkKey(key: string): boolean {
-  return key.startsWith(`${NS}:f:`) || key.startsWith(`${NS}:m:`);
+  return (
+    key.startsWith(`${NS}:f:`) ||
+    key.startsWith(`${NS}:m:`) ||
+    key.startsWith(`${NS}:mr:`)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -330,20 +377,33 @@ async function readManifest(
   kv: OnyxBaseKV,
   pointer: WorkspacePointer,
 ): Promise<WorkspaceManifest | null> {
-  const m8 = sha8(pointer.manifestSha256);
-  const parts: string[] = [];
-  for (let i = 0; i < pointer.manifestChunks; i++) {
-    const val = await kv.get(manifestChunkKey(m8, i));
-    if (val === null) return null; // hole in the manifest — treat as corrupt
-    parts.push(val);
+  let payload: Uint8Array;
+  if (typeof pointer.manifestInline === "string" && pointer.manifestInline) {
+    // Self-contained commit — decode straight from the pointer record.
+    payload = base64ToBytes(pointer.manifestInline);
+    if (pointer.manifestEncoding === "gzip") {
+      payload = (await gunzipBytes(payload)) ?? payload;
+    }
+  } else {
+    const m8 = sha8(pointer.manifestSha256);
+    const parts: string[] = [];
+    for (let i = 0; i < pointer.manifestChunks; i++) {
+      // Primary `m:` record, falling back to the mirrored `mr:` replica —
+      // a single record can lose durability on the multi-instance backend.
+      const val =
+        (await kv.get(manifestChunkKey(m8, i))) ??
+        (await kv.get(manifestReplicaKey(m8, i)));
+      if (val === null) return null; // hole in the manifest — treat as corrupt
+      parts.push(val);
+    }
+    payload = base64ToBytes(parts.join(""));
+    payload = (await gunzipBytes(payload)) ?? payload;
   }
-  const payload = base64ToBytes(parts.join(""));
-  const unzipped = (await gunzipBytes(payload)) ?? payload;
   // Integrity: full sha must match the pointer.
-  const actual = await sha256Hex(unzipped);
+  const actual = await sha256Hex(payload);
   if (actual !== pointer.manifestSha256) return null;
   try {
-    return JSON.parse(new TextDecoder().decode(unzipped)) as WorkspaceManifest;
+    return JSON.parse(new TextDecoder().decode(payload)) as WorkspaceManifest;
   } catch {
     return null;
   }
@@ -545,18 +605,36 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     totalBytes: newMeta.reduce((s, f) => s + f.size, 0),
   };
 
-  // 6. Stage manifest chunks (content-addressed).
+  // 6. Encode the manifest — INLINE in the pointer when it fits, else staged
+  //    as content-addressed chunk records plus mirrored replicas.
   stage("committing", "Committing workspace snapshot…");
   const manifestJson = JSON.stringify(manifest);
   const manifestBytes = new TextEncoder().encode(manifestJson);
   const manifestSha = await sha256Hex(manifestBytes);
   const manifestGz = (await gzipBytes(manifestBytes)) ?? manifestBytes;
-  const manifestB64 = bytesToBase64(manifestGz);
-  const mChunks = chunkString(manifestB64);
-  for (let i = 0; i < mChunks.length; i++) {
-    const value = mChunks[i];
-    if (value === undefined) continue;
-    pendingWrites.push({ key: manifestChunkKey(sha8(manifestSha), i), value });
+  const manifestEnc: "gzip" | "identity" =
+    manifestGz.length < manifestBytes.length ? "gzip" : "identity";
+  const manifestPayload = manifestEnc === "gzip" ? manifestGz : manifestBytes;
+  const manifestB64 = bytesToBase64(manifestPayload);
+  const manifestRecordKeys: string[] = [];
+  let manifestChunkCount = 0;
+  let manifestInline: string | null = null;
+  if (manifestB64.length <= MANIFEST_INLINE_MAX) {
+    // Small manifest → embed directly in the pointer record. The pointer IS
+    // the atomic commit, so the manifest can never go missing on its own.
+    manifestInline = manifestB64;
+  } else {
+    const mChunks = chunkString(manifestB64);
+    manifestChunkCount = mChunks.length;
+    for (let i = 0; i < mChunks.length; i++) {
+      const value = mChunks[i];
+      if (value === undefined) continue;
+      const primary = manifestChunkKey(sha8(manifestSha), i);
+      pendingWrites.push({ key: primary, value });
+      const replica = manifestReplicaKey(sha8(manifestSha), i);
+      pendingWrites.push({ key: replica, value });
+      manifestRecordKeys.push(primary, replica);
+    }
   }
 
   // 7. Write all staged chunks (concurrency-limited, one retry each).
@@ -599,6 +677,63 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     base.durationMs = Date.now() - t0;
     return base;
   }
+
+  // 7.5 PRE-COMMIT MANIFEST VERIFICATION (chunked manifests only) — a KV
+  //     write that returned 200 can still lose durability on OnyxBase's
+  //     multi-instance backend (observed live). Read back every manifest
+  //     record and rewrite any that don't match, with settle rounds because
+  //     reads are eventually-consistent across instances (lag is NOT a failed
+  //     write). Records that stay unreadable after the rounds produce a
+  //     warning + "partial" status — the commit still proceeds: content-
+  //     addressed keys mean a bad commit can never corrupt the previous
+  //     state, and aborting on stale-routing false negatives would block
+  //     pushes entirely (observed live). Inline manifests skip this — they
+  //     have no separate records; their durability check is 8.5.
+  if (!manifestInline && manifestRecordKeys.length > 0) {
+    const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const staged = manifestRecordKeys.map((key) => ({
+      key,
+      value: pendingWrites.find((w) => w.key === key)?.value,
+    }));
+    const readBack = async (): Promise<string[]> => {
+      const bad: string[] = [];
+      for (const s of staged) {
+        if (s.value === undefined) continue;
+        let back: string | null = null;
+        try {
+          back = await kv.get(s.key);
+        } catch {
+          back = null;
+        }
+        if (back !== s.value) bad.push(s.key);
+      }
+      return bad;
+    };
+    let bad = await readBack(); // round 0 — immediate
+    for (const round of [1, 2] as const) {
+      if (bad.length === 0) break;
+      stage("committing", "Verifying manifest records…");
+      const toRewrite = staged
+        .filter((s) => bad.includes(s.key) && s.value !== undefined)
+        .map((s) => ({ key: s.key, value: s.value as string }));
+      await pool(toRewrite, KV_CONCURRENCY, async (w) => {
+        try {
+          await kv.set(w.key, w.value);
+        } catch {
+          /* re-checked after the settle */
+        }
+      });
+      await settle(round === 1 ? 2000 : 3000); // let instances converge
+      bad = await readBack();
+    }
+    if (bad.length > 0) {
+      errors.push({
+        code: "KV_WRITE_FAILED",
+        message: `${bad.length} manifest record(s) could not be verified in OnyxBase yet (backend read lag or durability loss). The commit proceeded; if retrieve_workspace reports a corrupt snapshot, run push_workspace again.`,
+      });
+    }
+  }
+
   const pointer: WorkspacePointer = {
     v: 1,
     workspaceId: WORKSPACE_ID,
@@ -607,7 +742,10 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     totalFiles: manifest.totalFiles,
     totalBytes: manifest.totalBytes,
     manifestSha256: manifestSha,
-    manifestChunks: mChunks.length,
+    manifestChunks: manifestChunkCount,
+    ...(manifestInline
+      ? { manifestInline, manifestEncoding: manifestEnc }
+      : {}),
   };
   try {
     await kv.set(POINTER_KEY, JSON.stringify(pointer));
@@ -620,13 +758,54 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     return base;
   }
 
-  // 9. GC — remove obsolete chunks from any previous generation (PRD §11).
+  // 8.5 POST-COMMIT VERIFICATION — a commit is only real if it reads back.
+  //     Runs the EXACT code path a future retrieve uses (readPointer →
+  //     readManifest), end-to-end, with one settle round because OnyxBase
+  //     reads are eventually-consistent across instances (a fresh write may
+  //     not be visible to every instance yet — lag, not a lost write). An
+  //     unverifiable commit is KEPT and reported as "partial": read-back
+  //     failures are usually stale routing, and content-addressed chunk keys
+  //     mean a bad commit can never corrupt the previous state (the old
+  //     chunks stay intact; rolling back a probably-good commit would be
+  //     worse). NOTE: errors[] already carries any 7.5 warning — add the
+  //     pointer-level warning only when the pointer itself wouldn't verify.
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const verifyCommit = async (): Promise<boolean> => {
+    try {
+      const back = await readPointer(kv);
+      if (!back) return false;
+      if (
+        back.generation !== pointer.generation ||
+        back.manifestSha256 !== pointer.manifestSha256
+      ) {
+        return false;
+      }
+      const m = await readManifest(kv, back);
+      return m !== null && m.totalFiles === manifest.totalFiles;
+    } catch {
+      return false;
+    }
+  };
+  let committed = await verifyCommit(); // immediate
+  if (!committed) {
+    stage("committing", "Verifying commit…");
+    await settle(2500); // instance convergence window
+    committed = await verifyCommit();
+  }
+  if (!committed) {
+    errors.push({
+      code: "KV_WRITE_FAILED",
+      message:
+        "The commit was written but could not be verified in OnyxBase yet (instance read lag). If retrieve_workspace reports problems, run push_workspace again.",
+    });
+  }
+
+  // 9. GC — remove managed chunks no longer referenced by the new manifest
+  //    (including orphans left behind by earlier broken snapshots — PRD §11).
   stage("cleanup", "Cleaning up obsolete records…");
   let removedFiles = 0;
-  if (oldManifest) {
-    const referenced = new Set<string>([
-      ...mChunks.map((_, i) => manifestChunkKey(sha8(manifestSha), i)),
-    ]);
+  if (!opts.skipGc) {
+    const referenced = new Set<string>(manifestRecordKeys);
     for (const f of manifest.files) {
       for (let i = 0; i < f.chunkCount; i++) {
         referenced.add(fileChunkKey(f.fileId, sha8(f.sha256), i));
@@ -635,18 +814,22 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     try {
       const allKeys = await kv.listKeys(`${NS}:`);
       const obsolete = allKeys.filter((k) => isManagedChunkKey(k) && !referenced.has(k));
-      await pool(obsolete, KV_CONCURRENCY, async (k) => {
-        try {
-          await kv.delete(k);
-        } catch {
-          /* best-effort cleanup */
-        }
-      });
+      if (obsolete.length > 0) {
+        await pool(obsolete, KV_CONCURRENCY, async (k) => {
+          try {
+            await kv.delete(k);
+          } catch {
+            /* best-effort cleanup */
+          }
+        });
+      }
       // Files present in the old manifest but absent now were removed from
       // the cloud representation — count for the report.
-      removedFiles = oldManifest.files.filter(
-        (f) => !manifest.files.some((nf) => nf.path === f.path),
-      ).length;
+      removedFiles = oldManifest
+        ? oldManifest.files.filter(
+            (f) => !manifest.files.some((nf) => nf.path === f.path),
+          ).length
+        : 0;
     } catch {
       /* GC is best-effort */
     }
@@ -694,9 +877,17 @@ export async function retrieveWorkspace(
   };
 
   stage("checking", "Retrieving workspace…");
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let pointer: WorkspacePointer | null = null;
   try {
     pointer = await readPointer(kv);
+    if (!pointer) {
+      // Cheap guard against stale-negative reads — a fresh write can be
+      // invisible to the serving instance for a while (cold-start rehydrate
+      // converges). One short settle + re-read before concluding "empty".
+      await settle(2000);
+      pointer = await readPointer(kv);
+    }
   } catch (e) {
     base.errors.push({
       code: e instanceof OnyxBaseError ? e.code : "KV_READ_FAILED",
@@ -713,6 +904,17 @@ export async function retrieveWorkspace(
   let manifest: WorkspaceManifest | null = null;
   try {
     manifest = await readManifest(kv, pointer);
+    if (!manifest) {
+      // Missing manifest records are often instance read lag, not loss —
+      // retry across growing settle rounds before declaring corruption.
+      // (Convergence is cold-start rehydrate; worst case can exceed 20s.)
+      for (const ms of [3000, 6000, 12000]) {
+        stage("checking", "Waiting for cloud records to converge…");
+        await settle(ms);
+        manifest = await readManifest(kv, pointer);
+        if (manifest) break;
+      }
+    }
   } catch (e) {
     base.errors.push({
       code: e instanceof OnyxBaseError ? e.code : "KV_READ_FAILED",
@@ -722,10 +924,14 @@ export async function retrieveWorkspace(
     return base;
   }
   if (!manifest) {
+    // The pointer EXISTS but its manifest payload is unreadable — this is a
+    // CORRUPT snapshot (e.g. a manifest record lost durability on OnyxBase's
+    // multi-instance backend), NOT an empty cloud. Report it precisely so the
+    // user isn't told "nothing is saved" when records are actually there.
     base.errors.push({
-      code: "WORKSPACE_NOT_FOUND",
+      code: "CHECKSUM_MISMATCH",
       message:
-        "The stored workspace manifest is incomplete (a manifest chunk record is missing in cloud). Run push_workspace to re-commit the snapshot, then retrieve again.",
+        "The cloud snapshot is incomplete — the manifest referenced by the committed pointer is missing records in OnyxBase (records may still be propagating across instances, or were lost). Wait ~1 minute and retry retrieve_workspace; if it persists, run push_workspace to re-commit a fresh snapshot.",
     });
     base.durationMs = Date.now() - t0;
     return base;
@@ -830,26 +1036,33 @@ export async function retrieveWorkspace(
     absorb(await downloadFile(f), f);
   }
 
-  // Second pass for cross-instance propagation lag (bounded to one round).
+  // Extra passes for cross-instance propagation lag (bounded, growing
+  // waits) — a chunk that 404s now may simply be invisible to the serving
+  // instance; only a persistent miss after all passes is a real gap.
   if (missingChunkFiles.length > 0) {
-    stage("retrieving", `Re-checking ${missingChunkFiles.length} lagging file(s)…`);
-    await new Promise((r) => setTimeout(r, 2000));
-    const stillMissing: WorkspaceFileMeta[] = [];
-    for (const f of missingChunkFiles) {
-      if (opts.signal?.aborted) {
-        stillMissing.push(f);
-        continue;
+    let pending = missingChunkFiles;
+    for (const waitMs of [3000, 6000, 12000]) {
+      if (pending.length === 0 || opts.signal?.aborted) break;
+      stage("retrieving", `Re-checking ${pending.length} lagging file(s)…`);
+      await settle(waitMs);
+      const next: WorkspaceFileMeta[] = [];
+      for (const f of pending) {
+        if (opts.signal?.aborted) {
+          next.push(f);
+          continue;
+        }
+        const r = await downloadFile(f);
+        if (r.ok) {
+          absorb(r, f);
+        } else if (r.kind === "missing_chunk") {
+          next.push(f);
+        } else {
+          absorb(r, f);
+        }
       }
-      const r = await downloadFile(f);
-      if (r.ok) {
-        absorb(r, f);
-      } else if (r.kind === "missing_chunk") {
-        stillMissing.push(f);
-      } else {
-        absorb(r, f);
-      }
+      pending = next;
     }
-    for (const f of stillMissing) {
+    for (const f of pending) {
       errors.push({
         path: f.path,
         code: "KV_READ_FAILED",

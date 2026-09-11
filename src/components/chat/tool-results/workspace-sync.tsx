@@ -112,6 +112,8 @@ function friendlyError(code: string | undefined, message: string | undefined): s
       return "Couldn't reach OnyxBase. It may be down — try again shortly.";
     case "WORKSPACE_NOT_FOUND":
       return "No persistent workspace is saved in the cloud yet.";
+    case "CHECKSUM_MISMATCH":
+      return "The cloud snapshot is incomplete — wait ~1 minute and retry the restore; if it persists, run push_workspace to re-commit it.";
     case "E2B_UNAVAILABLE":
       return "The E2B sandbox isn't available right now.";
     default:
