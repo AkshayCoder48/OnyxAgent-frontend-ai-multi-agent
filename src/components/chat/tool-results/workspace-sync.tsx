@@ -39,6 +39,8 @@ interface WsSyncResult {
   restoredFiles?: number;
   downloadedBytes?: number;
   integrityVerified?: boolean;
+  degraded?: boolean;
+  salvage?: { salvagedFiles?: number; salvagedBytes?: number; salvagedPaths?: string[]; unrecoverableGroups?: number };
   cloud?: { totalFiles?: number; totalBytes?: number; updatedAt?: string; generation?: number };
   skippedFiles?: Array<{ path?: string; reason?: string }>;
   errors?: Array<{ path?: string; code?: string; message?: string }>;
@@ -112,8 +114,14 @@ function friendlyError(code: string | undefined, message: string | undefined): s
       return "Couldn't reach OnyxBase. It may be down — try again shortly.";
     case "WORKSPACE_NOT_FOUND":
       return "No persistent workspace is saved in the cloud yet.";
+    case "EMPTY_PUSH_BLOCKED":
+      return "Push refused — the sandbox is empty while the cloud still holds files. Restoring first; nothing was deleted.";
     case "CHECKSUM_MISMATCH":
-      return "The cloud snapshot is incomplete — wait ~1 minute and retry the restore; if it persists, run push_workspace to re-commit it.";
+      // The engine crafts a detailed, honest salvage-aware message — surface it.
+      return (
+        message ??
+        "Parts of the cloud snapshot were lost by OnyxBase. Whatever could be verified was salvaged; nothing was deleted."
+      );
     case "E2B_UNAVAILABLE":
       return "The E2B sandbox isn't available right now.";
     default:
@@ -211,7 +219,9 @@ export function WorkspaceSyncResult({ toolCall }: { toolCall: ToolCall }) {
             : status === "partial"
               ? isPush
                 ? "Workspace partially synced"
-                : "Workspace partially restored"
+                : parsed?.salvage
+                  ? "Snapshot salvaged"
+                  : "Workspace partially restored"
               : isPush
                 ? "Workspace Synced"
                 : "Workspace Restored";
@@ -327,11 +337,25 @@ export function WorkspaceSyncResult({ toolCall }: { toolCall: ToolCall }) {
               {parsed.restoredFiles ?? 0} files restored
             </StatRow>
             <StatRow icon={CloudDownload}>
-              {formatBytes(parsed.downloadedBytes)} downloaded
+              {formatBytes(
+                (parsed.downloadedBytes ?? 0) + (parsed.salvage?.salvagedBytes ?? 0),
+              )}{" "}
+              downloaded
             </StatRow>
             <StatRow icon={ShieldCheck}>
               {parsed.integrityVerified ? "Integrity verified" : "Integrity issues detected"}
             </StatRow>
+            {parsed.degraded && (
+              <StatRow icon={RefreshCw} tone="warn">
+                Rebuilt from per-file records (manifest was lost)
+              </StatRow>
+            )}
+            {parsed.salvage && (parsed.salvage.salvagedFiles ?? 0) > 0 && (
+              <StatRow icon={CloudDownload} tone="warn">
+                {parsed.salvage.salvagedFiles} file(s) salvaged to .onyx-salvage/ —{" "}
+                {parsed.salvage.unrecoverableGroups ?? 0} group(s) not recoverable
+              </StatRow>
+            )}
             {skipped.length > 0 && (
               <StatRow icon={Minus} tone="warn">
                 {skipped.length} file{skipped.length === 1 ? "" : "s"} skipped —{" "}

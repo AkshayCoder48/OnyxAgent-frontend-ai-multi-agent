@@ -85,13 +85,18 @@ async function stampLastSynced(userId: string): Promise<void> {
 
 registerTool(
   "push_workspace",
-  "Synchronize the COMPLETE current E2B workspace to the user's persistent OnyxBase KV cloud workspace (id: workspace_default). This is a SYNCHRONIZATION, not a new backup — it overwrites the cloud state to exactly match the current workspace. Files larger than 50 MB, secrets (.env, private keys), and generated directories (node_modules, .git, .next…) are skipped automatically. Unchanged files are detected by SHA-256 and reused. Call this after every meaningful task that modifies workspace files. No arguments needed — the workspace is discovered automatically.",
+  "Synchronize the COMPLETE current E2B workspace to the user's persistent OnyxBase KV cloud workspace (id: workspace_default). This is a SYNCHRONIZATION, not a new backup — it overwrites the cloud state to exactly match the current workspace. Files larger than 50 MB, secrets (.env, private keys), and generated directories (node_modules, .git, .next…) are skipped automatically. Unchanged files are detected by SHA-256 and reused. SAFETY: if the sandbox has NO syncable files while the cloud still holds files, the push is REFUSED (EMPTY_PUSH_BLOCKED) — restore/salvage first; pass force=true ONLY when the user explicitly confirms they want to wipe the cloud state. Call this after every meaningful task that modifies workspace files. No arguments needed — the workspace is discovered automatically.",
   {
     type: "object",
     properties: {
       reason: {
         type: "string",
         description: "Optional short note about why this sync is running (for the sync log).",
+      },
+      force: {
+        type: "boolean",
+        description:
+          "Allow overwriting a non-empty cloud snapshot with an empty workspace. Default false — the push is refused otherwise. Use ONLY with the user's explicit confirmation.",
       },
     },
     additionalProperties: false,
@@ -125,6 +130,7 @@ registerTool(
         kv: ob.kv,
         onStage: progressPipe(ctx),
         signal: ctx.signal,
+        force: _args.force === true,
       });
       if (result.ok) await stampLastSynced(ob.userId);
       return result;
@@ -160,7 +166,7 @@ registerTool(
 
 registerTool(
   "retrieve_workspace",
-  "Retrieve the user's persistent workspace from OnyxBase KV and restore it into the current E2B workspace (existing files are overwritten by the cloud copy; SHA-256 integrity is verified per file). Use mode 'restore' (default) to actually restore files, or mode 'check' to only report whether a cloud workspace exists. When a fresh E2B environment starts and a persistent workspace may exist, call this BEFORE workspace-dependent work.",
+  "Retrieve the user's persistent workspace from OnyxBase KV and restore it into the current E2B workspace (existing files are overwritten by the cloud copy; SHA-256 integrity is verified per file). Use mode 'restore' (default) to actually restore files, or mode 'check' to only report whether a cloud workspace exists. If the cloud snapshot's manifest was lost, this tool degrades gracefully: it rebuilds the file list from per-file records, or SALVAGES whatever files can be checksum-verified from surviving chunks into .onyx-salvage/ — it never deletes anything and never requires a re-push. When a fresh E2B environment starts and a persistent workspace may exist, call this BEFORE workspace-dependent work.",
   {
     type: "object",
     properties: {

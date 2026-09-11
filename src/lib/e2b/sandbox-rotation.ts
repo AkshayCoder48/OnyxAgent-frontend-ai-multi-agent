@@ -124,13 +124,28 @@ async function runAutoRestore(apiKey: string): Promise<void> {
             : `${Math.max(1, Math.round(result.downloadedBytes / 1024))} KB`
         } from OnyxBase`,
       });
+    } else if (result.status === "partial" && result.salvage) {
+      // Corrupt snapshot that salvage mode partially recovered — say so
+      // honestly instead of silence; the sync card has the full detail.
+      toast.warning("Cloud snapshot partially recovered", {
+        description:
+          `OnyxBase lost part of the snapshot. ${result.salvage.salvagedFiles} file(s) ` +
+          "salvaged to .onyx-salvage/ — see the restore card for details.",
+      });
     } else if (result.status === "partial") {
       toast.warning("Cloud workspace partially restored", {
         description: `${result.restoredFiles} files restored — some were skipped.`,
       });
+    } else if (result.status === "error") {
+      // Surface full failures too — silence made users believe their data
+      // would come back "in a minute" when it actually needed attention.
+      toast.error("Cloud workspace restore failed", {
+        description:
+          result.errors[0]?.code === "CHECKSUM_MISMATCH"
+            ? "OnyxBase lost part of the snapshot — nothing was deleted. Ask Onyx to run retrieve_workspace for a salvage report."
+            : (result.errors[0]?.message ?? "See the workspace sync card for details."),
+      });
     }
-    // full failure: stay quiet here; the agent's own retrieve call will
-    // surface the error through the tool UI.
   } catch {
     /* best-effort — never break tool execution */
   }

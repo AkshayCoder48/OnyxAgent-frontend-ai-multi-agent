@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "value": {
+    "v": 1,
+    "workspaceId": "workspace_default",
+    "generation": 1,
+    "updatedAt": "2026-09-11T10:02:06.196Z",
+    "totalFiles": 10,
+    "totalBytes": 176598,
+    "manifestSha256": "d8c639bb1bbb1748d2936fea4a34158ee2455b19653218a5f99039813f5e81a1",
+    "manifestChunks": 1
+  },
+  "type": "object",
+  "collection": "onyxagent",
+  "updatedAt": "2026-09-11T11:17:10.949Z"
+}

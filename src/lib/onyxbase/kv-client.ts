@@ -45,7 +45,10 @@ export type OnyxBaseErrorCode =
   | "CHECKSUM_MISMATCH"
   | "FILE_TOO_LARGE"
   | "SERIALIZATION_FAILED"
-  | "RESTORE_FAILED";
+  | "RESTORE_FAILED"
+  /** Push from an (near-)empty sandbox that would wipe a non-empty cloud
+   *  workspace — refused unless the user explicitly passes force. */
+  | "EMPTY_PUSH_BLOCKED";
 
 export class OnyxBaseError extends Error {
   code: OnyxBaseErrorCode;
