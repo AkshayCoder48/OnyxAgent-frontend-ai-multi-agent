@@ -1194,6 +1194,76 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
   }
   result.running = runningTaskIds.size;
 
+  // 2.5 RUN RECOVERY — E2B is the source of truth for LIVE scheduled
+  //     sandboxes. A stranded run-record save must never orphan a run (the
+  //     live sandbox with its finished state would be lost — observed live:
+  //     a completed run stuck "pending" because its status saves never
+  //     mirrored). List scheduled-tagged sandboxes; any one WITHOUT a live
+  //     run record (or with an already-terminal record) gets recovered:
+  //     e2bRunId resolved from the sandbox's bg-state pointer, then
+  //     finalized through the normal path.
+  try {
+    const apiKey = e2bKey();
+    if (apiKey) {
+      const paginator = Sandbox.list({ apiKey, limit: 50 });
+      const page = await paginator.nextItems();
+      const scheduled = page.filter((s) => {
+        const m = (s as { metadata?: Record<string, string> }).metadata;
+        return !!m && typeof m === "object" && "onyx-scheduled" in m;
+      });
+      for (const sb of scheduled) {
+        const meta = (sb as { metadata?: Record<string, string> }).metadata ?? {};
+        const taskId = String(meta["onyx-scheduled"] ?? "");
+        if (!taskId) continue;
+        // Known live run for this sandbox? (record-based tracking above)
+        const task = tasks.find((t) => t.id === taskId) ?? (await loadTaskById(kv, taskId));
+        if (!task) continue;
+        const runs = await loadRuns(kv, taskId);
+        const existing = runs.find((r) => r.sandboxId === sb.sandboxId);
+        if (existing && (existing.status === "running" || existing.status === "pending")) {
+          continue; // handled by the loop above
+        }
+        if (existing) {
+          continue; // already terminal — never re-finalize
+        }
+        const rawStart = (sb as unknown as { startedAt?: string | Date }).startedAt;
+        const startedAt =
+          rawStart instanceof Date
+            ? rawStart.toISOString()
+            : typeof rawStart === "string"
+              ? rawStart
+              : new Date().toISOString();
+        const recovered: ScheduledTaskRun = {
+          id: runIdFor(taskId, Date.parse(startedAt) || Date.now()),
+          taskId,
+          scheduledFor: Date.parse(startedAt) || Date.now(),
+          startedAt,
+          completedAt: null,
+          status: "running",
+          trigger: "schedule",
+          sandboxId: sb.sandboxId,
+          e2bRunId: null,
+          result: null,
+          error: null,
+          durationMs: null,
+          filesChanged: [],
+          toolCalls: 0,
+          logs: ["[recovery] live scheduled sandbox without a run record — recovered"],
+          unreachableChecks: 0,
+        };
+        finalChecks++;
+        try {
+          const done = await finalizeRun(kv, task, recovered);
+          if (done) result.finalized++;
+        } catch (e) {
+          result.errors.push(`recover ${taskId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  } catch {
+    /* recovery best-effort */
+  }
+
   // 2. Fire due tasks (at most ONE new launch per tick; global concurrency cap).
   const freshTasks = await loadTasks(kv); // re-load (finalize updates them)
   let newRuns = 0;
