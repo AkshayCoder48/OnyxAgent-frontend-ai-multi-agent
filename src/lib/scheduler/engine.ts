@@ -180,21 +180,27 @@ function latestVersionPerTask(entries: TaskVersionEntry[]): Map<string, TaskVers
 async function readTask(kv: SchedulerKV, id: string): Promise<ScheduledTask | null> {
   const keys = await listKeysRobust(kv, "schedule:tv:");
   const entries = parseVersionKeys(keys).filter((e) => e.id === id);
-  if (entries.length === 0) return null;
-  const latest = latestVersionPerTask(entries).get(id);
-  if (!latest || latest.tombstoned) return null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const raw = await kv.get(taskVersionKey(id, latest.version));
-      if (raw) {
-        const parsed = JSON.parse(raw) as ScheduledTask;
-        if (parsed && parsed.id === id) return parsed;
-        return null;
+  const latest = entries.length ? latestVersionPerTask(entries).get(id) ?? null : null;
+  if (latest && latest.tombstoned) return null;
+  const keysToTry: string[] = latest?.version
+    ? [taskVersionKey(id, latest.version)]
+    : // Legacy fallback (pre-versioned records) — mutable keys.
+      [taskKey(id), taskReplicaKey(id), taskVersionKey(id, "del")];
+  for (const key of keysToTry) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const raw = await kv.get(key);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { id?: string; deleted?: boolean };
+          if (parsed && parsed.deleted) return null;
+          if (parsed && parsed.id === id) return parsed as unknown as ScheduledTask;
+          return null;
+        }
+      } catch {
+        /* retry */
       }
-    } catch {
-      /* retry */
+      if (attempt < 1) await new Promise((r) => setTimeout(r, 1000));
     }
-    if (attempt < 1) await new Promise((r) => setTimeout(r, 1000));
   }
   return null;
 }
@@ -272,10 +278,26 @@ export async function loadTasks(kv: SchedulerKV): Promise<ScheduledTask[]> {
   const latest = latestVersionPerTask(parseVersionKeys(keys));
   const out: ScheduledTask[] = [];
   const jobs: Array<[string, TaskVersionEntry]> = [];
+  const versionedIds = new Set<string>();
   for (const [id, entry] of latest) {
+    versionedIds.add(id);
     if (entry.tombstoned) continue;
     jobs.push([id, entry]);
   }
+  // LEGACY MIGRATION — tasks written before the versioned format live at
+  // schedule:task:<id> / schedule:taskr:<id> (mutable keys). Read them as a
+  // fallback; the next mutation upgrades them to version records.
+  const legacyIds = new Set<string>();
+  for (const k of keys) {
+    if (k.startsWith("schedule:task:")) {
+      const id = k.slice("schedule:task:".length);
+      if (id && !versionedIds.has(id) && !id.includes(":")) legacyIds.add(id);
+    } else if (k.startsWith("schedule:taskr:")) {
+      const id = k.slice("schedule:taskr:".length);
+      if (id && !versionedIds.has(id) && !id.includes(":")) legacyIds.add(id);
+    }
+  }
+  for (const id of legacyIds) jobs.push([id, { id, version: "", tombstoned: false }]);
   if (jobs.length === 0) return [];
   let next = 0;
   const workers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
@@ -284,9 +306,13 @@ export async function loadTasks(kv: SchedulerKV): Promise<ScheduledTask[]> {
       const job = jobs[i];
       if (!job || i >= jobs.length) return;
       const [id, entry] = job;
+      const keysToTry = entry.version
+        ? [taskVersionKey(id, entry.version)]
+        : [taskKey(id), taskReplicaKey(id)];
+      for (const key of keysToTry) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const raw = await kv.get(taskVersionKey(id, entry.version));
+          const raw = await kv.get(key);
           if (raw) {
             const parsed = JSON.parse(raw) as ScheduledTask;
             if (parsed && parsed.id === id) {
@@ -299,6 +325,7 @@ export async function loadTasks(kv: SchedulerKV): Promise<ScheduledTask[]> {
           /* retry */
         }
         if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
+      }
       }
     }
   });
