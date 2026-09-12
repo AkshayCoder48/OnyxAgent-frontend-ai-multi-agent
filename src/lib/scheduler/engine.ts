@@ -309,23 +309,26 @@ export async function loadTasks(kv: SchedulerKV): Promise<ScheduledTask[]> {
       const keysToTry = entry.version
         ? [taskVersionKey(id, entry.version)]
         : [taskKey(id), taskReplicaKey(id)];
+      let resolved = false;
       for (const key of keysToTry) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const raw = await kv.get(key);
-          if (raw) {
-            const parsed = JSON.parse(raw) as ScheduledTask;
-            if (parsed && parsed.id === id) {
-              out.push(parsed);
+        if (resolved) break;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const raw = await kv.get(key);
+            if (raw) {
+              const parsed = JSON.parse(raw) as ScheduledTask;
+              if (parsed && parsed.id === id) {
+                out.push(parsed);
+                resolved = true;
+              }
+              resolved = true;
               break;
             }
-            break;
+          } catch {
+            /* retry */
           }
-        } catch {
-          /* retry */
+          if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
         }
-        if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
-      }
       }
     }
   });
