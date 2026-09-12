@@ -13,6 +13,7 @@ import { useChatSidebarStore } from "@/stores";
 import {
   Archive,
   ArchiveRestore,
+  CalendarClock,
   ChevronLeft,
   ChevronRight,
   MessageSquare,
@@ -25,6 +26,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { Conversation } from "@/types";
+import { ROUTES } from "@/lib/constants";
 import { ShareDialog } from "./share-dialog";
 
 /* ---------------------------------------------------------------------------
@@ -251,6 +253,8 @@ function ConversationList({
   onLoadMore,
 }: ConversationListProps) {
   const t = useTranslations("chat");
+  const ts = useTranslations("scheduled");
+  const router = useRouter();
   const [view, setView] = useState<ConversationView>("active");
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -295,6 +299,27 @@ function ConversationList({
           <kbd className="text-primary-foreground/70 font-mono text-[10px] tracking-wider">
             ⌘N
           </kbd>
+        </button>
+      </div>
+
+      {/* Scheduled Tasks — the automation entry, directly below the New
+          conversation button (same visual weight as the history rows below).
+          Present in the expanded sidebar AND the mobile Sheet (both render
+          this list); the collapsed rail gets an icon-only twin. */}
+      <div className="px-3 pb-2">
+        <button
+          type="button"
+          onClick={() => {
+            router.push(ROUTES.SCHEDULED_TASKS);
+            onNavigate?.();
+          }}
+          className="border-transparent text-foreground/70 hover:bg-foreground/5 hover:text-foreground group relative flex min-h-[40px] w-full cursor-pointer items-center gap-2.5 rounded-xl border px-3 py-2 text-sm transition-all"
+        >
+          <CalendarClock
+            className="text-foreground/40 h-4 w-4 shrink-0"
+            aria-hidden
+          />
+          <span className="min-w-0 flex-1 truncate text-left">{ts("navLabel")}</span>
         </button>
       </div>
 
@@ -520,6 +545,17 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
           aria-label="New chat"
         >
           <SquarePen className="h-4 w-4" aria-hidden />
+        </Button>
+        {/* Scheduled Tasks — icon-only twin for the collapsed rail. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-10 w-10 p-0"
+          onClick={() => router.push(ROUTES.SCHEDULED_TASKS)}
+          title="Scheduled Tasks"
+          aria-label="Scheduled Tasks"
+        >
+          <CalendarClock className="h-4 w-4" aria-hidden />
         </Button>
       </div>
     );

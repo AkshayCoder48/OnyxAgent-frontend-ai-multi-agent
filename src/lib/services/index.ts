@@ -1371,6 +1371,63 @@ export const settingsService = {
     }
   },
 
+  /** Store (or clear) the Telegram bot token, encrypted with the user's
+   *  vault key — `extra.telegram_bot_token_encrypted`. A SECOND copy lives
+   *  server-side in OnyxBase KV (schedule:telegram) for unattended scheduled
+   *  runs; this vault copy powers the in-browser telegram tools. Never
+   *  decrypted into prompts/tool args/results. */
+  async setTelegramBotToken(userId: string, token: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    if (token && !isVaultUnlocked()) {
+      const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+      await restoreVaultFromSession();
+    }
+    const encrypted = token ? await vaultEncrypt(token) : null;
+    const extra = { ...(row.extra ?? {}), telegram_bot_token_encrypted: encrypted };
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
+  /** Decrypt + return the Telegram bot token, or null. Restores the vault
+   *  from session when locked (same pattern as the OnyxBase key). */
+  async getDecryptedTelegramBotToken(userId: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return null;
+    const encrypted = row.extra?.telegram_bot_token_encrypted;
+    if (typeof encrypted !== "string" || !encrypted) return null;
+    try {
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
+      return await vaultDecrypt(encrypted);
+    } catch {
+      return null;
+    }
+  },
+
+  /** The connected Telegram chat id (NOT a secret — display-safe). */
+  async getTelegramChatId(userId: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    return (row?.extra?.telegram_chat_id as string | undefined) ?? null;
+  },
+
+  /** Store the connected Telegram chat id (plain — ids are not secrets). */
+  async setTelegramChatId(userId: string, chatId: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    const extra = { ...(row.extra ?? {}), telegram_chat_id: chatId };
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
   /** Store (or clear, when key is null) the LangSearch web-search API key,
    *  encrypted with the user's vault key. Stored under
    *  `extra.langsearch_api_key_encrypted` so we don't need a schema migration.

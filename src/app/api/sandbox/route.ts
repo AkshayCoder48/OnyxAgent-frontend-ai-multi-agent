@@ -116,7 +116,7 @@ interface CacheEntry {
  *  compressed 47-tool compendium; stale /home/user/agent.md is purged.
  *  Version 4 = cloud workspace persistence — push_workspace +
  *  retrieve_workspace tools + the persistent-workspace policy (49 tools). */
-const AGENT_MD_VERSION = 4;
+const AGENT_MD_VERSION = 5;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -230,13 +230,16 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     for (const [, entry] of sharedCache) localIds.add(entry.sandbox.sandboxId);
     for (const [, entry] of separateCache) localIds.add(entry.sandbox.sandboxId);
     // SINGLE-SANDBOX RULE: kill ALL running sandboxes that aren't in our
-    // local cache. Previously we kept the 3 most recent (headroom for
-    // multi-tab users), but with the E2B-as-source-of-truth architecture
-    // we enforce ONE sandbox per API key. Files are backed up before
-    // rotation, so killing orphans doesn't lose data — the next operation
-    // just creates a fresh sandbox.
+    // local cache — EXCEPT scheduled-task run sandboxes (metadata tag
+    // "onyx-scheduled", launched by /api/scheduler): those are isolated
+    // agent jobs that must survive interactive rotation.
     const toKill = page
-      .filter((s) => (s.state as string) !== "closed" && !localIds.has(s.sandboxId))
+      .filter(
+        (s) =>
+          (s.state as string) !== "closed" &&
+          !localIds.has(s.sandboxId) &&
+          !isScheduledSandbox(s),
+      )
       .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
     await Promise.all(
       toKill.map((s) =>
@@ -248,6 +251,23 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     }
   } catch {
     // best-effort — don't fail the operation if listing/killing fails.
+  }
+}
+
+/** Scheduled-task run sandboxes are tagged with metadata at creation
+ *  (see /api/scheduler engine fireRun) — the interactive single-sandbox
+ *  rotation must NEVER kill them. */
+function isScheduledSandbox(s: {
+  sandboxId: string;
+  metadata?: Record<string, string> | { [key: string]: string } | string | null;
+}): boolean {
+  const m = s.metadata as Record<string, string> | string | null | undefined;
+  if (!m) return false;
+  try {
+    const obj = typeof m === "string" ? (JSON.parse(m) as Record<string, string>) : m;
+    return !!obj && typeof obj === "object" && "onyx-scheduled" in obj;
+  } catch {
+    return false;
   }
 }
 
@@ -272,7 +292,7 @@ async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
   try {
     const paginator = Sandbox.list({ apiKey, limit: 50 });
     const page = await paginator.nextItems();
-    const running = page.filter((s) => (s.state as string) !== "closed");
+    const running = page.filter((s) => (s.state as string) !== "closed" && !isScheduledSandbox(s));
     await Promise.all(
       running.map((s) =>
         Sandbox.kill(s.sandboxId, { apiKey }).catch(() => {}),

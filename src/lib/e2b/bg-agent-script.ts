@@ -1907,7 +1907,156 @@ const TOOLS = [
       };
     },
   },
+  // ── Telegram (native — works in unattended scheduled runs) ────────────
+  // Credentials come from state.telegram (injected at launch by the browser
+  // or the scheduler) — NEVER from tool arguments, so the model never sees
+  // the bot token.
+  {
+    name: "telegram_send_message",
+    description: "Send a text message to the user's Telegram (their connected chat). Supports Telegram HTML entities (<b>, <i>, <code>). Use for delivering results, summaries, alerts, and scheduled-task reports directly to the user.",
+    parameters: { type: "object", properties: { text: { type: "string", description: "Message text (Telegram HTML allowed)" }, chat_id: { type: "string", description: "Optional override chat id — default is the user's connected chat" } }, required: ["text"] },
+    run: async (args) => {
+      const tg = await getTelegram();
+      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session. Tell the user to connect one in Settings → Integrations → Telegram." };
+      const chatId = String(args.chat_id || tg.chatId);
+      if (!String(args.text ?? "").trim()) return { error: "text must be non-empty" };
+      const r = await tgApi(tg.botToken, "sendMessage", { chat_id: chatId, text: String(args.text).slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true });
+      if (!r.ok) return { error: "Telegram sendMessage failed: " + (r.description || "unknown") };
+      return { success: true, chat_id: chatId, length: String(args.text).length };
+    },
+  },
+  {
+    name: "telegram_send_document",
+    description: "Send a FILE from the workspace to the user's Telegram as a document (reports, data files, exports). Reads the file from the sandbox filesystem.",
+    parameters: { type: "object", properties: { path: { type: "string", description: "Workspace-relative file path to send" }, caption: { type: "string", description: "Optional caption (max 1000 chars)" }, chat_id: { type: "string", description: "Optional override chat id" } }, required: ["path"] },
+    run: async (args) => {
+      const tg = await getTelegram();
+      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
+      const p = safePath(args.path);
+      if (!p) return { error: "Invalid path" };
+      let content;
+      try { content = await fs.readFile(p); } catch (e) { return { error: "Failed to read file: " + friendlyErr(e) }; }
+      if (content.length > 45 * 1024 * 1024) return { error: "File too large for Telegram (45 MB limit)" };
+      const chatId = String(args.chat_id || tg.chatId);
+      const form = new FormData();
+      form.append("chat_id", chatId);
+      form.append("caption", String(args.caption ?? "").slice(0, 1000));
+      const fname = path.basename(p).replace(/[^\w.\-]/g, "_") || "document";
+      form.append("document", new Blob([content]), fname);
+      const r = await tgForm(tg.botToken, "sendDocument", form);
+      if (!r.ok) return { error: "Telegram sendDocument failed: " + (r.description || "unknown") };
+      return { success: true, chat_id: chatId, file: fname, size: content.length };
+    },
+  },
+  {
+    name: "telegram_send_photo",
+    description: "Send a photo to the user's Telegram — either an image file from the workspace or a public image URL.",
+    parameters: { type: "object", properties: { path: { type: "string", description: "Workspace-relative image path (alternative to url)" }, url: { type: "string", description: "Public image URL (alternative to path)" }, caption: { type: "string" }, chat_id: { type: "string", description: "Optional override chat id" } }, required: [] },
+    run: async (args) => {
+      const tg = await getTelegram();
+      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
+      const chatId = String(args.chat_id || tg.chatId);
+      let form;
+      if (args.path) {
+        const p = safePath(args.path);
+        if (!p) return { error: "Invalid path" };
+        let content;
+        try { content = await fs.readFile(p); } catch (e) { return { error: "Failed to read file: " + friendlyErr(e) }; }
+        if (content.length > 9 * 1024 * 1024) return { error: "Photo too large for Telegram (10 MB limit)" };
+        form = new FormData();
+        form.append("chat_id", chatId);
+        form.append("caption", String(args.caption ?? "").slice(0, 1000));
+        form.append("photo", new Blob([content]), path.basename(p).replace(/[^\w.\-]/g, "_") || "photo.jpg");
+        const r = await tgForm(tg.botToken, "sendPhoto", form);
+        if (!r.ok) return { error: "Telegram sendPhoto failed: " + (r.description || "unknown") };
+        return { success: true, chat_id: chatId, source: "file" };
+      }
+      if (args.url) {
+        const r = await tgApi(tg.botToken, "sendPhoto", { chat_id: chatId, photo: String(args.url), caption: String(args.caption ?? "").slice(0, 1000) });
+        if (!r.ok) return { error: "Telegram sendPhoto failed: " + (r.description || "unknown") };
+        return { success: true, chat_id: chatId, source: "url" };
+      }
+      return { error: "Provide either path (workspace image) or url (public image URL)" };
+    },
+  },
+  {
+    name: "telegram_get_updates",
+    description: "Fetch recent messages received by the Telegram bot (what the user sent to it). Useful for reading replies or commands the user sent via Telegram.",
+    parameters: { type: "object", properties: { limit: { type: "number", description: "Max updates to return (default 10)" } }, required: [] },
+    run: async (args) => {
+      const tg = await getTelegram();
+      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
+      const r = await tgApi(tg.botToken, "getUpdates", { limit: Math.min(50, Math.max(1, Number(args.limit) || 10)) });
+      if (!r.ok) return { error: "Telegram getUpdates failed: " + (r.description || "unknown") };
+      const updates = (r.result || []).map((u) => ({
+        update_id: u.update_id,
+        chat_id: u.message && u.message.chat ? String(u.message.chat.id) : null,
+        from: u.message && u.message.from ? (u.message.from.first_name || u.message.from.username || "unknown") : null,
+        text: u.message && u.message.text ? u.message.text : null,
+        date: u.message && u.message.date ? u.message.date : null,
+      }));
+      return { success: true, updates: updates.slice(0, Math.max(1, Number(args.limit) || 10)) };
+    },
+  },
+  {
+    name: "telegram_get_chat",
+    description: "Get information about a Telegram chat by id (type, name, username).",
+    parameters: { type: "object", properties: { chat_id: { type: "string", description: "Chat id to inspect — default is the user's connected chat" } }, required: [] },
+    run: async (args) => {
+      const tg = await getTelegram();
+      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
+      const chatId = String(args.chat_id || tg.chatId);
+      const r = await tgApi(tg.botToken, "getChat", { chat_id: chatId });
+      if (!r.ok) return { error: "Telegram getChat failed: " + (r.description || "unknown") };
+      const c = r.result || {};
+      return { success: true, chat: { id: String(c.id), type: c.type, title: c.title || null, username: c.username || null, first_name: c.first_name || null } };
+    },
+  },
 ];
+
+// ── Telegram helpers (native tools) ───────────────────────────────────────
+// Credentials live in state.telegram — injected at launch (browser vault or
+// the scheduler). NEVER accepted through tool arguments.
+let TELEGRAM_CFG = null;
+
+async function getTelegram() {
+  if (TELEGRAM_CFG) return TELEGRAM_CFG;
+  try {
+    const st = await readState();
+    if (st.telegram && st.telegram.botToken) {
+      TELEGRAM_CFG = st.telegram;
+      return TELEGRAM_CFG;
+    }
+  } catch {}
+  return null;
+}
+
+async function tgApi(botToken, method, body) {
+  try {
+    const res = await fetch("https://api.telegram.org/bot" + botToken + "/" + method, {
+      method: body ? "POST" : "GET",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json();
+    return { ok: !!data.ok, result: data.result, description: data.description };
+  } catch (e) {
+    return { ok: false, description: String(e && e.message ? e.message : e) };
+  }
+}
+
+async function tgForm(botToken, method, form) {
+  try {
+    const res = await fetch("https://api.telegram.org/bot" + botToken + "/" + method, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    return { ok: !!data.ok, result: data.result, description: data.description };
+  } catch (e) {
+    return { ok: false, description: String(e && e.message ? e.message : e) };
+  }
+}
 
 // MERGE NOTE (tool-count cap): the manage_todos alias push was removed —
 // the in-browser registry no longer registers manage_todos (it was an exact

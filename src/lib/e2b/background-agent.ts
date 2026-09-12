@@ -111,6 +111,13 @@ export interface BgTurnOptions {
     description: string;
     parameters: Record<string, unknown>;
   }>;
+  /** Telegram credentials (resolved from the vault at launch) — the runner's
+   * NATIVE telegram_* tools use them inside the sandbox. Never in tool
+   * arguments or prompts. */
+  telegram?: {
+    botToken: string;
+    chatId: string;
+  };
 }
 
 const JOBS_KEY = "onyx-bg-jobs";
@@ -206,6 +213,8 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     // sandbox implementation). The runner exposes these to the LLM as bridged
     // tools executed back in the browser.
     ...(opts.browserTools && opts.browserTools.length > 0 ? { browserTools: opts.browserTools } : {}),
+    // Telegram (native tools in the runner) — vault-resolved at launch.
+    ...(opts.telegram ? { telegram: opts.telegram } : {}),
     messages: [
       ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
       ...opts.history,

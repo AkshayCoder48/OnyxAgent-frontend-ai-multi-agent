@@ -1,12 +1,24 @@
 {
   "buildCommand": "next build",
   "framework": "nextjs",
+  "crons": [
+    {
+      "path": "/api/scheduler/tick",
+      "schedule": "0 19 * * *"
+    }
+  ],
   "functions": {
     "src/app/api/sandbox/route.ts": {
       "maxDuration": 300
     },
     "src/app/api/chat-proxy/route.ts": {
       "maxDuration": 300
+    },
+    "src/app/api/scheduler/tick/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/scheduler/tasks/route.ts": {
+      "maxDuration": 120
     }
   }
 }

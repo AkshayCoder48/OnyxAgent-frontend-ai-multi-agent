@@ -44,6 +44,7 @@ import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
 import { WorkspaceSyncResult, isWorkspaceSyncTool } from "./tool-results/workspace-sync";
+import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
@@ -196,6 +197,9 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // Cloud workspace sync tools get the glassmorphic card in BOTH modes —
   // they are payloads, not chrome (PRD §19).
   const isWsSync = isWorkspaceSyncTool(toolCall.name);
+  // Scheduled-task tools get their glass cards in BOTH modes too — the task
+  // confirmation/list/history is content the user acts on, never chrome.
+  const isSched = isScheduledTaskTool(toolCall.name);
 
   return (
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
@@ -268,6 +272,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       )}
       {chartSpec && <ChartMessage spec={chartSpec} />}
       {isWsSync && <WorkspaceSyncResult toolCall={toolCall} />}
+      {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
       {isAskUser && (
@@ -305,6 +310,8 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // Cloud workspace sync tools — the glass card is the payload, always
   // expanded (running panel streams live stage lines inside it).
   const isWsSync = isWorkspaceSyncTool(toolCall.name);
+  // Scheduled-task tools — same rule: the card is the payload.
+  const isSched = isScheduledTaskTool(toolCall.name);
   // DDG search tools — detect and auto-expand
   const isDDGWebSearch = toolCall.name === "web_search" && toolCall.status === "completed";
   const isDDGImageSearch = toolCall.name === "image_search" && toolCall.status === "completed";
@@ -316,6 +323,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     toolCall.name === "ask_user" ||
       (isRunPython && toolCall.status === "completed") ||
       isWsSync ||
+      isSched ||
       (toolCall.name === "create_chart" &&
         toolCall.status === "completed" &&
         parseChartResult(toolCall.result) !== null) ||
@@ -787,6 +795,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // Rendered for ALL statuses (running handled above; settled
             // statuses parse the structured result). Never raw JSON.
             <WorkspaceSyncResult toolCall={toolCall} />
+          ) : isSched ? (
+            // Scheduled-task tools → their own glass cards (creation
+            // confirmation, task lists, run history, slim status cards).
+            // Rendered for ALL statuses (running handled above).
+            <ScheduledTaskResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

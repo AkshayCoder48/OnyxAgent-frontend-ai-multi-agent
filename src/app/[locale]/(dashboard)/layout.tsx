@@ -1,5 +1,6 @@
 import { Header } from "@/components/layout";
 import { AuthGuard } from "@/components/layout/auth-guard";
+import { SchedulerHeartbeat } from "@/components/scheduled/scheduler-heartbeat";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -12,6 +13,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           jank during streaming (GenUI PRD §12). dvh tracks the live visual
           viewport, so the chat container is the ONLY scrollable surface. */}
       <div className="flex h-dvh flex-col">
+        {/* Invisible: keeps the server-side scheduler ticking every 60s while
+            the app is open + toasts when tasks fire or finish. Renders null. */}
+        <SchedulerHeartbeat />
         <Header />
         <main
           id="main"

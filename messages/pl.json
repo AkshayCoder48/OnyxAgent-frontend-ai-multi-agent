@@ -203,6 +203,31 @@
     "failedToGenerateLink": "Nie udało się wygenerować linku",
     "failedToRevoke": "Nie udało się cofnąć dostępu"
   },
+  "scheduled": {
+    "navLabel": "Zaplanowane zadania",
+    "title": "Zaplanowane zadania",
+    "description": "Autonomiczne zadania agenta uruchamiane według harmonogramu — we własnej piaskownicy, z trwałym obszarem roboczym, nawet gdy aplikacja jest zamknięta. Wyniki pojawiają się tutaj i na Telegramie.",
+    "newTask": "Nowe zadanie",
+    "nextRun": "Następne uruchomienie",
+    "emptyTitle": "Brak zaplanowanych zadań",
+    "emptyDescription": "Utwórz pierwsze zadanie — agent wykona je samodzielnie według harmonogramu i dostarczy wynik (także na Telegramie).",
+    "status": {
+      "active": "Aktywne",
+      "paused": "Wstrzymane",
+      "running": "Uruchomione",
+      "failed": "Niepowodzenie",
+      "completed": "Zakończone"
+    }
+  },
+  "telegram": {
+    "title": "Telegram",
+    "sectionDescription": "Otrzymuj wyniki zadań zaplanowanych i wiadomości agenta na czacie Telegram.",
+    "connect": "Połącz Telegram",
+    "connectAction": "Połącz",
+    "test": "Testuj połączenie",
+    "discover": "Wykryj czat",
+    "disconnect": "Rozłącz"
+  },
   "admin": {
     "conversationsTitle": "Admin: Konwersacje",
     "conversationsDesc": "Przeglądaj i zarządzaj wszystkimi konwersacjami i użytkownikami.",

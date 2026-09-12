@@ -350,6 +350,19 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       browserTools = [];
     }
 
+    // Telegram (native runner tools) — resolve from the encrypted vault at
+    // launch so background turns can send to the user's Telegram even after
+    // the browser disconnects. Never model-visible.
+    let telegram: { botToken: string; chatId: string } | undefined;
+    try {
+      const { settingsService } = await import("@/lib/services");
+      const botToken = await settingsService.getDecryptedTelegramBotToken(ctx.userId);
+      const chatId = botToken ? await settingsService.getTelegramChatId(ctx.userId) : null;
+      if (botToken && chatId) telegram = { botToken, chatId };
+    } catch {
+      telegram = undefined;
+    }
+
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
       provider: {
@@ -367,6 +380,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       conversationId,
       seedTodos,
       browserTools,
+      telegram,
     });
 
     // 5. Consume the run's event stream until it finishes. The consumer

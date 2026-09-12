@@ -44,4 +44,11 @@ export const BG_NATIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "preview_image",
   "ocr_document",
   "counterfactual",
+  // Telegram — NATIVE so unattended scheduled runs can use them (credentials
+  // come from state.telegram, injected at launch; never tool arguments).
+  "telegram_send_message",
+  "telegram_send_document",
+  "telegram_send_photo",
+  "telegram_get_updates",
+  "telegram_get_chat",
 ]);
