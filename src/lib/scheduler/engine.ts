@@ -231,14 +231,31 @@ async function loadTaskById(kv: SchedulerKV, taskId: string, rolls = 5): Promise
 }
 
 export async function loadRuns(kv: SchedulerKV, taskId: string): Promise<ScheduledTaskRun[]> {
-  try {
-    const raw = await kv.get(SCHED_RUNS_PREFIX + taskId);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as ScheduledTaskRun[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const read = async (key: string): Promise<ScheduledTaskRun[]> => {
+    try {
+      const raw = await kv.get(key);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as ScheduledTaskRun[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  // Main key first, then the mirrored replica (single writes can strand
+  // on OnyxBase's mirror — same failure the task records hit).
+  const main = await read(SCHED_RUNS_PREFIX + taskId);
+  if (main.length > 0) return main;
+  return await read(`schedule:runsr:${taskId}`);
+}
+
+export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledTaskRun[]): Promise<void> {
+  const capped = runs.slice(-MAX_RUNS_PER_TASK);
+  const value = JSON.stringify(capped);
+  // Mirrored replica — two independent mirror attempts (run records strand
+  // exactly like task records did; without this, the finalize loop can lose
+  // track of a running run).
+  await kv.set(SCHED_RUNS_PREFIX + taskId, value);
+  await kv.set(`schedule:runsr:${taskId}`, value);
 }
 
 async function loadRunsConverged(kv: SchedulerKV, taskId: string, runId?: string): Promise<ScheduledTaskRun[]> {
@@ -250,11 +267,6 @@ async function loadRunsConverged(kv: SchedulerKV, taskId: string, runId?: string
     runs = await loadRuns(kv, taskId);
   }
   return runs;
-}
-
-export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledTaskRun[]): Promise<void> {
-  const capped = runs.slice(-MAX_RUNS_PER_TASK);
-  await kv.set(SCHED_RUNS_PREFIX + taskId, JSON.stringify(capped));
 }
 
 function e2bKey(): string | null {
@@ -430,6 +442,7 @@ export async function deleteTask(kv: SchedulerKV, taskId: string): Promise<void>
   }
   try {
     await kv.delete(SCHED_RUNS_PREFIX + taskId);
+    await kv.delete(`schedule:runsr:${taskId}`);
   } catch {
     /* best-effort */
   }
