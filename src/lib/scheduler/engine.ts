@@ -159,6 +159,14 @@ async function writeTaskVerified(
   };
   await kv.set(main, value);
   await kv.set(replica, value);
+  // UNCONDITIONAL rewrite sweep — a warm-instance probe can pass while the
+  // OnyxBase Telegram-mirror EDIT silently failed for BOTH writes (observed
+  // live: an update acked + probed OK, yet every other instance kept serving
+  // the old value indefinitely). The second pair of writes = two fresh
+  // mirror attempts; skipping it when the probe "passes" is a false economy.
+  await new Promise((r) => setTimeout(r, 1500));
+  await kv.set(main, value);
+  await kv.set(replica, value);
   const probe = async (): Promise<boolean> => {
     for (const key of [main, replica]) {
       try {
@@ -169,12 +177,6 @@ async function writeTaskVerified(
     }
     return false;
   };
-  if (await probe()) return {};
-  // Rewrite sweep (fresh mirror attempts) + settle + one more read.
-  await new Promise((r) => setTimeout(r, 1500));
-  await kv.set(main, value);
-  await kv.set(replica, value);
-  await new Promise((r) => setTimeout(r, 1500));
   if (await probe()) return {};
   return {
     warning:
