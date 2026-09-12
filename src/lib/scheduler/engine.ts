@@ -346,32 +346,88 @@ async function loadTaskById(kv: SchedulerKV, taskId: string, rolls = 4): Promise
   return null;
 }
 
+/** Run-record envelope with a write timestamp — lets readers pick the NEWEST
+ *  surviving copy across the mutable keys AND the immutable version records. */
+interface RunsEnvelope {
+  w: number;
+  runs: ScheduledTaskRun[];
+}
+
+function parseRunsValue(raw: string | null): RunsEnvelope | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as RunsEnvelope | ScheduledTaskRun[];
+    if (Array.isArray(parsed)) return { w: 0, runs: parsed }; // legacy shape
+    if (parsed && Array.isArray(parsed.runs) && typeof parsed.w === "number") return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function readEnvelope(kv: SchedulerKV, key: string): Promise<RunsEnvelope | null> {
+  try {
+    return parseRunsValue(await kv.get(key));
+  } catch {
+    return null;
+  }
+}
+
 export async function loadRuns(kv: SchedulerKV, taskId: string): Promise<ScheduledTaskRun[]> {
-  const read = async (key: string): Promise<ScheduledTaskRun[]> => {
-    try {
-      const raw = await kv.get(key);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw) as ScheduledTaskRun[];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
+  // Candidates: mutable main + replica (fast path) and the NEWEST immutable
+  // version record (schedule:rvh:<taskId>:<ts36> — new Telegram messages,
+  // immune to the mirror-EDIT reversion that strands mutable updates). The
+  // highest write-timestamp wins.
+  let best: RunsEnvelope | null = await readEnvelope(kv, SCHED_RUNS_PREFIX + taskId);
+  const replica = await readEnvelope(kv, `schedule:runsr:${taskId}`);
+  if (replica && (!best || replica.w > best.w)) best = replica;
+  try {
+    const keys = await kv.listKeys("schedule:");
+    const versions = keys
+      .filter((k) => k.startsWith(`schedule:rvh:${taskId}:`))
+      .map((k) => k.slice(`schedule:rvh:${taskId}:`.length))
+      .filter(Boolean)
+      .sort();
+    const latest = versions[versions.length - 1];
+    if (latest) {
+      const v = await readEnvelope(kv, `schedule:rvh:${taskId}:${latest}`);
+      if (v && (!best || v.w > best.w)) best = v;
     }
-  };
-  // Main key first, then the mirrored replica (single writes can strand
-  // on OnyxBase's mirror — same failure the task records hit).
-  const main = await read(SCHED_RUNS_PREFIX + taskId);
-  if (main.length > 0) return main;
-  return await read(`schedule:runsr:${taskId}`);
+  } catch {
+    /* version lookup best-effort */
+  }
+  return best?.runs ?? [];
 }
 
 export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledTaskRun[]): Promise<void> {
   const capped = runs.slice(-MAX_RUNS_PER_TASK);
-  const value = JSON.stringify(capped);
-  // Mirrored replica — two independent mirror attempts (run records strand
-  // exactly like task records did; without this, the finalize loop can lose
-  // track of a running run).
+  const env: RunsEnvelope = { w: Date.now(), runs: capped };
+  const value = JSON.stringify(env);
+  // Mutable fast path (main + replica)…
   await kv.set(SCHED_RUNS_PREFIX + taskId, value);
   await kv.set(`schedule:runsr:${taskId}`, value);
+  // …AND an immutable version record — a NEW Telegram message per save.
+  // Mutable mirror-EDITs have been observed to strand AND to revert after
+  // instance recycle; version keys are the durable source of truth.
+  const version = env.w.toString(36);
+  await kv.set(`schedule:rvh:${taskId}:${version}`, value);
+  // Version GC — keep the 2 newest (best-effort).
+  try {
+    const keys = await kv.listKeys("schedule:");
+    const old = keys
+      .filter((k) => k.startsWith(`schedule:rvh:${taskId}:`) && !k.endsWith(`:${version}`))
+      .sort()
+      .slice(0, -1);
+    for (const k of old) {
+      try {
+        await kv.delete(k);
+      } catch {
+        /* best-effort */
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
 }
 
 async function loadRunsConverged(kv: SchedulerKV, taskId: string, runId?: string): Promise<ScheduledTaskRun[]> {
@@ -565,6 +621,16 @@ export async function deleteTask(kv: SchedulerKV, taskId: string): Promise<void>
     await kv.delete(taskReplicaKey(taskId));
     await kv.delete(SCHED_RUNS_PREFIX + taskId);
     await kv.delete(`schedule:runsr:${taskId}`);
+    const all = await kv.listKeys("schedule:");
+    for (const k of all) {
+      if (k.startsWith(`schedule:rvh:${taskId}:`)) {
+        try {
+          await kv.delete(k);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
   } catch {
     /* best-effort */
   }
@@ -890,7 +956,7 @@ function escapeHtml(s: string): string {
 /** Check + finish one running run. Returns true when the run reached a
  *  terminal state this call. */
 export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: ScheduledTaskRun): Promise<boolean> {
-  if (run.status !== "running" || !run.sandboxId) return false;
+  if ((!run.sandboxId) || (run.status !== "running" && run.status !== "pending")) return false;
   const apiKey = e2bKey();
   if (!apiKey) return false;
 
@@ -1076,8 +1142,8 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
     for (const run of running) {
       if (finalChecks >= 3) break;
       runningTaskIds.add(task.id);
-      if (run.status === "pending" && Date.now() - Date.parse(run.startedAt) > 10 * 60_000) {
-        // Stuck pending (launch crashed mid-write) — declare failed.
+      if (run.status === "pending" && !run.sandboxId && Date.now() - Date.parse(run.startedAt) > 10 * 60_000) {
+        // Stuck pending with NO sandbox (launch crashed mid-write) — failed.
         run.status = "failed";
         run.error = "Launch never completed (stuck pending > 10 min).";
         run.completedAt = new Date().toISOString();
@@ -1087,7 +1153,10 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
         result.finalized++;
         continue;
       }
-      if (run.status !== "running") continue;
+      // A run with a sandboxId is LIVE whether its status says pending or
+      // running (the "running" save can strand on OnyxBase — the sandbox is
+      // the source of truth, the record is bookkeeping).
+      if (run.status !== "running" && !(run.status === "pending" && run.sandboxId)) continue;
       finalChecks++;
       try {
         const done = await finalizeRun(kv, task, run);
