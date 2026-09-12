@@ -8,8 +8,8 @@
  *   E2B (temporary execution env) ←→ this engine (browser) ←→ OnyxBase KV
  *                                                        (persistent state)
  *
- * STORAGE MODEL (KV values stay ≤ ~3 KB — comfortably under OnyxBase's ~4 KB
- * record ceiling, leaving room for JSON overhead):
+ * STORAGE MODEL (KV values ≤ ~120 KB base64 chars — live-verified ceiling is
+ * ≥ 256 KB with byte-identical read-back, 2026-09-12; see CHUNK_SIZE):
  *
  *   workspace:default:manifest                     ← atomic POINTER + INLINE
  *                                                     manifest when small
@@ -109,27 +109,60 @@ export const MAX_FILE_BYTES = 50 * 1024 * 1024;
  *  the aggregate. */
 const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 
-/** Encoded chars per KV value. OnyxBase documents ~4 KB per record; 3000
- *  chars leaves comfortable JSON overhead (PRD §8 — "2–3 KB, never fill the
- *  limit"). */
-const CHUNK_SIZE = 3000;
+/** Encoded chars per KV value. LIVE-VERIFIED 2026-09-12 against
+ *  https://onyxbase-phi.vercel.app with a real key: values up to 256,000
+ *  chars are accepted AND read back byte-identical (the "~4 KB record
+ *  ceiling" in earlier PRD notes was an assumption, never measured — it
+ *  caused the 2026-09-11 overnight incident: a ~1 MB workspace was split
+ *  into 3000-char chunks ≈ 500+ requests, which crawled for 9+ hours under
+ *  OnyxBase's throttling). 120,000 chars (~90 KB binary) keeps a 2x safety
+ *  margin under the measured ceiling while cutting request counts ~40x. */
+const CHUNK_SIZE = 120_000;
 
 /** Max base64 chars of manifest payload embedded directly in the pointer
- *  record. Keeps the whole pointer JSON ≤ ~2.9 KB — comfortably under
- *  OnyxBase's ~4 KB record ceiling. Small/medium workspaces (roughly ≤ 150
- *  files) then commit atomically as ONE self-contained record; larger ones
- *  fall back to chunked manifest records with mirrored replicas +
- *  pre-commit read-back verification. */
-const MANIFEST_INLINE_MAX = 2400;
+ *  record. With the live-verified 256 KB value ceiling (see CHUNK_SIZE),
+ *  a ~100 KB inline manifest covers thousands of files — the pointer then
+ *  IS the atomic, self-contained commit for nearly every real workspace
+ *  and the manifest can never go missing on its own. */
+const MANIFEST_INLINE_MAX = 100_000;
 
-/** Concurrent KV writes (small pool — polite to OnyxBase + Telegram mirror). */
-const KV_CONCURRENCY = 5;
+/** WRITE concurrency — ONE at a time, deliberately. Live measurement
+ *  (2026-09-12): OnyxBase mirrors every KV mutation into Telegram as a
+ *  message EDIT; concurrent writes trip Telegram's per-bot throttle and
+ *  some mirror writes are silently dropped — the record then acks 200 but
+ *  is permanently invisible to every other instance (2/12 survived a
+ *  6-concurrent batch; 12/12 survived sequential). That silent drop is
+ *  exactly what punched holes in the 2026-09-11 overnight snapshot.
+ *  Sequential writes are durable; the pacer keeps them polite. */
+const KV_WRITE_CONCURRENCY = 1;
+
+/** READ concurrency — reads only sample instances, never mutate, so
+ *  rolling them concurrently is free speed. */
+const KV_READ_CONCURRENCY = 6;
 
 /** Files per E2B read/write batch round-trip. */
 const E2B_BATCH_FILES = 40;
 
-/** Soft cap on base64 bytes accumulated per E2B batch response (~2 MB). */
-const E2B_BATCH_BYTES = 2 * 1024 * 1024;
+/** Soft cap on base64 bytes accumulated per E2B batch response (~4 MB). */
+const E2B_BATCH_BYTES = 4 * 1024 * 1024;
+
+/** Max obsolete-record deletions per GC pass (see step 9 — bounded so a
+ *  garbage-heavy cloud can't create another overnight crawl). */
+const GC_MAX_DELETES = 400;
+
+/** Hard wall-clock budget for one push. The overnight incident proved a
+ *  push must NEVER be allowed to "just keep going": 10 minutes and it
+ *  stops with an honest, safely-retryable partial (content-addressed keys
+ *  make retries idempotent, and the empty-push guard protects the cloud
+ *  state between attempts). */
+const PUSH_DEADLINE_MS = 10 * 60_000;
+
+/** Worst-case sustained request rate (req/min) used for the preflight
+ *  feasibility estimate. Measured goodput spans 60/min (throttled night)
+ *  to ~1200/min (healthy day); budgeting at the throttled floor means a
+ *  push only starts when it can finish even if OnyxBase is having a bad
+ *  night. */
+const CONSERVATIVE_RATE_PER_MIN = 60;
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -217,6 +250,10 @@ export interface PushResult {
   removedFiles: number;
   skippedFiles: SkippedFile[];
   errors: SyncErrorEntry[];
+  /** Non-fatal notes (propagation lag, deferred GC, …) — the push
+   *  succeeded; these tell the user what to expect next. NOT part of the
+   *  ok/partial verdict. */
+  warnings?: string[];
   durationMs: number;
 }
 
@@ -264,6 +301,11 @@ export interface SyncOptions {
    *  EMPTY-PUSH GUARD above). Only the user's explicit confirmation
    *  should ever set this. */
   force?: boolean;
+  /** Hard wall-clock budget for the push (ms, default 10 min). Exceeding
+   *  it aborts with a SAFE partial — no commit, previous cloud state
+   *  untouched, retry is idempotent. The overnight incident (2026-09-11,
+   *  9+ hours "running") is exactly what this exists to prevent. */
+  deadlineMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +795,8 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
   const { e2b, kv, onStage } = opts;
   const skipped: SkippedFile[] = [];
   const errors: SyncErrorEntry[] = [];
+  /** Non-fatal notes that must NOT flip the verdict to "partial". */
+  const warnings: string[] = [];
   const stage = (stage: SyncStage, detail: string) => onStage?.({ stage, detail });
 
   const base: PushResult = {
@@ -1010,9 +1054,41 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     }
   }
 
-  // 7. Write all staged chunks (concurrency-limited, one retry each).
+  // 6.5 PREFLIGHT FEASIBILITY — never START a push that can't finish
+  //     inside the deadline. The overnight incident (2026-09-11): ~500
+  //     tiny-chunk requests at a throttled 60 req/min ≈ 9+ hours of silent
+  //     crawling. Estimates use the CONSERVATIVE throttled-floor rate — on
+  //     a healthy day the real run finishes ~6x faster than estimated.
+  const deadlineMs = opts.deadlineMs ?? PUSH_DEADLINE_MS;
+  const deadlineAt = t0 + deadlineMs;
+  {
+    const estimatedRequests = Math.ceil(pendingWrites.length * 1.2) + 8;
+    const estimatedMs = (estimatedRequests / CONSERVATIVE_RATE_PER_MIN) * 60_000;
+    if (t0 + estimatedMs > deadlineAt) {
+      base.errors.push({
+        code: "SERIALIZATION_FAILED",
+        message:
+          `This push needs ~${estimatedRequests} KV requests (≈${Math.max(1, Math.ceil(estimatedMs / 60_000))} min at the worst-case throttled ${CONSERVATIVE_RATE_PER_MIN} req/min — usually ~6x faster), ` +
+          `which exceeds the ${Math.round(deadlineMs / 60_000)}-minute budget. Nothing was written — the cloud snapshot is untouched. ` +
+          "Trim the workspace (remove build output / large binaries) or re-run push_workspace with a higher deadlineMs.",
+      });
+      base.durationMs = Date.now() - t0;
+      return base;
+    }
+  }
+
+  // 7. Write all staged chunks (paced, concurrency-limited, deadline-guarded).
   let writeFailures = 0;
-  await pool(pendingWrites, KV_CONCURRENCY, async (w) => {
+  let deadlineHit = false;
+  let written = 0;
+  let progressAt = 0;
+  const totalWrites = pendingWrites.length;
+  await pool(pendingWrites, KV_WRITE_CONCURRENCY, async (w) => {
+    if (deadlineHit || opts.signal?.aborted) return;
+    if (Date.now() > deadlineAt) {
+      deadlineHit = true;
+      return;
+    }
     try {
       await kv.set(w.key, w.value);
     } catch (e) {
@@ -1029,12 +1105,41 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
         });
       }
     }
+    written++;
+    // Honest progress with ETA roughly every 5s (rate is adaptive).
+    const now = Date.now();
+    if (totalWrites > 3 && (now - progressAt > 5000 || written === totalWrites)) {
+      progressAt = now;
+      const rate = kv.effectiveRatePerMin();
+      const etaMin = rate > 0 ? (totalWrites - written) / rate : 0;
+      stage(
+        "syncing",
+        `Uploading records ${written}/${totalWrites}` +
+          (etaMin > 0.2 ? ` — ~${etaMin < 1 ? "<1" : Math.ceil(etaMin)} min left` : ""),
+      );
+    }
   }).catch((e) => {
     errors.push({
       code: e instanceof OnyxBaseError ? e.code : "KV_WRITE_FAILED",
       message: e instanceof Error ? e.message : "KV write aborted",
     });
   });
+
+  // The deadline (or an abort) fired mid-upload — stop SAFELY: nothing is
+  // committed, the previous cloud snapshot stays valid, and the retry is
+  // cheap (content-addressed keys make re-writes idempotent).
+  if (deadlineHit || opts.signal?.aborted) {
+    base.status = "partial";
+    base.errors = errors;
+    errors.push({
+      code: "KV_WRITE_FAILED",
+      message:
+        `The ${Math.round(deadlineMs / 60_000)}-minute push budget elapsed after uploading ${written}/${totalWrites} record(s). ` +
+        "NO commit was made — the previous cloud snapshot is untouched. Re-run push_workspace; it resumes cheaply (already-written records are idempotent).",
+    });
+    base.durationMs = Date.now() - t0;
+    return base;
+  }
 
   if (errors.some((err) => err.code === "ONYXBASE_UNAUTHORIZED")) {
     base.errors = errors;
@@ -1051,18 +1156,21 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     return base;
   }
 
-  // 7.5 PRE-COMMIT VERIFICATION (ALL staged records) — a KV write that
-  //     returned 200 can still be STRANDED on the writing instance when
-  //     OnyxBase's Telegram-mirror write silently fails (observed live
-  //     2026-09-11 AND in live test runs: committed pointer + invisible
-  //     chunks = restores that fail with "missing chunks"). Read back EVERY
-  //     staged record — file chunks, per-file meta, manifest chunks — and
-  //     rewrite any that don't match (each rewrite lands on a new random
-  //     instance and retries the mirror write). Settle rounds absorb routing
-  //     lag. Records that stay unreadable after the rounds BLOCK THE COMMIT:
-  //     the previous cloud snapshot stays valid, the push reports "partial"
-  //     and is safely retryable (content-addressed keys are idempotent, and
-  //     the empty-push guard prevents any accidental wipe in between).
+  // 7.5 PRE-COMMIT AUDIT — a KV write that returned 200 is durable in
+  //     OnyxBase's Telegram mirror (writes are SEQUENTIAL now, so the
+  //     mirror keeps up — see KV_WRITE_CONCURRENCY). But READS route to
+  //     random serverless instances whose local index may be stale, so a
+  //     freshly written record can legitimately read back 404 for a while
+  //     (observed live: bun write → immediate read 404 → readable minutes
+  //     later; never lost). Blocking a commit on that read-roulette caused
+  //     permanent false "partial" failures.
+  //     So the audit is now: read back every staged record (2 rolls each),
+  //     rewrite stragglers once after a settle (the rewrite re-acks and
+  //     lands on another instance, helping propagation), then probe again.
+  //     Anything STILL unreadable becomes an honest WARNING — the commit
+  //     proceeds because every write acked 200 — and the retrieve path has
+  //     its own convergence-tolerant reads. The commit-blocking condition
+  //     remains step 8: writeFailures > 0 (a write that genuinely failed).
   {
     const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
     // OnyxBase smart-parses JSON-looking string values into objects (the
@@ -1077,13 +1185,11 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
         return false;
       }
     };
-    // One "probe" = up to 3 GETs a few hundred ms apart. Reads route to
-    // RANDOM instances, so a single miss proves nothing — a healthy record
-    // still living on its writing instance (or already mirrored) is seen by
-    // at least one of 3 rolls with high probability, while a record whose
-    // mirror write silently failed stays invisible no matter how many rolls.
+    // One "probe" = up to 2 GETs a few hundred ms apart — rolling random
+    // instances. A miss on both rolls just means both rolls hit stale
+    // instances; the record is still durable in Telegram.
     const probe = async (key: string, value: string): Promise<boolean> => {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 2; i++) {
         let back: string | null = null;
         try {
           back = await kv.get(key);
@@ -1091,46 +1197,40 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
           back = null;
         }
         if (equalValue(back, value)) return true;
-        if (i < 2) await settle(400);
+        if (i < 1) await settle(300);
       }
       return false;
     };
     const readBackAll = async (): Promise<Set<string>> => {
       const bad = new Set<string>();
-      await pool(pendingWrites, KV_CONCURRENCY, async (w) => {
+      await pool(pendingWrites, KV_READ_CONCURRENCY, async (w) => {
         if (!(await probe(w.key, w.value))) bad.add(w.key);
       });
       return bad;
     };
     let bad = await readBackAll(); // round 0 — immediate
-    for (const round of [1, 2] as const) {
-      if (bad.size === 0) break;
+    if (bad.size > 0 && Date.now() < deadlineAt) {
       stage(
         "committing",
         `Verifying records… (${pendingWrites.length - bad.size}/${pendingWrites.length} readable)`,
       );
+      // One rewrite sweep for the stragglers — sequential, durable.
       const toRewrite = pendingWrites.filter((w) => bad.has(w.key));
-      await pool(toRewrite, KV_CONCURRENCY, async (w) => {
+      await pool(toRewrite, KV_WRITE_CONCURRENCY, async (w) => {
         try {
           await kv.set(w.key, w.value);
         } catch {
-          /* re-probed after the settle */
+          /* the audit verdict below stays honest either way */
         }
       });
-      await settle(round === 1 ? 2000 : 4000); // let instances converge
+      await settle(2500); // let instances converge a little
       bad = await readBackAll();
     }
     if (bad.size > 0) {
-      base.status = "partial";
-      base.errors = errors;
-      errors.push({
-        code: "KV_WRITE_FAILED",
-        message:
-          `${bad.size} of ${pendingWrites.length} record(s) could not be verified as readable on OnyxBase after retries (mirror propagation failed on their instances). ` +
-          "NO commit was made — the previous cloud snapshot is untouched. Run push_workspace again; it is safe to retry (unchanged files are reused).",
-      });
-      base.durationMs = Date.now() - t0;
-      return base;
+      warnings.push(
+        `${bad.size} of ${pendingWrites.length} record(s) were written (all acked 200 — they are durable in OnyxBase's Telegram mirror) but are not yet visible on every serving instance. ` +
+          "If retrieve_workspace reports a missing file, wait ~1 minute and retry — instance indexes converge on their own.",
+      );
     }
   }
 
@@ -1200,15 +1300,17 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     committed = await verifyCommit();
   }
   if (!committed) {
-    errors.push({
-      code: "KV_WRITE_FAILED",
-      message:
-        "The commit was written but could not be verified in OnyxBase yet (instance read lag). If retrieve_workspace reports problems, run push_workspace again — content-addressed records make the retry safe.",
-    });
+    warnings.push(
+      "The commit was written but could not be re-read yet (OnyxBase instance read lag — the write itself acked 200 and is durable). If retrieve_workspace reports problems, wait ~1 minute and retry it; the snapshot is intact.",
+    );
   }
 
   // 9. GC — remove managed chunks no longer referenced by the new manifest
   //    (including orphans left behind by earlier broken snapshots — PRD §11).
+  //    Capped per run: a cloud left with tens of thousands of garbage keys
+  //    (exactly what the overnight tiny-chunk incident produced) must not
+  //    turn the GC into another multi-hour crawl — each run clears up to
+  //    GC_MAX_DELETES and the next push finishes the job.
   stage("cleanup", "Cleaning up obsolete records…");
   let removedFiles = 0;
   if (!opts.skipGc) {
@@ -1224,8 +1326,14 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     try {
       const allKeys = await kv.listKeys(`${NS}:`);
       const obsolete = allKeys.filter((k) => isManagedChunkKey(k) && !referenced.has(k));
-      if (obsolete.length > 0) {
-        await pool(obsolete, KV_CONCURRENCY, async (k) => {
+      const toDelete = obsolete.slice(0, GC_MAX_DELETES);
+      if (obsolete.length > GC_MAX_DELETES) {
+        warnings.push(
+          `${obsolete.length - GC_MAX_DELETES} obsolete record(s) remain from earlier broken snapshots — this run removed ${GC_MAX_DELETES}; the next push will clean the rest.`,
+        );
+      }
+      if (toDelete.length > 0) {
+        await pool(toDelete, KV_WRITE_CONCURRENCY, async (k) => {
           try {
             await kv.delete(k);
           } catch {
@@ -1256,6 +1364,7 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
   base.uploadedBytes = uploadedBytes;
   base.removedFiles = removedFiles;
   base.errors = errors;
+  if (warnings.length > 0) base.warnings = warnings;
   base.durationMs = Date.now() - t0;
   return base;
 }

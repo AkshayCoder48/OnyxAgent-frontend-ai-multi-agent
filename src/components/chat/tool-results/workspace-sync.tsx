@@ -44,6 +44,9 @@ interface WsSyncResult {
   cloud?: { totalFiles?: number; totalBytes?: number; updatedAt?: string; generation?: number };
   skippedFiles?: Array<{ path?: string; reason?: string }>;
   errors?: Array<{ path?: string; code?: string; message?: string }>;
+  /** Non-fatal notes from the engine (propagation lag, deferred GC …) —
+   *  the sync SUCCEEDED; these explain what to expect next. */
+  warnings?: string[];
   durationMs?: number;
 }
 
@@ -371,6 +374,14 @@ export function WorkspaceSyncResult({ toolCall }: { toolCall: ToolCall }) {
           </StatRow>
         )}
         {/* partial with skipped-only failures stays calm — stats above show it */}
+
+        {/* Non-fatal engine warnings — the sync SUCCEEDED (green card); the
+            note just tells the user about propagation lag / deferred GC. */}
+        {success && (parsed.warnings?.length ?? 0) > 0 && (
+          <StatRow icon={Info} tone="muted">
+            {parsed.warnings![0]}
+          </StatRow>
+        )}
       </div>
 
       {/* footer */}

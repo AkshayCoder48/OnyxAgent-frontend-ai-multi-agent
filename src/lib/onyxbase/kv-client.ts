@@ -77,9 +77,97 @@ function normalizeBaseUrl(raw: string): string {
   return url.replace(/\/+$/, "");
 }
 
+/** Per-request hard timeout. A stalled connection must FAIL into the retry
+ *  path — never hang a worker forever (live incident 2026-09-11/12: a push
+ *  “ran” for 9+ hours, partly because individual fetches never timed out). */
+const REQUEST_TIMEOUT_MS = 25_000;
+
+/**
+ * Adaptive request pacer (token bucket).
+ *
+ * OnyxBase's throughput ceiling is NOT fixed: live 2026-09-12 a burst of
+ * 240 concurrent writes all returned 200 in ~12s (~1200/min), but during the
+ *  2026-09-11 night incident the same API throttled with 429
+ * "Rate limit exceeded (60 req/min)" storms. Fixed-rate assumptions are
+ * therefore wrong in BOTH directions — hammering triggers storms, crawling
+ * wastes hours.
+ *
+ * Strategy: pace proactively at a polite default (360/min, burst 6), then
+ * adapt: every 429 halves the sustained rate (floor 30/min) and honors the
+ * server's Retry-After; a run of clean responses slowly recovers the rate.
+ * All requests of one client share ONE pacer, so set/get/delete/list/whoami
+ * stay inside the same budget.
+ */
+class RatePacer {
+  private ratePerSec: number;
+  private readonly initialRatePerSec: number;
+  private readonly minRatePerSec: number;
+  private tokens: number;
+  private lastRefillAt: number;
+  private coolUntil = 0;
+  private successRun = 0;
+
+  constructor(initialRatePerMin = 360, minRatePerMin = 30) {
+    this.initialRatePerSec = initialRatePerMin / 60;
+    this.ratePerSec = this.initialRatePerSec;
+    this.minRatePerSec = minRatePerMin / 60;
+    this.tokens = 6; // small burst so latency-hiding concurrency still works
+    this.lastRefillAt = Date.now();
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    const elapsed = (now - this.lastRefillAt) / 1000;
+    if (elapsed > 0) {
+      this.tokens = Math.min(6, this.tokens + elapsed * this.ratePerSec);
+      this.lastRefillAt = now;
+    }
+  }
+
+  async acquire(): Promise<void> {
+    for (let i = 0; ; i++) {
+      const now = Date.now();
+      if (now < this.coolUntil) {
+        await new Promise((r) => setTimeout(r, this.coolUntil - now));
+        continue;
+      }
+      this.refill();
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return;
+      }
+      const waitMs = Math.max(25, Math.ceil(((1 - this.tokens) / this.ratePerSec) * 1000));
+      await new Promise((r) => setTimeout(r, Math.min(waitMs, 5000)));
+      if (i > 2000) return; // absolute guard against a pathological loop
+    }
+  }
+
+  noteThrottled(retryAfterSec?: number): void {
+    this.ratePerSec = Math.max(this.minRatePerSec, this.ratePerSec / 2);
+    this.tokens = 0;
+    this.successRun = 0;
+    const ra = Number(retryAfterSec);
+    const coolMs = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 30_000) : 2000;
+    this.coolUntil = Math.max(this.coolUntil, Date.now() + coolMs);
+  }
+
+  noteSuccess(): void {
+    if (++this.successRun >= 30) {
+      this.ratePerSec = Math.min(this.initialRatePerSec, this.ratePerSec * 1.25);
+      this.successRun = 0;
+    }
+  }
+
+  /** Current sustained rate for ETA math (requests per minute). */
+  effectiveRatePerMin(): number {
+    return Math.round(this.ratePerSec * 60);
+  }
+}
+
 export class OnyxBaseKV {
   private base: string;
   private apiKey: string;
+  private pacer = new RatePacer();
 
   constructor(apiKey: string, baseUrl?: string | null) {
     if (!apiKey || !apiKey.trim()) {
@@ -122,6 +210,10 @@ export class OnyxBaseKV {
         const backoff = Math.min(600 * 2 ** (attempt - 1), 4000);
         await new Promise((r) => setTimeout(r, backoff));
       }
+      // Paced BEFORE the fetch — the shared token bucket keeps every
+      // request of this client (and all its concurrent callers) inside a
+      // sustainable rate, so 429 storms never start.
+      await this.pacer.acquire();
       let res: Response;
       try {
         res = await fetch(`${this.base}${pathname}${qs}`, {
@@ -131,6 +223,9 @@ export class OnyxBaseKV {
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          // Hard per-request timeout — a stalled connection fails into the
+          // retry path instead of hanging a worker for hours.
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (e) {
         // Network-level failure — retry, then surface as unavailable.
@@ -164,6 +259,16 @@ export class OnyxBaseKV {
         }
       }
       last = { ok: res.ok, status: res.status, data, errorDetail, code: serverCode };
+
+      if (res.ok) {
+        this.pacer.noteSuccess();
+      } else if (res.status === 429) {
+        // The pacer adapts (halve rate, honor Retry-After) BEFORE we decide
+        // whether to retry — so even the final failed attempt leaves the
+        // pacer throttled down for whatever comes next.
+        const ra = Number(res.headers.get("retry-after"));
+        this.pacer.noteThrottled(Number.isFinite(ra) && ra > 0 ? ra : undefined);
+      }
 
       // Respect Retry-After on 429 (seconds) before the next attempt.
       if (!res.ok && res.status === 429 && attempt < MAX_ATTEMPTS - 1) {
@@ -362,6 +467,12 @@ export class OnyxBaseKV {
       );
     }
     return r.data ?? {};
+  }
+
+  /** Current effective request rate (requests/min) after adaptive
+   *  throttling — used by the sync engine for ETA + feasibility math. */
+  effectiveRatePerMin(): number {
+    return this.pacer.effectiveRatePerMin();
   }
 }
 
