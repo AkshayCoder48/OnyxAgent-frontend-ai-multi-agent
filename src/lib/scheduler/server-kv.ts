@@ -28,11 +28,25 @@ const WRITE_ATTEMPTS = 4;
 export class SchedulerKV {
   private base: string;
   private apiKey: string;
+  /** WRITE PACER — OnyxBase's Telegram mirror drops rapid sequential
+   *  writes (the 9-hour-push lesson: pace + sequential = durable). A
+   *  minimum gap between writes, widened on 429s, recovered on success. */
+  private lastWriteAt = 0;
+  private minWriteGapMs = 400;
 
   constructor(apiKey: string, baseUrl?: string | null) {
     this.apiKey = apiKey.trim();
     const raw = (baseUrl ?? ONYXBASE_DEFAULT_BASE_URL).trim();
     this.base = raw.replace(/\/+$/, "");
+  }
+
+  private async paceWrite(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastWriteAt;
+    if (elapsed < this.minWriteGapMs) {
+      await new Promise((r) => setTimeout(r, this.minWriteGapMs - elapsed));
+    }
+    this.lastWriteAt = Date.now();
   }
 
   private async req<T>(
@@ -88,6 +102,11 @@ export class SchedulerKV {
         }
       }
       last = { ok: res.ok, status: res.status, data, errorDetail, code: serverCode };
+      if (res.status === 429) {
+        this.minWriteGapMs = Math.min(this.minWriteGapMs * 2, 5000);
+      } else if (res.ok) {
+        this.minWriteGapMs = Math.max(400, Math.floor(this.minWriteGapMs / 2));
+      }
       if (!res.ok && res.status === 429 && attempt < MAX_ATTEMPTS - 1) {
         const ra = Number(res.headers.get("retry-after"));
         if (Number.isFinite(ra) && ra > 0) {
@@ -102,6 +121,7 @@ export class SchedulerKV {
   }
 
   async set(key: string, value: string): Promise<void> {
+    await this.paceWrite();
     const r = await this.req<{ error?: string }>("POST", "/v1/set", {
       collection: ONYXBASE_COLLECTION,
       key,

@@ -25,7 +25,7 @@
 
 import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
-import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX } from "@/lib/e2b/bg-agent-script";
+import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
 import type { SchedulerKV } from "./server-kv";
 import { computeNextRun, describeSchedule } from "./tz-cron";
 import {
@@ -410,7 +410,19 @@ export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledT
   // Mutable mirror-EDITs have been observed to strand AND to revert after
   // instance recycle; version keys are the durable source of truth.
   const version = env.w.toString(36);
-  await kv.set(`schedule:rvh:${taskId}:${version}`, value);
+  const versionKey = `schedule:rvh:${taskId}:${version}`;
+  await kv.set(versionKey, value);
+  // Verify the version record (the durable copy); rewrite with a fresh key
+  // when it strands.
+  try {
+    const back = await kv.get(versionKey);
+    if (back !== value) {
+      const retryEnv = { w: Date.now(), runs: capped };
+      await kv.set(`schedule:rvh:${taskId}:${retryEnv.w.toString(36)}`, JSON.stringify(retryEnv));
+    }
+  } catch {
+    /* best-effort */
+  }
   // Version GC — keep the 2 newest (best-effort).
   try {
     const keys = await kv.listKeys("schedule:");
@@ -983,16 +995,30 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
   }
   run.unreachableChecks = 0;
 
+  // Recover the e2b run id when the launch-time save stranded (the sandbox's
+  // bg-state pointer is the source of truth).
+  if (!run.e2bRunId) {
+    try {
+      const ptrRaw = await sandbox.files.read(BG_STATE_PATH);
+      const ptr = JSON.parse(ptrRaw) as { activeRun?: string };
+      if (ptr?.activeRun) run.e2bRunId = ptr.activeRun;
+    } catch {
+      /* pointer unreadable */
+    }
+  }
+
   // Read the runner's state mirror.
   let runnerStatus = "running";
   let content = "";
   let runnerError: string | null = null;
   try {
-    const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${run.e2bRunId}/state.json`);
-    const st = JSON.parse(raw) as { status?: string; content?: string; error?: string | null };
-    runnerStatus = st.status ?? "running";
-    content = st.content ?? "";
-    runnerError = st.error ?? null;
+    if (run.e2bRunId) {
+      const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${run.e2bRunId}/state.json`);
+      const st = JSON.parse(raw) as { status?: string; content?: string; error?: string | null };
+      runnerStatus = st.status ?? "running";
+      content = st.content ?? "";
+      runnerError = st.error ?? null;
+    }
   } catch {
     /* unreadable — treat as still running until stale */
   }
