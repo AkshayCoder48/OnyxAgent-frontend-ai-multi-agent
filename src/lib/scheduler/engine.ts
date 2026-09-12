@@ -1138,6 +1138,7 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
     trigger: opts.trigger,
     errors: [],
   };
+  (result as { debug?: string[] }).debug = [];
 
   // Tick lock — overlapping triggers collapse into one evaluation.
   try {
@@ -1182,11 +1183,15 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
       // A run with a sandboxId is LIVE whether its status says pending or
       // running (the "running" save can strand on OnyxBase — the sandbox is
       // the source of truth, the record is bookkeeping).
-      if (run.status !== "running" && !(run.status === "pending" && run.sandboxId)) continue;
+      if (run.status !== "running" && !(run.status === "pending" && run.sandboxId)) {
+        (result as { debug?: string[] }).debug?.push(`skip ${run.id} status=${run.status} sb=${run.sandboxId ?? "none"}`);
+        continue;
+      }
       finalChecks++;
       try {
         const done = await finalizeRun(kv, task, run);
         if (done) result.finalized++;
+        else (result as { debug?: string[] }).debug?.push(`pending-final ${run.id} sb=${run.sandboxId}`);
       } catch (e) {
         result.errors.push(`finalize ${task.id}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -1214,7 +1219,10 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
       for (const sb of scheduled) {
         const meta = (sb as { metadata?: Record<string, string> }).metadata ?? {};
         const taskId = String(meta["onyx-scheduled"] ?? "");
-        if (!taskId) continue;
+        if (!taskId) {
+          (result as { debug?: string[] }).debug?.push(`recovery: sandbox ${sb.sandboxId} has no metadata tag`);
+          continue;
+        }
         // Known live run for this sandbox? (record-based tracking above)
         const task = tasks.find((t) => t.id === taskId) ?? (await loadTaskById(kv, taskId));
         if (!task) continue;
