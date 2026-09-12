@@ -810,6 +810,18 @@ export async function fireRun(
   run.logs.push(`[sandbox] ${sandbox.sandboxId} created`);
   await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
 
+  // 1.5 SCHEDULER MARKER — E2B's list endpoint does NOT return sandbox
+  // metadata, so the tick's run-recovery identifies scheduled sandboxes by
+  // this marker file instead.
+  try {
+    await sandbox.files.write(
+      `${HOME}/.onyx/scheduled.json`,
+      JSON.stringify({ taskId: task.id, name: task.name, launchedAt: new Date().toISOString() }),
+    );
+  } catch {
+    /* best-effort */
+  }
+
   // 2. Onyx.md (identity + tool compendium) — the agent's documentation.
   try {
     await sandbox.files.write(`${HOME}/Onyx.md`, ONYX_MD);
@@ -1093,7 +1105,7 @@ async function persistFinal(kv: SchedulerKV, task: ScheduledTask, run: Scheduled
   if (notifyStatus) run.notifyStatus = notifyStatus;
 
   const runs = await loadRuns(kv, task.id);
-  const idx = runs.findIndex((r) => r.id === run.id);
+  const idx = runs.findIndex((r) => r.id === run.id || (run.sandboxId && r.sandboxId === run.sandboxId));
   if (idx >= 0) runs[idx] = run;
   else runs.push(run);
   await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
@@ -1212,18 +1224,36 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
     if (apiKey) {
       const paginator = Sandbox.list({ apiKey, limit: 50 });
       const page = await paginator.nextItems();
-      const scheduled = page.filter((s) => {
-        const m = (s as { metadata?: Record<string, string> }).metadata;
-        return !!m && typeof m === "object" && "onyx-scheduled" in m;
-      });
-      for (const sb of scheduled) {
-        const meta = (sb as { metadata?: Record<string, string> }).metadata ?? {};
-        const taskId = String(meta["onyx-scheduled"] ?? "");
-        if (!taskId) {
-          (result as { debug?: string[] }).debug?.push(`recovery: sandbox ${sb.sandboxId} has no metadata tag`);
-          continue;
+      // Only RUNNING sandboxes (paused ones wake on connect — costly; the
+      // finalize window (55 min) closes before the 1h auto-pause anyway).
+      const live = page.filter((s) => (s.state as string) === "running");
+      const known = new Set<string>();
+      for (const task of tasks) {
+        const runs = await loadRuns(kv, task.id);
+        for (const r of runs) {
+          if (r.sandboxId) known.add(r.sandboxId);
         }
-        // Known live run for this sandbox? (record-based tracking above)
+      }
+      for (const sb of live) {
+        if (known.has(sb.sandboxId)) continue; // tracked by a run record
+        // Identify scheduled sandboxes by the marker file (E2B's list does
+        // NOT return metadata — verified live).
+        let taskId = "";
+        let markerName = "";
+        let markerLaunched: string | null = null;
+        try {
+          const sandbox = await Sandbox.connect(sb.sandboxId, { apiKey });
+          const raw = await sandbox.files.read(`${HOME}/.onyx/scheduled.json`);
+          const marker = JSON.parse(raw) as { taskId?: string; name?: string; launchedAt?: string };
+          if (marker?.taskId) {
+            taskId = marker.taskId;
+            markerName = marker.name ?? "";
+            markerLaunched = marker.launchedAt ?? null;
+          }
+        } catch {
+          /* not scheduled / unreachable — skip */
+        }
+        if (!taskId) continue;
         const task = tasks.find((t) => t.id === taskId) ?? (await loadTaskById(kv, taskId));
         if (!task) continue;
         const runs = await loadRuns(kv, taskId);
@@ -1234,6 +1264,7 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
         if (existing) {
           continue; // already terminal — never re-finalize
         }
+        void markerName; void markerLaunched;
         const rawStart = (sb as unknown as { startedAt?: string | Date }).startedAt;
         const startedAt =
           rawStart instanceof Date
