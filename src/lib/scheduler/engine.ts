@@ -82,28 +82,48 @@ const MAX_LAUNCH_RETRIES = 3;
 // instance-roulette) + parallel per-task gets.
 // ---------------------------------------------------------------------------
 
+/** Versioned task records — the durability fix for OnyxBase's mirror.
+ *
+ * LIVE-DEBUGGED FAILURE MODES (2026-09-12, production):
+ *  1. A write acked 200 but was never visible anywhere (stranded mirror SEND).
+ *  2. An update converged fleet-wide, then REVERTED — instances rebuild their
+ *     index from the Telegram mirror on recycle, and a failed mirror EDIT
+ *     leaves the old message → the new value evaporates. Mutable keys are
+ *     therefore UNSAFE for data that must survive.
+ *
+ * The workspace-sync engine's answer is content-addressed, immutable chunks.
+ * The scheduler uses the same trick: every task mutation writes a NEW
+ * immutable version record (a new Telegram message — sends are far more
+ * reliable than edits, and a failed send is detectable + retryable with a
+ * fresh key). Reads resolve the latest surviving version via the key list.
+ *
+ *   schedule:tv:<taskId>:<versionTs36>   — immutable task snapshot
+ *   schedule:tv:<taskId>:del            — tombstone (task deleted)
+ */
+function taskVersionKey(id: string, version: string): string {
+  return `schedule:tv:${id}:${version}`;
+}
+
+/** Legacy mutable keys — still written as a fast-path/readable hint and
+ *  cleaned up opportunistically (old deployments may hold them). */
 function taskKey(id: string): string {
   return `schedule:task:${id}`;
 }
 
-/** Mirrored replica of a task record — OnyxBase's Telegram-mirror writes
- *  can drop (observed live: a write that acked 200 never became visible on
- *  ANY instance). The workspace-sync engine survives this exact failure with
- *  mirrored replicas (m: + mr: keys); the scheduler uses the same trick:
- *  two independent mirror attempts per task, reads fall back. */
 function taskReplicaKey(id: string): string {
   return `schedule:taskr:${id}`;
 }
 
-/** Robust prefix list — OnyxBase's list endpoint can hit a stale instance
- *  that shows only part of the namespace (observed live). Two passes with
- *  a settle delay, results unioned. */
-async function listKeysRobust(kv: SchedulerKV, prefix: string): Promise<string[]> {
+/** Robust prefix list — OnyxBase's list endpoint IGNORES the prefix query
+ *  param (returns the whole collection; filter client-side) and can hit a
+ *  stale instance showing only part of the namespace. Two passes with a
+ *  settle delay, results unioned. */
+async function listKeysRobust(kv: SchedulerKV, _prefix: string): Promise<string[]> {
   const union = new Set<string>();
   let sawAny = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const keys = await kv.listKeys(prefix);
+      const keys = await kv.listKeys("schedule:");
       if (keys.length > 0) sawAny = true;
       for (const k of keys) union.add(k);
     } catch {
@@ -115,38 +135,78 @@ async function listKeysRobust(kv: SchedulerKV, prefix: string): Promise<string[]
   return [...union];
 }
 
-/** Read one task record — main key with rolls, then the mirrored replica
- *  (the mirror write can land when the primary didn't). */
-async function readTask(kv: SchedulerKV, id: string): Promise<ScheduledTask | null> {
-  const tryKeys = [taskKey(id), taskReplicaKey(id)];
-  for (const key of tryKeys) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const raw = await kv.get(key);
-        if (raw) {
-          const parsed = JSON.parse(raw) as ScheduledTask;
-          if (parsed && parsed.id === id) return parsed;
-          return null; // corrupt record — treat as absent
-        }
-      } catch {
-        /* retry */
-      }
-      if (attempt < 1) await new Promise((r) => setTimeout(r, 1000));
+interface TaskVersionEntry {
+  id: string;
+  version: string;
+  tombstoned: boolean;
+}
+
+/** Parse the schedule: key namespace into per-task version entries. */
+function parseVersionKeys(keys: string[]): TaskVersionEntry[] {
+  const out: TaskVersionEntry[] = [];
+  for (const k of keys) {
+    if (!k.startsWith("schedule:tv:")) continue;
+    const rest = k.slice("schedule:tv:".length);
+    const sep = rest.indexOf(":");
+    if (sep < 0) continue;
+    const id = rest.slice(0, sep);
+    const version = rest.slice(sep + 1);
+    if (!id || !version) continue;
+    out.push({ id, version, tombstoned: version === "del" });
+  }
+  return out;
+}
+
+/** Latest version entry per task id (tombstones included so deletes win). */
+function latestVersionPerTask(entries: TaskVersionEntry[]): Map<string, TaskVersionEntry> {
+  const latest = new Map<string, TaskVersionEntry>();
+  for (const e of entries) {
+    const cur = latest.get(e.id);
+    if (!cur) {
+      latest.set(e.id, e);
+      continue;
     }
+    // Tombstone always beats a version; otherwise lexicographic version
+    // compare (base36 timestamps sort correctly).
+    const eWins =
+      e.tombstoned && !cur.tombstoned ? true : !e.tombstoned && !cur.tombstoned && e.version > cur.version ? true : false;
+    if (eWins) latest.set(e.id, e);
+  }
+  return latest;
+}
+
+/** Read one task by id — resolve the latest surviving version (direct key
+ *  reads of the version record, with rolls). */
+async function readTask(kv: SchedulerKV, id: string): Promise<ScheduledTask | null> {
+  const keys = await listKeysRobust(kv, "schedule:tv:");
+  const entries = parseVersionKeys(keys).filter((e) => e.id === id);
+  if (entries.length === 0) return null;
+  const latest = latestVersionPerTask(entries).get(id);
+  if (!latest || latest.tombstoned) return null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = await kv.get(taskVersionKey(id, latest.version));
+      if (raw) {
+        const parsed = JSON.parse(raw) as ScheduledTask;
+        if (parsed && parsed.id === id) return parsed;
+        return null;
+      }
+    } catch {
+      /* retry */
+    }
+    if (attempt < 1) await new Promise((r) => setTimeout(r, 1000));
   }
   return null;
 }
 
-/** Verified write: the record goes to the MAIN key AND a mirrored replica
- *  (two independent OnyxBase mirror attempts — single writes have been
- *  observed to strand). Then a probe read (main → replica). A write that
- *  still can't be read returns a warning — bounded, never blocks long. */
+/** Verified write — a NEW immutable version key (new Telegram message, not
+ *  an edit): write → probe → on strand, write a FRESH version key (new
+ *  mirror attempt) → probe. Also refreshes the legacy mutable keys as a
+ *  hint (best-effort; the version keys are the source of truth). */
 async function writeTaskVerified(
   kv: SchedulerKV,
   task: ScheduledTask,
 ): Promise<{ warning?: string }> {
-  const main = taskKey(task.id);
-  const replica = taskReplicaKey(task.id);
   const value = JSON.stringify(task);
   const equal = (back: string | null): boolean => {
     if (back === value) return true;
@@ -157,77 +217,101 @@ async function writeTaskVerified(
       return false;
     }
   };
-  await kv.set(main, value);
-  await kv.set(replica, value);
-  // UNCONDITIONAL rewrite sweep — a warm-instance probe can pass while the
-  // OnyxBase Telegram-mirror EDIT silently failed for BOTH writes (observed
-  // live: an update acked + probed OK, yet every other instance kept serving
-  // the old value indefinitely). The second pair of writes = two fresh
-  // mirror attempts; skipping it when the probe "passes" is a false economy.
-  await new Promise((r) => setTimeout(r, 1500));
-  await kv.set(main, value);
-  await kv.set(replica, value);
-  const probe = async (): Promise<boolean> => {
-    for (const key of [main, replica]) {
-      try {
-        if (equal(await kv.get(key))) return true;
-      } catch {
-        /* next */
-      }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const version = Date.now().toString(36) + (attempt > 0 ? "r" : "");
+    const key = taskVersionKey(task.id, version);
+    try {
+      await kv.set(key, value);
+    } catch {
+      continue;
     }
-    return false;
-  };
-  if (await probe()) return {};
+    try {
+      if (equal(await kv.get(key))) {
+        // Durable — refresh legacy mutable hints (best-effort).
+        try {
+          await kv.set(taskKey(task.id), value);
+          await kv.set(taskReplicaKey(task.id), value);
+        } catch {
+          /* hints only */
+        }
+        // Version GC — keep at most the 2 newest records per task.
+        void gcTaskVersions(kv, task.id, version).catch(() => {});
+        return {};
+      }
+    } catch {
+      /* probe failed — try a fresh version key */
+    }
+  }
   return {
     warning:
-      `Task "${task.name}" was written (main + replica, both acked 200) but OnyxBase hasn't converged the reads yet — it may take a minute to appear. If the task doesn't show up, re-check in a minute before recreating it.`,
+      `Task "${task.name}" was written but OnyxBase hasn't confirmed it durable — it may take a minute to appear. Re-check before recreating it.`,
   };
 }
 
+/** Best-effort garbage collection of superseded version records. */
+async function gcTaskVersions(kv: SchedulerKV, taskId: string, keepVersion: string): Promise<void> {
+  const keys = await kv.listKeys("schedule:");
+  const versions = keys
+    .filter((k) => k.startsWith(`schedule:tv:${taskId}:`) && k !== `schedule:tv:${taskId}:${keepVersion}`)
+    .filter((k) => !k.endsWith(":del"))
+    .sort();
+  // Keep the second-newest (crash-recovery margin), delete the rest.
+  const toDelete = versions.slice(0, -1);
+  for (const k of toDelete) {
+    try {
+      await kv.delete(k);
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 export async function loadTasks(kv: SchedulerKV): Promise<ScheduledTask[]> {
-  // NOTE: OnyxBase's /v1/list IGNORES the prefix query param (returns the
-  // whole collection) — filter client-side, and NEVER derive ids from keys
-  // that don't start with the prefix (garbage ids caused 3-attempt reads on
-  // ~50 nonexistent keys = the 40-second list latency). The union of main
-  // + replica keys dedupes by id.
-  const keys = await listKeysRobust(kv, "schedule:task");
-  const MAIN_PREFIX = "schedule:task:";
-  const REPL_PREFIX = "schedule:taskr:";
-  const ids = [
-    ...new Set(
-      keys.flatMap((k) => {
-        if (k.startsWith(MAIN_PREFIX)) return [k.slice(MAIN_PREFIX.length)];
-        if (k.startsWith(REPL_PREFIX)) return [k.slice(REPL_PREFIX.length)];
-        return [];
-      }),
-    ),
-  ].filter((id) => id && id.length > 4 && !id.includes(":"));
-  if (ids.length === 0) return [];
+  const keys = await listKeysRobust(kv, "schedule:tv:");
+  const latest = latestVersionPerTask(parseVersionKeys(keys));
   const out: ScheduledTask[] = [];
-  // Small parallel pools (reads are instance-roulette but concurrency-safe).
+  const jobs: Array<[string, TaskVersionEntry]> = [];
+  for (const [id, entry] of latest) {
+    if (entry.tombstoned) continue;
+    jobs.push([id, entry]);
+  }
+  if (jobs.length === 0) return [];
   let next = 0;
-  const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+  const workers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
     for (;;) {
       const i = next++;
-      const id = ids[i];
-      if (id === undefined || i >= ids.length) return;
-      const t = await readTask(kv, id);
-      if (t) out.push(t);
+      const job = jobs[i];
+      if (!job || i >= jobs.length) return;
+      const [id, entry] = job;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const raw = await kv.get(taskVersionKey(id, entry.version));
+          if (raw) {
+            const parsed = JSON.parse(raw) as ScheduledTask;
+            if (parsed && parsed.id === id) {
+              out.push(parsed);
+              break;
+            }
+            break;
+          }
+        } catch {
+          /* retry */
+        }
+        if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
+      }
     }
   });
   await Promise.all(workers);
   return out.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 }
 
-/** Load ONE task by id — DIRECT key read with rolls (the prefix-list can
- *  miss freshly-written keys on stale instances; a direct read converges
- *  much faster and the create's verified write proves some instance holds
- *  the value). Used by run_now/update/delete right after a create. */
-async function loadTaskById(kv: SchedulerKV, taskId: string, rolls = 5): Promise<ScheduledTask | null> {
+/** Load ONE task by id with retries (fresh-write convergence). */
+async function loadTaskById(kv: SchedulerKV, taskId: string, rolls = 4): Promise<ScheduledTask | null> {
   for (let attempt = 0; attempt < rolls; attempt++) {
     const t = await readTask(kv, taskId);
     if (t) return t;
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1200));
   }
   return null;
 }
@@ -432,17 +516,23 @@ export async function updateTask(kv: SchedulerKV, payload: UpdateTaskPayload): P
 }
 
 export async function deleteTask(kv: SchedulerKV, taskId: string): Promise<void> {
-  // Direct existence check (fresh-write convergence for deletes issued
-  // right after a create).
   const task = await loadTaskById(kv, taskId);
   if (!task) throw new Error(`Scheduled task not found: ${taskId}`);
-  await kv.delete(taskKey(taskId));
+  // TOMBSTONE — a new immutable record wins over every version (deletes via
+  // KV delete are mirror-edits and unreliable; tombstones are durable).
+  const tomb = taskVersionKey(taskId, "del");
+  await kv.set(tomb, JSON.stringify({ id: taskId, deleted: true, deletedAt: new Date().toISOString() }));
+  // Probe the tombstone; a second write on strand.
   try {
-    await kv.delete(taskReplicaKey(taskId));
+    const back = await kv.get(tomb);
+    if (!back) await kv.set(tomb, JSON.stringify({ id: taskId, deleted: true, deletedAt: new Date().toISOString() }));
   } catch {
     /* best-effort */
   }
+  // Legacy mutable keys + run history — best-effort cleanup.
   try {
+    await kv.delete(taskKey(taskId));
+    await kv.delete(taskReplicaKey(taskId));
     await kv.delete(SCHED_RUNS_PREFIX + taskId);
     await kv.delete(`schedule:runsr:${taskId}`);
   } catch {
