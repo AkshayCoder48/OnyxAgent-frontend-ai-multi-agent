@@ -17,6 +17,7 @@ import { PageHeader } from "@/components/dashboard/page-header";
 import { cn } from "@/lib/utils";
 import type { SafeScheduledTask } from "@/lib/scheduler/types";
 import { schedulerApi, useSchedulerKey } from "@/lib/scheduler/client";
+import { conversationService } from "@/lib/services";
 import { ROUTES } from "@/lib/constants";
 import { TaskCard } from "./task-card";
 import { TaskFormDialog } from "./task-form-dialog";
@@ -54,6 +55,9 @@ export function ScheduledTasksView() {
     [busy, setBusy] = useState<Record<string, string>>({});
   const /** task ids with a run currently in flight (from run-now + history) */
     [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  /** Conversation titles by id — resolves the cards' "💬 chat" chips (unknown
+   *  ids fall back to the "Linked chat" label). Fetched batched by list. */
+  const [chatTitles, setChatTitles] = useState<Record<string, string>>({});
   /** Freshly created/updated tasks kept locally until the server list
    *  converges (OnyxBase read lag — ids expire after 5 minutes). */
   const optimisticRef = useRef<Map<string, number>>(new Map());
@@ -103,6 +107,31 @@ export function ScheduledTasksView() {
     const id = window.setInterval(() => void refresh(), 30_000);
     return () => window.clearInterval(id);
   }, [ready, refresh]);
+
+  // Resolve the linked conversations' titles (batched list → id→title map).
+  // Refetched when the set of attached chats changes; silent on failure —
+  // the cards fall back to the generic "Linked chat" chip.
+  const chatIdKey = (tasks ?? []).map((t) => t.chatId ?? "-").join(",");
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await conversationService.list(userId, { limit: 100 });
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const c of list) {
+          if (c.title) map[c.id] = c.title;
+        }
+        setChatTitles(map);
+      } catch {
+        /* silent — chips fall back */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, chatIdKey]);
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
@@ -301,6 +330,7 @@ export function ScheduledTasksView() {
                   <TaskCard
                     task={task}
                     running={runningIds.has(task.id)}
+                    chatTitle={task.chatId ? (chatTitles[task.chatId] ?? null) : undefined}
                     historyOpen={historyTaskId === task.id}
                     onToggleHistory={() => {
                       setHistoryTaskId((cur) => (cur === task.id ? null : task.id));
@@ -345,6 +375,7 @@ export function ScheduledTasksView() {
         onOpenChange={setDialogOpen}
         task={editingTask}
         userId={userId ?? ""}
+        tasks={tasks ?? []}
         onSaved={(saved) => {
           // OPTIMISTIC MERGE — OnyxBase reads converge with a delay; a
           // freshly created task can be missing from the next `list` call

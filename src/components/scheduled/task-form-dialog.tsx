@@ -10,10 +10,10 @@
 // computes the next run with the same math the server uses (tz-cron).
 // ============================================================================
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { CalendarClock, Globe, Info, Loader2, Save, Send } from "lucide-react";
+import { CalendarClock, Globe, Info, Loader2, MessageSquare, Save, Send } from "lucide-react";
 import { Button } from "@/components/ui";
 import {
   Dialog,
@@ -36,10 +36,25 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { computeNextRun, normalizeSchedule } from "@/lib/scheduler/tz-cron";
-import type { SafeScheduledTask, ScheduleType, TaskSchedule } from "@/lib/scheduler/types";
+import type {
+  CreateTaskPayload,
+  SafeScheduledTask,
+  ScheduleType,
+  TaskSchedule,
+} from "@/lib/scheduler/types";
+import {
+  buildChatContext,
+  DEFAULT_CHAT_TASK_INSTRUCTIONS,
+} from "@/lib/scheduler/chat-context";
+import {
+  addLinkedChat,
+  mirrorChatToServer,
+  removeLinkedChat,
+} from "@/lib/scheduler/chat-sync";
 import { schedulerApi, getTelegramStatus, resolveProviderSnapshot } from "@/lib/scheduler/client";
 import { ROUTES } from "@/lib/constants";
-import { formatNextRun } from "./time-format";
+import type { Conversation } from "@/types";
+import { formatNextRun, formatRelativeAgo } from "./time-format";
 
 const BROWSER_TZ = (() => {
   try {
@@ -48,6 +63,9 @@ const BROWSER_TZ = (() => {
     return "UTC";
   }
 })();
+
+/** The chat context payload attached to creates (shared shape). */
+type CreateTaskPayloadChatContext = CreateTaskPayload["chatContext"];
 
 // Common IANA zones — Asia/Kolkata first, then the global spread.
 const COMMON_TZ = [
@@ -86,6 +104,9 @@ interface FormState {
   name: string;
   description: string;
   instructions: string;
+  /** UNIFIED CHAT MODE: the conversation the schedule attaches to ("" =
+   *  standalone instructions). */
+  chatId: string;
   type: ScheduleType;
   onceAt: string;
   intervalMinutes: string;
@@ -106,6 +127,7 @@ function initialState(task: SafeScheduledTask | null): FormState {
       name: "",
       description: "",
       instructions: "",
+      chatId: "",
       type: "daily",
       onceAt: "",
       intervalMinutes: "30",
@@ -125,6 +147,7 @@ function initialState(task: SafeScheduledTask | null): FormState {
     name: task.name,
     description: task.description ?? "",
     instructions: task.instructions,
+    chatId: task.chatId ?? "",
     type: task.scheduleType,
     onceAt: isoToLocalInput(task.scheduleExpression),
     intervalMinutes: String(Math.max(1, Math.round((meta.intervalSec ?? 3600) / 60))),
@@ -146,6 +169,9 @@ interface TaskFormDialogProps {
   /** Existing task when editing; null when creating. */
   task: SafeScheduledTask | null;
   userId: string;
+  /** Current task list (used to keep the chat-link registry accurate when
+   *  re-attaching a conversation another task might still reference). */
+  tasks?: SafeScheduledTask[];
   onSaved: (saved: SafeScheduledTask) => void;
 }
 
@@ -154,18 +180,26 @@ export function TaskFormDialog({
   onOpenChange,
   task,
   userId,
+  tasks,
   onSaved,
 }: TaskFormDialogProps) {
   const [form, setForm] = useState<FormState>(() => initialState(task));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [telegramConnected, setTelegramConnected] = useState<boolean | null>(null);
+  /** Conversations for the "Run in chat" picker (fetched on dialog open). */
+  const [conversations, setConversations] = useState<Conversation[] | null>(null);
+  const /** one-shot guard so the create-mode default (most recent conversation)
+      applies only once per dialog open, never over a user's explicit choice */
+    chatTouchedRef = useRef(false);
 
   // Reset whenever the dialog (re)opens for a task.
   useEffect(() => {
     if (open) {
       setForm(initialState(task));
       setError(null);
+      setConversations(null);
+      chatTouchedRef.current = false;
     }
   }, [open, task]);
 
@@ -182,6 +216,32 @@ export function TaskFormDialog({
       cancelled = true;
     };
   }, [open, userId]);
+
+  // Conversations for the "Run in chat" picker — fetched when the dialog
+  // opens (newest first). Chat mode is the primary flow, so CREATE defaults
+  // to the most recent conversation; editing preselects the task's chat.
+  useEffect(() => {
+    if (!open || !userId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { conversationService } = await import("@/lib/services");
+        const list = await conversationService.list(userId, { limit: 30 });
+        if (cancelled) return;
+        setConversations(list);
+        // Default: the most recent conversation when creating (chat mode is
+        // the primary flow) — only when the user hasn't picked anything yet.
+        if (!task && !chatTouchedRef.current && list.length > 0) {
+          setForm((f) => (f.chatId === "" ? { ...f, chatId: list[0]!.id } : f));
+        }
+      } catch {
+        if (!cancelled) setConversations([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, userId, task]);
 
   const patch = (p: Partial<FormState>) => setForm((f) => ({ ...f, ...p }));
 
@@ -229,7 +289,11 @@ export function TaskFormDialog({
 
   function validate(): string | null {
     if (!form.name.trim()) return "Give the task a name.";
-    if (!form.instructions.trim()) return "Instructions are required — they are the complete job the agent runs unattended.";
+    // With a chat attached, instructions are OPTIONAL (the standing-task
+    // default continues the conversation); standalone mode requires them.
+    if (!form.chatId && !form.instructions.trim()) {
+      return "Instructions are required — they are the complete job the agent runs unattended.";
+    }
     switch (form.type) {
       case "once":
         if (!form.onceAt || Number.isNaN(new Date(form.onceAt).getTime())) return "Pick a date and time for the one-time run.";
@@ -283,14 +347,29 @@ export function TaskFormDialog({
         );
         return;
       }
+      // UNIFIED CHAT MODE — the conversation the schedule attaches to.
+      const chatId = form.chatId.trim() || null;
+      // Chat context (systemPrompt + title + recent messages) assembled
+      // EXACTLY like the tool's browser-side assembly (shared helper). Sent
+      // with CREATE so the server writes the initial mirror; on UPDATE the
+      // engine only re-attaches the chat, so a forced mirror converges it.
+      let chatContext: CreateTaskPayloadChatContext = null;
+      if (chatId && !task) {
+        chatContext = await buildChatContext(userId, chatId);
+      }
+      const instructions = form.chatId.trim()
+        ? form.instructions.trim() || DEFAULT_CHAT_TASK_INSTRUCTIONS
+        : form.instructions;
       const payload: Record<string, unknown> = {
         name: form.name.trim(),
         description: form.description.trim() || undefined,
-        instructions: form.instructions,
+        instructions,
         schedule: schedulePayload,
         enabled: form.enabled,
         notifyTelegram: form.notifyTelegram,
         runtime: { provider },
+        chatId,
+        ...(chatContext ? { chatContext } : {}),
       };
       const res = task
         ? await schedulerApi(userId, "update", { id: task.id, ...payload })
@@ -299,6 +378,22 @@ export function TaskFormDialog({
         toast.error(res.message ?? (task ? "Update failed" : "Creation failed"));
         setError(res.message ?? "Something went wrong.");
         return;
+      }
+      // Keep the local chat-link registry accurate: register the attached
+      // conversation; drop a DETACHED/switched one only when no other task
+      // still references it.
+      const prevChatId = task?.chatId ?? null;
+      if (chatId) addLinkedChat(chatId);
+      if (prevChatId && prevChatId !== chatId) {
+        const stillHeld = (tasks ?? []).some(
+          (t) => t.id !== task?.id && (t.chatId ?? null) === prevChatId,
+        );
+        if (!stillHeld) removeLinkedChat(prevChatId);
+      }
+      // The update path does not rewrite the server-side mirror — push the
+      // browser's current state for the (new) conversation now.
+      if (task && chatId) {
+        void mirrorChatToServer(userId, chatId, { force: true });
       }
       onSaved(res.task);
       toast.success(task ? "Task updated" : "Scheduled task created", {
@@ -357,19 +452,61 @@ export function TaskFormDialog({
             </div>
           </div>
 
+          {/* Run in chat — the unified chat mode picker */}
+          <div className="space-y-1.5">
+            <Label htmlFor="sched-chat" className="flex items-center gap-1.5">
+              <MessageSquare className="size-3.5 text-muted-foreground" aria-hidden />
+              Run in chat
+            </Label>
+            <Select
+              value={form.chatId || "none"}
+              onValueChange={(v) => {
+                chatTouchedRef.current = true;
+                patch({ chatId: v === "none" ? "" : v });
+              }}
+            >
+              <SelectTrigger id="sched-chat" className="h-10 w-full" aria-label="Run in chat">
+                <SelectValue placeholder="No chat (standalone instructions)" />
+              </SelectTrigger>
+              <SelectContent className="max-h-64">
+                <SelectItem value="none">No chat (standalone instructions)</SelectItem>
+                {(conversations ?? []).map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    <span className="max-w-[380px] truncate">
+                      {c.title || "Untitled chat"} · {formatRelativeAgo(c.updated_at || c.created_at)}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11.5px] text-muted-foreground">
+              {form.chatId
+                ? "Runs inside that conversation — the agent gets the chat's history and each run's result is appended to the chat."
+                : "Standalone mode — the instructions below are the complete autonomous job (no conversation history)."}
+            </p>
+          </div>
+
           {/* Instructions */}
           <div className="space-y-1.5">
-            <Label htmlFor="sched-instructions">Instructions</Label>
+            <Label htmlFor="sched-instructions">
+              Instructions{form.chatId ? " (optional when a chat is attached)" : ""}
+            </Label>
             <Textarea
               id="sched-instructions"
               value={form.instructions}
               onChange={(e) => patch({ instructions: e.target.value })}
-              placeholder="The COMPLETE agent job executed at run time: what to research/do, files to create (with paths), what to send on Telegram. Written for an autonomous agent with no user available."
+              placeholder={
+                form.chatId
+                  ? "Optional — what each run should do. Defaults to continuing this conversation's standing task."
+                  : "The COMPLETE agent job executed at run time: what to research/do, files to create (with paths), what to send on Telegram. Written for an autonomous agent with no user available."
+              }
               className="min-h-[140px] resize-y font-mono text-[13px] leading-relaxed"
-              required
+              required={!form.chatId}
             />
             <p className="text-[11.5px] text-muted-foreground">
-              Executed verbatim in an isolated sandbox with your persistent workspace.
+              {form.chatId
+                ? "With a chat attached, empty instructions continue the conversation's standing task; written instructions run verbatim each time."
+                : "Executed verbatim in an isolated sandbox with your persistent workspace."}
             </p>
           </div>
 

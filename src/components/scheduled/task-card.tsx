@@ -8,6 +8,7 @@
 // ============================================================================
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   CalendarClock,
@@ -15,6 +16,7 @@ import {
   Globe,
   History,
   Loader2,
+  MessageSquare,
   PauseCircle,
   Play,
   Pencil,
@@ -33,12 +35,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { ROUTES } from "@/lib/constants";
 import { describeSchedule } from "@/lib/scheduler/tz-cron";
 import type { SafeScheduledTask } from "@/lib/scheduler/types";
 import { formatNextRun, formatRelativeAgo } from "./time-format";
 
-/** Status of the card as a whole: dot + tint (label via scheduled.status.*). */
-function statusOf(task: SafeScheduledTask): {
+/** Status of the card as a whole: dot + tint (label via scheduled.status.*).
+ *  Exported — the sidebar's Scheduled Tasks rows reuse the same mapping. */
+export function statusOf(task: SafeScheduledTask): {
   key: "active" | "paused" | "running" | "failed" | "completed";
   dot: string;
 } {
@@ -58,6 +62,9 @@ interface TaskCardProps {
   task: SafeScheduledTask;
   /** A run is in flight right now (from status polling) — amber pulse dot. */
   running?: boolean;
+  /** Title of the attached conversation (chat mode) — resolved by the parent;
+   *  null/undefined falls back to the "Linked chat" label. */
+  chatTitle?: string | null;
   historyOpen: boolean;
   onToggleHistory: () => void;
   onEdit: () => void;
@@ -71,6 +78,7 @@ interface TaskCardProps {
 export function TaskCard({
   task,
   running,
+  chatTitle,
   historyOpen,
   onToggleHistory,
   onEdit,
@@ -80,9 +88,12 @@ export function TaskCard({
   busyAction,
 }: TaskCardProps) {
   const t = useTranslations("scheduled");
+  const router = useRouter();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const status = statusOf(task);
   const display = running ? { key: "running" as const, dot: "animate-pulse bg-amber-500" } : status;
+  const chatHref = task.chatId ? `${ROUTES.CHAT}?id=${encodeURIComponent(task.chatId)}` : null;
+  const chatLabel = chatTitle?.trim() || t("linkedChat");
 
   return (
     <article
@@ -92,16 +103,52 @@ export function TaskCard({
       )}
       aria-label={`Scheduled task ${task.name}`}
     >
-      {/* Header: name + status */}
-      <div className="flex items-start justify-between gap-3">
+      {/* Header: name + status — the row becomes a link to the attached
+          conversation when the task runs in a chat (the action row below
+          stays non-navigating). */}
+      <div
+        {...(chatHref
+          ? {
+              role: "link",
+              tabIndex: 0,
+              onClick: () => router.push(chatHref),
+              onKeyDown: (e: React.KeyboardEvent) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  router.push(chatHref);
+                }
+              },
+            }
+          : {})}
+        className={cn(
+          "flex items-start justify-between gap-3 rounded-md -mx-1.5 px-1.5 py-1 transition-colors",
+          chatHref &&
+            "group/head cursor-pointer hover:bg-foreground/[0.04] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/40",
+        )}
+        aria-label={chatHref ? `Scheduled task ${task.name} — open linked chat` : undefined}
+      >
         <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-[15px] font-semibold tracking-tight text-foreground">
+          <h3
+            className={cn(
+              "truncate font-display text-[15px] font-semibold tracking-tight text-foreground",
+              chatHref && "group-hover/head:text-primary transition-colors",
+            )}
+          >
             {task.name}
           </h3>
           {task.description && (
             <p className="mt-0.5 line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">
               {task.description}
             </p>
+          )}
+          {chatHref && (
+            <span
+              className="mt-1.5 inline-flex max-w-full items-center gap-1 rounded-md border border-primary/25 bg-primary/5 px-1.5 py-0.5 text-[11px] font-medium text-primary"
+              title="Open the linked conversation"
+            >
+              <MessageSquare className="size-3 shrink-0" aria-hidden />
+              <span className="truncate">{chatLabel}</span>
+            </span>
           )}
         </div>
         <span

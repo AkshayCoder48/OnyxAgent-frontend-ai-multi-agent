@@ -26,6 +26,7 @@
 import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
+import type { BgEvent } from "@/lib/e2b/background-agent";
 import type { SchedulerKV } from "./server-kv";
 import { computeNextRun, describeSchedule } from "./tz-cron";
 import {
@@ -37,13 +38,24 @@ import {
   SCHED_TICK_KEY,
   SCHED_TELEGRAM_KEY,
   toSafeTask,
+  type ChatTurnMessage,
   type CreateTaskPayload,
+  type ProviderSnapshot,
   type SafeScheduledTask,
   type ScheduledTask,
   type ScheduledTaskRun,
   type TickResult,
   type UpdateTaskPayload,
 } from "./types";
+import {
+  appendServerMessages,
+  buildChatHistory,
+  readChatMeta,
+  writeChatMeta,
+  writeChatMirror,
+  type ServerChatMessage,
+} from "./chat-store";
+import { eventsToMessage } from "./events-to-message";
 import { serverPushWorkspace, serverRestoreWorkspace } from "./ws-sync";
 import {
   telegramSendDocument,
@@ -64,6 +76,10 @@ const ONCE_CATCHUP_GRACE_MS = 24 * 60 * 60_000;
 /** Retry backoff base for transient launch failures. */
 const RETRY_BASE_MS = 5 * 60_000;
 const MAX_LAUNCH_RETRIES = 3;
+/** Chat-execution records kept per chat (chat:<id>:execs envelope). */
+const MAX_CHAT_EXECS = 15;
+/** Max chat-exec version records kept after GC (mirrors task/run records). */
+const CHAT_EXEC_GC_KEEP = 2;
 
 // ---------------------------------------------------------------------------
 // KV persistence helpers
@@ -511,6 +527,8 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
     name,
     description: (payload.description ?? "").trim(),
     instructions,
+    // UNIFIED CHAT MODE — null/absent keeps the legacy standalone behavior.
+    chatId: (payload.chatId ?? "").trim() || null,
     scheduleType: schedule.type,
     scheduleExpression: (schedule.expression ?? "").trim(),
     scheduleMeta: {
@@ -557,6 +575,31 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
   task.nextRunAt = next;
 
   const verified = await writeTaskVerified(kv, task);
+
+  // CHAT MODE — seed the initial chat mirror (browser context) so the first
+  // run executes with the conversation's history. Best-effort: the task
+  // itself is already durable at this point.
+  if (task.chatId && payload.chatContext) {
+    try {
+      await writeChatMirror(kv, {
+        chatId: task.chatId,
+        ...(payload.chatContext.title ? { title: payload.chatContext.title } : {}),
+        ...(payload.chatContext.systemPrompt ? { systemPrompt: payload.chatContext.systemPrompt } : {}),
+        messages: payload.chatContext.messages ?? [],
+      });
+      const existingMeta = await readChatMeta(kv, task.chatId);
+      if (!existingMeta) {
+        await writeChatMeta(kv, task.chatId, {
+          title: payload.chatContext.title ?? task.name,
+          kind: "chat",
+          createdAt: now.toISOString(),
+        });
+      }
+    } catch {
+      /* mirror best-effort — sync_chat converges it later */
+    }
+  }
+
   return { task: toSafeTask(task), warning: verified.warning };
 }
 
@@ -573,6 +616,7 @@ export async function updateTask(kv: SchedulerKV, payload: UpdateTaskPayload): P
     task.instructions = payload.instructions.trim();
   }
   if (payload.workspaceId !== undefined) task.workspaceId = payload.workspaceId;
+  if (payload.chatId !== undefined) task.chatId = (payload.chatId ?? "").trim() || null;
   if (payload.enabled !== undefined) {
     task.enabled = payload.enabled;
     if (payload.enabled && task.nextRunAt == null) {
@@ -731,6 +775,491 @@ that apply to you.
 }
 
 // ---------------------------------------------------------------------------
+// UNIFIED CHAT EXECUTIONS — a scheduled/telegram run attached to a chat.
+//
+// A chat execution launches the SAME agent runtime (isolated E2B sandbox +
+// workspace restore + bg-agent runner) but seeds state.messages with the
+// chat's history (mirror + server messages via buildChatHistory) and appends
+// the run's assistant message back into the chat as a server message
+// (chat:<chatId>:smsg:<ts36>) when it finalizes. Telegram-triggered
+// executions use the same launcher (the webhook agent calls
+// startChatExecution directly); runs with telegram creds stream live into
+// Telegram from INSIDE the sandbox (state.telegram.stream — the streamer is
+// owned by bg-agent-script).
+//
+// Records (same durability rules as tasks/runs — sequential writes, immutable
+// version records, verified, GC'd small):
+//   chat:<chatId>:exv:<ts36>  — immutable exec-envelope version records
+//   chat:<chatId>:execs       — mutable envelope {w, execs: ChatExecutionRecord[]}
+// ---------------------------------------------------------------------------
+
+export interface ChatExecutionRecord {
+  /** "exec_<ts36>_<rand>" — links the ScheduledTaskRun.execId + sandbox marker. */
+  id: string;
+  chatId: string;
+  trigger: "scheduled" | "telegram";
+  taskId?: string;
+  sandboxId: string;
+  e2bRunId: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+  /** First 300 chars of the assistant message (preview for UIs). */
+  resultPreview?: string;
+  /** The server message ids appended to the chat (e.g. ["smsg_<e2bRunId>"]). */
+  messageIds?: string[];
+}
+
+interface ChatExecsEnvelope {
+  w: number;
+  execs: ChatExecutionRecord[];
+}
+
+function chatExecsKey(chatId: string): string {
+  return `chat:${chatId}:execs`;
+}
+
+function chatExecVersionKey(chatId: string, version: string): string {
+  return `chat:${chatId}:exv:${version}`;
+}
+
+function parseChatExecsValue(raw: string | null): ChatExecsEnvelope | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as ChatExecsEnvelope;
+    if (parsed && Array.isArray(parsed.execs) && typeof parsed.w === "number") return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Load the chat's execution records — mutable envelope + the NEWEST immutable
+ *  version record; the highest write-timestamp wins (loadRuns pattern). */
+export async function loadChatExecs(kv: SchedulerKV, chatId: string): Promise<ChatExecutionRecord[]> {
+  let best: ChatExecsEnvelope | null = null;
+  try {
+    best = parseChatExecsValue(await kv.get(chatExecsKey(chatId)));
+  } catch {
+    /* fall through to version records */
+  }
+  try {
+    const keys = await kv.listKeys("chat:");
+    const versions = keys
+      .filter((k) => k.startsWith(chatExecVersionKey(chatId, "")))
+      .sort();
+    const latest = versions[versions.length - 1];
+    if (latest) {
+      const v = parseChatExecsValue(await kv.get(latest));
+      if (v && (!best || v.w > best.w)) best = v;
+    }
+  } catch {
+    /* version lookup best-effort */
+  }
+  return best?.execs ?? [];
+}
+
+/** Persist the chat's execution records (saveRuns pattern: mutable envelope +
+ *  verified immutable version record + GC to 2). SEQUENTIAL writes only. */
+async function saveChatExecs(kv: SchedulerKV, chatId: string, execs: ChatExecutionRecord[]): Promise<void> {
+  const capped = execs.slice(-MAX_CHAT_EXECS);
+  const env: ChatExecsEnvelope = { w: Date.now(), execs: capped };
+  const value = JSON.stringify(env);
+  await kv.set(chatExecsKey(chatId), value);
+  const version = env.w.toString(36);
+  const versionKey = chatExecVersionKey(chatId, version);
+  await kv.set(versionKey, value);
+  try {
+    const back = await kv.get(versionKey);
+    if (back !== value) {
+      const retryEnv = { w: Date.now(), execs: capped };
+      await kv.set(chatExecVersionKey(chatId, retryEnv.w.toString(36)), JSON.stringify(retryEnv));
+    }
+  } catch {
+    /* best-effort verification */
+  }
+  try {
+    const keys = await kv.listKeys("chat:");
+    const versions = keys
+      .filter((k) => k.startsWith(chatExecVersionKey(chatId, "")) && k !== versionKey)
+      .sort();
+    // Keep the CHAT_EXEC_GC_KEEP newest (crash-recovery margin), delete older.
+    const toDelete = versions.slice(0, Math.max(0, versions.length - (CHAT_EXEC_GC_KEEP - 1)));
+    for (const k of toDelete) {
+      try {
+        await kv.delete(k);
+      } catch {
+        /* best-effort */
+      }
+    }
+  } catch {
+    /* GC best-effort */
+  }
+}
+
+/** Replace/insert one execution record in the chat's envelope and save. */
+async function persistChatExec(kv: SchedulerKV, rec: ChatExecutionRecord): Promise<void> {
+  const execs = await loadChatExecs(kv, rec.chatId);
+  const idx = execs.findIndex((e) => e.id === rec.id || (rec.sandboxId && e.sandboxId === rec.sandboxId));
+  if (idx >= 0) execs[idx] = rec;
+  else execs.push(rec);
+  await saveChatExecs(kv, rec.chatId, execs);
+}
+
+export interface ChatExecutionInput {
+  chatId: string;
+  trigger: "scheduled" | "telegram";
+  userMessage: string;
+  systemPrompt: string;
+  history: ChatTurnMessage[];
+  provider: ProviderSnapshot;
+  telegram?: { botToken: string; chatId: string } | null;
+  taskId?: string;
+  /** Sandbox label (task name / chat title). */
+  name?: string;
+  maxDurationMs?: number;
+}
+
+export interface ChatExecutionHandle {
+  sandboxId: string;
+  e2bRunId: string;
+  execId: string;
+}
+
+/**
+ * Launch a chat execution — fireRun's launch sequence, UNIFIED: isolated E2B
+ * sandbox (metadata-tagged so the interactive rotation never kills it), the
+ * scheduled.json marker (kind/chatId/execId — the tick's recovery source of
+ * truth), Onyx.md, cloud workspace restore, and the bg-agent runner seeded
+ * with [system, ...history, userMessage]. Telegram creds stream live from
+ * inside the sandbox (state.telegram.stream = true).
+ */
+export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionInput): Promise<ChatExecutionHandle> {
+  const chatId = (input.chatId ?? "").trim();
+  if (!chatId) throw new Error("startChatExecution: chatId is required");
+  const apiKey = e2bKey();
+  if (!apiKey) {
+    throw new Error("E2B_UNAVAILABLE: the server has no E2B_API_KEY configured — chat executions cannot start.");
+  }
+  if (!input.provider?.baseUrl) {
+    throw new Error("No AI provider configuration for this chat execution.");
+  }
+  const execId = "exec_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+  const startedAt = new Date().toISOString();
+  const rec: ChatExecutionRecord = {
+    id: execId,
+    chatId,
+    trigger: input.trigger,
+    ...(input.taskId ? { taskId: input.taskId } : {}),
+    sandboxId: "",
+    e2bRunId: "",
+    status: "running",
+    startedAt,
+  };
+
+  // 1. Isolated sandbox (fireRun's exact create — metadata-tagged).
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.create({
+      apiKey,
+      timeoutMs: input.maxDurationMs ?? 3_600_000,
+      envs: {},
+      metadata: { "onyx-scheduled": input.taskId ?? chatId, "onyx-task": (input.name ?? "").slice(0, 60) },
+      lifecycle: { onTimeout: "pause", autoResume: true },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    rec.status = "failed";
+    rec.completedAt = new Date().toISOString();
+    rec.error = `E2B sandbox creation failed: ${msg}`;
+    await persistChatExec(kv, rec).catch(() => {});
+    throw new Error(rec.error);
+  }
+  rec.sandboxId = sandbox.sandboxId;
+
+  try {
+    // Persist the running record (sandbox known) BEFORE launch so a stranded
+    // launch save is recoverable from the sandbox marker.
+    await persistChatExec(kv, rec);
+
+    // 1.5 SCHEDULER MARKER — kind/chatId/execId (E2B is the source of truth
+    //     for run recovery; taskId kept for legacy scheduled recovery).
+    await sandbox.files.write(
+      `${HOME}/.onyx/scheduled.json`,
+      JSON.stringify({
+        kind: input.trigger,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        chatId,
+        execId,
+        name: input.name ?? "",
+        launchedAt: startedAt,
+      }),
+    );
+
+    // 2. Onyx.md (identity + tool compendium).
+    try {
+      await sandbox.files.write(`${HOME}/Onyx.md`, ONYX_MD);
+    } catch {
+      /* best-effort */
+    }
+
+    // 3. Restore the persistent workspace BEFORE the agent runs.
+    await serverRestoreWorkspace(sandbox, kv);
+
+    // 4. Runner + run state, then launch as a background command.
+    await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
+    const e2bRunId = "run_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+    const runDir = BG_RUNS_PREFIX + e2bRunId;
+    const state = {
+      provider: {
+        baseUrl: input.provider.baseUrl,
+        apiKey: input.provider.apiKey,
+        model: input.provider.model,
+        toolsEnabled: input.provider.toolsEnabled !== false,
+        noPrefix: input.provider.noPrefix ?? false,
+        disabledParams: input.provider.disabledParams ?? [],
+      },
+      toolsEnabled: input.provider.toolsEnabled !== false,
+      messages: [
+        { role: "system", content: input.systemPrompt },
+        ...input.history.map((h) => ({ role: h.role, content: h.content })),
+        { role: "user", content: input.userMessage },
+      ],
+      ...(input.telegram?.botToken
+        ? { telegram: { botToken: input.telegram.botToken, chatId: input.telegram.chatId, stream: true } }
+        : {}),
+      ...(input.taskId
+        ? { scheduledTask: { taskId: input.taskId, runId: null, name: input.name ?? "" } }
+        : {}),
+      chatExecution: { execId, chatId, trigger: input.trigger, taskId: input.taskId ?? null },
+      maxRounds: 30,
+      status: "starting",
+      content: "",
+      startedAt,
+    };
+    await sandbox.files.write(`${runDir}/state.json`, JSON.stringify(state));
+    await sandbox.files.write(`${runDir}/events.jsonl`, "");
+    await sandbox.commands.run(
+      `node ${BG_SCRIPT_PATH} ${e2bRunId} > ${HOME}/.onyx/bg-agent.log 2>&1`,
+      { background: true, timeoutMs: 0, cwd: HOME },
+    );
+    rec.e2bRunId = e2bRunId;
+    await persistChatExec(kv, rec);
+    return { sandboxId: sandbox.sandboxId, e2bRunId, execId };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    rec.status = "failed";
+    rec.completedAt = new Date().toISOString();
+    rec.error = `Failed to launch the agent runner: ${msg}`;
+    await persistChatExec(kv, rec).catch(() => {});
+    try {
+      await sandbox.kill();
+    } catch {
+      /* best-effort */
+    }
+    throw new Error(rec.error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chat-execution finalization (shared with finalizeRun via the helpers)
+// ---------------------------------------------------------------------------
+
+interface RunnerTerminalState {
+  status: string;
+  content: string;
+  error: string | null;
+  /** The run streamed live into Telegram (state.telegram.stream) — the
+   *  finalizer must NOT send a duplicate completion notification. */
+  telegramStreamed: boolean;
+}
+
+/** Read the runner's state.json mirror (shared by finalizeRun + finalizeChatExecution). */
+async function readRunTerminalState(sandbox: Sandbox, e2bRunId: string | null): Promise<RunnerTerminalState> {
+  let runnerStatus = "running";
+  let content = "";
+  let runnerError: string | null = null;
+  let telegramStreamed = false;
+  try {
+    if (e2bRunId) {
+      const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${e2bRunId}/state.json`);
+      const st = JSON.parse(raw) as {
+        status?: string;
+        content?: string;
+        error?: string | null;
+        telegram?: { stream?: boolean } | null;
+      };
+      runnerStatus = st.status ?? "running";
+      content = st.content ?? "";
+      runnerError = st.error ?? null;
+      telegramStreamed = st.telegram?.stream === true;
+    }
+  } catch {
+    /* unreadable — treat as still running until stale */
+  }
+  return { status: runnerStatus, content, error: runnerError, telegramStreamed };
+}
+
+/** Build the assistant ServerChatMessage for a finished chat execution —
+ *  events.jsonl reduced via eventsToMessage, with the runner's final
+ *  state.json content as fallback. */
+function buildChatResultMessage(
+  rec: { e2bRunId: string; trigger: "scheduled" | "telegram" },
+  events: BgEvent[],
+  terminal: RunnerTerminalState,
+): ServerChatMessage {
+  const reduced = eventsToMessage(events);
+  let content = reduced.content || terminal.content || "";
+  if (!content) content = "(no final message)";
+  if (terminal.status === "error" && terminal.error && !content.includes(terminal.error)) {
+    content += `\n\n❌ Error: ${terminal.error}`;
+  }
+  return {
+    id: "smsg_" + rec.e2bRunId,
+    role: "assistant",
+    content,
+    thinking: reduced.thinking ?? null,
+    reasoning: reduced.reasoning ?? null,
+    parts: reduced.parts ?? null,
+    toolCalls: reduced.toolCalls ?? null,
+    createdAt: new Date().toISOString(),
+    origin: rec.trigger,
+  };
+}
+
+/** Telegram completion notification for chat executions (fireRun's
+ *  notifyTelegram, chat-shaped) — only used for LEGACY scheduled runs that
+ *  did NOT stream live. */
+async function notifyTelegramChatExecution(
+  creds: { botToken: string; chatId: string },
+  rec: ChatExecutionRecord,
+  content: string,
+  error?: string,
+): Promise<string | undefined> {
+  const label = rec.trigger === "telegram" ? "Telegram chat" : "Scheduled chat run";
+  const completedAt = rec.completedAt ? new Date(rec.completedAt) : new Date();
+  const timeLabel = completedAt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  if (rec.status === "completed") {
+    const header =
+      `✓ <b>${escapeHtml(label)} completed</b>\n` +
+      `Completed at ${timeLabel}${rec.taskId ? ` · task ${escapeHtml(rec.taskId)}` : ""}\n`;
+    const body = (content || "(no final message)").slice(0, 3200);
+    const r1 = await telegramSendMessage(creds.botToken, creds.chatId, `${header}\n${escapeHtml(body)}`);
+    if (r1.ok && content.length > 3200) {
+      await telegramSendDocument(
+        creds.botToken,
+        creds.chatId,
+        `${rec.chatId.replace(/[^\w.-]/g, "_")}-result.md`,
+        content,
+        "Full run result",
+      );
+    }
+    return r1.ok ? "sent" : `failed: ${r1.error}`;
+  }
+  const msg =
+    `⚠ <b>${escapeHtml(label)} failed</b>\n` +
+    `Failed at ${timeLabel}\n${escapeHtml((error ?? rec.error ?? "unknown error").slice(0, 1500))}`;
+  const r = await telegramSendMessage(creds.botToken, creds.chatId, msg);
+  return r.ok ? "sent" : `failed: ${r.error}`;
+}
+
+/**
+ * Finalize a chat execution: reconnect to the sandbox, harvest the run,
+ * append the assistant message to the chat (chat:<id>:smsg), push workspace
+ * changes back to the cloud, update the execution record, kill the sandbox.
+ *
+ * Returns false while the run is still live (the next tick re-checks).
+ * Telegram notify is SKIPPED unless opts.notifyTelegram is provided — runs
+ * that streamed live already delivered their final message in-sandbox.
+ */
+export async function finalizeChatExecution(
+  kv: SchedulerKV,
+  rec: ChatExecutionRecord,
+  opts?: { notifyTelegram?: { botToken: string; chatId: string } },
+): Promise<boolean> {
+  if (rec.status !== "running" || !rec.sandboxId) return false;
+  const apiKey = e2bKey();
+  if (!apiKey) return false;
+
+  let sandbox: Sandbox;
+  try {
+    sandbox = await Sandbox.connect(rec.sandboxId, { apiKey });
+  } catch {
+    throw new Error(`E2B sandbox ${rec.sandboxId} unreachable (chat execution ${rec.id}) — retry next tick.`);
+  }
+
+  // Recover the e2b run id from the sandbox's bg-state pointer when the
+  // launch-time save stranded (E2B is the source of truth).
+  let e2bRunId = rec.e2bRunId;
+  if (!e2bRunId) {
+    try {
+      const ptrRaw = await sandbox.files.read(BG_STATE_PATH);
+      const ptr = JSON.parse(ptrRaw) as { activeRun?: string };
+      if (ptr?.activeRun) e2bRunId = ptr.activeRun;
+    } catch {
+      /* pointer unreadable */
+    }
+  }
+
+  const terminal = await readRunTerminalState(sandbox, e2bRunId);
+  if (terminal.status === "running") return false; // still live — next tick
+
+  const harvested = e2bRunId
+    ? await harvestEvents(sandbox, e2bRunId)
+    : { toolCalls: 0, logs: [] as string[], events: [] as BgEvent[] };
+  const msg = buildChatResultMessage(
+    { e2bRunId: e2bRunId || rec.id, trigger: rec.trigger },
+    harvested.events,
+    terminal,
+  );
+  if (e2bRunId) rec.e2bRunId = e2bRunId;
+
+  // Append the assistant message to the chat (the whole point).
+  try {
+    await appendServerMessages(kv, rec.chatId, [msg]);
+  } catch {
+    /* best-effort — the execution record still finalizes; the message can be
+       re-derived from the sandbox events on a later pass if needed. */
+  }
+
+  // Workspace sync — the run's file changes persist to the cloud.
+  try {
+    await serverPushWorkspace(sandbox, kv);
+  } catch {
+    /* best-effort */
+  }
+
+  rec.status = terminal.status === "done" ? "completed" : "failed";
+  rec.completedAt = new Date().toISOString();
+  if (rec.status === "failed") {
+    rec.error = (terminal.error ?? "The agent runner ended with an error.").slice(0, MAX_RUN_RESULT);
+  }
+  rec.resultPreview = (msg.content || "").slice(0, 300);
+  rec.messageIds = [msg.id];
+  await persistChatExec(kv, rec);
+
+  // Kill the sandbox — the workspace is safely in the cloud.
+  try {
+    await sandbox.kill();
+  } catch {
+    /* best-effort — E2B reaps it */
+  }
+
+  // Legacy notify (scheduled runs without chat streaming). The record is
+  // already persisted; notify delivery status is fire-and-forget.
+  if (opts?.notifyTelegram?.botToken && opts.notifyTelegram.chatId) {
+    await notifyTelegramChatExecution(
+      opts.notifyTelegram,
+      rec,
+      msg.content,
+      terminal.error ?? undefined,
+    ).catch(() => undefined);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Fire a run (E2B sandbox + bg-agent launch)
 // ---------------------------------------------------------------------------
 
@@ -784,6 +1313,14 @@ export async function fireRun(
     run.completedAt = new Date().toISOString();
     await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
     return { run, alreadyRan: false, error: run.error ?? undefined };
+  }
+
+  // UNIFIED CHAT MODE — the task runs INSIDE its conversation: same agent
+  // runtime (isolated sandbox + workspace restore + bg-agent), seeded with
+  // the chat's history, its result appended back into the chat. The run
+  // record keeps the exact same idempotency/bookkeeping as legacy mode.
+  if (task.chatId) {
+    return fireChatRun(kv, task, run, runs);
   }
 
   // 1. Isolated sandbox for this run — metadata-tagged so the interactive
@@ -898,6 +1435,53 @@ export async function fireRun(
   }
 }
 
+/** CHAT-MODE launch — startChatExecution with the task's chat context. The
+ *  run record keeps the standard bookkeeping (idempotent id, sandbox/e2b
+ *  links, execId) so the tick's finalize path + run history work unchanged. */
+async function fireChatRun(
+  kv: SchedulerKV,
+  task: ScheduledTask,
+  run: ScheduledTaskRun,
+  runs: ScheduledTaskRun[],
+): Promise<{ run: ScheduledTaskRun; alreadyRan: boolean; error?: string }> {
+  try {
+    const history = await buildChatHistory(kv, task.chatId as string);
+    const userMessage =
+      task.instructions?.trim() ||
+      `This is a scheduled run of the chat "${task.name}". Continue this conversation's standing task and produce the deliverable.`;
+    const systemPrompt = history.systemPrompt || buildScheduledSystemPrompt(task);
+    const handle = await startChatExecution(kv, {
+      chatId: task.chatId as string,
+      trigger: "scheduled",
+      userMessage,
+      systemPrompt,
+      history: history.history,
+      provider: task.runtime.provider as ProviderSnapshot,
+      telegram: task.runtime.telegram,
+      taskId: task.id,
+      name: task.name,
+    });
+    run.sandboxId = handle.sandboxId;
+    run.e2bRunId = handle.e2bRunId;
+    run.execId = handle.execId;
+    run.status = "running";
+    run.logs.push(
+      `[sandbox] ${handle.sandboxId} created (unified chat execution ${handle.execId} for chat ${task.chatId})`,
+      `[runner] bg-agent launched (e2b run ${handle.e2bRunId})`,
+    );
+    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+    return { run, alreadyRan: false };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    run.status = "failed";
+    run.error = `Failed to launch the chat execution: ${msg}`;
+    run.completedAt = new Date().toISOString();
+    run.logs.push(`[error] chat execution launch failed: ${msg}`);
+    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+    return { run, alreadyRan: false, error: run.error };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Finalize a run (harvest result, sync workspace, notify, persist)
 // ---------------------------------------------------------------------------
@@ -905,10 +1489,13 @@ export async function fireRun(
 interface HarvestedEvents {
   toolCalls: number;
   logs: string[];
+  /** Raw parsed events — feeds eventsToMessage for chat-mode runs. */
+  events: BgEvent[];
 }
 
 async function harvestEvents(sandbox: Sandbox, e2bRunId: string): Promise<HarvestedEvents> {
   const logs: string[] = [];
+  const events: BgEvent[] = [];
   let toolCalls = 0;
   try {
     const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${e2bRunId}/events.jsonl`);
@@ -916,7 +1503,8 @@ async function harvestEvents(sandbox: Sandbox, e2bRunId: string): Promise<Harves
       const t = line.trim();
       if (!t) continue;
       try {
-        const ev = JSON.parse(t) as { t?: string; name?: string; id?: string; round?: number };
+        const ev = JSON.parse(t) as BgEvent;
+        events.push(ev);
         if (ev.t === "tool_call") {
           toolCalls++;
           logs.push(`tool: ${ev.name}`);
@@ -932,7 +1520,7 @@ async function harvestEvents(sandbox: Sandbox, e2bRunId: string): Promise<Harves
   } catch {
     /* events log missing/unreadable */
   }
-  return { toolCalls, logs: logs.slice(-MAX_RUN_LOG_LINES) };
+  return { toolCalls, logs: logs.slice(-MAX_RUN_LOG_LINES), events };
 }
 
 async function notifyTelegram(task: ScheduledTask, run: ScheduledTaskRun): Promise<string | undefined> {
@@ -1000,6 +1588,7 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
           : `E2B sandbox unreachable after ${run.unreachableChecks} checks — the run crashed or was killed.`;
       run.completedAt = new Date().toISOString();
       run.durationMs = Date.now() - startedMs;
+      await failChatExecBookkeeping(kv, task, run);
       await persistFinal(kv, task, run);
       return true;
     }
@@ -1020,20 +1609,10 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
   }
 
   // Read the runner's state mirror.
-  let runnerStatus = "running";
-  let content = "";
-  let runnerError: string | null = null;
-  try {
-    if (run.e2bRunId) {
-      const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${run.e2bRunId}/state.json`);
-      const st = JSON.parse(raw) as { status?: string; content?: string; error?: string | null };
-      runnerStatus = st.status ?? "running";
-      content = st.content ?? "";
-      runnerError = st.error ?? null;
-    }
-  } catch {
-    /* unreadable — treat as still running until stale */
-  }
+  const terminal = await readRunTerminalState(sandbox, run.e2bRunId);
+  const runnerStatus = terminal.status;
+  const content = terminal.content;
+  const runnerError = terminal.error;
 
   if (runnerStatus === "running") {
     if (ageMs > RUN_STALE_MS) {
@@ -1046,6 +1625,7 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
       run.error = `Run exceeded the ${Math.round(RUN_STALE_MS / 60000)}-minute budget — stopped.`;
       run.completedAt = new Date().toISOString();
       run.durationMs = Date.now() - startedMs;
+      await failChatExecBookkeeping(kv, task, run);
       await persistFinal(kv, task, run);
       return true;
     }
@@ -1053,7 +1633,9 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
   }
 
   // Terminal on the runner side — harvest.
-  const harvested = run.e2bRunId ? await harvestEvents(sandbox, run.e2bRunId) : { toolCalls: 0, logs: [] };
+  const harvested = run.e2bRunId
+    ? await harvestEvents(sandbox, run.e2bRunId)
+    : { toolCalls: 0, logs: [] as string[], events: [] as BgEvent[] };
   run.toolCalls = harvested.toolCalls;
   run.logs = [...run.logs, ...harvested.logs].slice(-MAX_RUN_LOG_LINES);
 
@@ -1067,6 +1649,28 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
   }
   run.completedAt = new Date().toISOString();
   run.durationMs = Date.now() - startedMs;
+
+  // UNIFIED CHAT MODE — append the assistant message to the chat + finalize
+  // the linked chat-execution record (idempotent: the tick's marker-recovery
+  // path may have finalized it already). Runs that streamed live into
+  // Telegram skip the finalizer notification (the streamer already delivered
+  // the final message in-sandbox).
+  let streamedToTelegram = false;
+  if ((run.execId || task.chatId) && run.e2bRunId) {
+    try {
+      const chatMsg = buildChatResultMessage(
+        { e2bRunId: run.e2bRunId, trigger: "scheduled" },
+        harvested.events,
+        terminal,
+      );
+      streamedToTelegram = terminal.telegramStreamed;
+      const execId = await finalizeChatExecBookkeeping(kv, task, run, chatMsg);
+      if (execId) run.execId = execId;
+      run.logs.push(`[chat] assistant message appended to chat ${task.chatId ?? ""} (${chatMsg.id})`);
+    } catch (e) {
+      run.logs.push(`[chat] message append failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // Workspace sync — the run's file changes persist to the cloud.
   try {
@@ -1096,12 +1700,83 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
     /* best-effort — E2B reaps it */
   }
 
-  await persistFinal(kv, task, run);
+  await persistFinal(kv, task, run, { skipNotify: streamedToTelegram });
   return true;
 }
 
-async function persistFinal(kv: SchedulerKV, task: ScheduledTask, run: ScheduledTaskRun): Promise<void> {
-  const notifyStatus = await notifyTelegram(task, run);
+/** Chat bookkeeping for a run that failed WITHOUT a harvestable sandbox
+ *  (unreachable / over budget): finalize the linked chat-execution record and
+ *  append the failure as the run's assistant message so the chat shows it. */
+async function failChatExecBookkeeping(kv: SchedulerKV, task: ScheduledTask, run: ScheduledTaskRun): Promise<void> {
+  if (!(run.execId || task.chatId)) return;
+  try {
+    const msg = buildChatResultMessage(
+      { e2bRunId: run.e2bRunId || run.id, trigger: "scheduled" },
+      [],
+      { status: "error", content: "", error: run.error, telegramStreamed: false },
+    );
+    await finalizeChatExecBookkeeping(kv, task, run, msg);
+  } catch {
+    /* best-effort — the run record below is authoritative */
+  }
+}
+
+/** Chat-mode bookkeeping for a finished task run: append the assistant
+ *  message to the chat's smsg records and finalize the linked
+ *  ChatExecutionRecord (creating one from the run when the launch-time save
+ *  stranded). Idempotent — a record already terminal is left untouched. */
+async function finalizeChatExecBookkeeping(
+  kv: SchedulerKV,
+  task: ScheduledTask,
+  run: ScheduledTaskRun,
+  msg: ServerChatMessage,
+): Promise<string | null> {
+  const chatId = (task.chatId ?? "").trim();
+  if (!chatId) return null;
+  const execs = await loadChatExecs(kv, chatId);
+  const idx = execs.findIndex(
+    (e) =>
+      (run.execId && e.id === run.execId) ||
+      (run.e2bRunId && e.e2bRunId === run.e2bRunId) ||
+      (run.sandboxId && e.sandboxId === run.sandboxId),
+  );
+  if (idx >= 0 && execs[idx]!.status !== "running") {
+    return execs[idx]!.id; // already finalized (e.g. marker recovery) — idempotent
+  }
+  const rec: ChatExecutionRecord =
+    idx >= 0
+      ? execs[idx]!
+      : {
+          id: run.execId ?? "exec_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8),
+          chatId,
+          trigger: "scheduled",
+          taskId: task.id,
+          sandboxId: run.sandboxId ?? "",
+          e2bRunId: run.e2bRunId ?? "",
+          status: "running",
+          startedAt: run.startedAt,
+        };
+  await appendServerMessages(kv, chatId, [msg]);
+  rec.status = run.status === "completed" ? "completed" : "failed";
+  rec.completedAt = run.completedAt ?? new Date().toISOString();
+  rec.error = run.error ?? undefined;
+  rec.resultPreview = (msg.content || "").slice(0, 300);
+  rec.messageIds = [msg.id];
+  if (idx >= 0) execs[idx] = rec;
+  else execs.push(rec);
+  await saveChatExecs(kv, chatId, execs);
+  return rec.id;
+}
+
+async function persistFinal(
+  kv: SchedulerKV,
+  task: ScheduledTask,
+  run: ScheduledTaskRun,
+  opts?: { skipNotify?: boolean },
+): Promise<void> {
+  // Runs that streamed live into Telegram already delivered the final
+  // message — the post-run notification would be a duplicate.
+  const notifyStatus = opts?.skipNotify ? "skipped (streamed live)" : await notifyTelegram(task, run);
   if (notifyStatus) run.notifyStatus = notifyStatus;
 
   const runs = await loadRuns(kv, task.id);
@@ -1241,18 +1916,68 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
         let taskId = "";
         let markerName = "";
         let markerLaunched: string | null = null;
+        let markerKind = "";
+        let markerChatId = "";
+        let markerExecId = "";
         try {
           const sandbox = await Sandbox.connect(sb.sandboxId, { apiKey });
           const raw = await sandbox.files.read(`${HOME}/.onyx/scheduled.json`);
-          const marker = JSON.parse(raw) as { taskId?: string; name?: string; launchedAt?: string };
+          const marker = JSON.parse(raw) as {
+            taskId?: string;
+            name?: string;
+            launchedAt?: string;
+            kind?: string;
+            chatId?: string;
+            execId?: string;
+          };
           if (marker?.taskId) {
             taskId = marker.taskId;
             markerName = marker.name ?? "";
             markerLaunched = marker.launchedAt ?? null;
           }
+          if (typeof marker?.kind === "string") markerKind = marker.kind;
+          if (typeof marker?.chatId === "string") markerChatId = marker.chatId;
+          if (typeof marker?.execId === "string") markerExecId = marker.execId;
         } catch {
           /* not scheduled / unreachable — skip */
         }
+
+        // UNIFIED CHAT EXECUTIONS — telegram-triggered runs and scheduled
+        // chat-runs whose run-record save stranded: the ChatExecutionRecord
+        // (chat:<chatId>:execs) is the bookkeeping; E2B is the source of
+        // truth. Finalize it directly; when the sandbox is still live, leave
+        // it (the next tick re-checks). Mirrors fireRun's orphan logic.
+        if (markerChatId && markerExecId && (markerKind === "telegram" || markerKind === "scheduled")) {
+          try {
+            const execs = await loadChatExecs(kv, markerChatId);
+            const rec =
+              execs.find((e) => e.id === markerExecId) ??
+              ({
+                // Record save stranded — synthesize from the marker (E2B truth).
+                id: markerExecId,
+                chatId: markerChatId,
+                trigger: markerKind === "telegram" ? "telegram" : "scheduled",
+                ...(taskId ? { taskId } : {}),
+                sandboxId: sb.sandboxId,
+                e2bRunId: "",
+                status: "running",
+                startedAt: markerLaunched ?? new Date().toISOString(),
+              } as ChatExecutionRecord);
+            if (rec.status === "running") {
+              finalChecks++;
+              try {
+                const done = await finalizeChatExecution(kv, { ...rec, sandboxId: sb.sandboxId });
+                if (done) result.finalized++;
+              } catch (e) {
+                result.errors.push(`recover chat exec ${markerExecId}: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+          } catch (e) {
+            result.errors.push(`load chat execs ${markerChatId}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          continue; // never ALSO run the task-run recovery for this sandbox
+        }
+
         if (!taskId) continue;
         const task = tasks.find((t) => t.id === taskId) ?? (await loadTaskById(kv, taskId));
         if (!task) continue;

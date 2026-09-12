@@ -3,7 +3,7 @@
 import { nanoid } from "nanoid";
 import type { AgentTurnOptions } from "./runtime";
 import type { WSEvent } from "@/types";
-import { useChatStore } from "@/stores/chat-store";
+import { useChatStore, type ExecutionChatStore } from "@/stores/chat-store";
 import { useResearchStore } from "@/stores";
 import { conversationService } from "@/lib/services";
 import {
@@ -62,6 +62,10 @@ const UNREACHABLE_PAUSE_MS = 1_000;
 export interface BackgroundTurnHandle {
   /** Stop the background job + the consumer. */
   stop: () => Promise<void>;
+  /** The sandbox running this turn (ExecutionHub sidebar surfaces it). */
+  sandboxId?: string;
+  /** The run id (.onyx/runs/<runId>) — the replayable event log. */
+  runId?: string;
 }
 
 interface RunContext {
@@ -69,20 +73,29 @@ interface RunContext {
   e2bApiKey: string;
   userId: string;
   conversationId: string | null;
-  /** The emit callback from use-chat (the WSEvent pipeline). */
+  /** The emit callback from the ExecutionHub's processor (the WSEvent
+   *  pipeline — survives React unmounts). */
   emit: (event: WSEvent) => void;
   /** Called when the turn finishes (done or error). */
   onFinished: () => void;
+  /** The EXECUTION's headless chat store (ExecutionHub). History building
+   *  and Dexie checkpointing read from it so they keep working while the
+   *  user views another conversation (the global UI store may hold a
+   *  different conversation's messages at that point). */
+  store?: ExecutionChatStore;
 }
 
-/** Text-only conversation history for the sandbox runner (no tool parts). */
-function buildHistory(turn: AgentTurnOptions): Array<{ role: "user" | "assistant" | "system"; content: string }> {
-  void turn; // history reads the live chat store (below); the options param
+/** Text-only conversation history for the sandbox runner (no tool parts).
+ *  Reads the execution's store when provided (the hub always provides it),
+ *  falling back to the global chat store for legacy callers. */
+function buildHistory(turn: AgentTurnOptions, store?: ExecutionChatStore): Array<{ role: "user" | "assistant" | "system"; content: string }> {
+  void turn; // history reads the live store (below); the options param
   // is kept for future turn-scoped history shaping.
   const history: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
-  // Prior turns from the chat store (text content only — the background
-  // runner has no access to browser-side tool context).
-  for (const msg of useChatStore.getState().messages) {
+  const messages = store ? store.getState().messages : globalMessagesCompat();
+  // Prior turns (text content only — the background runner has no access to
+  // browser-side tool context).
+  for (const msg of messages) {
     if (msg.role !== "user" && msg.role !== "assistant") continue;
     const text =
       msg.content ||
@@ -97,13 +110,20 @@ function buildHistory(turn: AgentTurnOptions): Array<{ role: "user" | "assistant
   return history.slice(-20); // cap the context window
 }
 
+/** Global-store read (legacy callers without an execution store). */
+function globalMessagesCompat(): import("@/types").ChatMessage[] {
+  return useChatStore.getState().messages;
+}
+
 async function persistCheckpoint(
   conversationId: string,
   userId: string,
   assistantMessageId: string,
   isStreaming: boolean,
+  store?: ExecutionChatStore,
 ): Promise<void> {
-  const msg = useChatStore.getState().messages.find((m) => m.id === assistantMessageId);
+  const messages = store ? store.getState().messages : globalMessagesCompat();
+  const msg = messages.find((m) => m.id === assistantMessageId);
   if (!msg) return;
   await conversationService.saveAgentCheckpoint(conversationId, userId, assistantMessageId, {
     role: "assistant",
@@ -140,6 +160,8 @@ async function consumeRun(ctx: {
   /** v3 bridge: provider API key + abort signal for browser-side tool calls. */
   aiApiKey?: string | null;
   bridgeAbort?: AbortController;
+  /** The execution's store (checkpointing source — survives navigation). */
+  store?: ExecutionChatStore;
 }): Promise<void> {
   const { e2bApiKey, job } = ctx;
   let cursor = 0;
@@ -209,7 +231,7 @@ async function consumeRun(ctx: {
         // shows progress).
         if (events.length > 0) {
           try {
-            await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished);
+            await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished, ctx.store);
           } catch {
             // best-effort
           }
@@ -246,7 +268,7 @@ async function consumeRun(ctx: {
     if (sawFrame) {
       // Clean segment end (timeout frame) — checkpoint and re-open at once.
       try {
-        await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, true);
+        await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, true, ctx.store);
       } catch {
         // best-effort
       }
@@ -353,7 +375,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     // Telegram (native runner tools) — resolve from the encrypted vault at
     // launch so background turns can send to the user's Telegram even after
     // the browser disconnects. Never model-visible.
-    let telegram: { botToken: string; chatId: string } | undefined;
+    let telegram: { botToken: string; chatId: string; stream?: boolean } | undefined;
     try {
       const { settingsService } = await import("@/lib/services");
       const botToken = await settingsService.getDecryptedTelegramBotToken(ctx.userId);
@@ -361,6 +383,22 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       if (botToken && chatId) telegram = { botToken, chatId };
     } catch {
       telegram = undefined;
+    }
+    // unified-3b (additive): when the user enabled "mirror web runs to
+    // Telegram", this web-app turn ALSO streams its progress into the user's
+    // Telegram chat (state.telegram.stream = true activates the unified-2a
+    // in-sandbox streamer). The vault flag is the RUNTIME source of truth —
+    // the scheduler KV config's mirrorRuns is informational only. Nothing
+    // else about the launch changes.
+    if (telegram) {
+      try {
+        const { settingsService } = await import("@/lib/services");
+        if (await settingsService.getTelegramMirrorEnabled(ctx.userId)) {
+          telegram = { ...telegram, stream: true };
+        }
+      } catch {
+        /* mirror off on any read failure */
+      }
     }
 
     const job = await launchBackgroundTurn({
@@ -375,7 +413,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         disabledParams: ctx.turn.provider.disabledParams ?? [],
       },
       systemPrompt: ctx.turn.systemPrompt,
-      history: buildHistory(ctx.turn),
+      history: buildHistory(ctx.turn, ctx.store),
       assistantMessageId,
       conversationId,
       seedTodos,
@@ -399,6 +437,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         isStopped: () => stopped,
         aiApiKey: ctx.turn.provider.apiKey,
         bridgeAbort,
+        store: ctx.store,
       });
     })().catch(() => {
       // The consumer died unexpectedly — surface as a normal turn error.
@@ -421,6 +460,10 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         emit("complete", {});
         ctx.onFinished();
       },
+      /** The sandbox running this turn (ExecutionHub surfaces it). */
+      sandboxId: job.sandboxId,
+      /** The run id (.onyx/runs/<runId>). */
+      runId: job.runId,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -544,6 +587,8 @@ export async function resumeBackgroundTurn(ctx: {
   conversationId: string;
   emit: (event: WSEvent) => void;
   onFinished: () => void;
+  /** The execution's store (checkpointing source — the hub provides it). */
+  store?: ExecutionChatStore;
 }): Promise<BackgroundTurnHandle | null> {
   const job = getActiveJob(ctx.conversationId);
   if (!job) return null;
@@ -570,6 +615,7 @@ export async function resumeBackgroundTurn(ctx: {
       onFinished: ctx.onFinished,
       isStopped: () => stopped,
       bridgeAbort,
+      store: ctx.store,
     });
   })().catch(() => {
     // best-effort — the next reload resumes again.
@@ -589,6 +635,10 @@ export async function resumeBackgroundTurn(ctx: {
       emit("complete", {});
       ctx.onFinished();
     },
+    /** The sandbox running this turn (ExecutionHub surfaces it). */
+    sandboxId: job.sandboxId,
+    /** The run id (.onyx/runs/<runId>). */
+    runId: job.runId,
   };
 }
 

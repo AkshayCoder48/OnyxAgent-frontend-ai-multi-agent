@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import type { ToolCall } from "@/types";
-import { useChatStore } from "@/stores/chat-store";
+import { useConversationStore } from "@/stores";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
+import { useExecutionFor, useExecutionMessages } from "@/lib/agent/execution-hub";
 import {
   SimpleToolTimeline,
   ToolTimeline,
@@ -29,7 +30,12 @@ import { ListTree, X } from "lucide-react";
  * conversation; long sessions scroll inside the fixed area.
  */
 export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
-  const messages = useChatStore((s) => s.messages);
+  // Merged message source: the live execution's store when the viewed
+  // conversation has a running agent (its events keep flowing regardless of
+  // navigation), otherwise the global chat store.
+  const currentConversationId = useConversationStore((s) => s.currentConversationId);
+  const execSummary = useExecutionFor(currentConversationId);
+  const messages = useExecutionMessages(execSummary?.id ?? null);
   const displayMode = useToolDisplayStore((s) => s.mode);
   const isSimple = displayMode === "simple";
   const scrollRef = useRef<HTMLDivElement>(null);

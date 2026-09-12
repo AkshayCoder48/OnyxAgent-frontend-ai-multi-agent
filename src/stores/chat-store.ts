@@ -1,7 +1,7 @@
 "use client";
 
-import { create } from "zustand";
-import type { ChatMessage, MessagePart, ToolCall } from "@/types";
+import { create, createStore, type StoreApi } from "zustand";
+import type { AskUserQuestion, ChatMessage, MessagePart, ToolCall } from "@/types";
 
 function newPartId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -30,7 +30,6 @@ function loadPersisted(): ChatMessage[] {
 // every single text delta (which causes massive lag).
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingMessages: ChatMessage[] | null = null;
-
 function savePersisted(messages: ChatMessage[]): void {
   if (typeof window === "undefined") return;
   pendingMessages = messages;
@@ -62,59 +61,6 @@ function flushPersisted(): void {
   }
 }
 
-interface ChatState {
-  messages: ChatMessage[];
-  isStreaming: boolean;
-  /** Currently selected provider ID (set by ChatControls, read by subagents). */
-  selectedProviderId: string | null;
-  /** Currently selected model (set by ChatControls, read by subagents). */
-  selectedModel: string | null;
-
-  setSelectedProviderId: (id: string | null) => void;
-  setSelectedModel: (model: string | null) => void;
-  /** One-shot post-hydration restore of the sessionStorage-persisted
-   *  messages (see the restorePersisted body for why it is NOT done in
-   *  create()). Called from ChatContainer's mount effect. */
-  restorePersisted: () => void;
-
-  addMessage: (message: ChatMessage) => void;
-  /** Remove a single message from the store (regenerate path: the old
-   *  assistant response + its user prompt are dropped before re-running
-   *  the turn). Dexie cleanup is the caller's responsibility. */
-  removeMessage: (id: string) => void;
-  updateMessage: (id: string, updater: (msg: ChatMessage) => ChatMessage) => void;
-  updateMessagesWhere: (
-    predicate: (msg: ChatMessage) => boolean,
-    updater: (msg: ChatMessage) => ChatMessage,
-  ) => void;
-  replaceMessageId: (oldId: string, newId: string) => void;
-  addToolCall: (messageId: string, toolCall: ToolCall) => void;
-  updateToolCall: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
-  appendTextDelta: (messageId: string, text: string, round?: number, at?: number) => void;
-  appendThinkingDelta: (messageId: string, text: string, round?: number, at?: number) => void;
-  appendReasoningDelta: (messageId: string, text: string, round?: number, at?: number) => void;
-  addToolCallPart: (messageId: string, toolCall: ToolCall, round?: number, at?: number) => void;
-  /** Stamp `roundEndedAt` on every part of `round` that lacks it — called
-   *  when the next round starts or the turn completes. Completed round
-   *  timing stays frozen forever (PRD §12). */
-  endRound: (messageId: string, round: number, endedAt?: number) => void;
-  /** Stamp `reasoningEndedAt` on the round's thinking/reasoning parts that
-   *  lack it — called the moment the first text delta / tool call / LLM
-   *  completion arrives after reasoning. The reasoning panel settles
-   *  ("Thought for Ns" + auto-collapse) INSTANTLY instead of waiting for
-   *  the round to end. Idempotent — already-stamped parts are untouched. */
-  endReasoning: (messageId: string, round: number, endedAt?: number) => void;
-  updateToolCallPart: (messageId: string, toolCallId: string, update: Partial<ToolCall>) => void;
-  appendToolStreamingOutput: (
-    messageId: string,
-    toolCallId: string,
-    text: string,
-    type: "stdout" | "stderr",
-  ) => void;
-  setStreaming: (streaming: boolean) => void;
-  clearMessages: () => void;
-}
-
 // BACKGROUND RESILIENCE (PRD §6/§24): flush the debounced sessionStorage
 // snapshot the moment the page is hidden or unloaded, so a mid-stream
 // refresh restores the freshest possible partial state (the runtime's
@@ -137,60 +83,71 @@ if (typeof window !== "undefined") {
 // and StrictMode's double effect invocation.
 let persistedRestored = false;
 
-export const useChatStore = create<ChatState>((set) => ({
-  // Empty on the FIRST render — server AND client. sessionStorage is
-  // client-only, so the server always renders the empty chat; restoring
-  // persisted messages synchronously here made the client's hydration
-  // render diverge from the server HTML (hydration mismatch + full tree
-  // re-render on every revisit-with-persisted-messages). The restore now
-  // happens post-hydration via restorePersisted() from ChatContainer's
-  // mount effect — same visual result, no mismatch.
-  messages: [],
-  isStreaming: false,
-  selectedProviderId: null,
-  selectedModel: null,
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGE-SLICE FACTORY
+//
+// The full set of message-mutating actions, extracted from the old global
+// store so it can be instantiated TWICE:
+//
+//   1. The global `useChatStore` (the UI store for the conversation the user
+//      is viewing — exactly as before; every existing consumer is unchanged).
+//   2. A HEADLESS per-execution store (`createExecutionChatStore`) owned by
+//      the ExecutionHub — the module-level agent runtime that survives React
+//      unmounts. While the user views the execution's conversation the UI
+//      reads the execution store; while they're elsewhere the hub keeps
+//      applying events to it and checkpointing to Dexie.
+//
+// All actions locate messages by id, so ids stay unique across stores and the
+// exact same logic serves both targets.
+// ─────────────────────────────────────────────────────────────────────────────
 
-  setSelectedProviderId: (id) => set({ selectedProviderId: id }),
-  setSelectedModel: (model) => set({ selectedModel: model }),
+/** Everything the message actions need from their host store. */
+interface MessageSliceHost {
+  /** Persist sink (sessionStorage snapshot). The EXECUTION stores pass a
+   *  gating wrapper so only the VIEWED conversation ever lands in the
+   *  snapshot (two running executions must never interleave writes). */
+  persist: (messages: ChatMessage[]) => void;
+}
 
-  restorePersisted: () =>
-    set((state) => {
-      if (persistedRestored || state.messages.length > 0) return state;
-      persistedRestored = true;
-      const persisted = loadPersisted();
-      return persisted.length > 0 ? { messages: persisted } : state;
-    }),
+function buildMessageActions<S extends { messages: ChatMessage[] }>(
+  set: (partial: Partial<S> | ((state: S) => Partial<S>)) => void,
+  host: MessageSliceHost,
+) {
+  const persist = host.persist;
 
-  addMessage: (message) =>
-    set((state) => {
+  const addMessage = (message: ChatMessage) =>
+    set((state: S) => {
       const messages = [...state.messages, message];
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  removeMessage: (id) =>
-    set((state) => {
+  const removeMessage = (id: string) =>
+    set((state: S) => {
       const messages = state.messages.filter((msg) => msg.id !== id);
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  updateMessage: (id, updater) =>
-    set((state) => {
+  const updateMessage = (id: string, updater: (msg: ChatMessage) => ChatMessage) =>
+    set((state: S) => {
       const messages = state.messages.map((msg) => (msg.id === id ? updater(msg) : msg));
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  updateMessagesWhere: (predicate, updater) =>
-    set((state) => {
+  const updateMessagesWhere = (
+    predicate: (msg: ChatMessage) => boolean,
+    updater: (msg: ChatMessage) => ChatMessage,
+  ) =>
+    set((state: S) => {
       const messages = state.messages.map((msg) => (predicate(msg) ? updater(msg) : msg));
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  replaceMessageId: (oldId, newId) =>
-    set((state) => {
+  const replaceMessageId = (oldId: string, newId: string) =>
+    set((state: S) => {
       const messages = state.messages.map((msg) =>
         msg.id === oldId
           ? {
@@ -204,21 +161,21 @@ export const useChatStore = create<ChatState>((set) => ({
             }
           : msg,
       );
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  addToolCall: (messageId, toolCall) =>
-    set((state) => {
+  const addToolCall = (messageId: string, toolCall: ToolCall) =>
+    set((state: S) => {
       const messages = state.messages.map((msg) =>
         msg.id === messageId ? { ...msg, toolCalls: [...(msg.toolCalls || []), toolCall] } : msg,
       );
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  updateToolCall: (messageId, toolCallId, update) =>
-    set((state) => {
+  const updateToolCall = (messageId: string, toolCallId: string, update: Partial<ToolCall>) =>
+    set((state: S) => {
       const messages = state.messages.map((msg) =>
         msg.id === messageId
           ? {
@@ -229,25 +186,21 @@ export const useChatStore = create<ChatState>((set) => ({
             }
           : msg,
       );
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  // OPTIMIZED: Only update the LAST message's text — avoid mapping the entire
-  // messages array. This is the hot path during streaming (called for every
-  // text delta). Using a direct mutation pattern with a shallow copy of just
-  // the changed message + its parent array.
-  appendTextDelta: (messageId, text, round, at) =>
-    set((state) => {
+  const appendTextDelta = (messageId: string, text: string, round?: number, at?: number) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
       // REASONING SETTLEMENT: text arriving after reasoning means the
       // model finished thinking — stamp reasoningEndedAt so the panel
-      // flips to "Thought for Ns" + auto-collapses right now (not when
-      // the round ends). Only parts of the SAME round + not yet stamped.
+      // flips to "Thought for Ns" + auto-collapses right now (not when the
+      // round ends). Only parts of the SAME round + not yet stamped.
       // `at` is the event's origin timestamp (runner wall-clock for
       // background turns) so the duration reflects WHEN the model
       // switched from thinking to answering.
@@ -342,14 +295,14 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts, content: msg.content + text };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  appendThinkingDelta: (messageId, text, round, at) =>
-    set((state) => {
+  const appendThinkingDelta = (messageId: string, text: string, round?: number, at?: number) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
@@ -385,14 +338,14 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts, thinking: (msg.thinking ?? "") + text };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  appendReasoningDelta: (messageId, text, round, at) =>
-    set((state) => {
+  const appendReasoningDelta = (messageId: string, text: string, round?: number, at?: number) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const parts: MessagePart[] = msg.parts ? [...msg.parts] : [];
@@ -421,14 +374,19 @@ export const useChatStore = create<ChatState>((set) => ({
 
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts, reasoning: (msg.reasoning ?? "") + text };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  addToolCallPart: (messageId, toolCall, round, at) =>
-    set((state) => {
+  const addToolCallPart = (
+    messageId: string,
+    toolCall: ToolCall,
+    round?: number,
+    at?: number,
+  ) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const messages = [...state.messages];
@@ -460,17 +418,17 @@ export const useChatStore = create<ChatState>((set) => ({
         ],
         toolCalls: [...(msg.toolCalls || []), { ...toolCall, startedAt: toolCall.startedAt ?? at ?? Date.now() }],
       };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  endRound: (messageId, round, endedAt) =>
-    set((state) => {
+  const endRound = (messageId: string, round: number, endedAt?: number) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
-      if (!msg.parts) return state;
+      if (!msg.parts) return {} as Partial<S>;
       const at = endedAt ?? Date.now();
       let changed = false;
       const parts = msg.parts.map((p) => {
@@ -480,21 +438,21 @@ export const useChatStore = create<ChatState>((set) => ({
         }
         return p;
       });
-      if (!changed) return state;
+      if (!changed) return {} as Partial<S>;
 
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  endReasoning: (messageId, round, endedAt) =>
-    set((state) => {
+  const endReasoning = (messageId: string, round: number, endedAt?: number) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
-      if (!msg.parts) return state;
+      if (!msg.parts) return {} as Partial<S>;
       const at = endedAt ?? Date.now();
       let changed = false;
       const parts = msg.parts.map((p) => {
@@ -508,18 +466,22 @@ export const useChatStore = create<ChatState>((set) => ({
         }
         return p;
       });
-      if (!changed) return state;
+      if (!changed) return {} as Partial<S>;
 
       const messages = [...state.messages];
       messages[idx] = { ...msg, parts };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  updateToolCallPart: (messageId, toolCallId, update) =>
-    set((state) => {
+  const updateToolCallPart = (
+    messageId: string,
+    toolCallId: string,
+    update: Partial<ToolCall>,
+  ) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const messages = [...state.messages];
@@ -540,14 +502,19 @@ export const useChatStore = create<ChatState>((set) => ({
           tc.id === toolCallId ? { ...tc, ...withEnd } : tc,
         ),
       };
-      savePersisted(messages);
-      return { messages };
-    }),
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
 
-  appendToolStreamingOutput: (messageId, toolCallId, text, type) =>
-    set((state) => {
+  const appendToolStreamingOutput = (
+    messageId: string,
+    toolCallId: string,
+    text: string,
+    type: "stdout" | "stderr",
+  ) =>
+    set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
-      if (idx === -1) return state;
+      if (idx === -1) return {} as Partial<S>;
 
       const msg = state.messages[idx]!;
       const field = type === "stderr" ? "streamingError" : "streamingOutput";
@@ -577,7 +544,72 @@ export const useChatStore = create<ChatState>((set) => ({
       const messages = [...state.messages];
       messages[idx] = { ...msg, toolCalls, parts };
       // Don't persist streaming output — it's transient
-      return { messages };
+      return { messages } as Partial<S>;
+    });
+
+  return {
+    addMessage,
+    removeMessage,
+    updateMessage,
+    updateMessagesWhere,
+    replaceMessageId,
+    addToolCall,
+    updateToolCall,
+    appendTextDelta,
+    appendThinkingDelta,
+    appendReasoningDelta,
+    addToolCallPart,
+    endRound,
+    endReasoning,
+    updateToolCallPart,
+    appendToolStreamingOutput,
+  };
+}
+
+type MessageActions = ReturnType<typeof buildMessageActions>;
+
+interface ChatState extends MessageActions {
+  messages: ChatMessage[];
+  isStreaming: boolean;
+  /** Currently selected provider ID (set by ChatControls, read by subagents). */
+  selectedProviderId: string | null;
+  /** Currently selected model (set by ChatControls, read by subagents). */
+  selectedModel: string | null;
+
+  setSelectedProviderId: (id: string | null) => void;
+  setSelectedModel: (model: string | null) => void;
+  /** One-shot post-hydration restore of the sessionStorage-persisted
+   *  messages (see the restorePersisted body for why it is NOT done in
+   *  create()). Called from ChatContainer's mount effect. */
+  restorePersisted: () => void;
+  setStreaming: (streaming: boolean) => void;
+  clearMessages: () => void;
+}
+
+export const useChatStore = create<ChatState>((set) => ({
+  // Empty on the FIRST render — server AND client. sessionStorage is
+  // client-only, so the server always renders the empty chat; restoring
+  // persisted messages synchronously here made the client's hydration
+  // render diverge from the server HTML (hydration mismatch + full tree
+  // re-render on every revisit-with-persisted-messages). The restore now
+  // happens post-hydration via restorePersisted() from ChatContainer's
+  // mount effect — same visual result, no mismatch.
+  messages: [],
+  isStreaming: false,
+  selectedProviderId: null,
+  selectedModel: null,
+
+  ...buildMessageActions<ChatState>(set, { persist: savePersisted }),
+
+  setSelectedProviderId: (id) => set({ selectedProviderId: id }),
+  setSelectedModel: (model) => set({ selectedModel: model }),
+
+  restorePersisted: () =>
+    set((state) => {
+      if (persistedRestored || state.messages.length > 0) return state;
+      persistedRestored = true;
+      const persisted = loadPersisted();
+      return persisted.length > 0 ? { messages: persisted } : state;
     }),
 
   setStreaming: (streaming) => {
@@ -601,6 +633,12 @@ export const useChatStore = create<ChatState>((set) => ({
     });
   },
 }));
+
+/** Persist a snapshot directly (ExecutionHub's finish-time sync-back writes
+ *  the store via setState, which bypasses the actions' persist hooks). */
+export function persistChatSnapshot(messages: ChatMessage[]): void {
+  savePersisted(messages);
+}
 
 /** Track which conversation the persisted messages belong to. */
 export function setPersistedConversationId(id: string | null): void {
@@ -627,4 +665,77 @@ export function reconcilePersisted(activeConversationId: string | null): void {
     useChatStore.setState({ messages: [] });
     setPersistedConversationId(activeConversationId);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEADLESS EXECUTION STORES
+//
+// One per ACTIVE agent execution (ExecutionHub). Same message actions as the
+// global UI store, plus the turn's UI-derivable state (isProcessing /
+// pendingQuestions / rateLimitStatus) so ANY mounted UI can subscribe to a
+// running execution and render it — and so the event processor keeps working
+// (and checkpointing to Dexie) after the user navigates away.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ExecutionChatState extends MessageActions {
+  messages: ChatMessage[];
+  isStreaming: boolean;
+  isProcessing: boolean;
+  pendingQuestions: AskUserQuestion[] | null;
+  rateLimitStatus: string | null;
+  setStreaming: (streaming: boolean) => void;
+  setProcessing: (processing: boolean) => void;
+  setPendingQuestions: (questions: AskUserQuestion[] | null) => void;
+  setRateLimitStatus: (status: string | null) => void;
+  /** Seed / replace the whole messages array (hub: initial seed from the
+   *  global store, final sync-back is done by the hub). */
+  replaceAllMessages: (messages: ChatMessage[]) => void;
+  /** End-of-execution flush: stamp remaining streaming bits + drop transient
+   *  flags (called by the hub after the terminal event). */
+  finishExecution: () => void;
+}
+
+export type ExecutionChatStore = StoreApi<ExecutionChatState>;
+
+/** A no-op persist sink (used when the execution's conversation isn't the
+ *  one being viewed). */
+const persistNoop = () => {};
+
+/** Create a headless execution store. `persistGate` — when provided, the
+ *  sessionStorage snapshot is only written while it returns true (the hub
+ *  keeps it pointed at "is this conversation currently viewed"). */
+export function createExecutionChatStore(persistGate?: () => boolean): ExecutionChatStore {
+  const persist = persistGate
+    ? (messages: ChatMessage[]) => {
+        if (persistGate()) savePersisted(messages);
+      }
+    : persistNoop;
+  return createStore<ExecutionChatState>((set) => ({
+    messages: [],
+    isStreaming: false,
+    isProcessing: false,
+    pendingQuestions: null,
+    rateLimitStatus: null,
+
+    ...buildMessageActions<ExecutionChatState>(set, { persist }),
+
+    setStreaming: (streaming) => {
+      if (!streaming) flushPersisted();
+      set({ isStreaming: streaming });
+    },
+    setProcessing: (processing) => set({ isProcessing: processing }),
+    setPendingQuestions: (questions) => set({ pendingQuestions: questions }),
+    setRateLimitStatus: (status) => set({ rateLimitStatus: status }),
+    replaceAllMessages: (messages) =>
+      set(() => ({ messages: messages.map((m) => ({ ...m })) })),
+    finishExecution: () =>
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.isStreaming || m.role === "assistant" ? { ...m, isStreaming: false } : m,
+        ),
+        isStreaming: false,
+        isProcessing: false,
+        pendingQuestions: null,
+      })),
+  }));
 }

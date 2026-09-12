@@ -8,6 +8,7 @@ import {
   AtSign,
   Bot,
   CheckCircle2,
+  Copy,
   Eye,
   EyeOff,
   ExternalLink,
@@ -15,17 +16,21 @@ import {
   KeyRound,
   Loader2,
   MessageCircle,
+  MessageSquare,
   Paperclip,
   Plug,
+  RefreshCw,
   Send,
   Trash2,
   XCircle,
+  Zap,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -46,9 +51,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-import { useAuth } from "@/hooks";
+import { useAuth, useCopyToClipboard } from "@/hooks";
 import { settingsService } from "@/lib/services";
-import { getTelegramStatus, telegramApi, type TelegramStatusView } from "@/lib/scheduler/client";
+import {
+  getTelegramChatStatus,
+  telegramChatApi,
+  type TelegramChatStatusView,
+  type TelegramWebhookStatusInfo,
+} from "@/lib/scheduler/telegram-client";
 import { ROUTES } from "@/lib/constants";
 
 /**
@@ -56,11 +66,19 @@ import { ROUTES } from "@/lib/constants";
  *
  * The bot token lives in TWO places, both user-owned:
  *  1. the server-side scheduler KV (schedule:telegram) — powers unattended
- *     scheduled-run notifications + the sandbox-native telegram tools;
+ *     scheduled-run notifications + REMOTE CHAT (the webhook) + the
+ *     sandbox-native telegram tools;
  *  2. the LOCAL encrypted vault (settingsService) — powers the in-browser
  *     telegram agent tools.
  * The token is typed into the connect dialog, sent once, stored encrypted,
  * and cleared from the form — it is never rendered or logged.
+ *
+ * REMOTE CHAT (unified-3b): with the bot connected + chat discovered,
+ * "Enable chat" registers a webhook (secret token) on the bot. A Telegram
+ * message then runs through the SAME agent runtime (E2B sandbox, workspace,
+ * tools) and the response streams back into Telegram; the conversation also
+ * lands in the linked OnyxAgent chat. The webhook secret is generated
+ * server-side and never leaves the KV + Telegram's webhook registration.
  */
 
 function formatSince(iso: string | null | undefined): string {
@@ -82,7 +100,7 @@ export function SectionIntegrationsTelegram() {
   const { user } = useAuth();
   const userId = user?.id;
 
-  const [status, setStatus] = React.useState<TelegramStatusView | null>(null);
+  const [status, setStatus] = React.useState<TelegramChatStatusView | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [notConfigured, setNotConfigured] = React.useState(false);
 
@@ -98,6 +116,19 @@ export function SectionIntegrationsTelegram() {
   const [discovering, setDiscovering] = React.useState(false);
   const [disconnectOpen, setDisconnectOpen] = React.useState(false);
 
+  // Remote chat (unified-3b) state.
+  const [enablingChat, setEnablingChat] = React.useState(false);
+  const [disablingChat, setDisablingChat] = React.useState(false);
+  const [disableChatOpen, setDisableChatOpen] = React.useState(false);
+  const [webhookInfo, setWebhookInfo] = React.useState<TelegramWebhookStatusInfo | null>(null);
+  const [checkingWebhook, setCheckingWebhook] = React.useState(false);
+  // "Mirror web runs to Telegram" — a LOCAL vault flag (the runtime source of
+  // truth; the KV config's mirrorRuns copy is informational only).
+  const [mirror, setMirror] = React.useState(false);
+  const [mirrorLoading, setMirrorLoading] = React.useState(true);
+
+  const { copy, copied } = useCopyToClipboard();
+
   const refresh = React.useCallback(async () => {
     if (!userId) {
       setLoading(false);
@@ -105,13 +136,13 @@ export function SectionIntegrationsTelegram() {
     }
     setLoading(true);
     try {
-      const res = await getTelegramStatus(userId);
+      const res = await getTelegramChatStatus(userId);
       if (res.error === "NOT_CONFIGURED") {
         setNotConfigured(true);
         setStatus(null);
       } else if (res.ok) {
         setNotConfigured(false);
-        setStatus((res.telegram as TelegramStatusView | undefined) ?? null);
+        setStatus((res.telegram as TelegramChatStatusView | undefined) ?? null);
       }
     } finally {
       setLoading(false);
@@ -121,6 +152,32 @@ export function SectionIntegrationsTelegram() {
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Load the mirror flag from the local vault (defaults off).
+  React.useEffect(() => {
+    if (!userId) {
+      setMirrorLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await settingsService.getTelegramMirrorEnabled(userId);
+        if (!cancelled) setMirror(v);
+      } catch {
+        /* stays off */
+      } finally {
+        if (!cancelled) setMirrorLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  const chatEnabled = !!status?.chatEnabled;
+  const webhookUrl = status?.webhookUrl ?? null;
+  const providerModel = status?.providerModel ?? null;
 
   async function handleConnect(e: React.FormEvent) {
     e.preventDefault();
@@ -135,7 +192,7 @@ export function SectionIntegrationsTelegram() {
     }
     setConnecting(true);
     try {
-      const res = await telegramApi(userId, "connect", { botToken: trimmed });
+      const res = await telegramChatApi(userId, "connect", { botToken: trimmed });
       if (!res.ok) {
         toast.error(res.message ?? "Telegram rejected the token", {
           icon: <XCircle className="size-4" />,
@@ -153,7 +210,7 @@ export function SectionIntegrationsTelegram() {
       }
       setToken(""); // wipe — transient by contract
       setConnectOpen(false);
-      setStatus((res.telegram as TelegramStatusView | undefined) ?? null);
+      setStatus((res.telegram as TelegramChatStatusView | undefined) ?? null);
       toast.success("Telegram bot connected", {
         description: res.message ?? "Now send /start to your bot and press Discover Chat.",
         icon: <CheckCircle2 className="size-4" />,
@@ -169,7 +226,7 @@ export function SectionIntegrationsTelegram() {
     if (!userId) return;
     setDiscovering(true);
     try {
-      const res = await telegramApi(userId, "discover", {});
+      const res = await telegramChatApi(userId, "discover", {});
       if (!res.ok) {
         toast.error(res.message ?? "No chat found", {
           description: "Send /start to your bot in Telegram first, then try again.",
@@ -177,7 +234,7 @@ export function SectionIntegrationsTelegram() {
         });
         return;
       }
-      const tg = (res.telegram as TelegramStatusView | undefined) ?? null;
+      const tg = (res.telegram as TelegramChatStatusView | undefined) ?? null;
       // Mirror the chat id into the local vault (plain — ids aren't secrets).
       if (userId && tg?.chatId) {
         try {
@@ -202,7 +259,7 @@ export function SectionIntegrationsTelegram() {
     if (!userId) return;
     setTesting(true);
     try {
-      const res = await telegramApi(userId, "test", {});
+      const res = await telegramChatApi(userId, "test", {});
       if (!res.ok) {
         toast.error(res.message ?? "Test message failed", { icon: <XCircle className="size-4" /> });
         return;
@@ -218,10 +275,107 @@ export function SectionIntegrationsTelegram() {
     }
   }
 
+  // ── Remote chat (unified-3b) ──────────────────────────────────────────────
+
+  async function handleEnableChat() {
+    if (!userId) return;
+    setEnablingChat(true);
+    try {
+      // Provider snapshot resolved CLIENT-side (the same resolution the
+      // scheduled-tasks create flow uses — never model-visible).
+      const { resolveProviderSnapshot } = await import("@/lib/scheduler/client");
+      const provider = await resolveProviderSnapshot();
+      if (!provider) {
+        toast("No AI provider/model is configured", {
+          description:
+            "Telegram replies will show a configuration warning until you re-enable chat with a provider selected.",
+          icon: <XCircle className="size-4" />,
+        });
+      }
+      const res = await telegramChatApi(userId, "enable_chat", { provider, mirrorRuns: mirror });
+      if (!res.ok) {
+        toast.error(res.message ?? "Failed to enable remote chat", {
+          icon: <XCircle className="size-4" />,
+        });
+        return;
+      }
+      await refresh();
+      toast.success("Telegram remote chat enabled", {
+        description:
+          res.webhookUrl ? `Webhook: ${res.webhookUrl}` : (res.message ?? "Send your bot a message in Telegram."),
+        icon: <CheckCircle2 className="size-4" />,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to enable remote chat");
+    } finally {
+      setEnablingChat(false);
+    }
+  }
+
+  async function handleDisableChat() {
+    if (!userId) return;
+    setDisablingChat(true);
+    try {
+      const res = await telegramChatApi(userId, "disable_chat", {});
+      if (!res.ok) {
+        toast.error(res.message ?? "Failed to disable remote chat");
+        return;
+      }
+      if (res.warning) {
+        toast(res.warning, { icon: <XCircle className="size-4" /> });
+      }
+      setWebhookInfo(null);
+      await refresh();
+      toast.success("Remote chat disabled", {
+        description: "Your bot no longer launches agent runs from Telegram.",
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to disable remote chat");
+    } finally {
+      setDisablingChat(false);
+      setDisableChatOpen(false);
+    }
+  }
+
+  async function handleWebhookStatus() {
+    if (!userId) return;
+    setCheckingWebhook(true);
+    try {
+      const res = await telegramChatApi(userId, "webhook_status", {});
+      if (!res.ok || !res.info) {
+        toast.error(res.message ?? "Could not read the webhook status");
+        return;
+      }
+      setWebhookInfo(res.info);
+      if (res.info.lastErrorMessage) {
+        toast("Telegram reported a delivery problem", {
+          description: res.info.lastErrorMessage,
+          icon: <XCircle className="size-4" />,
+        });
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not read the webhook status");
+    } finally {
+      setCheckingWebhook(false);
+    }
+  }
+
+  async function handleMirrorToggle(next: boolean) {
+    if (!userId || mirrorLoading) return;
+    setMirror(next); // optimistic
+    try {
+      await settingsService.setTelegramMirrorEnabled(userId, next);
+      toast.success(next ? "Web-app runs will stream to Telegram" : "Web-app run mirroring turned off");
+    } catch {
+      setMirror(!next); // revert
+      toast.error("Could not save the mirror setting");
+    }
+  }
+
   async function handleDisconnect() {
     if (!userId) return;
     try {
-      const res = await telegramApi(userId, "disconnect", {});
+      const res = await telegramChatApi(userId, "disconnect", {});
       if (!res.ok) {
         toast.error(res.message ?? "Disconnect failed");
         return;
@@ -234,8 +388,9 @@ export function SectionIntegrationsTelegram() {
         /* best-effort */
       }
       setStatus(null);
+      setWebhookInfo(null);
       toast.success("Telegram disconnected", {
-        description: "Scheduled tasks will no longer send Telegram notifications.",
+        description: "Remote chat is off and scheduled tasks no longer send Telegram notifications.",
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Disconnect failed");
@@ -399,7 +554,7 @@ export function SectionIntegrationsTelegram() {
     );
   }
 
-  // ── Connected: identity tiles + actions.
+  // ── Connected: identity tiles + remote chat + actions.
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -459,6 +614,163 @@ export function SectionIntegrationsTelegram() {
         </div>
       </div>
 
+      {/* ── Remote chat (unified-3b): Telegram as a real agent chat client ── */}
+      {status.chatId && (
+        <div className="rounded-lg border bg-muted/20 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="flex items-center gap-1.5 text-sm font-semibold">
+                <MessageSquare className="size-4 text-primary/70" aria-hidden />
+                Remote chat
+              </h4>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Chat with your agent directly in Telegram — full agent runtime, E2B sandbox,
+                workspace, tools; conversations appear in your chat list.
+              </p>
+            </div>
+            {chatEnabled ? (
+              <Badge className="gap-1 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" variant="secondary">
+                <CheckCircle2 className="size-3" aria-hidden />
+                Enabled
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="gap-1 shrink-0 text-muted-foreground">
+                Off
+              </Badge>
+            )}
+          </div>
+
+          {!chatEnabled ? (
+            <div className="mt-3 space-y-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={handleEnableChat}
+                disabled={enablingChat}
+                className="h-11"
+              >
+                {enablingChat ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+                Enable chat
+              </Button>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Enabling registers a webhook on your bot (Telegram requires a public HTTPS URL —
+                enable this from the deployed site, not localhost) and stores your currently
+                selected provider + model for unattended replies.
+              </p>
+            </div>
+          ) : (
+            <div className="mt-3 space-y-3">
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-muted-foreground">Webhook URL</span>
+                <div className="flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-2 font-mono text-[12px]">
+                    {webhookUrl ?? "—"}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => webhookUrl && void copy(webhookUrl)}
+                    disabled={!webhookUrl}
+                    className="size-11 shrink-0"
+                    aria-label="Copy webhook URL"
+                  >
+                    {copied ? (
+                      <CheckCircle2 className="size-4 text-emerald-500" />
+                    ) : (
+                      <Copy className="size-4" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {status.botUsername && (
+                  <a
+                    href={`https://t.me/${status.botUsername}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-0.5 rounded-md border border-border px-2 py-1 text-xs text-primary underline underline-offset-2"
+                  >
+                    <AtSign className="size-3" aria-hidden />
+                    {status.botUsername}
+                  </a>
+                )}
+                {providerModel ? (
+                  <Badge variant="secondary" className="gap-1.5 font-mono text-[11px]">
+                    <Bot className="size-3" aria-hidden />
+                    {providerModel}
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="gap-1 text-amber-600 dark:text-amber-400">
+                    <XCircle className="size-3" aria-hidden />
+                    No provider
+                  </Badge>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  Enabled {formatSince(status.enabledAt)}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Pending updates:{" "}
+                  {webhookInfo ? <span className="font-mono">{webhookInfo.pendingUpdateCount}</span> : "—"}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleWebhookStatus}
+                  disabled={checkingWebhook}
+                  className="size-11"
+                  aria-label="Refresh webhook status"
+                  title="Refresh pending updates from Telegram"
+                >
+                  {checkingWebhook ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-4" />
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDisableChatOpen(true)}
+                  className="h-11 text-destructive hover:text-destructive"
+                >
+                  <Trash2 className="size-4" />
+                  Disable chat
+                </Button>
+              </div>
+              {webhookInfo?.lastErrorMessage && (
+                <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+                  Telegram delivery problem: {webhookInfo.lastErrorMessage}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Mirror web runs — local vault flag, the runtime source of truth */}
+          <div className="mt-4 flex items-center justify-between gap-4 border-t pt-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Mirror web runs</p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Also stream web-app runs to Telegram — progress and results from chats you start
+                in the app appear in this Telegram chat too.
+              </p>
+            </div>
+            <Switch
+              checked={mirror}
+              onCheckedChange={(v) => void handleMirrorToggle(v)}
+              disabled={mirrorLoading}
+              aria-label="Mirror web-app runs to Telegram"
+            />
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <Button
           type="button"
@@ -476,8 +788,13 @@ export function SectionIntegrationsTelegram() {
           variant="outline"
           size="sm"
           onClick={handleDiscover}
-          disabled={discovering}
+          disabled={discovering || chatEnabled}
           className="h-11 min-w-[44px]"
+          title={
+            chatEnabled
+              ? "Discover is unavailable while remote chat is enabled — Telegram routes updates to the webhook"
+              : undefined
+          }
         >
           {discovering ? <Loader2 className="size-4 animate-spin" /> : <MessageCircle className="size-4" />}
           {t("discover")}
@@ -494,11 +811,43 @@ export function SectionIntegrationsTelegram() {
         </Button>
       </div>
 
+      {chatEnabled && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Discover Chat is unavailable while remote chat is enabled — Telegram routes updates to
+          the webhook instead of getUpdates. Disable chat first if you need to re-discover.
+        </p>
+      )}
+
       <p className="text-xs text-muted-foreground">
         Scheduled tasks deliver their results to this chat after every run; the agent can also send
-        messages and files through the telegram tools. Disconnecting clears the stored token and
-        chat link everywhere (server KV + this browser&apos;s vault).
+        messages and files through the telegram tools. Disconnecting disables remote chat and
+        clears the stored token and chat link everywhere (server KV + this browser&apos;s vault).
       </p>
+
+      {/* Disable-chat confirmation */}
+      <AlertDialog open={disableChatOpen} onOpenChange={setDisableChatOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disable remote chat?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your bot stops launching agent runs from Telegram and the webhook is removed. The
+              bot connection, discovered chat and scheduled-task notifications stay — you can
+              enable chat again anytime.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDisableChat}
+              disabled={disablingChat}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {disablingChat ? <Loader2 className="size-4 animate-spin" /> : null}
+              Disable chat
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Disconnect confirmation */}
       <AlertDialog open={disconnectOpen} onOpenChange={setDisconnectOpen}>
@@ -506,8 +855,9 @@ export function SectionIntegrationsTelegram() {
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect Telegram?</AlertDialogTitle>
             <AlertDialogDescription>
-              Scheduled tasks stop sending Telegram notifications and the agent&apos;s telegram
-              tools stop working until you reconnect. Existing tasks and history are untouched.
+              Remote chat is disabled, scheduled tasks stop sending Telegram notifications and the
+              agent&apos;s telegram tools stop working until you reconnect. Existing tasks and
+              history are untouched.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

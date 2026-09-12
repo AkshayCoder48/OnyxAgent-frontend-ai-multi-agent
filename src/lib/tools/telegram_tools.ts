@@ -243,7 +243,20 @@ registerTool(
     if (!tgRt || "error" in tgRt) return { error: tgRt && "error" in tgRt ? tgRt.error : "Telegram is not configured." };
     const limit = Math.min(50, Math.max(1, Number(args.limit) || 10));
     const r = await tg<Array<{ message?: { chat?: { id?: number }; from?: { first_name?: string; username?: string }; text?: string; date?: number } }>>(tgRt.botToken, "getUpdates", { limit });
-    if (!r.ok) return { error: `Telegram getUpdates failed: ${r.description ?? "unknown"}` };
+    if (!r.ok) {
+      // Remote chat mode: Telegram refuses getUpdates while a webhook is
+      // active ("can't use getUpdates while webhook is active" / 409 Conflict).
+      // Degrade gracefully — updates ARE processed, just not through this tool.
+      const desc = (r.description ?? "").toLowerCase();
+      if (desc.includes("webhook") || desc.includes("conflict")) {
+        return {
+          error: "WEBHOOK_ACTIVE",
+          message:
+            "This bot receives messages via webhook (remote chat mode). Updates are processed automatically — this tool is unavailable while the webhook is active. Disable chat in Settings → Integrations to use it.",
+        };
+      }
+      return { error: `Telegram getUpdates failed: ${r.description ?? "unknown"}` };
+    }
     const updates = (r.result ?? []).map((u) => ({
       chat_id: u.message?.chat?.id ? String(u.message.chat.id) : null,
       from: u.message?.from?.first_name || u.message?.from?.username || "unknown",

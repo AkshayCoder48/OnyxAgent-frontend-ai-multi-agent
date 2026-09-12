@@ -113,10 +113,15 @@ export interface BgTurnOptions {
   }>;
   /** Telegram credentials (resolved from the vault at launch) — the runner's
    * NATIVE telegram_* tools use them inside the sandbox. Never in tool
-   * arguments or prompts. */
+   * arguments or prompts. `stream: true` additionally activates the runner's
+   * Telegram progress streamer (one live message, batched edits every
+   * ~2.5s) executed inside E2B itself. */
   telegram?: {
     botToken: string;
     chatId: string;
+    /** unified-2a: stream run progress into the chat via message edits —
+     * runs INSIDE the sandbox (survives the browser being closed). */
+    stream?: boolean;
   };
 }
 
@@ -166,6 +171,12 @@ export function getActiveJob(conversationId: string | null): BgJob | null {
     if (job.conversationId === (conversationId ?? null)) return job;
   }
   return null;
+}
+
+/** ALL persisted jobs (app-mount rehydration: resume every running
+ *  conversation's consumer, not just the currently-viewed one). */
+export function listJobs(): BgJob[] {
+  return Object.values(readJobs());
 }
 
 async function sandboxCall<T>(

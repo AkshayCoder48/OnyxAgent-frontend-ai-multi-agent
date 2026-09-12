@@ -19,6 +19,11 @@
 
 import { registerTool, type ToolContext } from "./registry";
 import { resolveProviderSnapshot } from "@/lib/scheduler/client";
+import {
+  buildChatContext,
+  DEFAULT_CHAT_TASK_INSTRUCTIONS,
+} from "@/lib/scheduler/chat-context";
+import { addLinkedChat, removeLinkedChat } from "@/lib/scheduler/chat-sync";
 import type {
   CreateTaskPayload,
   SafeScheduledTask,
@@ -93,6 +98,7 @@ function taskSummary(t: SafeScheduledTask): string {
     `  schedule: ${describeSchedule(t as never)} · ${t.timezone}`,
     `  status: ${t.enabled ? "Active" : "Paused"} · next run: ${next} · last run: ${last}`,
     `  workspace: ${t.workspaceId}${t.runtime?.hasTelegram ? " · telegram notifications: on" : ""}`,
+    `  mode: ${t.chatId ? `chat-attached (${t.chatId}) — runs in that conversation` : "standalone instructions"}`,
     `  instructions: ${t.instructions.slice(0, 120)}${t.instructions.length > 120 ? "…" : ""}`,
   ].join("\n");
 }
@@ -113,6 +119,11 @@ registerTool(
         type: "string",
         description:
           "The COMPLETE agent job executed at run time: what to do, sources to check, files to create/update (with paths), what to send on Telegram. Written for an autonomous agent with NO user available.",
+      },
+      chatId: {
+        type: "string",
+        description:
+          "Attach the schedule to an existing conversation — the task runs in that chat with its history. Defaults to the CURRENT conversation when omitted.",
       },
       schedule: {
         type: "object",
@@ -154,28 +165,59 @@ registerTool(
     if (!schedule) {
       return { ok: false, error: "BAD_SCHEDULE", message: "The schedule object is required." };
     }
+    // UNIFIED CHAT MODE — resolve the conversation the schedule attaches to:
+    // explicit chatId → the runtime's conversation → the sidebar's current
+    // conversation. Null (none resolvable) = LEGACY standalone mode.
+    let chatId: string | null = null;
+    const explicitChatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
+    if (explicitChatId) {
+      chatId = explicitChatId;
+    } else {
+      let current: string | null = null;
+      try {
+        const { useConversationStore } = await import("@/stores");
+        current = useConversationStore.getState().currentConversationId;
+      } catch {
+        current = null;
+      }
+      chatId = current || ctx.conversationId || null;
+    }
+    let chatContext: CreateTaskPayload["chatContext"] = null;
+    if (chatId) {
+      const userId = ctx.userId;
+      if (userId) chatContext = await buildChatContext(userId, chatId);
+    }
+    // Chat mode makes instructions optional — the server requires a non-empty
+    // standing instruction, so substitute the default continuation phrasing.
+    const instructions = String(args.instructions ?? "");
     const payload: CreateTaskPayload = {
       name: String(args.name ?? ""),
       description: args.description ? String(args.description) : undefined,
-      instructions: String(args.instructions ?? ""),
+      instructions:
+        chatId && !instructions.trim() ? DEFAULT_CHAT_TASK_INSTRUCTIONS : instructions,
       schedule: {
         ...schedule,
         timezone: schedule.timezone || browserTimezone(),
       },
       enabled: args.enabled !== false,
       notifyTelegram: args.notifyTelegram !== false,
+      chatId,
+      chatContext,
       runtime: { provider },
     };
     const r = await schedulerCall<{ task: SafeScheduledTask }>(ctx, "create", payload as unknown as Record<string, unknown>);
     if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "creation failed" };
     const t = (r.result as { task?: SafeScheduledTask })?.task;
-    void ctx;
+    // Register the chat link locally (the create action already wrote the
+    // initial mirror server-side) so the sync component mirrors/pulls it.
+    if (t?.chatId) addLinkedChat(t.chatId);
     return {
       ok: true,
       action: "created",
       task: t,
       message: t
-        ? `Scheduled task created: ${t.name} — ${describeSchedule(t as never)} · ${t.timezone} · next run ${t.nextRunAt ? new Date(t.nextRunAt).toLocaleString() : "—"}`
+        ? `Scheduled task created: ${t.name} — ${describeSchedule(t as never)} · ${t.timezone} · next run ${t.nextRunAt ? new Date(t.nextRunAt).toLocaleString() : "—"}` +
+            (t.chatId ? ` · attached to this conversation (results appear in the chat)` : "")
         : "Task created.",
     };
   },
@@ -189,7 +231,7 @@ registerTool(
 
 registerTool(
   "update_scheduled_task",
-  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state, or Telegram notifications. Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
+  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state, Telegram notifications, or the conversation it is attached to. Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
   {
     type: "object",
     properties: {
@@ -197,6 +239,11 @@ registerTool(
       name: { type: "string" },
       description: { type: "string" },
       instructions: { type: "string", description: "Replacement agent job (full replacement, not a patch)" },
+      chatId: {
+        type: ["string", "null"],
+        description:
+          "Attach the schedule to a conversation (the task runs in that chat with its history). Send null to detach it back to standalone mode.",
+      },
       schedule: {
         type: "object",
         properties: {
@@ -220,6 +267,9 @@ registerTool(
     for (const k of ["name", "description", "instructions", "notifyTelegram"] as const) {
       if (args[k] !== undefined) payload[k] = args[k];
     }
+    if (args.chatId !== undefined) {
+      payload.chatId = args.chatId === null ? null : String(args.chatId);
+    }
     if (args.enabled !== undefined) payload.enabled = args.enabled === true;
     if (args.schedule) {
       payload.schedule = args.schedule;
@@ -228,9 +278,31 @@ registerTool(
       const provider = await resolveProviderSnapshot();
       if (provider) payload.runtime = { provider };
     }
+    // When the attached conversation changes, capture the CURRENT links so the
+    // local chat-link registry can be updated after a successful update.
+    let preTasks: SafeScheduledTask[] | null = null;
+    const chatChanging = args.chatId !== undefined;
+    if (chatChanging) {
+      const pre = await schedulerCall<{ tasks: SafeScheduledTask[] }>(ctx, "list", {});
+      if (pre.ok) preTasks = (pre.result as { tasks?: SafeScheduledTask[] })?.tasks ?? [];
+    }
     const r = await schedulerCall<{ task: SafeScheduledTask }>(ctx, "update", payload);
     if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "update failed" };
     const t = (r.result as { task?: SafeScheduledTask })?.task;
+    // Register/unregister the local chat links when chatId changes: add the
+    // new chat; drop the old one only when no other task still holds it.
+    if (chatChanging && t) {
+      const taskId = String(args.id ?? "");
+      const oldChatId = preTasks?.find((x) => x.id === taskId)?.chatId ?? null;
+      const newChatId = t.chatId ?? null;
+      if (oldChatId && oldChatId !== newChatId) {
+        const stillHeld = (preTasks ?? []).some(
+          (x) => x.id !== taskId && (x.chatId ?? null) === oldChatId,
+        );
+        if (!stillHeld) removeLinkedChat(oldChatId);
+      }
+      if (newChatId) addLinkedChat(newChatId);
+    }
     return {
       ok: true,
       action: "updated",
@@ -393,6 +465,7 @@ registerTool(
         lastRunStatus: t.lastRunStatus,
         runCount: t.runCount,
         workspaceId: t.workspaceId,
+        chatId: t.chatId ?? null,
         telegram: !!t.runtime?.hasTelegram,
       })),
       summary: filtered.length

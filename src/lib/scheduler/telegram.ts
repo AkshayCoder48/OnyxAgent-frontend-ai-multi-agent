@@ -171,6 +171,65 @@ export async function telegramGetUpdates(
   return r.result ?? [];
 }
 
+// ---------------------------------------------------------------------------
+// Webhook management (remote chat mode — unified-3b)
+// ---------------------------------------------------------------------------
+
+/** getWebhookInfo result (the fields Telegram returns). */
+export interface TelegramWebhookInfo {
+  url: string;
+  has_custom_certificate: boolean;
+  pending_update_count: number;
+  ip_address?: string;
+  last_error_date?: number;
+  last_error_message?: string;
+  last_synchronization_error_date?: number;
+  max_connections?: number;
+  allowed_updates?: string[];
+}
+
+/**
+ * Register the webhook: Telegram POSTs every incoming message to
+ * `{url}` with the `X-Telegram-Bot-Api-Secret-Token` header. Only "message"
+ * updates are delivered (the webhook route ignores everything else anyway).
+ * `dropPendingUpdates: true` discards updates queued before the enable
+ * (fresh enable — old messages must not fire agent runs).
+ */
+export async function telegramSetWebhook(
+  botToken: string,
+  url: string,
+  secretToken: string,
+  opts?: { dropPendingUpdates?: boolean },
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await tg<true>(botToken, "setWebhook", {
+    url,
+    secret_token: secretToken,
+    allowed_updates: ["message"],
+    drop_pending_updates: opts?.dropPendingUpdates === true,
+  });
+  return r.ok ? { ok: true } : { ok: false, error: r.description ?? "setWebhook failed" };
+}
+
+/** Remove the webhook (disable remote chat). `dropPending` also discards queued updates. */
+export async function telegramDeleteWebhook(
+  botToken: string,
+  dropPending = false,
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await tg<true>(botToken, "deleteWebhook", {
+    drop_pending_updates: dropPending,
+  });
+  return r.ok ? { ok: true } : { ok: false, error: r.description ?? "deleteWebhook failed" };
+}
+
+/** Read the live webhook state (url, pending_update_count, last_error_message…). */
+export async function telegramGetWebhookInfo(
+  botToken: string,
+): Promise<TelegramWebhookInfo | { error: string }> {
+  const r = await tg<TelegramWebhookInfo>(botToken, "getWebhookInfo");
+  if (r.ok && r.result) return r.result;
+  return { error: r.description ?? `getWebhookInfo failed (HTTP ${r.error_code ?? "network"})` };
+}
+
 /** Looks like a Telegram bot token (123456:ABC-DEF...). */
 export function looksLikeBotToken(token: string): boolean {
   return /^\d{6,}:[A-Za-z0-9_-]{30,}$/.test(token.trim());

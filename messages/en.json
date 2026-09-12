@@ -209,6 +209,8 @@
     "description": "Autonomous agent jobs that run on a schedule — in their own sandbox, with your persistent workspace, even when this app is closed. Results land here and on Telegram.",
     "newTask": "New Task",
     "nextRun": "Next run",
+    "linkedChat": "Linked chat",
+    "moreTasks": "{count} more",
     "emptyTitle": "No scheduled tasks yet",
     "emptyDescription": "Create the first one — the agent runs it on schedule, unattended, and delivers the result here (and on Telegram).",
     "status": {

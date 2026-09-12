@@ -21,6 +21,7 @@ import { Orb } from "@/components/assistant-ui/elements";
 import { ShimmerLabel } from "@/components/assistant-ui/elements";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { genuiPerfLog } from "@/lib/genui/perf";
+import { executionHub } from "@/lib/agent/execution-hub";
 import { Hourglass } from "lucide-react";
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
@@ -307,26 +308,20 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       (prevId !== null && prevId !== currId); // Switching between conversations
 
     if (shouldClear) {
-      // Abort any in-flight AI stream BEFORE clearing messages — otherwise
-      // the stream keeps writing to currentMessageIdRef which points to a
-      // message in the OLD conversation, causing messages to vanish or
-      // appear in the wrong chat (PRD §26, §27, §28).
-      if (isProcessing) {
-        stopGeneration();
-      }
+      // NAVIGATION NEVER ABORTS (spec §7/§29/§30): switching conversations
+      // DETACHES the UI from any running execution — it does NOT stop it.
+      // The ExecutionHub (module-level) keeps streaming the old conversation's
+      // agent, keeps checkpointing it to Dexie, and the sidebar's "Running"
+      // list keeps showing it. When the user comes back, the load-effect
+      // below sees the live execution and re-subscribes to its store.
       clearMessages();
       // Drop any pending queue when switching threads — those messages were
       // typed in the previous conversation's context, sending them into a
       // different conversation would surprise the user.
       clearQueued();
       // NOTE: the model + provider selection is deliberately NOT reset here.
-      // Resetting it (the old `setModel(null); setProviderId(null);`) was the
-      // model-desync bug: ChatControls' local state kept showing the user's
-      // pick while the runtime silently fell back to the provider default,
-      // so the NEXT request used a different model than the UI claimed. The
-      // selection is now session-level state owned by the chat store (single
-      // source of truth) and survives conversation switches — PRD §12/§17:
-      // "navigate between chats … the selected model must remain".
+      // The selection is session-level state owned by the chat store (single
+      // source of truth) and survives conversation switches.
     }
 
     // Reset the loaded-conversation tracker so the load-effect re-loads
@@ -340,7 +335,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     setPersistedConversationId(currId);
 
     prevConversationIdRef.current = currId;
-  }, [currentConversationId, clearMessages, clearQueued, isProcessing, stopGeneration, restorePersisted]);
+  }, [currentConversationId, clearMessages, clearQueued, restorePersisted]);
 
   // Load DB messages into the chat store when a conversation's messages arrive.
   //
@@ -368,6 +363,16 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     // Consume the flag set by the clear-effect and skip the DB paint.
     if (wasNewChatTransitionRef.current) {
       wasNewChatTransitionRef.current = false;
+      loadedConvIdRef.current = currentConversationId;
+      return;
+    }
+
+    // LIVE EXECUTION GATE: when the ExecutionHub has a running execution for
+    // this conversation, its store IS the live view (seeded with this
+    // conversation's history + streaming now) — painting the DB copy would
+    // REPLACE live content with a stale snapshot. Mark as loaded and let the
+    // execution store drive the UI (useChat's merged message source).
+    if (executionHub.getFor(currentConversationId)?.status === "running") {
       loadedConvIdRef.current = currentConversationId;
       return;
     }
@@ -409,7 +414,6 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       addChatMessage(chatMsg);
     });
   }, [currentMessages, hydratedConversationId, addChatMessage, clearMessages, currentConversationId]);
-
   // Auto-scroll is owned ENTIRELY by useChatScrollController above (see its
   // doc comment). The old per-flush `messagesEndRef.scrollIntoView()` was
   // removed: it scrolled every scrollable ancestor (not just the chat

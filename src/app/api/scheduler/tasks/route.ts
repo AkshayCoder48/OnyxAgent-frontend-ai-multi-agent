@@ -6,7 +6,7 @@
 //   Body: { action, ...payload }
 //
 // Actions: create | update | delete | pause | resume | run_now | list |
-//          get_history | get_run | status
+//          get_history | get_run | status | sync_chat | pull_chat
 //
 // Responses NEVER include credentials — task records are sanitized
 // (runtime → { hasProvider, providerModel, hasTelegram }).
@@ -24,6 +24,8 @@ import {
   setTaskEnabled,
   updateTask,
 } from "@/lib/scheduler/engine";
+import { pullChatUpdates, writeChatMirror } from "@/lib/scheduler/chat-store";
+import type { ChatTurnMessage } from "@/lib/scheduler/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,6 +61,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const action = String(body.action ?? "");
   const STRIP = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const parseChatContext = (
+    v: unknown,
+  ): { systemPrompt?: string; title?: string; messages: ChatTurnMessage[] } | null | undefined => {
+    if (v == null) return undefined;
+    if (typeof v !== "object") return null;
+    const ctx = v as { systemPrompt?: unknown; title?: unknown; messages?: unknown };
+    const messages = Array.isArray(ctx.messages)
+      ? (ctx.messages as unknown[])
+          .filter(
+            (m): m is ChatTurnMessage =>
+              !!m && typeof (m as ChatTurnMessage).id === "string" &&
+              ((m as ChatTurnMessage).role === "user" || (m as ChatTurnMessage).role === "assistant") &&
+              typeof (m as ChatTurnMessage).content === "string",
+          )
+          .map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            createdAt: typeof m.createdAt === "string" ? m.createdAt : new Date().toISOString(),
+          }))
+      : [];
+    return {
+      ...(typeof ctx.systemPrompt === "string" && ctx.systemPrompt ? { systemPrompt: ctx.systemPrompt } : {}),
+      ...(typeof ctx.title === "string" && ctx.title ? { title: ctx.title } : {}),
+      messages,
+    };
+  };
 
   try {
     switch (action) {
@@ -71,6 +100,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           workspaceId: STRIP(body.workspaceId),
           enabled: body.enabled !== false,
           notifyTelegram: body.notifyTelegram !== false,
+          chatId: typeof body.chatId === "string" ? body.chatId : body.chatId === null ? null : undefined,
+          chatContext: parseChatContext(body.chatContext),
           runtime: body.runtime as never,
         });
         return NextResponse.json({ ok: true, task: r.task, ...(r.warning ? { warning: r.warning } : {}) });
@@ -128,6 +159,37 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           tickInfo = null;
         }
         return NextResponse.json({ ok: true, tasks: tasks.length, tick: tickInfo });
+      }
+
+      // ── UNIFIED CHAT RECORDS ──────────────────────────────────────────
+      // sync_chat: browser → KV mirror snapshot (immutable version record).
+      case "sync_chat": {
+        const chatId = String(body.chatId ?? "").trim();
+        if (!chatId) {
+          return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "chatId is required" }, { status: 400 });
+        }
+        const messages = Array.isArray(body.messages) ? (body.messages as ChatTurnMessage[]) : [];
+        const r = await writeChatMirror(kv, {
+          chatId,
+          ...(typeof body.title === "string" && body.title ? { title: body.title } : {}),
+          ...(typeof body.systemPrompt === "string" && body.systemPrompt ? { systemPrompt: body.systemPrompt } : {}),
+          messages,
+        });
+        return NextResponse.json({ ok: true, durable: r.ok });
+      }
+
+      // pull_chat: KV server-appended messages → browser merge poller.
+      case "pull_chat": {
+        const updates = Array.isArray(body.updates)
+          ? (body.updates as Array<{ chatId?: unknown; after?: unknown }>)
+              .map((u) => ({
+                chatId: typeof u?.chatId === "string" ? u.chatId : "",
+                after: typeof u?.after === "string" ? u.after : undefined,
+              }))
+              .filter((u) => u.chatId)
+          : [];
+        const r = await pullChatUpdates(kv, updates);
+        return NextResponse.json({ ok: true, ...r });
       }
 
       default:

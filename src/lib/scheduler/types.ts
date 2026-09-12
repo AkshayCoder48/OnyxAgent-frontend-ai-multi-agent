@@ -90,6 +90,16 @@ export interface TelegramCreds {
   chatId: string;
 }
 
+/** One turn of a chat's history as consumed by the agent runtime (the
+ *  unified chat-execution context — see chat-store.ts). Defined here so the
+ *  shared client/server payloads can reference it without cycles. */
+export interface ChatTurnMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+}
+
 export interface ScheduledTask {
   id: string;
   userId: string;
@@ -97,6 +107,10 @@ export interface ScheduledTask {
   description: string;
   /** The COMPLETE agent job, preserved verbatim (never reduced to an action). */
   instructions: string;
+  /** UNIFIED CHAT MODE: the task runs INSIDE this conversation — the agent
+   *  gets the chat's history as context and its result is appended back into
+   *  the chat as a server message. Absent/null = LEGACY standalone mode. */
+  chatId?: string | null;
   scheduleType: ScheduleType;
   scheduleExpression: string;
   scheduleMeta: TaskScheduleMeta;
@@ -144,6 +158,9 @@ export interface ScheduledTaskRun {
   sandboxId: string | null;
   /** E2B run id (the .onyx/runs/<runId> dir) — live event polling. */
   e2bRunId: string | null;
+  /** Link to the unified chat execution (chat:<chatId> records) when the run
+   *  is attached to a conversation (chat-mode tasks). */
+  execId?: string | null;
   /** Final agent response (capped, for notifications + history). */
   result: string | null;
   error: string | null;
@@ -170,6 +187,43 @@ export const SCHED_RUNS_PREFIX = "schedule:runs:";
 export const SCHED_TELEGRAM_KEY = "schedule:telegram";
 /** Scheduler status + tick lock: { lastTickAt, … }. */
 export const SCHED_TICK_KEY = "schedule:tick";
+
+/**
+ * The FULL telegram connection record stored at SCHED_TELEGRAM_KEY
+ * ("schedule:telegram") — SERVER-side shape (carries the bot token + webhook
+ * secret, so it must NEVER be sent to a client; API responses project it
+ * through the route's masked() view). Written by /api/scheduler/telegram
+ * (connect / discover / enable_chat / disable_chat) and read by the telegram
+ * webhook route + the scheduler engine.
+ */
+export interface TelegramConnectionConfig {
+  botToken: string;
+  botName: string | null;
+  botUsername: string | null;
+  chatId: string | null;
+  chatName: string | null;
+  connectedAt: string | null;
+  /** REMOTE CHAT MODE (unified-3b) — present only while enabled.
+   *  Travels ONLY in the setWebhook call + KV + the webhook's header check. */
+  webhookSecret?: string;
+  /** The public webhook URL that was registered with Telegram. */
+  webhookUrl?: string;
+  /** The linked chat id AS USED by the KV chat records (chat:<id>:*) —
+   *  identical to chatId (kept explicit for the record's self-description). */
+  conversationId?: string;
+  /** Execution provider snapshot stored at enable time (null = no provider —
+   *  the webhook replies with a configuration warning). */
+  provider?: ProviderSnapshot | null;
+  /** INFORMATIONAL mirror flag (sent in enable_chat). The RUNTIME source of
+   *  truth for streaming web-app runs into Telegram is the local vault's
+   *  telegram_mirror_enabled flag (settingsService). */
+  mirrorRuns?: boolean;
+  /** When remote chat was enabled (ISO). */
+  enabledAt?: string;
+  /** Dedup cursor — the highest processed Telegram update_id. Retries and
+   *  redeliveries with update_id <= this value are skipped. */
+  lastUpdateId?: number;
+}
 
 export const MAX_RUNS_PER_TASK = 25;
 export const MAX_TASK_INSTRUCTIONS = 24_000;
@@ -220,6 +274,17 @@ export interface CreateTaskPayload {
   workspaceId?: string;
   enabled?: boolean;
   notifyTelegram?: boolean;
+  /** UNIFIED CHAT MODE — attach the schedule to an existing conversation
+   *  (runs with its history; results land in the chat). null/absent = legacy
+   *  standalone instruction mode. */
+  chatId?: string | null;
+  /** Initial chat mirror written at create time (browser context: system
+   *  prompt + recent messages) so the first run has history. */
+  chatContext?: {
+    systemPrompt?: string;
+    title?: string;
+    messages: ChatTurnMessage[];
+  } | null;
   /** Resolved CLIENT-side (never model-visible): execution snapshot. */
   runtime?: {
     provider?: ProviderSnapshot | null;
@@ -236,6 +301,8 @@ export interface UpdateTaskPayload {
   enabled?: boolean;
   workspaceId?: string;
   notifyTelegram?: boolean;
+  /** Attach/detach the task's conversation (chat mode). */
+  chatId?: string | null;
   runtime?: {
     provider?: ProviderSnapshot | null;
     telegram?: TelegramCreds | null;
@@ -252,7 +319,9 @@ export type TaskAction =
   | "list"
   | "get_history"
   | "get_run"
-  | "status";
+  | "status"
+  | "sync_chat"
+  | "pull_chat";
 
 export interface TickResult {
   ok: boolean;

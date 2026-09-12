@@ -132,6 +132,72 @@ export async function schedulerApi(
 }
 
 // ---------------------------------------------------------------------------
+// Unified chat records (sync_chat / pull_chat) — view types + wrappers
+// ---------------------------------------------------------------------------
+
+import type { ChatTurnMessage } from "./types";
+
+/**
+ * A server-appended message (smsg record) as the browser receives it — the
+ * server-side ServerChatMessage shape (chat-store.ts) with parts/toolCalls
+ * type-loose because they arrive as plain JSON.
+ */
+export interface ServerChatMessageView {
+  /** e.g. "smsg_<e2bRunId>" (scheduled-run results) or webhook-chosen. */
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  thinking?: string | null;
+  reasoning?: string | null;
+  /** Browser MessagePart[] shape (JSON). */
+  parts?: unknown[] | null;
+  /** Browser ToolCall[] shape (JSON). */
+  toolCalls?: unknown[] | null;
+  createdAt: string;
+  origin?: "scheduled" | "telegram";
+}
+
+export interface PullChatUpdateView {
+  chatId: string;
+  messages: ServerChatMessageView[];
+  meta?: { title: string; kind: "chat" | "telegram" };
+  /** The newest smsg marker for this chat (the next `after` cursor). */
+  nextAfter?: string;
+}
+
+export interface PullChatResponse extends SchedulerApiResponse {
+  updates: PullChatUpdateView[];
+  /** Newest smsg marker across the response (coarse server clock). */
+  serverTime: string;
+}
+
+export interface SyncChatResponse extends SchedulerApiResponse {
+  durable?: boolean;
+}
+
+export interface SyncChatPayload {
+  chatId: string;
+  title?: string;
+  systemPrompt?: string;
+  messages: ChatTurnMessage[];
+}
+
+/** sync_chat: browser → KV chat mirror snapshot → { ok, durable }. */
+export async function syncChat(userId: string, payload: SyncChatPayload): Promise<SyncChatResponse> {
+  const res = await schedulerApi(userId, "sync_chat", payload as unknown as Record<string, unknown>);
+  return res as unknown as SyncChatResponse;
+}
+
+/** pull_chat: KV server-appended messages for the given cursors. */
+export async function pullChat(
+  userId: string,
+  updates: Array<{ chatId: string; after?: string }>,
+): Promise<PullChatResponse> {
+  const res = await schedulerApi(userId, "pull_chat", { updates });
+  return res as unknown as PullChatResponse;
+}
+
+// ---------------------------------------------------------------------------
 // Telegram
 // ---------------------------------------------------------------------------
 

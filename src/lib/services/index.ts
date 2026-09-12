@@ -18,7 +18,7 @@
  */
 
 import { nanoid } from "nanoid";
-import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
+import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type MessageRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
 import {
   createVault,
   unlockVault,
@@ -207,6 +207,35 @@ export interface AddMessageInput {
    *  saveAgentCheckpoint). Omitted on the final save. */
   isStreaming?: boolean;
   tokensUsed?: number;
+}
+
+/**
+ * A server-appended message (scheduler pull_chat: scheduled-run results /
+ * telegram replies) to be persisted into Dexie via
+ * `conversationService.appendServerMessages`. The id is the SERVER's id
+ * ("smsg_<runId>" / webhook-chosen) and is preserved so re-delivered
+ * batches are idempotent.
+ */
+export interface ServerMessageRowInput {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  /** ISO timestamp — becomes the row's `created_at`. */
+  createdAt: string;
+  thinking?: string | null;
+  reasoning?: string | null;
+  /** Ordered timeline parts (assistant turns), JSON-persisted in `parts`. */
+  parts?: import("@/types/chat").MessagePart[] | null;
+  /** Flat tool calls (browser ToolCall shape incl. timing) → tool_calls rows. */
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    result?: unknown;
+    status?: "pending" | "running" | "completed" | "error";
+    startedAt?: number;
+    endedAt?: number;
+  }> | null;
 }
 
 export const conversationService = {
@@ -544,6 +573,99 @@ export const conversationService = {
       .delete();
 
     await bumpConversationTimestamp(conversationId);
+  },
+
+  /**
+   * Ensure a conversation row exists. Server-appended messages (scheduled-run
+   * results, telegram replies) can reference a conversation this browser has
+   * never opened — this creates it with the provided title when missing, and
+   * fills in a missing title on an existing row (chat meta from the server).
+   */
+  async ensureConversation(userId: string, conversationId: string, title?: string): Promise<Conversation> {
+    const existing = await db.conversations.get(conversationId);
+    const ts = nowISO();
+    if (!existing) {
+      const row: ConversationRow = {
+        id: conversationId,
+        user_id: userId,
+        ...(title ? { title } : {}),
+        created_at: ts,
+        updated_at: ts,
+        is_archived: false,
+        is_demo: false,
+        last_message_preview: null,
+        last_message_at: null,
+      };
+      await db.conversations.put(row);
+      return toConversation(row);
+    }
+    if (title && !existing.title) {
+      await db.conversations.update(conversationId, { title, updated_at: ts });
+    }
+    return toConversation(existing);
+  },
+
+  /**
+   * Append SERVER-side messages (scheduled-run results / telegram replies,
+   * pulled via the scheduler's pull_chat) into Dexie. Idempotent: ids are
+   * preserved so re-delivered batches bulkPut over the same rows (server
+   * retries can never duplicate history). Ensures the conversation row
+   * exists (created with `opts.title` when missing) and writes tool-call
+   * rows so getMessages hydrates the rich tool cards.
+   */
+  async appendServerMessages(
+    conversationId: string,
+    userId: string,
+    messages: ServerMessageRowInput[],
+    opts: { title?: string } = {},
+  ): Promise<void> {
+    if (!messages.length) return;
+    await this.ensureConversation(userId, conversationId, opts.title);
+    const rows: MessageRow[] = messages.map((m) => ({
+      id: m.id,
+      conversation_id: conversationId,
+      role: m.role,
+      content: m.content,
+      created_at: m.createdAt,
+      tool_calls: [],
+      files: [],
+      thinking: m.thinking ?? null,
+      reasoning: m.reasoning ?? null,
+      parts: m.parts ?? null,
+    }));
+    await db.messages.bulkPut(rows);
+    // Tool-call rows — getMessages hydrates these from the tool_calls table.
+    const toolRows: ToolCallRow[] = [];
+    for (const m of messages) {
+      for (const tc of m.toolCalls ?? []) {
+        const startedAt = typeof tc.startedAt === "number" ? new Date(tc.startedAt).toISOString() : m.createdAt;
+        const endedAt = typeof tc.endedAt === "number" ? new Date(tc.endedAt).toISOString() : m.createdAt;
+        toolRows.push({
+          id: `${m.id}:${tc.id}`,
+          message_id: m.id,
+          tool_call_id: tc.id,
+          tool_name: tc.name,
+          args: tc.args ?? {},
+          result: typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? null),
+          status: tc.status === "error" ? "failed" : (tc.status ?? "completed"),
+          started_at: startedAt,
+          completed_at: endedAt,
+          duration_ms:
+            typeof tc.startedAt === "number" && typeof tc.endedAt === "number"
+              ? Math.max(0, tc.endedAt - tc.startedAt)
+              : 0,
+        });
+      }
+    }
+    if (toolRows.length > 0) await db.tool_calls.bulkPut(toolRows);
+    // Conversation bookkeeping — newest message preview + timestamps.
+    const last = messages[messages.length - 1]!;
+    const ts = nowISO();
+    await db.conversations.update(conversationId, {
+      last_message_preview: (last.content ?? "").slice(0, 200),
+      last_message_at: last.createdAt,
+      updated_at: ts,
+    });
   },
 };
 
@@ -1425,6 +1547,28 @@ export const settingsService = {
     }
     if (!row) throw new Error("Could not initialize user settings");
     const extra = { ...(row.extra ?? {}), telegram_chat_id: chatId };
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
+  /** unified-3b: "Mirror web runs to Telegram" — when true, web-app background
+   *  turns pass stream: true so their progress streams into the user's
+   *  Telegram chat (the unified-2a in-sandbox streamer contract). A plain
+   *  boolean extra field (no secrets). This vault flag is the RUNTIME source
+   *  of truth; the scheduler KV config's mirrorRuns field is informational. */
+  async getTelegramMirrorEnabled(userId: string): Promise<boolean> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    return row?.extra?.telegram_mirror_enabled === true;
+  },
+
+  /** Store (or clear) the "mirror web runs to Telegram" flag. */
+  async setTelegramMirrorEnabled(userId: string, enabled: boolean): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    const extra = { ...(row.extra ?? {}), telegram_mirror_enabled: enabled };
     await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
   },
 

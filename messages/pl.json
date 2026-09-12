@@ -209,6 +209,8 @@
     "description": "Autonomiczne zadania agenta uruchamiane według harmonogramu — we własnej piaskownicy, z trwałym obszarem roboczym, nawet gdy aplikacja jest zamknięta. Wyniki pojawiają się tutaj i na Telegramie.",
     "newTask": "Nowe zadanie",
     "nextRun": "Następne uruchomienie",
+    "linkedChat": "Powiązany czat",
+    "moreTasks": "{count} więcej",
     "emptyTitle": "Brak zaplanowanych zadań",
     "emptyDescription": "Utwórz pierwsze zadanie — agent wykona je samodzielnie według harmonogramu i dostarczy wynik (także na Telegramie).",
     "status": {

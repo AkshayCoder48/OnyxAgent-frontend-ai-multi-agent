@@ -27,7 +27,12 @@ import {
 } from "lucide-react";
 import type { Conversation } from "@/types";
 import { ROUTES } from "@/lib/constants";
+import type { SafeScheduledTask } from "@/lib/scheduler/types";
+import { schedulerApi } from "@/lib/scheduler/client";
+import { describeSchedule } from "@/lib/scheduler/tz-cron";
+import { statusOf } from "@/components/scheduled/task-card";
 import { ShareDialog } from "./share-dialog";
+import { RunningExecutionsSection } from "./running-executions";
 
 /* ---------------------------------------------------------------------------
  * Date grouping for the Terra editorial history: tracked-caps day buckets.
@@ -225,10 +230,132 @@ function ConversationItem({
 
 type ConversationView = "active" | "archived";
 
+/* ---------------------------------------------------------------------------
+ * Scheduled Tasks sidebar section — the header row navigates to the
+ * management page; below it, the task rows themselves (chat-linked rows open
+ * the conversation, standalone rows go to /scheduled-tasks). The list is
+ * fetched via schedulerApi (OnyxBase key resolved at call time — never
+ * stored); when it is NOT_CONFIGURED or absent, ONLY the header row renders.
+ * ------------------------------------------------------------------------- */
+
+/** Fetch the user's scheduled tasks every 30s while the sidebar is mounted
+ *  (silent; failures → empty list → header row only, never an error). */
+function useSidebarScheduledTasks(userId: string | null | undefined): SafeScheduledTask[] | null {
+  const [tasks, setTasks] = useState<SafeScheduledTask[] | null>(null);
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    const load = async () => {
+      const res = await schedulerApi(userId, "list");
+      if (cancelled) return;
+      // NOT_CONFIGURED / no key / network error → header row only, no error.
+      setTasks(res.ok ? (res.tasks ?? []) : []);
+    };
+    void load().catch(() => {});
+    const id = window.setInterval(() => void load().catch(() => {}), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [userId]);
+  return tasks;
+}
+
+function ScheduledTasksSection({
+  tasks,
+  onSelect,
+  onNavigate,
+}: {
+  /** The sidebar's SHARED task list (fetched once in ConversationSidebar —
+   *  the expanded list and the collapsed rail dot use the same poller). */
+  tasks: SafeScheduledTask[] | null;
+  /** Same handler a conversation row uses — opens the linked chat. */
+  onSelect: (id: string) => void;
+  onNavigate?: () => void;
+}) {
+  const ts = useTranslations("scheduled");
+  const router = useRouter();
+
+  const rows = (tasks ?? []).slice(0, 4);
+  const more = (tasks?.length ?? 0) - rows.length;
+
+  const goManage = () => {
+    router.push(ROUTES.SCHEDULED_TASKS);
+    onNavigate?.();
+  };
+
+  return (
+    <div className="px-3 pb-2" data-testid="scheduled-tasks-section">
+      {/* Header row — a section label that still opens the management page. */}
+      <button
+        type="button"
+        onClick={goManage}
+        className="group flex min-h-[44px] w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left transition-colors hover:bg-foreground/5"
+        aria-label={ts("navLabel")}
+      >
+        <CalendarClock className="h-4 w-4 shrink-0 text-foreground/40" aria-hidden />
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground/70 group-hover:text-foreground">
+          {ts("navLabel")}
+        </span>
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-foreground/30" aria-hidden />
+      </button>
+
+      {/* Task rows — name + one-line schedule summary + status dot. */}
+      <div className="space-y-0.5">
+        {rows.map((task) => {
+          const dot = statusOf(task).dot;
+          return (
+            <button
+              key={task.id}
+              type="button"
+              onClick={() => {
+                if (task.chatId) {
+                  onSelect(task.chatId);
+                  onNavigate?.();
+                } else {
+                  goManage();
+                }
+              }}
+              className="flex min-h-[44px] w-full cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-3 py-1.5 text-left transition-colors hover:bg-foreground/5"
+              aria-label={`${ts("navLabel")}: ${task.name}`}
+            >
+              <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", dot)} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] leading-tight text-foreground/80">
+                  {task.name}
+                </span>
+                <span className="block truncate text-[11px] leading-tight text-foreground/45">
+                  {describeSchedule(task as never)}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+
+        {/* Overflow row → the management page. */}
+        {more > 0 && (
+          <button
+            type="button"
+            onClick={goManage}
+            className="flex min-h-[40px] w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-1.5 text-left text-[12px] text-foreground/50 transition-colors hover:bg-foreground/5 hover:text-foreground"
+            aria-label={ts("moreTasks", { count: more })}
+          >
+            <span className="w-4 shrink-0" aria-hidden />
+            {ts("moreTasks", { count: more })} →
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface ConversationListProps {
   conversations: Conversation[];
   currentConversationId: string | null;
   isLoading: boolean;
+  /** The sidebar's scheduled-task list (shared poller — see
+   *  useSidebarScheduledTasks in ConversationSidebar). */
+  scheduledTasks?: SafeScheduledTask[] | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onArchive: (id: string) => void;
@@ -243,6 +370,7 @@ function ConversationList({
   conversations = [],
   currentConversationId,
   isLoading,
+  scheduledTasks = null,
   onSelect,
   onDelete,
   onArchive,
@@ -253,8 +381,6 @@ function ConversationList({
   onLoadMore,
 }: ConversationListProps) {
   const t = useTranslations("chat");
-  const ts = useTranslations("scheduled");
-  const router = useRouter();
   const [view, setView] = useState<ConversationView>("active");
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -302,26 +428,26 @@ function ConversationList({
         </button>
       </div>
 
-      {/* Scheduled Tasks — the automation entry, directly below the New
-          conversation button (same visual weight as the history rows below).
-          Present in the expanded sidebar AND the mobile Sheet (both render
-          this list); the collapsed rail gets an icon-only twin. */}
-      <div className="px-3 pb-2">
-        <button
-          type="button"
-          onClick={() => {
-            router.push(ROUTES.SCHEDULED_TASKS);
-            onNavigate?.();
-          }}
-          className="border-transparent text-foreground/70 hover:bg-foreground/5 hover:text-foreground group relative flex min-h-[40px] w-full cursor-pointer items-center gap-2.5 rounded-xl border px-3 py-2 text-sm transition-all"
-        >
-          <CalendarClock
-            className="text-foreground/40 h-4 w-4 shrink-0"
-            aria-hidden
-          />
-          <span className="min-w-0 flex-1 truncate text-left">{ts("navLabel")}</span>
-        </button>
-      </div>
+      {/* Scheduled Tasks — the automation section, directly below the New
+          conversation button: a header row to the management page + the task
+          rows themselves (chat-linked rows open the conversation). Present in
+          the expanded sidebar AND the mobile Sheet (both render this list);
+          the collapsed rail keeps an icon-only twin with an emerald pulse
+          dot while any task is active. */}
+      <ScheduledTasksSection
+        tasks={scheduledTasks}
+        onSelect={(id) => handleSelect(id)}
+        onNavigate={onNavigate}
+      />
+
+      {/* LIVE EXECUTIONS (spec §13): every running agent execution — they
+          keep streaming no matter where the user navigates; clicking a row
+          re-subscribes the chat UI to the execution's live store. */}
+      <RunningExecutionsSection
+        conversations={all}
+        currentConversationId={currentConversationId}
+        onSelect={(id) => handleSelect(id)}
+      />
 
       {/* Search chats */}
       <div className="px-3 pb-2">
@@ -506,10 +632,16 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     }
   }, [authUserId, fetchConversations]);
 
+  // Scheduled-tasks poller — ONE fetch loop per sidebar (shared by the
+  // expanded/Sheet rows and the collapsed-rail pulse dot below).
+  const sidebarTasks = useSidebarScheduledTasks(authUserId);
+  const anyTaskActive = (sidebarTasks ?? []).some((t) => statusOf(t).key === "active");
+
   const listProps = {
     conversations,
     currentConversationId,
     isLoading,
+    scheduledTasks: sidebarTasks,
     onSelect: selectConversation,
     onDelete: deleteConversation,
     onArchive: archiveConversation,
@@ -519,6 +651,9 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     onLoadMore: fetchMoreConversations,
   };
 
+  // Collapsed-rail twin of the Scheduled Tasks section — the icon button + a
+  // small emerald pulse dot while any task is active (the shared poller
+  // above feeds it; only the collapsed branch renders this twin).
   if (isCollapsed) {
     return (
       <div
@@ -546,16 +681,23 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
         >
           <SquarePen className="h-4 w-4" aria-hidden />
         </Button>
-        {/* Scheduled Tasks — icon-only twin for the collapsed rail. */}
+        {/* Scheduled Tasks — icon-only twin for the collapsed rail, with a
+            small emerald pulse dot while any task is active. */}
         <Button
           variant="ghost"
           size="sm"
-          className="h-10 w-10 p-0"
+          className="relative h-10 w-10 p-0"
           onClick={() => router.push(ROUTES.SCHEDULED_TASKS)}
           title="Scheduled Tasks"
           aria-label="Scheduled Tasks"
         >
           <CalendarClock className="h-4 w-4" aria-hidden />
+          {anyTaskActive && (
+            <span
+              aria-hidden
+              className="absolute top-1.5 right-1.5 size-1.5 animate-pulse rounded-full bg-emerald-500"
+            />
+          )}
         </Button>
       </div>
     );
