@@ -24,6 +24,6 @@ export const config = {
     //   twitter-image, manifest.*, robots, sitemap) — these are dotless URLs
     //   that Next.js generates from src/app/{icon,apple-icon,…}.tsx and would
     //   otherwise be redirected to /{locale}/icon → 404.
-    "/((?!api|_next|_vercel|static|icon$|apple-icon$|opengraph-image$|twitter-image$|manifest|robots$|sitemap$|.*\\..*).*)",
+    "/((?!api|mock-kv|_next|_vercel|static|icon$|apple-icon$|opengraph-image$|twitter-image$|manifest|robots$|sitemap$|.*\\..*).*)",
   ],
 };

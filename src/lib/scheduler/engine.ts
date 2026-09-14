@@ -26,6 +26,16 @@
 import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
+import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
+import {
+  BRIDGE_PRESENCE_KEY,
+  BRIDGE_AUTH_DEFAULT_TTL_MS,
+  bridgeAuthKey,
+  onyxAiRuntimeOfflineMessage,
+  parseBridgePresence,
+  type BridgeAuthRecord,
+} from "@/lib/onyxai/bridge-protocol";
+import { resolveAppOrigin } from "@/lib/onyxai/bridge-server";
 import type { BgEvent } from "@/lib/e2b/background-agent";
 import type { SchedulerKV } from "./server-kv";
 import { computeNextRun, describeSchedule } from "./tz-cron";
@@ -809,6 +819,10 @@ export interface ChatExecutionRecord {
   resultPreview?: string;
   /** The server message ids appended to the chat (e.g. ["smsg_<e2bRunId>"]). */
   messageIds?: string[];
+  /** OnyxAI browser-bridge token when the provider is LOCAL (qvac on the
+   *  user's device — model calls relay through the user's browser). The
+   *  finalizer revokes it (best-effort; KV TTL is the safety net). */
+  bridgeToken?: string | null;
 }
 
 interface ChatExecsEnvelope {
@@ -919,6 +933,9 @@ export interface ChatExecutionInput {
   /** Sandbox label (task name / chat title). */
   name?: string;
   maxDurationMs?: number;
+  /** The app's public origin (bridge API base for OnyxAI executions).
+   *  Falls back to Vercel envs → localhost — see resolveAppOrigin. */
+  appOrigin?: string | null;
 }
 
 export interface ChatExecutionHandle {
@@ -946,12 +963,55 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
     throw new Error("No AI provider configuration for this chat execution.");
   }
   const execId = "exec_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+
+  // ── ONYXAI BROWSER BRIDGE ────────────────────────────────────────────────
+  // A LOCAL base URL (qvac serve on the user's device) is unreachable from
+  // the E2B sandbox AND from the server — the model runs IN THE USER'S
+  // BROWSER. Pre-check the browser runtime's presence BEFORE burning a
+  // sandbox: no fresh heartbeat → fail fast with the actionable "start your
+  // models" message (delivered to Telegram by the webhook's catch).
+  const localProvider = isLocalBaseUrl(input.provider.baseUrl);
+  let bridge: { origin: string; token: string; execId: string; sandboxId: string } | null = null;
+  if (localProvider) {
+    const presence = parseBridgePresence(await kv.get(BRIDGE_PRESENCE_KEY).catch(() => null));
+    if (!presence) {
+      throw new Error(
+        "ONYXAI_RUNTIME_OFFLINE: " +
+          onyxAiRuntimeOfflineMessage(
+            "(Trigger: " + input.trigger + ".)"
+          ),
+      );
+    }
+    if (presence.modelsOk === false || !Array.isArray(presence.models) || presence.models.length === 0) {
+      throw new Error(
+        "ONYXAI_QVAC_UNREACHABLE: The OnyxAI browser runtime is on, but no local models are being served. Start qvac on your device (qvac serve --openai --cors-origin <app-origin>) with at least one model in qvac.config.json, then try again.",
+      );
+    }
+    const wanted = (input.provider.model ?? "").trim();
+    if (wanted && !presence.models.includes(wanted)) {
+      throw new Error(
+        `ONYXAI_MODEL_NOT_RUNNING: The model "${wanted}" isn't started locally (served: ${presence.models.slice(0, 5).join(", ")}${presence.models.length > 5 ? "…" : ""}). Start it (qvac serve preload / qvac.config.json) in your browser runtime, then try again.`,
+      );
+    }
+    const token = "onxbr_" + execId.slice(5) + "_" + Math.random().toString(36).slice(2, 10);
+    const auth: BridgeAuthRecord = {
+      execId,
+      chatId,
+      trigger: input.trigger,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + (input.maxDurationMs ?? 3_600_000) + BRIDGE_AUTH_DEFAULT_TTL_MS,
+    };
+    await kv.set(bridgeAuthKey(token), JSON.stringify(auth));
+    bridge = { origin: resolveAppOrigin(input.appOrigin), token, execId, sandboxId: "" };
+  }
+
   const startedAt = new Date().toISOString();
   const rec: ChatExecutionRecord = {
     id: execId,
     chatId,
     trigger: input.trigger,
     ...(input.taskId ? { taskId: input.taskId } : {}),
+    ...(bridge ? { bridgeToken: bridge.token } : {}),
     sandboxId: "",
     e2bRunId: "",
     status: "running",
@@ -977,6 +1037,7 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
     throw new Error(rec.error);
   }
   rec.sandboxId = sandbox.sandboxId;
+  if (bridge) bridge.sandboxId = sandbox.sandboxId;
 
   try {
     // Persist the running record (sandbox known) BEFORE launch so a stranded
@@ -1033,6 +1094,9 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
         ? { scheduledTask: { taskId: input.taskId, runId: null, name: input.name ?? "" } }
         : {}),
       chatExecution: { execId, chatId, trigger: input.trigger, taskId: input.taskId ?? null },
+      // OnyxAI browser bridge — every model call relays through the user's
+      // open browser (the only thing that can reach the local qvac server).
+      ...(bridge ? { bridge } : {}),
       maxRounds: 30,
       status: "starting",
       content: "",
@@ -1239,6 +1303,13 @@ export async function finalizeChatExecution(
   rec.messageIds = [msg.id];
   await persistChatExec(kv, rec);
 
+  // Revoke the OnyxAI bridge token — the run is over, the sandbox may no
+  // longer submit model calls through the user's browser. (Best-effort; the
+  // KV expiry is the safety net for stranded finalizers.)
+  if (rec.bridgeToken) {
+    await kv.delete(bridgeAuthKey(rec.bridgeToken)).catch(() => {});
+  }
+
   // Kill the sandbox — the workspace is safely in the cloud.
   try {
     await sandbox.kill();
@@ -1323,6 +1394,52 @@ export async function fireRun(
     return fireChatRun(kv, task, run, runs);
   }
 
+  // ── ONYXAI BROWSER BRIDGE (legacy standalone tasks) — same contract as
+  // startChatExecution: a LOCAL provider means the model runs in the user's
+  // BROWSER; pre-check presence and hand the runner the bridge handle. ──
+  let legacyBridge: { origin: string; token: string; execId: string; sandboxId: string } | null = null;
+  if (isLocalBaseUrl(task.runtime.provider.baseUrl)) {
+    const presence = parseBridgePresence(await kv.get(BRIDGE_PRESENCE_KEY).catch(() => null));
+    const failOffline = (msg: string) => {
+      run.status = "failed";
+      run.error = msg;
+      run.completedAt = new Date().toISOString();
+      run.logs.push(`[error] ${msg}`);
+    };
+    if (!presence) {
+      failOffline("ONYXAI_RUNTIME_OFFLINE: " + onyxAiRuntimeOfflineMessage("(Trigger: scheduled task.)"));
+      await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+      return { run, alreadyRan: false, error: run.error ?? undefined };
+    }
+    if (presence.modelsOk === false || !Array.isArray(presence.models) || presence.models.length === 0) {
+      failOffline(
+        "ONYXAI_QVAC_UNREACHABLE: The OnyxAI browser runtime is on, but no local models are being served. Start qvac on your device (qvac serve --openai --cors-origin <app-origin>) with at least one model, then re-run the task.",
+      );
+      await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+      return { run, alreadyRan: false, error: run.error ?? undefined };
+    }
+    const wanted = (task.runtime.provider.model ?? "").trim();
+    if (wanted && !presence.models.includes(wanted)) {
+      failOffline(
+        `ONYXAI_MODEL_NOT_RUNNING: The model "${wanted}" isn't started locally (served: ${presence.models.slice(0, 5).join(", ")}${presence.models.length > 5 ? "…" : ""}). Start it in your browser runtime, then re-run the task.`,
+      );
+      await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+      return { run, alreadyRan: false, error: run.error ?? undefined };
+    }
+    const token = "onxbr_" + run.id.slice(5) + "_" + Math.random().toString(36).slice(2, 10);
+    await kv.set(
+      bridgeAuthKey(token),
+      JSON.stringify({
+        execId: run.id,
+        chatId: "",
+        trigger: "scheduled",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + BRIDGE_AUTH_DEFAULT_TTL_MS,
+      } satisfies BridgeAuthRecord),
+    );
+    legacyBridge = { origin: resolveAppOrigin(null), token, execId: run.id, sandboxId: "" };
+  }
+
   // 1. Isolated sandbox for this run — metadata-tagged so the interactive
   //    single-sandbox rotation NEVER kills scheduled runs.
   let sandbox: Sandbox;
@@ -1341,9 +1458,10 @@ export async function fireRun(
     run.completedAt = new Date().toISOString();
     run.logs.push(`[error] sandbox create failed: ${msg}`);
     await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-    return { run, alreadyRan: false, error: run.error };
+    return { run, alreadyRan: false, error: run.error ?? undefined };
   }
   run.sandboxId = sandbox.sandboxId;
+  if (legacyBridge) legacyBridge.sandboxId = sandbox.sandboxId;
   run.logs.push(`[sandbox] ${sandbox.sandboxId} created`);
   await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
 
@@ -1403,6 +1521,8 @@ export async function fireRun(
         ? { telegram: { botToken: task.runtime.telegram.botToken, chatId: task.runtime.telegram.chatId } }
         : {}),
       scheduledTask: { taskId: task.id, runId: run.id, name: task.name },
+      // OnyxAI browser bridge — model calls relay through the user's browser.
+      ...(legacyBridge ? { bridge: legacyBridge } : {}),
       maxRounds: 30,
       status: "starting",
       content: "",
@@ -1431,7 +1551,7 @@ export async function fireRun(
     } catch {
       /* best-effort */
     }
-    return { run, alreadyRan: false, error: run.error };
+    return { run, alreadyRan: false, error: run.error ?? undefined };
   }
 }
 
@@ -1478,7 +1598,7 @@ async function fireChatRun(
     run.completedAt = new Date().toISOString();
     run.logs.push(`[error] chat execution launch failed: ${msg}`);
     await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-    return { run, alreadyRan: false, error: run.error };
+    return { run, alreadyRan: false, error: run.error ?? undefined };
   }
 }
 

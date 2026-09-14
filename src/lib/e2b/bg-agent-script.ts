@@ -517,6 +517,132 @@ function readWithTimeout(reader, ms) {
   });
 }
 
+// ── OnyxAI browser bridge (LOCAL providers) ─────────────────────────────
+// state.bridge = { origin, token, execId, sandboxId } — set by the engine
+// when the provider base URL is LOCAL (qvac serve on the user's device):
+// neither this sandbox nor the server can reach the user's localhost, so
+// the model runs IN THE USER'S BROWSER (the OnyxAI Browser Runtime). Each
+// round: write the request body to a file here, queue it via the app's
+// bridge API (a tiny KV record — the body is far too big for KV), then
+// long-poll the normalized deltas the browser streams back and feed them
+// through the SAME delta pipeline as a direct provider SSE stream. The
+// browser picks requests up ONLY while an app tab has the runtime ON —
+// otherwise the pickup timeout produces the actionable error.
+async function bridgeFetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.text()).slice(0, 200); } catch {}
+    throw new Error("HTTP " + res.status + (detail ? " — " + detail : ""));
+  }
+  return await res.json();
+}
+
+const BRIDGE_PICKUP_TIMEOUT_MS = 150_000; // browser never picked the request up
+const BRIDGE_IDLE_TIMEOUT_MS = 240_000;   // no delta while streaming
+const BRIDGE_MAX_ATTEMPTS = 2;
+
+async function bridgeStreamRound(state, round, body, feedDeltas, finishStream, resetForRetry) {
+  const br = state.bridge;
+  for (let attempt = 1; attempt <= BRIDGE_MAX_ATTEMPTS; attempt++) {
+    const reqId = br.execId + "_r" + round + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const reqPath = path.join(BRIDGE_DIR, "llm-" + reqId + ".req.json");
+    await fs.mkdir(BRIDGE_DIR, { recursive: true });
+    await fs.writeFile(reqPath, JSON.stringify(body));
+    emitEvent({ t: "status", kind: "bridge_submit", round, attempt });
+    // 1. Queue the call (the browser runtime polls the queue record).
+    let submitted = false;
+    let submitErr = null;
+    try {
+      const sub = await bridgeFetchJson(br.origin + "/api/onyxai/bridge/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: br.token,
+          reqId: reqId,
+          sandboxId: br.sandboxId,
+          reqPath: reqPath,
+          model: String(body.model || ""),
+          round: round,
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      submitted = !!(sub && sub.ok);
+    } catch (e) {
+      submitErr = e && e.message ? e.message : String(e);
+    }
+    if (!submitted) {
+      await fs.rm(reqPath, { force: true }).catch(() => {});
+      if (attempt < BRIDGE_MAX_ATTEMPTS) {
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 2000, reason: "bridge submit failed: " + (submitErr || "rejected") });
+        await sleep(2000);
+        continue;
+      }
+      return { content: "", reasoning: "", toolCalls: [], error: "OnyxAI bridge submit failed: " + (submitErr || "the bridge rejected this request.") };
+    }
+
+    // 2. Long-poll deltas until the terminal final.
+    let after = 0;
+    let sawAny = false;
+    let streamError = null;
+    let finalInfo = null;
+    const pickupDeadline = Date.now() + BRIDGE_PICKUP_TIMEOUT_MS;
+    let idleDeadline = Date.now() + BRIDGE_IDLE_TIMEOUT_MS;
+    for (;;) {
+      let data = null;
+      try {
+        data = await bridgeFetchJson(
+          br.origin + "/api/onyxai/bridge/stream?token=" + encodeURIComponent(br.token) + "&reqId=" + encodeURIComponent(reqId) + "&after=" + after,
+          { signal: AbortSignal.timeout(35_000) },
+        );
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        if (Date.now() > idleDeadline) { streamError = "bridge stream read failed: " + msg; break; }
+        await sleep(1000);
+        continue;
+      }
+      if (data && Array.isArray(data.events)) {
+        for (const ev of data.events) {
+          if (ev && Array.isArray(ev.deltas)) {
+            for (const d of ev.deltas) {
+              if (d && (d.text || d.reasoning || d.toolCalls)) feedDeltas(d);
+            }
+          }
+          if (ev && typeof ev.seq === "number" && ev.seq > after) after = ev.seq;
+        }
+        if (data.events.length) {
+          sawAny = true;
+          idleDeadline = Date.now() + BRIDGE_IDLE_TIMEOUT_MS;
+        }
+      }
+      if (data && data.final) { finalInfo = data.final; break; }
+      if (data && data.gone) { streamError = "the browser runtime dropped this request (completed or expired on the other side)"; break; }
+      if (!sawAny && Date.now() > pickupDeadline) {
+        streamError = "OnyxAI model not running — the browser runtime did not pick up this request in 150s. Open OnyxAgent in your browser, turn ON the OnyxAI Browser Runtime (Settings → OnyxAI) and make sure qvac serve --openai is running on your device, then retry.";
+        break;
+      }
+      if (Date.now() > idleDeadline) { streamError = "idle timeout (240s without a chunk from the browser runtime)"; break; }
+      await sleep(300);
+    }
+    await fs.rm(reqPath, { force: true }).catch(() => {});
+    if (streamError && !sawAny && attempt < BRIDGE_MAX_ATTEMPTS) {
+      // Nothing streamed yet — a retry is duplicate-free.
+      resetForRetry();
+      emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 2000, reason: streamError });
+      await sleep(2000);
+      continue;
+    }
+    const result = await finishStream();
+    emitEvent({ t: "status", kind: "llm_end", round });
+    if (finalInfo && finalInfo.error) {
+      return { ...result, error: "OnyxAI (browser) error: " + String(finalInfo.error).slice(0, 500) };
+    }
+    if (streamError) return { ...result, error: streamError };
+    return result;
+  }
+  return { content: "", reasoning: "", toolCalls: [], error: "OnyxAI bridge round failed" };
+}
+
 // ── The streaming LLM call ──────────────────────────────────────────────
 const MAX_ATTEMPTS = 4;
 const IDLE_TIMEOUT_MS = 240_000;
@@ -708,6 +834,14 @@ async function streamRoundEvents(state, round, finalRound) {
     toolAcc.clear();
     preEmitted.clear();
   };
+
+  // ONYXAI BROWSER BRIDGE — local providers (qvac serve on the user's
+  // device) are unreachable from this sandbox. The model runs IN THE
+  // USER'S BROWSER; this round is relayed through the OnyxAI Browser
+  // Runtime and its deltas feed the SAME pipeline below.
+  if (state.bridge && state.bridge.token) {
+    return await bridgeStreamRound(state, round, body, feedDeltas, finishStream, resetForRetry);
+  }
 
   // Retry loop — only BEFORE any content arrived (no duplicate deltas).
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

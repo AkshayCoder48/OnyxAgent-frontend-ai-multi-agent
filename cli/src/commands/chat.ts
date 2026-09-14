@@ -39,6 +39,7 @@ export async function runChat(opts: {
   const apiKey = provider.hasApiKey ? getSecret(`provider_${provider.id}`) : null;
   const providerConfig: ProviderConfig = {
     baseUrl: provider.baseUrl,
+    name: provider.name,
     apiKey,
     model: opts.model ?? config.defaultModel ?? provider.models[0] ?? "gpt-4o",
     modelType: provider.modelType,

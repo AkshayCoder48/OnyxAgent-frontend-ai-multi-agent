@@ -1,5 +1,6 @@
 import { loadConfig } from "../lib/config.js";
 import { vaultExists, listSecrets } from "../lib/vault.js";
+import { checkOnyxAiRuntime } from "../lib/provider.js";
 import { existsSync } from "fs";
 import { PATHS } from "../lib/paths.js";
 
@@ -44,6 +45,18 @@ export async function runDoctor(): Promise<void> {
   // Providers
   if (config.providers.length === 0) {
     console.log("\n⚠ No providers configured. Run 'onyx setup' to add one.");
+  }
+
+  // OnyxAI Browser Runtime presence (only when the active provider is OnyxAI + local)
+  const activeProvider = config.providers.find((p) => p.id === config.activeProviderId);
+  if (activeProvider) {
+    const onyxRuntime = await checkOnyxAiRuntime({
+      baseUrl: activeProvider.baseUrl,
+      name: activeProvider.name,
+    });
+    if (onyxRuntime) {
+      console.log(`\nOnyxAI runtime: ${onyxRuntime}`);
+    }
   }
 
   console.log("\n✓ Diagnostics complete");

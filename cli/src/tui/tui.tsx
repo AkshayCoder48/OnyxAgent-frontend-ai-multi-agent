@@ -453,6 +453,7 @@ export async function startTui(opts: { showReasoning?: boolean; singleRound?: bo
 
   const providerConfig: ProviderConfig = {
     baseUrl: provider.baseUrl,
+    name: provider.name,
     apiKey,
     model,
     modelType: provider.modelType,

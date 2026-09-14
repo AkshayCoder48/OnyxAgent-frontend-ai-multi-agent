@@ -75,6 +75,22 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // E2E ONLY (ONYXAI_E2E_MOCK=1): same-origin relay to a local mock OnyxBase
+  // so the OnyxAI browser runtime can be exercised end-to-end inside sandbox
+  // previews whose browsers restrict cross-origin http. Never active in
+  // production.
+  ...(_isDev && process.env.ONYXAI_E2E_MOCK === "1"
+    ? {
+        async rewrites() {
+          return [
+            {
+              source: "/mock-kv/:path*",
+              destination: "http://localhost:3999/:path*",
+            },
+          ];
+        },
+      }
+    : {}),
 };
 
 export default withAnalyzer(withNextIntl(nextConfig));

@@ -277,6 +277,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       provider,
       telegram: { botToken, chatId },
       name: ((meta?.title ?? "Telegram chat") || "Telegram chat").slice(0, 60),
+      appOrigin: req.nextUrl.origin,
     });
 
     // Persist the cursor ONLY after the launch succeeded.

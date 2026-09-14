@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
   AtSign,
   Bot,
   CheckCircle2,
@@ -52,7 +53,8 @@ import {
 } from "@/components/ui/dialog";
 
 import { useAuth, useCopyToClipboard } from "@/hooks";
-import { settingsService } from "@/lib/services";
+import { aiProviderService, settingsService } from "@/lib/services";
+import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
 import {
   getTelegramChatStatus,
   telegramChatApi,
@@ -126,6 +128,10 @@ export function SectionIntegrationsTelegram() {
   // truth; the KV config's mirrorRuns copy is informational only).
   const [mirror, setMirror] = React.useState(false);
   const [mirrorLoading, setMirrorLoading] = React.useState(true);
+  // True when the STORED provider snapshot points at a LOCAL base URL (OnyxAI /
+  // QVAC) — those model calls can only be served by the OnyxAI Browser Runtime
+  // from an open app tab (see Settings → OnyxAI).
+  const [providerLocal, setProviderLocal] = React.useState(false);
 
   const { copy, copied } = useCopyToClipboard();
 
@@ -178,6 +184,32 @@ export function SectionIntegrationsTelegram() {
   const chatEnabled = !!status?.chatEnabled;
   const webhookUrl = status?.webhookUrl ?? null;
   const providerModel = status?.providerModel ?? null;
+
+  // The stored provider snapshot's base URL is masked server-side (only its
+  // model travels in the status view), so resolve localness HERE from the
+  // user's own provider rows: a LOCAL row that serves the stored model is the
+  // provider the snapshot was taken from → the Browser Runtime must be on.
+  React.useEffect(() => {
+    if (!userId || !chatEnabled || !providerModel) {
+      setProviderLocal(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await aiProviderService.list(userId);
+        const local = rows.some(
+          (r) => isLocalBaseUrl(r.base_url) && r.models.includes(providerModel),
+        );
+        if (!cancelled) setProviderLocal(local);
+      } catch {
+        if (!cancelled) setProviderLocal(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, chatEnabled, providerModel]);
 
   async function handleConnect(e: React.FormEvent) {
     e.preventDefault();
@@ -711,6 +743,22 @@ export function SectionIntegrationsTelegram() {
                   Enabled {formatSince(status.enabledAt)}
                 </span>
               </div>
+
+              {providerLocal && (
+                <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span>
+                    This chat uses OnyxAI (local) — the OnyxAI Browser Runtime must be running in
+                    an open app tab for Telegram messages to be answered.{" "}
+                    <Link
+                      href={ROUTES.SETTINGS_ONYXAI}
+                      className="font-medium underline underline-offset-2"
+                    >
+                      Settings → OnyxAI
+                    </Link>
+                  </span>
+                </p>
+              )}
 
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-muted-foreground">

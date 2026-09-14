@@ -14,7 +14,13 @@
  * - OpenRouter: /api/v1/chat/completions
  * - Exact custom endpoints (noPrefix mode)
  * - Local HTTP providers (Ollama, LM Studio, vLLM)
+ *
+ * Also gates LOCAL OnyxAI providers on the browser-runtime presence record
+ * the OnyxAgent web app heartbeats to OnyxBase KV (see the OnyxAI section
+ * below) — "the user has to start the models".
  */
+
+import { getSecret } from "./vault.js";
 
 export interface ProviderConfig {
   baseUrl: string;
@@ -25,6 +31,8 @@ export interface ProviderConfig {
   noPrefix?: boolean;
   thinkingEnabled?: boolean;
   temperature?: number;
+  /** Provider display name (from the config store) — used by the OnyxAI presence gate. */
+  name?: string | null;
 }
 
 export interface ToolDefinition {
@@ -60,6 +68,225 @@ export interface StreamChunk {
   finishReason?: string | null;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
   done?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// OnyxAI browser-runtime presence gate (OnyxBase KV)
+//
+// OnyxAI runs models LOCALLY in the user's browser (qvac serve --openai on
+// their device). The OnyxAgent web app's "OnyxAI Browser Runtime" heartbeats
+// a presence record to OnyxBase KV every 5s while it can reach the local
+// server — the CLI reads that record BEFORE calling a LOCAL OnyxAI provider,
+// so the user gets an actionable "start your models" error instead of a raw
+// connection refusal.
+// ---------------------------------------------------------------------------
+
+/** OnyxBase REST base URL (override with the ONYXBASE_BASE_URL env var). */
+const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-phi.vercel.app";
+/** KV key the Browser Runtime heartbeats (collection "onyxagent"). */
+const ONYXAI_PRESENCE_KEY = "onyxai:bridge:presence";
+/** Presence is fresh while younger than this (the heartbeat runs every 5s). */
+const ONYXAI_PRESENCE_STALE_MS = 20_000;
+/** Hard timeout for the presence fetch. */
+const ONYXAI_PRESENCE_TIMEOUT_MS = 10_000;
+/** Reuse one presence fetch for ~5s — a chat's rounds must not refetch every call. */
+const ONYXAI_PRESENCE_CACHE_MS = 5_000;
+
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"]);
+
+/**
+ * True when the URL points at the user's own machine (localhost / 127.0.0.1 /
+ * 0.0.0.0 / [::1] / ::1 / *.localhost hostnames) — same logic as the app's
+ * src/lib/onyxai/catalog.ts.
+ */
+export function isLocalBaseUrl(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    if (LOCAL_HOSTNAMES.has(u.hostname)) return true;
+    // qvac serve --host also allows .localhost subdomains.
+    if (u.hostname.endsWith(".localhost")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Presence record published by the OnyxAI Browser Runtime. */
+export interface OnyxAiPresence {
+  /** Epoch ms of the last heartbeat. */
+  lastSeenAt: number;
+  baseUrl?: string;
+  /** Models the local server actually serves. */
+  models: string[];
+  modelsOk: boolean;
+  activeModel?: string | null;
+  version: number;
+}
+
+function onyxBaseBaseUrl(): string {
+  return (process.env.ONYXBASE_BASE_URL ?? ONYXBASE_DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+}
+
+/**
+ * Resolve the OnyxBase API key: vault secret "onyxbase_key" → ONYXBASE_KEY env.
+ * An inaccessible/locked vault just means "not configured". Null when neither.
+ */
+function resolveOnyxBaseKey(): string | null {
+  try {
+    const fromVault = getSecret("onyxbase_key");
+    if (fromVault) return fromVault.trim();
+  } catch {
+    // Vault unavailable (no master key / corrupt) — fall through to the env var.
+  }
+  const fromEnv = (process.env.ONYXBASE_KEY ?? "").trim();
+  return fromEnv || null;
+}
+
+/**
+ * Fetch the presence record from OnyxBase KV.
+ * Returns null when the record is missing (404); throws on network/HTTP errors.
+ */
+async function fetchOnyxAiPresence(apiKey: string): Promise<OnyxAiPresence | null> {
+  const res = await fetch(
+    `${onyxBaseBaseUrl()}/v1/get/${encodeURIComponent(ONYXAI_PRESENCE_KEY)}?collection=onyxagent`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(ONYXAI_PRESENCE_TIMEOUT_MS),
+    },
+  );
+  if (res.status === 404) return null; // never heartbeated, or stopped
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`OnyxBase HTTP ${res.status}${errText ? `: ${errText.slice(0, 200)}` : ` (${res.statusText})`}`);
+  }
+  const data = (await res.json().catch(() => null)) as { value?: unknown } | null;
+  if (!data || data.value === undefined || data.value === null) return null;
+  // The KV API wraps the stored value as a JSON STRING — parse twice.
+  let raw: unknown = data.value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null; // corrupt record — treat as missing
+    }
+  }
+  const p = (typeof raw === "object" && raw !== null ? raw : {}) as Partial<OnyxAiPresence>;
+  if (typeof p.lastSeenAt !== "number") return null;
+  return {
+    lastSeenAt: p.lastSeenAt,
+    baseUrl: typeof p.baseUrl === "string" ? p.baseUrl : undefined,
+    models: Array.isArray(p.models) ? p.models.filter((m): m is string => typeof m === "string") : [],
+    modelsOk: p.modelsOk === true,
+    activeModel: typeof p.activeModel === "string" ? p.activeModel : null,
+    version: typeof p.version === "number" ? p.version : 1,
+  };
+}
+
+/** Module-level presence cache (see ONYXAI_PRESENCE_CACHE_MS). */
+let presenceCache: { fetchedAt: number; presence: OnyxAiPresence | null } | null = null;
+
+/**
+ * Cached presence fetch — retries once on failure, then throws a readable
+ * error. Never silently proceeds when a key IS configured but the check failed.
+ */
+async function fetchOnyxAiPresenceCached(apiKey: string): Promise<OnyxAiPresence | null> {
+  if (presenceCache && Date.now() - presenceCache.fetchedAt < ONYXAI_PRESENCE_CACHE_MS) {
+    return presenceCache.presence;
+  }
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const presence = await fetchOnyxAiPresence(apiKey);
+      presenceCache = { fetchedAt: Date.now(), presence };
+      return presence;
+    } catch (e) {
+      lastError = e;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 300)); // brief backoff, one retry
+    }
+  }
+  const reason = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `Couldn't verify the OnyxAI Browser Runtime — the OnyxBase presence check failed twice (${reason}). ` +
+      `OnyxBase: ${onyxBaseBaseUrl()} (override with ONYXBASE_BASE_URL). ` +
+      `Remove the onyxbase_key secret or unset ONYXBASE_KEY to skip this check.`,
+  );
+}
+
+/** The actionable "start your models" error (missing OR stale presence). */
+function onyxAiRuntimeOfflineError(): Error {
+  return new Error(
+    "OnyxAI models run locally in your browser — the OnyxAI Browser Runtime isn't running. " +
+      "Open the OnyxAgent app, turn ON the OnyxAI Browser Runtime (Settings → OnyxAI), then retry. " +
+      `(Presence via OnyxBase ${onyxBaseBaseUrl()} — override with ONYXBASE_BASE_URL.)`,
+  );
+}
+
+/**
+ * OnyxAI browser-runtime presence gate — verify the Browser Runtime is alive
+ * BEFORE calling a LOCAL OnyxAI provider ("the user has to start the models").
+ *
+ * No-op unless the base URL is local AND the provider name matches /onyx/i.
+ * Soft-skips when no OnyxBase key is configured — the direct local call then
+ * surfaces its own connection error.
+ */
+export async function assertOnyxAiRuntimeReady(opts: {
+  baseUrl: string;
+  model?: string | null;
+  name?: string | null;
+}): Promise<void> {
+  if (!isLocalBaseUrl(opts.baseUrl)) return;
+  const name = (opts.name ?? "").trim();
+  if (!name || !/onyx/i.test(name)) return;
+
+  const apiKey = resolveOnyxBaseKey();
+  if (!apiKey) return; // no OnyxBase key — soft skip
+
+  const presence = await fetchOnyxAiPresenceCached(apiKey);
+
+  if (!presence) throw onyxAiRuntimeOfflineError();
+  if (Date.now() - presence.lastSeenAt >= ONYXAI_PRESENCE_STALE_MS) throw onyxAiRuntimeOfflineError();
+  if (presence.modelsOk === false || presence.models.length === 0) {
+    throw new Error(
+      "The OnyxAI Browser Runtime is on but no local models are being served — start qvac on your device (qvac serve --openai) with at least one model.",
+    );
+  }
+  const wanted = (opts.model ?? "").trim();
+  if (wanted && !presence.models.includes(wanted)) {
+    const served = presence.models.slice(0, 5).join(", ") + (presence.models.length > 5 ? "…" : "");
+    throw new Error(
+      `The model "${wanted}" isn't started locally (served: ${served}). Start it in your browser runtime, then retry.`,
+    );
+  }
+}
+
+/**
+ * Non-throwing presence check for `onyx doctor` — returns a one-line status,
+ * or null when the gate doesn't apply (not OnyxAI, not a local base URL).
+ */
+export async function checkOnyxAiRuntime(opts: {
+  baseUrl: string;
+  name?: string | null;
+}): Promise<string | null> {
+  if (!isLocalBaseUrl(opts.baseUrl)) return null;
+  const name = (opts.name ?? "").trim();
+  if (!name || !/onyx/i.test(name)) return null;
+  const apiKey = resolveOnyxBaseKey();
+  if (!apiKey) return "not checked (no onyxbase_key secret or ONYXBASE_KEY env)";
+
+  let presence: OnyxAiPresence | null;
+  try {
+    presence = await fetchOnyxAiPresenceCached(apiKey);
+  } catch (e) {
+    return `unreachable via OnyxBase presence (${e instanceof Error ? e.message : String(e)})`;
+  }
+  if (!presence || Date.now() - presence.lastSeenAt >= ONYXAI_PRESENCE_STALE_MS) {
+    return "stale via OnyxBase presence (Browser Runtime isn't running)";
+  }
+  if (presence.modelsOk === false || presence.models.length === 0) {
+    return "reachable via OnyxBase presence, but no local models are served";
+  }
+  const age = Math.max(0, Math.round((Date.now() - presence.lastSeenAt) / 1000));
+  return `reachable via OnyxBase presence (${presence.models.length} model${presence.models.length === 1 ? "" : "s"}, seen ${age}s ago)`;
 }
 
 /**
@@ -106,6 +333,13 @@ export async function* streamChatCompletion(
   tools: ToolDefinition[] | undefined,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamChunk> {
+  // LOCAL OnyxAI → verify the browser runtime before anything else.
+  await assertOnyxAiRuntimeReady({
+    baseUrl: config.baseUrl,
+    model: config.model,
+    name: config.name,
+  });
+
   const endpoint = buildEndpoint(config, true);
 
   const headers: Record<string, string> = {
@@ -317,6 +551,13 @@ export async function chatCompletion(
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
 }> {
+  // LOCAL OnyxAI → verify the browser runtime before anything else.
+  await assertOnyxAiRuntimeReady({
+    baseUrl: config.baseUrl,
+    model: config.model,
+    name: config.name,
+  });
+
   const endpoint = buildEndpoint(config, false);
 
   const headers: Record<string, string> = {

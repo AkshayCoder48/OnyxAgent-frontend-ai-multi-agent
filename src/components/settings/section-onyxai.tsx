@@ -13,6 +13,7 @@ import {
   Loader2,
   Minus,
   Plus,
+  Radio,
   RefreshCw,
   Smartphone,
   Trash2,
@@ -67,6 +68,7 @@ import {
   isOnyxAiDismissed,
   undismissOnyxAiProvider,
 } from "@/lib/onyxai/seed";
+import { bridgeRuntime, type BridgeRuntimeStatus } from "@/lib/onyxai/bridge-runtime";
 import type { AIProviderRow } from "@/lib/db";
 
 /**
@@ -80,6 +82,9 @@ import type { AIProviderRow } from "@/lib/db";
  *
  * This section:
  *   1. Connection — URL + optional bearer key + direct Connect & Test probe.
+ *   1b. Browser Runtime — toggle + live status of the bridge that serves
+ *       REMOTE OnyxAI triggers (Telegram, scheduled tasks) from this browser
+ *       (see @/lib/onyxai/bridge-runtime).
  *   2. Setup guide — install / qvac.config.json / serve command with the
  *      app's own origin pre-filled for `--cors-origin`.
  *   3. Catalog — the curated QVAC model catalog grouped by DEVICE TIER
@@ -235,6 +240,319 @@ function CodeBlock({ code, caption }: { code: string; caption?: string }) {
           <CopyButton text={code} />
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Browser Runtime card — the remote-bridge toggle + live status
+// ---------------------------------------------------------------------------
+
+/**
+ * useSyncExternalStore needs a STABLE snapshot: `bridgeRuntime.getSnapshot()`
+ * builds a fresh object per call, which React would treat as a change on every
+ * render (infinite re-render — the same trap the worklog's zustand selector
+ * hit). Re-read it ONLY after the store actually emitted.
+ */
+let bridgeSnapshotCache: BridgeRuntimeStatus | null = null;
+let bridgeSnapshotDirty = true;
+
+function getStableBridgeSnapshot(): BridgeRuntimeStatus {
+  if (bridgeSnapshotDirty || !bridgeSnapshotCache) {
+    bridgeSnapshotCache = bridgeRuntime.getSnapshot();
+    bridgeSnapshotDirty = false;
+  }
+  return bridgeSnapshotCache;
+}
+
+function subscribeBridge(fn: () => void): () => void {
+  return bridgeRuntime.subscribe(() => {
+    bridgeSnapshotDirty = true;
+    fn();
+  });
+}
+
+/** SSR/hydration snapshot — the runtime is browser-only, so it is always off
+ *  on the server; React swaps in the live client snapshot after hydration. */
+const BRIDGE_SERVER_SNAPSHOT: BridgeRuntimeStatus = {
+  running: false,
+  leader: false,
+  enabled: "auto",
+  effectiveOn: false,
+  providerConfigured: false,
+  baseUrl: null,
+  modelsOk: false,
+  servedModels: [],
+  lastHeartbeatAt: null,
+  lastError: null,
+  busy: false,
+  servedCount: 0,
+  recent: [],
+};
+
+function getBridgeServerSnapshot(): BridgeRuntimeStatus {
+  return BRIDGE_SERVER_SNAPSHOT;
+}
+
+function formatAge(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+const BRIDGE_MODES = [
+  { value: "auto", label: "Auto (while OnyxAI is active)" },
+  { value: "on", label: "Always on" },
+  { value: "off", label: "Off" },
+] as const;
+
+function BrowserRuntimeCard({ origin }: { origin: string }) {
+  const status = React.useSyncExternalStore(
+    subscribeBridge,
+    getStableBridgeSnapshot,
+    getBridgeServerSnapshot,
+  );
+  const [now, setNow] = React.useState(() => Date.now());
+  const [settingMode, setSettingMode] = React.useState(false);
+
+  // Keep the "Xs ago" ages fresh (heartbeats land every 5s, but the label
+  // should keep counting even when the local server is unreachable).
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const setMode = React.useCallback(async (mode: "auto" | "on" | "off") => {
+    setSettingMode(true);
+    try {
+      await bridgeRuntime.setEnabled(mode);
+      toast.success(
+        mode === "auto"
+          ? "Browser Runtime: auto — serving while OnyxAI is the active provider"
+          : mode === "on"
+            ? "Browser Runtime: always serving while an app tab is open"
+            : "Browser Runtime off — remote OnyxAI requests won't be answered",
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to change the runtime mode");
+    } finally {
+      setSettingMode(false);
+    }
+  }, []);
+
+  const serving = status.running && status.leader;
+  const standby = status.running && !status.leader;
+  /** Mode is ON but the loops couldn't start (no OnyxBase key / provider
+   *  misconfigured) — surfaced as its own state, never silently "Off". */
+  const blocked = !status.running && status.enabled === "on";
+  const heartbeatAge = status.lastHeartbeatAt ? formatAge(now - status.lastHeartbeatAt) : null;
+
+  return (
+    <div className="rounded-lg border p-4 md:p-5">
+      {/* ── Header: title + status badge ─────────────────────────────── */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h4 className="flex items-center gap-1.5 text-sm font-semibold">
+          <Radio className="size-4 text-primary/70" aria-hidden />
+          Browser Runtime
+        </h4>
+        {serving ? (
+          <Badge
+            variant="outline"
+            className="gap-1.5 border-emerald-600/40 bg-emerald-600/10 text-emerald-700 dark:text-emerald-400"
+          >
+            <span className="relative flex size-2" aria-hidden>
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+              <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+            </span>
+            Serving
+          </Badge>
+        ) : standby ? (
+          <Badge
+            variant="outline"
+            className="gap-1.5 border-amber-600/40 bg-amber-600/10 text-amber-700 dark:text-amber-400"
+          >
+            <span className="inline-flex size-2 rounded-full bg-amber-500" aria-hidden />
+            Standby
+          </Badge>
+        ) : blocked ? (
+          <Badge
+            variant="outline"
+            className="gap-1.5 border-rose-600/40 bg-rose-600/10 text-rose-700 dark:text-rose-400"
+          >
+            <span className="inline-flex size-2 rounded-full bg-rose-500" aria-hidden />
+            Can’t start
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="gap-1.5 text-muted-foreground">
+            <span className="inline-flex size-2 rounded-full bg-muted-foreground/40" aria-hidden />
+            Off
+          </Badge>
+        )}
+      </div>
+
+      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+        OnyxAI models run locally in this browser. When Telegram messages or scheduled tasks use
+        OnyxAI, their model calls are relayed through this page — keep it open while you want
+        remote triggers answered. The CLI is gated by the same runtime.
+      </p>
+      {standby ? (
+        <p className="mt-1.5 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+          Another app tab is the serving tab — that tab must stay open for remote requests to be
+          answered.
+        </p>
+      ) : null}
+
+      {/* ── Mode selector (44px touch targets) ────────────────────────── */}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {BRIDGE_MODES.map(({ value, label }) => {
+          const active = status.enabled === value;
+          return (
+            <Button
+              key={value}
+              type="button"
+              variant={active ? "default" : "outline"}
+              size="sm"
+              className="h-11 min-w-[44px] gap-1.5 text-xs"
+              aria-pressed={active}
+              disabled={settingMode}
+              onClick={() => void setMode(value)}
+            >
+              {active ? <Check className="size-3.5" /> : null}
+              {label}
+            </Button>
+          );
+        })}
+      </div>
+
+      {/* ── Live status rows (while the loops run) ────────────────────── */}
+      {status.running ? (
+        <div className="mt-4 grid gap-3 rounded-md border bg-muted/30 p-3 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <p className="text-[11px] font-medium text-muted-foreground">
+              Served by your QVAC server ({status.servedModels.length})
+            </p>
+            {status.servedModels.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {status.servedModels.slice(0, 4).map((m) => (
+                  <Badge key={m} variant="outline" className="gap-1 font-mono text-[10px]">
+                    {m}
+                  </Badge>
+                ))}
+                {status.servedModels.length > 4 ? (
+                  <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                    +{status.servedModels.length - 4} more
+                  </Badge>
+                ) : null}
+              </div>
+            ) : (
+              <p className="mt-1 text-xs text-muted-foreground">
+                None yet — the server is reachable but serves no models.
+              </p>
+            )}
+          </div>
+          <div>
+            <p className="text-[11px] font-medium text-muted-foreground">Local server</p>
+            {status.modelsOk ? (
+              <p className="mt-1 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                <CheckCircle2 className="size-3.5" aria-hidden /> QVAC server reachable
+              </p>
+            ) : (
+              <p className="mt-1 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+                QVAC server unreachable — start{" "}
+                <code className="rounded bg-muted px-1 font-mono text-[11px]">
+                  qvac serve --openai --cors-origin {origin || "<origin>"}
+                </code>
+              </p>
+            )}
+          </div>
+          <div>
+            <p className="text-[11px] font-medium text-muted-foreground">Last heartbeat</p>
+            <p className="mt-1 text-xs">
+              {heartbeatAge ? `${heartbeatAge} ago` : "—"}
+              {status.busy ? (
+                <span className="text-muted-foreground"> · serving a request now</span>
+              ) : null}
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <p className="text-[11px] font-medium text-muted-foreground">Base URL</p>
+            <p className="mt-1 truncate font-mono text-[11px]" title={status.baseUrl ?? undefined}>
+              {status.baseUrl ?? "—"}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Requests served (total + recent list) ─────────────────────── */}
+      <div className="mt-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-xs font-medium">Requests served</p>
+          <span className="text-xs text-muted-foreground">
+            {status.servedCount} total{status.busy ? " · one running now" : ""}
+          </span>
+        </div>
+        {status.recent.length === 0 ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            None yet — remote OnyxAI requests (Telegram messages, scheduled tasks) will appear here.
+          </p>
+        ) : (
+          <div className="mt-2 max-h-40 space-y-1.5 overflow-y-auto pr-1">
+            {status.recent.map((r) => (
+              <div
+                key={r.reqId}
+                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md border bg-muted/20 px-2.5 py-1.5"
+              >
+                <span className="min-w-0 truncate font-mono text-[11px]">{r.model}</span>
+                {r.status === "running" ? (
+                  <Badge
+                    variant="outline"
+                    className="gap-1 border-amber-600/40 bg-amber-600/10 px-1.5 text-[10px] text-amber-700 dark:text-amber-400"
+                  >
+                    <Loader2 className="size-3 animate-spin" /> running
+                  </Badge>
+                ) : r.status === "done" ? (
+                  <Badge
+                    variant="outline"
+                    className="gap-1 border-emerald-600/40 bg-emerald-600/10 px-1.5 text-[10px] text-emerald-700 dark:text-emerald-400"
+                  >
+                    <CheckCircle2 className="size-3" /> done
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="gap-1 border-destructive/40 bg-destructive/10 px-1.5 text-[10px] text-destructive"
+                  >
+                    <XCircle className="size-3" /> error
+                  </Badge>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  {formatAge(now - r.startedAt)} ago
+                </span>
+                {r.chunks ? (
+                  <span className="text-xs text-muted-foreground">~{r.chunks} chunks</span>
+                ) : null}
+                {r.error ? (
+                  <span className="w-full truncate text-[11px] text-destructive" title={r.error}>
+                    {r.error}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {status.lastError ? (
+        <p className="mt-3 text-xs leading-relaxed text-destructive">{status.lastError}</p>
+      ) : null}
+      {status.running && !status.providerConfigured ? (
+        <p className="mt-2 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+          ⚠ The OnyxAI provider row isn&apos;t local (or is missing) — set its base URL to your local
+          QVAC server in the connection card above for this runtime to serve requests.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -735,6 +1053,9 @@ export function SectionOnyxAI() {
         ) : null}
       </div>
 
+      {/* ── Browser Runtime (remote-bridge toggle + live status) ─────── */}
+      <BrowserRuntimeCard origin={origin} />
+
       {/* ── Setup guide ────────────────────────────────────────────────── */}
       <Collapsible open={setupOpen} onOpenChange={setSetupOpen}>
         <CollapsibleContent className="space-y-4 rounded-lg border p-4 md:p-5">
@@ -801,9 +1122,11 @@ export function SectionOnyxAI() {
             <AlertTriangle className="size-4" />
             <AlertTitle>Local-model limits</AlertTitle>
             <AlertDescription>
-              Interactive chat streams directly from your device — but background &amp; scheduled runs execute in the
-              E2B cloud sandbox, which cannot reach your localhost. Use OnyxAI for live chats and a cloud provider for
-              unattended scheduled tasks. Same-model requests queue (one decode at a time per model).
+              Interactive chat streams directly from your device. Remote triggers (Telegram messages,
+              scheduled tasks) execute in the E2B cloud sandbox, which cannot reach your localhost —
+              with the <span className="font-medium">Browser Runtime</span> on, an open app tab relays
+              their model calls through this browser; otherwise use a cloud provider for unattended
+              runs. Same-model requests queue (one decode at a time per model).
             </AlertDescription>
           </Alert>
         </CollapsibleContent>
