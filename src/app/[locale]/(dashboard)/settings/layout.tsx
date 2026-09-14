@@ -7,6 +7,7 @@ import {
   Bot,
   Braces,
   CloudCog,
+  Cpu,
   KeyRound,
   Palette,
   Plug,
@@ -33,6 +34,7 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
     label: "Agent",
     tabs: [
       { label: "Config", href: ROUTES.SETTINGS_CONFIG, icon: Settings },
+      { label: "OnyxAI", href: ROUTES.SETTINGS_ONYXAI, icon: Cpu },
       { label: "Subagents", href: ROUTES.SETTINGS_SUBAGENTS, icon: Bot },
       { label: "Slash commands", href: ROUTES.SETTINGS_SLASH_COMMANDS, icon: Slash },
     ],

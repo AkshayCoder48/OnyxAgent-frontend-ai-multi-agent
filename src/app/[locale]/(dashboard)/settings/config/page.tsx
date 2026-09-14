@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   CheckCircle2,
+  Cpu,
   Download,
   Loader2,
   Pencil,
@@ -36,6 +38,7 @@ import {
 import { SectionCard } from "@/components/settings/settings-section";
 import { useAuth } from "@/hooks";
 import { aiProviderService, settingsService } from "@/lib/services";
+import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
 import { cn } from "@/lib/utils";
 import type { AIProviderRow } from "@/lib/db";
 
@@ -289,10 +292,19 @@ export default function ConfigSettingsPage() {
         title="AI providers"
         description="Add OpenAI-compatible providers (base URL + optional API key). Then add the model IDs you want exposed in the chat model picker. API keys are encrypted at rest."
         action={
-          <Button onClick={startCreate} size="sm">
-            <Plus className="h-4 w-4 mr-1.5" />
-            Add provider
-          </Button>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/settings/onyxai"
+              className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <Cpu className="h-3.5 w-3.5" />
+              OnyxAI · local
+            </Link>
+            <Button onClick={startCreate} size="sm">
+              <Plus className="h-4 w-4 mr-1.5" />
+              Add provider
+            </Button>
+          </div>
         }
       >
         {loading ? (
@@ -637,7 +649,9 @@ function ProviderEditor({
   };
 
   // Fetch available models from the provider's /v1/models endpoint.
-  // Uses the server-side /api/fetch-models proxy to avoid CORS issues.
+  // Uses the server-side /api/fetch-models proxy to avoid CORS issues —
+  // EXCEPT for local providers (OnyxAI / QVAC on the user's device), which
+  // are fetched DIRECTLY from the browser (the proxy can't reach localhost).
   const fetchModels = async () => {
     if (!draft.base_url.trim()) {
       toast.error("Enter a Base URL first");
@@ -645,22 +659,43 @@ function ProviderEditor({
     }
     setFetchingModels(true);
     try {
-      const params = new URLSearchParams({
-        baseUrl: draft.base_url.trim(),
-      });
-      if (draft.api_key.trim()) {
-        params.set("apiKey", draft.api_key.trim());
+      let fetched: string[] = [];
+      if (isLocalBaseUrl(draft.base_url.trim())) {
+        // Direct browser → local QVAC server call.
+        const base = draft.base_url.trim().replace(/\/$/, "");
+        const url = /\/v\d+$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+        const res = await fetch(url, {
+          headers: draft.api_key.trim()
+            ? { Authorization: `Bearer ${draft.api_key.trim()}` }
+            : undefined,
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) {
+          toast.error(`Local server returned HTTP ${res.status} — is \`qvac serve --openai\` running?`);
+          return;
+        }
+        const data = await res.json();
+        fetched = Array.isArray(data?.data)
+          ? data.data.map((m: { id?: string }) => m?.id).filter((id: unknown): id is string => typeof id === "string")
+          : [];
+      } else {
+        const params = new URLSearchParams({
+          baseUrl: draft.base_url.trim(),
+        });
+        if (draft.api_key.trim()) {
+          params.set("apiKey", draft.api_key.trim());
+        }
+        if (draft.no_prefix) {
+          params.set("noPrefix", "1");
+        }
+        const res = await fetch(`/api/fetch-models?${params.toString()}`);
+        const data = await res.json();
+        if (!res.ok) {
+          toast.error(`Failed to fetch models: ${data?.error ?? res.statusText}`);
+          return;
+        }
+        fetched = data.models ?? [];
       }
-      if (draft.no_prefix) {
-        params.set("noPrefix", "1");
-      }
-      const res = await fetch(`/api/fetch-models?${params.toString()}`);
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error(`Failed to fetch models: ${data?.error ?? res.statusText}`);
-        return;
-      }
-      const fetched: string[] = data.models ?? [];
       if (fetched.length === 0) {
         toast.info("No models returned by this provider");
         return;

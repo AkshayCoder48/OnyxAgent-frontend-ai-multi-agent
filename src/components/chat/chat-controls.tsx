@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders } from "lucide-react";
+import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders, TriangleAlert, Wrench } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
@@ -11,6 +11,7 @@ import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { useExperimentalStore } from "@/stores/experimental-store";
 import { cn } from "@/lib/utils";
+import { ONYXAI_PROVIDER_NAME, toolCallingForAlias } from "@/lib/onyxai/catalog";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
 type Tab = "model" | "settings";
@@ -104,6 +105,17 @@ export function ChatControls({
         const { useAuthStore } = await import("@/stores");
         const { db } = await import("@/lib/db");
         const userId = useAuthStore.getState().user?.id;
+        // OnyxAI (QVAC local inference) is the app's optional default provider
+        // — make sure the row exists so it shows in the picker out of the box.
+        // Idempotent + dismissible (see src/lib/onyxai/seed.ts).
+        if (userId) {
+          try {
+            const { ensureOnyxAiProvider } = await import("@/lib/onyxai/seed");
+            await ensureOnyxAiProvider(userId);
+          } catch {
+            // Vault locked / DB unavailable — the settings section seeds later.
+          }
+        }
         let userProviders = userId ? await aiProviderService.list(userId) : [];
 
         // If no providers found for this user ID (e.g. after non-auth migration
@@ -453,6 +465,11 @@ function ModelPanel({
                   {p.models.map((modelId) => {
                     const isActive =
                       selectedProviderId === p.id && selectedModel === modelId;
+                    // OnyxAI models carry tool-calling capability info from the
+                    // catalog — non-tool-calling models are badged because they
+                    // won't work well as the agent brain.
+                    const isOnyxAi = p.name === ONYXAI_PROVIDER_NAME;
+                    const tools = isOnyxAi ? toolCallingForAlias(modelId) : null;
                     return (
                       <li key={`${p.id}::${modelId}`}>
                         <button
@@ -465,7 +482,23 @@ function ModelPanel({
                               : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
                           )}
                         >
-                          <span className="truncate font-mono">{modelId}</span>
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <span className="truncate font-mono">{modelId}</span>
+                            {tools === "native" ? (
+                              <Wrench
+                                className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400"
+                                aria-label="Tool-calling model"
+                              />
+                            ) : tools === "none" || tools === "template" ? (
+                              <span
+                                className="flex shrink-0 items-center gap-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400"
+                                title="No reliable tool calling — won't work well as the agent brain"
+                              >
+                                <TriangleAlert className="size-3" />
+                                no tools
+                              </span>
+                            ) : null}
+                          </span>
                           {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
                         </button>
                       </li>

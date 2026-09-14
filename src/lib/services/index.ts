@@ -29,6 +29,7 @@ import {
   requireVault,
 } from "@/lib/crypto/vault";
 import { ONYXBASE_WORKSPACE_ID } from "@/lib/onyxbase/kv-client";
+import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
 // Lazy-load the E2B sandbox client . The class lives at
 // `@/lib/e2b/client` for back-compat with the existing import paths; it
 // now talks to E2B's REST API instead of the old proxy.
@@ -1061,12 +1062,19 @@ export const aiProviderService = {
     const targetModel = model ?? provider.models[0] ?? "gpt-4o-mini";
     const base = provider.base_url.replace(/\/$/, "");
     const targetUrl = provider.no_prefix ? base : `${base}/chat/completions`;
+    // OnyxAI / local providers (QVAC serve on the user's device): test
+    // DIRECTLY from the browser — the server-side chat proxy cannot reach
+    // the user's localhost.
+    const isLocal = isLocalBaseUrl(provider.base_url);
+    const requestUrl = isLocal
+      ? targetUrl
+      : `/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`;
     try {
-      const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
+      const res = await fetch(requestUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-target-url": targetUrl,
+          ...(isLocal ? {} : { "x-target-url": targetUrl }),
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({

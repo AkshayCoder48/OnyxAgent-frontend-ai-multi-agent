@@ -7,6 +7,7 @@ import {
   Bot,
   Cloud,
   CloudCog,
+  Cpu,
   Moon,
   Palette,
   Plug,
@@ -32,9 +33,11 @@ import { SectionMcp } from "./section-mcp";
 import { SectionCustomTools } from "./section-custom-tools";
 import { SectionSkills } from "./section-skills";
 import { SectionAppearance } from "./section-appearance";
+import { SectionOnyxAI } from "./section-onyxai";
 
 export type SettingsSectionId =
   | "providers"
+  | "onyxai"
   | "agent"
   | "slash"
   | "e2b"
@@ -77,6 +80,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: "AI Providers",
         description: "BYO-key model providers",
         icon: Bot,
+      },
+      {
+        id: "onyxai",
+        label: "OnyxAI (Local)",
+        description: "QVAC-powered local models — HF + catalog",
+        icon: Cpu,
       },
       {
         id: "agent",
@@ -275,6 +284,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
             </div>
             <Separator className="mb-6" />
             {active === "providers" && <SectionProviders />}
+            {active === "onyxai" && <SectionOnyxAI />}
             {active === "agent" && <SectionAgentSettings />}
             {active === "slash" && <SectionSlashCommands />}
             {active === "e2b" && <SectionE2B />}

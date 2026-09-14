@@ -52,6 +52,7 @@ import {
   learnParamBan,
   parseUnsupportedParam,
 } from "@/lib/agent/param-policy";
+import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -745,23 +746,47 @@ async function streamRound(
 
   let response: Response;
   let rateLimitAttempts = 0;
+  // OnyxAI / local providers (QVAC `qvac serve --openai` on the user's own
+  // device): fetch the target DIRECTLY from the browser. The chat proxy runs
+  // server-side (Vercel) and can never reach the user's localhost — only the
+  // browser on the same machine can. QVAC's `--cors-origin` flag trusts this
+  // app's origin, so the direct cross-origin call is authorized. Custom
+  // headers like `x-target-url` are omitted on the direct path (they would
+  // trigger an unneeded CORS preflight).
+  const isLocalProvider = isLocalBaseUrl(provider.baseUrl);
+  const requestUrl = isLocalProvider
+    ? targetUrl
+    : `${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
   for (;;) {
     // Pass the target URL via ?url= query param — Vercel can't strip query
     // params. Use Accept: text/event-stream to signal streaming intent to
     // all proxies.
-    response = await fetch(`${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-target-url": targetUrl,
-        Authorization: `Bearer ${provider.apiKey}`,
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify(body),
-      signal,
-      // Prevent browser/proxy from buffering the response.
-      cache: "no-store",
-    });
+    try {
+      response = await fetch(requestUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(isLocalProvider ? {} : { "x-target-url": targetUrl }),
+          Authorization: `Bearer ${provider.apiKey}`,
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify(body),
+        signal,
+        // Prevent browser/proxy from buffering the response.
+        cache: "no-store",
+      });
+    } catch (e) {
+      // A direct local fetch that fails at the network layer means QVAC is
+      // not running (or CORS blocked it) — give the user an actionable hint
+      // instead of a bare "Failed to fetch".
+      if (isLocalProvider) {
+        throw new Error(
+          `OnyxAI local server unreachable at ${provider.baseUrl} — is \`qvac serve --openai\` running on this device, and was it started with \`--cors-origin ${typeof window !== "undefined" ? window.location.origin : "<app-origin>"}\`? ` +
+            `(Original error: ${e instanceof Error ? e.message : String(e)})`,
+        );
+      }
+      throw e;
+    }
 
     // PARAMETER SELF-HEALING: a 400 `unsupported_parameter` names the exact
     // offending field — strip it from the body, remember the ban for this

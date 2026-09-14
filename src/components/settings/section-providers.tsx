@@ -56,6 +56,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 
 import { useProviders } from "@/hooks/use-data";
 import type { AIProvider, AIModelType } from "@/types";
+import { ONYXAI_PROVIDER_NAME } from "@/lib/onyxai/catalog";
+import { dismissOnyxAiProvider } from "@/lib/onyxai/seed";
 
 interface FormState {
   name: string;
@@ -199,6 +201,11 @@ export function SectionProviders() {
     if (!deleteTarget) return;
     try {
       await remove(deleteTarget.id);
+      // Deleting the built-in OnyxAI provider also dismisses auto-seeding,
+      // so it doesn't reappear next session (re-addable from Settings → OnyxAI).
+      if (deleteTarget.name === ONYXAI_PROVIDER_NAME && deleteTarget.user_id) {
+        dismissOnyxAiProvider(deleteTarget.user_id);
+      }
       toast.success("Provider deleted");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Delete failed");
@@ -244,7 +251,16 @@ export function SectionProviders() {
             <TableBody>
               {providers.map((p) => (
                 <TableRow key={p.id}>
-                  <TableCell className="font-medium">{p.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <span className="flex items-center gap-1.5">
+                      {p.name}
+                      {p.name === ONYXAI_PROVIDER_NAME ? (
+                        <Badge variant="secondary" className="px-1.5 text-[9px] uppercase tracking-wide" title="Built-in default provider — powered by QVAC local inference. Manage it in Settings → OnyxAI.">
+                          Default · QVAC
+                        </Badge>
+                      ) : null}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-muted-foreground hidden max-w-[200px] truncate text-xs sm:table-cell">
                     {p.base_url}
                   </TableCell>

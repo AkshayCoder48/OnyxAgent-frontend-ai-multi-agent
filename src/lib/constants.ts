@@ -32,6 +32,7 @@ export const ROUTES = {
   SETTINGS_API_KEYS: "/settings/api-keys",
   SETTINGS_CLOUD: "/settings/cloud",
   SETTINGS_INTEGRATIONS: "/settings/integrations",
+  SETTINGS_ONYXAI: "/settings/onyxai",
   SCHEDULED_TASKS: "/scheduled-tasks",
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
