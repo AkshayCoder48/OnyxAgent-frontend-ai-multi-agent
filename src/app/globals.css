@@ -6,6 +6,12 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "tailwindcss";
+/* tw-animate — REQUIRED for the animate-in / slide-in-from-* / fade-in / zoom-in
+   utilities used by Sheet, Dialog, Popover, DropdownMenu, Tooltip and the
+   docked panels' mobile drawers. It was in package.json but never imported,
+   so every one of those classes was a silent no-op: overlays appeared
+   instantly with no animation (the "sidebars suddenly appear" bug). */
+@import "tw-animate-css";
 @import "./glass-buttons.css";
 
 /* =========================================================================
@@ -2815,9 +2821,31 @@ body.sidebar-open {
 .docked-panel[data-dragging="true"] {
   transition: none;
 }
+/* INNER SLIDE (panel slide-in feel): while the outer aside animates its
+   width 0 ↔ W, the fixed-width inner column translates from the right
+   edge — the content genuinely SLIDES in/out instead of being revealed
+   through a static clip window. Same curve/duration as the width so the
+   two movements read as one motion; opacity eases the arrival. */
+.docked-panel-inner {
+  transform: translateX(0);
+  opacity: 1;
+  transition:
+    transform 250ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms ease-out;
+}
+.docked-panel[data-open="false"] .docked-panel-inner,
+.docked-panel:not([data-open="true"]) .docked-panel-inner {
+  transform: translateX(40px);
+  opacity: 0;
+}
 @media (prefers-reduced-motion: reduce) {
   .docked-panel {
     transition: none;
+  }
+  .docked-panel-inner {
+    transition: none;
+    transform: none;
+    opacity: 1;
   }
 }
 

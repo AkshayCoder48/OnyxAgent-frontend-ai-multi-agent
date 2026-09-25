@@ -99,6 +99,12 @@ export interface AgentTurnOptions {
   signal?: AbortSignal;
   /** Optional context the tools can read (vault key, E2B sandbox key, env vars…). */
   toolContext?: ToolContext;
+  /** Caller-minted generation identity for this turn. When the caller emits
+   *  turn-opening events (e.g. the early `model_request_start` during the
+   *  chat-naming call) they stamp THIS id so the runtime's own events adopt
+   *  the SAME generation — the processor then reuses the placeholder
+   *  assistant message instead of creating a duplicate. */
+  generationId?: string;
 }
 
 export interface AgentTurnResult {
@@ -231,10 +237,32 @@ interface ChatCompletionMessage {
   /** For tool-result messages. */
   tool_call_id?: string;
   name?: string;
-  /** DeepSeek/moonshot/g4f reasoning_content — MUST be passed back to the
-   *  API in thinking mode, otherwise the provider rejects the request with
-   *  "The reasoning_content in the thinking mode must be passed back to the API." */
+  /** DeepSeek/moonshot/g4f reasoning_content — some thinking-mode providers
+   *  REQUIRE it on tool rounds. NOT sent by default (strict OpenAI-compatible
+   *  validators reject unknown fields with a generic 400); streamRound's
+   *  self-healing promotes the symbol-carried reasoning (see WIRE_REASONING)
+   *  to this field when the provider explicitly demands it. */
   reasoning_content?: string;
+}
+
+/** Symbol-keyed sidecar for an assistant message's reasoning. Symbol keys
+ *  are DROPPED by JSON.stringify, so the reasoning rides along in the
+ *  message objects without ever reaching the wire — until the reasoning
+ *  self-healing copies it onto `reasoning_content` for providers that
+ *  demand the replay (LLM HTTP 400 fix). */
+const WIRE_REASONING = Symbol("wireReasoning");
+type WireReasoningCarrier = { [WIRE_REASONING]?: string };
+
+/** Attach reasoning to a wire message under the invisible symbol key. */
+function carryReasoning(msg: ChatCompletionMessage, reasoning: string | null | undefined): void {
+  (msg as unknown as WireReasoningCarrier)[WIRE_REASONING] = reasoning ?? undefined;
+}
+
+/** The reasoning-replay decision, shared between runAgentTurn (which builds
+ *  messages) and streamRound (which sees the provider's 400 and can flip
+ *  it mid-turn). */
+interface ReasoningReplayState {
+  enabled: boolean;
 }
 
 interface ChatCompletionTool {
@@ -651,6 +679,8 @@ async function streamRound(
     /** 1-based agent round number — stamped into the model_request_start
      *  event so the UI can create a separate reasoning panel per round. */
     roundNumber?: number;
+    /** Shared reasoning-replay decision (see ReasoningReplayState). */
+    reasoningReplay?: ReasoningReplayState;
   },
 ): Promise<RoundResult> {
   const {
@@ -662,6 +692,7 @@ async function streamRound(
     emit,
     signal,
     roundNumber,
+    reasoningReplay,
   } = opts;
 
   // Target URL — strip trailing slash. If the provider has `no_prefix` set,
@@ -780,6 +811,27 @@ async function streamRound(
         if (badParam === "reasoning_effort") delete body.thinking; // paired
         if (badParam === "thinking") delete body.reasoning_effort; // paired
         console.warn(`[agent] provider rejected '${badParam}' — stripped it and retrying`);
+        continue;
+      }
+      // REASONING-REPLAY SELF-HEALING (LLM HTTP 400 fix): DeepSeek-style
+      // thinking endpoints require reasoning_content on assistant tool-round
+      // messages. It is withheld by default (strict-gateway compatibility);
+      // when the provider's 400 explicitly demands it, promote every
+      // symbol-carried reasoning onto the wire and retry the same request.
+      if (
+        reasoningReplay &&
+        !reasoningReplay.enabled &&
+        /reasoning_content/i.test(errText) &&
+        /must be passed|required|pass(ed)? back|include/i.test(errText)
+      ) {
+        reasoningReplay.enabled = true;
+        for (const m of messages) {
+          if (m && m.role === "assistant") {
+            const r = (m as unknown as WireReasoningCarrier)[WIRE_REASONING];
+            if (typeof r === "string" && r) m.reasoning_content = r;
+          }
+        }
+        console.warn("[agent] provider requires reasoning_content replay — restoring it and retrying");
         continue;
       }
     }
@@ -1280,7 +1332,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   // new turn's temp message ID with the old turn's DB ID — hijacking all
   // subsequent text deltas onto the wrong message. With generation_id, the
   // stale event is silently dropped.
-  const generationId = nanoid();
+  const generationId = opts.generationId ?? nanoid();
   const emit = wrapEmitWithGenerationId(opts.emit, generationId);
 
   // Lazily load the user's decrypted E2B sandbox API key + env-var dict
@@ -1692,27 +1744,36 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   }
 
   function buildPriorMessages(): ChatCompletionMessage[] {
-    return [
+    const out: ChatCompletionMessage[] = [
       { role: "system", content: enhancedSystemPrompt + handoffContext },
       ...trimmedHistory
         .filter((m) => (m.role as string) !== "tool")
         .map((m): ChatCompletionMessage => {
           if (m.role === "user") return { role: "user", content: m.content };
           if (m.role === "system") return { role: "system", content: m.content };
-          return {
+          const wire: ChatCompletionMessage = {
             role: "assistant",
             content: m.content
               ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
               : "",
-            // Pass reasoning_content back to the API — required by DeepSeek/
-            // moonshot/g4f providers in thinking mode. Without it, the API
-            // rejects with "The reasoning_content in the thinking mode must
-            // be passed back to the API."
-            reasoning_content: m.reasoning || undefined,
           };
+          // STRICT-COMPAT (LLM HTTP 400 fix): reasoning_content is NOT sent by
+          // default — strict OpenAI-compatible validators reject unknown
+          // fields with a generic 400. The reasoning rides along under the
+          // JSON-invisible WIRE_REASONING symbol instead; DeepSeek-style
+          // thinking endpoints that demand the replay get it restored by
+          // streamRound's 400 self-healing (reasoningReplay.enabled).
+          carryReasoning(wire, m.reasoning);
+          if (reasoningReplay.enabled && m.reasoning) wire.reasoning_content = m.reasoning;
+          return wire;
         }),
     ];
+    return out;
   }
+
+  /** Shared reasoning-replay decision — flipped by streamRound's 400
+   *  self-healing when the provider demands reasoning_content replay. */
+  const reasoningReplay: ReasoningReplayState = { enabled: false };
 
   let priorMessages = buildPriorMessages();
 
@@ -1806,6 +1867,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         emit,
         signal,
         roundNumber: round,
+        reasoningReplay,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1854,6 +1916,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             emit,
             signal,
             roundNumber: round,
+            reasoningReplay,
           });
         } catch (retryErr) {
           // Retry also failed — give up and report the original error
@@ -2076,16 +2139,14 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     }
 
     // Tool calls requested — append the assistant turn to the message list.
-    // CRITICAL: Pass reasoning_content back to the API — DeepSeek/moonshot/g4f
-    // providers in thinking mode REQUIRE this. Without it, the API rejects
-    // with "The reasoning_content in the thinking mode must be passed back
-    // to the API."
-    // Also truncate large tool call arguments before sending them back.
-    messages.push({
+    // STRICT-COMPAT (LLM HTTP 400 fix): reasoning_content is withheld by
+    // default (strict validators reject unknown fields) and carried under
+    // the JSON-invisible WIRE_REASONING symbol; DeepSeek-style providers get
+    // it restored via the reasoningReplay self-healing.
+    // Tool call arguments are truncated before sending them back.
+    const assistantWire: ChatCompletionMessage = {
       role: "assistant",
       content: roundResult.content || "",
-      // Pass reasoning_content back so the provider can maintain context.
-      reasoning_content: roundResult.reasoning || undefined,
       tool_calls: roundResult.toolCalls.map((tc) => ({
         id: tc.id,
         type: "function",
@@ -2094,7 +2155,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           arguments: safeStringifyArgs(truncateToolArgs(tc.name, tc.args)),
         },
       })),
-    });
+    };
+    carryReasoning(assistantWire, roundResult.reasoning);
+    if (reasoningReplay.enabled && roundResult.reasoning) {
+      assistantWire.reasoning_content = roundResult.reasoning;
+    }
+    messages.push(assistantWire);
 
     // Execute ALL tools in parallel — every `tool_call` event is emitted
     // instantly (so the UI renders all cards simultaneously), then every

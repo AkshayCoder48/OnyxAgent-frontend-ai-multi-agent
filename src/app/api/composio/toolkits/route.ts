@@ -94,7 +94,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         categories = undefined; // chips are optional — never fail the grid
       }
     }
-    cacheSet(key, { expires: Date.now() + CACHE_TTL_MS, page, categories });
+    // NEVER CACHE AN EMPTY PAGE (count-vs-dropdown mismatch fix): an empty
+    // first page is either a transient upstream quirk or a shape shift —
+    // caching it for 5 minutes locks in "No platforms found" while the
+    // status card keeps showing the real total. Empty results always
+    // re-hit the upstream so a Retry (or reload) can recover immediately.
+    if (page.items.length > 0) {
+      cacheSet(key, { expires: Date.now() + CACHE_TTL_MS, page, categories });
+    }
     return NextResponse.json({
       ok: true,
       items: page.items,

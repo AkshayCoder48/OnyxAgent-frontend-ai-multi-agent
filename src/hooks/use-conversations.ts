@@ -61,8 +61,12 @@ export function useConversations() {
   // React Query owns the list: cached across navigations, deduped, no refetch
   // storms. Both active and archived are fetched in one call so the sidebar
   // tabs can partition them client-side. Mutations patch the cache directly.
+  // The key is USER-SCOPED (see qk.conversations.list) so the async
+  // local-user → real-user swap on app boot refetches instead of showing
+  // a stale empty list until a route change.
+  const listKey = qk.conversations.list(userId ?? undefined);
   const { data: conversations = [], isLoading: listLoading } = useQuery({
-    queryKey: qk.conversations.list(),
+    queryKey: listKey,
     queryFn: async () => {
       const userId = getUserId();
       const items = await conversationService.list(userId, {
@@ -80,12 +84,14 @@ export function useConversations() {
     enabled: !!userId,
   });
 
+  // Memoized writeCache bound to the CURRENT user's key — mutations always
+  // patch the list the UI is actually reading.
   const writeCache = useCallback(
     (updater: (prev: Conversation[]) => Conversation[]) =>
-      queryClient.setQueryData<Conversation[]>(qk.conversations.list(), (prev = []) =>
+      queryClient.setQueryData<Conversation[]>(listKey, (prev = []) =>
         updater(prev),
       ),
-    [queryClient],
+    [queryClient, listKey],
   );
 
   // `isLoading` historically reflected both the list fetch and the
@@ -200,8 +206,9 @@ export function useConversations() {
     // The list query auto-fetches and dedupes; force a fresh pull here to keep
     // the previous explicit-refresh semantics (e.g. after a new conversation
     // is created during an agent turn). Start it FIRST so the verifyInList
-    // check below can see fresh list data.
-    const listPromise = queryClient.invalidateQueries({ queryKey: qk.conversations.list() });
+    // check below can see fresh list data. Invalidating the `all` prefix
+    // covers the user-scoped list key regardless of which user id is live.
+    const listPromise = queryClient.invalidateQueries({ queryKey: qk.conversations.all() });
 
     const urlId = new URLSearchParams(window.location.search).get("id");
     const convState = useConversationStore.getState();
@@ -226,7 +233,7 @@ export function useConversations() {
   const fetchMoreConversations = useCallback(async () => {
     if (!hasMoreRef.current || loadingMoreRef.current) return;
     loadingMoreRef.current = true;
-    const current = queryClient.getQueryData<Conversation[]>(qk.conversations.list()) ?? [];
+    const current = queryClient.getQueryData<Conversation[]>(listKey) ?? [];
     try {
       const userId = getUserId();
       const more = await conversationService.list(userId, {
@@ -246,7 +253,7 @@ export function useConversations() {
     } finally {
       loadingMoreRef.current = false;
     }
-  }, [queryClient, writeCache, getUserId]);
+  }, [queryClient, writeCache, getUserId, listKey]);
 
   const createConversation = useCallback(
     async (title?: string): Promise<Conversation | null> => {

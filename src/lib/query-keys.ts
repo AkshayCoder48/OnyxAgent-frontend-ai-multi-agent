@@ -30,7 +30,14 @@ export const qk = {
   },
   conversations: {
     all: () => ["conversations"] as const,
-    list: () => ["conversations", "list"] as const,
+    /** USER-SCOPED list key (bug: "history empty on app open"). The auth
+     * store boots with the transient `local-user` id and swaps to the real
+     * Dexie user id asynchronously — a key WITHOUT the id cached the empty
+     * first fetch forever (no refetch on id change; a Settings round-trip
+     * remounted the sidebar and "fixed" it). Scoping the key makes the id
+     * swap a NEW cache entry that fetches with the correct user. Prefix
+     * invalidation via `all()` still matches every scoped key. */
+    list: (userId?: string) => ["conversations", "list", userId ?? "anon"] as const,
     count: () => ["conversations", "count"] as const,
     messages: (id: string) => ["conversations", id, "messages"] as const,
   },
@@ -51,7 +58,8 @@ export const qk = {
     collections: () => ["rag", "collections"] as const,
   },
   slashCommands: {
-    list: () => ["slash-commands", "list"] as const,
+    /** USER-SCOPED (same boot-swap rationale as conversations.list). */
+    list: (userId?: string) => ["slash-commands", "list", userId ?? "anon"] as const,
   },
   admin: {
     stats: () => ["admin", "stats"] as const,

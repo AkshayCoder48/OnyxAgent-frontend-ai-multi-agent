@@ -382,6 +382,12 @@ export function useChat(options: UseChatOptions = {}) {
         executionHub.finishExecution(execution.id, "failed");
         return;
       }
+      // ONE generation identity for the whole turn — the runtime adopts it
+      // (opts.generationId) so the early `model_request_start` below (fired
+      // during the naming call) and the runtime's own events share a
+      // generation and reuse the SAME placeholder assistant message.
+      const turnGenerationId = nanoid();
+      opts.generationId = turnGenerationId;
 
       // ── PRD §12 — FIRST CALL = CHAT NAMING CALL ────────────────────────
       // New chats ONLY (and only now that the turn options resolved — a
@@ -395,6 +401,20 @@ export function useChat(options: UseChatOptions = {}) {
       //     TITLE_WAIT_CAP_MS, so a slow provider never stalls the chat
       //     (the title then lands late and the reveal plays whenever it
       //     arrives; the skeleton holds the space until then).
+      //
+      // GEM VISIBILITY (logo-invisible-during-naming fix): the naming call
+      // can hold the turn open for seconds — firing `model_request_start`
+      // FIRST creates the streaming assistant placeholder immediately, so
+      // the OnyxAgent gem header + shimmering "Thinking" indicator are
+      // visible for the WHOLE naming phase (previously the area below the
+      // user bubble was blank until the main call started). Both the
+      // background and foreground main-call paths re-run this event with
+      // the same round/generation — the placeholder is reused, never
+      // duplicated.
+      execution.processor.handle({
+        type: "model_request_start",
+        data: { round: 1, generation_id: turnGenerationId },
+      });
       if (!convId) {
         const conv = await conversationService.create(userId, "");
         convId = conv.id;

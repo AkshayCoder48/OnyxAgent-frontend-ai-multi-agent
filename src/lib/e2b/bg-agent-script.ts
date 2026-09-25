@@ -64,16 +64,63 @@ let emitChain = Promise.resolve();
 const cap = (s, n) => (typeof s === "string" && s.length > n ? s.slice(0, n) + "\n... (truncated)" : s);
 /** Error-detail cleaner: gateways answer 4xx/5xx with HTML error pages —
  *  strip tags so the user sees a readable one-line reason, not a wall of
- *  markup. Also adds the base-URL hint for 404s (root-vs-API confusion). */
+ *  markup. Also adds the base-URL hint for 404s (root-vs-API confusion).
+ *
+ *  ENVELOPE PARSING (LLM HTTP 400 fix): many OpenAI-compatible gateways
+ *  wrap failures as {"success":false,"error":{"message":…,"code":…,
+ *  "details":…}} — the actionable part (details/param/why) often lives
+ *  one level deeper than the generic message ("Something was wrong with
+ *  the input data"). Surface message + code + details when present so the
+ *  user gets an actionable error instead of an opaque BAD_REQUEST. */
 const cleanDetail = (s, status) => {
   let t = String(s ?? "");
   if (/^\s*(<!DOCTYPE|<html)/i.test(t)) t = "(HTML error page)";
+  // JSON envelope ({"success":false,"error":{...}} / {"error":{...}}) —
+  // extract message + code + details into one readable line.
+  if (/^\s*\{/.test(t)) {
+    try {
+      const o = JSON.parse(t);
+      const e = o && typeof o === "object" && o.error && typeof o.error === "object" ? o.error : null;
+      if (e) {
+        const parts = [];
+        if (typeof e.message === "string" && e.message) parts.push(e.message);
+        if (typeof o.code === "string" && o.code) parts.push("(" + o.code + ")");
+        if (typeof e.code === "string" && e.code && !parts.some((p) => p.includes(e.code))) parts.push("(" + e.code + ")");
+        // 'details' (fastapi-style validation) + 'param' (openai-style) both
+        // name the offending field — they are the "check the details" payload.
+        const details = e.details ?? e.detail ?? e.errors;
+        if (details !== undefined && details !== null) {
+          let dStr = "";
+          try { dStr = typeof details === "string" ? details : JSON.stringify(details); } catch { dStr = String(details); }
+          if (dStr && dStr !== "[]") parts.push("— details: " + cap(dStr, 220));
+        }
+        if (typeof e.param === "string" && e.param) parts.push("— field: " + e.param);
+        if (parts.length) {
+          t = parts.join(" ");
+        }
+      }
+    } catch { /* not JSON — fall through to tag stripping */ }
+  }
   t = t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  t = cap(t, 300);
+  t = cap(t, 400);
   if (status === 404 && !t) {
     t = "endpoint not found — check the provider Base URL (the app calls {base}/chat/completions)";
   }
   return t;
+};
+
+/** Sanitized request-shape context appended to 4xx errors so the user (and
+ *  bug reports) can see WHAT was being sent without ever leaking keys or
+ *  message content: round, message count, tool count, param keys.
+ *  (NOTE: this file is a String.raw template literal — no backticks and no
+ *  dollar-brace interpolation inside script code; plain concatenation only.) */
+const requestShapeHint = (state, round, body) => {
+  try {
+    const msgs = Array.isArray(state.messages) ? state.messages.length : 0;
+    const tools = Array.isArray(body.tools) ? body.tools.length : 0;
+    const keys = Object.keys(body).filter((k) => k !== "messages" && k !== "tools").join(",");
+    return " [request: round " + round + ", " + msgs + " messages, " + tools + " tools, params: " + keys + "]";
+  } catch { return ""; }
 };
 
 /** Parse an HTTP-400 error body naming an unsupported parameter
@@ -501,6 +548,65 @@ function readWithTimeout(reader, ms) {
   });
 }
 
+/** Request-message serializer (LLM HTTP 400 fix).
+ *
+ *  state.messages is the LOCAL conversation record — it may carry a local
+ *  'reasoning' field on assistant messages (kept for DeepSeek-style
+ *  providers that REQUIRE reasoning_content to be passed back on tool
+ *  rounds). The WIRE format, however, must contain ONLY fields every
+ *  OpenAI-compatible endpoint accepts: strict validators (Pydantic-style
+ *  gateways) reject unknown fields with a generic 400 "Something was wrong
+ *  with the input data".
+ *
+ *  Default: strip 'reasoning' (never send it). Self-healing flips
+ *  state.replayReasoning = true when a provider's 400 explicitly demands it
+ *  ("reasoning_content ... must be passed back") — then assistant messages
+ *  regain reasoning_content for the rest of the run. */
+function buildRequestMessages(state) {
+  const replay = state.replayReasoning === true;
+  return (Array.isArray(state.messages) ? state.messages : []).map((m) => {
+    if (!m || typeof m !== "object") return m;
+    if (m.role !== "assistant" || m.reasoning === undefined) return m;
+    if (replay && m.reasoning) {
+      return { ...m, reasoning_content: m.reasoning, reasoning: undefined };
+    }
+    const { reasoning, ...rest } = m;
+    void reasoning;
+    return rest;
+  });
+}
+
+/** Defensive JSON-Schema validation for tool parameters (LLM HTTP 400 fix).
+ *  A single malformed tool definition (missing 'type', 'properties' not an
+ *  object, 'required' naming unknown props, non-serializable values) makes
+ *  strict endpoints reject the WHOLE request. Fix what's fixable, and fall
+ *  back to a bare object schema when not. */
+function sanitizeToolParameters(schema) {
+  const fallback = { type: "object", properties: {} };
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return fallback;
+  const out = { type: "object" };
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) {
+    const props = {};
+    for (const [k, v] of Object.entries(schema.properties)) {
+      if (!v || typeof v !== "object" || Array.isArray(v)) {
+        props[k] = { type: "string" };
+      } else {
+        props[k] = v; // keep as-is (nested schemas pass through — JSON-serializable by construction)
+      }
+    }
+    out.properties = props;
+  } else {
+    out.properties = {};
+  }
+  if (Array.isArray(schema.required)) {
+    const known = new Set(Object.keys(out.properties));
+    const req = schema.required.filter((r) => typeof r === "string" && known.has(r));
+    if (req.length) out.required = req;
+  }
+  if (typeof schema.additionalProperties === "boolean") out.additionalProperties = schema.additionalProperties;
+  return out;
+}
+
 // ── The streaming LLM call ──────────────────────────────────────────────
 const MAX_ATTEMPTS = 4;
 const IDLE_TIMEOUT_MS = 240_000;
@@ -517,7 +623,7 @@ async function streamRoundEvents(state, round, finalRound) {
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
   const body = {
     model: p.model,
-    messages: state.messages,
+    messages: buildRequestMessages(state),
     temperature: p.temperature ?? 0.7,
     stream: true,
   };
@@ -532,7 +638,7 @@ async function streamRoundEvents(state, round, finalRound) {
   // final answer (the cap ends the turn in done, never the old terminal
   // max-rounds error). Fence/DSML "tool_call" text on the final round is
   // parsed too — nothing executes; the text stays text.
-  if (state.toolsEnabled !== false && finalRound !== true) body.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (state.toolsEnabled !== false && finalRound !== true) body.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: sanitizeToolParameters(t.parameters) } }));
   if (state.paramBans.includes("tools") || disabledParams.includes("tools")) delete body.tools;
 
   // Pass-through emitters (1:1 with the provider's native SSE deltas).
@@ -728,6 +834,23 @@ async function streamRoundEvents(state, round, finalRound) {
         clearTimeout(hardTimer);
         continue;
       }
+      // REASONING-REPLAY SELF-HEALING: DeepSeek-style thinking endpoints
+      // REJECT a request whose assistant tool-call message lacks
+      // reasoning_content ("The reasoning_content in the thinking mode must
+      // be passed back to the API"). buildRequestMessages strips it by
+      // default (strict-gateway compatibility); flip the replay flag on
+      // this specific error and retry the same request WITH it restored.
+      if (
+        state.replayReasoning !== true &&
+        /reasoning_content/i.test(detail400) &&
+        /must be passed|required|pass(ed)? back|include/i.test(detail400)
+      ) {
+        state.replayReasoning = true;
+        body.messages = buildRequestMessages(state);
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "restored reasoning_content replay (provider requires it)" });
+        clearTimeout(hardTimer);
+        continue;
+      }
     }
     if (res && !res.ok) {
       const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
@@ -745,7 +868,7 @@ async function streamRoundEvents(state, round, finalRound) {
       if (res.status < 500 && res.status !== 429 && res.status !== 408) {
         return await nonStreamFallback(state, round, feedDeltas, finishStream);
       }
-      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) };
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) + requestShapeHint(state, round, body) };
     }
     if (!res || !res.body) {
       if (fetchErr && attempt < MAX_ATTEMPTS) {
@@ -856,10 +979,10 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
-  const nb = { model: p.model, messages: state.messages, temperature: p.temperature ?? 0.7 };
+  const nb = { model: p.model, messages: buildRequestMessages(state), temperature: p.temperature ?? 0.7 };
   const dp = Array.isArray(p.disabledParams) ? p.disabledParams : [];
   if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;
-  if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+  if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: sanitizeToolParameters(t.parameters) } }));
   if (dp.includes("tools") || state.paramBans.includes("tools")) delete nb.tools;
   try {
     const res = await fetch(url, {
@@ -898,9 +1021,9 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
           return await feedCompleteMessage(msg2, round, feedDeltas, finishStream);
         }
         const detail2 = await retryRes.text().catch(() => "");
-        return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + retryRes.status + " " + cleanDetail(detail2, retryRes.status) };
+        return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + retryRes.status + " " + cleanDetail(detail2, retryRes.status) + requestShapeHint(state, round, nb) };
       }
-      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) };
+      return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) + requestShapeHint(state, round, nb) };
     }
     const json = await res.json();
     const msg = json.choices?.[0]?.message ?? {};
@@ -2150,10 +2273,17 @@ async function main() {
       return;
     }
     // ONE assistant message carrying content + tool_calls (protocol shape).
+    // STRICT-COMPAT (LLM HTTP 400 fix): the wire format keeps ONLY fields
+    // every OpenAI-compatible endpoint accepts. The local 'reasoning' field
+    // rides along in state.messages but is STRIPPED by buildRequestMessages
+    // unless self-healing detected a DeepSeek-style provider that demands
+    // reasoning_content replay (see the 400 handler in streamRoundEvents).
+    // 'content' is a STRING ("" when the model only called tools) — null
+    // is spec-legal but some strict gateways type it as str.
     state.messages.push({
       role: "assistant",
-      content: result.content || null,
-      ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
+      content: result.content || "",
+      ...(result.reasoning ? { reasoning: result.reasoning } : {}),
       tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } })),
     });
     for (const tc of toolCalls) {

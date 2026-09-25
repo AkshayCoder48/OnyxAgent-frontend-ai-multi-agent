@@ -151,6 +151,14 @@ export function SectionIntegrationsComposio() {
   const [nextCursor, setNextCursor] = React.useState<string | null>(null);
   const [totalItems, setTotalItems] = React.useState<number | null>(null);
   const [catalogLoading, setCatalogLoading] = React.useState(false);
+  /** Set when the catalog REQUEST failed (vs a genuinely empty result).
+   *  Drives the explicit error card + Retry — a failed load must NEVER look
+   *  like "No platforms found" while the status card still shows a count
+   *  (the 1463-vs-empty mismatch bug). */
+  const [catalogError, setCatalogError] = React.useState<string | null>(null);
+  /** True once a catalog page has loaded successfully (the count card only
+   *  shows a number from THIS dataset — the same one the grid renders). */
+  const [catalogLoaded, setCatalogLoaded] = React.useState(false);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [search, setSearch] = React.useState("");
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
@@ -178,7 +186,10 @@ export function SectionIntegrationsComposio() {
 
   /** Load the masked live status (+ connections) via the proxy. */
   const refreshStatus = React.useCallback(async () => {
-    if (!userId || !hasStoredKey) return;
+    if (!userId) return;
+    // NOTE: no hasStoredKey guard — the vault-backed header resolution is the
+    // authoritative check (a stale hasStoredKey closure after a fresh
+    // Connect would silently skip the refresh).
     const headers = await resolveComposioHeaders(userId);
     if (!headers) return;
     try {
@@ -190,10 +201,10 @@ export function SectionIntegrationsComposio() {
       setStatus(null);
       setStatusError(e instanceof Error ? e.message : "Could not reach Composio.");
     }
-  }, [userId, hasStoredKey]);
+  }, [userId]);
 
   const refreshConnections = React.useCallback(async () => {
-    if (!userId || !hasStoredKey) return;
+    if (!userId) return;
     const headers = await resolveComposioHeaders(userId);
     if (!headers) return;
     try {
@@ -202,16 +213,24 @@ export function SectionIntegrationsComposio() {
     } catch {
       // Non-fatal — cards fall back to "Not connected".
     }
-  }, [userId, hasStoredKey]);
+  }, [userId]);
 
   /** Load one catalog page (server-side search + category + cursor). */
   const loadCatalog = React.useCallback(
     async (opts: { cursor?: string; search?: string; category?: string; append?: boolean } = {}) => {
-      if (!userId || !hasStoredKey) return;
+      // NOTE: no hasStoredKey guard — resolveComposioHeaders reads the vault
+      // DIRECTLY (the authoritative check). The old `!hasStoredKey` early
+      // return silently skipped the load when called from handleConnect:
+      // the closure still saw the PRE-connect value, so after a fresh
+      // Connect the platform grid stayed "No platforms found" while the
+      // connect toast/status card showed the real count (the
+      // 1463-vs-empty-dropdown mismatch bug).
+      if (!userId) return;
       const headers = await resolveComposioHeaders(userId);
       if (!headers) return;
       const setLoading = opts.append ? setLoadingMore : setCatalogLoading;
       setLoading(true);
+      if (!opts.append) setCatalogError(null);
       try {
         const r = await apiComposioToolkits(headers, {
           cursor: opts.cursor,
@@ -223,17 +242,28 @@ export function SectionIntegrationsComposio() {
         setToolkits((prev) => (opts.append ? [...prev, ...r.items] : r.items));
         setNextCursor(r.nextCursor);
         setTotalItems(r.totalItems);
+        setCatalogLoaded(true);
+        setCatalogError(null);
         if (r.categories) setCategories(r.categories);
       } catch (e) {
+        // HONEST FAILURE STATE: keep a previously loaded page visible for
+        // appends, but a FIRST-page failure surfaces as an explicit error
+        // card with a Retry — never as "No platforms found".
+        const message = e instanceof Error ? e.message : "Composio request failed";
+        if (!opts.append) {
+          setToolkits([]);
+          setCatalogLoaded(false);
+          setCatalogError(message);
+        }
         toast.error("Could not load the platform catalog", {
-          description: e instanceof Error ? e.message : "Composio request failed",
+          description: message,
           icon: <XCircle className="size-4" />,
         });
       } finally {
         setLoading(false);
       }
     },
-    [userId, hasStoredKey],
+    [userId],
   );
 
   // Initial load: status + connections. The catalog is loaded by the
@@ -246,12 +276,14 @@ export function SectionIntegrationsComposio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, hasStoredKey]);
 
-  // Re-query the catalog when the debounced search / category changes.
+  // Re-query the catalog when the debounced search / category changes — OR
+  // when the key PRESENCE flips (fresh Connect on this page: hasStoredKey
+  // false→true must trigger the first catalog load, not just a remount).
   React.useEffect(() => {
     if (!userId || !hasStoredKey) return;
     void loadCatalog({ search: debouncedSearch || undefined, category: activeCategory || undefined });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, activeCategory]);
+  }, [debouncedSearch, activeCategory, userId, hasStoredKey]);
 
   // OAuth completion poller — while platforms are awaiting authorization.
   React.useEffect(() => {
@@ -373,6 +405,8 @@ export function SectionIntegrationsComposio() {
       setBlockedLink(null);
       setNextCursor(null);
       setTotalItems(null);
+      setCatalogError(null);
+      setCatalogLoaded(false);
       setSearch("");
       setActiveCategory("");
       toast.success("Composio disconnected", {
@@ -634,7 +668,21 @@ export function SectionIntegrationsComposio() {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-lg border bg-muted/30 p-3">
                 <span className="text-xs font-medium text-muted-foreground">Platforms available</span>
-                <p className="mt-1 text-sm font-semibold">{status.totalToolkits.toLocaleString()}</p>
+                {/* SINGLE DATASET (1463-vs-empty mismatch fix): the count is
+                    the CATALOG's own total — the exact dataset the grid
+                    renders from. Loading → "…"; failed → "—" (never a stale
+                    validation count next to an empty/failed grid). */}
+                <p className="mt-1 flex items-center gap-1.5 text-sm font-semibold">
+                  {catalogError ? (
+                    <span title="The platform catalog failed to load — see below">—</span>
+                  ) : catalogLoaded ? (
+                    (totalItems ?? 0).toLocaleString()
+                  ) : catalogLoading ? (
+                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label="Loading platform catalog" />
+                  ) : (
+                    "—"
+                  )}
+                </p>
               </div>
               <div className="rounded-lg border bg-muted/30 p-3">
                 <span className="text-xs font-medium text-muted-foreground">Connected apps</span>
@@ -738,6 +786,27 @@ export function SectionIntegrationsComposio() {
             {catalogLoading ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="size-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : catalogError ? (
+              /* EXPLICIT ERROR STATE — a failed catalog load is NEVER shown
+                 as "No platforms found" (the count-vs-dropdown mismatch
+                 bug): the real upstream reason + a Retry affordance. */
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-6 py-10 text-center">
+                <XCircle className="mx-auto size-5 text-destructive" aria-hidden />
+                <p className="mt-2 text-sm font-medium text-foreground">Could not load the platform catalog</p>
+                <p className="mx-auto mt-1 max-w-md text-[13px] text-muted-foreground">{catalogError}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-4"
+                  onClick={() =>
+                    void loadCatalog({ search: debouncedSearch || undefined, category: activeCategory || undefined })
+                  }
+                >
+                  <RefreshCw className="size-4" />
+                  Retry
+                </Button>
               </div>
             ) : toolkits.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border px-6 py-10 text-center">

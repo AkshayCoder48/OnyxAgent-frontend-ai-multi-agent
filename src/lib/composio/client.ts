@@ -288,7 +288,7 @@ export class ComposioClient {
     sortBy?: "usage" | "alphabetically";
   } = {}): Promise<ComposioToolkitPage> {
     const limit = Math.min(Math.max(Math.floor(opts.limit ?? 100), 1), 1000);
-    return this.request<ComposioToolkitPage>("GET", "/api/v3/toolkits", {
+    const raw = await this.request<unknown>("GET", "/api/v3/toolkits", {
       query: {
         search: opts.search,
         category: opts.category,
@@ -297,6 +297,11 @@ export class ComposioClient {
         sort_by: opts.sortBy,
       },
     });
+    // DEFENSIVE PAGE NORMALIZATION (count-vs-dropdown mismatch fix): if the
+    // upstream shape shifts (items nested one level, array at the top, or a
+    // `data` wrapper), normalize instead of silently rendering an empty
+    // catalog while the status count still shows the total.
+    return normalizeToolkitPage(raw);
   }
 
   async listToolkitCategories(): Promise<{ items: ComposioCategory[] }> {
@@ -434,6 +439,43 @@ export class ComposioClient {
 // ---------------------------------------------------------------------------
 // Sanitizers
 // ---------------------------------------------------------------------------
+
+/**
+ * Normalize a raw toolkits-endpoint payload into ComposioToolkitPage.
+ *
+ * Handles the documented shape ({items: [...], next_cursor, total_items}) and
+ * defensively unwraps shape drift observed across API revisions: a nested
+ * `items.items`, a top-level array, or a `data`/`result` wrapper. An
+ * unrecognized shape yields an EMPTY page (the UI shows its honest error /
+ * empty state instead of crashing) — never a fabricated dataset.
+ */
+export function normalizeToolkitPage(raw: unknown): ComposioToolkitPage {
+  const empty: ComposioToolkitPage = { items: [], next_cursor: null, total_items: 0, current_page: 1, total_pages: 1 };
+  if (Array.isArray(raw)) {
+    // Bare array — no pagination info available.
+    return { items: raw as ComposioToolkit[], next_cursor: null, total_items: raw.length, current_page: 1, total_pages: 1 };
+  }
+  if (!raw || typeof raw !== "object") return empty;
+  const o = raw as Record<string, unknown>;
+  // Unwrap one level of common wrappers.
+  const source = (o.items ?? o.data ?? o.result ?? o) as Record<string, unknown> | ComposioToolkit[];
+  let items: unknown = source;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const inner = (source as Record<string, unknown>).items;
+    if (Array.isArray(inner)) items = inner;
+  }
+  if (!Array.isArray(items)) items = [];
+  const meta = (Array.isArray(source) ? o : source) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  return {
+    items: items as ComposioToolkit[],
+    next_cursor: str(o.next_cursor ?? meta.next_cursor),
+    total_items: num(o.total_items ?? meta.total_items) || (items as unknown[]).length,
+    current_page: num(o.current_page ?? meta.current_page) || 1,
+    total_pages: num(o.total_pages ?? meta.total_pages) || 1,
+  };
+}
 
 /**
  * Reduce a raw connected-account record to the SAFE projection.

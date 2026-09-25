@@ -33,9 +33,14 @@ import { cn } from "@/lib/utils";
 /** Below the lg breakpoint the docked column becomes a mobile drawer. */
 const DESKTOP_QUERY = "(min-width: 1024px)";
 
-/** Is the viewport in the docked-panel (lg+) range? */
+/** Is the viewport in the docked-panel (lg+) range? Lazily initialized from
+ *  matchMedia (client) so the FIRST render already knows the branch — no
+ *  one-frame mobile-Sheet flash on desktop, no hydration issue (both
+ *  branches render null while the panel is closed, which it is at mount). */
 function useIsDesktop() {
-  const [isDesktop, setIsDesktop] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(DESKTOP_QUERY).matches : false,
+  );
   useEffect(() => {
     const mq = window.matchMedia(DESKTOP_QUERY);
     const update = () => setIsDesktop(mq.matches);
@@ -163,14 +168,19 @@ export function DockedPanel({
         aria-hidden={!open}
         inert={!open}
         data-dragging={dragging}
+        data-open={open}
         className="docked-panel relative hidden shrink-0 overflow-hidden lg:block"
         style={{ width: open ? width : 0 }}
       >
         {/* Fixed-width inner column — the content never reflows while the
             outer aside animates its width; the outer clips it edge-to-edge
-            so the panel hugs the viewport with just its hairline. */}
+            so the panel hugs the viewport with just its hairline. The inner
+            column ALSO translates (slide-in feel): as the outer widens, the
+            content slides in from the right edge instead of being revealed
+            through a static window — see .docked-panel-inner in globals.css
+            (skipped entirely under prefers-reduced-motion). */}
         <div
-          className="border-border flex h-full flex-col border-l"
+          className="docked-panel-inner border-border flex h-full flex-col border-l"
           style={{ width }}
         >
           {isDesktop && contentMounted ? children : null}

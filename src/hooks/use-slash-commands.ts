@@ -17,6 +17,7 @@ import {
   mergeWithUserCommands,
   type SlashCommand,
 } from "@/components/chat/slash-commands";
+import { useAuthStore } from "@/stores";
 
 interface UseSlashCommandsResult {
   /** Raw rows from the backend (custom commands + built-in overrides). */
@@ -46,6 +47,11 @@ interface UseSlashCommandsResult {
  */
 export function useSlashCommands(): UseSlashCommandsResult {
   const queryClient = useQueryClient();
+  // USER-SCOPED key (same boot-swap bug as the conversations list): the
+  // auth store swaps local-user → real Dexie user async, and a static key
+  // would serve the transient user's (empty) cache until a remount.
+  const userId = useAuthStore((s) => s.user?.id);
+  const listKey = qk.slashCommands.list(userId ?? undefined);
 
   const {
     data: records = [],
@@ -53,8 +59,9 @@ export function useSlashCommands(): UseSlashCommandsResult {
     error: queryError,
     refetch,
   } = useQuery({
-    queryKey: qk.slashCommands.list(),
+    queryKey: listKey,
     queryFn: listSlashCommands,
+    enabled: !!userId,
   });
 
   const error =
@@ -66,10 +73,10 @@ export function useSlashCommands(): UseSlashCommandsResult {
 
   const writeCache = useCallback(
     (updater: (prev: UserSlashCommandRecord[]) => UserSlashCommandRecord[]) =>
-      queryClient.setQueryData<UserSlashCommandRecord[]>(qk.slashCommands.list(), (prev = []) =>
+      queryClient.setQueryData<UserSlashCommandRecord[]>(listKey, (prev = []) =>
         updater(prev),
       ),
-    [queryClient],
+    [queryClient, listKey],
   );
 
   // Kept for API compatibility: the list auto-fetches on mount; this forces a
