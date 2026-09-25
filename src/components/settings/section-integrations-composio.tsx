@@ -26,7 +26,6 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
-  Info,
   KeyRound,
   Link2,
   Loader2,
@@ -54,6 +53,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { SectionCard } from "@/components/settings/settings-section";
+import { MoreOptions } from "@/components/settings/more-options";
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
 import {
@@ -164,7 +164,6 @@ export function SectionIntegrationsComposio() {
   const [blockedLink, setBlockedLink] = React.useState<{ toolkit: string; url: string } | null>(null);
 
   // ── advanced ("More options") ───────────────────────────────────────────
-  const [moreOpen, setMoreOpen] = React.useState(false);
   const [reconnectLinks, setReconnectLinks] = React.useState<Array<{ toolkit: string; redirectUrl: string | null }>>([]);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = React.useState<"disconnect_key" | "disconnect_all" | null>(null);
@@ -783,20 +782,8 @@ export function SectionIntegrationsComposio() {
 
       {/* ── More options (advanced) ──────────────────────────────────────── */}
       {connected && (
-        <div className="space-y-2">
-          <button
-            type="button"
-            onClick={() => setMoreOpen((s) => !s)}
-            className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-            aria-expanded={moreOpen}
-          >
-            <Info className="size-3.5" />
-            {moreOpen ? "Hide" : "More options"}
-            <ChevronDown className={cn("size-3.5 transition-transform", moreOpen && "rotate-180")} />
-          </button>
-
-          {moreOpen && (
-            <SectionCard title="Session & connection management" description="Advanced Composio controls.">
+        <MoreOptions>
+          <SectionCard title="Session & connection management" description="Advanced Composio controls.">
               <div className="space-y-4">
                 {/* Session details */}
                 <div className="rounded-lg border bg-muted/30 p-3">
@@ -896,9 +883,8 @@ export function SectionIntegrationsComposio() {
                   key itself stays stored until you disconnect Composio above.
                 </p>
               </div>
-            </SectionCard>
-          )}
-        </div>
+          </SectionCard>
+        </MoreOptions>
       )}
 
       {/* ── Confirmations ────────────────────────────────────────────────── */}

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { Button, Input, Label } from "@/components/ui";
 import { SectionCard as SettingsSectionCard } from "@/components/settings/settings-section";
+import { MoreOptions } from "@/components/settings/more-options";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { mcpService } from "@/lib/services";
@@ -249,16 +250,22 @@ export default function McpsSettingsPage() {
               placeholder="https://example.com/mcp"
             />
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="mcp-headers" className="text-xs uppercase">Headers (JSON)</Label>
-            <Input
-              id="mcp-headers"
-              value={form.headers}
-              onChange={(e) => setForm((f) => ({ ...f, headers: e.target.value }))}
-              placeholder='{"Authorization":"Bearer …"}'
-              className="font-mono text-xs"
-            />
-          </div>
+
+          <MoreOptions>
+            <div className="space-y-1.5 rounded-lg border p-3">
+              <Label htmlFor="mcp-headers" className="text-xs uppercase">Headers (JSON)</Label>
+              <Input
+                id="mcp-headers"
+                value={form.headers}
+                onChange={(e) => setForm((f) => ({ ...f, headers: e.target.value }))}
+                placeholder='{"Authorization":"Bearer …"}'
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Only needed for servers that require auth headers — sent on every request.
+              </p>
+            </div>
+          </MoreOptions>
 
           <Button onClick={handleAdd} disabled={saving}>
             {saving ? (

@@ -17,6 +17,10 @@ import {
 /**
  * SubAgentSidebar — right sidebar showing chat between user and subagents.
  *
+ * Mounted inside the DockedPanel container (docked column on lg+, drawer
+ * below) — visibility/open-close is the container's job, so this component
+ * only renders its content and reports close via `onClose`.
+ *
  * Features:
  *   - @ mention to tag a specific subagent (autocomplete dropdown)
  *   - Real streaming (token-by-token) from the subagent LLM
@@ -26,13 +30,7 @@ import {
  *   - Session selector to switch between past chats
  *   - Send images via paperclip
  */
-export function SubAgentSidebar({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
+export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
   const {
     subagents, sessions, activeSessionId,
     setActiveSession, deleteSession,
@@ -161,12 +159,10 @@ export function SubAgentSidebar({
     setShowMention(false);
   };
 
-  if (!open) return null;
-
   const messages = activeSession?.messages ?? [];
 
   return (
-    <aside className="flex h-full w-full flex-col bg-card md:w-80 lg:w-96">
+    <div className="flex h-full w-full flex-col bg-card">
       <input
         ref={fileInputRef}
         type="file"
@@ -404,7 +400,7 @@ export function SubAgentSidebar({
           </div>
         </div>
       </div>
-    </aside>
+    </div>
   );
 }
 

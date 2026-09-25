@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Bot, Trash2, Save } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MoreOptions } from "@/components/settings/more-options";
 
 interface AIProvider {
   id: string;
@@ -113,6 +114,11 @@ function SubagentCard({
 
   const selectedProvider = providers.find((p) => p.id === providerId);
 
+  /** Auto-expand the advanced area when this subagent already overrides the
+   *  main agent's provider/model/key, so nothing is silently hidden. */
+  const advancedNonDefault =
+    !!(subagent.providerId || subagent.model || subagent.apiKey);
+
   const handleSave = () => {
     onUpdate({
       name,
@@ -188,74 +194,6 @@ function SubagentCard({
             <Input id="subagent-description" value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 h-9" />
           </div>
 
-          {/* System Prompt */}
-          <div>
-            <label htmlFor="subagent-system-prompt" className="text-xs font-medium text-muted-foreground">System Prompt</label>
-            <textarea
-              id="subagent-system-prompt"
-              value={systemPrompt}
-              onChange={(e) => setSystemPrompt(e.target.value)}
-              rows={3}
-              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm resize-y"
-              placeholder="Instructions for this subagent..."
-            />
-          </div>
-
-          {/* Provider override */}
-          <div>
-            <label htmlFor="subagent-provider" className="text-xs font-medium text-muted-foreground">
-              API Provider (leave empty to inherit main agent&apos;s)
-            </label>
-            <select
-              id="subagent-provider"
-              value={providerId}
-              onChange={(e) => {
-                setProviderId(e.target.value);
-                setModel(""); // reset model when provider changes
-              }}
-              className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
-            >
-              <option value="">Inherit from main agent</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Model override */}
-          <div>
-            <label htmlFor="subagent-model" className="text-xs font-medium text-muted-foreground">
-              Model (leave empty to inherit)
-            </label>
-            <select
-              id="subagent-model"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={!providerId && !selectedProvider}
-              className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm disabled:opacity-50"
-            >
-              <option value="">Inherit</option>
-              {(selectedProvider?.models ?? []).map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* API Key override */}
-          <div>
-            <label htmlFor="subagent-api-key" className="text-xs font-medium text-muted-foreground">
-              API Key (leave empty to inherit provider&apos;s key)
-            </label>
-            <Input
-              id="subagent-api-key"
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="mt-1 h-9"
-              placeholder="Inherit from provider"
-            />
-          </div>
-
           {/* Enabled toggle */}
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -266,6 +204,75 @@ function SubagentCard({
             />
             Enabled (orchestrator can call this subagent)
           </label>
+
+          {/* ── Advanced: system prompt + provider/model/key overrides ── */}
+          <MoreOptions defaultOpen={advancedNonDefault}>
+            <div className="space-y-3 rounded-lg border p-3">
+              <div>
+                <label htmlFor="subagent-system-prompt" className="text-xs font-medium text-muted-foreground">System Prompt</label>
+                <textarea
+                  id="subagent-system-prompt"
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  rows={3}
+                  className="mt-1 w-full rounded-md border border-border bg-background p-2 text-sm resize-y"
+                  placeholder="Instructions for this subagent..."
+                />
+              </div>
+
+              <div>
+                <label htmlFor="subagent-provider" className="text-xs font-medium text-muted-foreground">
+                  API Provider (leave empty to inherit main agent&apos;s)
+                </label>
+                <select
+                  id="subagent-provider"
+                  value={providerId}
+                  onChange={(e) => {
+                    setProviderId(e.target.value);
+                    setModel(""); // reset model when provider changes
+                  }}
+                  className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
+                >
+                  <option value="">Inherit from main agent</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="subagent-model" className="text-xs font-medium text-muted-foreground">
+                  Model (leave empty to inherit)
+                </label>
+                <select
+                  id="subagent-model"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={!providerId && !selectedProvider}
+                  className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm disabled:opacity-50"
+                >
+                  <option value="">Inherit</option>
+                  {(selectedProvider?.models ?? []).map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="subagent-api-key" className="text-xs font-medium text-muted-foreground">
+                  API Key (leave empty to inherit provider&apos;s key)
+                </label>
+                <Input
+                  id="subagent-api-key"
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="mt-1 h-9"
+                  placeholder="Inherit from provider"
+                />
+              </div>
+            </div>
+          </MoreOptions>
 
           {/* Save */}
           <div className="flex justify-end gap-2 pt-2">

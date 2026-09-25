@@ -2794,3 +2794,25 @@ body.sidebar-open {
     transition: none;
   }
 }
+
+/* ============================================================
+   TERRA DOCKED PANELS — Task 4-a (PRD §16/§17)
+   Right-hand panels (subagents / files / tool timeline) are real
+   layout columns, not floating overlays: open/close is an animated
+   WIDTH transition (~250ms ease-out) so the main chat column
+   shrinks and grows seamlessly. Used by DockedPanel
+   (src/components/chat/docked-panel.tsx).
+   ============================================================ */
+.docked-panel {
+  transition: width 250ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* While the user drags the resize handle the width must track the
+   pointer 1:1 — no transition lag. */
+.docked-panel[data-dragging="true"] {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .docked-panel {
+    transition: none;
+  }
+}

@@ -46,6 +46,7 @@ import {
 
 import { useCustomTools } from "@/hooks/use-data";
 import type { CustomTool, CustomToolImpl } from "@/types";
+import { MoreOptions } from "@/components/settings/more-options";
 
 interface HeaderRow {
   id: string;
@@ -225,6 +226,14 @@ export function SectionCustomTools() {
     }
   }
 
+  /** Auto-expand the advanced area when the edited tool already carries
+   *  non-default advanced values, so nothing is silently hidden. */
+  const advancedNonDefault =
+    !!editing &&
+    (!editing.is_active ||
+      Object.keys(editing.http_headers ?? {}).length > 0 ||
+      JSON.stringify(editing.parameters_schema ?? {}) !== DEFAULT_SCHEMA);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2">
@@ -349,17 +358,6 @@ export function SectionCustomTools() {
                 required
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="t-schema">Parameters schema (JSON)</Label>
-              <Textarea
-                id="t-schema"
-                value={form.parameters_schema}
-                onChange={(e) => setForm({ ...form, parameters_schema: e.target.value })}
-                className="font-mono text-sm min-h-[140px]"
-                spellCheck={false}
-              />
-            </div>
-
             {form.impl_kind === "http_webhook" ? (
               <div className="space-y-3 rounded-md border p-3">
                 <div className="space-y-1.5">
@@ -372,6 +370,43 @@ export function SectionCustomTools() {
                     className="font-mono text-sm"
                   />
                 </div>
+              </div>
+            ) : (
+              <div className="space-y-1.5 rounded-md border p-3">
+                <Label htmlFor="t-py">Python source</Label>
+                <Textarea
+                  id="t-py"
+                  value={form.python_source}
+                  onChange={(e) => setForm({ ...form, python_source: e.target.value })}
+                  placeholder={"def run(args):\n    return {\"ok\": True}"}
+                  className="font-mono text-sm min-h-[160px]"
+                  spellCheck={false}
+                />
+                <p className="text-muted-foreground text-xs">
+                  Executed in the E2B Sandbox. Define a <code>run(args)</code> function returning a
+                  JSON-serialisable value.
+                </p>
+              </div>
+            )}
+
+            {/* ── Advanced: raw schema JSON, custom headers, per-item flags ── */}
+            <MoreOptions defaultOpen={advancedNonDefault}>
+              <div className="space-y-1.5">
+                <Label htmlFor="t-schema">Parameters schema (JSON)</Label>
+                <Textarea
+                  id="t-schema"
+                  value={form.parameters_schema}
+                  onChange={(e) => setForm({ ...form, parameters_schema: e.target.value })}
+                  className="font-mono text-sm min-h-[140px]"
+                  spellCheck={false}
+                />
+                <p className="text-muted-foreground text-xs">
+                  The schema the model sees when calling this tool. The default fits most tools —
+                  only edit it for multi-argument tools.
+                </p>
+              </div>
+
+              {form.impl_kind === "http_webhook" && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label>Headers</Label>
@@ -380,7 +415,9 @@ export function SectionCustomTools() {
                     </Button>
                   </div>
                   {form.http_headers.length === 0 ? (
-                    <p className="text-muted-foreground text-xs">No custom headers.</p>
+                    <p className="text-muted-foreground text-xs">
+                      No custom headers — only needed when the webhook requires auth.
+                    </p>
                   ) : (
                     <div className="space-y-2">
                       {form.http_headers.map((h) => (
@@ -414,36 +451,20 @@ export function SectionCustomTools() {
                     </div>
                   )}
                 </div>
-              </div>
-            ) : (
-              <div className="space-y-1.5 rounded-md border p-3">
-                <Label htmlFor="t-py">Python source</Label>
-                <Textarea
-                  id="t-py"
-                  value={form.python_source}
-                  onChange={(e) => setForm({ ...form, python_source: e.target.value })}
-                  placeholder={"def run(args):\n    return {\"ok\": True}"}
-                  className="font-mono text-sm min-h-[160px]"
-                  spellCheck={false}
-                />
-                <p className="text-muted-foreground text-xs">
-                  Executed in the E2B Sandbox. Define a <code>run(args)</code> function returning a
-                  JSON-serialisable value.
-                </p>
-              </div>
-            )}
+              )}
 
-            <div className="flex items-center justify-between gap-2 rounded-md border p-3">
-              <div>
-                <Label htmlFor="t-active">Active</Label>
-                <p className="text-muted-foreground text-xs">Inactive tools are hidden from the model.</p>
+              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                <div>
+                  <Label htmlFor="t-active">Active</Label>
+                  <p className="text-muted-foreground text-xs">Inactive tools are hidden from the model.</p>
+                </div>
+                <Switch
+                  id="t-active"
+                  checked={form.is_active}
+                  onCheckedChange={(v) => setForm({ ...form, is_active: v })}
+                />
               </div>
-              <Switch
-                id="t-active"
-                checked={form.is_active}
-                onCheckedChange={(v) => setForm({ ...form, is_active: v })}
-              />
-            </div>
+            </MoreOptions>
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>

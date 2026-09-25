@@ -8,7 +8,6 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
-  Info,
   KeyRound,
   Loader2,
   Save,
@@ -34,6 +33,7 @@ import {
 
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
+import { MoreOptions } from "@/components/settings/more-options";
 import {
   OnyxBaseKV,
   ONYXBASE_DEFAULT_BASE_URL,
@@ -77,7 +77,6 @@ export function SectionCloudWorkspace() {
   const [saving, setSaving] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [clearOpen, setClearOpen] = React.useState(false);
-  const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [baseUrl, setBaseUrl] = React.useState("");
 
   const hasStored = !!settings?.onyxbase_api_key_present;
@@ -314,42 +313,32 @@ export function SectionCloudWorkspace() {
         </div>
       </div>
 
-      {/* Advanced — custom OnyxBase endpoint */}
-      <div className="space-y-2">
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((s) => !s)}
-          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Info className="size-3.5" />
-          {showAdvanced ? "Hide" : "Advanced"} — custom OnyxBase instance
-        </button>
-        {showAdvanced && (
-          <div className="flex items-end gap-2 rounded-lg border p-3">
-            <div className="flex-1 space-y-1.5">
-              <Label htmlFor="onyxbase-url" className="text-xs">
-                API endpoint
-              </Label>
-              <Input
-                id="onyxbase-url"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder={ONYXBASE_DEFAULT_BASE_URL}
-                spellCheck={false}
-                className="font-mono text-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                Only change this if you run your own OnyxBase deployment. Default:{" "}
-                <span className="font-mono">{ONYXBASE_DEFAULT_BASE_URL}</span>
-              </p>
-            </div>
-            <Button type="button" variant="outline" size="sm" onClick={handleBaseUrlSave}>
-              <Save className="size-4" />
-              Save
-            </Button>
+      {/* ── Advanced — custom OnyxBase endpoint ── */}
+      <MoreOptions>
+        <div className="flex items-end gap-2 rounded-lg border p-3">
+          <div className="flex-1 space-y-1.5">
+            <Label htmlFor="onyxbase-url" className="text-xs">
+              API endpoint
+            </Label>
+            <Input
+              id="onyxbase-url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={ONYXBASE_DEFAULT_BASE_URL}
+              spellCheck={false}
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">
+              Only change this if you run your own OnyxBase deployment. Default:{" "}
+              <span className="font-mono">{ONYXBASE_DEFAULT_BASE_URL}</span>
+            </p>
           </div>
-        )}
-      </div>
+          <Button type="button" variant="outline" size="sm" onClick={handleBaseUrlSave}>
+            <Save className="size-4" />
+            Save
+          </Button>
+        </div>
+      </MoreOptions>
 
       {/* Clear-key confirmation */}
       <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>

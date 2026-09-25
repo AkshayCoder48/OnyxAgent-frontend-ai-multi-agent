@@ -4,130 +4,52 @@ import { useState, useCallback } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
+import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
-import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
-import { FolderOpen, Menu, Bot, X, ListTree, History } from "lucide-react";
+import { FolderOpen, Menu, Bot, ListTree } from "lucide-react";
 
-/** Resizable right sidebar wrapper — drag the left edge to resize. */
-function ResizableRightPanel({
-  storageKey,
-  defaultWidth,
-  minWidth,
-  maxWidth,
-  children,
-}: {
-  storageKey: string;
-  defaultWidth: number;
-  minWidth: number;
-  maxWidth: number;
-  children: React.ReactNode;
-}) {
-  const [width, setWidth] = useResizableSidebar(storageKey, defaultWidth, minWidth, maxWidth);
-
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startX = e.clientX;
-      const startWidth = width;
-      const handleMouseMove = (moveEvent: MouseEvent) => {
-        const delta = startX - moveEvent.clientX;
-        setWidth(startWidth + delta);
-      };
-      const handleMouseUp = () => {
-        document.removeEventListener("mousemove", handleMouseMove);
-        document.removeEventListener("mouseup", handleMouseUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-      document.addEventListener("mousemove", handleMouseMove);
-      document.addEventListener("mouseup", handleMouseUp);
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-    },
-    [width, setWidth],
-  );
-
-  return (
-    <aside
-      className="hidden shrink-0 animate-slide-in-right md:block relative overflow-visible"
-      style={{ width: `${width}px` }}
-    >
-      <div
-        onMouseDown={handleMouseDown}
-        className="absolute top-0 bottom-0 left-0 z-50 cursor-col-resize transition-colors hover:bg-primary/40 group"
-        style={{ width: "4px", marginLeft: "-2px" }}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
-      >
-        {/* Invisible wider hit area for easier grabbing */}
-        <div className="absolute inset-y-0 -inset-x-2" />
-      </div>
-      {children}
-    </aside>
-  );
-}
-
-type RightPanel = "files" | "subagents" | "timeline" | null;
+type SidePanel = "files" | "timeline" | null;
 
 export default function ChatPage() {
-  const [rightPanel, setRightPanel] = useState<RightPanel>(null);
-  const [mobilePanel, setMobilePanel] = useState<RightPanel>(null);
+  // Files / timeline panels — the user's last right-panel choice, closed by
+  // default. The DockedPanel container renders each as a docked column on
+  // lg+ and a full-height drawer below, so this single state drives both.
+  const [sidePanel, setSidePanel] = useState<SidePanel>(null);
   const { open: openChatSidebar } = useChatSidebarStore();
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
   const { conversations } = useConversations();
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
-  const subagentSidebarOpen = useSubagentStore((s) => s.sidebarOpen);
-  const setSubagentSidebarOpen = useSubagentStore((s) => s.setSidebarOpen);
-  // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15): `use-chat` flips `sidebarOpen` on
-  // the subagent store the moment a sub-agent tool call starts — mirror it
-  // into the local panel state (both desktop and mobile) so the sidebar
-  // opens automatically and streams the sub-agent's progress. Closing the
-  // panel (header Bot button, X, or Sheet onOpenChange) writes false back
-  // to the store so a NEW invocation re-opens it.
-  //
-  // Uses the render-time "adjust state when a prop changes" pattern from
-  // the React docs instead of a useEffect + setState (which triggers
-  // cascading renders and is flagged by the React Compiler lint).
-  const [prevSubagentOpen, setPrevSubagentOpen] = useState(subagentSidebarOpen);
-  if (subagentSidebarOpen !== prevSubagentOpen) {
-    setPrevSubagentOpen(subagentSidebarOpen);
-    if (subagentSidebarOpen) {
-      setRightPanel("subagents");
-      setMobilePanel("subagents");
-    } else {
-      setRightPanel((p) => (p === "subagents" ? null : p));
-      setMobilePanel((p) => (p === "subagents" ? null : p));
-    }
-  }
+  // Subagent panel — the store is the single source of truth: the event
+  // processor flips `sidebarOpen` the moment a sub-agent tool call starts
+  // (PRD §15), and the docked panel reads it directly (no mirroring into
+  // local panel state).
+  const subagentOpen = useSubagentStore((s) => s.sidebarOpen);
+  const setSubagentOpen = useSubagentStore((s) => s.setSidebarOpen);
 
-  const closeSubagentSidebar = useCallback(() => {
-    setSubagentSidebarOpen(false);
-  }, [setSubagentSidebarOpen]);
+  // Only one right-hand panel VISIBLE at a time — fully DERIVED during
+  // render (no state syncing, so it is React-Compiler-safe): while the
+  // subagent panel is open (manually or auto-opened by the agent) it takes
+  // over the dock; closing it restores the panel that was open before.
+  const filesOpen = sidePanel === "files" && !subagentOpen;
+  const timelineOpen = sidePanel === "timeline" && !subagentOpen;
 
-  const togglePanel = (panel: RightPanel) => {
-    if (window.innerWidth >= 768) {
-      if (panel === "subagents") {
-        // Manual toggle writes through to the store so the auto-open effect
-        // stays in sync (closing here must not be re-opened by a stale flag).
-        setSubagentSidebarOpen(!subagentSidebarOpen);
-      } else {
-        setRightPanel((prev) => (prev === panel ? null : panel));
-      }
-    } else {
-      if (panel === "subagents") {
-        setSubagentSidebarOpen(!subagentSidebarOpen);
-      } else {
-        setMobilePanel(panel);
-      }
-    }
+  const closeSubagent = useCallback(() => {
+    setSubagentOpen(false);
+  }, [setSubagentOpen]);
+
+  const toggleSubagents = () => setSubagentOpen(!subagentOpen);
+  const toggleSidePanel = (panel: Exclude<SidePanel, null>) => {
+    // Opening a side panel takes over the dock from the subagent panel
+    // (setSubagentOpen is a no-op when the value is unchanged).
+    setSubagentOpen(false);
+    const wasVisible = panel === "files" ? filesOpen : timelineOpen;
+    setSidePanel(wasVisible ? null : panel);
   };
 
   return (
@@ -135,7 +57,9 @@ export default function ChatPage() {
       <ConversationSidebar />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Glass top bar (Terra spec): serif conversation title on the left,
-            history / share / more affordances on the right, over a hairline. */}
+            panel toggles on the right, over a hairline. Chat history lives
+            in the conversation sidebar (left rail + its mobile sheet), not
+            here (PRD §11). */}
         <div className="glass-header flex h-12 shrink-0 items-center justify-between border-b px-2 sm:px-4">
           <div className="flex min-w-0 items-center gap-1.5">
             <Button
@@ -153,46 +77,42 @@ export default function ChatPage() {
             </h1>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={openChatSidebar}
-              className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
-              title="Chat history"
-              aria-label="Chat history"
-            >
-              <History className="h-4 w-4" />
-            </Button>
             {/* Tool timeline — a DOCKED SIDEBAR (not a popup): the whole
                 working session as a fixed, scrollable, real-time panel on
                 the right. */}
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => togglePanel("timeline")}
-              className={rightPanel === "timeline" || mobilePanel === "timeline" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
+              onClick={() => toggleSidePanel("timeline")}
+              className={timelineOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Tool timeline"
               aria-label="Show tool timeline"
+              aria-expanded={timelineOpen}
+              aria-controls="timeline-panel"
             >
               <ListTree className="h-4 w-4" />
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => togglePanel("subagents")}
-              className={rightPanel === "subagents" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
+              onClick={toggleSubagents}
+              className={subagentOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Subagent chat"
               aria-label="Toggle subagent panel"
+              aria-expanded={subagentOpen}
+              aria-controls="subagent-panel"
             >
               <Bot className="h-4 w-4" />
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => togglePanel("files")}
-              className={rightPanel === "files" ? "h-8 w-8 p-0 bg-foreground/5" : "h-8 w-8 p-0 text-muted-foreground hover:text-foreground"}
+              onClick={() => toggleSidePanel("files")}
+              className={filesOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Show files"
               aria-label="Toggle files panel"
+              aria-expanded={filesOpen}
+              aria-controls="files-panel"
             >
               <FolderOpen className="h-4 w-4" />
             </Button>
@@ -203,64 +123,53 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Desktop right panel — files, subagents, or the tool timeline
-          (each resizable, each a docked sidebar rather than a popup). */}
-      {rightPanel === "files" && (
-        <ResizableRightPanel storageKey="file-sidebar-width" defaultWidth={320} minWidth={240} maxWidth={600}>
-          <FileSidebar />
-        </ResizableRightPanel>
-      )}
-      {rightPanel === "subagents" && (
-        <ResizableRightPanel storageKey="subagent-sidebar-width" defaultWidth={360} minWidth={280} maxWidth={600}>
-          <SubAgentSidebar open onClose={closeSubagentSidebar} />
-        </ResizableRightPanel>
-      )}
-      {rightPanel === "timeline" && (
-        <ResizableRightPanel storageKey="timeline-sidebar-width" defaultWidth={340} minWidth={280} maxWidth={600}>
-          <TimelineSidebar onClose={() => setRightPanel(null)} />
-        </ResizableRightPanel>
-      )}
-
-      {/* Mobile sheet — files */}
-      <Sheet open={mobilePanel === "files"} onOpenChange={(o) => !o && setMobilePanel(null)}>
-        <SheetContent side="right" className="w-[85vw] max-w-sm p-0">
-          <button
-            type="button"
-            onClick={() => setMobilePanel(null)}
-            aria-label="Close files panel"
-            title="Close"
-            className="bg-background/80 hover:bg-foreground/5 text-foreground/60 hover:text-foreground absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md backdrop-blur-sm transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
-          <FileSidebar />
-        </SheetContent>
-      </Sheet>
-
-      {/* Mobile sheet — subagents */}
-      <Sheet
-        open={mobilePanel === "subagents"}
-        onOpenChange={(o) => {
-          if (!o) {
-            setMobilePanel(null);
-            setSubagentSidebarOpen(false);
-          }
-        }}
+      {/* Right-hand docked panels (PRD §16/§17): in-flow columns on lg+
+          whose open/close is an animated width change (the main chat
+          column shrinks seamlessly — no overlay, no backdrop, no blur),
+          and full-height drawers below lg. One at a time; each is
+          resizable with the width persisted. */}
+      <DockedPanel
+        id="subagent-panel"
+        label="Subagent chat"
+        open={subagentOpen}
+        onClose={closeSubagent}
+        storageKey="subagent-sidebar-width"
+        defaultWidth={360}
+        minWidth={280}
+        maxWidth={600}
+        sheetClassName="w-[90vw] max-w-md"
       >
-        <SheetContent side="right" className="w-[90vw] max-w-md p-0">
-          <SubAgentSidebar open onClose={() => { setMobilePanel(null); setSubagentSidebarOpen(false); }} />
-        </SheetContent>
-      </Sheet>
+        <SubAgentSidebar onClose={closeSubagent} />
+      </DockedPanel>
 
-      {/* Mobile sheet — tool timeline (the sidebar's own header X closes it) */}
-      <Sheet
-        open={mobilePanel === "timeline"}
-        onOpenChange={(o) => !o && setMobilePanel(null)}
+      <DockedPanel
+        id="files-panel"
+        label="Files"
+        open={filesOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="file-sidebar-width"
+        defaultWidth={320}
+        minWidth={240}
+        maxWidth={600}
+        sheetCloseButton
+        sheetClassName="w-[85vw] max-w-sm"
       >
-        <SheetContent side="right" className="w-[85vw] max-w-sm p-0">
-          <TimelineSidebar onClose={() => setMobilePanel(null)} />
-        </SheetContent>
-      </Sheet>
+        <FileSidebar />
+      </DockedPanel>
+
+      <DockedPanel
+        id="timeline-panel"
+        label="Tool timeline"
+        open={timelineOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="timeline-sidebar-width"
+        defaultWidth={340}
+        minWidth={280}
+        maxWidth={600}
+        sheetClassName="w-[85vw] max-w-sm"
+      >
+        <TimelineSidebar onClose={() => setSidePanel(null)} />
+      </DockedPanel>
     </div>
   );
 }

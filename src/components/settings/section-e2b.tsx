@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 import { useSettings } from "@/hooks/use-data";
+import { MoreOptions } from "@/components/settings/more-options";
 
 // E2B sandbox keys are opaque tokens (e.g. e2b_...); we do a light
 // structural check only.
@@ -176,22 +177,35 @@ export function SectionE2B() {
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
             Save key
           </Button>
-          <Button type="button" variant="outline" onClick={handleTestFormat} disabled={!key.trim()}>
-            Test format
-          </Button>
-          {hasStored && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setClearOpen(true)}
-              className="text-destructive hover:text-destructive"
-              disabled={saving}
-            >
-              <Trash2 className="size-4" /> Clear key
-            </Button>
-          )}
         </div>
       </form>
+
+      {/* ── Advanced: key diagnostics + destructive removal ── */}
+      <MoreOptions>
+        <div className="space-y-2 rounded-lg border p-3">
+          <p className="text-sm font-medium">Key tools</p>
+          <p className="text-muted-foreground text-xs">
+            The key format is validated automatically on save — these are rarely needed.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={handleTestFormat} disabled={!key.trim()}>
+              Test format
+            </Button>
+            {hasStored && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setClearOpen(true)}
+                className="text-destructive hover:text-destructive"
+                disabled={saving}
+              >
+                <Trash2 className="size-3.5" /> Clear key
+              </Button>
+            )}
+          </div>
+        </div>
+      </MoreOptions>
 
       <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
         <AlertDialogContent>

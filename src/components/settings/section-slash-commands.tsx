@@ -39,6 +39,7 @@ import {
 
 import { useSlashCommands } from "@/hooks/use-data";
 import type { UserSlashCommand } from "@/types";
+import { MoreOptions } from "@/components/settings/more-options";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -290,19 +291,21 @@ export function SectionSlashCommands() {
                 required
               />
             </div>
-            <div className="flex items-center justify-between gap-2 rounded-md border p-3">
-              <div>
-                <Label htmlFor="cmd-enabled">Enabled</Label>
-                <p className="text-muted-foreground text-xs">
-                  Disabled commands won&apos;t appear in autocomplete.
-                </p>
+            <MoreOptions defaultOpen={!!editing && !editing.is_enabled}>
+              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                <div>
+                  <Label htmlFor="cmd-enabled">Enabled</Label>
+                  <p className="text-muted-foreground text-xs">
+                    Disabled commands won&apos;t appear in autocomplete.
+                  </p>
+                </div>
+                <Switch
+                  id="cmd-enabled"
+                  checked={form.is_enabled}
+                  onCheckedChange={(v) => setForm({ ...form, is_enabled: v })}
+                />
               </div>
-              <Switch
-                id="cmd-enabled"
-                checked={form.is_enabled}
-                onCheckedChange={(v) => setForm({ ...form, is_enabled: v })}
-              />
-            </div>
+            </MoreOptions>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel

@@ -8,6 +8,7 @@ import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { MoreOptions } from "@/components/settings/more-options";
 import {
   Select,
   SelectContent,
@@ -227,28 +228,30 @@ export function SectionAppearance() {
         </Button>
       </section>
 
-      {/* Font size */}
-      <section className="space-y-3">
-        <div>
-          <h3 className="text-sm font-semibold">Font size</h3>
-          <p className="text-muted-foreground text-xs">
-            Scales the entire interface. Defaults to <code>base</code> (16&nbsp;px).
-          </p>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="font-size">Size</Label>
-          <Select value={fontSize} onValueChange={handleFont}>
-            <SelectTrigger id="font-size" className="w-full sm:w-[200px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="sm">Small (14 px)</SelectItem>
-              <SelectItem value="base">Base (16 px)</SelectItem>
-              <SelectItem value="lg">Large (18 px)</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </section>
+      {/* ── Advanced: interface scaling ── */}
+      <MoreOptions defaultOpen={fontSize !== "base"}>
+        <section className="space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold">Font size</h3>
+            <p className="text-muted-foreground text-xs">
+              Scales the entire interface. Defaults to <code>base</code> (16&nbsp;px).
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="font-size">Size</Label>
+            <Select value={fontSize} onValueChange={handleFont}>
+              <SelectTrigger id="font-size" className="w-full sm:w-[200px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="sm">Small (14 px)</SelectItem>
+                <SelectItem value="base">Base (16 px)</SelectItem>
+                <SelectItem value="lg">Large (18 px)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </section>
+      </MoreOptions>
     </div>
   );
 }

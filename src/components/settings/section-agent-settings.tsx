@@ -21,6 +21,7 @@ import {
 import { useSettings } from "@/hooks/use-data";
 import { useAuthStore } from "@/stores";
 import type { UserSettings } from "@/types";
+import { MoreOptions } from "@/components/settings/more-options";
 
 type ThinkingEffort = "low" | "medium" | "high";
 
@@ -147,7 +148,7 @@ export function SectionAgentSettings() {
 
   return (
     <div className="space-y-6">
-      {/* Model & generation */}
+      {/* ── Essentials: default model + temperature ── */}
       <section className="space-y-4">
         <div className="space-y-1.5">
           <Label htmlFor="default-model">Default model</Label>
@@ -186,90 +187,89 @@ export function SectionAgentSettings() {
 
       <Separator />
 
-      {/* Thinking */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
+      {/* ── Advanced: thinking + environment variables ── */}
+      <MoreOptions>
+        <section className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <Label htmlFor="thinking-enabled">Extended thinking</Label>
+              <p className="text-muted-foreground text-xs">
+                Let the model reason before answering (where supported).
+              </p>
+            </div>
+            <Switch
+              id="thinking-enabled"
+              checked={thinkingEnabled}
+              onCheckedChange={setThinkingEnabled}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="thinking-effort">Thinking effort</Label>
+            <Select
+              value={thinkingEffort}
+              onValueChange={(v: ThinkingEffort) => setThinkingEffort(v)}
+              disabled={!thinkingEnabled}
+            >
+              <SelectTrigger id="thinking-effort" className="w-full sm:w-[200px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="low">Low</SelectItem>
+                <SelectItem value="medium">Medium</SelectItem>
+                <SelectItem value="high">High</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </section>
+
+        <section className="space-y-3">
           <div>
-            <Label htmlFor="thinking-enabled">Extended thinking</Label>
+            <Label>Environment variables</Label>
             <p className="text-muted-foreground text-xs">
-              Let the model reason before answering (where supported).
+              Injected into Python sandboxes and tool calls. Stored as a JSON object on your settings.
             </p>
           </div>
-          <Switch
-            id="thinking-enabled"
-            checked={thinkingEnabled}
-            onCheckedChange={setThinkingEnabled}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="thinking-effort">Thinking effort</Label>
-          <Select
-            value={thinkingEffort}
-            onValueChange={(v: ThinkingEffort) => setThinkingEffort(v)}
-            disabled={!thinkingEnabled}
-          >
-            <SelectTrigger id="thinking-effort" className="w-full sm:w-[200px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="low">Low</SelectItem>
-              <SelectItem value="medium">Medium</SelectItem>
-              <SelectItem value="high">High</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </section>
-
-      <Separator />
-
-      {/* Env vars */}
-      <section className="space-y-3">
-        <div>
-          <Label>Environment variables</Label>
-          <p className="text-muted-foreground text-xs">
-            Injected into Python sandboxes and tool calls. Stored as a JSON object on your settings.
-          </p>
-        </div>
-        <div className="space-y-2">
-          {envRows.length === 0 ? (
-            <p className="text-muted-foreground rounded-md border border-dashed py-6 text-center text-xs">
-              No environment variables set.
-            </p>
-          ) : (
-            envRows.map((row) => (
-              <div key={row.id} className="flex items-center gap-2">
-                <Input
-                  value={row.key}
-                  onChange={(e) => updateEnvRow(row.id, { key: e.target.value })}
-                  placeholder="KEY"
-                  className="font-mono text-sm"
-                  autoComplete="off"
-                />
-                <Input
-                  value={row.value}
-                  onChange={(e) => updateEnvRow(row.id, { value: e.target.value })}
-                  placeholder="value"
-                  className="font-mono text-sm"
-                  autoComplete="off"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="text-destructive hover:text-destructive shrink-0"
-                  onClick={() => removeEnvRow(row.id)}
-                  aria-label="Remove row"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            ))
-          )}
-        </div>
-        <Button type="button" variant="outline" size="sm" onClick={addEnvRow}>
-          <Plus className="size-4" /> Add variable
-        </Button>
-      </section>
+          <div className="space-y-2">
+            {envRows.length === 0 ? (
+              <p className="text-muted-foreground rounded-md border border-dashed py-6 text-center text-xs">
+                No environment variables set.
+              </p>
+            ) : (
+              envRows.map((row) => (
+                <div key={row.id} className="flex items-center gap-2">
+                  <Input
+                    value={row.key}
+                    onChange={(e) => updateEnvRow(row.id, { key: e.target.value })}
+                    placeholder="KEY"
+                    className="font-mono text-sm"
+                    autoComplete="off"
+                  />
+                  <Input
+                    value={row.value}
+                    onChange={(e) => updateEnvRow(row.id, { value: e.target.value })}
+                    placeholder="value"
+                    className="font-mono text-sm"
+                    autoComplete="off"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-destructive hover:text-destructive shrink-0"
+                    onClick={() => removeEnvRow(row.id)}
+                    aria-label="Remove row"
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={addEnvRow}>
+            <Plus className="size-4" /> Add variable
+          </Button>
+        </section>
+      </MoreOptions>
 
       {/* Sticky footer save bar */}
       <div className="bg-background/95 supports-[backdrop-filter]:bg-background/80 sticky bottom-0 -mx-4 mt-4 border-t backdrop-blur md:-mx-8">

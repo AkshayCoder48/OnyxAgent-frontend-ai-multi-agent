@@ -46,6 +46,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 import { useMCPServers } from "@/hooks/use-data";
 import type { MCPServer, MCPTransport } from "@/types";
+import { MoreOptions } from "@/components/settings/more-options";
 
 interface HeaderRow {
   id: string;
@@ -314,60 +315,65 @@ export function SectionMcp() {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>Headers</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addHeader}>
-                  <Plus className="size-3.5" /> Add header
-                </Button>
-              </div>
-              {form.headers.length === 0 ? (
-                <p className="text-muted-foreground text-xs">No custom headers.</p>
-              ) : (
-                <div className="space-y-2">
-                  {form.headers.map((h) => (
-                    <div key={h.id} className="flex items-center gap-2">
-                      <Input
-                        value={h.key}
-                        onChange={(e) => updateHeader(h.id, { key: e.target.value })}
-                        placeholder="Header-Name"
-                        className="font-mono text-sm"
-                        autoComplete="off"
-                      />
-                      <Input
-                        value={h.value}
-                        onChange={(e) => updateHeader(h.id, { value: e.target.value })}
-                        placeholder="value"
-                        className="font-mono text-sm"
-                        autoComplete="off"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="text-destructive hover:text-destructive shrink-0"
-                        onClick={() => removeHeader(h.id)}
-                        aria-label="Remove header"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </div>
-                  ))}
+            {/* ── Advanced: custom headers + per-item flags ── */}
+            <MoreOptions defaultOpen={!!editing && Object.keys(editing.headers ?? {}).length > 0}>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Custom headers</Label>
+                  <Button type="button" variant="outline" size="sm" onClick={addHeader}>
+                    <Plus className="size-3.5" /> Add header
+                  </Button>
                 </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 rounded-md border p-3">
-              <div>
-                <Label htmlFor="mcp-active">Active</Label>
-                <p className="text-muted-foreground text-xs">Inactive servers are skipped at runtime.</p>
+                {form.headers.length === 0 ? (
+                  <p className="text-muted-foreground text-xs">
+                    No custom headers — only needed for servers that require auth headers.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {form.headers.map((h) => (
+                      <div key={h.id} className="flex items-center gap-2">
+                        <Input
+                          value={h.key}
+                          onChange={(e) => updateHeader(h.id, { key: e.target.value })}
+                          placeholder="Header-Name"
+                          className="font-mono text-sm"
+                          autoComplete="off"
+                        />
+                        <Input
+                          value={h.value}
+                          onChange={(e) => updateHeader(h.id, { value: e.target.value })}
+                          placeholder="value"
+                          className="font-mono text-sm"
+                          autoComplete="off"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive shrink-0"
+                          onClick={() => removeHeader(h.id)}
+                          aria-label="Remove header"
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <Switch
-                id="mcp-active"
-                checked={form.is_active}
-                onCheckedChange={(v) => setForm({ ...form, is_active: v })}
-              />
-            </div>
+
+              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+                <div>
+                  <Label htmlFor="mcp-active">Active</Label>
+                  <p className="text-muted-foreground text-xs">Inactive servers are skipped at runtime.</p>
+                </div>
+                <Switch
+                  id="mcp-active"
+                  checked={form.is_active}
+                  onCheckedChange={(v) => setForm({ ...form, is_active: v })}
+                />
+              </div>
+            </MoreOptions>
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>

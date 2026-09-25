@@ -7,8 +7,8 @@
  * several skill folders), Upload SKILL.md (single bare file), the skills
  * list (name, description, sync badge, enable/disable, download, delete).
  *
- * Advanced options live under "More options ▾" (the collapsible pattern from
- * section-integrations-composio.tsx): per-skill sync details (last synced,
+ * Advanced options live under "More options ▾" (the shared collapsible in
+ * more-options.tsx): per-skill sync details (last synced,
  * chunk counts), the Restore-from-cloud list, and per-skill raw metadata.
  *
  * Sync badges never lie (PRD §38): "Synced" only appears after the push's KV
@@ -23,7 +23,6 @@ import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
-  ChevronDown,
   Cloud,
   CloudDownload,
   Download,
@@ -38,7 +37,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Table,
@@ -59,6 +57,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { SectionCard } from "@/components/settings/settings-section";
+import { MoreOptions } from "@/components/settings/more-options";
 import { Switch } from "@/components/ui/switch";
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
@@ -171,7 +170,6 @@ export function SectionSkills() {
   const [restoringSlug, setRestoringSlug] = React.useState<string | null>(null);
   const [downloadingSlug, setDownloadingSlug] = React.useState<string | null>(null);
   const [togglingId, setTogglingId] = React.useState<string | null>(null);
-  const [moreOpen, setMoreOpen] = React.useState(false);
 
   /** Slugs currently being pushed in THIS session (badge override). */
   const pushingRef = React.useRef<Set<string>>(new Set());
@@ -655,126 +653,111 @@ export function SectionSkills() {
       )}
 
       {/* ── More options (advanced) ──────────────────────────────────────── */}
-      <div className="space-y-2">
-        <button
-          type="button"
-          onClick={() => setMoreOpen((s) => !s)}
-          className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-          aria-expanded={moreOpen}
+      <MoreOptions>
+        <SectionCard
+          title="Cloud sync details"
+          description={
+            cloudConfigured
+              ? "Per-skill OnyxBase sync bookkeeping. Badges are re-derived from content hashes on every load."
+              : "Add an OnyxBase API key (Settings → Cloud Workspace) to sync skills to your private cloud."
+          }
         >
-          <Info className="size-3.5" />
-          {moreOpen ? "Hide" : "More options"}
-          <ChevronDown className={cn("size-3.5 transition-transform", moreOpen && "rotate-180")} />
-        </button>
-
-        {moreOpen && (
-          <div className="space-y-4">
-            <SectionCard
-              title="Cloud sync details"
-              description={
-                cloudConfigured
-                  ? "Per-skill OnyxBase sync bookkeeping. Badges are re-derived from content hashes on every load."
-                  : "Add an OnyxBase API key (Settings → Cloud Workspace) to sync skills to your private cloud."
-              }
-            >
-              {rows.length === 0 ? (
-                <p className="text-muted-foreground text-sm">No skills installed.</p>
-              ) : (
-                <div className="space-y-2">
-                  {rows.map((s) => (
-                    <div
-                      key={s.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate font-mono text-xs font-medium">{s.name}</p>
-                        <p className="text-muted-foreground mt-0.5 text-xs">
-                          Last synced {formatSynced(s.synced_at)} ·{" "}
-                          {s.sync_chunks ?? 0} chunk record(s) ·{" "}
-                          {s.file_count ?? "?"} file(s)
-                          {s.cloud_sha256 ? ` · sha ${s.cloud_sha256.slice(0, 8)}…` : ""}
-                        </p>
-                        {s.sync_error && (
-                          <p className="mt-0.5 text-xs text-destructive">{s.sync_error}</p>
-                        )}
-                      </div>
-                      <span className={cn("rounded-md border px-2 py-0.5 text-xs font-medium", syncBadge(displayState(s)).className)}>
-                        {syncBadge(displayState(s)).label}
-                      </span>
-                    </div>
-                  ))}
+          {rows.length === 0 ? (
+            <p className="text-muted-foreground text-sm">No skills installed.</p>
+          ) : (
+            <div className="space-y-2">
+              {rows.map((s) => (
+                <div
+                  key={s.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs font-medium">{s.name}</p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      Last synced {formatSynced(s.synced_at)} ·{" "}
+                      {s.sync_chunks ?? 0} chunk record(s) ·{" "}
+                      {s.file_count ?? "?"} file(s)
+                      {s.cloud_sha256 ? ` · sha ${s.cloud_sha256.slice(0, 8)}…` : ""}
+                    </p>
+                    {s.sync_error && (
+                      <p className="mt-0.5 text-xs text-destructive">{s.sync_error}</p>
+                    )}
+                  </div>
+                  <span className={cn("rounded-md border px-2 py-0.5 text-xs font-medium", syncBadge(displayState(s)).className)}>
+                    {syncBadge(displayState(s)).label}
+                  </span>
                 </div>
-              )}
-            </SectionCard>
+              ))}
+            </div>
+          )}
+        </SectionCard>
 
-            <SectionCard
-              title="Restore from cloud"
-              description="Skills present in your OnyxBase cloud but not installed here. Nothing is ever auto-restored or auto-deleted — restore is always your explicit action."
-            >
-              {cloudOnly.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  {cloudConfigured
-                    ? "No cloud-only skills — every cloud skill is installed locally."
-                    : "Cloud restore requires an OnyxBase API key."}
-                </p>
-              ) : (
-                <ul className="space-y-2">
-                  {cloudOnly.map((e) => (
-                    <li
-                      key={e.slug}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate font-mono text-xs font-medium">{e.slug}</p>
-                        <p className="text-muted-foreground mt-0.5 text-xs">
-                          {e.fileCount} file(s) · {(e.rawBytes / 1024).toFixed(1)} KB · pushed{" "}
-                          {formatSynced(e.syncedAt)}
-                        </p>
-                        {e.description && (
-                          <p className="text-muted-foreground mt-0.5 truncate text-xs">{e.description}</p>
-                        )}
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void handleRestore(e.slug)}
-                        disabled={restoringSlug === e.slug}
-                      >
-                        {restoringSlug === e.slug ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <CloudDownload className="size-3.5" />
-                        )}
-                        Restore
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </SectionCard>
+        <SectionCard
+          title="Restore from cloud"
+          description="Skills present in your OnyxBase cloud but not installed here. Nothing is ever auto-restored or auto-deleted — restore is always your explicit action."
+        >
+          {cloudOnly.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              {cloudConfigured
+                ? "No cloud-only skills — every cloud skill is installed locally."
+                : "Cloud restore requires an OnyxBase API key."}
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {cloudOnly.map((e) => (
+                <li
+                  key={e.slug}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs font-medium">{e.slug}</p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {e.fileCount} file(s) · {(e.rawBytes / 1024).toFixed(1)} KB · pushed{" "}
+                      {formatSynced(e.syncedAt)}
+                    </p>
+                    {e.description && (
+                      <p className="text-muted-foreground mt-0.5 truncate text-xs">{e.description}</p>
+                    )}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleRestore(e.slug)}
+                    disabled={restoringSlug === e.slug}
+                  >
+                    {restoringSlug === e.slug ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <CloudDownload className="size-3.5" />
+                    )}
+                    Restore
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
 
-            <SectionCard
-              title="Raw skill metadata"
-              description="The exact Dexie rows behind the list above (troubleshooting)."
-            >
-              {rows.length === 0 ? (
-                <p className="text-muted-foreground text-sm">No skills installed.</p>
-              ) : (
-                <div className="space-y-2">
-                  {rows.map((s) => (
-                    <details key={s.id} className="rounded-lg border px-3 py-2">
-                      <summary className="cursor-pointer font-mono text-xs font-medium">{s.name}</summary>
-                      <pre className="text-muted-foreground mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">
-                        {JSON.stringify(s, null, 2)}
-                      </pre>
-                    </details>
-                  ))}
-                </div>
-              )}
-            </SectionCard>
-          </div>
-        )}
-      </div>
+        <SectionCard
+          title="Raw skill metadata"
+          description="The exact Dexie rows behind the list above (troubleshooting)."
+        >
+          {rows.length === 0 ? (
+            <p className="text-muted-foreground text-sm">No skills installed.</p>
+          ) : (
+            <div className="space-y-2">
+              {rows.map((s) => (
+                <details key={s.id} className="rounded-lg border px-3 py-2">
+                  <summary className="cursor-pointer font-mono text-xs font-medium">{s.name}</summary>
+                  <pre className="text-muted-foreground mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">
+                    {JSON.stringify(s, null, 2)}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+      </MoreOptions>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <AlertDialogContent>

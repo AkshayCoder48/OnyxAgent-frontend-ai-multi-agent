@@ -34,6 +34,7 @@ import {
   Switch,
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
+import { MoreOptions } from "@/components/settings/more-options";
 import { useAuth } from "@/hooks";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { cn } from "@/lib/utils";
@@ -627,6 +628,17 @@ function ProviderEditor({
   const [newModel, setNewModel] = useState("");
   const [fetchingModels, setFetchingModels] = useState(false);
 
+  /** Auto-expand the advanced area when the edited provider already carries
+   *  non-default advanced values, so nothing is silently hidden. */
+  const advancedNonDefault =
+    editing &&
+    (draft.model_type !== "chat" ||
+      draft.no_prefix === true ||
+      draft.thinking_enabled === true ||
+      draft.tools_enabled === false ||
+      !draft.is_active ||
+      (draft.disabled_params ?? []).length > 0);
+
   const addModel = () => {
     const m = newModel.trim();
     if (!m) return;
@@ -709,111 +721,6 @@ function ProviderEditor({
             onChange={(e) => onChange({ ...draft, base_url: e.target.value })}
           />
         </FormField>
-      </div>
-
-      {/* No-prefix option — when enabled, the runtime uses the base URL
-          as-is without appending /chat/completions. This is for providers
-          that have non-standard endpoint paths. */}
-      <div className="flex items-center gap-2">
-        <Switch
-          id="provider-no-prefix"
-          checked={draft.no_prefix ?? false}
-          onCheckedChange={(v) => onChange({ ...draft, no_prefix: v })}
-        />
-        <label htmlFor="provider-no-prefix" className="text-sm cursor-pointer">
-          Use raw base URL (no <code className="font-mono text-xs">/chat/completions</code> suffix)
-        </label>
-      </div>
-      <p className="text-xs text-muted-foreground -mt-2 ml-7">
-        When on, the app calls <code className="font-mono text-xs">{`{base_url}`}</code> directly
-        instead of <code className="font-mono text-xs">{`{base_url}/chat/completions`}</code>. Useful
-        for providers with non-standard endpoints.
-      </p>
-
-      {/* Thinking toggle — for providers like Poolside that support
-          chat_template_kwargs: {enable_thinking: true} */}
-      <div className="flex items-center gap-2">
-        <Switch
-          id="provider-thinking"
-          checked={draft.thinking_enabled ?? false}
-          onCheckedChange={(v) => onChange({ ...draft, thinking_enabled: v })}
-        />
-        <label htmlFor="provider-thinking" className="text-sm cursor-pointer">
-          Thinking enabled
-        </label>
-      </div>
-      <p className="text-xs text-muted-foreground -mt-2 ml-7">
-        Sends <code className="font-mono text-xs">{"chat_template_kwargs: {enable_thinking: true}"}</code> in the
-        request body. For providers like Poolside that support native reasoning tokens.
-      </p>
-
-      {/* Request parameters — some model routes reject standard params
-          (e.g. temperature) with HTTP 400 unsupported_parameter. Users can
-          disable them per provider here; the runtime ALSO self-heals by
-          auto-stripping a rejected param and retrying once. */}
-      <div className="rounded-lg border border-foreground/10 bg-muted/30 p-3 space-y-3">
-        <div className="text-sm font-medium">Request parameters</div>
-        <p className="text-xs text-muted-foreground">
-          Disable parameters this model route rejects. If a request still fails with{" "}
-          <code className="font-mono text-xs">unsupported_parameter</code>, Onyx auto-strips the
-          parameter and retries.
-        </p>
-        <div className="flex items-center gap-2">
-          <Switch
-            id="provider-param-temperature"
-            checked={!(draft.disabled_params ?? []).includes("temperature")}
-            onCheckedChange={(v) =>
-              onChange({
-                ...draft,
-                disabled_params: v
-                  ? (draft.disabled_params ?? []).filter((x) => x !== "temperature")
-                  : [...(draft.disabled_params ?? []), "temperature"],
-              })
-            }
-          />
-          <label htmlFor="provider-param-temperature" className="text-sm cursor-pointer">
-            Temperature
-          </label>
-        </div>
-        <div className="flex items-center gap-2">
-          <Switch
-            id="provider-param-reasoning"
-            checked={
-              !(draft.disabled_params ?? []).includes("reasoning_effort") &&
-              !(draft.disabled_params ?? []).includes("thinking")
-            }
-            onCheckedChange={(v) =>
-              onChange({
-                ...draft,
-                disabled_params: v
-                  ? (draft.disabled_params ?? []).filter(
-                      (x) => x !== "reasoning_effort" && x !== "thinking",
-                    )
-                  : [...(draft.disabled_params ?? []), "reasoning_effort", "thinking"],
-              })
-            }
-          />
-          <label htmlFor="provider-param-reasoning" className="text-sm cursor-pointer">
-            Reasoning effort
-          </label>
-        </div>
-        <div className="flex items-center gap-2">
-          <Switch
-            id="provider-param-stream-options"
-            checked={!(draft.disabled_params ?? []).includes("stream_options")}
-            onCheckedChange={(v) =>
-              onChange({
-                ...draft,
-                disabled_params: v
-                  ? (draft.disabled_params ?? []).filter((x) => x !== "stream_options")
-                  : [...(draft.disabled_params ?? []), "stream_options"],
-              })
-            }
-          />
-          <label htmlFor="provider-param-stream-options" className="text-sm cursor-pointer">
-            Stream usage stats
-          </label>
-        </div>
       </div>
 
       <FormField
@@ -908,101 +815,217 @@ function ProviderEditor({
         )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <Switch
-          id="provider-active"
-          checked={draft.is_active}
-          onCheckedChange={(v) => onChange({ ...draft, is_active: v })}
-        />
-        <label htmlFor="provider-active" className="text-sm">
-          Active (show in chat model picker)
-        </label>
-      </div>
-
-      {/* API endpoint type — controls whether the agent hits
-          /v1/chat/completions (universal, works with every OpenAI-compatible
-          provider including g4f.space) or /v1/responses (OpenAI-direct only).
-          Defaulting to "chat" is what fixes the stuck-at-thinking bug users
-          hit when they pointed the app at g4f.space — that provider doesn't
-          implement /v1/responses and the SSE parser hung forever waiting for
-          a chunk that never came. */}
-      <div>
-        <span className="text-sm font-medium block">API endpoint type</span>
-        <p className="text-xs text-muted-foreground mb-2">
-          Most OpenAI-compatible providers (OpenRouter, Groq, Together, Ollama,
-          vLLM, LM Studio, g4f.space, …) only support{" "}
-          <code className="font-mono">/v1/chat/completions</code>. Use the
-          Responses API only when talking to OpenAI directly.
-        </p>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <button
-            type="button"
-            onClick={() => onChange({ ...draft, model_type: "chat" })}
-            className={`text-left rounded-lg border p-3 transition-colors ${
-              draft.model_type === "chat"
-                ? "border-primary bg-primary/5 ring-1 ring-primary"
-                : "border-foreground/15 hover:border-foreground/30"
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  draft.model_type === "chat" ? "bg-primary" : "bg-muted-foreground/40"
-                }`}
-              />
-              <span className="font-medium text-sm">Chat Completions</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1 ml-4">
-              <code className="font-mono">/v1/chat/completions</code> — works
-              with all providers
-            </p>
-          </button>
-          <button
-            type="button"
-            onClick={() => onChange({ ...draft, model_type: "responses" })}
-            className={`text-left rounded-lg border p-3 transition-colors ${
-              draft.model_type === "responses"
-                ? "border-primary bg-primary/5 ring-1 ring-primary"
-                : "border-foreground/15 hover:border-foreground/30"
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  draft.model_type === "responses" ? "bg-primary" : "bg-muted-foreground/40"
-                }`}
-              />
-              <span className="font-medium text-sm">Responses API</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1 ml-4">
-              <code className="font-mono">/v1/responses</code> — OpenAI direct only
-            </p>
-          </button>
-        </div>
-      </div>
-
-      {/* Tool calling toggle — when off, NO tools array is sent in the
-          request body. Some providers (notably certain g4f models) reject
-          any request that includes a tools array via HTTP 403, which
-          surfaces as stuck-at-thinking because the SSE stream never starts.
-          With this off the user can still chat in text-only mode. */}
-      <div className="rounded-lg border border-foreground/15 p-3">
-        <div className="flex items-start justify-between gap-3">
+      {/* ── Advanced: everything beyond the essentials lives behind one
+          consistent "More options ▾" disclosure (shared component). ── */}
+      <MoreOptions defaultOpen={advancedNonDefault}>
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-foreground/10 p-3">
           <div className="min-w-0">
-            <p className="text-sm font-medium">Tool calling</p>
+            <p className="text-sm font-medium">Active</p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Disable if the provider returns 403 errors on tool calls (some
-              g4f / free models). Text-only mode still works for chat — the
-              agent just can&apos;t call create_file, run_python, etc.
+              Show this provider&apos;s models in the chat model picker.
             </p>
           </div>
           <Switch
-            id="provider-tools-enabled"
-            checked={draft.tools_enabled}
-            onCheckedChange={(v) => onChange({ ...draft, tools_enabled: v })}
+            id="provider-active"
+            checked={draft.is_active}
+            onCheckedChange={(v) => onChange({ ...draft, is_active: v })}
           />
         </div>
-      </div>
+
+        {/* API endpoint type — controls whether the agent hits
+            /v1/chat/completions (universal, works with every OpenAI-compatible
+            provider including g4f.space) or /v1/responses (OpenAI-direct only).
+            Defaulting to "chat" is what fixes the stuck-at-thinking bug users
+            hit when they pointed the app at g4f.space — that provider doesn't
+            implement /v1/responses and the SSE parser hung forever waiting for
+            a chunk that never came. */}
+        <div>
+          <span className="text-sm font-medium block">API endpoint type</span>
+          <p className="text-xs text-muted-foreground mb-2">
+            Most OpenAI-compatible providers (OpenRouter, Groq, Together, Ollama,
+            vLLM, LM Studio, g4f.space, …) only support{" "}
+            <code className="font-mono">/v1/chat/completions</code>. Use the
+            Responses API only when talking to OpenAI directly.
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => onChange({ ...draft, model_type: "chat" })}
+              className={`text-left rounded-lg border p-3 transition-colors ${
+                draft.model_type === "chat"
+                  ? "border-primary bg-primary/5 ring-1 ring-primary"
+                  : "border-foreground/15 hover:border-foreground/30"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    draft.model_type === "chat" ? "bg-primary" : "bg-muted-foreground/40"
+                  }`}
+                />
+                <span className="font-medium text-sm">Chat Completions</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1 ml-4">
+                <code className="font-mono">/v1/chat/completions</code> — works
+                with all providers
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange({ ...draft, model_type: "responses" })}
+              className={`text-left rounded-lg border p-3 transition-colors ${
+                draft.model_type === "responses"
+                  ? "border-primary bg-primary/5 ring-1 ring-primary"
+                  : "border-foreground/15 hover:border-foreground/30"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    draft.model_type === "responses" ? "bg-primary" : "bg-muted-foreground/40"
+                  }`}
+                />
+                <span className="font-medium text-sm">Responses API</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1 ml-4">
+                <code className="font-mono">/v1/responses</code> — OpenAI direct only
+              </p>
+            </button>
+          </div>
+        </div>
+
+        {/* No-prefix option — when enabled, the runtime uses the base URL
+            as-is without appending /chat/completions. This is for providers
+            that have non-standard endpoint paths. */}
+        <div className="flex flex-col gap-1 rounded-lg border border-foreground/10 p-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="provider-no-prefix"
+              checked={draft.no_prefix ?? false}
+              onCheckedChange={(v) => onChange({ ...draft, no_prefix: v })}
+            />
+            <label htmlFor="provider-no-prefix" className="text-sm cursor-pointer">
+              Use raw base URL (no <code className="font-mono text-xs">/chat/completions</code> suffix)
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground ml-7">
+            When on, the app calls <code className="font-mono text-xs">{`{base_url}`}</code> directly
+            instead of <code className="font-mono text-xs">{`{base_url}/chat/completions`}</code>. Useful
+            for providers with non-standard endpoints.
+          </p>
+        </div>
+
+        {/* Thinking toggle — for providers like Poolside that support
+            chat_template_kwargs: {enable_thinking: true} */}
+        <div className="flex flex-col gap-1 rounded-lg border border-foreground/10 p-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="provider-thinking"
+              checked={draft.thinking_enabled ?? false}
+              onCheckedChange={(v) => onChange({ ...draft, thinking_enabled: v })}
+            />
+            <label htmlFor="provider-thinking" className="text-sm cursor-pointer">
+              Thinking enabled
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground ml-7">
+            Sends <code className="font-mono text-xs">{"chat_template_kwargs: {enable_thinking: true}"}</code> in the
+            request body. For providers like Poolside that support native reasoning tokens.
+          </p>
+        </div>
+
+        {/* Tool calling toggle — when off, NO tools array is sent in the
+            request body. Some providers (notably certain g4f models) reject
+            any request that includes a tools array via HTTP 403, which
+            surfaces as stuck-at-thinking because the SSE stream never starts.
+            With this off the user can still chat in text-only mode. */}
+        <div className="rounded-lg border border-foreground/15 p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Tool calling</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Disable if the provider returns 403 errors on tool calls (some
+                g4f / free models). Text-only mode still works for chat — the
+                agent just can&apos;t call create_file, run_python, etc.
+              </p>
+            </div>
+            <Switch
+              id="provider-tools-enabled"
+              checked={draft.tools_enabled}
+              onCheckedChange={(v) => onChange({ ...draft, tools_enabled: v })}
+            />
+          </div>
+        </div>
+
+        {/* Request parameters — some model routes reject standard params
+            (e.g. temperature) with HTTP 400 unsupported_parameter. Users can
+            disable them per provider here; the runtime ALSO self-heals by
+            auto-stripping a rejected param and retrying once. */}
+        <div className="rounded-lg border border-foreground/10 bg-muted/30 p-3 space-y-3">
+          <div className="text-sm font-medium">Request parameters</div>
+          <p className="text-xs text-muted-foreground">
+            Disable parameters this model route rejects. If a request still fails with{" "}
+            <code className="font-mono text-xs">unsupported_parameter</code>, Onyx auto-strips the
+            parameter and retries.
+          </p>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="provider-param-temperature"
+              checked={!(draft.disabled_params ?? []).includes("temperature")}
+              onCheckedChange={(v) =>
+                onChange({
+                  ...draft,
+                  disabled_params: v
+                    ? (draft.disabled_params ?? []).filter((x) => x !== "temperature")
+                    : [...(draft.disabled_params ?? []), "temperature"],
+                })
+              }
+            />
+            <label htmlFor="provider-param-temperature" className="text-sm cursor-pointer">
+              Temperature
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="provider-param-reasoning"
+              checked={
+                !(draft.disabled_params ?? []).includes("reasoning_effort") &&
+                !(draft.disabled_params ?? []).includes("thinking")
+              }
+              onCheckedChange={(v) =>
+                onChange({
+                  ...draft,
+                  disabled_params: v
+                    ? (draft.disabled_params ?? []).filter(
+                        (x) => x !== "reasoning_effort" && x !== "thinking",
+                      )
+                    : [...(draft.disabled_params ?? []), "reasoning_effort", "thinking"],
+                })
+              }
+            />
+            <label htmlFor="provider-param-reasoning" className="text-sm cursor-pointer">
+              Reasoning effort
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="provider-param-stream-options"
+              checked={!(draft.disabled_params ?? []).includes("stream_options")}
+              onCheckedChange={(v) =>
+                onChange({
+                  ...draft,
+                  disabled_params: v
+                    ? (draft.disabled_params ?? []).filter((x) => x !== "stream_options")
+                    : [...(draft.disabled_params ?? []), "stream_options"],
+                })
+              }
+            />
+            <label htmlFor="provider-param-stream-options" className="text-sm cursor-pointer">
+              Stream usage stats
+            </label>
+          </div>
+        </div>
+      </MoreOptions>
 
       <div className="flex items-center justify-end gap-2 pt-2 border-t border-foreground/10">
         <Button variant="ghost" onClick={onCancel} disabled={saving}>

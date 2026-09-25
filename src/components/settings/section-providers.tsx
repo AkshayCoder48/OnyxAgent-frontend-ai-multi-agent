@@ -56,6 +56,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 
 import { useProviders } from "@/hooks/use-data";
 import type { AIProvider, AIModelType } from "@/types";
+import { MoreOptions } from "@/components/settings/more-options";
 
 interface FormState {
   name: string;
@@ -207,6 +208,16 @@ export function SectionProviders() {
     }
   }
 
+  /** Auto-expand the advanced area when the edited provider already carries
+   *  non-default advanced values, so nothing is silently hidden. */
+  const advancedNonDefault =
+    !!editing &&
+    (form.model_type !== "chat" ||
+      !form.tools_enabled ||
+      form.thinking_enabled ||
+      editing.is_active ||
+      form.disabled_params.length > 0);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2">
@@ -306,6 +317,7 @@ export function SectionProviders() {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* ── Essentials: everything needed to get a provider running ── */}
             <div className="space-y-1.5">
               <Label htmlFor="p-name">Name</Label>
               <Input
@@ -361,7 +373,9 @@ export function SectionProviders() {
                 These IDs are sent verbatim to the provider&apos;s API.
               </p>
             </div>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+
+            {/* ── Advanced: endpoint shape, capabilities, request params ── */}
+            <MoreOptions defaultOpen={advancedNonDefault}>
               <div className="space-y-1.5">
                 <Label>Model type</Label>
                 <Select
@@ -376,120 +390,124 @@ export function SectionProviders() {
                     <SelectItem value="responses">responses</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-muted-foreground text-xs">
+                  Most OpenAI-compatible providers use <code className="text-[10px]">chat</code>.
+                  Pick <code className="text-[10px]">responses</code> only for OpenAI direct.
+                </p>
               </div>
-            </div>
-            <div className="flex flex-col gap-3 rounded-md border p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-tools">Tools enabled</Label>
-                  <p className="text-muted-foreground text-xs">Allow function/tool calls.</p>
+              <div className="flex flex-col gap-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-tools">Tools enabled</Label>
+                    <p className="text-muted-foreground text-xs">Allow function/tool calls.</p>
+                  </div>
+                  <Switch
+                    id="p-tools"
+                    checked={form.tools_enabled}
+                    onCheckedChange={(v) => setForm({ ...form, tools_enabled: v })}
+                  />
                 </div>
-                <Switch
-                  id="p-tools"
-                  checked={form.tools_enabled}
-                  onCheckedChange={(v) => setForm({ ...form, tools_enabled: v })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-thinking">Thinking enabled</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Sends <code className="text-[10px]">chat_template_kwargs: {"{enable_thinking: true}"}</code> for providers like Poolside that support native reasoning tokens.
-                  </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-thinking">Thinking enabled</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Sends <code className="text-[10px]">chat_template_kwargs: {"{enable_thinking: true}"}</code> for providers like Poolside that support native reasoning tokens.
+                    </p>
+                  </div>
+                  <Switch
+                    id="p-thinking"
+                    checked={form.thinking_enabled}
+                    onCheckedChange={(v) => setForm({ ...form, thinking_enabled: v })}
+                  />
                 </div>
-                <Switch
-                  id="p-thinking"
-                  checked={form.thinking_enabled}
-                  onCheckedChange={(v) => setForm({ ...form, thinking_enabled: v })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-active">Active</Label>
-                  <p className="text-muted-foreground text-xs">Only one provider can be active.</p>
-                </div>
-                <Switch
-                  id="p-active"
-                  checked={form.is_active}
-                  onCheckedChange={(v) => setForm({ ...form, is_active: v })}
-                />
-              </div>
-            </div>
-            <div className="space-y-3 rounded-md border p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label>Request parameters</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Disable parameters this model route rejects (e.g. <code className="text-[10px]">temperature</code>). If a request still fails with{" "}
-                    <code className="text-[10px]">unsupported_parameter</code>, Onyx auto-strips the parameter and retries.
-                  </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-active">Active</Label>
+                    <p className="text-muted-foreground text-xs">Only one provider can be active.</p>
+                  </div>
+                  <Switch
+                    id="p-active"
+                    checked={form.is_active}
+                    onCheckedChange={(v) => setForm({ ...form, is_active: v })}
+                  />
                 </div>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-temperature">Temperature</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Send <code className="text-[10px]">temperature</code> in request bodies.
-                  </p>
+              <div className="space-y-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label>Request parameters</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Disable parameters this model route rejects (e.g. <code className="text-[10px]">temperature</code>). If a request still fails with{" "}
+                      <code className="text-[10px]">unsupported_parameter</code>, Onyx auto-strips the parameter and retries.
+                    </p>
+                  </div>
                 </div>
-                <Switch
-                  id="p-temperature"
-                  checked={!form.disabled_params.includes("temperature")}
-                  onCheckedChange={(v) =>
-                    setForm({
-                      ...form,
-                      disabled_params: v
-                        ? form.disabled_params.filter((x) => x !== "temperature")
-                        : [...form.disabled_params, "temperature"],
-                    })
-                  }
-                />
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-reasoning">Reasoning effort</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Send <code className="text-[10px]">reasoning_effort</code> /{" "}
-                    <code className="text-[10px]">thinking</code> hints (when set in chat).
-                  </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-temperature">Temperature</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Send <code className="text-[10px]">temperature</code> in request bodies.
+                    </p>
+                  </div>
+                  <Switch
+                    id="p-temperature"
+                    checked={!form.disabled_params.includes("temperature")}
+                    onCheckedChange={(v) =>
+                      setForm({
+                        ...form,
+                        disabled_params: v
+                          ? form.disabled_params.filter((x) => x !== "temperature")
+                          : [...form.disabled_params, "temperature"],
+                      })
+                    }
+                  />
                 </div>
-                <Switch
-                  id="p-reasoning"
-                  checked={
-                    !form.disabled_params.includes("reasoning_effort") &&
-                    !form.disabled_params.includes("thinking")
-                  }
-                  onCheckedChange={(v) =>
-                    setForm({
-                      ...form,
-                      disabled_params: v
-                        ? form.disabled_params.filter((x) => x !== "reasoning_effort" && x !== "thinking")
-                        : [...form.disabled_params, "reasoning_effort", "thinking"],
-                    })
-                  }
-                />
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <Label htmlFor="p-streamopts">Stream usage stats</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Send <code className="text-[10px]">stream_options: {"{include_usage: true}"}</code> with streaming requests.
-                  </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-reasoning">Reasoning effort</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Send <code className="text-[10px]">reasoning_effort</code> /{" "}
+                      <code className="text-[10px]">thinking</code> hints (when set in chat).
+                    </p>
+                  </div>
+                  <Switch
+                    id="p-reasoning"
+                    checked={
+                      !form.disabled_params.includes("reasoning_effort") &&
+                      !form.disabled_params.includes("thinking")
+                    }
+                    onCheckedChange={(v) =>
+                      setForm({
+                        ...form,
+                        disabled_params: v
+                          ? form.disabled_params.filter((x) => x !== "reasoning_effort" && x !== "thinking")
+                          : [...form.disabled_params, "reasoning_effort", "thinking"],
+                      })
+                    }
+                  />
                 </div>
-                <Switch
-                  id="p-streamopts"
-                  checked={!form.disabled_params.includes("stream_options")}
-                  onCheckedChange={(v) =>
-                    setForm({
-                      ...form,
-                      disabled_params: v
-                        ? form.disabled_params.filter((x) => x !== "stream_options")
-                        : [...form.disabled_params, "stream_options"],
-                    })
-                  }
-                />
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <Label htmlFor="p-streamopts">Stream usage stats</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Send <code className="text-[10px]">stream_options: {"{include_usage: true}"}</code> with streaming requests.
+                    </p>
+                  </div>
+                  <Switch
+                    id="p-streamopts"
+                    checked={!form.disabled_params.includes("stream_options")}
+                    onCheckedChange={(v) =>
+                      setForm({
+                        ...form,
+                        disabled_params: v
+                          ? form.disabled_params.filter((x) => x !== "stream_options")
+                          : [...form.disabled_params, "stream_options"],
+                      })
+                    }
+                  />
+                </div>
               </div>
-            </div>
+            </MoreOptions>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
