@@ -53,6 +53,7 @@ export function ChatInput({
   const [uploadingCount, setUploadingCount] = useState(0);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [isFocused, setIsFocused] = useState(false);
+  const [sendPulse, setSendPulse] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -73,13 +74,34 @@ export function ChatInput({
     }
   }, [isProcessing]);
 
-  // Auto-resize textarea
+  // Auto-resize textarea — MEASURED HEIGHT, ANIMATED (PRD §20 seamless
+  // motion: the resize must never snap). Two-phase write: restore the
+  // previous px height, then flip to the newly measured one on the next
+  // frame so the CSS height transition (.mb-height) interpolates between
+  // the two instead of jumping (a direct auto→px flip can't transition).
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+    const el = textareaRef.current;
+    if (!el) return;
+    const prev = el.style.height;
+    el.style.height = "auto";
+    const next = `${Math.min(el.scrollHeight, 200)}px`;
+    if (prev && prev !== next) {
+      el.style.height = prev;
+      const raf = requestAnimationFrame(() => {
+        el.style.height = next;
+      });
+      return () => cancelAnimationFrame(raf);
     }
+    el.style.height = next;
   }, [message]);
+
+  // Prompt-submission pulse (PRD §20): a subtle scale/blur breath on the
+  // composer as the message leaves (.mb-send-pulse). Toggling the class
+  // off→on across two frames restarts the one-shot animation on every send.
+  const pulseComposer = useCallback(() => {
+    setSendPulse(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => setSendPulse(true)));
+  }, []);
 
   const runSlashCommand = useCallback(
     (cmd: SlashCommand) => {
@@ -93,8 +115,9 @@ export function ChatInput({
       onSend(cmd.action.replaceWith, fileIds, files);
       setMessage("");
       setAttachedFiles([]);
+      pulseComposer();
     },
-    [attachedFiles, onSend, slashContext],
+    [attachedFiles, onSend, slashContext, pulseComposer],
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -112,6 +135,7 @@ export function ChatInput({
     onSend(trimmed || "Analyze the attached file(s)", fileIds, files);
     setMessage("");
     setAttachedFiles([]);
+    pulseComposer();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -182,7 +206,7 @@ export function ChatInput({
   const canSend = message.trim().length > 0 || attachedFiles.length > 0;
 
   return (
-    <form onSubmit={handleSubmit} className="relative">
+    <form onSubmit={handleSubmit} className={cn("relative", sendPulse && "mb-send-pulse")}>
       <input
         ref={fileInputRef}
         type="file"
@@ -260,7 +284,7 @@ export function ChatInput({
             disabled={disabled}
             rows={1}
             className={cn(
-              "placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
+              "placeholder:text-muted-foreground/60 mb-height min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
               isFocused && "placeholder:text-muted-foreground/40",
             )}
           />

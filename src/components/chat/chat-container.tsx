@@ -572,12 +572,20 @@ function ChatUI({
               <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
             </div>
           ) : (
-            <MessageList
-              messages={messages}
-              onRegenerate={onRegenerate}
-              onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
-              isRegenerating={isProcessing}
-            />
+            // Chat switching (PRD §20): the conversation store clears +
+            // reloads messages — keying the wrapper on the conversation id
+            // replays a light 150ms opacity cross-fade (.mb-thread-in) so
+            // the new thread settles in instead of hard-cutting. Opacity
+            // only: the thread can be a large subtree, so no blur/transform
+            // here (mobile perf rule).
+            <div key={conversationId ?? "new-chat"} className="mb-thread-in">
+              <MessageList
+                messages={messages}
+                onRegenerate={onRegenerate}
+                onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
+                isRegenerating={isProcessing}
+              />
+            </div>
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
               stays until the AI generates its first character/tool call.

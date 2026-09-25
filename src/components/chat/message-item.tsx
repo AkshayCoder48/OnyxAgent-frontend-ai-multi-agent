@@ -28,7 +28,7 @@ import {
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
-import { GenUIBlock } from "@/components/genui/GenUIBlock";
+import { GenUICreationGate } from "@/components/genui/GenUICreationGate";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { extractGenUINodes, buildTextSegments } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
@@ -181,8 +181,8 @@ function TextBubble({
    *  the text no longer contains sentinels, these are used to render the
    *  GenUI block. During streaming, the live-parsed spec takes precedence. */
   genuiNodes?: GenUINode[];
-  /** True while the message is actively streaming. Drives the GenUIBlock's
-   *  shimmer placeholder. */
+  /** True while the message is actively streaming. Drives the GenUI creation
+   *  gate ("Creating …" line → cross-fade into the rendered block). */
   isStreaming?: boolean;
 }) {
   // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
@@ -284,10 +284,13 @@ function TextBubble({
             </div>
           );
         }
-        // GenUI segment
+        // GenUI segment — PRD §21 creation gate: while the block streams, a
+        // thinking-UI-style "Creating …" line stands in (NO shimmer
+        // placeholder card); when the spec completes it cross-fades into the
+        // rendered block (creation line blurs out as the block blur-in).
         return (
           <div key={i} className={cn(i > 0 && "mt-3")}>
-            <GenUIBlock spec={seg.spec!} streaming={seg.streaming} />
+            <GenUICreationGate spec={seg.spec} streaming={seg.streaming} />
           </div>
         );
       })}

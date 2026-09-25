@@ -121,7 +121,8 @@ function ConversationItem({
       className={cn(
         // Date-grouped history rows — the ACTIVE row is a soft-terracotta
         // pill (#F0E3D5 fill, #EAD6C4 hairline) with a terracotta icon.
-        "group relative flex min-h-[40px] cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all",
+        // New rows materialize softly (PRD §20 motion system).
+        "mb-fade-in-soft group relative flex min-h-[40px] cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all",
         isActive
           ? "bg-accent text-accent-foreground border border-[#ead6c4] dark:border-[#4c3d2a]"
           : "text-foreground/70 hover:bg-foreground/5 hover:text-foreground border border-transparent",

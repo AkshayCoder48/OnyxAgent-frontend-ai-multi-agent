@@ -33,9 +33,6 @@ export const ghostButtonClass =
 export const monoLabelClass =
   "font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase";
 
-export const collapsePanelClass =
-  "grid transition-[grid-template-rows] duration-200 ease-out";
-
 /** Shimmering label used while work is in flight (terracotta-tinted). */
 export function ShimmerLabel({
   children,
@@ -58,7 +55,9 @@ export function ShimmerLabel({
   );
 }
 
-/** Animated disclosure panel — animates between 0 and measured height. */
+/** Animated disclosure panel — animates between 0 and measured height WITH a
+ * soft opacity fade (the `.mb-collapse` utility from the Terra motion system:
+ * grid-template-rows 0fr→1fr + opacity + visibility). */
 export function CollapsePanel({
   open,
   children,
@@ -69,10 +68,7 @@ export function CollapsePanel({
   className?: string;
 }) {
   return (
-    <div
-      className={cn(collapsePanelClass, open ? "[grid-template-rows:1fr]" : "[grid-template-rows:0fr]", className)}
-      aria-hidden={!open}
-    >
+    <div className={cn("mb-collapse", className)} data-open={open} aria-hidden={!open}>
       <div className="min-h-0 overflow-hidden">{children}</div>
     </div>
   );

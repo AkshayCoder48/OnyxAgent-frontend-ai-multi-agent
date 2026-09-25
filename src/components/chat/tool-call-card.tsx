@@ -689,16 +689,18 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         />
 
         {/* Tool name — a small muted glyph for recognition, then the label.
-            NO icon box, NO card border: just the name on the line. */}
+            NO icon box, NO card border: just the name on the line. The
+            running→completed swap cross-fades (.mb-fade-in-soft keyed on the
+            phase) instead of hard-cutting (PRD §20). */}
         {isRunning ? (
-          <>
+          <span key="running" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
             <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
             <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
               {liveCaption}
             </ShimmerLabel>
-          </>
+          </span>
         ) : (
-          <>
+          <span key="settled" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
             <ToolIcon
               className={cn(
                 "h-3.5 w-3.5 shrink-0",
@@ -709,15 +711,19 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {friendlyName}
             </span>
-          </>
+          </span>
         )}
         {/* The mono argument chip — the primary arg rides next to the label. */}
         {inputHint && !isRunning ? (
-          <span className={cn(chipClass, "shrink truncate")}>{inputHint}</span>
+          <span className={cn(chipClass, "mb-fade-in-soft shrink truncate")}>{inputHint}</span>
         ) : null}
 
-        {/* Right actions — duration badge + settle state + raw toggle. */}
-        <span className="ml-auto flex shrink-0 items-center gap-0.5">
+        {/* Right actions — duration badge + settle state + raw toggle. The
+            running↔settled swap cross-fades with the label above. */}
+        <span
+          key={isRunning ? "live" : "done"}
+          className="mb-fade-in-soft ml-auto flex shrink-0 items-center gap-0.5"
+        >
           {isRunning ? (
             <ToolLiveElapsed startedAt={toolCall.startedAt} />
           ) : (

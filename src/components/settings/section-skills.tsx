@@ -568,7 +568,7 @@ export function SectionSkills() {
                 const state = displayState(s);
                 const badge = syncBadge(state);
                 return (
-                  <TableRow key={s.id} className={cn(!s.is_active && "opacity-55")}>
+                  <TableRow key={s.id} className={cn("mb-fade-in-soft", !s.is_active && "opacity-55")}>
                     <TableCell>
                       <Switch
                         checked={!!s.is_active}
@@ -669,7 +669,7 @@ export function SectionSkills() {
               {rows.map((s) => (
                 <div
                   key={s.id}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2"
+                  className="mb-fade-in-soft flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2"
                 >
                   <div className="min-w-0">
                     <p className="truncate font-mono text-xs font-medium">{s.name}</p>
@@ -707,7 +707,7 @@ export function SectionSkills() {
               {cloudOnly.map((e) => (
                 <li
                   key={e.slug}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
+                  className="mb-fade-in-soft flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
                 >
                   <div className="min-w-0">
                     <p className="truncate font-mono text-xs font-medium">{e.slug}</p>
@@ -747,7 +747,7 @@ export function SectionSkills() {
           ) : (
             <div className="space-y-2">
               {rows.map((s) => (
-                <details key={s.id} className="rounded-lg border px-3 py-2">
+                <details key={s.id} className="mb-fade-in-soft rounded-lg border px-3 py-2">
                   <summary className="cursor-pointer font-mono text-xs font-medium">{s.name}</summary>
                   <pre className="text-muted-foreground mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">
                     {JSON.stringify(s, null, 2)}

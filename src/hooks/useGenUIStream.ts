@@ -73,7 +73,11 @@ function segmentsToResult(segments: TextSegment[]): UseGenUIStreamResult {
   const allNodes: GenUINode[] = [];
   let inGenUI = false;
   for (const seg of segments) {
-    if (seg.type !== "genui" || !seg.spec) continue;
+    if (seg.type !== "genui") continue;
+    // A spec-less streaming segment (block open, nothing parsed yet —
+    // PRD §21 creation line) still counts as "inside a GenUI block".
+    if (seg.streaming) inGenUI = true;
+    if (!seg.spec) continue;
     allNodes.push(...seg.spec.nodes);
     inGenUI = Boolean(seg.streaming);
   }

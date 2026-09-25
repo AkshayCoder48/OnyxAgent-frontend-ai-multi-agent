@@ -29,7 +29,7 @@ export function SlashCommandPalette({
 
   if (commands.length === 0) {
     return (
-      <div className="border-foreground/10 bg-popover absolute bottom-full left-0 mb-2 w-full max-w-sm rounded-xl border p-3 shadow-lg">
+      <div className="border-foreground/10 bg-popover mb-blur-in absolute bottom-full left-0 mb-2 w-full max-w-sm rounded-xl border p-3 shadow-lg">
         <p className="text-foreground/55 text-xs">
           No matching commands. Press <kbd className="font-mono">Esc</kbd> to dismiss.
         </p>
@@ -38,7 +38,7 @@ export function SlashCommandPalette({
   }
 
   return (
-    <div className="border-foreground/10 bg-popover absolute bottom-full left-0 mb-2 w-full max-w-md overflow-hidden rounded-xl border shadow-lg">
+    <div className="border-foreground/10 bg-popover mb-blur-in absolute bottom-full left-0 mb-2 w-full max-w-md overflow-hidden rounded-xl border shadow-lg">
       <div className="border-foreground/8 text-foreground/55 flex items-center justify-between border-b px-3 py-1.5 font-mono text-[10px] tracking-wider uppercase">
         <span>Commands</span>
         <span className="hidden sm:inline">↑↓ to navigate · ↵ to run · esc to dismiss</span>

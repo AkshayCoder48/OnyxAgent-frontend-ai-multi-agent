@@ -530,6 +530,14 @@ export function buildTextSegments(
       if (cached) {
         segments.push({ type: "genui", spec: cached, streaming: true });
         pushed = true;
+      } else {
+        // PRD §21: the block is open but nothing has parsed into a node
+        // yet (the JSON is still arriving). Emit a spec-less streaming
+        // segment so the UI can show the "Creating …" line from the very
+        // first sentinel byte instead of a blank gap. Callers treat a
+        // spec-less genui segment as "creating, nothing renderable yet".
+        segments.push({ type: "genui", spec: undefined, streaming: true });
+        pushed = true;
       }
     }
 

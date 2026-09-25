@@ -117,7 +117,7 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
           <button
             key={p.title}
             onClick={() => onPick(p.prompt)}
-            className="glass-card hover-lift ripple-tap group flex items-start gap-2.5 rounded-xl border border-border p-3 text-left sm:p-3.5 sm:gap-3"
+            className="glass-card hover-lift ripple-tap mb-press group flex items-start gap-2.5 rounded-xl border border-border p-3 text-left sm:p-3.5 sm:gap-3"
           >
             <p.icon className={`mt-0.5 h-4 w-4 shrink-0 ${p.color} group-hover:scale-110 transition-transform`} />
             <div className="min-w-0 flex-1">

@@ -62,15 +62,11 @@ export function MoreOptions({
         <ChevronDown className={cn("size-3.5 transition-transform", isOpen && "rotate-180")} />
       </button>
 
-      {/* Smooth height + opacity reveal (0fr→1fr grid rows). `invisible`
-          keeps collapsed controls out of the tab order while letting the
-          fade-out finish before visibility actually flips. */}
-      <div
-        className={cn(
-          "grid transition-all duration-200 ease-out",
-          isOpen ? "grid-rows-[1fr] opacity-100" : "invisible grid-rows-[0fr] opacity-0",
-        )}
-      >
+      {/* Smooth height + opacity reveal (`.mb-collapse` — the shared Terra
+          motion-system disclosure: grid rows 0fr→1fr + opacity). Collapsed
+          content is `visibility:hidden` (delayed until the fade-out
+          finishes) so it never catches focus or screen-reader hits. */}
+      <div className="mb-collapse" data-open={isOpen}>
         <div className="overflow-hidden">
           <div className="space-y-4 pt-1">{children}</div>
         </div>

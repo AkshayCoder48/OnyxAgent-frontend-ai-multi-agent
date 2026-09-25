@@ -940,6 +940,7 @@
   0% {
     opacity: 0;
     transform: translateY(10px) scale(0.94);
+    filter: blur(3px);
   }
   60% {
     opacity: 1;
@@ -947,6 +948,7 @@
   100% {
     opacity: 1;
     transform: translateY(0) scale(1);
+    filter: blur(0);
   }
 }
 
@@ -960,10 +962,12 @@
   0% {
     opacity: 0;
     transform: translateY(6px);
+    filter: blur(3px);
   }
   100% {
     opacity: 1;
     transform: translateY(0);
+    filter: blur(0);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2841,5 +2845,244 @@ body.sidebar-open {
 @media (prefers-reduced-motion: reduce) {
   .title-reveal {
     animation: none;
+  }
+}
+
+/* ============================================================
+   TERRA MOTION SYSTEM — Task 4-c (PRD §20/§21)
+   One coherent motion-blur language for every surface: entrances
+   fade + slide + blur-to-sharp, exits blur away, disclosures
+   animate height + opacity, and every duration lives in the
+   150–320ms band with GPU-friendly properties only
+   (opacity / transform / filter / grid-template-rows).
+
+   Utilities (mb- = motion-blur):
+     .mb-fade-in       — 240ms fade + 4px rise + blur(4px)→0.
+                         Default entrance for cards, rows, chips.
+     .mb-fade-in-soft  — 160ms opacity-only. For text swaps (status
+                         chips), list rows — the cheapest possible
+                         transition so per-second re-renders stay free.
+     .mb-blur-in       — 320ms blur(8px) + scale(0.985)→sharp. For
+                         panel-like content appearing (menus, palettes,
+                         GenUI blocks materializing after creation).
+     .mb-fade-out-blur — 240ms exit: fades + blurs away, ends hidden
+                         (fill forwards). Pair with .mb-blur-in for
+                         cross-fades (GenUI creation line → block).
+     .mb-thread-in     — 150ms opacity-only container cross-fade
+                         (chat switching). No blur/transform on
+                         purpose: the thread can be a huge subtree.
+     .mb-collapse      — disclosure height + opacity via
+                         grid-template-rows 0fr→1fr. Driven by the
+                         data-open attribute (see CollapsePanel +
+                         MoreOptions). Content stays mounted; the
+                         collapsed state is visibility:hidden so it
+                         never catches focus or screen-reader hits.
+     .mb-press         — active scale(0.97) + brightness press
+                         feedback for non-Button touch targets
+                         (shadcn Button already ships active:scale-95).
+     .mb-height        — 180ms height transition for JS-measured
+                         heights (chat textarea auto-resize).
+
+   Staggered lists: reuse the existing `.stagger-in` wrapper.
+   Established one-shot entrances (step-card-in, round-in,
+   title-reveal, animate-message-in …) stay as-is — this section
+   extends the SAME language (they now blur-to-sharp too), it does
+   not compete with it.
+   ============================================================ */
+
+@keyframes mb-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+.mb-fade-in {
+  animation: mb-fade-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes mb-fade-in-soft {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.mb-fade-in-soft {
+  animation: mb-fade-in-soft 160ms ease-out both;
+}
+
+@keyframes mb-blur-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+}
+.mb-blur-in {
+  animation: mb-blur-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes mb-fade-out-blur {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    visibility: visible;
+  }
+  to {
+    opacity: 0;
+    filter: blur(4px);
+    visibility: hidden;
+  }
+}
+.mb-fade-out-blur {
+  animation: mb-fade-out-blur 240ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes mb-thread-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.mb-thread-in {
+  animation: mb-thread-in 150ms ease-out both;
+}
+
+/* Disclosure — grid-rows 0fr→1fr height + opacity. The single child
+   must be min-height:0 + overflow:hidden (both provided by the rule
+   below). visibility flips AFTER the close fade (0s delay 200ms) and
+   instantly on open, so collapsed controls leave the tab order
+   without cutting the fade-out short. */
+.mb-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 160ms ease-out,
+    visibility 0s 200ms;
+}
+.mb-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+.mb-collapse[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    grid-template-rows 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 200ms ease-out 40ms,
+    visibility 0s;
+}
+
+/* Press feedback for plain buttons / cards (shadcn Button already
+   has active:scale-95 + transition-transform of its own). */
+.mb-press {
+  transition: transform 120ms ease, filter 120ms ease;
+}
+.mb-press:active {
+  transform: scale(0.97);
+  filter: brightness(0.96);
+}
+
+/* Measured-height transition (chat textarea auto-resize): the JS sets
+   height:auto → reads scrollHeight → restores the old px → flips to
+   the new px on the next frame, so this transition interpolates. */
+.mb-height {
+  transition: height 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Prompt-submission pulse — the composer settles with a quick
+   scale/blur breath as the message leaves (PRD §20). */
+@keyframes mb-send-pulse {
+  0% {
+    filter: blur(0);
+    transform: scale(1);
+  }
+  35% {
+    filter: blur(1.5px);
+    transform: scale(0.996);
+  }
+  100% {
+    filter: blur(0);
+    transform: scale(1);
+  }
+}
+.mb-send-pulse {
+  animation: mb-send-pulse 280ms ease-out;
+}
+
+/* --- Overlay content blur-in (Dialog / Sheet / Popover / DropdownMenu /
+   Tooltip). The tailwind `animate-in` utilities already fade+zoom these;
+   a light blur-to-sharp on top unifies them with the motion system.
+   Implemented with @starting-style + transition so it runs IN PARALLEL
+   with the existing animation (no animation-property conflict) and is
+   pure progressive enhancement — browsers without @starting-style simply
+   keep the current fade+zoom. */
+[role="dialog"],
+[role="menu"],
+[role="tooltip"] {
+  transition: filter 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@starting-style {
+  [role="dialog"][data-state="open"],
+  [role="menu"][data-state="open"],
+  [role="tooltip"][data-state="delayed-open"] {
+    filter: blur(6px);
+  }
+}
+
+/* Reduced motion — the global 0.01ms rule at the top of the file
+   already neutralizes every animation/transition; these explicit
+   overrides additionally pin the visibility/opacity end-states so
+   collapsed disclosures and cross-fades land instantly and visibly. */
+@media (prefers-reduced-motion: reduce) {
+  .mb-fade-in,
+  .mb-fade-in-soft,
+  .mb-blur-in,
+  .mb-thread-in,
+  .mb-send-pulse {
+    animation: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+    transform: none !important;
+  }
+  /* The exit leg of a cross-fade is pure decoration — with motion reduced
+     it must not linger as a static overlay on top of the content that
+     replaced it, so it is removed outright. */
+  .mb-fade-out-blur {
+    display: none !important;
+  }
+  .mb-collapse,
+  .mb-collapse[data-open="true"] {
+    transition: none !important;
+  }
+  .mb-press,
+  .mb-height {
+    transition: none !important;
+  }
+  .mb-press:active {
+    transform: none;
+  }
+  [role="dialog"],
+  [role="menu"],
+  [role="tooltip"] {
+    transition: none !important;
   }
 }
