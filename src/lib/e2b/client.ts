@@ -275,6 +275,14 @@ export class E2BClient {
     return r.sandboxId;
   }
 
+  /** Current in-memory sandbox ID WITHOUT any network call. The rotation
+   *  loop uses this as a fallback when localStorage is unavailable — so a
+   *  cold-started rotation can still tell the server which sandbox to back
+   *  up before replacing it (PRD §9–10: never lose the live workspace). */
+  peekSandboxId(): string | null {
+    return this.sandboxId;
+  }
+
   async deleteSandbox(): Promise<void> {
     try {
       await this.call("kill");

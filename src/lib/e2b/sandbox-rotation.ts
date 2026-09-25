@@ -3,26 +3,30 @@
 /**
  * E2B Sandbox auto-rotation system.
  *
- * E2B sandboxes have a 24-hour hard TTL — after 24h, the sandbox is killed
- * by E2B and all files in it are lost. To prevent data loss, we auto-rotate
- * the sandbox at 23h:
+ * E2B sandboxes have a hard lifetime cap — the Hobby plan allows 1h max
+ * continuous runtime (the server creates sandboxes with onTimeout:"pause"
+ * + autoResume, so a paused sandbox is RESUMED, not lost, but rotation keeps
+ * the lifecycle simple). To keep the workspace healthy we auto-rotate the
+ * sandbox every 50 minutes:
  *
- *   1. Download ALL files from the old sandbox (recursive walk of /home/user)
- *   2. Kill the old sandbox (Sandbox.kill)
- *   3. Create a new sandbox
- *   4. Upload ALL files to the new sandbox (batch_write)
- *   5. Update sandboxId in localStorage + client cache
+ *   1. The client sends `rotate` + its CURRENT sandboxId to the server
+ *   2. The server backs up ALL files from the old sandbox (BINARY-SAFE
+ *      base64 — images, archives, dotfiles included; only volatile shell
+ *      state like .bash_history is skipped)
+ *   3. Kills ONLY that old sandbox (never anything else)
+ *   4. Creates a new sandbox
+ *   5. Restores the backup (binary-safe writes)
+ *   6. The client updates sandboxId in localStorage + its client cache
  *
  * The rotation is TRANSPARENT — tools don't know it happened. They just
  * call `ensureFreshSandbox(apiKey)` before every file operation and code
  * execution, and the rotation happens automatically if needed.
  *
- * SINGLE SANDBOX RULE: the server's `rotate` action kills ALL orphaned
- * sandboxes on the account before creating a new one, enforcing the
- * "one sandbox per API key" rule.
- *
- * NO file size limit — ALL files (code, images, etc.) are backed up and restored.
- * Binary files are skipped (can't JSON-serialize).
+ * FILE-LOSS SAFETY (PRD §9–10): rotation never kills sandboxes it isn't
+ * replacing, and it backs up BEFORE killing — the client sandboxId makes
+ * the rotation work even on a serverless cold start (empty server cache).
+ * The durable layer for the 24h E2B TTL is the OnyxBase cloud workspace
+ * (auto-restore below + push/retrieve_workspace tools).
  */
 
 import { getE2BClient, evictAllE2BClients } from "./client";
@@ -52,12 +56,21 @@ function restoredFlagKey(sandboxId: string): string {
 }
 
 /** Files present in EVERY fresh E2B sandbox (template + app-managed) — a
- *  sandbox containing only these is "empty" for auto-restore purposes. */
+ *  sandbox containing only these is "empty" for auto-restore purposes.
+ *  Volatile shell-state files (.bash_history, .viminfo, …) are included:
+ *  they appear the moment the user runs any command but are never user
+ *  workspace content, so their presence must not block a cloud restore. */
 const FRESH_SANDBOX_BUILTIN = new Set([
   ".bash_logout",
   ".bashrc",
   ".profile",
   ".sudo_as_admin_successful",
+  ".bash_history",
+  ".wget-hsts",
+  ".viminfo",
+  ".python_history",
+  ".node_repl_history",
+  ".lesshst",
   "onyx.md",
   ".onyxagent_files.json",
 ]);
@@ -89,17 +102,23 @@ async function runAutoRestore(apiKey: string): Promise<void> {
     const flag = restoredFlagKey(sandboxId);
     if (window.localStorage.getItem(flag)) return; // already handled
 
-    // Mark ATTEMPTED up-front so a failure never retries in a loop.
-    try {
-      window.localStorage.setItem(flag, "1");
-    } catch { /* ignore */ }
+    const markHandled = () => {
+      try {
+        window.localStorage.setItem(flag, "1");
+      } catch { /* ignore */ }
+    };
 
     // Only a sandbox with NO user content gets the cloud snapshot — never
     // clobber live files (rotation already restored them server-side).
     // Fresh sandboxes always contain template dotfiles + the app-written
     // Onyx.md, so "empty" ignores those (FRESH_SANDBOX_BUILTIN + rules).
     const files = await client.walkFiles();
-    if (!(await isFreshEmptySandbox(files))) return;
+    if (!(await isFreshEmptySandbox(files))) {
+      // Sandbox already has content — nothing to restore, ever, for this
+      // sandbox id. Consume the flag so we never re-check it.
+      markHandled();
+      return;
+    }
 
     const settings = await settingsService.get(userId).catch(() => null);
     const baseUrl = settings?.onyxbase_base_url || undefined;
@@ -108,10 +127,42 @@ async function runAutoRestore(apiKey: string): Promise<void> {
       "@/lib/onyxbase/workspace-sync"
     );
     const kv = new OnyxBaseKV(obKey, baseUrl);
-    const pointer = await getCloudPointer(kv);
-    if (!pointer) return; // nothing in the cloud yet
+    // FLAG-CONSUMPTION SAFETY (PRD §9–10): the flag is consumed ONLY after a
+    // definitive answer. A transient pointer-read failure (OnyxBase's
+    // multi-instance KV can throw on a cold instance) returns WITHOUT
+    // setting the flag, so the next ensureFreshSandboxForCtx call retries —
+    // the old code marked ATTEMPTED up-front, so one network blip left a
+    // fresh sandbox permanently empty with the restore never re-attempted.
+    let pointer: Awaited<ReturnType<typeof getCloudPointer>>;
+    try {
+      pointer = await getCloudPointer(kv);
+    } catch {
+      return; // transient — flag NOT consumed; retried on a later call
+    }
+    if (!pointer) {
+      markHandled(); // definitively nothing in the cloud for this workspace
+      return; // nothing in the cloud yet
+    }
 
-    const result = await retrieveWorkspace({ e2b: client, kv, mode: "restore" });
+    let result: Awaited<ReturnType<typeof retrieveWorkspace>>;
+    try {
+      result = await retrieveWorkspace({ e2b: client, kv, mode: "restore" });
+    } catch {
+      // The engine itself threw (bug / hard KV failure). Consume the flag
+      // so a broken restore can't loop on every tool call, but tell the
+      // user — silence is how "files vanished" went unnoticed before.
+      markHandled();
+      const { toast } = await import("sonner");
+      toast.error("Cloud workspace restore failed", {
+        description:
+          "The sandbox is empty and the cloud snapshot could not be read. " +
+          "Ask Onyx to run retrieve_workspace for a detailed report.",
+      });
+      return;
+    }
+    // The restore ATTEMPT completed — consume the flag (failed restores
+    // don't retry in a loop; the toasts below surface them honestly).
+    markHandled();
 
     // Best-effort notification — the AI-side retrieve_workspace card shows
     // the detailed glass UI; this toast covers the app-level auto path.
@@ -147,7 +198,9 @@ async function runAutoRestore(apiKey: string): Promise<void> {
       });
     }
   } catch {
-    /* best-effort — never break tool execution */
+    /* best-effort — never break tool execution. Deliberately does NOT
+       consume the flag: infrastructure failures before the restore decision
+       remain retryable on a later call (bounded — one attempt per tool call). */
   }
 }
 
@@ -228,11 +281,11 @@ export async function resolveSandboxApiKey(ctx: {
 }
 
 /**
- * Ensure the sandbox for the given API key is fresh (< 23h old).
+ * Ensure the sandbox for the given API key is fresh (< 50 min old).
  *
- * If the sandbox is older than 23h (or no creation timestamp is recorded),
- * performs an atomic rotation on the server:
- *   backup → kill → create → restore.
+ * If the sandbox is older than the rotation age (or no creation timestamp is
+ * recorded), performs an atomic rotation on the server:
+ *   backup → kill old → create → restore.
  *
  * Called before EVERY file operation and code execution. Transparent to
  * callers — never throws (rotation failures are logged and swallowed so
@@ -292,12 +345,26 @@ export async function ensureFreshSandbox(apiKey: string): Promise<void> {
 /**
  * Perform the actual rotation by calling the server's `rotate` action.
  *
- * The server does: killOrphans → backup → kill → create → restore, all
- * atomically. We just need to update the client-side cached sandboxId and
- * creation timestamp afterwards.
+ * The server does: backup (ALL files, binary-safe) → kill the OLD sandbox
+ * only → create → restore — all atomically. We pass our CURRENT sandbox ID
+ * so the server can find the old sandbox even on a serverless cold start
+ * (its in-memory cache is empty there — without the id a cold rotation
+ * couldn't back anything up and the workspace would be lost). Afterwards we
+ * update the client-side cached sandboxId and creation timestamp.
  */
 async function performRotation(apiKey: string): Promise<void> {
   try {
+    // The CURRENT sandbox id — the server uses it (as a fallback to its own
+    // cache) to back up + replace exactly this sandbox. localStorage is the
+    // primary source; the in-memory E2BClient's id is the fallback for when
+    // localStorage is unavailable.
+    const storedSandboxId =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(`e2b-sandbox-id:${apiKey}`)
+        : null;
+    const currentSandboxId =
+      storedSandboxId ??
+      getE2BClient(apiKey, null, "shared").peekSandboxId();
     const res = await fetch("/api/sandbox", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -305,6 +372,7 @@ async function performRotation(apiKey: string): Promise<void> {
         apiKey,
         action: "rotate",
         sandboxMode: "shared",
+        sandboxId: currentSandboxId,
       }),
     });
 
@@ -339,7 +407,7 @@ async function performRotation(apiKey: string): Promise<void> {
       // sandboxId from localStorage. (The old client still holds a reference
       // to the killed sandbox.)
       evictAllE2BClients();
-      // Record the rotation time so we rotate again in 23h.
+      // Record the rotation time so we rotate again after the rotation age.
       setStoredCreatedAt(apiKey, Date.now());
       console.log(
         `[sandbox-rotation] rotated to ${data.sandboxId} (backed up ${data.backedUp ?? 0}, restored ${data.restored ?? 0})`,

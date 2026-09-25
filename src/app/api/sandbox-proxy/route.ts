@@ -20,8 +20,17 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const DEFAULT_CWD = "/home/user";
-const SANDBOX_TTL_MS = 5 * 60 * 1000;
+// Cache TTL for the apiKey-keyed CREATE path: match E2B's sandbox lifetime so
+// a warm instance keeps handing the SAME sandbox back to old bundles (the
+// previous 5-minute TTL silently swapped in an EMPTY sandbox every 5 min —
+// "files auto-delete after waiting some time" for stale-bundle users).
+const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_SANDBOXES = 10;
+// Same stale-only kill rule as /api/sandbox: a cached entry under pressure
+// is DROPPED from the cache unless it is demonstrably stale (>20h — E2B's
+// 24h TTL kills it within hours anyway). Never kill a fresh sandbox just to
+// free a cache slot — the client reconnects by sandbox ID (PRD §9–10).
+const STALE_SANDBOX_KILL_AGE_MS = 20 * 60 * 60 * 1000;
 
 interface CacheEntry {
   sandbox: Sandbox;
@@ -37,24 +46,59 @@ function normalizePath(p: string | undefined | null): string {
   return `${DEFAULT_CWD}/${trimmed}`;
 }
 
+/** Evict the oldest cache entries when the shim's cache is full. Fresh
+ *  entries are only DROPPED (their client reconnects by sandbox ID);
+ *  only stale (>20h) ones are killed. */
+function enforceLimit(): void {
+  if (sandboxCache.size < MAX_SANDBOXES) return;
+  const oldest = [...sandboxCache.entries()].sort(
+    (a, b) => a[1].createdAt - b[1].createdAt,
+  )[0];
+  if (oldest) {
+    sandboxCache.delete(oldest[0]);
+    if (Date.now() - oldest[1].createdAt > STALE_SANDBOX_KILL_AGE_MS) {
+      void oldest[1].sandbox.kill().catch(() => {});
+    }
+  }
+}
+
+/** Create (or reuse) the sandbox for an apiKey — the POST /sandboxes
+ *  (create) path of the old protocol, which carries no sandbox ID. */
 async function getSandbox(apiKey: string): Promise<Sandbox> {
   const cached = sandboxCache.get(apiKey);
   if (cached && Date.now() - cached.createdAt < SANDBOX_TTL_MS) {
     return cached.sandbox;
   }
-  // Enforce limit
-  if (sandboxCache.size >= MAX_SANDBOXES) {
-    const oldest = [...sandboxCache.entries()].sort(
-      (a, b) => a[1].createdAt - b[1].createdAt,
-    )[0];
-    if (oldest) {
-      sandboxCache.delete(oldest[0]);
-      void oldest[1].sandbox.kill().catch(() => {});
-    }
-  }
+  enforceLimit();
   const sandbox = await Sandbox.create({ apiKey, timeoutMs: 86_400_000 }); // 24 hours
   sandboxCache.set(apiKey, { sandbox, createdAt: Date.now() });
   return sandbox;
+}
+
+/** Resolve the sandbox the OLD BUNDLE asked for by ID (every
+ *  /sandboxes/{id}/... request). Connects to that exact sandbox — the
+ *  previous implementation ignored the ID entirely and served whatever was
+ *  in the apiKey cache, so after the cache TTL expired every command landed
+ *  in a fresh EMPTY sandbox while the bundle's real workspace kept running
+ *  orphaned. Returns null when the sandbox is gone; the caller then replies
+ *  with an explicit error instead of silently substituting a new sandbox
+ *  (PRD §9: an empty/incomplete answer must never read as "delete all
+ *  files"). */
+async function getSandboxById(
+  apiKey: string,
+  sandboxId: string,
+): Promise<Sandbox | null> {
+  const cached = sandboxCache.get(sandboxId);
+  if (cached && Date.now() - cached.createdAt < SANDBOX_TTL_MS) {
+    return cached.sandbox;
+  }
+  try {
+    const sandbox = await Sandbox.connect(sandboxId, { apiKey });
+    sandboxCache.set(sandboxId, { sandbox, createdAt: Date.now() });
+    return sandbox;
+  } catch {
+    return null; // dead or inaccessible — do NOT create a replacement
+  }
 }
 
 function parseSandboxIdFromUrl(url: string): string | null {
@@ -124,8 +168,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Reuse the cached sandbox (or connect to the existing one)
-    const sandbox = await getSandbox(apiKey);
+    // Resolve the EXACT sandbox the old bundle is addressing (by ID — never
+    // a substitute). If it is gone, say so explicitly: silently serving a
+    // fresh sandbox made the bundle's workspace appear to vanish.
+    const sandbox = await getSandboxById(apiKey, sandboxId);
+    if (!sandbox) {
+      return NextResponse.json(
+        {
+          error:
+            `Sandbox ${sandboxId} is not running anymore. Refresh the page to ` +
+            "load the current app version, which reconnects to your workspace.",
+        },
+        { status: 404 },
+      );
+    }
 
     switch (action) {
       case "exec": {
@@ -255,7 +311,19 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const sandbox = await getSandbox(apiKey);
+    // Serve the EXACT sandbox the old bundle is addressing — never a
+    // substitute (see getSandboxById).
+    const sandbox = await getSandboxById(apiKey, sandboxId);
+    if (!sandbox) {
+      return NextResponse.json(
+        {
+          error:
+            `Sandbox ${sandboxId} is not running anymore. Refresh the page to ` +
+            "load the current app version, which reconnects to your workspace.",
+        },
+        { status: 404 },
+      );
+    }
 
     // GET /sandboxes/{id}/files?path=... → list files
     if (parsedUrl.pathname.includes("/files")) {

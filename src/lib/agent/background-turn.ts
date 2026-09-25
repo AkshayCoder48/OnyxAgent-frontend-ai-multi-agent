@@ -9,8 +9,10 @@ import { conversationService } from "@/lib/services";
 import {
   launchBackgroundTurn,
   streamBackgroundTurn,
+  pollBackgroundTurn,
   stopBackgroundTurn,
   clearJob,
+  updateJobCursor,
   getActiveJob,
   type BgEvent,
   type BgJob,
@@ -47,17 +49,49 @@ import {
  * browser happened to receive them.
  *
  * On reload, `resumeBackgroundTurn` picks the persisted job back up and
- * continues consuming from its seq cursor: whatever ran while the browser
- * was closed replays into the chat exactly once.
+ * continues consuming from its seq cursor (persisted next to every Dexie
+ * checkpoint): whatever ran while the browser was closed replays into the
+ * chat exactly once.
+ *
+ * v2.2 TRANSPORT RESILIENCE (PRD §23 — "stream loss ≠ job failure"): a
+ * dead SSE segment (serverless cold start, network blip, paused sandbox,
+ * black-holed connection) NEVER fails the turn. The consumer reconnects
+ * with exponential backoff, resumes from the seq cursor (bg_wait is
+ * cursor-driven → reconnects are idempotent), probes the run's real
+ * liveness through the bg_status REST channel (which doubles as a fallback
+ * event drain while SSE is down), and only ever surfaces an error when the
+ * RUN ITSELF reports terminal failure. The persisted job is never cleared
+ * on transport failure — a reload can always resume it.
  */
 
 /** One bg_wait segment — the HTTP request stays open up to ~11s, then the
- *  client immediately re-issues. Well under the route's maxDuration=300. */
+ *  client immediately re-issues. Well under the route's maxDuration=300.
+ *  The segment IS the heartbeat: the server pushes a keep-alive data frame
+ *  every ~2.5s while idle and a timeout frame at the cap, so a healthy
+ *  segment ALWAYS yields ≥1 frame — “no EVENTS but frames” = alive,
+ *  “no FRAMES at all / fetch throw” = dead connection → reconnect. */
 const WAIT_SEGMENT_MS = 11_000;
-/** Network-level failures (fetch throws / unreachable) before giving up. */
-const MAX_UNREACHABLE = 5;
-/** Pause between unreachable retries. */
-const UNREACHABLE_PAUSE_MS = 1_000;
+
+// ── TRANSPORT-FAILURE RECOVERY (PRD §23) ────────────────────────────────────
+/** First reconnect delay after a transport failure — doubles each failure. */
+const RECONNECT_BASE_MS = 1_000;
+/** Backoff ceiling — a long outage settles into one retry every 30s. */
+const RECONNECT_MAX_MS = 30_000;
+/** Zombie-connection watchdog: healthy segments cap at ~11s + heartbeats
+ *  arrive every ~2.5s, so NO frame for this long means the connection is
+ *  black-holed (no FIN/RST — the fetch promise would hang forever). Generous
+ *  on purpose: a paused-sandbox `Sandbox.connect` auto-resume can take tens
+ *  of seconds at segment open before the first frame. */
+const SEGMENT_WATCHDOG_MS = 60_000;
+/** Continuous outage length before the first NON-destructive banner
+ *  (“reconnecting…”). Below this the hiccup is invisible — brief blips
+ *  self-heal without bothering the user. */
+const RECONNECT_NOTICE_MS = 30_000;
+/** Hard limit (PRD §23): after this long without ANY transport, swap the
+ *  banner to the reassuring “your job is still running” notice. NEVER a
+ *  fatal error — reconnecting continues silently for as long as the job
+ *  lives (the E2B run is unaffected server-side). */
+const TRANSPORT_NOTICE_MS = 10 * 60_000;
 
 export interface BackgroundTurnHandle {
   /** Stop the background job + the consumer. */
@@ -141,15 +175,38 @@ async function persistCheckpoint(
 }
 
 /**
- * Consume one background run: seq-cursor SSE segment loop. The server PUSHES
- * each batch of new events the moment its sandbox read lands (60ms cadence
- * while the stream is hot); this consumer replays every event through the
- * SAME `emit` pipeline the in-browser runtime uses and re-opens the segment
- * when it caps out (~11s, one amortized RTT). Returns when the run reaches a
- * terminal status (done/error) or the consumer is stopped. Shared by start +
- * resume so both paths replay identically.
+ * Consume one background run: seq-cursor SSE segment loop with TRANSPORT
+ * RESILIENCE (PRD §23). The server PUSHES each batch of new events the
+ * moment its sandbox read lands (60ms cadence while the stream is hot);
+ * this consumer replays every event through the SAME `emit` pipeline the
+ * in-browser runtime uses and re-opens the segment when it caps out (~11s,
+ * one amortized RTT).
+ *
+ * STREAM LOSS ≠ JOB FAILURE — the reconnect contract:
+ *   • dead segment (fetch throw / zero frames / unreachable frame / watchdog
+ *     trip) → reconnect with exponential backoff (1s→2s→…→30s cap),
+ *     indefinitely while the job is alive; backoff + outage clock reset the
+ *     moment frames (or fallback events) flow again;
+ *   • before anything is declared dead, `pollBackgroundTurn` (bg_status — a
+ *     separate REST channel that reconnects to the sandbox independently and
+ *     auto-resumes a paused one) is probed for the RUN's real status: still
+ *     running/paused → keep reconnecting; its events are also drained as a
+ *     fallback so the UI keeps moving while SSE is down; terminal → the
+ *     honest done/error is surfaced (genuine job failure only);
+ *   • the persisted job (localStorage `onyx-bg-jobs`) is NEVER cleared on
+ *     transport failure, so a reload always resumes;
+ *   • after TRANSPORT_NOTICE_MS of continuous outage a NON-destructive
+ *     banner ("reconnecting… your job is still running") replaces the old
+ *     fatal error — reconnecting continues silently.
+ *
+ * Returns when the run reaches a terminal status (done/error), the consumer
+ * is stopped, or an unexpected exception escapes (the caller's last-resort
+ * net). Shared by start + resume so both paths replay identically.
+ *
+ * Exported for the reconnect-loop regression test (transport loss must NEVER
+ * produce a fatal error — PRD §23).
  */
-async function consumeRun(ctx: {
+export async function consumeRun(ctx: {
   e2bApiKey: string;
   job: BgJob;
   conversationId: string;
@@ -164,8 +221,11 @@ async function consumeRun(ctx: {
   store?: ExecutionChatStore;
 }): Promise<void> {
   const { e2bApiKey, job } = ctx;
-  let cursor = 0;
-  let unreachable = 0;
+  /** Seq cursor — starts at the persisted lastSeq (resume lands AFTER the
+   *  checkpointed content) and advances with every processed event; bg_wait
+   *  takes it as `afterSeq`, so every reconnect/reload replays exactly the
+   *  events this browser has not yet seen (idempotent — PRD §38). */
+  let cursor = job.lastSeq ?? 0;
 
   // WSEvent-emitting wrapper handed to bridged tools (ask_user questions,
   // tool_output, todo events …) — the same pipeline the runtime uses.
@@ -173,119 +233,275 @@ async function consumeRun(ctx: {
     ctx.emit(e.type, e.data as Record<string, unknown>);
   };
 
-  for (;;) {
-    if (ctx.isStopped()) return;
-    let sawFrame = false;
-    let unreachableFrame = false;
-    let unreachableMsg: string | null = null;
+  // ── seq-cursor persistence (reload-resume starts after the checkpoint) ──
+  // COHERENCE RULE: the cursor advances in localStorage only AFTER the
+  // matching Dexie checkpoint landed. A crash between the two replays the
+  // tail onto the stale checkpoint (harmless re-render — the content wasn't
+  // in the checkpoint); the reverse order would SKIP events whose
+  // checkpoint never landed (lost output — PRD §38 forbids that).
+  let cursorSavedAt = 0;
+  const persistCursor = (force = false) => {
+    const now = Date.now();
+    // Throttle non-forced writes: token-level batches land every 60-150ms;
+    // one localStorage write per second is plenty. Forced writes ride every
+    // successful checkpoint + every exit path.
+    if (!force && now - cursorSavedAt < 1_000) return;
+    cursorSavedAt = now;
     try {
-      for await (const resp of streamBackgroundTurn(e2bApiKey, job.sandboxId, job.runId, cursor, WAIT_SEGMENT_MS)) {
-        sawFrame = true;
-        if (ctx.isStopped()) return; // for-await return → generator's finally cancels the fetch
-        if (resp.status === "unreachable") {
-          unreachableFrame = true;
-          unreachableMsg =
-            resp.error ??
-            "Background sandbox unreachable on E2B. If it expired, start a new message — otherwise reopening this page resumes a paused sandbox automatically.";
-          break;
-        }
-        unreachable = 0;
-        // Replay new events through the pipeline (seq order == file order).
-        const events = resp.events ?? [];
-        let finished = false;
-        for (const ev of events) {
-          if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
-          if (ev.t === "browser_tool_call") {
-            // v3 FULL TOOLSET — the sandbox runner delegated a browser-registry
-            // tool to this browser. Fire-and-forget: NEVER block the replay
-            // loop (a long ask_user wait must not stall event consumption —
-            // the runner serializes tool ordering on its side). Reload-safe
-            // dedup lives inside handleBrowserToolCall (localStorage marks,
-            // keyed by the EVENT SEQ — gateways like kilo-auto reuse tool-call
-            // ids such as call_0_0 across rounds, so the id alone collides).
-            void handleBrowserToolCall({
-              e2bApiKey,
-              sandboxId: job.sandboxId,
-              runId: job.runId,
-              conversationId: ctx.conversationId,
-              userId: ctx.userId,
-              aiApiKey: ctx.aiApiKey,
-              callId: String(ev.id ?? ""),
-              name: String(ev.name ?? ""),
-              args: (ev.args ?? {}) as Record<string, unknown>,
-              eventSeq: typeof ev.seq === "number" ? ev.seq : undefined,
-              emit: bridgeEmit,
-              signal: ctx.bridgeAbort?.signal,
-            }).catch(() => {
-              // best-effort — the runner's timeout produces a graceful error
-            });
-            continue;
-          }
-          replayEvent(ctx.emit, ev);
-          if (ev.t === "done" || ev.t === "error") finished = true;
-        }
-        if (typeof resp.afterSeq === "number" && resp.afterSeq > cursor) cursor = resp.afterSeq;
-        if (resp.done) finished = true;
-
-        // Checkpoint after every batch with content (so a reload mid-run
-        // shows progress).
-        if (events.length > 0) {
-          try {
-            await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, !finished, ctx.store);
-          } catch {
-            // best-effort
-          }
-        }
-        if (finished) {
-          ctx.emit("complete", {});
-          clearJob(job.assistantMessageId);
-          ctx.onFinished();
-          return;
-        }
-        // Immediately keep reading — the server pushes the next batch the
-        // moment it lands (no fixed-tick sleep, no per-batch round trip).
-      }
+      updateJobCursor(job.assistantMessageId, cursor);
     } catch {
-      // fetch/stream failed mid-segment — treat like an unreachable frame
-      unreachableFrame = true;
+      // best-effort — localStorage quota / private mode
     }
-    if (ctx.isStopped()) return;
-    if (unreachableFrame) {
-      unreachable++;
-      if (unreachable >= MAX_UNREACHABLE) {
-        ctx.emit("error", {
-          message:
-            unreachableMsg ??
-            "Lost the connection to the background sandbox on E2B (network error). The job itself is unaffected — reopening or reloading this page reconnects and resumes it.",
+  };
+  /** Checkpoint + cursor in the coherence order (see above). */
+  const checkpointAndAdvance = async (isStreaming: boolean) => {
+    try {
+      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, isStreaming, ctx.store);
+      persistCursor(true);
+    } catch {
+      // Checkpoint failed — leave the cursor BEHIND so a reload replays
+      // this batch onto the stale checkpoint (idempotent re-render).
+    }
+  };
+
+  /** Replay one batch of events through the pipeline (seq order == file
+   *  order). Shared by the SSE frames and the bg_status fallback drain.
+   *  Returns true when the batch contained a terminal (done/error) event. */
+  const processEvents = (events: BgEvent[]): boolean => {
+    let finished = false;
+    for (const ev of events) {
+      if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
+      if (ev.t === "browser_tool_call") {
+        // v3 FULL TOOLSET — the sandbox runner delegated a browser-registry
+        // tool to this browser. Fire-and-forget: NEVER block the replay
+        // loop (a long ask_user wait must not stall event consumption —
+        // the runner serializes tool ordering on its side). Reload-safe
+        // dedup lives inside handleBrowserToolCall (localStorage marks,
+        // keyed by the EVENT SEQ — gateways like kilo-auto reuse tool-call
+        // ids such as call_0_0 across rounds, so the id alone collides).
+        void handleBrowserToolCall({
+          e2bApiKey,
+          sandboxId: job.sandboxId,
+          runId: job.runId,
+          conversationId: ctx.conversationId,
+          userId: ctx.userId,
+          aiApiKey: ctx.aiApiKey,
+          callId: String(ev.id ?? ""),
+          name: String(ev.name ?? ""),
+          args: (ev.args ?? {}) as Record<string, unknown>,
+          eventSeq: typeof ev.seq === "number" ? ev.seq : undefined,
+          emit: bridgeEmit,
+          signal: ctx.bridgeAbort?.signal,
+        }).catch(() => {
+          // best-effort — the runner's timeout produces a graceful error
         });
-        clearJob(job.assistantMessageId);
-        ctx.onFinished();
-        return;
+        continue;
       }
-      await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
-      continue;
+      replayEvent(ctx.emit, ev);
+      if (ev.t === "done" || ev.t === "error") finished = true;
     }
-    if (sawFrame) {
-      // Clean segment end (timeout frame) — checkpoint and re-open at once.
+    return finished;
+  };
+
+  /** Close the run out: final checkpoint (isStreaming=false), terminal
+   *  events, job cleanup. `statusError` is set ONLY for a genuine run
+   *  failure reported by the run itself — never for transport loss. */
+  const finishRun = async (statusError: string | null) => {
+    try {
+      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, false, ctx.store);
+    } catch {
+      // best-effort — the per-batch checkpoint already covers the content
+    }
+    persistCursor(true);
+    if (statusError) {
+      ctx.emit("error", { message: statusError });
+    }
+    ctx.emit("complete", {});
+    clearJob(job.assistantMessageId);
+    ctx.onFinished();
+  };
+
+  // ── outage state ──
+  let backoffMs = RECONNECT_BASE_MS;
+  /** When the CURRENT continuous transport outage began (null = healthy). */
+  let failedSince: number | null = null;
+  /** Banner stage: 0 none, 1 early "reconnecting…", 2 hard-limit
+   *  "your job is still running". NON-destructive (the PRD §7 rate-limit
+   *  banner slot — agent state preserved, nothing duplicated). */
+  let noticeStage = 0;
+
+  const clearNotice = () => {
+    if (noticeStage === 0) return;
+    noticeStage = 0;
+    try {
+      ctx.store?.getState().setRateLimitStatus(null);
+    } catch {
+      // best-effort
+    }
+  };
+  const showNotice = (stage: 1 | 2) => {
+    if (noticeStage >= stage) return;
+    noticeStage = stage;
+    try {
+      ctx.store?.getState().setRateLimitStatus(
+        stage === 1
+          ? "Connection to the background sandbox was interrupted — reconnecting automatically…"
+          : "Still reconnecting to the background sandbox — your job is still running on E2B and will resume here automatically.",
+      );
+    } catch {
+      // best-effort
+    }
+  };
+  /** Frames (or fallback events) are flowing again — the outage is over. */
+  const outageOver = () => {
+    failedSince = null;
+    backoffMs = RECONNECT_BASE_MS;
+    clearNotice();
+  };
+
+  try {
+    for (;;) {
+      if (ctx.isStopped()) return;
+      let transportFailure = false;
+      let failureReason = "";
+      let sawFrame = false;
+
+      // Zombie watchdog: abort a segment that produced NO frame for way
+      // longer than its natural lifetime (dead connection without FIN/RST —
+      // the fetch promise would hang forever). Generous on purpose: a
+      // paused-sandbox Sandbox.connect auto-resume at segment open can take
+      // tens of seconds before the first frame.
+      const segmentAbort = new AbortController();
+      const watchdog = setTimeout(() => segmentAbort.abort(), SEGMENT_WATCHDOG_MS);
       try {
-        await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, true, ctx.store);
+        for await (
+          const resp of streamBackgroundTurn(
+            e2bApiKey,
+            job.sandboxId,
+            job.runId,
+            cursor,
+            WAIT_SEGMENT_MS,
+            segmentAbort.signal,
+          )
+        ) {
+          sawFrame = true;
+          if (ctx.isStopped()) return; // for-await return → generator's finally cancels the fetch
+          if (resp.status === "unreachable") {
+            // Sandbox-side connect failure (paused sandbox / cold start /
+            // E2B blip) — TRANSPORT, not job failure. Sandbox.connect
+            // auto-resumes paused sandboxes, so retrying is the cure.
+            transportFailure = true;
+            failureReason = resp.error ?? "sandbox unreachable";
+            break;
+          }
+          // A live frame — any previous outage is over.
+          if (failedSince !== null) outageOver();
+          // Replay new events through the pipeline (seq order == file order).
+          const events = resp.events ?? [];
+          const finished = processEvents(events);
+          if (typeof resp.afterSeq === "number" && resp.afterSeq > cursor) cursor = resp.afterSeq;
+          if (resp.done || finished) {
+            await finishRun(null); // terminal events already replayed
+            return;
+          }
+          // Checkpoint after every batch with content (so a reload mid-run
+          // shows progress), then advance the persisted cursor.
+          if (events.length > 0) {
+            await checkpointAndAdvance(true);
+          }
+          // Immediately keep reading — the server pushes the next batch the
+          // moment it lands (no fixed-tick sleep, no per-batch round trip).
+        }
+      } catch (err) {
+        // fetch/stream failed mid-segment (network blip, watchdog abort) —
+        // transport failure, NOT job failure.
+        transportFailure = true;
+        failureReason = err instanceof Error ? err.message : String(err);
+      } finally {
+        clearTimeout(watchdog);
+      }
+      if (ctx.isStopped()) return;
+
+      // A healthy segment ALWAYS yields ≥1 frame (keep-alive every ~2.5s,
+      // timeout frame at the ~11s cap). The generator ending cleanly with
+      // ZERO frames means the connection was silently killed — a transport
+      // failure too (otherwise this would busy-loop re-opening segments).
+      if (!sawFrame && !transportFailure) {
+        transportFailure = true;
+        failureReason = "no stream frames";
+      }
+
+      if (!transportFailure) {
+        // Clean segment end (timeout frame / stream close after frames) —
+        // checkpoint and re-open at once. Empty EVENTS with a frame = the
+        // connection is ALIVE (keep-alive/timeout frame); only a missing
+        // FRAME means the connection died.
+        await checkpointAndAdvance(true);
+        continue;
+      }
+
+      // ── TRANSPORT FAILURE → RECONNECT WITH BACKOFF (never a fatal error) ─
+      if (failedSince === null) {
+        failedSince = Date.now();
+        console.warn(
+          "[background-turn] stream lost — reconnecting (the E2B job keeps running):",
+          failureReason,
+        );
+      }
+      const outageMs = Date.now() - failedSince;
+
+      // Liveness probe through the sibling REST channel (bg_status): it
+      // reconnects to the sandbox independently of the SSE path, is the
+      // ONLY source of an honest terminal verdict, and doubles as a
+      // FALLBACK event drain so the UI keeps moving while the stream is
+      // down. Sandbox.connect inside it auto-resumes a paused sandbox.
+      try {
+        const snap = await pollBackgroundTurn(e2bApiKey, job.sandboxId, job.runId);
+        if (snap.status !== "unreachable") {
+          // bg_status returns the WHOLE event log — keep only what this
+          // browser has not consumed yet (seq dedupe; seq-less v1-legacy
+          // events stay on the SSE channel to avoid replay loops).
+          const missed = (snap.events ?? []).filter(
+            (ev): ev is BgEvent => typeof ev.seq === "number" && ev.seq > cursor,
+          );
+          if (missed.length > 0) {
+            const finished = processEvents(missed);
+            await checkpointAndAdvance(!snap.done);
+            if (finished || snap.done) {
+              // Terminal state reached through the fallback channel.
+              await finishRun(
+                snap.status === "error" && !finished ? snap.error ?? "Background run failed." : null,
+              );
+              return;
+            }
+            // Events ARE flowing through the fallback — the run is alive;
+            // only the SSE path is broken.
+            outageOver();
+          } else if (snap.done) {
+            // Terminal state with no undelivered events (the terminal event
+            // was already consumed; state.json merely confirms it).
+            await finishRun(snap.status === "error" ? snap.error ?? "Background run failed." : null);
+            return;
+          }
+        }
       } catch {
-        // best-effort
+        // /api/sandbox itself unreachable (offline / serverless cold start)
+        // — pure network outage; keep retrying.
       }
-    } else {
-      // Generator ended without a single frame — defensive unreachable path.
-      unreachable++;
-      if (unreachable >= MAX_UNREACHABLE) {
-        ctx.emit("error", {
-          message:
-            "Lost the connection to the background sandbox on E2B (no stream frames). The job itself is unaffected — reopening or reloading this page reconnects and resumes it.",
-        });
-        clearJob(job.assistantMessageId);
-        ctx.onFinished();
-        return;
-      }
-      await new Promise((r) => setTimeout(r, UNREACHABLE_PAUSE_MS));
+
+      // NON-destructive notices (PRD §23): early banner, then the hard-limit
+      // reassurance. NEVER the old fatal "Lost the connection" error — the
+      // job stays persisted and reconnecting continues indefinitely.
+      if (outageMs >= TRANSPORT_NOTICE_MS) showNotice(2);
+      else if (outageMs >= RECONNECT_NOTICE_MS) showNotice(1);
+
+      await new Promise((r) => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
     }
+  } finally {
+    // Last-write-wins safety net for every exit path (stop / terminal /
+    // unexpected) — a no-op once the job record was cleared.
+    persistCursor(true);
   }
 }
 
@@ -410,7 +626,9 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         store: ctx.store,
       });
     })().catch(() => {
-      // The consumer died unexpectedly — surface as a normal turn error.
+      // LAST-RESORT net only: transport failures are handled INSIDE
+      // consumeRun (reconnect with backoff — PRD §23); this fires solely
+      // on an unexpected consumer crash (e.g. a thrown emit).
       emit("error", { message: "The background stream consumer stopped unexpectedly." });
       clearJob(assistantMessageId);
       ctx.onFinished();
@@ -548,8 +766,11 @@ function replayEvent(
 /**
  * Resume the persisted background job for a conversation after a reload:
  * replays any events that ran while the browser was closed, then keeps
- * consuming until the turn finishes. Returns the handle, or null when there
- * is nothing to resume.
+ * consuming until the turn finishes. consumeRun picks up from the job's
+ * persisted seq cursor (saved next to every Dexie checkpoint), so the
+ * replay lands strictly AFTER the checkpointed content — exactly once,
+ * never duplicated (PRD §38). Returns the handle, or null when there is
+ * nothing to resume.
  */
 export async function resumeBackgroundTurn(ctx: {
   e2bApiKey: string;
@@ -569,7 +790,9 @@ export async function resumeBackgroundTurn(ctx: {
   };
 
   // Reload restored the assistant message from the checkpoint; re-adopt it
-  // as the current streaming message.
+  // as the current streaming message. (The processor's message_saved handler
+  // ADOPTS the existing checkpointed row — it never renames the fresh temp
+  // shell on top of it, so no duplicate empty bubble.)
   emit("model_request_start", { round: 1 });
   emit("message_saved", { message_id: job.assistantMessageId });
 

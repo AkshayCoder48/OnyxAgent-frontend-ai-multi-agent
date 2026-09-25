@@ -317,7 +317,18 @@ export class AgentEventProcessor {
         const { message_id } = wsEvent.data as { message_id: string };
         const oldId = this.currentMessageId;
         if (oldId && oldId !== message_id) {
-          this.store.getState().replaceMessageId(oldId, message_id);
+          // RELOAD-RESUME DEDUP (PRD §38): on background-turn resume the
+          // store was seeded from the Dexie checkpoint, which ALREADY holds
+          // a row with `message_id`. Renaming the fresh temp shell on top
+          // of it would leave TWO rows sharing the id (an empty duplicate
+          // bubble + deltas landing on the first match). Adopt the
+          // checkpointed row instead and drop the shell.
+          const exists = this.store.getState().messages.some((m) => m.id === message_id);
+          if (exists) {
+            this.store.getState().removeMessage(oldId);
+          } else {
+            this.store.getState().replaceMessageId(oldId, message_id);
+          }
           this.currentMessageId = message_id;
         } else if (!oldId) {
           const messages = this.store.getState().messages;

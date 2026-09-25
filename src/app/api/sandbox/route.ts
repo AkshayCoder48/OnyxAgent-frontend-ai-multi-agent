@@ -49,14 +49,32 @@ const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — files persist for a 
 // but the server instance is still alive with the cached entry).
 const ROTATION_AGE_MS = 23 * 60 * 60 * 1000; // 23 hours
 // SHARED SANDBOX ARCHITECTURE: ONE sandbox per API key — the E2B sandbox is
-// the SINGLE source of truth for files (no OPFS). When the sandbox quota is
-// exceeded (e.g. "20/20"), we kill ALL sandboxes on the account, create ONE
-// fresh sandbox, and the file tools repopulate it from scratch.
+// the SINGLE source of truth for files (no OPFS mirror; the OnyxBase cloud
+// workspace is the durable backup layer). When the sandbox quota is exceeded
+// (e.g. "20/20"), we kill ALL sandboxes on the account, create ONE fresh
+// sandbox, and the cloud auto-restore (src/lib/e2b/sandbox-rotation.ts)
+// repopulates it from the last OnyxBase snapshot when configured.
+//
+// FILE-LOSS SAFETY (PRD §9–10): a sandbox is NEVER killed merely because it
+// is absent from this instance's in-memory cache — on serverless the cache
+// is EMPTY on every cold start, so "unknown to me" says nothing about
+// whether a sandbox is abandoned. Only sandboxes that are BOTH unknown to
+// the cache AND older than STALE_SANDBOX_KILL_AGE_MS (E2B's 24h hard TTL
+// kills them within hours anyway) are reclaimed as stale; explicit kill
+// paths are the user-initiated reset/kill actions and quota-error recovery.
 //
 // We keep MAX_SANDBOXES=3 in the local cache as headroom (the shared one
-// + maybe a stale entry during dead-sandbox recovery). The quota recovery
-// path enforces the "one sandbox" rule on E2B's side by killing orphans.
+// + maybe a stale entry during dead-sandbox recovery). Cache-pressure
+// eviction drops fresh entries WITHOUT killing them (the client reconnects
+// by sandbox ID); stale ones (>20h) are killed to protect the quota.
 const MAX_SANDBOXES = 3;
+
+/** A sandbox this old is demonstrably stale — E2B's 24h hard TTL kills it
+ *  within hours no matter what we do, so reclaiming it (quota protection)
+ *  can no longer destroy a workspace that would otherwise have survived.
+ *  Anything YOUNGER is never killed just for being unknown to this
+ *  instance's cache (it may be a live workspace on a cold-started server). */
+const STALE_SANDBOX_KILL_AGE_MS = 20 * 60 * 60 * 1000; // 20 hours
 
 /**
  * Normalize a file path to an absolute path rooted at /home/user (the
@@ -203,20 +221,63 @@ async function enforceLimit(): Promise<void> {
   const [oldestKey, oldest] = all[0]!;
   if (sharedCache.has(oldestKey)) sharedCache.delete(oldestKey);
   else separateCache.delete(oldestKey);
-  void oldest.sandbox.kill().catch(() => {});
-  // Also try to kill orphaned sandboxes on E2B's side — these accumulate
-  // when sandboxes die without being evicted from our local cache (e.g.
-  // Vercel serverless cold starts lose the in-memory cache, but the sandbox
-  // keeps running on E2B). This is the root cause of the "20/20 sandbox"
-  // quota error. Best-effort — don't block on it.
+  // Cache-pressure eviction KILLS the sandbox only when it is demonstrably
+  // stale (>20h — E2B kills it within hours anyway). A fresh sandbox is
+  // merely DROPPED from this instance's cache: it keeps running on E2B and
+  // its owner's client reconnects to it by sandbox ID on the next request.
+  // (The module cache is shared across ALL requests/users on this serverless
+  // instance — killing here could destroy another user's live workspace.)
+  if (Date.now() - oldest.createdAt > STALE_SANDBOX_KILL_AGE_MS) {
+    void oldest.sandbox.kill().catch(() => {});
+  }
+  // Reclaim stale sandboxes unknown to this instance (previous sessions,
+  // dead serverless instances) — never fresh ones (see
+  // killOrphanedSandboxes). Best-effort — don't block on it.
   void killOrphanedSandboxes(oldest.apiKey).catch(() => {});
 }
 
+/** Age of a listed sandbox in ms. `SandboxInfo.startedAt` is a Date, but be
+ *  defensive about SDK shape drift (string ISO timestamps). UNKNOWN age is
+ *  reported as 0 — i.e. treated as brand new — so an unreadable start time
+ *  can never make us kill a possibly-live sandbox. */
+function sandboxAgeMs(s: { startedAt?: unknown }, now: number): number {
+  const sa = s.startedAt;
+  if (sa instanceof Date) {
+    const t = sa.getTime();
+    return Number.isFinite(t) ? now - t : 0;
+  }
+  if (typeof sa === "string") {
+    const t = Date.parse(sa);
+    return Number.isNaN(t) ? 0 : now - t;
+  }
+  if (sa && typeof (sa as { getTime?: unknown }).getTime === "function") {
+    try {
+      const t = (sa as Date).getTime();
+      return Number.isFinite(t) ? now - t : 0;
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
+}
+
 /**
- * List all running sandboxes on E2B for an API key and kill any that aren't
- * in our local cache. This prevents the "20/20 sandbox limit reached" error
- * that happens when sandboxes accumulate from previous sessions / dead
- * serverless instances. Best-effort — never throws.
+ * Reclaim STALE sandboxes on E2B for an API key: running sandboxes that are
+ * (a) NOT in this instance's local cache, (b) NOT scheduled-task run
+ * sandboxes, and (c) OLDER than STALE_SANDBOX_KILL_AGE_MS (20h — E2B's 24h
+ * hard TTL kills them within hours anyway). This still protects the account
+ * from the "20/20 sandbox limit reached" error caused by sandboxes leaking
+ * from previous sessions / dead serverless instances.
+ *
+ * FILE-LOSS SAFETY (PRD §9–10): sandboxes younger than the stale age are
+ * NEVER killed, no matter how "orphaned" they look. On serverless, this
+ * module's cache is EMPTY on every cold start — the user's LIVE workspace
+ * is exactly as "unknown" as a genuinely abandoned sandbox, and the old
+ * kill-anything-unknown behavior destroyed live workspaces on page refresh,
+ * chat navigation, and every sandbox re-create. Deletion must be explicit
+ * (user reset) or forced (quota) — never inferred from an empty cache.
+ *
+ * Best-effort — never throws.
  *
  * The `knownApiKey` param is the API key of the sandbox that triggered this
  * call (we need it to list sandboxes — E2B's list endpoint requires a key).
@@ -229,25 +290,27 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     const localIds = new Set<string>();
     for (const [, entry] of sharedCache) localIds.add(entry.sandbox.sandboxId);
     for (const [, entry] of separateCache) localIds.add(entry.sandbox.sandboxId);
-    // SINGLE-SANDBOX RULE: kill ALL running sandboxes that aren't in our
-    // local cache — EXCEPT scheduled-task run sandboxes (metadata tag
-    // "onyx-scheduled", launched by /api/scheduler): those are isolated
-    // agent jobs that must survive interactive rotation.
-    const toKill = page
-      .filter(
-        (s) =>
-          (s.state as string) !== "closed" &&
-          !localIds.has(s.sandboxId) &&
-          !isScheduledSandbox(s),
-      )
-      .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
+    // STALE-ONLY KILL: local-cache absence alone is NOT evidence of
+    // abandonment (serverless cold start = empty cache). Only age makes a
+    // sandbox demonstrably idle-and-doomed. Scheduled-task run sandboxes
+    // (metadata tag "onyx-scheduled", launched by /api/scheduler) are always
+    // spared — they are isolated agent jobs that must survive interactive
+    // rotation and cold starts.
+    const now = Date.now();
+    const toKill = page.filter(
+      (s) =>
+        (s.state as string) !== "closed" &&
+        !localIds.has(s.sandboxId) &&
+        !isScheduledSandbox(s) &&
+        sandboxAgeMs(s, now) > STALE_SANDBOX_KILL_AGE_MS,
+    );
     await Promise.all(
       toKill.map((s) =>
         Sandbox.kill(s.sandboxId, { apiKey: knownApiKey }).catch(() => {}),
       ),
     );
     if (toKill.length > 0) {
-      console.log(`[sandbox] killed ${toKill.length} orphaned sandbox(es) to enforce single-sandbox rule`);
+      console.log(`[sandbox] reclaimed ${toKill.length} stale sandbox(es) (>20h, unknown to this instance)`);
     }
   } catch {
     // best-effort — don't fail the operation if listing/killing fails.
@@ -280,11 +343,13 @@ function isQuotaError(err: unknown): boolean {
 }
 
 /**
- * Kill ALL running sandboxes on the account (E2B's side). Used when we hit
- * the quota limit — the shared-sandbox architecture means we only ever need
- * ONE sandbox per API key, so when quota is exceeded we nuke everything and
- * start fresh. OPFS is the source of truth, so no files are lost — the next
- * run_python/run_terminal auto-syncs OPFS to the new sandbox.
+ * Kill ALL running sandboxes on the account (E2B's side). Used ONLY when we
+ * hit the sandbox quota limit — the shared-sandbox architecture means we
+ * only ever need ONE sandbox per API key, so when E2B refuses to create
+ * another one we nuke everything and start fresh. This is the explicit,
+ * forced kill path (PRD §9: deletion must be explicit or forced, never
+ * inferred): the durable workspace lives in the OnyxBase cloud snapshot, so
+ * the cloud auto-restore repopulates the fresh sandbox when configured.
  *
  * Best-effort — never throws. Returns the count of killed sandboxes.
  */
@@ -307,26 +372,47 @@ async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
   }
 }
 
+/** A single file in a rotation backup: raw BYTES as base64. Backing up
+ *  EVERY file as base64 (text included) is what makes rotation lossless —
+ *  the old text-only backup silently dropped every binary file. */
+interface BackupFile {
+  path: string;
+  base64: string;
+}
+
+/** Volatile shell state + template dotfiles. These are NEVER user workspace
+ *  content: they are re-created by the sandbox template (a stale copy restored
+ *  into a fresh sandbox would be wrong) or are throwaway shell history. Every
+ *  OTHER file — binary included, dotfiles included — is backed up. */
+const ROTATION_SKIP_FILES = new Set([
+  ".bash_history",
+  ".bash_logout",
+  ".bashrc",
+  ".profile",
+  ".sudo_as_admin_successful",
+  ".wget-hsts",
+  ".viminfo",
+  ".python_history",
+  ".node_repl_history",
+  ".lesshst",
+]);
+
 /**
- * Recursively walk /home/user in a sandbox and return all TEXT files as
- * { path, content } pairs. Used by the `rotate` and `backup_all` actions
- * to migrate files to a new sandbox.
+ * Recursively walk /home/user in a sandbox and return ALL files (binary
+ * included) as base64 { path, base64 } pairs. Used by the `rotate` and
+ * `backup_all` actions to migrate files to a new sandbox.
  *
- * - Files >500KB are SKIPPED (too large for JSON transport).
- * - Binary files are SKIPPED (can't JSON-serialize — detected by checking
- *   the first 1KB for null bytes).
- * - Shell dotfiles (.bashrc, .profile, etc.) are skipped — they're
- *   sandbox-template-specific and shouldn't be restored.
+ * BINARY-SAFE (PRD §9–10 file-loss fix): every file is read as bytes and
+ * base64-encoded — the previous implementation detected binary files by
+ * null bytes in the first 1KB and SKIPPED them, so every rotation silently
+ * lost all images, archives, databases, PDFs, etc. There is no size limit:
+ * the backup stays in server memory for the duration of the rotation and
+ * the response only carries counts, not contents.
  */
 async function backupAllFilesFromSandbox(
   sandbox: Sandbox,
-): Promise<Array<{ path: string; content: string }>> {
-  const files: Array<{ path: string; content: string }> = [];
-  // NO file size limit — user requested all files (code, images, etc.) be backed up.
-  const SKIP_FILES = new Set([
-    ".bash_history", ".bash_logout", ".bashrc", ".profile",
-    ".sudo_as_admin_successful", ".wget-hsts",
-  ]);
+): Promise<BackupFile[]> {
+  const files: BackupFile[] = [];
 
   async function walkDir(dirPath: string) {
     let entries;
@@ -337,27 +423,17 @@ async function backupAllFilesFromSandbox(
     }
     for (const entry of entries) {
       const fname = entry.name ?? entry.path.split("/").pop() ?? "";
-      if (SKIP_FILES.has(fname)) continue;
-      const isDir =
-        (entry.type as string) === "dir" ||
-        (entry.type as string) === "directory" ||
-        (entry.type as string) === "FILE_TYPE_DIRECTORY";
-      if (isDir) {
+      if (ROTATION_SKIP_FILES.has(fname)) continue;
+      if (isDirType(entry.type as string)) {
         await walkDir(entry.path);
       } else {
         try {
+          // Read as raw bytes — preserves binary content exactly.
           const bytes = await sandbox.files.read(entry.path, { format: "bytes" });
-          // NO size limit — back up ALL files regardless of size.
-          // Skip binary files — detect null bytes in the first 1KB.
-          const checkLen = Math.min(bytes.byteLength, 1024);
-          let isBinary = false;
-          for (let i = 0; i < checkLen; i++) {
-            if (bytes[i] === 0) { isBinary = true; break; }
-          }
-          if (isBinary) continue;
-          // Convert to UTF-8 string — safe because we verified it's text.
-          const text = Buffer.from(bytes).toString("utf8");
-          files.push({ path: entry.path, content: text });
+          files.push({
+            path: entry.path,
+            base64: Buffer.from(bytes).toString("base64"),
+          });
         } catch {
           // skip unreadable files (permissions, etc.)
         }
@@ -369,14 +445,39 @@ async function backupAllFilesFromSandbox(
   return files;
 }
 
+/** Write a base64 backup entry to a sandbox as raw bytes (binary-safe;
+ *  parent directories are created implicitly by the E2B write). */
+async function restoreBackupFile(
+  sandbox: Sandbox,
+  file: BackupFile,
+): Promise<boolean> {
+  try {
+    const bytes = Buffer.from(file.base64, "base64");
+    await sandbox.files.write(file.path, new Blob([new Uint8Array(bytes)]));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Perform an atomic sandbox rotation: killOrphans → backup → kill → create → restore.
+ * Perform an atomic sandbox rotation: backup → kill old → create → restore.
  *
  * Used by:
  *   - The `rotate` action (called by the client-side `ensureFreshSandbox`
- *     when the sandbox is >23h old).
+ *     rotation loop). The client passes its CURRENT sandbox ID so a
+ *     serverless cold start (empty server-side cache) can still find, back
+ *     up, and replace the old sandbox — previously a cold rotation created
+ *     an empty sandbox and orphaned the old one with all its files.
  *   - The `getSandbox` safety-net check (when the server's cached entry is
  *     >23h old).
+ *
+ * FILE-LOSS SAFETY: rotation NEVER kills anything except the ONE sandbox it
+ * is replacing, and only AFTER its files have been backed up. The old
+ * "kill orphaned sandboxes first" step killed the live workspace before the
+ * backup ran whenever this instance's cache was cold — catastrophic data
+ * loss on every rotation. Stale-sandbox reclaiming stays in
+ * createAndCacheSandbox (age-guarded, >20h only).
  *
  * Returns the new sandbox + counts of files backed up and restored.
  */
@@ -384,43 +485,59 @@ async function performRotation(
   apiKey: string,
   conversationId: string | null,
   mode: "shared" | "separate",
+  clientSandboxId?: string | null,
 ): Promise<{ sandbox: Sandbox; backedUp: number; restored: number }> {
   const key = cacheKey(apiKey, conversationId, mode);
 
-  // 1. Enforce single-sandbox rule — kill ALL orphaned sandboxes on the
-  //    account before creating a new one.
-  await killOrphanedSandboxes(apiKey);
-
-  // 2. Try to backup files from the current sandbox (if any).
-  let backupFiles: Array<{ path: string; content: string }> = [];
+  // 1. Resolve the OLD sandbox: local cache first (warm instance), then the
+  //    client-provided sandbox ID (cold start — the client stores the
+  //    current id at `e2b-sandbox-id:<apiKey>` and sends it on every
+  //    request). Sandbox.connect also auto-resumes a paused sandbox.
+  let oldSandbox: Sandbox | null = null;
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
-    if (await isAlive(cached.sandbox)) {
-      try {
-        backupFiles = await backupAllFilesFromSandbox(cached.sandbox);
-        console.log(`[sandbox] rotation: backed up ${backupFiles.length} files from ${cached.sandbox.sandboxId}`);
-      } catch (err) {
-        // best-effort — if backup fails, continue with empty backup
-        console.warn(`[sandbox] rotation: backup failed:`, err instanceof Error ? err.message : String(err));
-      }
+    oldSandbox = (await isAlive(cached.sandbox)) ? cached.sandbox : null;
+  }
+  if (!oldSandbox && clientSandboxId) {
+    try {
+      oldSandbox = await Sandbox.connect(clientSandboxId, { apiKey });
+    } catch {
+      // Dead or already gone — nothing to back up.
     }
-    // 3. Kill the old sandbox (evictCacheEntry kills + removes from cache).
-    evictCacheEntry(mode, key);
   }
 
-  // 4. Create a new sandbox (createAndCacheSandbox handles quota recovery).
+  // 2. Back up ALL files (binary-safe) from the old sandbox before touching
+  //    anything. Best-effort — a failed backup logs and continues with an
+  //    empty one rather than killing a live workspace we couldn't read.
+  let backupFiles: BackupFile[] = [];
+  if (oldSandbox) {
+    try {
+      backupFiles = await backupAllFilesFromSandbox(oldSandbox);
+      console.log(`[sandbox] rotation: backed up ${backupFiles.length} files from ${oldSandbox.sandboxId}`);
+    } catch (err) {
+      // best-effort — if backup fails, continue with empty backup
+      console.warn(`[sandbox] rotation: backup failed:`, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // 3. Kill the OLD sandbox only (after the backup). Evicting the cache
+  //    entry kills + removes it; a connect()-resolved sandbox is killed
+  //    directly.
+  if (cached) {
+    evictCacheEntry(mode, key);
+  } else if (oldSandbox) {
+    void oldSandbox.kill().catch(() => {});
+  }
+
+  // 4. Create a new sandbox (createAndCacheSandbox handles quota recovery;
+  //    its stale-reclaim is age-guarded and cannot touch live sandboxes).
   const sandbox = await createAndCacheSandbox(apiKey, conversationId, mode);
 
-  // 5. Restore the backup (if any) to the new sandbox.
+  // 5. Restore the backup (if any) to the new sandbox — binary-safe writes.
   let restored = 0;
   if (backupFiles.length > 0) {
     for (const f of backupFiles) {
-      try {
-        await sandbox.files.write(f.path, f.content);
-        restored++;
-      } catch {
-        // skip files that fail to write
-      }
+      if (await restoreBackupFile(sandbox, f)) restored++;
     }
     console.log(`[sandbox] rotation: restored ${restored}/${backupFiles.length} files to ${sandbox.sandboxId}`);
   }
@@ -431,15 +548,19 @@ async function performRotation(
 /** Create a fresh sandbox and cache it. Used by getSandbox() and the
  *  dead-sandbox recovery path. Creates predefined folders best-effort.
  *
- *  SINGLE-SANDBOX ENFORCEMENT: `killOrphanedSandboxes(apiKey)` runs at the
- *  start of EVERY create to kill orphaned sandboxes from previous sessions /
- *  dead serverless instances. This prevents the "20/20 sandbox limit reached"
- *  error and enforces the "one sandbox per API key" rule.
+ *  STALE-RECLAIM: `killOrphanedSandboxes(apiKey)` runs at the start of EVERY
+ *  create, but is AGE-GUARDED — it only reclaims sandboxes from previous
+ *  sessions / dead serverless instances that are ALSO older than 20h (E2B's
+ *  24h TTL kills them within hours anyway). This still prevents the
+ *  "20/20 sandbox limit reached" error from leaked sandboxes while never
+ *  touching a live workspace that merely happens to be unknown to this
+ *  instance's cold cache.
  *
  *  QUOTA RECOVERY: if `Sandbox.create` fails with a quota error (e.g.
  *  "20/20 sandbox limit reached"), we kill ALL sandboxes on the account
- *  (enforcing the "one shared sandbox" rule), clear our local cache, and
- *  retry the create. */
+ *  (the forced path — see killAllSandboxesOnAccount), clear our local
+ *  cache, and retry the create. The OnyxBase cloud auto-restore then
+ *  repopulates the fresh sandbox when configured. */
 /** Sanitize client-supplied env vars for sandbox injection (PRD §14):
  *  only string→string entries, sane size caps, no empty names. Values are
  *  NEVER logged. */
@@ -464,11 +585,10 @@ async function createAndCacheSandbox(
   mode: "shared" | "separate",
   envs?: Record<string, string>,
 ): Promise<Sandbox> {
-  // Enforce single-sandbox rule — kill ALL orphaned sandboxes on the account
-  // before creating a new one. This runs on EVERY create (not just when the
-  // cache is full) to handle the case where orphans accumulated from previous
-  // serverless instances (Vercel cold starts lose the in-memory cache, but
-  // the sandboxes keep running on E2B).
+  // Reclaim STALE sandboxes (>20h, unknown to this instance — leaked from
+  // previous sessions / dead serverless instances) before creating a new
+  // one. Age-guarded inside killOrphanedSandboxes: a live workspace that is
+  // merely unknown to this cold instance's cache is NEVER killed.
   await killOrphanedSandboxes(apiKey);
 
   await enforceLimit();
@@ -594,7 +714,7 @@ async function getSandbox(
     // and all files would be lost.
     if (Date.now() - cached.createdAt > ROTATION_AGE_MS) {
       console.log(`[sandbox] getSandbox: cached sandbox ${cached.sandbox.sandboxId} is >23h old, rotating...`);
-      const { sandbox: rotated } = await performRotation(apiKey, conversationId, mode);
+      const { sandbox: rotated } = await performRotation(apiKey, conversationId, mode, clientSandboxId);
       return rotated;
     }
     // Liveness check — if the cached sandbox is dead, evict + fall through
@@ -1937,12 +2057,10 @@ export async function POST(req: NextRequest) {
       }
 
       case "backup_all": {
-        // Recursively walk /home/user and return ALL text files as
-        // { path, content } pairs (raw UTF-8 text, NOT base64).
-        // Files >500KB are SKIPPED (too large for JSON transport).
-        // Binary files are SKIPPED (can't JSON-serialize — detected by
-        // checking the first 1KB for null bytes).
-        // Shell dotfiles are skipped (sandbox-template-specific).
+        // Recursively walk /home/user and return ALL files as
+        // { path, base64 } pairs (BINARY-SAFE — every file, including
+        // images/archives, is base64-encoded; only volatile shell-state
+        // dotfiles are skipped).
         //
         // Used by the auto-rotation system to migrate files to a new sandbox.
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
@@ -1955,19 +2073,23 @@ export async function POST(req: NextRequest) {
       }
 
       case "rotate": {
-        // Atomic sandbox rotation: killOrphans → backup → kill → create → restore.
-        // Called by the client-side `ensureFreshSandbox` when the sandbox is
-        // >23h old (approaching E2B's 24h hard TTL).
+        // Atomic sandbox rotation: backup → kill old → create → restore.
+        // Called by the client-side `ensureFreshSandbox` rotation loop
+        // (every 50 min — before E2B's 1h timeout window ends).
         //
-        // The rotation is TRANSPARENT — the new sandbox has the same files
-        // as the old one (text files ≤500KB). Tools don't know it happened;
-        // they just see the new sandboxId on the next call.
+        // The client sends its CURRENT sandbox ID in `sandboxId`, so a
+        // serverless cold start (empty server-side cache) still finds and
+        // backs up the old sandbox before replacing it. The rotation is
+        // TRANSPARENT — the new sandbox has the SAME files as the old one
+        // (ALL files, binary included). Tools don't know it happened; they
+        // just see the new sandboxId on the next call.
         //
         // Returns { sandboxId, backedUp, restored }.
         const { sandbox, backedUp, restored } = await performRotation(
           apiKey,
           conversationId,
           sandboxMode,
+          clientSandboxId,
         );
         return NextResponse.json({
           sandboxId: sandbox.sandboxId,

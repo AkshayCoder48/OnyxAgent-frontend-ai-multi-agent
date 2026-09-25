@@ -76,6 +76,11 @@ export interface BgJob {
   conversationId: string | null;
   assistantMessageId: string;
   startedAt: number;
+  /** PRD §23/§38 — the seq of the LAST event this browser consumed.
+   *  Persisted (throttled) next to every Dexie checkpoint so a reload
+   *  resumes the stream AFTER the checkpointed content: reconnects and
+   *  reload-resumes are idempotent (never replay duplicates, never gaps). */
+  lastSeq?: number;
 }
 
 export interface BgTurnOptions {
@@ -149,6 +154,21 @@ function saveJob(job: BgJob): void {
 export function clearJob(assistantMessageId: string): void {
   const jobs = readJobs();
   delete jobs[assistantMessageId];
+  writeJobs(jobs);
+}
+
+/** Advance the persisted job's seq cursor (consumeRun checkpoint boundary —
+ *  throttled by the caller). Never RESURRECTS a cleared job: once the run
+ *  finished (clearJob) a late cursor write must not re-add it, or the next
+ *  reload would "resume" a dead run. */
+export function updateJobCursor(assistantMessageId: string, lastSeq: number): void {
+  if (typeof window === "undefined") return;
+  if (!Number.isFinite(lastSeq) || lastSeq < 0) return;
+  const jobs = readJobs();
+  const job = jobs[assistantMessageId];
+  if (!job) return; // finished/stopped — do not resurrect
+  if ((job.lastSeq ?? 0) === lastSeq) return;
+  job.lastSeq = lastSeq;
   writeJobs(jobs);
 }
 
@@ -285,6 +305,39 @@ export async function* streamBackgroundTurn(
     }),
     signal,
   });
+  // JSON body instead of an SSE stream: the bg_wait handler answers the
+  // sandbox-unreachable branch (Sandbox.connect failed at segment open —
+  // serverless cold start, paused sandbox, E2B blip) with HTTP 200 + JSON.
+  // Surfaced as an UNREACHABLE FRAME (not a throw, not zero frames) so the
+  // caller's reconnect loop handles it — stream loss is transport failure,
+  // never job failure (PRD §23). This was the exact shape behind the old
+  // false "Lost the connection (no stream frames)" fatal error: the raw
+  // JSON body contains no `data:` lines, so the frame parser found nothing.
+  if (res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const text = await res.text().catch(() => "");
+      let payload: { status?: string; error?: string } = {};
+      try {
+        payload = JSON.parse(text) as { status?: string; error?: string };
+      } catch {
+        // fall through to the generic error below
+      }
+      yield {
+        sandboxId,
+        status: "unreachable",
+        error:
+          payload.error ??
+          "Background sandbox unreachable on E2B (reconnecting automatically).",
+        events: [],
+        content: "",
+        startedAt: null,
+        done: false,
+        afterSeq,
+      } as BgStatus;
+      return;
+    }
+  }
   // Non-OK / non-streaming response — surface it as a frame error (the
   // caller treats a generator that ends without frames as unreachable).
   if (!res.ok) {
