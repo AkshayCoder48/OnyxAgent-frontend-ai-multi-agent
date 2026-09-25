@@ -161,7 +161,7 @@ export function RunHistoryPanel({ taskId, userId, refreshKey, onRunningChange }:
         </div>
       ) : runs.length === 0 ? (
         <p className="px-1 pb-2 text-[13px] text-muted-foreground">
-          No runs yet — the first run appears here (and in Telegram, if enabled) once the task fires.
+          No runs yet — the first run appears here once the task fires.
         </p>
       ) : (
         <ul className="scrollbar-thin max-h-72 space-y-1 overflow-y-auto px-1 pb-1">

@@ -97,7 +97,7 @@ function taskSummary(t: SafeScheduledTask): string {
     `${t.name} [id: ${t.id}]`,
     `  schedule: ${describeSchedule(t as never)} · ${t.timezone}`,
     `  status: ${t.enabled ? "Active" : "Paused"} · next run: ${next} · last run: ${last}`,
-    `  workspace: ${t.workspaceId}${t.runtime?.hasTelegram ? " · telegram notifications: on" : ""}`,
+    `  workspace: ${t.workspaceId}`,
     `  mode: ${t.chatId ? `chat-attached (${t.chatId}) — runs in that conversation` : "standalone instructions"}`,
     `  instructions: ${t.instructions.slice(0, 120)}${t.instructions.length > 120 ? "…" : ""}`,
   ].join("\n");
@@ -109,7 +109,7 @@ function taskSummary(t: SafeScheduledTask): string {
 
 registerTool(
   "create_scheduled_task",
-  "Create an autonomous SCHEDULED TASK that runs a full agent job (research, coding, file generation, Telegram delivery…) on a schedule — even when this app is closed. The task runs in an isolated E2B sandbox with the web/file/terminal/python/telegram tools, the persistent workspace restored before and synced after each run, and its result saved + (optionally) sent to the user's Telegram. SCHEDULE object: { type: 'daily'|'weekly'|'monthly'|'interval'|'once'|'cron', expression, time, timezone, startAt?, endAt? }. expression: daily='HH:MM'; weekly=weekday numbers 0-6 (0=Sunday, comma list); monthly=day-of-month 1-31; interval=SECONDS (>=60); once=ISO datetime; cron=5-field expression. time='HH:MM' for weekly/monthly. timezone: IANA name (Asia/Kolkata, America/New_York…); default is the user's local timezone — only set another when the user explicitly names it. Convert natural language ('every weekday at 8:30 AM', 'every 30 minutes', 'tomorrow at 5 PM') into these fields. instructions = the COMPLETE agent job in full detail — it is executed verbatim by an autonomous agent with no user available, so make it self-contained (what to research/do, which files to write and their names, what to send on Telegram). Ask a clarifying question ONLY when the time is genuinely ambiguous ('schedule this daily' with no time anywhere); otherwise create the task directly.",
+  "Create an autonomous SCHEDULED TASK that runs a full agent job (research, coding, file generation) on a schedule — even when this app is closed. The task runs in an isolated E2B sandbox with the web/file/terminal/python tools, the persistent workspace restored before and synced after each run, and its result saved. SCHEDULE object: { type: 'daily'|'weekly'|'monthly'|'interval'|'once'|'cron', expression, time, timezone, startAt?, endAt? }. expression: daily='HH:MM'; weekly=weekday numbers 0-6 (0=Sunday, comma list); monthly=day-of-month 1-31; interval=SECONDS (>=60); once=ISO datetime; cron=5-field expression. time='HH:MM' for weekly/monthly. timezone: IANA name (Asia/Kolkata, America/New_York…); default is the user's local timezone — only set another when the user explicitly names it. Convert natural language ('every weekday at 8:30 AM', 'every 30 minutes', 'tomorrow at 5 PM') into these fields. instructions = the COMPLETE agent job in full detail — it is executed verbatim by an autonomous agent with no user available, so make it self-contained (what to research/do, which files to write and their names). Ask a clarifying question ONLY when the time is genuinely ambiguous ('schedule this daily' with no time anywhere); otherwise create the task directly.",
   {
     type: "object",
     properties: {
@@ -118,7 +118,7 @@ registerTool(
       instructions: {
         type: "string",
         description:
-          "The COMPLETE agent job executed at run time: what to do, sources to check, files to create/update (with paths), what to send on Telegram. Written for an autonomous agent with NO user available.",
+          "The COMPLETE agent job executed at run time: what to do, sources to check, files to create/update (with paths). Written for an autonomous agent with NO user available.",
       },
       chatId: {
         type: "string",
@@ -140,10 +140,6 @@ registerTool(
         },
         required: ["type"],
         additionalProperties: false,
-      },
-      notifyTelegram: {
-        type: "boolean",
-        description: "Send run results to the user's connected Telegram (default true when connected)",
       },
       enabled: { type: "boolean", description: "Start active (default true)" },
     },
@@ -200,7 +196,6 @@ registerTool(
         timezone: schedule.timezone || browserTimezone(),
       },
       enabled: args.enabled !== false,
-      notifyTelegram: args.notifyTelegram !== false,
       chatId,
       chatContext,
       runtime: { provider },
@@ -231,7 +226,7 @@ registerTool(
 
 registerTool(
   "update_scheduled_task",
-  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state, Telegram notifications, or the conversation it is attached to. Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
+  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state, or the conversation it is attached to. Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
   {
     type: "object",
     properties: {
@@ -257,14 +252,13 @@ registerTool(
         additionalProperties: false,
       },
       enabled: { type: "boolean", description: "true = active, false = paused" },
-      notifyTelegram: { type: "boolean" },
     },
     required: ["id"],
     additionalProperties: false,
   },
   async (args, ctx) => {
     const payload: Record<string, unknown> = { id: String(args.id ?? "") };
-    for (const k of ["name", "description", "instructions", "notifyTelegram"] as const) {
+    for (const k of ["name", "description", "instructions"] as const) {
       if (args[k] !== undefined) payload[k] = args[k];
     }
     if (args.chatId !== undefined) {
@@ -425,7 +419,7 @@ registerTool(
 
 registerTool(
   "list_scheduled_tasks",
-  "List the user's scheduled tasks with id, name, schedule, timezone, status (Active/Paused), next run, last run, and whether Telegram notifications are on. Use this to find task ids before update/delete/pause/resume, or to answer 'what automations do I have?'.",
+  "List the user's scheduled tasks with id, name, schedule, timezone, status (Active/Paused), next run, last run. Use this to find task ids before update/delete/pause/resume, or to answer 'what automations do I have?'.",
   {
     type: "object",
     properties: {
@@ -466,7 +460,6 @@ registerTool(
         runCount: t.runCount,
         workspaceId: t.workspaceId,
         chatId: t.chatId ?? null,
-        telegram: !!t.runtime?.hasTelegram,
       })),
       summary: filtered.length
         ? filtered.map(taskSummary).join("\n\n")

@@ -8,7 +8,7 @@ for the `workspace_default` snapshot (generation 1, committed
 
 - OnyxBase's multi-instance KV lost the committed **manifest record** (both
   the primary `m:` and replica `mr:` copies) and ~70% of the file chunk
-  records when their Telegram-mirror writes silently failed. This is the
+  records when their durable-mirror writes silently failed. This is the
   backend durability incident documented in
   `src/lib/onyxbase/workspace-sync.ts` (DURABILITY / RECOVERY sections).
 - The loss happened **on OnyxBase's side, before any re-push** — nothing the

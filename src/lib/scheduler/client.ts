@@ -15,17 +15,7 @@ import { useAuth } from "@/hooks";
 import type {
   SafeScheduledTask,
   ScheduledTaskRun,
-  TelegramStatus,
 } from "@/lib/scheduler/types";
-
-/**
- * Telegram connection status as the API actually returns it — the shared
- * `TelegramStatus` type omits `chatName` (a newer field); this view adds it
- * back without touching the server-owned types module.
- */
-export interface TelegramStatusView extends TelegramStatus {
-  chatName?: string | null;
-}
 
 /** Envelope every /api/scheduler route answers with. */
 export interface SchedulerApiResponse {
@@ -36,7 +26,6 @@ export interface SchedulerApiResponse {
   tasks?: SafeScheduledTask[];
   run?: ScheduledTaskRun;
   runs?: ScheduledTaskRun[];
-  telegram?: TelegramStatusView;
   [key: string]: unknown;
 }
 
@@ -143,7 +132,7 @@ import type { ChatTurnMessage } from "./types";
  * type-loose because they arrive as plain JSON.
  */
 export interface ServerChatMessageView {
-  /** e.g. "smsg_<e2bRunId>" (scheduled-run results) or webhook-chosen. */
+  /** e.g. "smsg_<e2bRunId>" (scheduled-run results). */
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -154,13 +143,13 @@ export interface ServerChatMessageView {
   /** Browser ToolCall[] shape (JSON). */
   toolCalls?: unknown[] | null;
   createdAt: string;
-  origin?: "scheduled" | "telegram";
+  origin?: "scheduled";
 }
 
 export interface PullChatUpdateView {
   chatId: string;
   messages: ServerChatMessageView[];
-  meta?: { title: string; kind: "chat" | "telegram" };
+  meta?: { title: string; kind: "chat" };
   /** The newest smsg marker for this chat (the next `after` cursor). */
   nextAfter?: string;
 }
@@ -195,71 +184,6 @@ export async function pullChat(
 ): Promise<PullChatResponse> {
   const res = await schedulerApi(userId, "pull_chat", { updates });
   return res as unknown as PullChatResponse;
-}
-
-// ---------------------------------------------------------------------------
-// Telegram
-// ---------------------------------------------------------------------------
-
-/** Call POST /api/scheduler/telegram with `{ action, ...payload }`. */
-export async function telegramApi(
-  userId: string,
-  action: string,
-  payload: Record<string, unknown> = {},
-): Promise<SchedulerApiResponse> {
-  if (!userId) {
-    return { ok: false, error: "NO_USER", message: "Sign in first." };
-  }
-  let key: string | null = null;
-  try {
-    key = await resolveKey(userId);
-  } catch {
-    key = null;
-  }
-  if (!key || !key.trim()) {
-    return { ok: false, error: "NOT_CONFIGURED", message: NOT_CONFIGURED_MESSAGE };
-  }
-  try {
-    return await postScheduler("/api/scheduler/telegram", key, { action, ...payload });
-  } catch (e) {
-    return {
-      ok: false,
-      error: "NETWORK",
-      message: e instanceof Error ? e.message : "Network error",
-    };
-  }
-}
-
-/** GET /api/scheduler/telegram → connection status (token never returned). */
-export async function getTelegramStatus(userId: string): Promise<SchedulerApiResponse> {
-  if (!userId) {
-    return { ok: false, error: "NO_USER", message: "Sign in first." };
-  }
-  let key: string | null = null;
-  try {
-    key = await resolveKey(userId);
-  } catch {
-    key = null;
-  }
-  if (!key || !key.trim()) {
-    return { ok: false, error: "NOT_CONFIGURED", message: NOT_CONFIGURED_MESSAGE };
-  }
-  try {
-    const res = await fetch("/api/scheduler/telegram", {
-      headers: { "X-OnyxBase-Key": key },
-    });
-    const data = (await res.json().catch(() => ({}))) as SchedulerApiResponse;
-    if (!res.ok && data.ok !== false) {
-      return { ok: false, error: "HTTP_ERROR", message: `Request failed (${res.status})` };
-    }
-    return data;
-  } catch (e) {
-    return {
-      ok: false,
-      error: "NETWORK",
-      message: e instanceof Error ? e.message : "Network error",
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 // ============================================================================
 // TaskCard — one scheduled task, Terra editorial style: name + status dot,
 // schedule description, next run (task-timezone aware), last run, created
-// date, workspace id, telegram indicator, and the action row (Edit / Pause ⇄
+// date, workspace id, runtime indicator, and the action row (Edit / Pause ⇄
 // Resume / Run now / Delete-with-confirm / History).
 // ============================================================================
 
@@ -20,7 +20,6 @@ import {
   PauseCircle,
   Play,
   Pencil,
-  Send,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui";
@@ -197,7 +196,7 @@ export function TaskCard({
         </p>
       </div>
 
-      {/* Meta footer: workspace id, created date, telegram, runtime */}
+      {/* Meta footer: workspace id, created date, runtime */}
       <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-border/60 pt-3 text-[11.5px] text-muted-foreground">
         <span className="font-mono">{task.workspaceId}</span>
         <span aria-hidden>·</span>
@@ -211,22 +210,6 @@ export function TaskCard({
         <span
           className={cn(
             "ml-auto inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5",
-            task.notificationConfig?.telegram
-              ? "border-primary/25 bg-primary/5 text-primary"
-              : "border-border text-muted-foreground/70",
-          )}
-          title={
-            task.notificationConfig?.telegram
-              ? "Result sent to Telegram after each run"
-              : "Telegram notifications off"
-          }
-        >
-          <Send className="size-3" aria-hidden />
-          {task.notificationConfig?.telegram ? "Telegram on" : "Telegram off"}
-        </span>
-        <span
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5",
             task.runtime?.hasProvider
               ? "border-emerald-500/25 text-emerald-600 dark:text-emerald-400"
               : "border-red-500/25 text-red-600 dark:text-red-400",

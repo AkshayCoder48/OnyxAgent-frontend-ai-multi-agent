@@ -195,7 +195,7 @@ export class OnyxBaseKV {
     const qs = query
       ? "?" + new URLSearchParams({ collection: ONYXBASE_COLLECTION, ...query }).toString()
       : `?collection=${ONYXBASE_COLLECTION}`;
-    // OnyxBase is multi-instance (in-memory index + Telegram mirror): reads
+    // OnyxBase is multi-instance (in-memory index + durable mirror): reads
     // can transiently fail with 500 (auth rehydrate error on a cold instance),
     // 502/503 (restarts / "durable backend unreachable"), or 429 (per-key
     // rate caps). 401 can appear briefly for freshly-created keys before an

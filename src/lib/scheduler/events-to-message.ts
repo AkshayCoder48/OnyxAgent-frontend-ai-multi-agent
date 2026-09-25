@@ -3,7 +3,7 @@
  * an assistant ChatMessage-like record, server-side.
  *
  * Mirrors the browser's part-building rules (use-chat/event-processor) in
- * simplified form so a scheduled/telegram run's result renders in the chat
+ * simplified form so a scheduled run's result renders in the chat
  * with the same structure the user sees during live turns:
  *   - round_start → new round (parts of different rounds never merge)
  *   - reasoning_delta → one reasoning part per round-episode, merged while

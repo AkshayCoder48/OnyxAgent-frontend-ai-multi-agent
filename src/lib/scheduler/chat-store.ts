@@ -1,7 +1,7 @@
 /**
  * SERVER-side chat KV records — the unified chat-execution storage layer.
  *
- * A scheduled/telegram execution is a schedule attached to an EXISTING chat:
+ * A scheduled execution is a schedule attached to an EXISTING chat:
  * the agent runs with the chat's history and its result lands back in that
  * chat. The chat's state lives in OnyxBase KV under the user's account
  * (collection "onyxagent", same durability conventions as the scheduler
@@ -19,8 +19,8 @@
  *                                 (written by engine.ts)
  *   chat:<chatId>:execs         — mutable exec envelope {w, execs[]} (engine.ts)
  *
- * Every mutation is a NEW immutable version record (a new Telegram message in
- * OnyxBase's mirror — sends are reliable, edits strand/revert); reads resolve
+ * Every mutation is a NEW immutable version record (a new mirror message in
+ * OnyxBase's durable backend — sends are reliable, edits strand/revert); reads resolve
  * the latest surviving version via the key list. Writes are verified by
  * read-back with one fresh-key rewrite sweep (the engine's writeTaskVerified
  * pattern). Values are capped (~100KB) so no record can bloat the KV.
@@ -48,13 +48,13 @@ export interface ChatMirror {
 }
 
 /**
- * A message appended by the SERVER (scheduled runs, telegram webhook replies)
- * that the browser pulls into Dexie + the live store. `parts`/`toolCalls`
+ * A message appended by the SERVER (scheduled runs) that the browser pulls
+ * into Dexie + the live store. `parts`/`toolCalls`
  * mirror the browser MessagePart[]/ToolCall[] shapes (type-loose here so the
  * server module needs no client imports).
  */
 export interface ServerChatMessage {
-  /** e.g. "smsg_<e2bRunId>" (assistant results) or a webhook-chosen id. */
+  /** e.g. "smsg_<e2bRunId>" (assistant results). */
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -65,13 +65,13 @@ export interface ServerChatMessage {
   /** ToolCall[] from eventsToMessage. */
   toolCalls?: unknown[] | null;
   createdAt: string;
-  origin: "scheduled" | "telegram";
+  origin: "scheduled";
 }
 
 export interface ChatMeta {
   id: string;
   title: string;
-  kind: "chat" | "telegram";
+  kind: "chat";
   createdAt: string;
   updatedAt: string;
 }
@@ -442,7 +442,7 @@ export async function writeChatMeta(kv: SchedulerKV, chatId: string, meta: Omit<
   const rec: ChatMeta = {
     id: chatId,
     title: (meta.title ?? "").slice(0, 300),
-    kind: meta.kind === "telegram" ? "telegram" : "chat",
+    kind: "chat",
     createdAt: meta.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -512,7 +512,7 @@ export interface PullChatUpdateRequest {
 export interface PullChatUpdateResponse {
   chatId: string;
   messages: ServerChatMessage[];
-  meta?: { title: string; kind: "chat" | "telegram" };
+  meta?: { title: string; kind: "chat" };
   /** The newest smsg marker for this chat (the next `after` cursor). */
   nextAfter?: string;
 }

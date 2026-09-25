@@ -65,7 +65,6 @@ interface SchedResult {
     lastRunStatus?: string | null;
     runCount?: number;
     workspaceId?: string;
-    telegram?: boolean;
   }>;
   count?: number;
   run?: ScheduledTaskRun;
@@ -248,9 +247,6 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
             <Pencil className="size-3" aria-hidden />
             Edit in Scheduled Tasks
           </button>
-          {task?.runtime?.hasTelegram && (
-            <span className="shrink-0">Telegram notifications on</span>
-          )}
         </div>
       </div>
     );

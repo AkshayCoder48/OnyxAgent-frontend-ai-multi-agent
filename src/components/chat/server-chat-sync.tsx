@@ -6,7 +6,7 @@
 // the unified chat records (see lib/scheduler/chat-sync.ts):
 //
 //   · every 45s (+ on mount) it PULLS server-appended messages for every
-//     linked chat (scheduled-run results, telegram replies) into Dexie and,
+//     linked chat (scheduled-run results) into Dexie and,
 //     for the viewed conversation, into the live chat store — silent,
 //     never throws;
 //   · it MIRRORS the browser's state to the server when the viewed

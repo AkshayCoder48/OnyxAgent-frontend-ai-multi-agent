@@ -29,7 +29,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             spec §14). Renders null. */}
         <ExecutionRehydrator />
         {/* Invisible: the OnyxAI Browser Runtime — heartbeats presence and
-            serves remote model calls (Telegram / scheduled tasks) against
+            serves remote model calls (scheduled tasks) against
             the user's local QVAC server while an app tab is open. Renders
             null. */}
         <OnyxAiBridgeRuntime />

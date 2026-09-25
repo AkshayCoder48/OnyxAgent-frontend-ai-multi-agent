@@ -37,26 +37,12 @@
  *   7. Retries (5xx/429/network, exponential backoff) happen BEFORE any
  *      content streams — no duplicate deltas. Mid-stream failures flush the
  *      partial content and preserve it.
- *   8. TELEGRAM PROGRESS STREAM (unified-2a): state.telegram =
- *      { botToken, chatId, stream? } — stream:true mirrors the run's
- *      thinking / tool / final-answer progress into the user's Telegram
- *      chat by editing ONE message (batched edits every ~2.5s; Telegram has
- *      no token streaming). It runs INSIDE the sandbox, so the stream
- *      survives the browser and the Vercel request being gone — E2B is the
- *      execution source of truth. Pure observer + Telegram side-effect:
- *      event/seq/state semantics are untouched, every call is
- *      fire-and-forget, and 3 consecutive failures disable the stream.
  */
 
 export const BG_AGENT_SCRIPT = String.raw`
 // OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
 // Started as: node bg-agent.mjs <runId>
 //
-// state.telegram = { botToken: string, chatId: string, stream?: boolean }:
-//   the native telegram_* tools read botToken/chatId (unchanged); when
-//   stream === true the runner ALSO live-mirrors its own progress into that
-//   Telegram chat (one message, throttled edits) — see "Telegram progress
-//   stream" below, next to the tgApi helpers.
 import fs from "node:fs/promises";
 import { exec } from "node:child_process";
 import path from "node:path";
@@ -154,14 +140,10 @@ async function writeState(state) {
   await fs.rename(tmp, STATE_FILE);
 }
 
-/** Append one event to the run's append-only log (O(1), order-serialized).
- *  The Telegram streamer (unified-2a) observes every event here — a pure
- *  observer guarded by its own try/catch, it can never alter or fail the
- *  log path. */
+/** Append one event to the run's append-only log (O(1), order-serialized). */
 function emitEvent(ev) {
   ev.ts = Date.now();
   ev.seq = ++SEQ;
-  try { tgTrack(ev); } catch {}
   emitChain = emitChain
     .then(() => fs.appendFile(EVENTS_FILE, JSON.stringify(ev) + "\n"))
     .catch(() => {});
@@ -2060,449 +2042,7 @@ const TOOLS = [
       };
     },
   },
-  // ── Telegram (native — works in unattended scheduled runs) ────────────
-  // Credentials come from state.telegram (injected at launch by the browser
-  // or the scheduler) — NEVER from tool arguments, so the model never sees
-  // the bot token.
-  {
-    name: "telegram_send_message",
-    description: "Send a text message to the user's Telegram (their connected chat). Supports Telegram HTML entities (<b>, <i>, <code>). Use for delivering results, summaries, alerts, and scheduled-task reports directly to the user.",
-    parameters: { type: "object", properties: { text: { type: "string", description: "Message text (Telegram HTML allowed)" }, chat_id: { type: "string", description: "Optional override chat id — default is the user's connected chat" } }, required: ["text"] },
-    run: async (args) => {
-      const tg = await getTelegram();
-      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session. Tell the user to connect one in Settings → Integrations → Telegram." };
-      const chatId = String(args.chat_id || tg.chatId);
-      if (!String(args.text ?? "").trim()) return { error: "text must be non-empty" };
-      const r = await tgApi(tg.botToken, "sendMessage", { chat_id: chatId, text: String(args.text).slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true });
-      if (!r.ok) return { error: "Telegram sendMessage failed: " + (r.description || "unknown") };
-      return { success: true, chat_id: chatId, length: String(args.text).length };
-    },
-  },
-  {
-    name: "telegram_send_document",
-    description: "Send a FILE from the workspace to the user's Telegram as a document (reports, data files, exports). Reads the file from the sandbox filesystem.",
-    parameters: { type: "object", properties: { path: { type: "string", description: "Workspace-relative file path to send" }, caption: { type: "string", description: "Optional caption (max 1000 chars)" }, chat_id: { type: "string", description: "Optional override chat id" } }, required: ["path"] },
-    run: async (args) => {
-      const tg = await getTelegram();
-      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
-      const p = safePath(args.path);
-      if (!p) return { error: "Invalid path" };
-      let content;
-      try { content = await fs.readFile(p); } catch (e) { return { error: "Failed to read file: " + friendlyErr(e) }; }
-      if (content.length > 45 * 1024 * 1024) return { error: "File too large for Telegram (45 MB limit)" };
-      const chatId = String(args.chat_id || tg.chatId);
-      const form = new FormData();
-      form.append("chat_id", chatId);
-      form.append("caption", String(args.caption ?? "").slice(0, 1000));
-      const fname = path.basename(p).replace(/[^\w.\-]/g, "_") || "document";
-      form.append("document", new Blob([content]), fname);
-      const r = await tgForm(tg.botToken, "sendDocument", form);
-      if (!r.ok) return { error: "Telegram sendDocument failed: " + (r.description || "unknown") };
-      return { success: true, chat_id: chatId, file: fname, size: content.length };
-    },
-  },
-  {
-    name: "telegram_send_photo",
-    description: "Send a photo to the user's Telegram — either an image file from the workspace or a public image URL.",
-    parameters: { type: "object", properties: { path: { type: "string", description: "Workspace-relative image path (alternative to url)" }, url: { type: "string", description: "Public image URL (alternative to path)" }, caption: { type: "string" }, chat_id: { type: "string", description: "Optional override chat id" } }, required: [] },
-    run: async (args) => {
-      const tg = await getTelegram();
-      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
-      const chatId = String(args.chat_id || tg.chatId);
-      let form;
-      if (args.path) {
-        const p = safePath(args.path);
-        if (!p) return { error: "Invalid path" };
-        let content;
-        try { content = await fs.readFile(p); } catch (e) { return { error: "Failed to read file: " + friendlyErr(e) }; }
-        if (content.length > 9 * 1024 * 1024) return { error: "Photo too large for Telegram (10 MB limit)" };
-        form = new FormData();
-        form.append("chat_id", chatId);
-        form.append("caption", String(args.caption ?? "").slice(0, 1000));
-        form.append("photo", new Blob([content]), path.basename(p).replace(/[^\w.\-]/g, "_") || "photo.jpg");
-        const r = await tgForm(tg.botToken, "sendPhoto", form);
-        if (!r.ok) return { error: "Telegram sendPhoto failed: " + (r.description || "unknown") };
-        return { success: true, chat_id: chatId, source: "file" };
-      }
-      if (args.url) {
-        const r = await tgApi(tg.botToken, "sendPhoto", { chat_id: chatId, photo: String(args.url), caption: String(args.caption ?? "").slice(0, 1000) });
-        if (!r.ok) return { error: "Telegram sendPhoto failed: " + (r.description || "unknown") };
-        return { success: true, chat_id: chatId, source: "url" };
-      }
-      return { error: "Provide either path (workspace image) or url (public image URL)" };
-    },
-  },
-  {
-    name: "telegram_get_updates",
-    description: "Fetch recent messages received by the Telegram bot (what the user sent to it). Useful for reading replies or commands the user sent via Telegram.",
-    parameters: { type: "object", properties: { limit: { type: "number", description: "Max updates to return (default 10)" } }, required: [] },
-    run: async (args) => {
-      const tg = await getTelegram();
-      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
-      const r = await tgApi(tg.botToken, "getUpdates", { limit: Math.min(50, Math.max(1, Number(args.limit) || 10)) });
-      if (!r.ok) return { error: "Telegram getUpdates failed: " + (r.description || "unknown") };
-      const updates = (r.result || []).map((u) => ({
-        update_id: u.update_id,
-        chat_id: u.message && u.message.chat ? String(u.message.chat.id) : null,
-        from: u.message && u.message.from ? (u.message.from.first_name || u.message.from.username || "unknown") : null,
-        text: u.message && u.message.text ? u.message.text : null,
-        date: u.message && u.message.date ? u.message.date : null,
-      }));
-      return { success: true, updates: updates.slice(0, Math.max(1, Number(args.limit) || 10)) };
-    },
-  },
-  {
-    name: "telegram_get_chat",
-    description: "Get information about a Telegram chat by id (type, name, username).",
-    parameters: { type: "object", properties: { chat_id: { type: "string", description: "Chat id to inspect — default is the user's connected chat" } }, required: [] },
-    run: async (args) => {
-      const tg = await getTelegram();
-      if (!tg) return { error: "TELEGRAM_NOT_CONNECTED: no Telegram bot is configured for this session." };
-      const chatId = String(args.chat_id || tg.chatId);
-      const r = await tgApi(tg.botToken, "getChat", { chat_id: chatId });
-      if (!r.ok) return { error: "Telegram getChat failed: " + (r.description || "unknown") };
-      const c = r.result || {};
-      return { success: true, chat: { id: String(c.id), type: c.type, title: c.title || null, username: c.username || null, first_name: c.first_name || null } };
-    },
-  },
 ];
-
-// ── Telegram helpers (native tools) ───────────────────────────────────────
-// Credentials live in state.telegram — injected at launch (browser vault or
-// the scheduler). NEVER accepted through tool arguments.
-let TELEGRAM_CFG = null;
-
-async function getTelegram() {
-  if (TELEGRAM_CFG) return TELEGRAM_CFG;
-  try {
-    const st = await readState();
-    if (st.telegram && st.telegram.botToken) {
-      TELEGRAM_CFG = st.telegram;
-      return TELEGRAM_CFG;
-    }
-  } catch {}
-  return null;
-}
-
-async function tgApi(botToken, method, body, signal) {
-  try {
-    const res = await fetch("https://api.telegram.org/bot" + botToken + "/" + method, {
-      method: body ? "POST" : "GET",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    });
-    const data = await res.json();
-    return { ok: !!data.ok, result: data.result, description: data.description };
-  } catch (e) {
-    return { ok: false, description: String(e && e.message ? e.message : e) };
-  }
-}
-
-async function tgForm(botToken, method, form, signal) {
-  try {
-    const res = await fetch("https://api.telegram.org/bot" + botToken + "/" + method, {
-      method: "POST",
-      body: form,
-      signal,
-    });
-    const data = await res.json();
-    return { ok: !!data.ok, result: data.result, description: data.description };
-  } catch (e) {
-    return { ok: false, description: String(e && e.message ? e.message : e) };
-  }
-}
-
-// ── Telegram progress stream (unified-2a) ─────────────────────────────
-// state.telegram = { botToken: string, chatId: string, stream?: boolean }
-//   → stream === true makes the runner mirror its OWN progress into the
-//     user's Telegram chat by editing ONE message. Telegram has no token
-//     streaming, so edits are batched every ~2.5s: thinking → writing →
-//     running tools → final answer (short: edited into the message; long:
-//     sent as a .txt document). This runs INSIDE the sandbox, so the stream
-//     survives the browser AND the Vercel request being gone — E2B is the
-//     execution source of truth. The native telegram_* tools read the same
-//     state.telegram object and are completely unchanged.
-//   Design contract: PURE OBSERVER + Telegram side-effect. tgTrack() feeds
-//   off emitEvent (zero changes to event/seq/state semantics); every
-//   Telegram call is fire-and-forget with internal catches and an abort
-//   timeout; 3 consecutive failures set dead = true (the stream goes
-//   silent, the run is unaffected).
-let TG = null;
-
-/** Minimal HTML escaper for Telegram parse_mode:HTML (& < >). */
-function tgEsc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/** Bounded Telegram call: each request gets an AbortController so a hung
- *  api.telegram.org can never keep the runner process alive after the run
- *  ends (the finalize edits are awaited on the terminal paths). */
-async function tgBounded(ms, makeCall) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => { try { ac.abort(); } catch {} }, ms);
-  try {
-    return await makeCall(ac.signal);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** Build the streamer — null unless state.telegram.stream === true with
- *  real credentials. Sends the initial "working…" message immediately
- *  (fire-and-forget) and starts the 2.5s throttled edit loop. */
-function initTelegramStream(state) {
-  const cfg = state && state.telegram ? state.telegram : null;
-  if (!cfg || cfg.stream !== true || !cfg.botToken || !cfg.chatId) return null;
-
-  const S = {
-    botToken: String(cfg.botToken),
-    chatId: String(cfg.chatId),
-    messageId: null,          // null until the first send lands
-    lastEditAt: 0,
-    lastSentText: "",         // text of the last successful message/edit
-    pendingText: "",          // recent assistant text tail (cap 2000, memory)
-    startedAt: Date.now(),
-    toolLines: new Map(),     // toolCallId -> {name, status, startedAt, brief}
-    phase: "thinking",        // "thinking" | "working" | "done" | "error"
-    sawAnyText: false,
-    sawReasoning: false,
-    charsOfText: 0,
-    editInFlight: false,
-    editPromise: null,
-    sendPromise: null,
-    retrying: false,
-    failCount: 0,             // consecutive failures (reset on any success)
-    dead: false,
-    finalized: false,
-    timer: null,
-  };
-
-  const noteFailure = () => {
-    S.failCount += 1;
-    if (S.failCount >= 3) S.dead = true;
-  };
-
-  S.fmtElapsed = () => {
-    const s = Math.max(0, Math.floor((Date.now() - S.startedAt) / 1000));
-    return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
-  };
-
-  /** Progress message (≤ ~600 chars — headroom under Telegram's 4096). */
-  S.renderProgress = () => {
-    const header = S.phase === "done" ? "✅ <b>OnyxAgent</b> — done"
-      : S.phase === "error" ? "⚠️ <b>OnyxAgent</b> — failed"
-      : "🧠 <b>OnyxAgent</b> — working…";
-    const anyRunning = [...S.toolLines.values()].some((l) => l.status === "running");
-    const toolsPhase = anyRunning || (S.toolLines.size > 0 && !S.sawAnyText);
-    const phaseLine = S.retrying ? "↻ retrying model…"
-      : toolsPhase ? "🔧 Running tools"
-      : S.sawAnyText ? "✍️ Writing…"
-      : "🧠 Thinking…";
-    const lines = [header, "⏱ " + S.fmtElapsed(), phaseLine];
-    // Up to 6 most-recent tool lines (✓ completed / … running / ⚠ error).
-    let tools = [...S.toolLines.values()].slice(-6).map((l) =>
-      "• <code>" + tgEsc(l.name) + "</code> " + (l.status === "completed" ? "✓" : l.status === "error" ? "⚠" : "…"));
-    while (tools.length > 1 && tools.join("\n").length > 380) tools.shift();
-    if (tools.length) lines.push(tools.join("\n"));
-    if (S.charsOfText > 500) {
-      lines.push("· " + (S.charsOfText >= 1000 ? (S.charsOfText / 1000).toFixed(1) + "k chars" : S.charsOfText + " chars"));
-    }
-    lines.push("<i>live — updates every few seconds</i>");
-    return lines.join("\n");
-  };
-
-  /** Fire a NEW message (initial send + recovery when the tracked message
-   *  was lost). Never throws; failures count toward dead. */
-  S.send = (text) => {
-    if (S.dead) return Promise.resolve(false);
-    S.editInFlight = true; // a pending send must never stack a second one
-    const p = tgBounded(12_000, (signal) =>
-      tgApi(S.botToken, "sendMessage", { chat_id: S.chatId, text, parse_mode: "HTML", disable_web_page_preview: true }, signal)
-    )
-      .then((r) => {
-        if (r && r.ok && r.result && r.result.message_id) {
-          S.messageId = r.result.message_id;
-          S.lastSentText = text;
-          S.failCount = 0;
-          return true;
-        }
-        noteFailure();
-        return false;
-      })
-      .catch(() => { noteFailure(); return false; })
-      .finally(() => { S.editInFlight = false; });
-    S.sendPromise = p;
-    return p;
-  };
-
-  /** Edit the tracked message. "message to edit not found" resets the id
-   *  (the next call re-sends); "message is not modified" is a no-op. */
-  S.edit = (text) => {
-    if (S.dead) return Promise.resolve(false);
-    if (S.messageId == null) return S.send(text);
-    const p = tgBounded(12_000, (signal) =>
-      tgApi(S.botToken, "editMessageText", { chat_id: S.chatId, message_id: S.messageId, text, parse_mode: "HTML", disable_web_page_preview: true }, signal)
-    )
-      .then((r) => {
-        const d = String((r && r.description) || "");
-        if ((r && r.ok) || /message is not modified/i.test(d)) {
-          S.lastSentText = text;
-          S.failCount = 0;
-          return true;
-        }
-        if (/message to edit not found/i.test(d)) {
-          S.messageId = null; // the next edit re-sends a fresh message
-          return false;
-        }
-        noteFailure();
-        return false;
-      })
-      .catch(() => { noteFailure(); return false; });
-    S.editPromise = p;
-    return p;
-  };
-
-  /** Throttled tick (every 2.5s): render, dedupe, edit when changed. */
-  S.tick = () => {
-    if (S.dead || S.finalized || S.editInFlight) return;
-    const text = S.renderProgress();
-    if (text === S.lastSentText) return;
-    S.editInFlight = true;
-    S.lastEditAt = Date.now();
-    S.edit(text).finally(() => { S.editInFlight = false; });
-  };
-
-  S.stop = () => {
-    if (S.timer) { clearInterval(S.timer); S.timer = null; }
-  };
-
-  /** Terminal: done. Short results replace the progress message; long ones
-   *  become "done — attached" + the full text as a .txt document. */
-  S.finalizeDone = async (content) => {
-    if (S.finalized) return;
-    S.finalized = true;
-    S.phase = "done";
-    S.stop();
-    if (S.dead) return;
-    try { if (S.sendPromise) await S.sendPromise; } catch {}
-    try { if (S.editPromise) await S.editPromise; } catch {}
-    if (S.dead) return;
-    const text = String(content ?? "");
-    if (text.length <= 3800) {
-      await S.edit("✅ <b>OnyxAgent</b> — done\n\n" + tgEsc(text)).catch(() => {});
-      return;
-    }
-    await S.edit("✅ <b>OnyxAgent</b> — done\n\n<i>Full result (" + text.length + " chars) attached as a file.</i>").catch(() => {});
-    try {
-      const form = new FormData();
-      form.append("chat_id", S.chatId);
-      const fname = "onyxagent-result-" + Date.now() + ".txt";
-      form.append("document", new Blob([text]), fname);
-      await tgBounded(30_000, (signal) => tgForm(S.botToken, "sendDocument", form, signal)).catch(() => {});
-    } catch {}
-  };
-
-  /** Terminal: error — the reason (first 1500 chars) inside a <code> block. */
-  S.finalizeError = async (err) => {
-    if (S.finalized) return;
-    S.finalized = true;
-    S.phase = "error";
-    S.stop();
-    if (S.dead) return;
-    try { if (S.sendPromise) await S.sendPromise; } catch {}
-    try { if (S.editPromise) await S.editPromise; } catch {}
-    if (S.dead) return;
-    const short = tgEsc(String(err ?? "Unknown error").slice(0, 1500));
-    await S.edit("⚠️ <b>OnyxAgent</b> — failed\n\n<code>" + short + "</code>").catch(() => {});
-  };
-
-  // Initial message — ONE send, fire-and-forget: never blocks or fails the
-  // agent (finalize awaits sendPromise, so the message-id race is covered).
-  S.send("🧠 <b>OnyxAgent</b> — working…\n<i>⏱ started just now</i>");
-
-  // Throttled edit loop — near-real-time within Telegram's edit economics.
-  S.timer = setInterval(() => {
-    try { S.tick(); } catch {}
-  }, 2500);
-
-  return S;
-}
-
-/** Pure event observer — called from emitEvent, so EVERY event flows through
- *  here. Synchronous, never throws, mutates streamer state only. */
-function tgTrack(ev) {
-  if (!TG || TG.dead || TG.finalized) return;
-  try {
-    switch (ev.t) {
-      case "text_delta":
-      case "text": { // v1 legacy monolithic text
-        const d = typeof ev.content === "string" ? ev.content : "";
-        if (!d) break;
-        TG.sawAnyText = true;
-        TG.retrying = false;
-        TG.phase = "working";
-        TG.charsOfText += d.length;
-        TG.pendingText = (TG.pendingText + d).slice(-2000);
-        break;
-      }
-      case "reasoning_delta":
-      case "reasoning": // v1 legacy monolithic reasoning
-        TG.sawReasoning = true;
-        TG.retrying = false;
-        TG.phase = "thinking";
-        break;
-      case "tool_call": {
-        TG.retrying = false;
-        const id = String(ev.id || ev.name || "tool");
-        TG.toolLines.set(id, {
-          name: String(ev.name || "tool").replace(/[^\w.-]/g, "_").slice(0, 32),
-          status: "running",
-          startedAt: typeof ev.ts === "number" ? ev.ts : Date.now(),
-          brief: "",
-        });
-        break;
-      }
-      case "tool_result": {
-        const id = String(ev.id || ev.name || "tool");
-        const prev = TG.toolLines.get(id);
-        const line = {
-          name: String(ev.name || (prev ? prev.name : "tool")).replace(/[^\w.-]/g, "_").slice(0, 32),
-          status: "completed",
-          startedAt: prev ? prev.startedAt : (typeof ev.ts === "number" ? ev.ts : Date.now()),
-          brief: "",
-        };
-        // Cheap one-line brief from the JSON result (skipped when awkward).
-        try {
-          const parsed = JSON.parse(String(ev.result ?? ""));
-          if (parsed && typeof parsed === "object") {
-            if (parsed.error !== undefined) line.status = "error";
-            const src = typeof parsed.output === "string" ? parsed.output
-              : typeof parsed.content === "string" ? parsed.content
-              : typeof parsed.success === "string" ? parsed.success
-              : typeof parsed.error === "string" ? parsed.error
-              : null;
-            if (src) line.brief = String(src).replace(/\s+/g, " ").trim().slice(0, 60);
-          }
-        } catch {}
-        TG.toolLines.set(id, line);
-        break;
-      }
-      case "status":
-        if (ev.kind === "retry") TG.retrying = true;
-        else if (ev.kind === "first_token" || ev.kind === "llm_end") TG.retrying = false;
-        break;
-      case "round_start":
-        TG.retrying = false;
-        break;
-      default:
-        break;
-    }
-  } catch {}
-}
 
 // MERGE NOTE (tool-count cap): the manage_todos alias push was removed —
 // the in-browser registry no longer registers manage_todos (it was an exact
@@ -2587,19 +2127,12 @@ async function main() {
   EVENTS_FILE = path.join(runDir, "events.jsonl");
 
   const state = await readState();
-  // TELEGRAM PROGRESS STREAM (unified-2a): stream === true mirrors this
-  // run's progress into the user's Telegram chat (ONE message, batched
-  // edits every ~2.5s) from inside the sandbox — it survives the browser
-  // and the Vercel request being gone. Null when not requested; a pure
-  // observer that can never fail the run.
-  TG = initTelegramStream(state);
   // A run with no provider config cannot stream anything — a readable,
   // actionable terminal (never a raw TypeError) per PRD TR-2.
   if (!state || !state.provider || !state.provider.baseUrl) {
     const msg = "Run state is missing its provider configuration (state.json was lost or never written). Restarting the turn will fix it.";
     await emitEvent({ t: "error", message: msg });
     await setTerminal("error", msg);
-    if (TG) await TG.finalizeError(msg);
     return;
   }
   // seq continuity — a crash-relaunch must not reuse seq numbers.
@@ -2694,13 +2227,11 @@ async function main() {
       const msg = String(e && e.message ? e.message : e);
       await emitEvent({ t: "error", message: msg });
       await setTerminal("error", msg);
-      if (TG) await TG.finalizeError(msg);
       return;
     }
     if (result.error) {
       await emitEvent({ t: "error", message: result.error });
       await setTerminal("error", result.error);
-      if (TG) await TG.finalizeError(result.error);
       return;
     }
     const toolCalls = (result.toolCalls ?? []).filter((tc) => tc && tc.function && tc.function.name);
@@ -2714,12 +2245,10 @@ async function main() {
       if (!content && !result.reasoning.trim()) {
         await emitEvent({ t: "error", message: "The model returned an empty response." });
         await setTerminal("error", "The model returned an empty response.");
-        if (TG) await TG.finalizeError("The model returned an empty response.");
         return;
       }
       await emitEvent({ t: "done", content });
       await setTerminal("done", content);
-      if (TG) await TG.finalizeDone(content);
       return;
     }
     // ONE assistant message carrying content + tool_calls (protocol shape).
@@ -2759,21 +2288,14 @@ async function main() {
   // kept as a defensive terminal so the run can never hang open.
   await emitEvent({ t: "done", content: "" });
   await setTerminal("done", "");
-  if (TG) await TG.finalizeDone("");
 }
 
 main().catch(async (e) => {
   try { await emitEvent({ t: "error", message: String(e?.message ?? e) }); } catch {}
   try { await setTerminal("error", String(e?.message ?? e)); } catch {}
-  try { if (TG) await TG.finalizeError(String(e?.message ?? e)); } catch {}
   process.exit(1);
 });
 
-// Telegram streamer safety net: a live edit timer must never keep the
-// process open (or fire mid-teardown) on ANY exit path.
-process.on("exit", () => {
-  try { if (TG) TG.stop(); } catch {}
-});
 `;
 
 /** Where the runner script + state live inside the sandbox. */

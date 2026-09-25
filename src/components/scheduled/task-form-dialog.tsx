@@ -11,9 +11,8 @@
 // ============================================================================
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { toast } from "sonner";
-import { CalendarClock, Globe, Info, Loader2, MessageSquare, Save, Send } from "lucide-react";
+import { CalendarClock, Globe, Info, Loader2, MessageSquare, Save } from "lucide-react";
 import { Button } from "@/components/ui";
 import {
   Dialog,
@@ -51,8 +50,7 @@ import {
   mirrorChatToServer,
   removeLinkedChat,
 } from "@/lib/scheduler/chat-sync";
-import { schedulerApi, getTelegramStatus, resolveProviderSnapshot } from "@/lib/scheduler/client";
-import { ROUTES } from "@/lib/constants";
+import { schedulerApi, resolveProviderSnapshot } from "@/lib/scheduler/client";
 import type { Conversation } from "@/types";
 import { formatNextRun, formatRelativeAgo } from "./time-format";
 
@@ -118,7 +116,6 @@ interface FormState {
   cronExpression: string;
   timezone: string;
   enabled: boolean;
-  notifyTelegram: boolean;
 }
 
 function initialState(task: SafeScheduledTask | null): FormState {
@@ -139,7 +136,6 @@ function initialState(task: SafeScheduledTask | null): FormState {
       cronExpression: "",
       timezone: BROWSER_TZ,
       enabled: true,
-      notifyTelegram: true,
     };
   }
   const meta = task.scheduleMeta ?? {};
@@ -159,7 +155,6 @@ function initialState(task: SafeScheduledTask | null): FormState {
     cronExpression: task.scheduleType === "cron" ? task.scheduleExpression : "",
     timezone: task.timezone || BROWSER_TZ,
     enabled: task.enabled,
-    notifyTelegram: task.notificationConfig?.telegram !== false,
   };
 }
 
@@ -186,7 +181,6 @@ export function TaskFormDialog({
   const [form, setForm] = useState<FormState>(() => initialState(task));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [telegramConnected, setTelegramConnected] = useState<boolean | null>(null);
   /** Conversations for the "Run in chat" picker (fetched on dialog open). */
   const [conversations, setConversations] = useState<Conversation[] | null>(null);
   const /** one-shot guard so the create-mode default (most recent conversation)
@@ -202,20 +196,6 @@ export function TaskFormDialog({
       chatTouchedRef.current = false;
     }
   }, [open, task]);
-
-  // Telegram connection hint (no secrets — masked status only).
-  useEffect(() => {
-    if (!open || !userId) return;
-    let cancelled = false;
-    (async () => {
-      const res = await getTelegramStatus(userId);
-      if (cancelled) return;
-      setTelegramConnected(res.ok && !!res.telegram?.connected);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open, userId]);
 
   // Conversations for the "Run in chat" picker — fetched when the dialog
   // opens (newest first). Chat mode is the primary flow, so CREATE defaults
@@ -366,7 +346,6 @@ export function TaskFormDialog({
         instructions,
         schedule: schedulePayload,
         enabled: form.enabled,
-        notifyTelegram: form.notifyTelegram,
         runtime: { provider },
         chatId,
         ...(chatContext ? { chatContext } : {}),
@@ -498,7 +477,7 @@ export function TaskFormDialog({
               placeholder={
                 form.chatId
                   ? "Optional — what each run should do. Defaults to continuing this conversation's standing task."
-                  : "The COMPLETE agent job executed at run time: what to research/do, files to create (with paths), what to send on Telegram. Written for an autonomous agent with no user available."
+                  : "The COMPLETE agent job executed at run time: what to research/do, files to create (with paths). Written for an autonomous agent with no user available."
               }
               className="min-h-[140px] resize-y font-mono text-[13px] leading-relaxed"
               required={!form.chatId}
@@ -709,36 +688,6 @@ export function TaskFormDialog({
               />
             </div>
 
-            <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-              <div className="min-w-0">
-                <p className="flex items-center gap-1.5 text-sm font-medium">
-                  <Send className="size-3.5 text-primary/70" aria-hidden />
-                  Telegram notifications
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {telegramConnected == null ? (
-                    "Checking connection…"
-                  ) : telegramConnected ? (
-                    "Connected — the result is delivered to your chat after every run."
-                  ) : (
-                    <>
-                      {"Not connected — "}
-                      <Link
-                        href={ROUTES.SETTINGS_INTEGRATIONS}
-                        className="font-medium text-primary underline underline-offset-2"
-                      >
-                        connect Telegram in Settings → Integrations
-                      </Link>
-                    </>
-                  )}
-                </p>
-              </div>
-              <Switch
-                checked={form.notifyTelegram}
-                onCheckedChange={(v) => patch({ notifyTelegram: v })}
-                aria-label="Telegram notifications"
-              />
-            </div>
           </div>
 
           {error && (

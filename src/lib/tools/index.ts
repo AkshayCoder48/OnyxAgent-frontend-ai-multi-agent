@@ -39,6 +39,5 @@ import "./image_preview";
 import "./ocr";
 import "./workspace_sync";
 import "./scheduled_tasks";
-import "./telegram_tools";
 
 export {};

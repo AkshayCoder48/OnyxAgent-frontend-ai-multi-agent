@@ -4,16 +4,16 @@
  * Mirrors the browser client's wire protocol exactly (same endpoints, same
  * collection, same retry/backoff/pacer semantics — see
  * src/lib/onyxbase/kv-client.ts), but imports cleanly inside server routes
- * (no "use client" boundary). All scheduler state (tasks, runs, telegram
- * creds, tick lock) lives in this KV under the user's OnyxBase account, so
+ * (no "use client" boundary). All scheduler state (tasks, runs, tick
+ * lock) lives in this KV under the user's OnyxBase account, so
  * the schedule survives restarts and works with the browser closed.
  *
  * Durability rules learned from the 9-hour-push incident (commit 4a6a8f0):
  *  - hard per-request timeout (AbortSignal) — never hang a serverless worker
  *  - paced requests (token bucket) with 429/Retry-After adaptation
  *  - retried 401/500/502/503 (multi-instance cold-start roulette)
- *  - writes are issued SEQUENTIALLY by callers (concurrent writes drop
- *    OnyxBase's Telegram mirror durability — see worklog cloud-sync-9hr-fix)
+ *  - writes are issued SEQUENTIALLY by callers (concurrent writes can be
+ *    dropped by OnyxBase's durable mirror — see worklog cloud-sync-9hr-fix)
  */
 
 const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-phi.vercel.app";
@@ -28,7 +28,7 @@ const WRITE_ATTEMPTS = 4;
 export class SchedulerKV {
   private base: string;
   private apiKey: string;
-  /** WRITE PACER — OnyxBase's Telegram mirror drops rapid sequential
+  /** WRITE PACER — OnyxBase's durable mirror drops rapid sequential
    *  writes (the 9-hour-push lesson: pace + sequential = durable). A
    *  minimum gap between writes, widened on 429s, recovered on success. */
   private lastWriteAt = 0;

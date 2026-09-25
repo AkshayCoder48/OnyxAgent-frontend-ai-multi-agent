@@ -5,7 +5,7 @@
 //
 // Keeps the OnyxAI Browser Runtime alive for the whole session: while an app
 // tab is open (and the runtime is enabled / OnyxAI is the active provider),
-// it heartbeats presence and serves remote model calls (Telegram, scheduled
+// it heartbeats presence and serves remote model calls (scheduled
 // tasks) against the user's local QVAC server. Renders null — the status UI
 // lives in Settings → OnyxAI.
 // ============================================================================

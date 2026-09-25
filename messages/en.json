@@ -206,13 +206,13 @@
   "scheduled": {
     "navLabel": "Scheduled Tasks",
     "title": "Scheduled Tasks",
-    "description": "Autonomous agent jobs that run on a schedule — in their own sandbox, with your persistent workspace, even when this app is closed. Results land here and on Telegram.",
+    "description": "Autonomous agent jobs that run on a schedule — in their own sandbox, with your persistent workspace, even when this app is closed. Results land here.",
     "newTask": "New Task",
     "nextRun": "Next run",
     "linkedChat": "Linked chat",
     "moreTasks": "{count} more",
     "emptyTitle": "No scheduled tasks yet",
-    "emptyDescription": "Create the first one — the agent runs it on schedule, unattended, and delivers the result here (and on Telegram).",
+    "emptyDescription": "Create the first one — the agent runs it on schedule, unattended, and delivers the result here.",
     "status": {
       "active": "Active",
       "paused": "Paused",
@@ -220,15 +220,6 @@
       "failed": "Failed",
       "completed": "Completed"
     }
-  },
-  "telegram": {
-    "title": "Telegram",
-    "sectionDescription": "Receive scheduled-task results and agent messages in your Telegram chat.",
-    "connect": "Connect Telegram",
-    "connectAction": "Connect",
-    "test": "Test Connection",
-    "discover": "Discover Chat",
-    "disconnect": "Disconnect"
   },
   "admin": {
     "conversationsTitle": "Admin: Conversations",

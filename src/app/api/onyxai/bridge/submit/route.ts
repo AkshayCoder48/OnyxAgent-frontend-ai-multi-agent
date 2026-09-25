@@ -1,7 +1,7 @@
 // ============================================================================
 // POST /api/onyxai/bridge/submit — the E2B sandbox enqueues one model call.
 //
-// The bg-agent runner (inside a scheduled/telegram execution sandbox) calls
+// The bg-agent runner (inside a scheduled execution sandbox) calls
 // this when the provider is OnyxAI (a LOCAL base URL the sandbox can't
 // reach): it writes the full OpenAI request body to a file in its own
 // filesystem (no size limit), then submits a tiny queue record here. The

@@ -36,7 +36,7 @@
  *
  * DURABILITY (learned the hard way — live incident 2026-09-11): OnyxBase's
  *   KV is multi-instance: each instance keeps a local index hydrated from
- *   the Telegram mirror, and a write updates the WRITING instance + the
+ *   the durable mirror, and a write updates the WRITING instance + the
  *   mirror — where the mirror write can silently fail (which orphaned a
  *   committed snapshot whose manifest chunk vanished). Reads hit random
  *   instances, so a fresh write can be invisible to the next read for a
@@ -127,8 +127,8 @@ const CHUNK_SIZE = 120_000;
 const MANIFEST_INLINE_MAX = 100_000;
 
 /** WRITE concurrency — ONE at a time, deliberately. Live measurement
- *  (2026-09-12): OnyxBase mirrors every KV mutation into Telegram as a
- *  message EDIT; concurrent writes trip Telegram's per-bot throttle and
+ *  (2026-09-12): OnyxBase mirrors every KV mutation into its durable
+ *  backend as a message EDIT; concurrent writes trip the backend's throttle and
  *  some mirror writes are silently dropped — the record then acks 200 but
  *  is permanently invisible to every other instance (2/12 survived a
  *  6-concurrent batch; 12/12 survived sequential). That silent drop is
@@ -1157,7 +1157,7 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
   }
 
   // 7.5 PRE-COMMIT AUDIT — a KV write that returned 200 is durable in
-  //     OnyxBase's Telegram mirror (writes are SEQUENTIAL now, so the
+  //     OnyxBase's durable mirror (writes are SEQUENTIAL now, so the
   //     mirror keeps up — see KV_WRITE_CONCURRENCY). But READS route to
   //     random serverless instances whose local index may be stale, so a
   //     freshly written record can legitimately read back 404 for a while
@@ -1187,7 +1187,7 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     };
     // One "probe" = up to 2 GETs a few hundred ms apart — rolling random
     // instances. A miss on both rolls just means both rolls hit stale
-    // instances; the record is still durable in Telegram.
+    // instances; the record is still durable in the mirror.
     const probe = async (key: string, value: string): Promise<boolean> => {
       for (let i = 0; i < 2; i++) {
         let back: string | null = null;
@@ -1228,7 +1228,7 @@ export async function pushWorkspace(opts: SyncOptions): Promise<PushResult> {
     }
     if (bad.size > 0) {
       warnings.push(
-        `${bad.size} of ${pendingWrites.length} record(s) were written (all acked 200 — they are durable in OnyxBase's Telegram mirror) but are not yet visible on every serving instance. ` +
+        `${bad.size} of ${pendingWrites.length} record(s) were written (all acked 200 — they are durable in OnyxBase's mirror) but are not yet visible on every serving instance. ` +
           "If retrieve_workspace reports a missing file, wait ~1 minute and retry — instance indexes converge on their own.",
       );
     }

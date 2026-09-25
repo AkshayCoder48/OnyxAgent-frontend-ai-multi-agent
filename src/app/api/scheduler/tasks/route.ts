@@ -9,7 +9,7 @@
 //          get_history | get_run | status | sync_chat | pull_chat
 //
 // Responses NEVER include credentials — task records are sanitized
-// (runtime → { hasProvider, providerModel, hasTelegram }).
+// (runtime → { hasProvider, providerModel }).
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
@@ -99,7 +99,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           schedule: body.schedule as never,
           workspaceId: STRIP(body.workspaceId),
           enabled: body.enabled !== false,
-          notifyTelegram: body.notifyTelegram !== false,
           chatId: typeof body.chatId === "string" ? body.chatId : body.chatId === null ? null : undefined,
           chatContext: parseChatContext(body.chatContext),
           runtime: body.runtime as never,

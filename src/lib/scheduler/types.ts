@@ -2,13 +2,13 @@
  * Scheduled Tasks — shared types (client + server safe).
  *
  * The scheduler is SERVER-SIDE and persistent: task definitions, execution
- * history, telegram credentials and tick state live in OnyxBase KV under the
- * user's account (collection "onyxagent"), so schedules survive application
+ * history and tick state live in OnyxBase KV under the user's account
+ * (collection "onyxagent"), so schedules survive application
  * restarts, browser closure and device switches. The browser is only a
  * trigger source (heartbeat) + a management UI — never the source of truth.
  *
- * SECURITY: `task.runtime` carries execution credentials (provider key,
- * telegram bot token) so unattended runs work with the browser closed. That
+ * SECURITY: `task.runtime` carries execution credentials (provider key)
+ * so unattended runs work with the browser closed. That
  * record lives in the user's own OnyxBase KV (readable only with the user's
  * key) and is NEVER rendered to the model — it is not part of any tool
  * schema, tool arguments, system prompt or run logs. API responses strip or
@@ -85,11 +85,6 @@ export interface ProviderSnapshot {
   disabledParams?: string[];
 }
 
-export interface TelegramCreds {
-  botToken: string;
-  chatId: string;
-}
-
 /** One turn of a chat's history as consumed by the agent runtime (the
  *  unified chat-execution context — see chat-store.ts). Defined here so the
  *  shared client/server payloads can reference it without cycles. */
@@ -120,13 +115,11 @@ export interface ScheduledTask {
   enabled: boolean;
   workspaceId: string;
   notificationConfig: {
-    telegram: boolean;
     inApp: boolean;
   };
   /** Execution snapshot for unattended runs (credentials — masked on read). */
   runtime: {
     provider: ProviderSnapshot | null;
-    telegram: TelegramCreds | null;
   };
   createdAt: string;
   updatedAt: string;
@@ -183,47 +176,8 @@ export interface ScheduledTaskRun {
 export const SCHED_TASKS_KEY = "schedule:tasks";
 /** Per-task run history: schedule:runs:<taskId> (capped array, newest last). */
 export const SCHED_RUNS_PREFIX = "schedule:runs:";
-/** Telegram connection: { botToken, chatId, … } (masked on read-back). */
-export const SCHED_TELEGRAM_KEY = "schedule:telegram";
 /** Scheduler status + tick lock: { lastTickAt, … }. */
 export const SCHED_TICK_KEY = "schedule:tick";
-
-/**
- * The FULL telegram connection record stored at SCHED_TELEGRAM_KEY
- * ("schedule:telegram") — SERVER-side shape (carries the bot token + webhook
- * secret, so it must NEVER be sent to a client; API responses project it
- * through the route's masked() view). Written by /api/scheduler/telegram
- * (connect / discover / enable_chat / disable_chat) and read by the telegram
- * webhook route + the scheduler engine.
- */
-export interface TelegramConnectionConfig {
-  botToken: string;
-  botName: string | null;
-  botUsername: string | null;
-  chatId: string | null;
-  chatName: string | null;
-  connectedAt: string | null;
-  /** REMOTE CHAT MODE (unified-3b) — present only while enabled.
-   *  Travels ONLY in the setWebhook call + KV + the webhook's header check. */
-  webhookSecret?: string;
-  /** The public webhook URL that was registered with Telegram. */
-  webhookUrl?: string;
-  /** The linked chat id AS USED by the KV chat records (chat:<id>:*) —
-   *  identical to chatId (kept explicit for the record's self-description). */
-  conversationId?: string;
-  /** Execution provider snapshot stored at enable time (null = no provider —
-   *  the webhook replies with a configuration warning). */
-  provider?: ProviderSnapshot | null;
-  /** INFORMATIONAL mirror flag (sent in enable_chat). The RUNTIME source of
-   *  truth for streaming web-app runs into Telegram is the local vault's
-   *  telegram_mirror_enabled flag (settingsService). */
-  mirrorRuns?: boolean;
-  /** When remote chat was enabled (ISO). */
-  enabledAt?: string;
-  /** Dedup cursor — the highest processed Telegram update_id. Retries and
-   *  redeliveries with update_id <= this value are skipped. */
-  lastUpdateId?: number;
-}
 
 export const MAX_RUNS_PER_TASK = 25;
 export const MAX_TASK_INSTRUCTIONS = 24_000;
@@ -238,7 +192,6 @@ export interface SafeScheduledTask extends Omit<ScheduledTask, "runtime"> {
   runtime: {
     hasProvider: boolean;
     providerModel: string | null;
-    hasTelegram: boolean;
   };
 }
 
@@ -249,17 +202,8 @@ export function toSafeTask(t: ScheduledTask): SafeScheduledTask {
     runtime: {
       hasProvider: !!(runtime.provider && runtime.provider.baseUrl),
       providerModel: runtime.provider?.model ?? null,
-      hasTelegram: !!(runtime.telegram && runtime.telegram.botToken),
     },
   };
-}
-
-export interface TelegramStatus {
-  connected: boolean;
-  botName: string | null;
-  botUsername: string | null;
-  chatId: string | null;
-  connectedAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +217,6 @@ export interface CreateTaskPayload {
   schedule: TaskSchedule;
   workspaceId?: string;
   enabled?: boolean;
-  notifyTelegram?: boolean;
   /** UNIFIED CHAT MODE — attach the schedule to an existing conversation
    *  (runs with its history; results land in the chat). null/absent = legacy
    *  standalone instruction mode. */
@@ -288,7 +231,6 @@ export interface CreateTaskPayload {
   /** Resolved CLIENT-side (never model-visible): execution snapshot. */
   runtime?: {
     provider?: ProviderSnapshot | null;
-    telegram?: TelegramCreds | null;
   };
 }
 
@@ -300,12 +242,10 @@ export interface UpdateTaskPayload {
   schedule?: TaskSchedule;
   enabled?: boolean;
   workspaceId?: string;
-  notifyTelegram?: boolean;
   /** Attach/detach the task's conversation (chat mode). */
   chatId?: string | null;
   runtime?: {
     provider?: ProviderSnapshot | null;
-    telegram?: TelegramCreds | null;
   };
 }
 

@@ -211,10 +211,10 @@ export interface AddMessageInput {
 }
 
 /**
- * A server-appended message (scheduler pull_chat: scheduled-run results /
- * telegram replies) to be persisted into Dexie via
+ * A server-appended message (scheduler pull_chat: scheduled-run results)
+ * to be persisted into Dexie via
  * `conversationService.appendServerMessages`. The id is the SERVER's id
- * ("smsg_<runId>" / webhook-chosen) and is preserved so re-delivered
+ * ("smsg_<runId>") and is preserved so re-delivered
  * batches are idempotent.
  */
 export interface ServerMessageRowInput {
@@ -578,7 +578,7 @@ export const conversationService = {
 
   /**
    * Ensure a conversation row exists. Server-appended messages (scheduled-run
-   * results, telegram replies) can reference a conversation this browser has
+   * results) can reference a conversation this browser has
    * never opened — this creates it with the provided title when missing, and
    * fills in a missing title on an existing row (chat meta from the server).
    */
@@ -607,7 +607,7 @@ export const conversationService = {
   },
 
   /**
-   * Append SERVER-side messages (scheduled-run results / telegram replies,
+   * Append SERVER-side messages (scheduled-run results,
    * pulled via the scheduler's pull_chat) into Dexie. Idempotent: ids are
    * preserved so re-delivered batches bulkPut over the same rows (server
    * retries can never duplicate history). Ensures the conversation row
@@ -1499,85 +1499,6 @@ export const settingsService = {
     } catch {
       return null;
     }
-  },
-
-  /** Store (or clear) the Telegram bot token, encrypted with the user's
-   *  vault key — `extra.telegram_bot_token_encrypted`. A SECOND copy lives
-   *  server-side in OnyxBase KV (schedule:telegram) for unattended scheduled
-   *  runs; this vault copy powers the in-browser telegram tools. Never
-   *  decrypted into prompts/tool args/results. */
-  async setTelegramBotToken(userId: string, token: string | null): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    if (token && !isVaultUnlocked()) {
-      const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
-      await restoreVaultFromSession();
-    }
-    const encrypted = token ? await vaultEncrypt(token) : null;
-    const extra = { ...(row.extra ?? {}), telegram_bot_token_encrypted: encrypted };
-    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
-  },
-
-  /** Decrypt + return the Telegram bot token, or null. Restores the vault
-   *  from session when locked (same pattern as the OnyxBase key). */
-  async getDecryptedTelegramBotToken(userId: string): Promise<string | null> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) return null;
-    const encrypted = row.extra?.telegram_bot_token_encrypted;
-    if (typeof encrypted !== "string" || !encrypted) return null;
-    try {
-      if (!isVaultUnlocked()) {
-        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
-        await restoreVaultFromSession();
-      }
-      return await vaultDecrypt(encrypted);
-    } catch {
-      return null;
-    }
-  },
-
-  /** The connected Telegram chat id (NOT a secret — display-safe). */
-  async getTelegramChatId(userId: string): Promise<string | null> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    return (row?.extra?.telegram_chat_id as string | undefined) ?? null;
-  },
-
-  /** Store the connected Telegram chat id (plain — ids are not secrets). */
-  async setTelegramChatId(userId: string, chatId: string | null): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    const extra = { ...(row.extra ?? {}), telegram_chat_id: chatId };
-    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
-  },
-
-  /** unified-3b: "Mirror web runs to Telegram" — when true, web-app background
-   *  turns pass stream: true so their progress streams into the user's
-   *  Telegram chat (the unified-2a in-sandbox streamer contract). A plain
-   *  boolean extra field (no secrets). This vault flag is the RUNTIME source
-   *  of truth; the scheduler KV config's mirrorRuns field is informational. */
-  async getTelegramMirrorEnabled(userId: string): Promise<boolean> {
-    const row = await db.user_settings.where("user_id").equals(userId).first();
-    return row?.extra?.telegram_mirror_enabled === true;
-  },
-
-  /** Store (or clear) the "mirror web runs to Telegram" flag. */
-  async setTelegramMirrorEnabled(userId: string, enabled: boolean): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    const extra = { ...(row.extra ?? {}), telegram_mirror_enabled: enabled };
-    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
   },
 
   /** Store (or clear, when key is null) the LangSearch web-search API key,

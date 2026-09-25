@@ -5,7 +5,7 @@
 //
 // OnyxAI models run IN THIS BROWSER: `qvac serve --openai` on the user's
 // device is reachable only from the user's browser, so every REMOTE agent
-// trigger (Telegram webhook, scheduled task) that uses OnyxAI relays its
+// trigger (scheduled task) that uses OnyxAI relays its
 // model calls through here while an app tab is open:
 //
 //   1. HEARTBEAT (5s): probe the local QVAC server (GET /v1/models) and

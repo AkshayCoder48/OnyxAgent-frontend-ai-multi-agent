@@ -248,7 +248,7 @@ export function ScheduledTasksView() {
           <p className="text-sm font-medium text-foreground">Cloud scheduling isn&apos;t configured</p>
           <p className="mt-1 max-w-md text-[13px] leading-relaxed text-muted-foreground">
             Add your OnyxBase API key in Settings → Cloud Workspace — the same key that powers your
-            persistent cloud workspace. Scheduled tasks, their history, and Telegram delivery all
+            persistent cloud workspace. Scheduled tasks and their history
             live in your own OnyxBase account.
           </p>
           <Button asChild variant="outline" size="sm" className="mt-4 h-11">

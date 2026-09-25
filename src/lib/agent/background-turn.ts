@@ -372,35 +372,6 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       browserTools = [];
     }
 
-    // Telegram (native runner tools) — resolve from the encrypted vault at
-    // launch so background turns can send to the user's Telegram even after
-    // the browser disconnects. Never model-visible.
-    let telegram: { botToken: string; chatId: string; stream?: boolean } | undefined;
-    try {
-      const { settingsService } = await import("@/lib/services");
-      const botToken = await settingsService.getDecryptedTelegramBotToken(ctx.userId);
-      const chatId = botToken ? await settingsService.getTelegramChatId(ctx.userId) : null;
-      if (botToken && chatId) telegram = { botToken, chatId };
-    } catch {
-      telegram = undefined;
-    }
-    // unified-3b (additive): when the user enabled "mirror web runs to
-    // Telegram", this web-app turn ALSO streams its progress into the user's
-    // Telegram chat (state.telegram.stream = true activates the unified-2a
-    // in-sandbox streamer). The vault flag is the RUNTIME source of truth —
-    // the scheduler KV config's mirrorRuns is informational only. Nothing
-    // else about the launch changes.
-    if (telegram) {
-      try {
-        const { settingsService } = await import("@/lib/services");
-        if (await settingsService.getTelegramMirrorEnabled(ctx.userId)) {
-          telegram = { ...telegram, stream: true };
-        }
-      } catch {
-        /* mirror off on any read failure */
-      }
-    }
-
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
       provider: {
@@ -418,7 +389,6 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       conversationId,
       seedTodos,
       browserTools,
-      telegram,
     });
 
     // 5. Consume the run's event stream until it finishes. The consumer

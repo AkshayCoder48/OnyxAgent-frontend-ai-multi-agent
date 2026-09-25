@@ -83,7 +83,7 @@ import type { AIProviderRow } from "@/lib/db";
  * This section:
  *   1. Connection — URL + optional bearer key + direct Connect & Test probe.
  *   1b. Browser Runtime — toggle + live status of the bridge that serves
- *       REMOTE OnyxAI triggers (Telegram, scheduled tasks) from this browser
+ *       REMOTE OnyxAI triggers (scheduled tasks) from this browser
  *       (see @/lib/onyxai/bridge-runtime).
  *   2. Setup guide — install / qvac.config.json / serve command with the
  *      app's own origin pre-filled for `--cors-origin`.
@@ -393,7 +393,7 @@ function BrowserRuntimeCard({ origin }: { origin: string }) {
       </div>
 
       <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-        OnyxAI models run locally in this browser. When Telegram messages or scheduled tasks use
+        OnyxAI models run locally in this browser. When scheduled tasks use
         OnyxAI, their model calls are relayed through this page — keep it open while you want
         remote triggers answered. The CLI is gated by the same runtime.
       </p>
@@ -495,7 +495,7 @@ function BrowserRuntimeCard({ origin }: { origin: string }) {
         </div>
         {status.recent.length === 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">
-            None yet — remote OnyxAI requests (Telegram messages, scheduled tasks) will appear here.
+            None yet — remote OnyxAI requests (scheduled tasks) will appear here.
           </p>
         ) : (
           <div className="mt-2 max-h-40 space-y-1.5 overflow-y-auto pr-1">
@@ -570,7 +570,7 @@ interface LiveCatalogEntry {
 
 export function SectionOnyxAI() {
   // useAuth (not the raw store) — its mount effect rehydrates the user +
-  // vault on cold navigation to settings (same pattern as Telegram section).
+  // vault on cold navigation to settings.
   const { user } = useAuth();
   const userId = user?.id ?? null;
   const qc = useQueryClient();
@@ -1122,7 +1122,7 @@ export function SectionOnyxAI() {
             <AlertTriangle className="size-4" />
             <AlertTitle>Local-model limits</AlertTitle>
             <AlertDescription>
-              Interactive chat streams directly from your device. Remote triggers (Telegram messages,
+              Interactive chat streams directly from your device. Remote triggers (
               scheduled tasks) execute in the E2B cloud sandbox, which cannot reach your localhost —
               with the <span className="font-medium">Browser Runtime</span> on, an open app tab relays
               their model calls through this browser; otherwise use a cloud provider for unattended

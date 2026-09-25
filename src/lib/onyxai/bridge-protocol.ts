@@ -4,7 +4,7 @@
  * OnyxAI models run IN THE USER'S BROWSER — `qvac serve --openai` on the
  * user's own device is reachable ONLY from that browser (the server and the
  * E2B sandbox can never reach the user's localhost). Remote triggers
- * (Telegram webhook, scheduled tasks) still execute the FULL agent loop in
+ * (scheduled tasks) still execute the FULL agent loop in
  * E2B — only the MODEL CALL is relayed through the connected browser:
  *
  *   E2B sandbox ──POST /api/onyxai/bridge/submit──▶ KV queue record

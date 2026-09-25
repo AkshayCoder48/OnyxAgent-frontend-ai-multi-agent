@@ -10,7 +10,7 @@
 //                     as an immutable chat mirror version record, so the next
 //                     scheduled run sees the latest history.
 //   SERVER → BROWSER  pullServerMessages()  pull_chat: server-appended
-//                     messages (scheduled-run results, telegram replies) are
+//                     messages (scheduled-run results) are
 //                     deduped by id, persisted into Dexie (idempotent bulkPut
 //                     via conversationService.appendServerMessages) and — when
 //                     the user is viewing that chat and nothing is executing —

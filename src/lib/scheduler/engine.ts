@@ -10,8 +10,8 @@
  *    cloud workspace into it, launch the bg-agent runner as a background
  *    command (the agent loop runs INSIDE E2B — browser closed is fine)
  *  - `finalizeRun()` — reconnect to the run's sandbox, harvest the result +
- *    execution timeline, push workspace changes back to the cloud, send the
- *    Telegram notification, persist the run record
+ *    execution timeline, push workspace changes back to the cloud, persist
+ *    the run record
  *
  * Duplicate-execution protection: run ids are DETERMINISTIC
  * (run_<taskId>_<occurrenceMs>) — before starting, the engine checks the run
@@ -46,7 +46,6 @@ import {
   MAX_TASK_INSTRUCTIONS,
   SCHED_RUNS_PREFIX,
   SCHED_TICK_KEY,
-  SCHED_TELEGRAM_KEY,
   toSafeTask,
   type ChatTurnMessage,
   type CreateTaskPayload,
@@ -67,10 +66,6 @@ import {
 } from "./chat-store";
 import { eventsToMessage } from "./events-to-message";
 import { serverPushWorkspace, serverRestoreWorkspace } from "./ws-sync";
-import {
-  telegramSendDocument,
-  telegramSendMessage,
-} from "./telegram";
 
 const HOME = "/home/user";
 /** Max concurrent scheduled runs (E2B Hobby = limited concurrency). */
@@ -113,13 +108,13 @@ const CHAT_EXEC_GC_KEEP = 2;
  * LIVE-DEBUGGED FAILURE MODES (2026-09-12, production):
  *  1. A write acked 200 but was never visible anywhere (stranded mirror SEND).
  *  2. An update converged fleet-wide, then REVERTED — instances rebuild their
- *     index from the Telegram mirror on recycle, and a failed mirror EDIT
+ *     index from the durable mirror on recycle, and a failed mirror EDIT
  *     leaves the old message → the new value evaporates. Mutable keys are
  *     therefore UNSAFE for data that must survive.
  *
  * The workspace-sync engine's answer is content-addressed, immutable chunks.
  * The scheduler uses the same trick: every task mutation writes a NEW
- * immutable version record (a new Telegram message — sends are far more
+ * immutable version record (a new mirror message — sends are far more
  * reliable than edits, and a failed send is detectable + retryable with a
  * fresh key). Reads resolve the latest surviving version via the key list.
  *
@@ -231,7 +226,7 @@ async function readTask(kv: SchedulerKV, id: string): Promise<ScheduledTask | nu
   return null;
 }
 
-/** Verified write — a NEW immutable version key (new Telegram message, not
+/** Verified write — a NEW immutable version key (new mirror message, not
  *  an edit): write → probe → on strand, write a FRESH version key (new
  *  mirror attempt) → probe. Also refreshes the legacy mutable keys as a
  *  hint (best-effort; the version keys are the source of truth). */
@@ -401,7 +396,7 @@ async function readEnvelope(kv: SchedulerKV, key: string): Promise<RunsEnvelope 
 
 export async function loadRuns(kv: SchedulerKV, taskId: string): Promise<ScheduledTaskRun[]> {
   // Candidates: mutable main + replica (fast path) and the NEWEST immutable
-  // version record (schedule:rvh:<taskId>:<ts36> — new Telegram messages,
+  // version record (schedule:rvh:<taskId>:<ts36> — new mirror messages,
   // immune to the mirror-EDIT reversion that strands mutable updates). The
   // highest write-timestamp wins.
   let best: RunsEnvelope | null = await readEnvelope(kv, SCHED_RUNS_PREFIX + taskId);
@@ -432,7 +427,7 @@ export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledT
   // Mutable fast path (main + replica)…
   await kv.set(SCHED_RUNS_PREFIX + taskId, value);
   await kv.set(`schedule:runsr:${taskId}`, value);
-  // …AND an immutable version record — a NEW Telegram message per save.
+  // …AND an immutable version record — a NEW mirror message per save.
   // Mutable mirror-EDITs have been observed to strand AND to revert after
   // instance recycle; version keys are the durable source of truth.
   const version = env.w.toString(36);
@@ -488,20 +483,6 @@ function newTaskId(): string {
   return "task_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
 }
 
-/** Read the stored telegram connection (schedule:telegram) — server-side
- *  credential resolution so tokens never cross the client boundary. */
-async function readTelegramCreds(kv: SchedulerKV): Promise<{ botToken: string; chatId: string } | null> {
-  try {
-    const raw = await kv.get(SCHED_TELEGRAM_KEY);
-    if (!raw) return null;
-    const cfg = JSON.parse(raw) as { botToken?: string; chatId?: string | null };
-    if (cfg?.botToken && cfg.chatId) return { botToken: cfg.botToken, chatId: String(cfg.chatId) };
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export function runIdFor(taskId: string, occurrence: number, seq = 0): string {
   return seq > 0
     ? `run_${taskId}_${occurrence}_r${seq}`
@@ -522,13 +503,6 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
   }
   const schedule = payload.schedule;
   if (!schedule || !schedule.type) throw new Error("Schedule is required");
-
-  // Telegram creds: server-side resolution from schedule:telegram (the
-  // client NEVER handles the token — masked reads only).
-  let telegram: { botToken: string; chatId: string } | null = payload.runtime?.telegram ?? null;
-  if (!telegram && payload.notifyTelegram !== false) {
-    telegram = await readTelegramCreds(kv);
-  }
 
   const now = new Date();
   const task: ScheduledTask = {
@@ -553,12 +527,10 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
     enabled: payload.enabled !== false,
     workspaceId: payload.workspaceId || "workspace_default",
     notificationConfig: {
-      telegram: payload.notifyTelegram !== false,
       inApp: true,
     },
     runtime: {
       provider: payload.runtime?.provider ?? null,
-      telegram: telegram ?? null,
     },
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
@@ -635,13 +607,7 @@ export async function updateTask(kv: SchedulerKV, payload: UpdateTaskPayload): P
       delete task.nextRetryAt;
     }
   }
-  if (payload.notifyTelegram !== undefined) task.notificationConfig.telegram = payload.notifyTelegram;
-  if (payload.notifyTelegram === true || (payload.notifyTelegram === undefined && task.notificationConfig.telegram)) {
-    const creds = payload.runtime?.telegram ?? (await readTelegramCreds(kv));
-    if (creds) task.runtime.telegram = creds;
-  }
   if (payload.runtime?.provider !== undefined) task.runtime.provider = payload.runtime.provider;
-  if (payload.runtime?.telegram !== undefined) task.runtime.telegram = payload.runtime.telegram;
 
   if (payload.schedule) {
     const { normalizeSchedule } = await import("./tz-cron");
@@ -723,9 +689,6 @@ function taskScheduleOf(t: ScheduledTask): { type: string; expression: string; t
 
 function buildScheduledSystemPrompt(task: ScheduledTask): string {
   const tzNote = `Timezone for all timestamps in this task: ${task.timezone}.`;
-  const telegramNote = task.runtime.telegram?.botToken
-    ? "The telegram_send_message / telegram_send_document tools are available and pre-configured with the user's connected Telegram account — use them to deliver results to the user."
-    : "Telegram is not connected; deliver results as files in the workspace and in your final message.";
   // COMPACT prompt (the full Onyx.md is a FILE in the sandbox — read_file it
   // for the complete tool compendium + GenUI reference). Small models reject
   // 39KB system prompts outright; even large ones work better compact.
@@ -739,7 +702,6 @@ session live). Facts about this run:
 - Task name: "${task.name}"
 - Schedule: ${describeSchedule(task)} (${tzNote})
 - Workspace: ${task.workspaceId} — its files were RESTORED into this sandbox before you started. All file changes you make will be synchronized back to the user's persistent cloud workspace when the run finishes.
-- ${telegramNote}
 
 RULES FOR THIS RUN:
 1. Do the COMPLETE job described in the user message — this is a real agent
@@ -768,8 +730,6 @@ RULES FOR THIS RUN:
 - Data/media: create_chart, preview_image, ocr_document, counterfactual,
   current_datetime
 - Planning: manage_todo, show_todo
-- Telegram: telegram_send_message, telegram_send_document,
-  telegram_send_photo, telegram_get_updates, telegram_get_chat
 (always function-calling — never "Thought:/Action:" text)
 
 READ /home/user/Onyx.md FIRST (read_file) — it documents every tool in
@@ -785,17 +745,13 @@ that apply to you.
 }
 
 // ---------------------------------------------------------------------------
-// UNIFIED CHAT EXECUTIONS — a scheduled/telegram run attached to a chat.
+// UNIFIED CHAT EXECUTIONS — a scheduled run attached to a chat.
 //
 // A chat execution launches the SAME agent runtime (isolated E2B sandbox +
 // workspace restore + bg-agent runner) but seeds state.messages with the
 // chat's history (mirror + server messages via buildChatHistory) and appends
 // the run's assistant message back into the chat as a server message
-// (chat:<chatId>:smsg:<ts36>) when it finalizes. Telegram-triggered
-// executions use the same launcher (the webhook agent calls
-// startChatExecution directly); runs with telegram creds stream live into
-// Telegram from INSIDE the sandbox (state.telegram.stream — the streamer is
-// owned by bg-agent-script).
+// (chat:<chatId>:smsg:<ts36>) when it finalizes.
 //
 // Records (same durability rules as tasks/runs — sequential writes, immutable
 // version records, verified, GC'd small):
@@ -807,7 +763,7 @@ export interface ChatExecutionRecord {
   /** "exec_<ts36>_<rand>" — links the ScheduledTaskRun.execId + sandbox marker. */
   id: string;
   chatId: string;
-  trigger: "scheduled" | "telegram";
+  trigger: "scheduled";
   taskId?: string;
   sandboxId: string;
   e2bRunId: string;
@@ -923,12 +879,11 @@ async function persistChatExec(kv: SchedulerKV, rec: ChatExecutionRecord): Promi
 
 export interface ChatExecutionInput {
   chatId: string;
-  trigger: "scheduled" | "telegram";
+  trigger: "scheduled";
   userMessage: string;
   systemPrompt: string;
   history: ChatTurnMessage[];
   provider: ProviderSnapshot;
-  telegram?: { botToken: string; chatId: string } | null;
   taskId?: string;
   /** Sandbox label (task name / chat title). */
   name?: string;
@@ -949,8 +904,7 @@ export interface ChatExecutionHandle {
  * sandbox (metadata-tagged so the interactive rotation never kills it), the
  * scheduled.json marker (kind/chatId/execId — the tick's recovery source of
  * truth), Onyx.md, cloud workspace restore, and the bg-agent runner seeded
- * with [system, ...history, userMessage]. Telegram creds stream live from
- * inside the sandbox (state.telegram.stream = true).
+ * with [system, ...history, userMessage].
  */
 export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionInput): Promise<ChatExecutionHandle> {
   const chatId = (input.chatId ?? "").trim();
@@ -969,7 +923,7 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
   // the E2B sandbox AND from the server — the model runs IN THE USER'S
   // BROWSER. Pre-check the browser runtime's presence BEFORE burning a
   // sandbox: no fresh heartbeat → fail fast with the actionable "start your
-  // models" message (delivered to Telegram by the webhook's catch).
+  // models" message.
   const localProvider = isLocalBaseUrl(input.provider.baseUrl);
   let bridge: { origin: string; token: string; execId: string; sandboxId: string } | null = null;
   if (localProvider) {
@@ -1087,9 +1041,6 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
         ...input.history.map((h) => ({ role: h.role, content: h.content })),
         { role: "user", content: input.userMessage },
       ],
-      ...(input.telegram?.botToken
-        ? { telegram: { botToken: input.telegram.botToken, chatId: input.telegram.chatId, stream: true } }
-        : {}),
       ...(input.taskId
         ? { scheduledTask: { taskId: input.taskId, runId: null, name: input.name ?? "" } }
         : {}),
@@ -1134,9 +1085,6 @@ interface RunnerTerminalState {
   status: string;
   content: string;
   error: string | null;
-  /** The run streamed live into Telegram (state.telegram.stream) — the
-   *  finalizer must NOT send a duplicate completion notification. */
-  telegramStreamed: boolean;
 }
 
 /** Read the runner's state.json mirror (shared by finalizeRun + finalizeChatExecution). */
@@ -1144,7 +1092,6 @@ async function readRunTerminalState(sandbox: Sandbox, e2bRunId: string | null): 
   let runnerStatus = "running";
   let content = "";
   let runnerError: string | null = null;
-  let telegramStreamed = false;
   try {
     if (e2bRunId) {
       const raw = await sandbox.files.read(`${BG_RUNS_PREFIX}${e2bRunId}/state.json`);
@@ -1152,24 +1099,22 @@ async function readRunTerminalState(sandbox: Sandbox, e2bRunId: string | null): 
         status?: string;
         content?: string;
         error?: string | null;
-        telegram?: { stream?: boolean } | null;
       };
       runnerStatus = st.status ?? "running";
       content = st.content ?? "";
       runnerError = st.error ?? null;
-      telegramStreamed = st.telegram?.stream === true;
     }
   } catch {
     /* unreadable — treat as still running until stale */
   }
-  return { status: runnerStatus, content, error: runnerError, telegramStreamed };
+  return { status: runnerStatus, content, error: runnerError };
 }
 
 /** Build the assistant ServerChatMessage for a finished chat execution —
  *  events.jsonl reduced via eventsToMessage, with the runner's final
  *  state.json content as fallback. */
 function buildChatResultMessage(
-  rec: { e2bRunId: string; trigger: "scheduled" | "telegram" },
+  rec: { e2bRunId: string; trigger: "scheduled" },
   events: BgEvent[],
   terminal: RunnerTerminalState,
 ): ServerChatMessage {
@@ -1192,55 +1137,16 @@ function buildChatResultMessage(
   };
 }
 
-/** Telegram completion notification for chat executions (fireRun's
- *  notifyTelegram, chat-shaped) — only used for LEGACY scheduled runs that
- *  did NOT stream live. */
-async function notifyTelegramChatExecution(
-  creds: { botToken: string; chatId: string },
-  rec: ChatExecutionRecord,
-  content: string,
-  error?: string,
-): Promise<string | undefined> {
-  const label = rec.trigger === "telegram" ? "Telegram chat" : "Scheduled chat run";
-  const completedAt = rec.completedAt ? new Date(rec.completedAt) : new Date();
-  const timeLabel = completedAt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
-  if (rec.status === "completed") {
-    const header =
-      `✓ <b>${escapeHtml(label)} completed</b>\n` +
-      `Completed at ${timeLabel}${rec.taskId ? ` · task ${escapeHtml(rec.taskId)}` : ""}\n`;
-    const body = (content || "(no final message)").slice(0, 3200);
-    const r1 = await telegramSendMessage(creds.botToken, creds.chatId, `${header}\n${escapeHtml(body)}`);
-    if (r1.ok && content.length > 3200) {
-      await telegramSendDocument(
-        creds.botToken,
-        creds.chatId,
-        `${rec.chatId.replace(/[^\w.-]/g, "_")}-result.md`,
-        content,
-        "Full run result",
-      );
-    }
-    return r1.ok ? "sent" : `failed: ${r1.error}`;
-  }
-  const msg =
-    `⚠ <b>${escapeHtml(label)} failed</b>\n` +
-    `Failed at ${timeLabel}\n${escapeHtml((error ?? rec.error ?? "unknown error").slice(0, 1500))}`;
-  const r = await telegramSendMessage(creds.botToken, creds.chatId, msg);
-  return r.ok ? "sent" : `failed: ${r.error}`;
-}
-
 /**
  * Finalize a chat execution: reconnect to the sandbox, harvest the run,
  * append the assistant message to the chat (chat:<id>:smsg), push workspace
  * changes back to the cloud, update the execution record, kill the sandbox.
  *
  * Returns false while the run is still live (the next tick re-checks).
- * Telegram notify is SKIPPED unless opts.notifyTelegram is provided — runs
- * that streamed live already delivered their final message in-sandbox.
  */
 export async function finalizeChatExecution(
   kv: SchedulerKV,
   rec: ChatExecutionRecord,
-  opts?: { notifyTelegram?: { botToken: string; chatId: string } },
 ): Promise<boolean> {
   if (rec.status !== "running" || !rec.sandboxId) return false;
   const apiKey = e2bKey();
@@ -1317,16 +1223,6 @@ export async function finalizeChatExecution(
     /* best-effort — E2B reaps it */
   }
 
-  // Legacy notify (scheduled runs without chat streaming). The record is
-  // already persisted; notify delivery status is fire-and-forget.
-  if (opts?.notifyTelegram?.botToken && opts.notifyTelegram.chatId) {
-    await notifyTelegramChatExecution(
-      opts.notifyTelegram,
-      rec,
-      msg.content,
-      terminal.error ?? undefined,
-    ).catch(() => undefined);
-  }
   return true;
 }
 
@@ -1517,9 +1413,6 @@ export async function fireRun(
         { role: "system", content: buildScheduledSystemPrompt(task) },
         { role: "user", content: task.instructions },
       ],
-      ...(task.runtime.telegram?.botToken
-        ? { telegram: { botToken: task.runtime.telegram.botToken, chatId: task.runtime.telegram.chatId } }
-        : {}),
       scheduledTask: { taskId: task.id, runId: run.id, name: task.name },
       // OnyxAI browser bridge — model calls relay through the user's browser.
       ...(legacyBridge ? { bridge: legacyBridge } : {}),
@@ -1577,7 +1470,6 @@ async function fireChatRun(
       systemPrompt,
       history: history.history,
       provider: task.runtime.provider as ProviderSnapshot,
-      telegram: task.runtime.telegram,
       taskId: task.id,
       name: task.name,
     });
@@ -1641,48 +1533,6 @@ async function harvestEvents(sandbox: Sandbox, e2bRunId: string): Promise<Harves
     /* events log missing/unreadable */
   }
   return { toolCalls, logs: logs.slice(-MAX_RUN_LOG_LINES), events };
-}
-
-async function notifyTelegram(task: ScheduledTask, run: ScheduledTaskRun): Promise<string | undefined> {
-  const creds = task.runtime.telegram;
-  if (!task.notificationConfig.telegram || !creds?.botToken || !creds.chatId) return undefined;
-  const tz = task.timezone || "UTC";
-  const completedAt = run.completedAt ? new Date(run.completedAt) : new Date();
-  const timeLabel = `${completedAt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: tz })} ${tzShort(tz)}`;
-  if (run.status === "completed") {
-    const header =
-      `✓ <b>Scheduled task completed</b>\n<b>${escapeHtml(task.name)}</b>\n` +
-      `Completed at ${timeLabel} · ${run.durationMs ? Math.round(run.durationMs / 1000) : "?"}s · ${run.toolCalls} tool calls\n` +
-      (run.filesChanged.length ? `Files updated: ${run.filesChanged.slice(0, 12).map(escapeHtml).join(", ")}${run.filesChanged.length > 12 ? " …" : ""}\n` : "");
-    const body = (run.result ?? "(no final message)").slice(0, 3200);
-    const r1 = await telegramSendMessage(creds.botToken, creds.chatId, `${header}\n${escapeHtml(body)}`);
-    if (r1.ok && (run.result ?? "").length > 3200) {
-      await telegramSendDocument(
-        creds.botToken,
-        creds.chatId,
-        `${task.name.replace(/[^\w.-]/g, "_")}-result.md`,
-        run.result ?? "",
-        "Full run result",
-      );
-    }
-    return r1.ok ? "sent" : `failed: ${r1.error}`;
-  }
-  const msg =
-    `⚠ <b>Scheduled task failed</b>\n<b>${escapeHtml(task.name)}</b>\n` +
-    `Failed at ${timeLabel}\n${escapeHtml((run.error ?? "unknown error").slice(0, 1500))}\n` +
-    `Open Scheduled Tasks in the app to view the logs.`;
-  const r = await telegramSendMessage(creds.botToken, creds.chatId, msg);
-  return r.ok ? "sent" : `failed: ${r.error}`;
-}
-
-function tzShort(tz: string): string {
-  const m = /\b([A-Z]{2,5})$/.exec(tz);
-  if (m) return m[1] ?? "";
-  return tz.split("/").pop()?.slice(0, 6).toUpperCase() ?? tz;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Check + finish one running run. Returns true when the run reached a
@@ -1772,10 +1622,7 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
 
   // UNIFIED CHAT MODE — append the assistant message to the chat + finalize
   // the linked chat-execution record (idempotent: the tick's marker-recovery
-  // path may have finalized it already). Runs that streamed live into
-  // Telegram skip the finalizer notification (the streamer already delivered
-  // the final message in-sandbox).
-  let streamedToTelegram = false;
+  // path may have finalized it already).
   if ((run.execId || task.chatId) && run.e2bRunId) {
     try {
       const chatMsg = buildChatResultMessage(
@@ -1783,7 +1630,6 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
         harvested.events,
         terminal,
       );
-      streamedToTelegram = terminal.telegramStreamed;
       const execId = await finalizeChatExecBookkeeping(kv, task, run, chatMsg);
       if (execId) run.execId = execId;
       run.logs.push(`[chat] assistant message appended to chat ${task.chatId ?? ""} (${chatMsg.id})`);
@@ -1820,7 +1666,7 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
     /* best-effort — E2B reaps it */
   }
 
-  await persistFinal(kv, task, run, { skipNotify: streamedToTelegram });
+  await persistFinal(kv, task, run);
   return true;
 }
 
@@ -1833,7 +1679,7 @@ async function failChatExecBookkeeping(kv: SchedulerKV, task: ScheduledTask, run
     const msg = buildChatResultMessage(
       { e2bRunId: run.e2bRunId || run.id, trigger: "scheduled" },
       [],
-      { status: "error", content: "", error: run.error, telegramStreamed: false },
+      { status: "error", content: "", error: run.error },
     );
     await finalizeChatExecBookkeeping(kv, task, run, msg);
   } catch {
@@ -1892,13 +1738,7 @@ async function persistFinal(
   kv: SchedulerKV,
   task: ScheduledTask,
   run: ScheduledTaskRun,
-  opts?: { skipNotify?: boolean },
 ): Promise<void> {
-  // Runs that streamed live into Telegram already delivered the final
-  // message — the post-run notification would be a duplicate.
-  const notifyStatus = opts?.skipNotify ? "skipped (streamed live)" : await notifyTelegram(task, run);
-  if (notifyStatus) run.notifyStatus = notifyStatus;
-
   const runs = await loadRuns(kv, task.id);
   const idx = runs.findIndex((r) => r.id === run.id || (run.sandboxId && r.sandboxId === run.sandboxId));
   if (idx >= 0) runs[idx] = run;
@@ -2062,12 +1902,12 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
           /* not scheduled / unreachable — skip */
         }
 
-        // UNIFIED CHAT EXECUTIONS — telegram-triggered runs and scheduled
-        // chat-runs whose run-record save stranded: the ChatExecutionRecord
+        // UNIFIED CHAT EXECUTIONS — scheduled chat-runs whose run-record save
+        // stranded: the ChatExecutionRecord
         // (chat:<chatId>:execs) is the bookkeeping; E2B is the source of
         // truth. Finalize it directly; when the sandbox is still live, leave
         // it (the next tick re-checks). Mirrors fireRun's orphan logic.
-        if (markerChatId && markerExecId && (markerKind === "telegram" || markerKind === "scheduled")) {
+        if (markerChatId && markerExecId && markerKind === "scheduled") {
           try {
             const execs = await loadChatExecs(kv, markerChatId);
             const rec =
@@ -2076,7 +1916,7 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
                 // Record save stranded — synthesize from the marker (E2B truth).
                 id: markerExecId,
                 chatId: markerChatId,
-                trigger: markerKind === "telegram" ? "telegram" : "scheduled",
+                trigger: "scheduled",
                 ...(taskId ? { taskId } : {}),
                 sandboxId: sb.sandboxId,
                 e2bRunId: "",

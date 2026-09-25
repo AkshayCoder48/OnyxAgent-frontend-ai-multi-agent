@@ -10,7 +10,7 @@
  *   workspace:default:fm:{fileId}:{sha8}      ← per-file metadata record
  *
  * Durability rules (from the 4a6a8f0 push-hang fix): SEQUENTIAL writes
- * (concurrent writes drop OnyxBase's Telegram mirror), hard budget, atomic
+ * (concurrent writes can be dropped by OnyxBase's durable mirror), hard budget, atomic
  * pointer-last commit, capped GC.
  *
  * Uses the E2B SDK Sandbox directly (server-only).
