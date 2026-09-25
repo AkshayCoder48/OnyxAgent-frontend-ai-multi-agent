@@ -74,6 +74,10 @@ export function useSettings() {
     mutationFn: async (key: string | null) => settingsService.setOnyxBaseApiKey(userId!, key),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["user-settings", userId] }),
   });
+  const setComposioKeyM = useMutation({
+    mutationFn: async (key: string | null) => settingsService.setComposioApiKey(userId!, key),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["user-settings", userId] }),
+  });
   return {
     settings: query.data ?? null,
     loading: query.isLoading,
@@ -82,6 +86,7 @@ export function useSettings() {
     setE2BKey: setE2BKeyM.mutateAsync,
     setSandboxKey: setE2BKeyM.mutateAsync,
     setOnyxBaseApiKey: setOnyxBaseKeyM.mutateAsync,
+    setComposioApiKey: setComposioKeyM.mutateAsync,
   };
 }
 

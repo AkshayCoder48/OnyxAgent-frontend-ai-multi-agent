@@ -1172,6 +1172,15 @@ export interface UserSettings {
   /** ISO timestamp of the last successful push_workspace — stored under
    *  `extra.onyxbase_last_synced`. */
   onyxbase_last_synced?: string | null;
+  /** Whether a Composio API key is stored (encrypted under
+   *  `extra.composio_api_key_encrypted`). Powers the external-app
+   *  integrations (platform catalog, OAuth connections, agent tools). */
+  composio_api_key_present?: boolean;
+  /** Composio tool-router session id (`trs_…`) — stored PLAIN under
+   *  `extra.composio_session_id` (not a secret; it authorizes nothing
+   *  without the vault-encrypted API key). Reused across prompts so we never
+   *  create a session per turn. */
+  composio_session_id?: string | null;
 }
 
 export const settingsService = {
@@ -1217,6 +1226,8 @@ export const settingsService = {
       onyxbase_base_url: (row.extra?.onyxbase_base_url as string | undefined) ?? undefined,
       onyxbase_workspace_id: ONYXBASE_WORKSPACE_ID,
       onyxbase_last_synced: (row.extra?.onyxbase_last_synced as string | null | undefined) ?? null,
+      composio_api_key_present: !!row.extra?.composio_api_key_encrypted,
+      composio_session_id: (row.extra?.composio_session_id as string | null | undefined) ?? null,
     };
   },
 
@@ -1252,6 +1263,11 @@ export const settingsService = {
     }
     if (patch.onyxbase_last_synced !== undefined) {
       update.extra = { ...(update.extra ?? row.extra ?? {}), onyxbase_last_synced: patch.onyxbase_last_synced };
+    }
+    // Composio session id (plain, not a secret — authorizes nothing without
+    // the vault-encrypted API key).
+    if (patch.composio_session_id !== undefined) {
+      update.extra = { ...(update.extra ?? row.extra ?? {}), composio_session_id: patch.composio_session_id };
     }
     // Handle env_vars — the settings page sends Record<string, string>,
     // but the DB stores Record<string, { value, is_secret }> (secrets
@@ -1530,6 +1546,57 @@ export const settingsService = {
     } catch {
       return null;
     }
+  },
+
+  /** Store (or clear, when key is null) the Composio API key, encrypted with
+   *  the user's vault key. Stored under `extra.composio_api_key_encrypted`
+   *  (same pattern as OnyxBase/SkillsMP — no schema migration).
+   *
+   *  SECURITY: the key is only decrypted transiently in the browser to build
+   *  the `x-composio-key` request header for our /api/composio/* proxy
+   *  routes. It never enters system prompts, tool arguments, E2B, or logs. */
+  async setComposioApiKey(userId: string, key: string | null): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    if (!row) throw new Error("Could not initialize user settings");
+    // Restore the vault from the session JWK when the page was reloaded —
+    // otherwise saving after a refresh would fail with "vault is locked".
+    if (key && !isVaultUnlocked()) {
+      const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+      await restoreVaultFromSession();
+    }
+    const encrypted = key ? await vaultEncrypt(key) : null;
+    const extra = { ...(row.extra ?? {}), composio_api_key_encrypted: encrypted };
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
+  /** Decrypt + return the Composio API key, or null when unconfigured.
+   *  Mirrors the OnyxBase key flow: tries to restore the vault from session
+   *  before decrypting. */
+  async getDecryptedComposioApiKey(userId: string): Promise<string | null> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return null;
+    const encrypted = row.extra?.composio_api_key_encrypted;
+    if (typeof encrypted !== "string" || !encrypted) return null;
+    try {
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
+      return await vaultDecrypt(encrypted);
+    } catch {
+      return null;
+    }
+  },
+
+  /** Store (or clear, when null) the Composio tool-router session id. NOT a
+   *  secret — kept plain so the agent tools and the settings UI can restore
+   *  the same session across prompts and refreshes. */
+  async setComposioSessionId(userId: string, sessionId: string | null): Promise<void> {
+    await this.update(userId, { composio_session_id: sessionId });
   },
 
   /** Set the file system mode: "auto", "local", or "hopx" (legacy alias for

@@ -16,6 +16,7 @@ import {
   ListTodo,
   MessageCircleQuestion,
   PenLine,
+  Plug,
   Search,
   Terminal,
   Wrench,
@@ -186,6 +187,23 @@ const RULES: Record<string, TenseRule> = {
     past: "Restored the workspace from the cloud",
     present: "Restoring the workspace from the cloud",
     icon: CloudDownload,
+  },
+
+  // ── External apps (Composio) ──────────────────────────────────────────
+  composio_search_tools: {
+    past: "Searched app integrations",
+    present: "Searching app integrations",
+    icon: Plug,
+  },
+  composio_connect_platform: {
+    past: "Prepared an app connection link",
+    present: "Preparing an app connection link",
+    icon: Plug,
+  },
+  composio_execute_tool: {
+    past: "Used an app integration",
+    present: "Using an app integration",
+    icon: Plug,
   },
 };
 

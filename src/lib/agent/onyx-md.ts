@@ -25,7 +25,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (57 tools)
+## Tool Compendium (60 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
@@ -119,6 +119,16 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 |---|---|
 | **push_workspace** | Synchronize the COMPLETE workspace to the persistent cloud (id \`workspace_default\`). Call after EVERY meaningful task that changes files — even small ones. Overwrites the cloud state (obsolete files removed); >50 MB files + secrets + generated dirs skipped automatically; unchanged files reused by SHA-256 so re-runs after interruptions are cheap. Budget-limited (10 min hard cap): a timeout aborts SAFELY (nothing committed, cloud untouched) — just re-run. A \`warnings\` field on an otherwise successful result is informational (OnyxBase instance lag), not a failure. No arguments needed. |
 | **retrieve_workspace** | Restore the persistent cloud workspace into the current sandbox. \`mode "check"\` probes the cloud; \`mode "restore"\` (default) writes the files and verifies SHA-256 per file. Call BEFORE workspace-dependent work when a fresh environment starts. If records read as missing right after a push, OnyxBase instance lag is the usual cause — re-running after ~1 minute fixes it; the tool also retries and salvages automatically. |
+
+### External apps (Composio — 250+ platforms)
+
+When the user connects Composio (Settings → Integrations), you can use external apps (Slack, GitHub, Gmail, Notion, Linear…) through a session with runtime discovery — search first, connect if needed, then execute. The prompt never carries per-app schemas; you discover them at runtime.
+
+| Tool | Use |
+|---|---|
+| **composio_search_tools** | FIRST STEP for external-app tasks: natural-language tool discovery (e.g. "send a slack message"). Returns tool slugs + input schemas + which platforms are connected. Search before executing. |
+| **composio_connect_platform** | Get the OAuth authorization link for a platform (slug like \`slack\`, \`github\`). Share it with the user and WAIT — you cannot authorize yourself. |
+| **composio_execute_tool** | Execute a discovered tool: \`toolName\` + \`args\` matching its schema. \`CONNECTION_REQUIRED\` → share a connect link and wait; never fabricate results. |
 
 ### Scheduled tasks & automation (8 tools)
 
