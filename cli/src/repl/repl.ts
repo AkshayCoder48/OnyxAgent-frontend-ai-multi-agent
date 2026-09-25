@@ -96,7 +96,6 @@ export async function startRepl(opts: ReplOptions = {}): Promise<void> {
 
     const providerConfig: ProviderConfig = {
       baseUrl: provider.baseUrl,
-      name: provider.name,
       apiKey,
       model,
       modelType: provider.modelType,

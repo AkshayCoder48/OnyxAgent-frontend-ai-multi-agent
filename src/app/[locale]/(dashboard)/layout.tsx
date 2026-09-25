@@ -3,7 +3,6 @@ import { AuthGuard } from "@/components/layout/auth-guard";
 import { SchedulerHeartbeat } from "@/components/scheduled/scheduler-heartbeat";
 import { ServerChatSync } from "@/components/chat/server-chat-sync";
 import { ExecutionRehydrator } from "@/components/chat/execution-rehydrator";
-import { OnyxAiBridgeRuntime } from "@/components/onyxai/bridge-runtime-mount";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -28,11 +27,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             job (browser refresh must not terminate backend execution —
             spec §14). Renders null. */}
         <ExecutionRehydrator />
-        {/* Invisible: the OnyxAI Browser Runtime — heartbeats presence and
-            serves remote model calls (scheduled tasks) against
-            the user's local QVAC server while an app tab is open. Renders
-            null. */}
-        <OnyxAiBridgeRuntime />
         <Header />
         <main
           id="main"

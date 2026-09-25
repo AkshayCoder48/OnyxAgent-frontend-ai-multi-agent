@@ -11,7 +11,6 @@ import {
   parseUnsupportedParam,
 } from "@/lib/agent/param-policy";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
-import { isLocalBaseUrl } from "@/lib/onyxai/catalog";
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
@@ -208,39 +207,24 @@ export async function executeSubagentTurn(
 
       // Use ?url= query param + Accept: text/event-stream + cache: no-store
       // (curl -N equivalent — no buffering anywhere in the pipeline).
-      // OnyxAI / local providers (QVAC on the user's device): fetch DIRECTLY
-      // — the server-side proxy cannot reach the user's localhost.
       // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + rate-limit error
       // bodies with backoff + jitter, honoring Retry-After. Mirrors the
       // main runtime's streamRound retry loop.
-      const isLocalProvider = isLocalBaseUrl(config.baseUrl);
-      const requestUrl = isLocalProvider
-        ? targetUrl
-        : `/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`;
+      const requestUrl = `/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`;
       let res: Response;
       let rateLimitAttempts = 0;
       for (;;) {
-        try {
-          res = await fetch(requestUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(isLocalProvider ? {} : { "x-target-url": targetUrl }),
-              Authorization: `Bearer ${config.apiKey}`,
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify(body),
-            cache: "no-store",
-          });
-        } catch (e) {
-          if (isLocalProvider) {
-            throw new Error(
-              `OnyxAI local server unreachable at ${config.baseUrl} — is \`qvac serve --openai\` running on this device? ` +
-                `(Original error: ${e instanceof Error ? e.message : String(e)})`,
-            );
-          }
-          throw e;
-        }
+        res = await fetch(requestUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-target-url": targetUrl,
+            Authorization: `Bearer ${config.apiKey}`,
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify(body),
+          cache: "no-store",
+        });
 
         const rl = res.status === 429 || res.status === 529;
         if (rl && rateLimitAttempts < 3) {
