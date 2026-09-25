@@ -39,6 +39,8 @@
  *      partial content and preserve it.
  */
 
+import { ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
+
 export const BG_AGENT_SCRIPT = String.raw`
 // OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
 // Started as: node bg-agent.mjs <runId>
@@ -1910,6 +1912,12 @@ const TOOLS = [
   },
 ];
 
+// Tools documented in the TOOL DIGEST (generated from Onyx.md — parity
+// is test-enforced against the browser registry). Used to slim the
+// in-prompt tool list: digest-documented tools are listed by NAME only,
+// dynamic tools (MCP / custom, bridged from the browser) keep a blurb.
+const DIGEST_TOOLS = new Set(${JSON.stringify(ONYX_MD_DIGEST_TOOLS)});
+
 // MERGE NOTE (tool-count cap): the manage_todos alias push was removed —
 // the in-browser registry no longer registers manage_todos (it was an exact
 // duplicate of manage_todo), so the background surface must not either.
@@ -2054,14 +2062,38 @@ async function main() {
   }
   // Tool-list text (the SAME discipline the in-browser runtime uses) so the
   // model knows its exact surface — prevents hallucinated tool names.
+  // When the system prompt already carries the TOOL DIGEST (injected
+  // upstream: interactive turns via background-agent.ts, scheduled runs via
+  // the scheduler engine), append ONLY the live names — the digest already
+  // documents every built-in's capability, so duplicating descriptions here
+  // would just bloat the prompt (small providers reject fat prompts).
   if (state.messages.length && state.messages[0] && state.messages[0].role === "system") {
     const sysMsg = state.messages[0];
     const content = String(sysMsg.content ?? "");
     if (!content.includes("## Available Tools (")) {
-      const toolListText =
-        "\n\n## Available Tools (" + ALL_TOOLS.length + " total)\nYou have access to these tools. Use them by calling them through the FUNCTION-CALLING API (the tool_calls mechanism). NEVER write tool calls as plain text (e.g. \"Thought: ... Action: run_terminal Input: {...}\"). ALWAYS use the function-calling mechanism to invoke tools.\n\nUse them by name when the user's request matches:\n" +
-        ALL_TOOLS.map((t) => "- **" + t.name + "** — " + t.description).join("\n") +
-        "\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list.";
+      let toolListText;
+      if (content.includes("## TOOL DIGEST")) {
+        const documented = ALL_TOOLS.filter((t) => DIGEST_TOOLS.has(t.name));
+        const dynamic = ALL_TOOLS.filter((t) => !DIGEST_TOOLS.has(t.name));
+        toolListText =
+          "\n\n## Available Tools (" + ALL_TOOLS.length + " total — LIVE registry for THIS turn)\n" +
+          documented.map((t) => t.name).join(", ") +
+          (dynamic.length
+            ? "\n\nDynamic tools (" + dynamic.length + " — active this turn, not in the digest):\n" +
+              dynamic
+                .map((t) => {
+                  const d = String(t.description ?? "").replace(/\s+/g, " ").trim();
+                  return "- **" + t.name + "** — " + (d.length > 140 ? d.slice(0, 140) + "…" : d);
+                })
+                .join("\n")
+            : "") +
+          "\n\nThis list + your tool definitions are the ONLY source of truth for what you can call this turn — not your memory, not Onyx.md alone. Every tool named here is real and callable: never claim you lack one. Tools not named here are NOT available this turn — say so honestly instead of calling them.";
+      } else {
+        toolListText =
+          "\n\n## Available Tools (" + ALL_TOOLS.length + " total)\nYou have access to these tools. Use them by calling them through the FUNCTION-CALLING API (the tool_calls mechanism). NEVER write tool calls as plain text (e.g. \"Thought: ... Action: run_terminal Input: {...}\"). ALWAYS use the function-calling mechanism to invoke tools.\n\nUse them by name when the user's request matches:\n" +
+          ALL_TOOLS.map((t) => "- **" + t.name + "** — " + t.description).join("\n") +
+          "\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list.";
+      }
       sysMsg.content = content + toolListText;
     }
   }

@@ -42,6 +42,8 @@ import type {
 } from "@/types";
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
+import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
+import { promptKb } from "@/lib/agent/tool-digest";
 import { waitForAskUser, ASK_USER_RESPONSE_EVENT } from "@/lib/agent/ask-user-wait";
 import { conversationService, settingsService } from "@/lib/services";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
@@ -1416,8 +1418,28 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   console.log(`[agent] Tools registered: ${registeredTools.length}`, registeredTools.map(t => t.name));
 
   // Build the enhanced system prompt with the tool list + usage knowledge.
+  // PRD §13/§14/§38 — RUNTIME-GROUNDED availability: this list is built from
+  // the LIVE registry at turn time (never a static copy), so dynamically
+  // registered tools (MCP `mcp_<server>__<tool>`, custom tools) appear the
+  // turn they load. Built-in capabilities live in the TOOL DIGEST below (one
+  // line per tool, generated from Onyx.md) — here we only anchor the exact
+  // names that exist THIS TURN, plus one-line blurbs for tools the digest
+  // does not document (dynamic ones). This keeps the prompt compact: the
+  // full per-tool descriptions already travel in the tools array itself.
+  const digestToolNames = new Set<string>(ONYX_MD_DIGEST_TOOLS);
+  const documented = registeredTools.filter((t) => digestToolNames.has(t.name));
+  const undocumented = registeredTools.filter((t) => !digestToolNames.has(t.name));
+  const firstSentence = (d: string): string => {
+    const s = (d || "").replace(/\s+/g, " ").trim();
+    const m = /^[^.!?]*[.!?]/.exec(s);
+    if (m && m[0].length <= 150) return m[0];
+    if (s.length <= 150) return s;
+    const cut = s.slice(0, 140);
+    const sp = cut.lastIndexOf(" ");
+    return `${(sp > 60 ? cut.slice(0, sp) : cut).replace(/[,;:.]+$/, "")}…`;
+  };
   const toolListText = registeredTools.length > 0
-    ? `\n\n## Available Tools (${registeredTools.length} total)\nYou have access to these tools. Use them by calling them through the FUNCTION-CALLING API (the tool_calls mechanism). NEVER write tool calls as plain text (e.g. "Thought: ... Action: run_terminal Input: {...}"). ALWAYS use the function-calling mechanism to invoke tools.\n\nUse them by name when the user's request matches:\n${registeredTools.map((t) => `- **${t.name}** — ${t.description}`).join("\n")}\n\nIMPORTANT: These are the ONLY tools available. Do not mention or use any tool that is not in this list. NEVER write "Thought:", "Action:", "Input:", "Observation:", or "Final Answer:" as text — these are ReAct patterns that DON'T work here. Use the tool_calls mechanism instead.`
+    ? `\n\n## Available Tools (${registeredTools.length} total — LIVE registry for THIS turn)\nYou have access to these tools. Use them ONLY by calling them through the FUNCTION-CALLING API (the tool_calls mechanism) — NEVER as plain text ("Thought: ... Action: run_terminal Input: {...}" does nothing).\n\nBuilt-in tools (${documented.length}) — capabilities in the TOOL DIGEST below:\n${documented.map((t) => t.name).join(", ")}${undocumented.length > 0 ? `\n\nDynamic tools (${undocumented.length} — MCP servers / custom tools, active this turn):\n${undocumented.map((t) => `- **${t.name}** — ${firstSentence(t.description)}`).join("\n")}` : ""}\n\nThis list + your active tool definitions are the ONLY source of truth for what you can call this turn — not your memory, not Onyx.md alone. Every tool named here is real and callable.`
     : "";
 
   const toolKnowledgeBase = `
@@ -1436,37 +1458,11 @@ Before starting ANY task, you MUST first call \`analyze_workspace\` to understan
 
 NEVER blindly modify files without first understanding the workspace. The only exception is for trivial conversational answers (e.g. "what time is it") where no file or code changes will be made.
 
-## Automatic Task Complexity Detection
-After workspace analysis, estimate task complexity:
-- **Tiny**: Single answer, no file changes → no sub-agents
-- **Small**: One file, simple change → usually no sub-agents
-- **Medium**: 2-4 files, moderate complexity → optional sub-agents
-- **Large**: 5-10+ files, multiple technologies → spawn specialists
-- **Massive**: Repository-wide, multi-system → multi-agent workflow
-
 ## Dynamic Sub-Agent Decision
 - **Never spawn agents unnecessarily** — Tiny/Small tasks should be handled directly.
-- For **Large/Massive** tasks, spawn specialized agents with roles:
-  Planner, Frontend Engineer, Backend Engineer, Database Engineer,
-  Testing Engineer, Documentation Writer, API Specialist,
-  Performance Optimizer, Security Reviewer, Refactoring Specialist,
-  Deployment Engineer
+- For **Large/Massive** tasks, spawn specialists with the role the work implies (Planner, Frontend/Backend Engineer, Testing, Documentation, Security, …)
 - Use \`disposable: true\` for one-off tasks (auto-cleans after completion — agent is removed from the sidebar)
 - Use \`disposable: false\` for persistent agents needed for ongoing work
-
-## Execution Pipeline
-1. Receive user request
-2. Call \`analyze_workspace\` to build full workspace context
-3. Build project understanding (technologies, patterns, existing subagents)
-4. Estimate task complexity (Tiny / Small / Medium / Large / Massive)
-5. Decide if sub-agents are needed
-6. Determine optimal number of agents (respect the 5-8 concurrency limit)
-7. Assign specialized roles (Frontend Engineer, Backend Engineer, …)
-8. Spawn agents with appropriate \`disposable\` setting + \`role\`
-9. Execute work in parallel where beneficial (use \`query_subagent\`)
-10. Aggregate and validate outputs (use \`list_subagents\` + \`query_subagent\`)
-11. Dispose of temporary agents automatically via \`complete_subagent\`
-12. Deliver final unified result to the user
 
 ## Agent Lifecycle Status (real-time tracking)
 Each subagent has a lifecycle status surfaced in the UI:
@@ -1478,35 +1474,6 @@ Each subagent has a lifecycle status surfaced in the UI:
 - **reviewing**: validating its own output
 - **completed**: task finished (still available if non-disposable)
 - **disposed**: auto-removed (disposable agents only)
-
-## Tool Usage Guide — When to Use What
-
-### Workspace Analysis (run FIRST)
-- **analyze_workspace**: Scan the entire workspace before starting any task. Returns files, key project files (README, package.json, configs, .env), skills, MCP servers, available tools, env vars, existing subagents, and memories. Call this BEFORE any file modification or sub-agent spawning. Re-run when context may have changed (e.g. after a sub-agent has made significant changes).
-
-### Code Execution
-- **run_python**: Use for data analysis, calculations, file processing, ML models, web scraping with Python. ALWAYS try this first for any computation task. Requires an E2B sandbox key (configured in Settings).
-- **run_terminal**: Use for shell commands — file operations, git, npm/pip installs, system queries. Supports pipes (|), redirects (>), and chains (&&).
-
-### Web & Search
-- **web_search**: Search the web for text results. Uses LangSearch (if API key configured in Settings) for richer summaries, else falls back to Miklium (Yahoo-based). Returns titles, URLs, snippets. Best for finding current information, documentation, or answers to factual questions.
-- **image_search**: Search for images via Miklium. Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants pictures, photos, or diagrams.
-- **video_search**: Search for videos via Miklium. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants tutorials or multimedia content.
-- **web_fetch**: Use to read the full content of a specific URL. Use AFTER web_search to deep-read a promising result page.
-
-### File Management (E2B sandbox — authoritative workspace)
-- **create_file / write_file**: Create or overwrite files in the user's workspace. Files persist across sessions. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.
-- **read_file**: Read the content of a file in the workspace.
-- **edit_file**: Edit a file by finding and replacing text. For large edits, use create_file_chunk with mode='append'.
-- **delete_file**: Remove a file from the workspace.
-- **move_file**: Move OR rename a file (same directory + new filename = rename; different directory = move).
-- **list_files**: List all files in a directory. Use this to discover what files exist before reading them.
-- **search_files**: Grep/search for text across files. Use when the user asks "find X in my files".
-- **create_folder**: Create a new directory in the workspace.
-- **delete_folder**: Delete a folder and all its contents.
-- **verify_path**: Verify a path exists, create directories (and empty file) if missing. Call BEFORE create_file_chunk to ensure parent dirs exist.
-- **create_file_chunk**: Write/append content in 2-4 KB (50-200 line) chunks with progress tracking. Use mode="create" for the first chunk, mode="append" for subsequent chunks.
-- **read_file_section**: Read a specific section of a file (by 0-based line range). Use to verify previously written chunks before appending the next one, or to resume an interrupted write.
 
 ### CRITICAL: Incremental File Writing Policy
 NEVER generate an entire large file in one operation. Large files MUST be written incrementally:
@@ -1528,44 +1495,16 @@ Available tools for incremental writing:
 - create_file_chunk: Write/append content in chunks with progress tracking
 - read_file_section: Read specific sections for verification and resume
 
-### Memory & Knowledge
-- **manage_memory**: Save, search, list, or delete persistent facts about the user (action-based). Use when the user says "remember that..." or when you learn something important about their preferences.
-- **e2b_rag / hopx_rag**: Search through uploaded documents using semantic search. Use when the user asks about content in their knowledge base or uploaded files.
-
 ### Subagent Orchestration (you are an orchestrator)
-- **analyze_workspace**: Scan the workspace BEFORE spawning subagents — lets you pick the right roles, detect existing agents, and avoid duplicates.
-- **spawn_subagent**: Create a new subagent for a specific task. Pass \`disposable: true\` for one-off tasks (auto-disposes), \`role\` for specialization (e.g. "Frontend Engineer"). Use when a task is complex enough to delegate (e.g. "research X while I work on Y").
-- **query_subagent**: Send a message to a subagent and get its reply. The subagent processes your message using its own API config and has access to all the same tools you do. Use this to delegate work and get results. If the subagent's task isn't done, query again with more specific instructions.
-- **list_subagents**: Check which subagents are currently active (returns disposable + role + lifecycle status). Use before spawning to avoid duplicates.
-- **steer_subagent**: Send guidance to a running subagent (e.g. "focus only on Python files").
-- **complete_subagent**: Mark a subagent's task as completed. For disposable agents, this AUTOMATICALLY disposes them (status="disposed", removed from sidebar, enabled=false).
-- **cancel_subagent**: Cancel a subagent that's going in the wrong direction.
-- **create_custom_tool**: Create a specialized tool for a subagent (e.g. a meme generator, a sentiment analyzer). Use when a subagent needs a capability that doesn't exist in the built-in tools.
-- **manage_subagent_chat**: Create, delete, rename, or pin subagent chat SESSIONS (action-based: create / delete / edit_title / pin).
+Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\`; steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
 
-### Datetime & Utilities
-- **datetime**: Get the current date/time. Use when the user asks "what time is it" or when timestamps are needed.
-- **chart**: Create data visualizations (bar, line, pie, scatter, etc). Use when the user wants to "visualize" or "plot" data.
-- **preview_image**: Display an image inline in the chat from a URL or base64. Use when you want to show the user a visual — a generated image, a screenshot, a diagram URL, etc.
-- **ocr_document**: Extract text from an image OR a PDF using OCR. Use when the user wants to read text from a screenshot, photo, scanned document, or any image/PDF containing text. Accepts url or base64 (data URI) — the document kind is detected automatically.
-- **manage_memory**: Save, search, list, or delete persistent facts about the user (action-based). Use when the user says "remember that..." or when you learn something important about their preferences.
-- **todos**: Create and manage a live task checklist. Use for multi-step tasks to show progress.
-- **workflow**: Create, run, and manage multi-step workflow pipelines. Use when the user wants to automate a sequence of AI/tool steps.
-- **counterfactual**: Explore "what if" scenarios. Use when the user asks hypothetical questions.
-- **security_audit**: Audit code or config for security issues. Use when the user asks to "check for vulnerabilities" or "is this secure".
-
-### Skills & MCP
-- **manage_skill**: Install, read, edit, or delete skills (from Settings → Skills). Skills are contextual capabilities that activate when your task matches.
-- **manage_mcp**: Create, edit, list, or delete MCP (Model Context Protocol) server configurations; mcp_tools calls tools on those servers.
-- **manage_custom_tool**: Create, edit, or delete user-defined custom HTTP/Python tools.
-- **manage_chats**: List past conversations and read their transcripts. Use when the user asks "what did we talk about before" or "find a conversation about X".
-- **manage_env_var**: List, get, add, set, edit, or delete sandbox environment variables.
+### Skills, MCP & dynamic tools
+- MCP servers expose their tools DYNAMICALLY as \`mcp_<server>__<tool>\` — they appear in your tool definitions when active (configure servers with \`manage_mcp\`). Custom tools work the same way (\`manage_custom_tool\`).
+- Skills (\`manage_skill\`) are contextual instruction files — \`read\` a skill before applying it.
 
 ### When to THINK (reasoning) vs ACT (tools)
-- **Think first** when: the task is ambiguous, requires planning, involves multiple steps, or the user's intent isn't clear. Break down the problem before acting.
-- **Act immediately** when: the user gives a clear, direct command (e.g. "run this code", "search for X", "create a file named Y").
-- **Use tools in parallel** when: multiple independent sub-tasks can run at the same time (e.g. search the web AND read a local file simultaneously).
-- **Chain tools** when: one tool's output feeds into the next (e.g. search → fetch URL → extract data → write to file).
+- **Think first** for ambiguous/multi-step/unclear-intent tasks; **act immediately** on clear direct commands.
+- **Parallelize** independent calls; **chain** tools when one output feeds the next (search → fetch → extract → write).
 
 ### AUTONOMOUS TASK DECOMPOSITION & MULTI-AGENT DELEGATION ENGINE
 You are an **Executive Orchestrator**, not a worker. Your primary role is to understand, plan, divide, delegate, monitor, validate, and merge — NOT to implement everything yourself.
@@ -1609,37 +1548,17 @@ Automatically delegate when ANY of these are true:
 
 **Automatic Failure Recovery:** If a subagent fails: retry once → spawn a Debug Agent → if still failing, split the task further → continue automatically.
 
-**Automatic Specialist Selection:** Infer the right specialist from the task:
-- Frontend Agent, Backend Agent, Database Agent, Testing Agent, Documentation Agent
-- Research Agent, Code Reviewer, Security Agent, Deployment Agent
-- React Agent, Python Agent, TypeScript Agent, API Agent, UI Designer Agent
-
-**Parallel Execution:** Independent tasks MUST execute simultaneously. Example: for "build a web app", spawn Frontend + Backend + Database agents in parallel, then Testing after they complete.
+**Automatic Specialist Selection:** infer the right specialist from the task (frontend / backend / database / testing / documentation / research / review / security / deployment — or the language- or framework-specific role the work implies).
 
 **Planning is Mandatory:** Skipping planning for large requests is an error. Always plan before executing.
 
 ### File Uploads
-When the user uploads a file, you'll see a tag like \`<@filename is uploaded check the workspace>\` in their message. The file is in your workspace — use \`list_files\` or \`read_file\` to access it. A manifest file \`.onyxagent_files.json\` lists all uploaded files with their metadata.
+When the user uploads a file, you'll see a tag like \`<@filename is uploaded check the workspace>\` in their message. The file is in your workspace — use \`list_folder\` or \`read_file\` to access it. A manifest file \`.onyxagent_files.json\` lists all uploaded files with their metadata.
 
-### Subagent Auto-Spawning
-When you detect a large or complex task, automatically spawn subagents to handle different parts in parallel. For example:
-- "Build a web app" → spawn a Coder subagent for frontend, a Coder subagent for backend, a Researcher for API docs
-- "Research and summarize" → spawn a Researcher to search, an Analyst to summarize
-- "Create content" → spawn a Writer subagent, and use create_custom_tool if it needs special capabilities
+${ONYX_MD_DIGEST}
 
-Each subagent shares the same sandbox + file system as you, so they can read/write the same files.
-
-## CRITICAL: Read Onyx.md for tool usage guide
-A file called \`Onyx.md\` has been written to the sandbox at \`/home/user/Onyx.md\`. It contains:
-- Your Onyx identity (who you are, how you behave)
-- The compressed tool compendium — use cases for every tool (when to use run_python vs run_terminal, create_file vs create_file_chunk, etc.)
-- Incremental file writing policy (for files >200 lines)
-- Task complexity detection guide
-- Subagent orchestration patterns
-- Error recovery procedures
-- Tool calling rules
-
-Read it FIRST with \`read_file\` (path: \`Onyx.md\`) before using any tools. If it doesn't exist, use \`run_terminal\` with command \`sed -n '1,200p' /home/user/Onyx.md\` as fallback.
+## Onyx.md — the full operating manual
+Detailed tool usage, execution policies and the complete GenUI reference: \`read_file\` /home/user/Onyx.md when you need more than the TOOL DIGEST above.
 
 ## PERSISTENT WORKSPACE POLICY
 The active E2B workspace is your working environment; the OnyxBase KV cloud workspace is the persistent source of truth (E2B is temporary, the cloud is permanent).
@@ -1655,13 +1574,12 @@ The active E2B workspace is your working environment; the OnyxBase KV cloud work
 - DATA-LOSS SAFETY (critical): OnyxBase's backend has lost snapshot records before (2026-09-11 incident). If \`retrieve_workspace\` reports a corrupt/lost manifest, it automatically degrades: rebuild from per-file records, or SALVAGE checksum-verifiable files into \`.onyx-salvage/\`. NEVER respond to that with "run push_workspace to re-commit" — from an empty sandbox that would wipe the surviving cloud data (and the tool now REFUSES it with EMPTY_PUSH_BLOCKED). Instead: report honestly what was recovered vs. lost, keep salvaged files, and only push once the sandbox again holds real work. \`force=true\` on push_workspace requires the user's EXPLICIT confirmation — never set it on your own.
 
 ## SCHEDULED TASKS & AUTOMATION POLICY
-You can create and manage AUTONOMOUS SCHEDULED TASKS — full agent jobs (research, coding, file generation) that run on a schedule on the server, even when the user's browser is closed.
-- Every task owns exactly ONE DEDICATED CHAT (titled with the task name, listed in the sidebar like any conversation): executions, tool calls and result messages land in that chat — there is no separate task dashboard.
-- When the user expresses ANY recurring or future intent ("every morning at 8 AM, …", "every Friday back up…", "tomorrow at 5 PM, …", "run this every 30 minutes"), CREATE a scheduled task with \`create_scheduled_task\` — do not just promise to do it later.
+AUTONOMOUS SCHEDULED TASKS are full agent jobs that run on a server-side schedule with the browser closed. Every task owns ONE DEDICATED CHAT (its executions, tool calls and results land there — no separate dashboard).
+- ANY recurring or future intent ("every morning at 8 AM…", "tomorrow at 5 PM…") → CREATE a task with \`create_scheduled_task\` now — never just promise to do it later.
 - The \`instructions\` are executed VERBATIM by an autonomous agent with no user available: make them complete and self-contained (what to do, which files to write with exact paths). Preserve the user's original wording's intent — never reduce it to a stub.
-- Schedule types: once (ISO datetime), daily ("HH:MM"), weekly (weekday numbers 0-6 + time), monthly (day + time), interval (seconds ≥ 60), cron (5-field). Timezone is ALWAYS IANA ("Asia/Kolkata", "America/New_York"…) — default to the user's local timezone; only use another when they explicitly name it ("New York time").
-- Convert natural language faithfully: "every weekday at 8:30 AM" → weekly, weekdays 1-5, time 08:30. Ask a clarifying question ONLY when the time is genuinely un-inferable ("schedule this daily" with no time ever mentioned).
-- Manage existing automation with the dedicated tools: list_scheduled_tasks (find ids), update_scheduled_task ("move it to 9 AM"), pause_scheduled_task / resume_scheduled_task, run_scheduled_task_now ("run it right now"), delete_scheduled_task, get_scheduled_task_history ("did it run? what did it produce?").
+- Schedule types: once / daily / weekly / monthly / interval (≥60s) / cron — full argument formats in the tool schema. Timezone is ALWAYS IANA — default to the user's local timezone; only use another when they explicitly name it.
+- Convert natural language faithfully ("every weekday at 8:30 AM" → weekly, weekdays 1-5, 08:30). Ask a clarifying question ONLY when the time is genuinely un-inferable.
+- Manage by id: \`list_scheduled_tasks\` first, then update / pause / resume / run-now / delete / history (see TOOL DIGEST).
 - Scheduled runs execute with the persistent workspace restored before and synced after each run. The run's files land in the SAME workspace the user sees.
 
 ## Generative UI (GenUI)
@@ -1673,15 +1591,23 @@ GenUI lets you render rich interactive UI components — cards, tables, charts, 
 
 **FULL documentation** (all 33 node types, props, use cases, examples, custom HTML components) is in \`Onyx.md\` under the "Generative UI (GenUI)" section. Read it with \`read_file\` (path: \`Onyx.md\`) before emitting GenUI blocks — it contains the rules that make specs render correctly on the first try.
 
-Quick reference — available types: header, text_block, card, card_grid, stat, stats_row, badge, progress, sparkline, key_value, quote, code_block, comparison_table, image, image_grid, list, checklist, timeline, stepper, divider, columns, tabs, accordion, callout, terminal_card, agent_card, weather_card, stock_ticker, suggestion_chips, sources_panel, **custom_html**, **custom_card**.
+Quick reference — 33 node types incl. header, text_block, card, card_grid, stat, badge, progress, sparkline, comparison_table, image, list, checklist, timeline, stepper, tabs, accordion, callout, weather_card, stock_ticker, sources_panel, **custom_html**, **custom_card** (full list + props + examples in Onyx.md's GenUI section).
 
-The two custom types let you write arbitrary HTML/CSS/JS (mini-games, calculators, educational demos, interactive visualizations) that renders in a sandboxed iframe. They accept \`html\`, \`css\`, and \`js\` props (markup, stylesheet, script — the script runs after the markup exists; script errors surface in-card instead of silently killing the widget). Set \`height\` to fit your content. See Onyx.md for complete examples.
+The two custom types take \`html\` / \`css\` / \`js\` props (script runs after markup; errors surface in-card) and render arbitrary HTML/CSS/JS in a sandboxed iframe — set \`height\` to fit; examples in Onyx.md.
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 
   const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey}\n- workspaceId: workspace_default\n- cloudConfigured: ${cloudConfigured}${cloudConfigured ? "\nCloud workspace sync is ACTIVE — after completing any task that modifies workspace files, you MUST call push_workspace before responding." : "\nCloud workspace sync is not configured — do not call push_workspace / retrieve_workspace; suggest the user add an OnyxBase API key in Settings → Cloud Workspace if persistence matters."}`;
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${workspaceStatusText}`;
+
+  // Prompt-budget guard (PRD §13/§14): interactive system prompts must stay
+  // under ~24KB — small providers reject fat prompts outright and quality
+  // degrades long before the context limit.
+  console.log(
+    `[agent] system prompt: ${promptKb(enhancedSystemPrompt)}KB ` +
+      `(tools=${registeredTools.length}, digest=${enhancedSystemPrompt.includes("## TOOL DIGEST") ? "injected" : "MISSING"})`,
+  );
 
   // CONTEXT WINDOW MANAGEMENT: Always strip tool_calls from history to
   // prevent DEGRADED errors. The AI doesn't need old tool calls to continue.

@@ -5,6 +5,7 @@ import { useSubagentStore, type SubagentConfig, type SubagentMessage } from "@/s
 import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { listTools } from "@/lib/tools/registry";
+import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import {
   applyParamPolicy,
   learnParamBan,
@@ -163,10 +164,21 @@ export async function executeSubagentTurn(
     const trimmedSessionMessages = sessionMessages.length > 20
       ? sessionMessages.slice(-20)
       : sessionMessages;
+    // PRD §13/§14/§38 — subagents get the FULL registry toolset (toolsSchema
+    // above) but their system prompt used to be just a name+description,
+    // so subagents denied tools they actually had. Inject the tool digest
+    // (every tool + availability rules) + the LIVE tool names for this
+    // session, so subagent tool knowledge matches the main agent's.
+    const subagentBasePrompt =
+      subagent.systemPrompt || `You are ${subagent.name}, a subagent. ${subagent.description}`;
+    const subagentSystemPrompt = ensureToolDigest(
+      `${subagentBasePrompt}\n\n## Active tools this turn (${allTools.length})\n${allTools.map((t) => t.name).join(", ")}\nAll of them are real and callable via function-calling — never claim you lack a tool that is in your definitions; never call one that is not.`,
+    );
+    console.log(`[subagent] system prompt: ${promptKb(subagentSystemPrompt)}KB (tools=${allTools.length})`);
     const apiMessages: ChatCompletionMessage[] = [
       {
         role: "system",
-        content: subagent.systemPrompt || `You are ${subagent.name}, a subagent. ${subagent.description}`,
+        content: subagentSystemPrompt,
       },
       ...trimmedSessionMessages.map((m) => ({
         role: m.role as "user" | "assistant",

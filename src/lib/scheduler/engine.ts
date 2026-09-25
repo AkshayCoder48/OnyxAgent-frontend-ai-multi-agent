@@ -31,6 +31,8 @@
 
 import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
+import { ONYX_MD_DIGEST } from "@/lib/agent/onyx-md-digest";
+import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
 import type { BgEvent } from "@/lib/e2b/background-agent";
 import type { SchedulerKV } from "./server-kv";
@@ -756,9 +758,10 @@ function taskScheduleOf(t: ScheduledTask): { type: string; expression: string; t
 
 function buildScheduledSystemPrompt(task: ScheduledTask): string {
   const tzNote = `Timezone for all timestamps in this task: ${task.timezone}.`;
-  // COMPACT prompt (the full Onyx.md is a FILE in the sandbox — read_file it
-  // for the complete tool compendium + GenUI reference). Small models reject
-  // 39KB system prompts outright; even large ones work better compact.
+  // COMPACT prompt + the TOOL DIGEST (every tool + availability rules,
+  // generated from Onyx.md, ≤8KB — NOT the full 39KB manual: small models
+  // reject fat system prompts outright). The full manual stays a FILE in
+  // the sandbox (/home/user/Onyx.md) for deep-reads.
   return `You are ONYX — an autonomous AI operator with a Linux sandbox
 (/home/user is your workspace) and real tools.
 
@@ -776,8 +779,9 @@ RULES FOR THIS RUN:
 2. There is NO user to answer questions — never call ask_user. If something
    is ambiguous, make the most sensible choice and continue.
 3. Browser-side tools (chats, memories, skills management, subagents) have
-   no browser connected — they will time out. Use the sandbox-native tools
-   (files, terminal, python, web_fetch, web_search, charts, datetime, …).
+   no browser connected — they are NOT in your tool definitions this turn.
+   Use the sandbox-native tools (files, terminal, python, web_fetch,
+   web_search, charts, datetime, …).
 4. Save all deliverables as FILES in the workspace (e.g. reports as .md).
    The final workspace state is what the user keeps.
 5. End with a clear final message summarizing: what you did, files created
@@ -787,21 +791,20 @@ RULES FOR THIS RUN:
 6. Work autonomously until the job is done. Do not stop early to "report
    progress" — finish the work, then summarize.
 
-## Available tools (sandbox-native)
-- Files: analyze_workspace, list_folder, read_file, read_file_section,
-  create_file, write_file, edit_file, delete_file, create_folder,
-  delete_folder, move_file, verify_path, create_file_chunk, send_file,
-  send_folder, search_documents
-- Execution: run_python (60s), run_terminal (120s)
-- Web: web_search, web_fetch, image_search, video_search
-- Data/media: create_chart, preview_image, ocr_document, counterfactual,
-  current_datetime
-- Planning: manage_todo, show_todo
+${ONYX_MD_DIGEST}
+
+In THIS autonomous run the sandbox-native tools (files, terminal, python,
+web, charts, datetime, todos, OCR, …) are live. Browser-bridged tools
+(chats, memories, skills management, subagents) have no browser connected
+— they are absent from your tool definitions this turn, so simply do not
+use them. The digest's availability rule applies exactly: your ACTIVE
+tool definitions are the final word.
+
 (always function-calling — never "Thought:/Action:" text)
 
-READ /home/user/Onyx.md FIRST (read_file) — it documents every tool in
-detail plus the GenUI spec, execution policies, and the workspace rules
-that apply to you.
+The FULL manual — detailed tool usage, execution policies, the complete
+GenUI reference — is at /home/user/Onyx.md in this sandbox: read_file it
+whenever you need more than the digest above.
 
 ## Workspace rules
 - E2B is temporary; the cloud workspace is permanent. Your file changes are
@@ -1044,6 +1047,18 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
     await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
     const e2bRunId = "run_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
     const runDir = BG_RUNS_PREFIX + e2bRunId;
+    // PRD §13/§14/§38 — the chat-execution system prompt ALWAYS carries the
+    // tool digest (idempotent): the mirror prompt may come from the browser
+    // (chat-context.ts — the interactive CALLER prompt, which has no tool
+    // knowledge of its own), while buildScheduledSystemPrompt already embeds
+    // it. Without this the scheduled model sees only the sandbox-runner's
+    // name list and "Onyx.md is a file" — the exact gap that made models
+    // claim "I don't have access to that tool" about registered tools.
+    const execSystemPrompt = ensureToolDigest(input.systemPrompt);
+    console.log(
+      `[scheduler] chat-exec system prompt: ${promptKb(execSystemPrompt)}KB ` +
+        `(digest=${execSystemPrompt.includes("## TOOL DIGEST") ? "injected" : "MISSING"}, chat=${chatId})`,
+    );
     const state = {
       provider: {
         baseUrl: input.provider.baseUrl,
@@ -1055,7 +1070,7 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
       },
       toolsEnabled: input.provider.toolsEnabled !== false,
       messages: [
-        { role: "system", content: input.systemPrompt },
+        { role: "system", content: execSystemPrompt },
         ...input.history.map((h) => ({ role: h.role, content: h.content })),
         { role: "user", content: input.userMessage },
       ],

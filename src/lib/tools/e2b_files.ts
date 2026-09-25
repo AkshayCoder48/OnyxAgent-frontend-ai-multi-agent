@@ -5,6 +5,7 @@ import { getE2BClient } from "@/lib/e2b/client";
 import {
   ensureFreshSandboxForCtx,
 } from "@/lib/e2b/sandbox-rotation";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { zipSync } from "fflate";
 
 /**
@@ -195,6 +196,9 @@ registerTool(
         }
       }
       await client.writeFile(path, content);
+      // Workspace changed — invalidate the analyze_workspace snapshot cache
+      // (PRD §22).
+      bumpWorkspaceVersion();
       return {
         success: true,
         path,
@@ -237,6 +241,7 @@ registerTool(
     try {
       const client = getE2BClient(apiKey, null, "shared");
       await client.writeFile(path, content);
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { path, bytes: content.length };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -296,6 +301,7 @@ registerTool(
         count = 1;
       }
       await client.writeFile(path, updated);
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { path, replacements: count };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -334,6 +340,7 @@ registerTool(
     try {
       const client = getE2BClient(apiKey, null, "shared");
       await client.deleteFile(path);
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { deleted: true, path };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -366,6 +373,7 @@ registerTool(
     try {
       const client = getE2BClient(apiKey, null, "shared");
       await client.createFolder(path);
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { created: true, path };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -403,6 +411,7 @@ registerTool(
       // (it's effectively `rm -rf` under the hood — envd handles recursion).
       const client = getE2BClient(apiKey, null, "shared");
       await client.deleteFile(path);
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { deleted: true, path };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -726,6 +735,7 @@ registerTool(
       } catch {
         // best-effort — the file was already copied
       }
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { moved: true, source, destination, size: content.length };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

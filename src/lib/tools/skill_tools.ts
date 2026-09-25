@@ -9,6 +9,7 @@
 import { registerTool } from "./registry";
 import type { ToolResult } from "@/types";
 import { skillService } from "@/lib/services";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 const MANAGE_SKILL_DESCRIPTION = `Manage the user's installed skills — one tool for every skill operation. Skills are SKILL.md instruction files the agent can install and consult. Pass \`action\` plus the fields that action needs:
 
@@ -111,6 +112,9 @@ registerTool(
         // Save metadata — dir_path is the OPFS directory path
         const dirPath = `users/${ctx.userId}/skills/${name}`;
         await skillService.install(ctx.userId, name, description, dirPath);
+        // analyze_workspace reports installed skills — refresh its snapshot
+        // cache so a follow-up call sees the new skill (PRD §22).
+        bumpWorkspaceVersion("local");
         return { success: true, output: { created: name, path: `${dirPath}/SKILL.md`, storage_path: storagePath } };
       } catch (e) {
         return {
@@ -136,6 +140,7 @@ registerTool(
         if (args.description) {
           await skillService.update(skill.id, { description: args.description as string });
         }
+        bumpWorkspaceVersion("local"); // skill list/content changed
         return { success: true, output: { edited: name } };
       } catch (e) {
         return {
@@ -160,6 +165,7 @@ registerTool(
         // OPFS deletion might fail — metadata deletion is more important
       }
       await skillService.delete(skill.id);
+      bumpWorkspaceVersion("local"); // skill list changed
       return { success: true, output: { deleted: name } };
     }
 

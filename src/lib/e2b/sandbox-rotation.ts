@@ -204,9 +204,16 @@ async function runAutoRestore(apiKey: string): Promise<void> {
   }
 }
 
-/** Fire-and-forget auto-restore guard — called after every sandbox
- *  freshness check. Cheap (one localStorage read) once handled. */
-function maybeAutoRestoreWorkspace(apiKey: string): void {
+/**
+ * Fire-and-forget auto-restore guard — called after every sandbox
+ * freshness check. Cheap (one localStorage read) once handled.
+ *
+ * Exported (PRD §22) so `analyze_workspace` can trigger it on its rare
+ * FIRST-RUN path (brand-new sandbox, no known id) without going through
+ * `ensureFreshSandboxForCtx` — which would also pay the rotation check.
+ * Analysis itself NEVER triggers a restore on subsequent calls.
+ */
+export function maybeAutoRestoreWorkspace(apiKey: string): void {
   if (autoRestorePromise) return;
   autoRestorePromise = runAutoRestore(apiKey).finally(() => {
     autoRestorePromise = null;

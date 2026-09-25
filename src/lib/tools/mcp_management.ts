@@ -9,6 +9,7 @@
 import { registerTool } from "./registry";
 import type { ToolResult } from "@/types";
 import { mcpService } from "@/lib/services";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 const MANAGE_MCP_DESCRIPTION = `Manage MCP (Model Context Protocol) server configurations — one tool for every MCP operation. Pass \`action\` plus the fields that action needs:
 
@@ -86,6 +87,7 @@ registerTool(
         headers: (args.headers as Record<string, string>) || {},
         is_active: Boolean(args.is_active ?? true),
       });
+      bumpWorkspaceVersion("local"); // mcp_servers changed — refresh snapshot cache
       return { success: true, output: { created: server.name, id: server.id } };
     }
 
@@ -104,6 +106,7 @@ registerTool(
       if (args.headers !== undefined) patch.headers = args.headers;
       if (args.is_active !== undefined) patch.is_active = args.is_active;
       await mcpService.update(id, patch);
+      bumpWorkspaceVersion("local"); // mcp_servers changed
       return { success: true, output: { edited: existing.name, id } };
     }
 
@@ -116,6 +119,7 @@ registerTool(
         return { success: false, output: null, error: `MCP server with id '${id}' not found` };
       }
       await mcpService.delete(id);
+      bumpWorkspaceVersion("local"); // mcp_servers changed
       return { success: true, output: { deleted: existing.name, id } };
     }
 

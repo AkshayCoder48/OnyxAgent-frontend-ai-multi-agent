@@ -3,6 +3,7 @@
 import { registerTool } from "./registry";
 import { nanoid } from "nanoid";
 import { useSubagentStore, type SubagentConfig } from "@/stores/subagent-store";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 /**
  * Subagent orchestration tools — lets the main AI act as an orchestrator that
@@ -180,6 +181,9 @@ Role:
     };
     taskStore.set(taskId, task);
     emitStatus(task);
+    // Local agent-visible state changed — refresh analyze_workspace's
+    // cached subagent list (PRD §22; scope "local" keeps key-file reuse).
+    bumpWorkspaceVersion("local");
 
     // NO initial message — the AI can only interact with the subagent via
     // query_subagent. The user requested no auto-message on spawn.
@@ -642,6 +646,7 @@ NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. Th
 
       // Remove from taskStore right away — the agent is gone.
       taskStore.delete(taskId);
+      bumpWorkspaceVersion("local"); // subagent list changed
 
       return {
         task_id: taskId,
@@ -658,6 +663,7 @@ NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. Th
     emitStatus(task);
     emitMessage(taskId, "result", result);
     task.messages.push({ type: "result", text: result, timestamp: new Date().toISOString() });
+    bumpWorkspaceVersion("local"); // lifecycle status changed
 
     // Auto-remove from the store after 30 seconds (the UI panel also auto-
     // removes completed tasks after 10s, but we keep the data a bit longer

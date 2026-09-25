@@ -9,6 +9,7 @@
 import { registerTool } from "./registry";
 import type { ToolResult } from "@/types";
 import { settingsService } from "@/lib/services";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // PRESERVE SECRET FLAG (PRD §14): the AI's own write tools previously
 // hardcoded `is_secret: false`, silently downgrading encrypted secrets to
@@ -121,6 +122,9 @@ registerTool(
       }
       vars[name] = value;
       await saveEnvVars(ctx.userId, vars);
+      // analyze_workspace reports configured env vars — refresh its snapshot
+      // cache so a follow-up call sees the change (PRD §22).
+      bumpWorkspaceVersion("local");
       if (action === "add") {
         return { success: true, output: { added: name, total_vars: Object.keys(vars).length } };
       }
@@ -139,6 +143,7 @@ registerTool(
       }
       delete vars[name];
       await saveEnvVars(ctx.userId, vars);
+      bumpWorkspaceVersion("local"); // env vars changed
       return { success: true, output: { deleted: name, remaining: Object.keys(vars).length } };
     }
 

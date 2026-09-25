@@ -25,7 +25,11 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (55 tools)
+## Tool Compendium (57 tools)
+
+> This compendium is the source for the TOOL DIGEST injected into every
+> system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
+> every registered tool listed here by its exact registry name.
 
 ### Multi-function tools — one tool, one \`action\` parameter
 
@@ -59,7 +63,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 | **send_file** | Deliver a file to the user as a download (base64 data URL for binaries). |
 | **send_folder** | Deliver a folder as a ZIP download. |
 | **verify_path** | Pre-create/verify dirs + empty files before writing. |
-| **create_file_chunk** | Write/append large files in chunks — see Writing Policy below. |
+| **create_file_chunk** | Write/append large files in chunks — for files >200 lines (see Writing Policy). |
 | **analyze_workspace** | Full workspace scan. Run FIRST on every task. |
 
 ### Code execution

@@ -3,6 +3,7 @@
 import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
 import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // E2B Python sandbox — modules available in the code-interpreter template.
 const PYTHON_NOTE =
@@ -80,8 +81,12 @@ registerTool(
       // No reverse sync — files created/modified by the Python code are
       // already in the sandbox (the single source of truth). The file
       // tools will see them on the next read/list call.
+      // The command MAY have written files (attribution is impossible), so
+      // invalidate the analyze_workspace snapshot cache (PRD §22).
+      bumpWorkspaceVersion();
       return { exit_code: exitCode, stdout, stderr };
     } catch (e) {
+      bumpWorkspaceVersion(); // the run may still have written files
       return {
         error: e instanceof Error ? e.message : String(e),
         exit_code: -1,
@@ -162,8 +167,12 @@ registerTool(
 
       // No reverse sync — files created/modified by the command are
       // already in the sandbox (the single source of truth).
+      // The command MAY have written files (attribution is impossible), so
+      // invalidate the analyze_workspace snapshot cache (PRD §22).
+      bumpWorkspaceVersion();
       return { exit_code: exitCode, stdout, stderr };
     } catch (e) {
+      bumpWorkspaceVersion(); // the command may still have written files
       return {
         error: e instanceof Error ? e.message : String(e),
         exit_code: -1,

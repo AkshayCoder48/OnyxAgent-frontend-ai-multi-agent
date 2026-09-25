@@ -20,6 +20,7 @@
 import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
 import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { OnyxBaseKV, ONYXBASE_DEFAULT_BASE_URL, looksLikeOnyxBaseKey } from "@/lib/onyxbase/kv-client";
 import {
   pushWorkspace,
@@ -216,14 +217,19 @@ registerTool(
 
     const e2b = getE2BClient(e2bKey, null, "shared");
     try {
-      return await retrieveWorkspace({
+      const result = await retrieveWorkspace({
         e2b,
         kv: ob.kv,
         mode: "restore",
         onStage: progressPipe(ctx),
         signal: ctx.signal,
       });
+      // The restore wrote files into the sandbox — invalidate the
+      // analyze_workspace snapshot cache (PRD §22).
+      bumpWorkspaceVersion();
+      return result;
     } catch (e) {
+      bumpWorkspaceVersion(); // a partial restore may have written files
       return {
         ok: false, status: "error", tool: "retrieve_workspace", workspaceId: WORKSPACE_ID,
         restoredFiles: 0, downloadedBytes: 0, integrityVerified: false, skippedFiles: [],

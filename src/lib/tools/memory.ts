@@ -13,6 +13,7 @@
 import { registerTool } from "./registry";
 import * as opfs from "@/lib/storage/opfs";
 import { nanoid } from "nanoid";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 const MANAGE_MEMORY_DESCRIPTION = `Manage the agent's long-term memory — one tool for every memory operation. Memories persist across conversations and are stored locally. Pass \`action\` plus the fields that action needs:
 
@@ -61,6 +62,9 @@ registerTool(
           created_at: new Date().toISOString(),
         };
         await opfs.writeFileAtPath(memoryDir, `${id}.json`, JSON.stringify(entry, null, 2));
+        // analyze_workspace reports stored memories — refresh its snapshot
+        // cache so a follow-up call sees this entry (PRD §22, scope "local").
+        bumpWorkspaceVersion("local");
         return { id, message: "Memory saved", entry };
       } catch (e) {
         return { error: e instanceof Error ? e.message : String(e) };
@@ -147,6 +151,7 @@ registerTool(
       try {
         const { deleteFile } = await import("@/lib/storage/opfs");
         await deleteFile(`users/${ctx.userId}/memory/${args.id}.json`);
+        bumpWorkspaceVersion("local"); // memories changed — snapshot cache stale
         return { id: args.id, message: "Memory deleted" };
       } catch (e) {
         return { error: e instanceof Error ? e.message : String(e) };

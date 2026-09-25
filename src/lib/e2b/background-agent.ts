@@ -19,6 +19,8 @@
  *      browser was closed replays into the chat.
  */
 
+import { ensureToolDigest } from "@/lib/agent/tool-digest";
+
 export interface BgEvent {
   t:
     | "round_start"
@@ -233,7 +235,12 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     // tools executed back in the browser.
     ...(opts.browserTools && opts.browserTools.length > 0 ? { browserTools: opts.browserTools } : {}),
     messages: [
-      ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
+      // PRD §13/§14/§38 — the caller prompt (use-chat buildTurnOptions) has
+      // no tool knowledge of its own; the sandbox runner appends the live
+      // tool-name list but NOT the digest. Inject it here so background
+      // turns get the same every-tool grounding as foreground turns
+      // (idempotent — never duplicates if a future caller pre-injects).
+      ...(opts.systemPrompt ? [{ role: "system", content: ensureToolDigest(opts.systemPrompt) }] : []),
       ...opts.history,
     ],
   };

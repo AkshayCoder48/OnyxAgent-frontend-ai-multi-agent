@@ -6,6 +6,7 @@ import {
   ensureFreshSandbox,
   resolveSandboxApiKey,
 } from "@/lib/e2b/sandbox-rotation";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 /**
  * Incremental File Writer & Safe Save System.
@@ -168,6 +169,7 @@ registerTool(
               createdDirs.push(acc);
             }
           }
+          if (createdDirs.length > 0) bumpWorkspaceVersion(); // workspace changed
         } else {
           return {
             exists: false,
@@ -205,6 +207,7 @@ registerTool(
           }
         }
       }
+      if (createdDirs.length > 0) bumpWorkspaceVersion(); // workspace changed
 
       // Create the empty file if missing.
       try {
@@ -213,6 +216,7 @@ registerTool(
       } catch {
         if (createDirs) {
           await client.writeFile(rawPath, "");
+          bumpWorkspaceVersion(); // workspace changed
         } else {
           return {
             exists: false,
@@ -358,6 +362,7 @@ registerTool(
           };
         }
       }
+      bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
 
       // 4. Read back the file to verify the write succeeded. We compare the
       //    file's tail to the chunk we just wrote — for an overwrite the tail
