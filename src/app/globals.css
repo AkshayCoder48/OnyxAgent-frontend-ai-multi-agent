@@ -2816,3 +2816,30 @@ body.sidebar-open {
     transition: none;
   }
 }
+
+/* ============================================================
+   TERRA TITLE REVEAL — Task 4-b (PRD §12)
+   The first AI call of a new chat generates the title; the empty
+   title space (a shimmer skeleton while the naming call runs)
+   reveals the title with a fade + slide + blur-to-sharp settle.
+   ============================================================ */
+@keyframes title-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+.title-reveal {
+  animation: title-reveal 420ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .title-reveal {
+    animation: none;
+  }
+}

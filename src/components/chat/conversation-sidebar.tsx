@@ -147,7 +147,11 @@ function ConversationItem({
         />
       ) : (
         <div className="min-w-0 flex-1">
-          <span className="block truncate">{displayTitle}</span>
+          {/* key on the text → the generated title (naming call) reveals with
+              the same fade/slide/blur settle as the subheader (PRD §12). */}
+          <span key={displayTitle} className="title-reveal block truncate">
+            {displayTitle}
+          </span>
         </div>
       )}
 

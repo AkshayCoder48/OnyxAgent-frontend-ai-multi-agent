@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import type { AgentTurnOptions } from "@/lib/agent/runtime";
 import { respondToAskUser } from "@/lib/agent/runtime";
-import { aiProviderService, settingsService } from "@/lib/services";
+import { aiProviderService, conversationService, settingsService } from "@/lib/services";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { useChatStore, useAuthStore } from "@/stores";
 import type {
@@ -16,6 +16,12 @@ import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { startBackgroundTurn } from "@/lib/agent/background-turn";
+import {
+  generateChatTitle,
+  fallbackChatTitle,
+  TITLE_WAIT_CAP_MS,
+} from "@/lib/agent/title-generator";
+import { notifyConversationsChanged } from "@/lib/scheduler/chat-sync";
 import {
   executionHub,
   useExecutionById,
@@ -296,7 +302,7 @@ export function useChat(options: UseChatOptions = {}) {
       // optimistic user message + every agent event, its consumer/checkpoint
       // loop keeps running no matter where the user navigates. This hook
       // merely subscribes (already done via execSummary above).
-      const convId = currentConversationIdFromStore ?? conversationId ?? null;
+      let convId = currentConversationIdFromStore ?? conversationId ?? null;
       const wantBackground = useBackgroundRunStore.getState().enabled;
       const execution: ExecutionRecord = executionHub.createExecution({
         conversationId: convId,
@@ -375,6 +381,64 @@ export function useChat(options: UseChatOptions = {}) {
       if (!opts) {
         executionHub.finishExecution(execution.id, "failed");
         return;
+      }
+
+      // ── PRD §12 — FIRST CALL = CHAT NAMING CALL ────────────────────────
+      // New chats ONLY (and only now that the turn options resolved — a
+      // provider failure must not leave a stray empty chat row behind):
+      //  1. create the conversation eagerly with an EMPTY title (the
+      //     subheader shows a shimmer skeleton for the empty title space);
+      //  2. run a small DEDICATED naming call with the SAME provider+model
+      //     the user selected — its reply NEVER enters the chat messages;
+      //  3. apply the generated title (fade/slide/blur reveal);
+      //  4. only THEN start the main agent call below — waiting at most
+      //     TITLE_WAIT_CAP_MS, so a slow provider never stalls the chat
+      //     (the title then lands late and the reveal plays whenever it
+      //     arrives; the skeleton holds the space until then).
+      if (!convId) {
+        const conv = await conversationService.create(userId, "");
+        convId = conv.id;
+        // The pre-created conversation is what this turn runs against
+        // (buildTurnOptions read the conversation id from the RENDER scope,
+        // which was still null when this doSend closure captured it).
+        opts.conversationId = conv.id;
+        // Same event the runtime/background paths emit when THEY create the
+        // conversation — the pipeline attaches the id, fixes the URL +
+        // sessionStorage, stamps every store message with the id, re-keys
+        // the execution, and notifies the host (sidebar refresh).
+        execution.processor.handle({
+          type: "conversation_created",
+          data: { conversation_id: conv.id },
+        });
+
+        const namingPromise = generateChatTitle({
+          provider: {
+            baseUrl: opts.provider.baseUrl,
+            apiKey: opts.provider.apiKey,
+            model: opts.provider.model,
+            noPrefix: opts.provider.noPrefix,
+            disabledParams: opts.provider.disabledParams,
+          },
+          firstMessage: content,
+        });
+        let title: string | null = null;
+        try {
+          const capped = Promise.race([
+            namingPromise,
+            new Promise<null>((resolve) =>
+              setTimeout(() => resolve(null), TITLE_WAIT_CAP_MS),
+            ),
+          ]);
+          title = await capped;
+        } catch {
+          title = null; // generateChatTitle never rejects — belt & braces
+        }
+        const finalTitle = title ?? fallbackChatTitle(content);
+        await conversationService.update(conv.id, { title: finalTitle });
+        // Sidebar + subheader re-render with the new title (React Query
+        // refetch via the conversations-changed event) — the empty title
+        // space reveals the title with the fade/slide/blur animation.
+        notifyConversationsChanged();
       }
 
       // ── BACKGROUND RUN (E2B) ──────────────────────────────────────────

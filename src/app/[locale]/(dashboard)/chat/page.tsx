@@ -72,9 +72,25 @@ export default function ChatPage() {
             >
               <Menu className="h-4 w-4" />
             </Button>
-            <h1 className="font-display truncate text-[17px] font-medium tracking-tight sm:text-lg">
-              {conversationTitle || "New conversation"}
-            </h1>
+            {currentConversationId && !conversationTitle ? (
+              /* PRD §12 — the naming call is in flight: a shimmer skeleton
+                 holds the empty title space (no layout jump when the title
+                 lands). */
+              <span
+                aria-hidden
+                className="shimmer mt-0.5 h-4 w-28 rounded-sm sm:h-5 sm:w-36"
+              />
+            ) : (
+              /* The title reveals with a fade/slide/blur-to-sharp settle
+                 (keyed on the text so the generated title, renames, and
+                 chat switches all animate in seamlessly). */
+              <h1
+                key={conversationTitle ?? "new"}
+                className="title-reveal font-display truncate text-[17px] font-medium tracking-tight sm:text-lg"
+              >
+                {conversationTitle || "New conversation"}
+              </h1>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
             {/* Tool timeline — a DOCKED SIDEBAR (not a popup): the whole
