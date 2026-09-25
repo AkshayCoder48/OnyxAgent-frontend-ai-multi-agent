@@ -30,6 +30,11 @@ import {
   type RetrieveResult,
   type StageEvent,
 } from "@/lib/onyxbase/workspace-sync";
+import {
+  pushSkillsToCloud,
+  toSummary as skillsSummary,
+  type SkillsPushSummary,
+} from "@/lib/onyxbase/skills-sync";
 
 const NO_KEY_MESSAGE =
   "Cloud workspace isn't configured yet. Add your OnyxBase API key in Settings → Cloud Workspace.";
@@ -86,7 +91,7 @@ async function stampLastSynced(userId: string): Promise<void> {
 
 registerTool(
   "push_workspace",
-  "Synchronize the COMPLETE current E2B workspace to the user's persistent OnyxBase KV cloud workspace (id: workspace_default). This is a SYNCHRONIZATION, not a new backup — it overwrites the cloud state to exactly match the current workspace. Files larger than 50 MB, secrets (.env, private keys), and generated directories (node_modules, .git, .next…) are skipped automatically. Unchanged files are detected by SHA-256 and reused, so re-running after an interruption is cheap. Runs are budget-limited (10 min hard cap): if the budget elapses mid-upload the push aborts SAFELY with a partial — nothing is committed, the cloud keeps its previous state, and re-running resumes. A 'warnings' field in a SUCCESSFUL result is informational only (OnyxBase instance lag) — the snapshot is committed. SAFETY: if the sandbox has NO syncable files while the cloud still holds files, the push is REFUSED (EMPTY_PUSH_BLOCKED) — restore/salvage first; pass force=true ONLY when the user explicitly confirms they want to wipe the cloud state. Call this after every meaningful task that modifies workspace files. No arguments needed — the workspace is discovered automatically.",
+  "Synchronize the COMPLETE current E2B workspace to the user's persistent OnyxBase KV cloud workspace (id: workspace_default). This is a SYNCHRONIZATION, not a new backup — it overwrites the cloud state to exactly match the current workspace. Files larger than 50 MB, secrets (.env, private keys), and generated directories (node_modules, .git, .next…) are skipped automatically. Unchanged files are detected by SHA-256 and reused, so re-running after an interruption is cheap. Runs are budget-limited (10 min hard cap): if the budget elapses mid-upload the push aborts SAFELY with a partial — nothing is committed, the cloud keeps its previous state, and re-running resumes. A 'warnings' field in a SUCCESSFUL result is informational only (OnyxBase instance lag) — the snapshot is committed. SAFETY: if the sandbox has NO syncable files while the cloud still holds files, the push is REFUSED (EMPTY_PUSH_BLOCKED) — restore/salvage first; pass force=true ONLY when the user explicitly confirms they want to wipe the cloud state. The user's installed SKILLS (browser-side) are also synced to their own cloud namespace in the same run — see the 'skills' field of the result. Call this after every meaningful task that modifies workspace files. No arguments needed — the workspace is discovered automatically.",
   {
     type: "object",
     properties: {
@@ -103,6 +108,48 @@ registerTool(
     additionalProperties: false,
   },
   async (_args, ctx) => {
+    // 0. OnyxBase credential — resolved FIRST because the browser-side
+    //    SKILLS push (PRD §8) needs no sandbox: skills upload alongside the
+    //    workspace files even when E2B itself is unavailable.
+    const ob = await resolveOnyxBase(ctx);
+
+    // 0.5 SKILLS PUSH (browser-side, no E2B needed). Runs BEFORE the
+    //     (potentially long) workspace push so skills are safely in the
+    //     cloud even if the workspace push later times out. Failures are
+    //     reported per-skill in the result — they never abort the
+    //     workspace push, and the workspace push never aborts them.
+    let skills: SkillsPushSummary | undefined;
+    if (ob) {
+      try {
+        const r = await pushSkillsToCloud(ob.userId, {
+          kv: ob.kv,
+          signal: ctx.signal,
+          onStage: (detail) => ctx.onToolOutput?.("", detail, "stdout"),
+        });
+        skills = skillsSummary(r);
+        if (r.pushed + r.unchanged > 0) {
+          ctx.onToolOutput?.(
+            "",
+            `Skills cloud sync: ${r.pushed} pushed, ${r.unchanged} unchanged${r.failed ? `, ${r.failed} failed` : ""}`,
+            "stdout",
+          );
+        }
+      } catch (e) {
+        skills = {
+          tool: "push_skills",
+          ok: false,
+          pushed: 0,
+          unchanged: 0,
+          failed: 0,
+          cloudOnly: 0,
+          errors: [e instanceof Error ? e.message : "skills push failed"],
+          skipped: [],
+          warnings: [],
+          durationMs: 0,
+        };
+      }
+    }
+
     // 1. E2B availability (PRD §13).
     const e2bKey = await ensureFreshSandboxForCtx(ctx);
     if (!e2bKey) {
@@ -110,12 +157,11 @@ registerTool(
         ok: false, status: "error", tool: "push_workspace", workspaceId: WORKSPACE_ID,
         syncedFiles: 0, unchangedFiles: 0, updatedFiles: 0, uploadedBytes: 0, removedFiles: 0,
         skippedFiles: [], errors: [{ code: "E2B_UNAVAILABLE", message: NO_E2B_MESSAGE }], durationMs: 0,
+        ...(skills ? { skills } : {}),
       } satisfies PushResult;
     }
 
-    // 2. OnyxBase credential (resolved server-… client-side at execution
-    //    time; never part of the model-visible context).
-    const ob = await resolveOnyxBase(ctx);
+    // 2. Report missing credentials (the skills push above could not have run).
     if (!ob) {
       return {
         ok: false, status: "not_configured", tool: "push_workspace", workspaceId: WORKSPACE_ID,
@@ -134,7 +180,7 @@ registerTool(
         force: _args.force === true,
       });
       if (result.ok) await stampLastSynced(ob.userId);
-      return result;
+      return { ...result, ...(skills ? { skills } : {}) } satisfies PushResult;
     } catch (e) {
       return {
         ok: false,
@@ -154,6 +200,7 @@ registerTool(
           },
         ],
         durationMs: 0,
+        ...(skills ? { skills } : {}),
       } satisfies PushResult;
     }
   },

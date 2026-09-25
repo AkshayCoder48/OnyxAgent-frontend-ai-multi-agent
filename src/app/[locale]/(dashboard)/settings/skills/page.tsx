@@ -27,8 +27,9 @@ import {
   fetchSkillsMPPage,
   searchSkillsMPSkills,
   installSkillsMPSkill,
-  installSkillFile,
+  installSkillFiles,
   uninstallSkill,
+  type SkillInstallItemResult,
   type SkillsMPSkill,
 } from "@/lib/skills/installer";
 import { isOPFSAvailable } from "@/lib/storage/opfs";
@@ -271,9 +272,13 @@ export default function SkillsSettingsPage() {
     }
   };
 
+  // Multi-file upload (PRD §5): every selected .zip may hold MULTIPLE skill
+  // folders; each discovered skill is validated + registered independently
+  // and reported with its own success/error toast (never silent, never
+  // blocking its siblings).
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
     if (!user) return;
     if (!opfsAvailable) {
       toast.error("OPFS is not available in this browser — can't install skills.");
@@ -282,14 +287,24 @@ export default function SkillsSettingsPage() {
     }
     setUploading(true);
     try {
-      const meta = await installSkillFile(user.id, file);
-      const fileCount = meta.files?.length ?? 1;
-      const destMsg = e2bAvailable
-        ? `${fileCount} file${fileCount === 1 ? "" : "s"} written to OPFS + E2B sandbox.`
-        : `${fileCount} file${fileCount === 1 ? "" : "s"} written to OPFS.`;
-      toast.success(`Installed skill: ${meta.name}`, {
-        description: destMsg,
-      });
+      const results: SkillInstallItemResult[] = await installSkillFiles(user.id, files);
+      for (const r of results) {
+        if (r.ok) {
+          const fileCount = r.files.length || 1;
+          const destMsg = e2bAvailable
+            ? `${fileCount} file${fileCount === 1 ? "" : "s"} written to OPFS + E2B sandbox.`
+            : `${fileCount} file${fileCount === 1 ? "" : "s"} written to OPFS.`;
+          toast.success(`Installed skill: ${r.name}`, { description: destMsg });
+        } else {
+          toast.error(`Could not install "${r.source}"`, { description: r.error ?? undefined });
+        }
+        for (const w of r.warnings) toast.warning(`"${r.source}": ${w}`);
+      }
+      const ok = results.filter((r) => r.ok).length;
+      const bad = results.length - ok;
+      if (results.length > 1) {
+        toast.info(`Upload finished: ${ok} installed, ${bad} failed.`);
+      }
       await loadInstalled();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
@@ -390,6 +405,7 @@ export default function SkillsSettingsPage() {
             ref={fileInputRef}
             type="file"
             accept=".zip,.md,.markdown"
+            multiple
             onChange={handleUpload}
             disabled={uploading || !opfsAvailable || !e2bAvailable}
             className="hidden"

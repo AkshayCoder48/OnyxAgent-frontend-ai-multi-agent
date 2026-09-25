@@ -181,8 +181,25 @@ export interface SkillRow {
   updated_at: string;
   /** Optional version string (read from SKILL.md frontmatter). */
   version?: string | null;
-  /** Where the skill came from — "catalog" (marketplace) or "local" (upload). */
-  source?: "catalog" | "local" | string;
+  /** Where the skill came from — "upload" (ZIP/SKILL.md upload),
+   *  "catalog" (SkillsMP marketplace), or "restore" (OnyxBase cloud restore). */
+  source?: "catalog" | "upload" | "restore" | "local" | string;
+  /** Number of files in the skill directory (SKILL.md + bundled assets). */
+  file_count?: number | null;
+  // -- OnyxBase cloud-sync bookkeeping (PRD §8) ------------------------------
+  // Sync state is a CACHE for the UI badge — the display state is always
+  // re-derived by `reconcileSkillsFromCloud` (sha vs cloud manifest), so a
+  // stale "syncing" from a crashed session can never permanently lie.
+  /** "local" | "synced" | "syncing" | "sync_failed" (badge cache). */
+  sync_state?: "local" | "synced" | "syncing" | "sync_failed" | null;
+  /** ISO timestamp of the last SUCCESSFUL push of this skill. */
+  synced_at?: string | null;
+  /** sha256 of the pushed skill payload at the last successful push. */
+  cloud_sha256?: string | null;
+  /** Number of KV chunk records the pushed skill occupies. */
+  sync_chunks?: number | null;
+  /** Last sync error (kept for the "Sync failed" tooltip). */
+  sync_error?: string | null;
 }
 
 // Charts/Maps are stored as part of a tool_call's `result` JSONB column. We

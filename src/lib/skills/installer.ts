@@ -1,25 +1,35 @@
 "use client";
 
 /**
- * Skill installer — browser-side extraction + OPFS persistence for SkillsMP
- * marketplace skills. Used by the Settings → Skills page to:
+ * Skill installer — browser-side extraction + OPFS persistence.
  *
- *   1. Parse a user-supplied `.zip` (or a bare `SKILL.md` file) using `fflate`.
- *   2. Extract `SKILL.md` and any sibling assets.
- *   3. Write the files to OPFS at `users/<userId>/skills/<skillName>/...`.
- *   4. Parse the YAML-ish front-matter at the top of `SKILL.md` to read the
- *      `name` and `description` fields, then call `skillService.install(...)`
- *      to persist the metadata row in IndexedDB.
+ * Used by the Settings → Skills surfaces to:
  *
- * The same flow is used by the SkillsMP catalog "Install" button — the only
- * difference is the catalog downloads the skill file from SkillsMP first
- * (via `fetch`), then pipes the bytes through `installSkillZip` (or writes
- * the SKILL.md directly if the response is markdown).
+ *   1. Parse user-supplied `.zip` archives (which may contain MULTIPLE skill
+ *      folders — `skill-a/SKILL.md`, `skill-b/SKILL.md`, … — or one skill at
+ *      the root) through the SAFE pipeline in `./zip` (central-directory
+ *      validation → entry-at-a-time, byte-capped extraction → per-dir skill
+ *      detection → per-file SKILL.md validation).
+ *   2. Write each skill's files to OPFS at `users/<userId>/skills/<name>/…`.
+ *   3. Register metadata rows in IndexedDB via `skillService.install(...)`.
+ *   4. Fire-and-forget upload the SKILL.md to the E2B sandbox when configured.
+ *
+ * The same flow serves the SkillsMP catalog "Install" button — the catalog
+ * downloads the skill bytes first, then pipes them through the single-skill
+ * entry points.
  */
 
-import { unzipSync, strFromU8 } from "fflate";
+import { strFromU8, zipSync } from "fflate";
 import { skillService } from "@/lib/services";
 import { writeFileAtPath, removeDir, ensureSkillDir } from "@/lib/storage/opfs";
+import {
+  extractZipEntries,
+  parseZipCentralDirectory,
+  planSkillBundles,
+  validateSkillMdText,
+  ZipFormatError,
+  type PlannedSkill,
+} from "./zip";
 
 export interface InstalledSkillMeta {
   name: string;
@@ -34,6 +44,23 @@ export interface SkillInstallOptions {
   nameOverride?: string;
   /** Override the description (otherwise read from SKILL.md front-matter). */
   descriptionOverride?: string;
+}
+
+/** Per-item outcome of a multi-skill upload (PRD §5: per-item success/error,
+ *  an invalid item never blocks its siblings). */
+export interface SkillInstallItemResult {
+  /** What the item was called in the source (zip dir name / file name). */
+  source: string;
+  ok: boolean;
+  /** Sanitized skill name when registered. */
+  name: string | null;
+  description: string | null;
+  dirPath: string | null;
+  files: string[];
+  /** Actionable per-item error message for the UI. */
+  error: string | null;
+  /** Non-fatal notes (dropped junk entries, asset write failures, …). */
+  warnings: string[];
 }
 
 /** Front-matter shape we recognize at the top of SKILL.md. */
@@ -91,89 +118,72 @@ interface ZipEntry {
   bytes: Uint8Array;
 }
 
-function normalizeZipEntries(rawEntries: Array<{ path: string; bytes: Uint8Array }>): {
-  entries: ZipEntry[];
-  skillMd: ZipEntry | null;
-} {
-  // Strip macOS / Windows metadata + directory placeholders.
-  const cleaned = rawEntries.filter((e) => {
-    const p = e.path;
-    if (p.startsWith("__MACOSX/")) return false;
-    if (p.endsWith("/")) return false; // directory placeholder
-    if (p.split("/").pop()?.startsWith(".")) return false; // dotfile (.DS_Store etc.)
-    return true;
-  });
-
-  if (cleaned.length === 0) {
-    return { entries: [], skillMd: null };
-  }
-
-  // Detect a single top-level folder prefix.
-  const topLevels = new Set(
-    cleaned.map((e) => e.path.split("/")[0] ?? ""),
-  );
-  const hasSingleTopFolder =
-    topLevels.size === 1 && !topLevels.has("SKILL.md");
-
-  const stripPrefix = hasSingleTopFolder ? `${[...topLevels][0]}/` : "";
-
-  const entries: ZipEntry[] = cleaned.map((e) => ({
-    relPath: e.path.startsWith(stripPrefix) ? e.path.slice(stripPrefix.length) : e.path,
-    bytes: e.bytes,
-  }));
-
-  const skillMd = entries.find((e) => e.relPath === "SKILL.md") ?? null;
-  return { entries, skillMd };
-}
-
-/**
- * Install a `.zip` skill archive. The zip MUST contain a `SKILL.md` either
- * at its root or inside a single top-level folder. The skill is written to
- * OPFS at `users/<userId>/skills/<sanitizedName>/` and a metadata row is
- * upserted into IndexedDB.
- *
- * Throws `Error` with a friendly message if the zip is missing SKILL.md or
- * OPFS isn't available.
- */
-export async function installSkillZip(
+/** Write one planned skill's files to OPFS + register the Dexie row.
+ *  Returns the per-item result. Existing skills are only overwritten via
+ *  `skillService.install` AFTER every file write was attempted — a failed
+ *  upload never destroys the previously installed version's metadata (PRD
+ *  §38: never lose skills). */
+async function persistPlannedSkill(
   userId: string,
-  zipBytes: Uint8Array,
-  opts: SkillInstallOptions = {},
-): Promise<InstalledSkillMeta> {
-  let files: Array<{ path: string; bytes: Uint8Array }> = [];
+  plan: PlannedSkill,
+  files: Map<string, Uint8Array>,
+  opts: SkillInstallOptions,
+  sourceLabel: string,
+): Promise<SkillInstallItemResult> {
+  const result: SkillInstallItemResult = {
+    source: sourceLabel,
+    ok: false,
+    name: null,
+    description: null,
+    dirPath: null,
+    files: [],
+    error: null,
+    warnings: [],
+  };
+
+  const skillMdBytes = files.get(plan.skillMdPath);
+  if (!skillMdBytes) {
+    result.error = `SKILL.md ("${plan.skillMdPath}") could not be extracted from the archive.`;
+    return result;
+  }
+
+  let skillMdText: string;
   try {
-    const unzipped = unzipSync(zipBytes);
-    files = Object.entries(unzipped).map(([path, bytes]) => ({
-      path,
-      bytes: bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes),
-    }));
-  } catch (err) {
-    throw new Error(
-      `Failed to unzip skill archive: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    skillMdText = strFromU8(skillMdBytes);
+  } catch {
+    result.error = "SKILL.md is not valid UTF-8 text.";
+    return result;
   }
 
-  const { entries, skillMd } = normalizeZipEntries(files);
-  if (!skillMd) {
-    throw new Error(
-      "Invalid skill archive: missing SKILL.md at the root (or in a single top-level folder).",
-    );
+  // Structural validation (PRD §6 — actionable error, never silent).
+  const fallbackName = opts.nameOverride ?? plan.dirName ?? sourceLabel;
+  const validation = validateSkillMdText(skillMdText, fallbackName);
+  if (!validation.ok) {
+    result.error = validation.error;
+    return result;
   }
 
-  const skillMdText = strFromU8(skillMd.bytes);
-  const fm = parseSkillFrontMatter(skillMdText);
-  const name = sanitizeSkillName(opts.nameOverride ?? fm.name ?? "unnamed-skill");
-  const description = opts.descriptionOverride ?? fm.description ?? null;
+  const name = sanitizeSkillName(opts.nameOverride ?? validation.name ?? plan.dirName ?? "unnamed-skill");
+  const description = opts.descriptionOverride ?? validation.description ?? null;
 
-  // Ensure the skill directory exists, then write every entry.
+  // Ensure the skill directory exists, then write every file of the bundle.
   await ensureSkillDir(userId, name);
   const dirPath = `users/${userId}/skills/${name}`;
   const writtenRelPaths: string[] = [];
-  for (const entry of entries) {
-    // Reject path traversal attempts — every relPath must be relative.
-    if (entry.relPath.startsWith("/")) continue;
-    if (entry.relPath.includes("..")) continue;
-    const segments = entry.relPath.split("/");
+  let skillMdWriteFailed = false;
+  for (const relPath of plan.files) {
+    const bytes = files.get(relPath);
+    if (!bytes) {
+      result.warnings.push(`"${relPath}" was rejected during archive validation and was skipped.`);
+      continue;
+    }
+    // Defense in depth: every written path is relative and traversal-free
+    // (already guaranteed by parseZipCentralDirectory, re-checked here).
+    if (relPath.startsWith("/") || relPath.split("/").includes("..")) {
+      result.warnings.push(`"${relPath}" has an unsafe path and was skipped.`);
+      continue;
+    }
+    const segments = relPath.split("/");
     const filename = segments.pop();
     if (!filename) continue;
     const subdir = segments.length > 0 ? `${dirPath}/${segments.join("/")}` : dirPath;
@@ -182,37 +192,205 @@ export async function installSkillZip(
       // ArrayBuffer but not the modern Uint8Array<ArrayBufferLike> shape
       // that fflate returns. OPFS's `createWritable().write()` then accepts
       // the Blob natively.
-      const buf = new ArrayBuffer(entry.bytes.byteLength);
-      new Uint8Array(buf).set(entry.bytes);
+      const buf = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buf).set(bytes);
       await writeFileAtPath(subdir, filename, new Blob([buf]));
-      writtenRelPaths.push(entry.relPath);
+      writtenRelPaths.push(relPath);
     } catch (err) {
-      console.warn(`[skill-install] failed to write ${entry.relPath}:`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (relPath === plan.skillMdPath) skillMdWriteFailed = true;
+      result.warnings.push(`failed to write ${relPath}: ${message}`);
     }
   }
 
-  await skillService.install(userId, name, description, dirPath);
-
-  // Fire-and-forget: upload the SKILL.md (if present) to the sandbox.
-  try {
-    const { readTextFile } = await import("@/lib/storage/opfs");
-    const skillMd = await readTextFile(`${dirPath}/SKILL.md`);
-    void uploadSkillToSandbox(userId, name, skillMd);
-  } catch {
-    // No SKILL.md in the zip — skip sandbox upload.
+  if (skillMdWriteFailed || !writtenRelPaths.some((p) => p === plan.skillMdPath)) {
+    // SKILL.md itself did not land — do NOT touch the existing metadata row
+    // (the previously installed version, if any, stays fully intact).
+    result.error = `Could not write ${plan.skillMdPath} to local storage — the skill was not installed.`;
+    return result;
   }
 
+  await skillService.install(userId, name, description, dirPath, {
+    source: "upload",
+    fileCount: writtenRelPaths.length,
+  });
+
+  // Fire-and-forget: upload the SKILL.md to the sandbox (if configured) so
+  // sandbox-side agents can read it too. Failures never fail the install.
+  void uploadSkillToSandbox(userId, name, skillMdText).catch(() => {});
+
+  result.ok = true;
+  result.name = name;
+  result.description = description;
+  result.dirPath = dirPath;
+  result.files = writtenRelPaths;
+  return result;
+}
+
+/**
+ * Install a `.zip` archive that may contain MULTIPLE skill folders
+ * (`skill-a/SKILL.md`, `skill-b/SKILL.md`, …) or a single skill at its root.
+ *
+ * Validation + extraction run through the safe pipeline in `./zip`
+ * (bomb-capped, traversal/symlink-proof, entry-at-a-time). Every discovered
+ * skill dir is validated and registered INDEPENDENTLY — one invalid skill
+ * produces a per-item error without blocking its siblings. The archive-level
+ * failures (corrupt zip, zip-bomb totals, absurd entry counts) reject the
+ * whole archive up-front with a single actionable error.
+ */
+export async function installSkillZipBundle(
+  userId: string,
+  zipBytes: Uint8Array,
+  opts: SkillInstallOptions & { sourceLabel?: string } = {},
+): Promise<SkillInstallItemResult[]> {
+  const sourceLabel = opts.sourceLabel ?? "archive";
+  let parsed;
+  try {
+    parsed = parseZipCentralDirectory(zipBytes);
+  } catch (err) {
+    const message =
+      err instanceof ZipFormatError
+        ? err.message
+        : `Failed to read the skill archive: ${err instanceof Error ? err.message : String(err)}`;
+    return [
+      {
+        source: sourceLabel,
+        ok: false,
+        name: null,
+        description: null,
+        dirPath: null,
+        files: [],
+        error: message,
+        warnings: [],
+      },
+    ];
+  }
+
+  if (parsed.entries.length === 0) {
+    return [
+      {
+        source: sourceLabel,
+        ok: false,
+        name: null,
+        description: null,
+        dirPath: null,
+        files: [],
+        error: "The archive contains no extractable files.",
+        warnings: [],
+      },
+    ];
+  }
+
+  // Detection happens on the validated names BEFORE extraction so only the
+  // entries that belong to a candidate skill dir are ever inflated.
+  const plan = planSkillBundles(parsed.entries.map((e) => e.name));
+  if (plan.skills.length === 0) {
+    const reasons = plan.rejected.map((r) => `${r.dir || "(root)"}: ${r.reason}`).join("; ");
+    return [
+      {
+        source: sourceLabel,
+        ok: false,
+        name: null,
+        description: null,
+        dirPath: null,
+        files: [],
+        error: `No skill folder with a SKILL.md was found in this archive. ${reasons || ""}`.trim(),
+        warnings: [],
+      },
+    ];
+  }
+
+  // Extract only the entries belonging to planned skills (single pass over
+  // the archive, byte-budgeted by the validator's totals).
+  const needed = new Set(plan.skills.flatMap((s) => s.files));
+  const entriesToExtract = parsed.entries.filter((e) => needed.has(e.name));
+  let extracted: Map<string, Uint8Array>;
+  try {
+    extracted = extractZipEntries(zipBytes, entriesToExtract);
+  } catch (err) {
+    const message =
+      err instanceof ZipFormatError
+        ? err.message
+        : `Failed to extract the skill archive: ${err instanceof Error ? err.message : String(err)}`;
+    return [
+      {
+        source: sourceLabel,
+        ok: false,
+        name: null,
+        description: null,
+        dirPath: null,
+        files: [],
+        error: message,
+        warnings: [],
+      },
+    ];
+  }
+
+  const rejectedNames = new Map(parsed.rejected.map((r) => [r.name, r.reason]));
+  // name/description overrides only make sense for single-skill archives
+  // (the SkillsMP catalog path) — with multiple planned skills they would
+  // collapse every skill onto the same name.
+  const skillOpts: SkillInstallOptions =
+    plan.skills.length === 1 ? opts : {};
+  const results: SkillInstallItemResult[] = [];
+  for (const skill of plan.skills) {
+    // Carry per-entry rejection notes into the owning skill item when the
+    // dropped entry belonged to its subtree (e.g. a symlink asset).
+    const skillWarnings: string[] = [];
+    for (const relPath of skill.files) {
+      const reason = rejectedNames.get(relPath);
+      if (reason) skillWarnings.push(`"${relPath}" was skipped (${reason}).`);
+    }
+    const item = await persistPlannedSkill(userId, skill, extracted, skillOpts, skill.dir || sourceLabel);
+    item.warnings = [...skillWarnings, ...item.warnings];
+    results.push(item);
+  }
+  for (const rej of plan.rejected) {
+    if (plan.skills.some((s) => s.dir === rej.dir)) continue; // already surfaced above
+    results.push({
+      source: rej.dir || "(root)",
+      ok: false,
+      name: null,
+      description: null,
+      dirPath: null,
+      files: [],
+      error: rej.reason,
+      warnings: [],
+    });
+  }
+  return results;
+}
+
+/**
+ * Install a single-skill `.zip` archive (legacy entry point, used by the
+ * SkillsMP catalog). Wraps `installSkillZipBundle` and returns the FIRST
+ * successfully registered skill; throws with the first error when nothing
+ * installed. `nameOverride` (the catalog slug) is applied when the bundle
+ * holds exactly one skill.
+ */
+export async function installSkillZip(
+  userId: string,
+  zipBytes: Uint8Array,
+  opts: SkillInstallOptions = {},
+): Promise<InstalledSkillMeta> {
+  const results = await installSkillZipBundle(userId, zipBytes, opts);
+  const okItem = results.find((r) => r.ok);
+  const firstError = results.find((r) => !r.ok);
+  if (!okItem) {
+    throw new Error(firstError?.error ?? "Invalid skill archive: no installable skill found.");
+  }
   return {
-    name,
-    description,
-    dirPath,
-    files: writtenRelPaths,
+    name: okItem.name!,
+    description: okItem.description,
+    dirPath: okItem.dirPath!,
+    files: okItem.files,
   };
 }
 
 /**
- * Install a bare `SKILL.md` file (no zip). The file is written to
- * `users/<userId>/skills/<sanitizedName>/SKILL.md`.
+ * Install a bare `SKILL.md` file (no zip). The file is validated first
+ * (PRD §6: name resolution + non-trivial body — useful error, never a silent
+ * failure) and written to `users/<userId>/skills/<sanitizedName>/SKILL.md`.
  */
 export async function installSkillMd(
   userId: string,
@@ -220,18 +398,37 @@ export async function installSkillMd(
   opts: SkillInstallOptions = {},
 ): Promise<InstalledSkillMeta> {
   const text = await file.text();
-  const fm = parseSkillFrontMatter(text);
-  const name = sanitizeSkillName(opts.nameOverride ?? fm.name ?? file.name.replace(/\.md$/i, ""));
-  const description = opts.descriptionOverride ?? fm.description ?? null;
+  return installSkillMdText(userId, file.name, text, opts);
+}
+
+/** Text-based variant of {@link installSkillMd} — also used by the SkillsMP
+ *  catalog when the download resolves to raw markdown. `sourceLabel` is the
+ *  filename to derive a fallback name from. */
+export async function installSkillMdText(
+  userId: string,
+  sourceLabel: string,
+  text: string,
+  opts: SkillInstallOptions = {},
+): Promise<InstalledSkillMeta> {
+  const fallback = opts.nameOverride ?? sourceLabel.replace(/\.md$|\.markdown$/i, "");
+  const validation = validateSkillMdText(text, fallback);
+  if (!validation.ok) {
+    throw new Error(`Invalid SKILL.md: ${validation.error}`);
+  }
+  const name = sanitizeSkillName(opts.nameOverride ?? validation.name ?? fallback);
+  const description = opts.descriptionOverride ?? validation.description ?? null;
 
   await ensureSkillDir(userId, name);
   const dirPath = `users/${userId}/skills/${name}`;
   await writeFileAtPath(dirPath, "SKILL.md", text);
 
-  await skillService.install(userId, name, description, dirPath);
+  await skillService.install(userId, name, description, dirPath, {
+    source: "upload",
+    fileCount: 1,
+  });
 
   // Fire-and-forget: upload to sandbox if configured.
-  void uploadSkillToSandbox(userId, name, text);
+  void uploadSkillToSandbox(userId, name, text).catch(() => {});
 
   return {
     name,
@@ -239,6 +436,63 @@ export async function installSkillMd(
     dirPath,
     files: ["SKILL.md"],
   };
+}
+
+/**
+ * Install a mixed batch of uploaded files (multiple `.zip` archives and/or
+ * bare `SKILL.md` files). Every file is processed independently; results are
+ * flat and per-item (PRD §5: display the discovered skills with
+ * success/error per skill).
+ */
+export async function installSkillFiles(
+  userId: string,
+  files: File[],
+): Promise<SkillInstallItemResult[]> {
+  const results: SkillInstallItemResult[] = [];
+  for (const file of files) {
+    const lower = file.name.toLowerCase();
+    try {
+      if (lower.endsWith(".zip")) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        results.push(...(await installSkillZipBundle(userId, bytes, { sourceLabel: file.name })));
+      } else if (lower.endsWith(".md") || lower.endsWith(".markdown")) {
+        const meta = await installSkillMd(userId, file);
+        results.push({
+          source: file.name,
+          ok: true,
+          name: meta.name,
+          description: meta.description,
+          dirPath: meta.dirPath,
+          files: meta.files,
+          error: null,
+          warnings: [],
+        });
+      } else {
+        results.push({
+          source: file.name,
+          ok: false,
+          name: null,
+          description: null,
+          dirPath: null,
+          files: [],
+          error: `Unsupported file type: ${file.name}. Upload .zip archives or a SKILL.md file.`,
+          warnings: [],
+        });
+      }
+    } catch (err) {
+      results.push({
+        source: file.name,
+        ok: false,
+        name: null,
+        description: null,
+        dirPath: null,
+        files: [],
+        error: err instanceof Error ? err.message : `Failed to install ${file.name}`,
+        warnings: [],
+      });
+    }
+  }
+  return results;
 }
 
 /**
@@ -261,6 +515,32 @@ export async function installSkillFile(
   throw new Error(
     `Unsupported file type: ${file.name}. Upload a .zip archive or a SKILL.md file.`,
   );
+}
+
+/**
+ * Export an installed skill as a `.zip` archive (the Download action in the
+ * Skills settings UI). Reads the skill directory from OPFS and packs every
+ * file with fflate. Returns null when the skill directory is empty/missing.
+ */
+export async function exportSkillZip(
+  userId: string,
+  name: string,
+): Promise<{ blob: Blob; fileCount: number } | null> {
+  const { walkFiles } = await import("@/lib/storage/opfs");
+  const safe = sanitizeSkillName(name);
+  const dir = await ensureSkillDir(userId, safe);
+  const files = await walkFiles(dir);
+  if (files.length === 0) return null;
+  const tree: Record<string, Uint8Array> = {};
+  for (const f of files) {
+    const blob = await f.handle.getFile();
+    tree[f.path] = new Uint8Array(await blob.arrayBuffer());
+  }
+  const zipped = zipSync(tree);
+  // Copy into a fresh ArrayBuffer — Blob needs the plain buffer shape.
+  const buf = new ArrayBuffer(zipped.length);
+  new Uint8Array(buf).set(zipped);
+  return { blob: new Blob([buf], { type: "application/zip" }), fileCount: files.length };
 }
 
 /**
@@ -899,8 +1179,11 @@ guidelines:
  *
  * Errors are swallowed (logged to console) — the install should not fail
  * because the sandbox upload failed.
+ *
+ * Exported for the OnyxBase skills-sync restore flow (it makes restored
+ * skills available in the sandbox exactly like locally installed ones).
  */
-async function uploadSkillToSandbox(
+export async function uploadSkillToSandbox(
   userId: string,
   skillName: string,
   skillMdContent: string,
@@ -1037,6 +1320,13 @@ export async function installSkillsMPSkill(
       nameOverride: safeSlug,
       descriptionOverride: description,
     });
+    // Catalog installs are tagged with their origin in the metadata row.
+    try {
+      const row = await skillService.getByName(userId, meta.name);
+      if (row) await skillService.update(row.id, { source: "catalog" });
+    } catch {
+      /* best-effort tagging */
+    }
     // Read the installed SKILL.md from OPFS for the sandbox upload.
     let sandboxMd: string | null = null;
     try {
@@ -1075,7 +1365,10 @@ export async function installSkillsMPSkill(
   );
 
   // 6. Save metadata to IndexedDB.
-  await skillService.install(userId, safeSlug, description, dirPath);
+  await skillService.install(userId, safeSlug, description, dirPath, {
+    source: "catalog",
+    fileCount: 1,
+  });
 
   // 7. Fire-and-forget: upload to sandbox if configured.
   void uploadSkillToSandbox(userId, safeSlug, skillMdContent);

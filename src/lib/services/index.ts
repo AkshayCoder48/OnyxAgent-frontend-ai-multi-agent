@@ -1785,19 +1785,39 @@ export const skillService = {
     return db.skills.where("user_id").equals(userId).toArray();
   },
 
-  async install(userId: string, name: string, description: string | null, dirPath: string) {
+  async install(
+    userId: string,
+    name: string,
+    description: string | null,
+    dirPath: string,
+    meta: { source?: string; fileCount?: number; resetSync?: boolean } = {},
+  ) {
     const existing = await db.skills
       .where("[user_id+name]")
       .equals([userId, name])
       .first();
     if (existing) {
       // Update the description + dir_path in case the user is re-installing
-      // an updated version of the same skill.
+      // an updated version of the same skill. A re-install is a NEW local
+      // version of the skill → the previous sync bookkeeping no longer
+      // matches the on-disk content, so the badge resets to "local" unless
+      // the caller (cloud restore) says otherwise.
       const updated = {
         ...existing,
         description: description ?? existing.description,
         dir_path: dirPath,
         is_active: true,
+        file_count: meta.fileCount ?? existing.file_count ?? null,
+        ...(meta.source ? { source: meta.source } : {}),
+        ...(meta.resetSync === false
+          ? {}
+          : {
+              sync_state: "local" as const,
+              synced_at: null,
+              cloud_sha256: null,
+              sync_chunks: null,
+              sync_error: null,
+            }),
         updated_at: nowISO(),
       };
       await db.skills.put(updated);
@@ -1814,6 +1834,9 @@ export const skillService = {
       is_active: true,
       created_at: ts,
       updated_at: ts,
+      ...(meta.source ? { source: meta.source } : {}),
+      file_count: meta.fileCount ?? null,
+      sync_state: "local" as const,
     };
     await db.skills.add(row);
     return row;
@@ -1838,8 +1861,22 @@ export const skillService = {
     return db.skills.get(id);
   },
 
-  /** Update skill metadata (description, dir_path, is_active, etc.). */
-  async update(id: string, patch: Partial<{ description: string | null; dir_path: string; is_active: boolean }>) {
+  /** Update skill metadata (description, dir_path, is_active, sync bookkeeping, …). */
+  async update(
+    id: string,
+    patch: Partial<{
+      description: string | null;
+      dir_path: string;
+      is_active: boolean;
+      source: string;
+      file_count: number | null;
+      sync_state: "local" | "synced" | "syncing" | "sync_failed" | null;
+      synced_at: string | null;
+      cloud_sha256: string | null;
+      sync_chunks: number | null;
+      sync_error: string | null;
+    }>,
+  ) {
     await db.skills.update(id, { ...patch, updated_at: nowISO() });
     return db.skills.get(id);
   },
