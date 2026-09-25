@@ -1,11 +1,16 @@
 /**
  * Scheduled Tasks — shared types (client + server safe).
  *
+ * CHAT-ONLY MODEL: every scheduled task owns exactly ONE dedicated chat.
+ * Task creation always yields a chat (browser-created via the AI tool, or
+ * server-created from chat-store records); executions run through that chat
+ * and every result lands in it. There is no standalone task universe.
+ *
  * The scheduler is SERVER-SIDE and persistent: task definitions, execution
  * history and tick state live in OnyxBase KV under the user's account
  * (collection "onyxagent"), so schedules survive application
  * restarts, browser closure and device switches. The browser is only a
- * trigger source (heartbeat) + a management UI — never the source of truth.
+ * trigger source (heartbeat) + the chat surface — never the source of truth.
  *
  * SECURITY: `task.runtime` carries execution credentials (provider key)
  * so unattended runs work with the browser closed. That
@@ -102,9 +107,10 @@ export interface ScheduledTask {
   description: string;
   /** The COMPLETE agent job, preserved verbatim (never reduced to an action). */
   instructions: string;
-  /** UNIFIED CHAT MODE: the task runs INSIDE this conversation — the agent
-   *  gets the chat's history as context and its result is appended back into
-   *  the chat as a server message. Absent/null = LEGACY standalone mode. */
+  /** The task's DEDICATED chat — executions run through it and results land
+   *  in it (chat-only model). Always set on new/updated tasks; null only on
+   *  pre-chat-only LEGACY records, which the engine migrates (server-side
+   *  chat creation) the first time they fire. */
   chatId?: string | null;
   scheduleType: ScheduleType;
   scheduleExpression: string;
@@ -217,12 +223,14 @@ export interface CreateTaskPayload {
   schedule: TaskSchedule;
   workspaceId?: string;
   enabled?: boolean;
-  /** UNIFIED CHAT MODE — attach the schedule to an existing conversation
-   *  (runs with its history; results land in the chat). null/absent = legacy
-   *  standalone instruction mode. */
+  /** The task's DEDICATED chat. When given, the schedule attaches to that
+   *  conversation (a browser conversation created by the AI tool). When
+   *  ABSENT, the server creates a dedicated chat record itself (chat-store
+   *  meta + mirror seeded with the scheduled system prompt). */
   chatId?: string | null;
   /** Initial chat mirror written at create time (browser context: system
-   *  prompt + recent messages) so the first run has history. */
+   *  prompt + recent messages of the chat the task was created from) so the
+   *  first run has history. */
   chatContext?: {
     systemPrompt?: string;
     title?: string;
@@ -242,8 +250,6 @@ export interface UpdateTaskPayload {
   schedule?: TaskSchedule;
   enabled?: boolean;
   workspaceId?: string;
-  /** Attach/detach the task's conversation (chat mode). */
-  chatId?: string | null;
   runtime?: {
     provider?: ProviderSnapshot | null;
   };
@@ -258,8 +264,6 @@ export type TaskAction =
   | "run_now"
   | "list"
   | "get_history"
-  | "get_run"
-  | "status"
   | "sync_chat"
   | "pull_chat";
 

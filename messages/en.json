@@ -203,24 +203,6 @@
     "failedToGenerateLink": "Failed to generate link",
     "failedToRevoke": "Failed to revoke access"
   },
-  "scheduled": {
-    "navLabel": "Scheduled Tasks",
-    "title": "Scheduled Tasks",
-    "description": "Autonomous agent jobs that run on a schedule — in their own sandbox, with your persistent workspace, even when this app is closed. Results land here.",
-    "newTask": "New Task",
-    "nextRun": "Next run",
-    "linkedChat": "Linked chat",
-    "moreTasks": "{count} more",
-    "emptyTitle": "No scheduled tasks yet",
-    "emptyDescription": "Create the first one — the agent runs it on schedule, unattended, and delivers the result here.",
-    "status": {
-      "active": "Active",
-      "paused": "Paused",
-      "running": "Running",
-      "failed": "Failed",
-      "completed": "Completed"
-    }
-  },
   "admin": {
     "conversationsTitle": "Admin: Conversations",
     "conversationsDesc": "Browse and manage all conversations and users.",

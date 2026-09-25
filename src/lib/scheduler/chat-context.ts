@@ -2,9 +2,9 @@
 
 // ============================================================================
 // Chat-context assembly — the SHARED browser-side builder for chat-attached
-// scheduled tasks (unified chat mode). Used by BOTH the AI tools
-// (src/lib/tools/scheduled_tasks.ts) and the management UI's TaskFormDialog,
-// so the server always receives the same shape:
+// scheduled tasks (chat-only model). Used by the AI tools
+// (src/lib/tools/scheduled_tasks.ts) and the chat-sync mirror, so the server
+// always receives the same shape:
 //   { systemPrompt, title?, messages: ChatTurnMessage[] }
 //
 // The system-prompt resolution is a LIGHT copy of use-chat.ts buildTurnOptions

@@ -45,12 +45,53 @@ const LINKS_KEY = "onyx-chat-links";
 const MARKER_PREFIX = "onyx-chat-smsg:";
 /** Mirror throttle — at most one sync_chat per chat per 30s (module map). */
 const MIRROR_THROTTLE_MS = 30_000;
+/** Window event fired when the link registry changes (the sidebar's schedule
+ *  badge + sync components listen so localStorage writes become reactive). */
+export const CHAT_LINKS_CHANGED_EVENT = "onyx:chat-links-changed";
+/** Window event fired when the conversation list changed OUTSIDE React Query
+ *  (a tool created a dedicated chat, a server-message merge created/updated a
+ *  conversation in Dexie). The sidebar listens and refetches the list. */
+export const CONVERSATIONS_CHANGED_EVENT = "onyx:conversations-changed";
+/** Window event asking the chat surface to OPEN a conversation (the tool
+ *  result cards' "Open chat" action — the sidebar owns selection). CustomEvent
+ *  detail carries the chatId. */
+export const OPEN_CONVERSATION_EVENT = "onyx:open-conversation";
 
 function safeLocalStorage(): Storage | null {
   try {
     return typeof window !== "undefined" ? window.localStorage : null;
   } catch {
     return null;
+  }
+}
+
+function notifyLinksChanged(): void {
+  try {
+    window.dispatchEvent(new Event(CHAT_LINKS_CHANGED_EVENT));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Best-effort notification that conversations changed outside React Query —
+ *  the sidebar refetches the list. */
+export function notifyConversationsChanged(): void {
+  try {
+    window.dispatchEvent(new Event(CONVERSATIONS_CHANGED_EVENT));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Ask the mounted chat surface to open a conversation (in-page switch — no
+ *  route change). Returns false when no listener can act (caller falls back
+ *  to router navigation). */
+export function openConversation(chatId: string): boolean {
+  try {
+    window.dispatchEvent(new CustomEvent(OPEN_CONVERSATION_EVENT, { detail: chatId }));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -82,6 +123,7 @@ export function addLinkedChat(chatId: string): void {
   ids.add(chatId);
   try {
     ls.setItem(LINKS_KEY, JSON.stringify([...ids]));
+    notifyLinksChanged();
   } catch {
     /* quota — best-effort */
   }
@@ -96,6 +138,7 @@ export function removeLinkedChat(chatId: string): void {
   const next = ids.filter((id) => id !== chatId);
   try {
     ls.setItem(LINKS_KEY, JSON.stringify(next));
+    notifyLinksChanged();
   } catch {
     /* best-effort */
   }
@@ -256,7 +299,9 @@ async function mergeServerMessages(
   if (!fresh.length) return;
 
   // 1) Persist into Dexie (rows keep the server ids — re-merges overwrite,
-  //    never duplicate).
+  //    never duplicate). ensureConversation creates the local conversation
+  //    row when the chat was born server-side (legacy migration, other
+  //    devices) — so a fresh merge may CHANGE the sidebar list.
   const { conversationService } = await import("@/lib/services");
   await conversationService.appendServerMessages(
     chatId,
@@ -264,6 +309,7 @@ async function mergeServerMessages(
     fresh.map(serverMessageToRowInput),
     { title: update.meta?.title },
   );
+  notifyConversationsChanged();
 
   // 2) Live append — only for the CURRENTLY VIEWED conversation and only
   //    when no agent execution is running for it (read-only hub lookup; the

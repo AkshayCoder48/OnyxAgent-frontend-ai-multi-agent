@@ -1,17 +1,23 @@
 /**
  * The scheduler ENGINE — server-side, persistent, authoritative.
  *
+ * CHAT-ONLY MODEL: every scheduled task owns exactly ONE dedicated chat.
+ * Executions ALWAYS run through that chat (startChatExecution → isolated
+ * E2B sandbox → bg-agent runner) and every result lands back in the chat as
+ * a server message. There is no standalone task universe.
+ *
  * Responsibilities:
  *  - task CRUD over OnyxBase KV (single tasks record + per-task run history)
  *  - `tick()` — the authoritative heartbeat: finalize finished runs, fire due
  *    tasks (idempotent, catch-up), reschedule, persist everything
- *  - `fireRun()` — create an isolated E2B sandbox (metadata-tagged so the
- *    interactive sandbox-rotation NEVER kills scheduled runs), restore the
- *    cloud workspace into it, launch the bg-agent runner as a background
- *    command (the agent loop runs INSIDE E2B — browser closed is fine)
+ *  - `fireRun()` — the idempotent run-record owner; the launch itself is
+ *    `startChatExecution` (isolated E2B sandbox, metadata-tagged so the
+ *    interactive sandbox-rotation NEVER kills scheduled runs, cloud
+ *    workspace restored into it, bg-agent runner launched as a background
+ *    command — the agent loop runs INSIDE E2B — browser closed is fine)
  *  - `finalizeRun()` — reconnect to the run's sandbox, harvest the result +
  *    execution timeline, push workspace changes back to the cloud, persist
- *    the run record
+ *    the run record, append the result message to the task's chat
  *
  * Duplicate-execution protection: run ids are DETERMINISTIC
  * (run_<taskId>_<occurrenceMs>) — before starting, the engine checks the run
@@ -453,11 +459,10 @@ export async function saveRuns(kv: SchedulerKV, taskId: string, runs: ScheduledT
   }
 }
 
-async function loadRunsConverged(kv: SchedulerKV, taskId: string, runId?: string): Promise<ScheduledTaskRun[]> {
+async function loadRunsConverged(kv: SchedulerKV, taskId: string): Promise<ScheduledTaskRun[]> {
   let runs = await loadRuns(kv, taskId);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const found = runId ? runs.some((r) => r.id === runId) : runs.length > 0;
-    if (found) return runs;
+    if (runs.length > 0) return runs;
     await new Promise((r) => setTimeout(r, 2500));
     runs = await loadRuns(kv, taskId);
   }
@@ -471,6 +476,78 @@ function e2bKey(): string | null {
 
 function newTaskId(): string {
   return "task_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+/** Server-side id for a DEDICATED chat created without browser help (legacy
+ *  migration + direct API creates). Browser-created dedicated chats keep
+ *  their conversationService nanoid. */
+function newChatId(): string {
+  return "chat_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+}
+
+/** CHAT-ONLY MODEL — every task owns exactly ONE dedicated chat. When a task
+ *  arrives without a chatId (legacy pre-chat records, or a direct API create)
+ *  the server creates the chat record itself: chat meta (title = task name)
+ *  + an initial mirror seeded with the scheduled system prompt + a seed
+ *  server message (so the browser's pull loop materializes the local
+ *  conversation and the chat shows up in the sidebar immediately). Chat-store
+ *  supports this fully server-side (writeChatMeta/writeChatMirror/
+ *  appendServerMessages need no browser). */
+async function ensureTaskChat(
+  kv: SchedulerKV,
+  task: ScheduledTask,
+  chatContext?: CreateTaskPayload["chatContext"],
+): Promise<void> {
+  const existing = (task.chatId ?? "").trim();
+  if (existing) {
+    // An explicit chat (browser conversation id) — only make sure the server
+    // meta exists; NEVER overwrite an existing chat's mirror/history.
+    try {
+      const meta = await readChatMeta(kv, existing);
+      if (!meta) {
+        await writeChatMeta(kv, existing, {
+          title: task.name,
+          kind: "chat",
+          createdAt: task.createdAt || new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* meta best-effort — the mirror sync converges it later */
+    }
+    return;
+  }
+  const chatId = newChatId();
+  task.chatId = chatId;
+  try {
+    await writeChatMeta(kv, chatId, {
+      title: task.name,
+      kind: "chat",
+      createdAt: task.createdAt || new Date().toISOString(),
+    });
+    await writeChatMirror(kv, {
+      chatId,
+      title: task.name,
+      systemPrompt: chatContext?.systemPrompt ?? buildScheduledSystemPrompt(task),
+      messages: chatContext?.messages ?? [],
+    });
+    // Seed message: the browser has never seen this chat — the first pull
+    // creates the local conversation (ensureConversation) with this notice,
+    // so the task's chat appears in the sidebar right away.
+    await appendServerMessages(kv, chatId, [
+      {
+        id: `smsg_home_${task.id}`,
+        role: "assistant",
+        content:
+          `⏰ This conversation is the dedicated home of the scheduled task "${task.name}". ` +
+          "Every execution — its thinking, tool calls and results — lands here as messages. " +
+          "Manage the schedule from any other chat with the scheduled-task tools.",
+        createdAt: new Date().toISOString(),
+        origin: "scheduled",
+      },
+    ]);
+  } catch {
+    /* best-effort — fireChatRun falls back to buildScheduledSystemPrompt */
+  }
 }
 
 export function runIdFor(taskId: string, occurrence: number, seq = 0): string {
@@ -501,7 +578,8 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
     name,
     description: (payload.description ?? "").trim(),
     instructions,
-    // UNIFIED CHAT MODE — null/absent keeps the legacy standalone behavior.
+    // CHAT-ONLY — the task ALWAYS gets a dedicated chat: the explicit chatId
+    // (a browser conversation) or a server-created chat record (below).
     chatId: (payload.chatId ?? "").trim() || null,
     scheduleType: schedule.type,
     scheduleExpression: (schedule.expression ?? "").trim(),
@@ -548,9 +626,10 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
 
   const verified = await writeTaskVerified(kv, task);
 
-  // CHAT MODE — seed the initial chat mirror (browser context) so the first
-  // run executes with the conversation's history. Best-effort: the task
-  // itself is already durable at this point.
+  // CHAT-ONLY — guarantee the dedicated chat record server-side: use the
+  // given chatId (browser conversation) or create one now. When the browser
+  // supplied an initial chatContext snapshot, it becomes the chat's seed
+  // mirror so the first run executes with that history.
   if (task.chatId && payload.chatContext) {
     try {
       await writeChatMirror(kv, {
@@ -559,17 +638,14 @@ export async function createTask(kv: SchedulerKV, payload: CreateTaskPayload): P
         ...(payload.chatContext.systemPrompt ? { systemPrompt: payload.chatContext.systemPrompt } : {}),
         messages: payload.chatContext.messages ?? [],
       });
-      const existingMeta = await readChatMeta(kv, task.chatId);
-      if (!existingMeta) {
-        await writeChatMeta(kv, task.chatId, {
-          title: payload.chatContext.title ?? task.name,
-          kind: "chat",
-          createdAt: now.toISOString(),
-        });
-      }
     } catch {
       /* mirror best-effort — sync_chat converges it later */
     }
+  }
+  await ensureTaskChat(kv, task, payload.chatContext ?? undefined).catch(() => {});
+  // The dedicated chat id may have been assigned above — persist it.
+  if (task.chatId && task.chatId !== (payload.chatId ?? "").trim()) {
+    await writeTaskVerified(kv, task).catch(() => {});
   }
 
   return { task: toSafeTask(task), warning: verified.warning };
@@ -588,7 +664,8 @@ export async function updateTask(kv: SchedulerKV, payload: UpdateTaskPayload): P
     task.instructions = payload.instructions.trim();
   }
   if (payload.workspaceId !== undefined) task.workspaceId = payload.workspaceId;
-  if (payload.chatId !== undefined) task.chatId = (payload.chatId ?? "").trim() || null;
+  // NOTE: chatId is intentionally NOT updatable — a schedule belongs to its
+  // dedicated chat for its whole life (chat-only model).
   if (payload.enabled !== undefined) {
     task.enabled = payload.enabled;
     if (payload.enabled && task.nextRunAt == null) {
@@ -1159,7 +1236,8 @@ export async function finalizeChatExecution(
 }
 
 // ---------------------------------------------------------------------------
-// Fire a run (E2B sandbox + bg-agent launch)
+// Fire a run — CHAT-ONLY: the E2B sandbox launch lives in
+// startChatExecution; fireRun owns the idempotent run record + bookkeeping.
 // ---------------------------------------------------------------------------
 
 export async function fireRun(
@@ -1214,122 +1292,39 @@ export async function fireRun(
     return { run, alreadyRan: false, error: run.error ?? undefined };
   }
 
-  // UNIFIED CHAT MODE — the task runs INSIDE its conversation: same agent
-  // runtime (isolated sandbox + workspace restore + bg-agent), seeded with
-  // the chat's history, its result appended back into the chat. The run
-  // record keeps the exact same idempotency/bookkeeping as legacy mode.
-  if (task.chatId) {
-    return fireChatRun(kv, task, run, runs);
-  }
-
-
-  // 1. Isolated sandbox for this run — metadata-tagged so the interactive
-  //    single-sandbox rotation NEVER kills scheduled runs.
-  let sandbox: Sandbox;
-  try {
-    sandbox = await Sandbox.create({
-      apiKey,
-      timeoutMs: 3_600_000,
-      envs: {},
-      metadata: { "onyx-scheduled": task.id, "onyx-task": task.name.slice(0, 60) },
-      lifecycle: { onTimeout: "pause", autoResume: true },
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    run.status = "failed";
-    run.error = `E2B sandbox creation failed: ${msg}`;
-    run.completedAt = new Date().toISOString();
-    run.logs.push(`[error] sandbox create failed: ${msg}`);
-    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-    return { run, alreadyRan: false, error: run.error ?? undefined };
-  }
-  run.sandboxId = sandbox.sandboxId;
-  run.logs.push(`[sandbox] ${sandbox.sandboxId} created`);
-  await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-
-  // 1.5 SCHEDULER MARKER — E2B's list endpoint does NOT return sandbox
-  // metadata, so the tick's run-recovery identifies scheduled sandboxes by
-  // this marker file instead.
-  try {
-    await sandbox.files.write(
-      `${HOME}/.onyx/scheduled.json`,
-      JSON.stringify({ taskId: task.id, name: task.name, launchedAt: new Date().toISOString() }),
-    );
-  } catch {
-    /* best-effort */
-  }
-
-  // 2. Onyx.md (identity + tool compendium) — the agent's documentation.
-  try {
-    await sandbox.files.write(`${HOME}/Onyx.md`, ONYX_MD);
-  } catch {
-    /* best-effort */
-  }
-
-  // 3. Restore the persistent workspace BEFORE the agent runs.
-  try {
-    const restore = await serverRestoreWorkspace(sandbox, kv);
-    run.logs.push(
-      restore.ok
-        ? `[workspace] restored ${restore.restoredFiles} file(s) (${Math.round(restore.bytes / 1024)} KB) from cloud`
-        : `[workspace] restore warning: ${restore.error ?? restore.warnings.join("; ")}`,
-    );
-    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-  } catch (e) {
-    run.logs.push(`[workspace] restore failed: ${e instanceof Error ? e.message : String(e)}`);
-    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-  }
-
-  // 4. Write the runner + run state, then launch as a background command.
-  try {
-    await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
-    const e2bRunId = "run_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
-    const runDir = BG_RUNS_PREFIX + e2bRunId;
-    const state = {
-      provider: {
-        baseUrl: task.runtime.provider.baseUrl,
-        apiKey: task.runtime.provider.apiKey,
-        model: task.runtime.provider.model,
-        toolsEnabled: task.runtime.provider.toolsEnabled !== false,
-        noPrefix: task.runtime.provider.noPrefix ?? false,
-        disabledParams: task.runtime.provider.disabledParams ?? [],
-      },
-      toolsEnabled: task.runtime.provider.toolsEnabled !== false,
-      messages: [
-        { role: "system", content: buildScheduledSystemPrompt(task) },
-        { role: "user", content: task.instructions },
-      ],
-      scheduledTask: { taskId: task.id, runId: run.id, name: task.name },
-      maxRounds: 30,
-      status: "starting",
-      content: "",
-      startedAt: new Date().toISOString(),
-    };
-    await sandbox.files.write(`${runDir}/state.json`, JSON.stringify(state));
-    await sandbox.files.write(`${runDir}/events.jsonl`, "");
-    const handle = await sandbox.commands.run(
-      `node ${BG_SCRIPT_PATH} ${e2bRunId} > ${HOME}/.onyx/bg-agent.log 2>&1`,
-      { background: true, timeoutMs: 0, cwd: HOME },
-    );
-    run.e2bRunId = e2bRunId;
-    run.status = "running";
-    run.logs.push(`[runner] bg-agent launched (pid ${handle.pid}, e2b run ${e2bRunId})`);
-    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
-    return { run, alreadyRan: false };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    run.status = "failed";
-    run.error = `Failed to launch the agent runner: ${msg}`;
-    run.completedAt = new Date().toISOString();
-    run.logs.push(`[error] launch failed: ${msg}`);
-    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+  // CHAT-ONLY — every execution runs INSIDE the task's dedicated
+  // conversation: same agent runtime (isolated sandbox + workspace restore +
+  // bg-agent), seeded with the chat's history, its result appended back into
+  // the chat. There is NO standalone path anymore.
+  if (!task.chatId) {
+    // LEGACY MIGRATION (chat-only model): pre-chat tasks without a chatId
+    // get their DEDICATED chat created server-side right here (chat meta +
+    // mirror seeded with the scheduled system prompt — chat-store supports
+    // full server-side chat creation), then fire through the normal path.
     try {
-      await sandbox.kill();
-    } catch {
-      /* best-effort */
+      await ensureTaskChat(kv, task);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      run.status = "failed";
+      run.error = `Failed to create the task's dedicated chat: ${msg}`;
+      run.completedAt = new Date().toISOString();
+      run.logs.push(`[migration] dedicated-chat creation failed: ${msg}`);
+      await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
+      return { run, alreadyRan: false, error: run.error ?? undefined };
     }
+    if (task.chatId) {
+      await writeTaskVerified(kv, task).catch(() => {});
+      run.logs.push(`[migration] dedicated chat ${task.chatId} created for legacy chatless task`);
+    }
+  }
+  if (!task.chatId) {
+    run.status = "failed";
+    run.error = "Task has no dedicated chat and one could not be created.";
+    run.completedAt = new Date().toISOString();
+    await saveRuns(kv, task.id, runs.slice(-MAX_RUNS_PER_TASK));
     return { run, alreadyRan: false, error: run.error ?? undefined };
   }
+  return fireChatRun(kv, task, run, runs);
 }
 
 /** CHAT-MODE launch — startChatExecution with the task's chat context. The
@@ -1504,9 +1499,9 @@ export async function finalizeRun(kv: SchedulerKV, task: ScheduledTask, run: Sch
   run.completedAt = new Date().toISOString();
   run.durationMs = Date.now() - startedMs;
 
-  // UNIFIED CHAT MODE — append the assistant message to the chat + finalize
-  // the linked chat-execution record (idempotent: the tick's marker-recovery
-  // path may have finalized it already).
+  // CHAT-ONLY — append the assistant message to the task's dedicated chat +
+  // finalize the linked chat-execution record (idempotent: the tick's
+  // marker-recovery path may have finalized it already).
   if ((run.execId || task.chatId) && run.e2bRunId) {
     try {
       const chatMsg = buildChatResultMessage(
@@ -1968,13 +1963,16 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
 // Manual "run now"
 // ---------------------------------------------------------------------------
 
-export async function runTaskNow(kv: SchedulerKV, taskId: string): Promise<ScheduledTaskRun> {
+export async function runTaskNow(
+  kv: SchedulerKV,
+  taskId: string,
+): Promise<{ run: ScheduledTaskRun; task: SafeScheduledTask }> {
   const task = await loadTaskById(kv, taskId);
   if (!task) throw new Error(`Scheduled task not found: ${taskId}`);
   if (!task.enabled) throw new Error("Task is paused — resume it before running.");
   const occurrence = Date.now();
   const fired = await fireRun(kv, task, occurrence, "manual");
-  return fired.run;
+  return { run: fired.run, task: toSafeTask(task) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1989,9 +1987,4 @@ export async function listTasksSafe(kv: SchedulerKV): Promise<SafeScheduledTask[
 export async function getTaskHistory(kv: SchedulerKV, taskId: string, limit = 20): Promise<ScheduledTaskRun[]> {
   const runs = await loadRunsConverged(kv, taskId);
   return runs.slice(-limit).reverse();
-}
-
-export async function getRun(kv: SchedulerKV, taskId: string, runId: string): Promise<ScheduledTaskRun | null> {
-  const runs = await loadRunsConverged(kv, taskId, runId);
-  return runs.find((r) => r.id === runId) ?? null;
 }

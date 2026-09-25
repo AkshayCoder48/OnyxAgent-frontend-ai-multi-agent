@@ -18,7 +18,7 @@ import {
   Clock,
   History,
   Loader2,
-  Pencil,
+  MessageSquare,
   Play,
   PauseCircle,
   RefreshCw,
@@ -28,7 +28,7 @@ import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { describeSchedule } from "@/lib/scheduler/tz-cron";
 import type { SafeScheduledTask, ScheduledTaskRun } from "@/lib/scheduler/types";
-import { ROUTES } from "@/lib/constants";
+import { openConversation } from "@/lib/scheduler/chat-sync";
 import { formatAbsolute, formatDuration } from "@/components/scheduled/time-format";
 
 const SCHED_TOOL_NAMES = new Set([
@@ -65,6 +65,7 @@ interface SchedResult {
     lastRunStatus?: string | null;
     runCount?: number;
     workspaceId?: string;
+    chatId?: string | null;
   }>;
   count?: number;
   run?: ScheduledTaskRun;
@@ -158,6 +159,17 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
   const parsed = useMemo(() => parseSchedResult(toolCall), [toolCall]);
   const name = toolCall.name;
 
+  // CHAT-ONLY MODEL: open the task's dedicated chat. On the chat page the
+  // sidebar handles the in-page switch (openConversation event); elsewhere
+  // (or on a public/shared view) fall back to a route navigation.
+  const openChat = (chatId: string | null | undefined) => {
+    if (!chatId) return;
+    const onChatPage =
+      typeof window !== "undefined" && /\/chat\/?$/.test(window.location.pathname);
+    if (onChatPage && openConversation(chatId)) return;
+    void router.push(`/chat?id=${encodeURIComponent(chatId)}`);
+  };
+
   // ── Running: slim glass card with a live spinner.
   if (isRunning || !parsed) {
     const doing = name === "list_scheduled_tasks"
@@ -207,7 +219,8 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
 
   const task = parsed.task;
 
-  // ── create / update → confirmation card (spec §18).
+  // ── create / update → confirmation card (chat-only: name, schedule,
+  //    status, next/last run, and the dedicated chat — clickable).
   if (name === "create_scheduled_task" || (name === "update_scheduled_task" && task)) {
     const created = name === "create_scheduled_task";
     return (
@@ -234,25 +247,34 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
                   ? formatAbsolute(task.nextRunAt, task.timezone)
                   : "—"}
               </span>
+              <span>
+                Last run:{" "}
+                {task.lastRunAt ? formatAbsolute(task.lastRunAt, task.timezone) : "never"}
+              </span>
               <StatusDot status={task.enabled ? "active" : "paused"} />
             </div>
           </div>
         )}
         <div className="flex items-center justify-between gap-2 border-t border-border/40 px-4 py-2 text-[11.5px] text-muted-foreground">
-          <button
-            type="button"
-            onClick={() => router.push(ROUTES.SCHEDULED_TASKS)}
-            className="inline-flex min-h-[28px] items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
-          >
-            <Pencil className="size-3" aria-hidden />
-            Edit in Scheduled Tasks
-          </button>
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <MessageSquare className="size-3 shrink-0" aria-hidden />
+            <span className="truncate">Dedicated chat — executions + results land there</span>
+          </span>
+          {task?.chatId && (
+            <button
+              type="button"
+              onClick={() => openChat(task.chatId)}
+              className="inline-flex min-h-[28px] shrink-0 items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
+            >
+              Open chat
+            </button>
+          )}
         </div>
       </div>
     );
   }
 
-  // ── list → compact task rows.
+  // ── list → compact task rows (each opens its dedicated chat).
   if (name === "list_scheduled_tasks") {
     const rows = parsed.tasks ?? [];
     return (
@@ -269,38 +291,38 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
           ) : (
             <ul className="space-y-1.5">
               {rows.map((t, i) => (
-                <li
-                  key={t.id ?? i}
-                  className="flex items-center justify-between gap-2 rounded-lg bg-foreground/[0.03] px-2.5 py-2 text-[12.5px]"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground/90">{t.name}</p>
-                    <p className="truncate text-muted-foreground">
-                      {t.schedule} · {t.timezone}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <StatusDot status={t.status === "Paused" ? "paused" : "active"} />
-                    <p className="text-[11px] text-muted-foreground">
-                      {t.nextRunAt ? formatAbsolute(t.nextRunAt, t.timezone) : "no next run"}
-                    </p>
-                  </div>
+                <li key={t.id ?? i}>
+                  <button
+                    type="button"
+                    disabled={!t.chatId}
+                    onClick={() => openChat(t.chatId)}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-lg bg-foreground/[0.03] px-2.5 py-2 text-left text-[12.5px]",
+                      t.chatId ? "transition-colors hover:bg-foreground/[0.06]" : "cursor-default",
+                    )}
+                    aria-label={t.chatId ? `Open the chat for ${t.name ?? "this task"}` : (t.name ?? "task")}
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-foreground/90">{t.name}</p>
+                      <p className="truncate text-muted-foreground">
+                        {t.schedule} · {t.timezone}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <StatusDot status={t.status === "Paused" ? "paused" : "active"} />
+                      <p className="text-[11px] text-muted-foreground">
+                        {t.nextRunAt ? formatAbsolute(t.nextRunAt, t.timezone) : "no next run"}
+                      </p>
+                    </div>
+                  </button>
                 </li>
               ))}
             </ul>
           )}
         </div>
-        <div className="flex items-center justify-between gap-2 border-t border-border/40 px-4 py-2 text-[11.5px] text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            <CalendarClock className="size-3" aria-hidden />
-            <button
-              type="button"
-              onClick={() => router.push(ROUTES.SCHEDULED_TASKS)}
-              className="font-medium text-primary transition-colors hover:text-[#a8421f]"
-            >
-              Open Scheduled Tasks
-            </button>
-          </span>
+        <div className="flex items-center gap-1.5 border-t border-border/40 px-4 py-2 text-[11.5px] text-muted-foreground">
+          <MessageSquare className="size-3 shrink-0" aria-hidden />
+          <span>Every task runs in its own dedicated chat — click one to open it.</span>
         </div>
       </div>
     );
@@ -375,13 +397,13 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
         return {
           icon: Play,
           title: "Run started",
-          text: "It continues in the background — watch it live in Scheduled Tasks → run history.",
+          text: "It continues in the background — the result lands in the task's dedicated chat.",
         };
       case "delete_scheduled_task":
         return {
           icon: Trash2,
           title: "Task deleted",
-          text: parsed.message ?? "The schedule and its history were removed.",
+          text: parsed.message ?? "The schedule and its history were removed — its chat stays as a normal conversation.",
         };
       default:
         return {
@@ -404,14 +426,18 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
       </div>
       {(name === "run_scheduled_task_now" || name === "resume_scheduled_task") && (
         <div className="flex items-center justify-end gap-2 border-t border-border/40 px-4 py-2 text-[11.5px] text-muted-foreground">
-          <button
-            type="button"
-            onClick={() => router.push(ROUTES.SCHEDULED_TASKS)}
-            className="inline-flex min-h-[28px] items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
-          >
-            <CalendarClock className="size-3" aria-hidden />
-            View in Scheduled Tasks
-          </button>
+          {task?.chatId ? (
+            <button
+              type="button"
+              onClick={() => openChat(task.chatId)}
+              className="inline-flex min-h-[28px] items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
+            >
+              <MessageSquare className="size-3" aria-hidden />
+              View chat
+            </button>
+          ) : (
+            name === "run_scheduled_task_now" && <span>The result lands in the task&apos;s chat.</span>
+          )}
         </div>
       )}
     </div>

@@ -4,9 +4,10 @@
 // SchedulerHeartbeat — an invisible client component mounted once in the
 // dashboard layout. While the app is open it POSTs /api/scheduler/tick every
 // 60s (fire-and-forget, silent). When a tick FIRES a task or FINALIZES a
-// finished run, it surfaces a toast (with a shortcut to /scheduled-tasks).
-// Never throws — every failure is swallowed so it can never break a page.
-// Exposes nothing; renders null.
+// finished run, it surfaces a toast pointing at the task's DEDICATED CHAT
+// (chat-only model: executions and results land there — there is no separate
+// task dashboard). Never throws — every failure is swallowed so it can never
+// break a page. Exposes nothing; renders null.
 // ============================================================================
 
 import { useEffect } from "react";
@@ -35,20 +36,20 @@ export function SchedulerHeartbeat() {
         const res = await tickHeartbeat(userId);
         if (cancelled || !res || !res.ok || !res.ticked) return;
         if (res.finalized > 0) {
-          toast("Scheduled task finished — view it in Scheduled Tasks", {
+          toast("Scheduled task finished — the result landed in its chat", {
             icon: <CalendarClock className="size-4" />,
             action: {
-              label: "View",
-              onClick: () => router.push(ROUTES.SCHEDULED_TASKS),
+              label: "Open chats",
+              onClick: () => router.push(ROUTES.CHAT),
             },
           });
         } else if (res.fired > 0) {
           toast("A scheduled task just started", {
             icon: <CalendarClock className="size-4" />,
-            description: "It runs in a background sandbox — progress lands in its run history.",
+            description: "It runs in a background sandbox — progress lands in its dedicated chat.",
             action: {
-              label: "View",
-              onClick: () => router.push(ROUTES.SCHEDULED_TASKS),
+              label: "Open chats",
+              onClick: () => router.push(ROUTES.CHAT),
             },
           });
         }

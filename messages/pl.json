@@ -203,24 +203,6 @@
     "failedToGenerateLink": "Nie udało się wygenerować linku",
     "failedToRevoke": "Nie udało się cofnąć dostępu"
   },
-  "scheduled": {
-    "navLabel": "Zaplanowane zadania",
-    "title": "Zaplanowane zadania",
-    "description": "Autonomiczne zadania agenta uruchamiane według harmonogramu — we własnej piaskownicy, z trwałym obszarem roboczym, nawet gdy aplikacja jest zamknięta. Wyniki pojawiają się tutaj.",
-    "newTask": "Nowe zadanie",
-    "nextRun": "Następne uruchomienie",
-    "linkedChat": "Powiązany czat",
-    "moreTasks": "{count} więcej",
-    "emptyTitle": "Brak zaplanowanych zadań",
-    "emptyDescription": "Utwórz pierwsze zadanie — agent wykona je samodzielnie według harmonogramu i dostarczy wynik.",
-    "status": {
-      "active": "Aktywne",
-      "paused": "Wstrzymane",
-      "running": "Uruchomione",
-      "failed": "Niepowodzenie",
-      "completed": "Zakończone"
-    }
-  },
   "admin": {
     "conversationsTitle": "Admin: Konwersacje",
     "conversationsDesc": "Przeglądaj i zarządzaj wszystkimi konwersacjami i użytkownikami.",

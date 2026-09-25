@@ -8,6 +8,11 @@
  *   pause_scheduled_task, resume_scheduled_task, run_scheduled_task_now,
  *   list_scheduled_tasks, get_scheduled_task_history
  *
+ * CHAT-ONLY MODEL: every task owns exactly ONE DEDICATED CHAT. Creating a
+ * task (from any chat) creates a NEW chat titled with the task name — it
+ * appears in the sidebar like any conversation, and every execution, tool
+ * call and result lands in it. There is no separate task dashboard.
+ *
  * SECURITY MODEL (same as push_workspace): the OnyxBase key is resolved from
  * the encrypted vault HERE, at execution time, and sent to /api/scheduler/*
  * as a request header — it is never part of any tool schema, argument,
@@ -21,9 +26,14 @@ import { registerTool, type ToolContext } from "./registry";
 import { resolveProviderSnapshot } from "@/lib/scheduler/client";
 import {
   buildChatContext,
+  resolveChatSystemPrompt,
   DEFAULT_CHAT_TASK_INSTRUCTIONS,
 } from "@/lib/scheduler/chat-context";
-import { addLinkedChat, removeLinkedChat } from "@/lib/scheduler/chat-sync";
+import {
+  addLinkedChat,
+  notifyConversationsChanged,
+  removeLinkedChat,
+} from "@/lib/scheduler/chat-sync";
 import type {
   CreateTaskPayload,
   SafeScheduledTask,
@@ -98,7 +108,7 @@ function taskSummary(t: SafeScheduledTask): string {
     `  schedule: ${describeSchedule(t as never)} · ${t.timezone}`,
     `  status: ${t.enabled ? "Active" : "Paused"} · next run: ${next} · last run: ${last}`,
     `  workspace: ${t.workspaceId}`,
-    `  mode: ${t.chatId ? `chat-attached (${t.chatId}) — runs in that conversation` : "standalone instructions"}`,
+    `  chat: ${t.chatId ?? "—"} — executions + results appear in that dedicated chat`,
     `  instructions: ${t.instructions.slice(0, 120)}${t.instructions.length > 120 ? "…" : ""}`,
   ].join("\n");
 }
@@ -109,11 +119,11 @@ function taskSummary(t: SafeScheduledTask): string {
 
 registerTool(
   "create_scheduled_task",
-  "Create an autonomous SCHEDULED TASK that runs a full agent job (research, coding, file generation) on a schedule — even when this app is closed. The task runs in an isolated E2B sandbox with the web/file/terminal/python tools, the persistent workspace restored before and synced after each run, and its result saved. SCHEDULE object: { type: 'daily'|'weekly'|'monthly'|'interval'|'once'|'cron', expression, time, timezone, startAt?, endAt? }. expression: daily='HH:MM'; weekly=weekday numbers 0-6 (0=Sunday, comma list); monthly=day-of-month 1-31; interval=SECONDS (>=60); once=ISO datetime; cron=5-field expression. time='HH:MM' for weekly/monthly. timezone: IANA name (Asia/Kolkata, America/New_York…); default is the user's local timezone — only set another when the user explicitly names it. Convert natural language ('every weekday at 8:30 AM', 'every 30 minutes', 'tomorrow at 5 PM') into these fields. instructions = the COMPLETE agent job in full detail — it is executed verbatim by an autonomous agent with no user available, so make it self-contained (what to research/do, which files to write and their names). Ask a clarifying question ONLY when the time is genuinely ambiguous ('schedule this daily' with no time anywhere); otherwise create the task directly.",
+  "Create an autonomous SCHEDULED TASK that runs a full agent job (research, coding, file generation) on a schedule — even when this app is closed. The task gets its own DEDICATED CHAT (titled with the task name) that appears in the sidebar like any conversation: every execution runs through that chat with the web/file/terminal/python tools in an isolated sandbox, the persistent workspace restored before and synced after each run, and the result message lands in the chat. SCHEDULE object: { type: 'daily'|'weekly'|'monthly'|'interval'|'once'|'cron', expression, time, timezone, startAt?, endAt? }. expression: daily='HH:MM'; weekly=weekday numbers 0-6 (0=Sunday, comma list); monthly=day-of-month 1-31; interval=SECONDS (>=60); once=ISO datetime; cron=5-field expression. time='HH:MM' for weekly/monthly. timezone: IANA name (Asia/Kolkata, America/New_York…); default is the user's local timezone — only set another when the user explicitly names it. Convert natural language ('every weekday at 8:30 AM', 'every 30 minutes', 'tomorrow at 5 PM') into these fields. instructions = the COMPLETE agent job in full detail — it is executed verbatim by an autonomous agent with no user available, so make it self-contained (what to research/do, which files to write and their names). Ask a clarifying question ONLY when the time is genuinely ambiguous ('schedule this daily' with no time anywhere); otherwise create the task directly.",
   {
     type: "object",
     properties: {
-      name: { type: "string", description: "Short task name (e.g. 'Daily Railway Research')" },
+      name: { type: "string", description: "Short task name (e.g. 'Daily Railway Research') — it becomes the dedicated chat's title" },
       description: { type: "string", description: "One-line description of what the task does" },
       instructions: {
         type: "string",
@@ -123,7 +133,7 @@ registerTool(
       chatId: {
         type: "string",
         description:
-          "Attach the schedule to an existing conversation — the task runs in that chat with its history. Defaults to the CURRENT conversation when omitted.",
+          "Attach the schedule to an EXISTING conversation instead of creating a dedicated chat (rare — only when the user explicitly asks to schedule THIS chat). Default: a new dedicated chat.",
       },
       schedule: {
         type: "object",
@@ -161,36 +171,58 @@ registerTool(
     if (!schedule) {
       return { ok: false, error: "BAD_SCHEDULE", message: "The schedule object is required." };
     }
-    // UNIFIED CHAT MODE — resolve the conversation the schedule attaches to:
-    // explicit chatId → the runtime's conversation → the sidebar's current
-    // conversation. Null (none resolvable) = LEGACY standalone mode.
+    const taskName = String(args.name ?? "").trim();
+
+    // DEDICATED CHAT — exactly one per task. An explicit chatId attaches to
+    // that EXISTING conversation; otherwise a NEW chat is created in the
+    // browser (conversationService — so it shows in the sidebar like any
+    // chat) titled with the task name, seeded with the CURRENT chat's system
+    // prompt + recent messages so the first run has context. If the browser
+    // can't create it, the server creates the chat record itself.
     let chatId: string | null = null;
+    let chatContext: CreateTaskPayload["chatContext"] = null;
+    /** Set when THIS call created the dedicated conversation — on a failed
+     *  create the orphan is deleted again so the sidebar stays clean. */
+    let createdConvId: string | null = null;
     const explicitChatId = typeof args.chatId === "string" ? args.chatId.trim() : "";
     if (explicitChatId) {
       chatId = explicitChatId;
+      chatContext = await buildChatContext(ctx.userId, chatId);
     } else {
-      let current: string | null = null;
       try {
-        const { useConversationStore } = await import("@/stores");
-        current = useConversationStore.getState().currentConversationId;
+        const { conversationService } = await import("@/lib/services");
+        const conv = await conversationService.create(ctx.userId, taskName || "Scheduled task");
+        chatId = conv.id;
+        createdConvId = conv.id;
+        notifyConversationsChanged();
+        // Seed the dedicated chat with the CURRENT conversation's context
+        // (system prompt + recent messages); the title stays the task name.
+        let currentId: string | null = null;
+        try {
+          const { useConversationStore } = await import("@/stores");
+          currentId = useConversationStore.getState().currentConversationId;
+        } catch {
+          currentId = null;
+        }
+        const seed = currentId ? await buildChatContext(ctx.userId, currentId) : null;
+        chatContext = seed
+          ? { systemPrompt: seed.systemPrompt, messages: seed.messages }
+          : { systemPrompt: await resolveChatSystemPrompt(ctx.userId), messages: [] };
       } catch {
-        current = null;
+        // Browser couldn't create the conversation (no Dexie / no user) —
+        // send no chatId; the server creates the dedicated chat record.
+        chatId = null;
+        chatContext = null;
       }
-      chatId = current || ctx.conversationId || null;
     }
-    let chatContext: CreateTaskPayload["chatContext"] = null;
-    if (chatId) {
-      const userId = ctx.userId;
-      if (userId) chatContext = await buildChatContext(userId, chatId);
-    }
+
     // Chat mode makes instructions optional — the server requires a non-empty
     // standing instruction, so substitute the default continuation phrasing.
     const instructions = String(args.instructions ?? "");
     const payload: CreateTaskPayload = {
-      name: String(args.name ?? ""),
+      name: taskName,
       description: args.description ? String(args.description) : undefined,
-      instructions:
-        chatId && !instructions.trim() ? DEFAULT_CHAT_TASK_INSTRUCTIONS : instructions,
+      instructions: !instructions.trim() ? DEFAULT_CHAT_TASK_INSTRUCTIONS : instructions,
       schedule: {
         ...schedule,
         timezone: schedule.timezone || browserTimezone(),
@@ -201,7 +233,20 @@ registerTool(
       runtime: { provider },
     };
     const r = await schedulerCall<{ task: SafeScheduledTask }>(ctx, "create", payload as unknown as Record<string, unknown>);
-    if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "creation failed" };
+    if (!r.ok) {
+      // The task never materialized — remove the orphan dedicated chat we
+      // just created so no empty "task" conversation lingers in the sidebar.
+      if (createdConvId) {
+        try {
+          const { conversationService } = await import("@/lib/services");
+          await conversationService.delete(createdConvId);
+          notifyConversationsChanged();
+        } catch {
+          /* best-effort — an empty chat is harmless */
+        }
+      }
+      return { ok: false, error: r.error, message: r.message ?? "creation failed" };
+    }
     const t = (r.result as { task?: SafeScheduledTask })?.task;
     // Register the chat link locally (the create action already wrote the
     // initial mirror server-side) so the sync component mirrors/pulls it.
@@ -212,7 +257,7 @@ registerTool(
       task: t,
       message: t
         ? `Scheduled task created: ${t.name} — ${describeSchedule(t as never)} · ${t.timezone} · next run ${t.nextRunAt ? new Date(t.nextRunAt).toLocaleString() : "—"}` +
-            (t.chatId ? ` · attached to this conversation (results appear in the chat)` : "")
+            (t.chatId ? ` · dedicated chat "${t.name}" (executions + results appear there)` : "")
         : "Task created.",
     };
   },
@@ -226,7 +271,7 @@ registerTool(
 
 registerTool(
   "update_scheduled_task",
-  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state, or the conversation it is attached to. Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
+  "Modify an existing scheduled task — name, description, instructions, schedule (time/type/timezone), enabled state. The task's dedicated chat stays attached for its whole life (executions + results always land there). Find the task id first with list_scheduled_tasks. The schedule object follows the same shape as create_scheduled_task (partial updates allowed — only the fields you send change).",
   {
     type: "object",
     properties: {
@@ -234,11 +279,6 @@ registerTool(
       name: { type: "string" },
       description: { type: "string" },
       instructions: { type: "string", description: "Replacement agent job (full replacement, not a patch)" },
-      chatId: {
-        type: ["string", "null"],
-        description:
-          "Attach the schedule to a conversation (the task runs in that chat with its history). Send null to detach it back to standalone mode.",
-      },
       schedule: {
         type: "object",
         properties: {
@@ -261,9 +301,6 @@ registerTool(
     for (const k of ["name", "description", "instructions"] as const) {
       if (args[k] !== undefined) payload[k] = args[k];
     }
-    if (args.chatId !== undefined) {
-      payload.chatId = args.chatId === null ? null : String(args.chatId);
-    }
     if (args.enabled !== undefined) payload.enabled = args.enabled === true;
     if (args.schedule) {
       payload.schedule = args.schedule;
@@ -272,31 +309,9 @@ registerTool(
       const provider = await resolveProviderSnapshot();
       if (provider) payload.runtime = { provider };
     }
-    // When the attached conversation changes, capture the CURRENT links so the
-    // local chat-link registry can be updated after a successful update.
-    let preTasks: SafeScheduledTask[] | null = null;
-    const chatChanging = args.chatId !== undefined;
-    if (chatChanging) {
-      const pre = await schedulerCall<{ tasks: SafeScheduledTask[] }>(ctx, "list", {});
-      if (pre.ok) preTasks = (pre.result as { tasks?: SafeScheduledTask[] })?.tasks ?? [];
-    }
     const r = await schedulerCall<{ task: SafeScheduledTask }>(ctx, "update", payload);
     if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "update failed" };
     const t = (r.result as { task?: SafeScheduledTask })?.task;
-    // Register/unregister the local chat links when chatId changes: add the
-    // new chat; drop the old one only when no other task still holds it.
-    if (chatChanging && t) {
-      const taskId = String(args.id ?? "");
-      const oldChatId = preTasks?.find((x) => x.id === taskId)?.chatId ?? null;
-      const newChatId = t.chatId ?? null;
-      if (oldChatId && oldChatId !== newChatId) {
-        const stillHeld = (preTasks ?? []).some(
-          (x) => x.id !== taskId && (x.chatId ?? null) === oldChatId,
-        );
-        if (!stillHeld) removeLinkedChat(oldChatId);
-      }
-      if (newChatId) addLinkedChat(newChatId);
-    }
     return {
       ok: true,
       action: "updated",
@@ -316,7 +331,7 @@ registerTool(
 
 registerTool(
   "delete_scheduled_task",
-  "Permanently delete a scheduled task and its run history. The user's workspace files are NOT touched — only the schedule is removed. Find the id with list_scheduled_tasks when the user references a task by name.",
+  "Permanently delete a scheduled task and its run history. The task's dedicated chat and the user's workspace files are NOT touched — the chat simply becomes a normal conversation. Find the id with list_scheduled_tasks when the user references a task by name.",
   {
     type: "object",
     properties: { id: { type: "string", description: "Task id from list_scheduled_tasks" } },
@@ -324,10 +339,24 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const r = await schedulerCall(ctx, "delete", { id: String(args.id ?? "") });
-    return r.ok
-      ? { ok: true, action: "deleted", message: "Scheduled task deleted." }
-      : { ok: false, error: r.error, message: r.message ?? "delete failed" };
+    const taskId = String(args.id ?? "");
+    // Capture the task first so its chat link can be unregistered when no
+    // other task still holds that chat.
+    let chatId: string | null = null;
+    const pre = await schedulerCall<{ tasks: SafeScheduledTask[] }>(ctx, "list", {});
+    if (pre.ok) {
+      chatId = (pre.result as { tasks?: SafeScheduledTask[] })?.tasks?.find((x) => x.id === taskId)?.chatId ?? null;
+    }
+    const r = await schedulerCall(ctx, "delete", { id: taskId });
+    if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "delete failed" };
+    if (chatId) {
+      const stillHeld =
+        (pre.result as { tasks?: SafeScheduledTask[] } | undefined)?.tasks?.some(
+          (x) => x.id !== taskId && (x.chatId ?? null) === chatId,
+        ) ?? false;
+      if (!stillHeld) removeLinkedChat(chatId);
+    }
+    return { ok: true, action: "deleted", message: "Scheduled task deleted — its chat stays as a normal conversation." };
   },
   false,
   "automation",
@@ -339,7 +368,7 @@ registerTool(
 
 registerTool(
   "pause_scheduled_task",
-  "Pause a scheduled task — executions stop immediately, but the task, its schedule, and its run history are kept intact. Resume later with resume_scheduled_task.",
+  "Pause a scheduled task — executions stop immediately, but the task, its schedule, its chat, and its run history are kept intact. Resume later with resume_scheduled_task.",
   {
     type: "object",
     properties: { id: { type: "string", description: "Task id from list_scheduled_tasks" } },
@@ -358,7 +387,7 @@ registerTool(
 
 registerTool(
   "resume_scheduled_task",
-  "Resume a paused scheduled task — it picks up its schedule and computes the next run from now.",
+  "Resume a paused scheduled task — it picks up its schedule and computes the next run from now. Executions + results continue landing in its dedicated chat.",
   {
     type: "object",
     properties: { id: { type: "string", description: "Task id from list_scheduled_tasks" } },
@@ -389,7 +418,7 @@ registerTool(
 
 registerTool(
   "run_scheduled_task_now",
-  "Immediately execute a scheduled task (same job, same workspace) WITHOUT waiting for its schedule or changing future runs. The run happens in an isolated background sandbox — the user can watch it live in Scheduled Tasks → Run history.",
+  "Immediately execute a scheduled task (same job, same workspace) WITHOUT waiting for its schedule or changing future runs. The run happens in an isolated background sandbox and writes straight into the task's dedicated chat — the result message, tool calls, and files appear there like any conversation turn.",
   {
     type: "object",
     properties: { id: { type: "string", description: "Task id from list_scheduled_tasks" } },
@@ -397,15 +426,17 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const r = await schedulerCall<{ run: ScheduledTaskRun }>(ctx, "run_now", { id: String(args.id ?? "") });
+    const r = await schedulerCall<{ run: ScheduledTaskRun; task?: SafeScheduledTask }>(ctx, "run_now", { id: String(args.id ?? "") });
     if (!r.ok) return { ok: false, error: r.error, message: r.message ?? "run failed to start" };
     const run = (r.result as { run?: ScheduledTaskRun })?.run;
+    const t = (r.result as { task?: SafeScheduledTask })?.task;
     return {
       ok: true,
       action: "started",
       run,
+      task: t,
       message: run
-        ? `Run started (${run.id}) in sandbox ${run.sandboxId} — it continues in the background; the result lands in the task's run history.`
+        ? `Run started (${run.id}) — it continues in the background and the result lands in the task's chat${t?.chatId ? ` (${t.chatId})` : ""}.`
         : "Run started.",
     };
   },
@@ -419,7 +450,7 @@ registerTool(
 
 registerTool(
   "list_scheduled_tasks",
-  "List the user's scheduled tasks with id, name, schedule, timezone, status (Active/Paused), next run, last run. Use this to find task ids before update/delete/pause/resume, or to answer 'what automations do I have?'.",
+  "List the user's scheduled tasks with id, name, schedule, timezone, status (Active/Paused), next run, last run, and the dedicated chat each task executes in. Use this to find task ids before update/delete/pause/resume, or to answer 'what automations do I have?'.",
   {
     type: "object",
     properties: {
@@ -476,7 +507,7 @@ registerTool(
 
 registerTool(
   "get_scheduled_task_history",
-  "Get a scheduled task's execution history: each run's time, duration, status, error, final result, files changed, and tool-call count. Use it to answer 'did my task run?', 'what did it produce?', or 'why did it fail?'.",
+  "Get a scheduled task's execution history: each run's time, duration, status, error, final result, files changed, and tool-call count. The full result messages also live in the task's dedicated chat. Use it to answer 'did my task run?', 'what did it produce?', or 'why did it fail?'.",
   {
     type: "object",
     properties: {

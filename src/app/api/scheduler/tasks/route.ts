@@ -6,7 +6,10 @@
 //   Body: { action, ...payload }
 //
 // Actions: create | update | delete | pause | resume | run_now | list |
-//          get_history | get_run | status | sync_chat | pull_chat
+//          get_history | sync_chat | pull_chat
+//
+// CHAT-ONLY: `create` always yields a task with exactly one dedicated chat
+// (the given chatId or a server-created chat record).
 //
 // Responses NEVER include credentials — task records are sanitized
 // (runtime → { hasProvider, providerModel }).
@@ -17,7 +20,6 @@ import { SchedulerKV, resolveSchedulerKey } from "@/lib/scheduler/server-kv";
 import {
   createTask,
   deleteTask,
-  getRun,
   getTaskHistory,
   listTasksSafe,
   runTaskNow,
@@ -127,8 +129,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case "run_now": {
-        const run = await runTaskNow(kv, String(body.id ?? ""));
-        return NextResponse.json({ ok: true, run });
+        const r = await runTaskNow(kv, String(body.id ?? ""));
+        return NextResponse.json({ ok: true, run: r.run, task: r.task });
       }
 
       case "list": {
@@ -141,26 +143,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ ok: true, runs });
       }
 
-      case "get_run": {
-        const run = await getRun(kv, String(body.id ?? ""), String(body.runId ?? ""));
-        return NextResponse.json({ ok: true, run });
-      }
-
-      case "status": {
-        const [tasks, tickRaw] = await Promise.all([
-          listTasksSafe(kv),
-          kv.get("schedule:tick").catch(() => null),
-        ]);
-        let tickInfo: Record<string, unknown> | null = null;
-        try {
-          tickInfo = tickRaw ? (JSON.parse(tickRaw) as Record<string, unknown>) : null;
-        } catch {
-          tickInfo = null;
-        }
-        return NextResponse.json({ ok: true, tasks: tasks.length, tick: tickInfo });
-      }
-
-      // ── UNIFIED CHAT RECORDS ──────────────────────────────────────────
+      // ── UNIFIED CHAT RECORDS ─────────────────────────────────────────────
       // sync_chat: browser → KV mirror snapshot (immutable version record).
       case "sync_chat": {
         const chatId = String(body.chatId ?? "").trim();

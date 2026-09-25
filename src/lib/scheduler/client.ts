@@ -29,20 +29,6 @@ export interface SchedulerApiResponse {
   [key: string]: unknown;
 }
 
-/** Status payload for action "status". */
-export interface SchedulerStatusInfo {
-  tasks: number;
-  tick: {
-    lastTickAt: number | null;
-    trigger: string;
-    fired: number;
-    finalized: number;
-    tasks: number;
-    running: number;
-    nextDueAt: number | null;
-  } | null;
-}
-
 /** Tick payload (POST /api/scheduler/tick). */
 export interface SchedulerTickResult {
   ok: boolean;
