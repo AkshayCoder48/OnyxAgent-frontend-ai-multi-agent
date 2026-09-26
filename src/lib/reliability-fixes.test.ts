@@ -98,32 +98,41 @@ describe("normalizeToolkitPage", () => {
 // ---------------------------------------------------------------------------
 
 /** Extract a top-level `function name(args) { … }` source from the runner
- *  script (balanced braces) and evaluate it in isolation. */
-function extractRunnerFn(name: string): (...args: unknown[]) => unknown {
-  const start = BG_AGENT_SCRIPT.indexOf(`function ${name}(`);
-  if (start === -1) throw new Error(`function ${name} not found in BG_AGENT_SCRIPT`);
-  let depth = 0;
-  let end = -1;
-  for (let i = start; i < BG_AGENT_SCRIPT.length; i++) {
-    const ch = BG_AGENT_SCRIPT[i]!;
-    if (ch === "{") depth++;
-    if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
+ *  script (balanced braces) and evaluate it in isolation. `deps` names other
+ *  top-level functions the target calls (e.g. the wire-compat helpers
+ *  buildRequestMessages now routes through) — they are extracted the same
+ *  way and declared alongside the target inside the factory so the
+ *  extracted function stays runnable standalone. */
+function extractRunnerFn(name: string, deps: string[] = []): (...args: unknown[]) => unknown {
+  const extractOne = (fnName: string): string => {
+    const start = BG_AGENT_SCRIPT.indexOf(`function ${fnName}(`);
+    if (start === -1) throw new Error(`function ${fnName} not found in BG_AGENT_SCRIPT`);
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < BG_AGENT_SCRIPT.length; i++) {
+      const ch = BG_AGENT_SCRIPT[i]!;
+      if (ch === "{") depth++;
+      if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
       }
     }
-  }
-  if (end === -1) throw new Error(`unbalanced braces for ${name}`);
-  const src = BG_AGENT_SCRIPT.slice(start, end);
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-  const factory = new Function(`return (${src});`) as () => (...args: unknown[]) => unknown;
+    if (end === -1) throw new Error(`unbalanced braces for ${fnName}`);
+    return BG_AGENT_SCRIPT.slice(start, end);
+  };
+  const src = [name, ...deps].map(extractOne).join("\n");
+  const factory = new Function(`${src}\nreturn ${name};`) as () => (...args: unknown[]) => unknown;
   return factory();
 }
 
 describe("runner buildRequestMessages (reasoning never on the wire by default)", () => {
-  const buildRequestMessages = extractRunnerFn("buildRequestMessages") as (state: unknown) => unknown[];
+  const buildRequestMessages = extractRunnerFn("buildRequestMessages", [
+    "applyWireCompat",
+    "wireMode",
+  ]) as (state: unknown) => unknown[];
 
   it("strips the local reasoning field from assistant messages", () => {
     const state = {

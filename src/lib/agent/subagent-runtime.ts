@@ -11,6 +11,12 @@ import {
   learnParamBan,
   parseUnsupportedParam,
 } from "@/lib/agent/param-policy";
+import {
+  buildWireMessages,
+  getWireCompat,
+  nextStrictGatewayStep,
+  wireAllowsTools,
+} from "@/lib/agent/wire-compat";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 
 /**
@@ -195,14 +201,24 @@ export async function executeSubagentTurn(
     let maxIterations = 10;
 
     while (maxIterations-- > 0) {
+      // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of
+      // apiMessages is rebuilt each iteration through buildWireMessages, so
+      // session-learned downgrades (tool-text mode, compact/dropped system,
+      // no-tools) apply from the next round on. The subagent's own
+      // apiMessages array keeps its NATIVE shape for persistence.
+      const wireMode = getWireCompat(config.baseUrl, config.model);
       const body: Record<string, unknown> = {
         model: config.model,
-        messages: apiMessages,
+        messages: buildWireMessages(apiMessages, wireMode),
         temperature: 0.7,
         stream: true, // ALWAYS stream
         stream_options: { include_usage: true },
       };
-      if (config.toolsEnabled && toolsSchema.length > 0) {
+      if (
+        config.toolsEnabled &&
+        toolsSchema.length > 0 &&
+        wireAllowsTools(config.baseUrl, config.model)
+      ) {
         body.tools = toolsSchema;
         body.tool_choice = "auto";
       }
@@ -262,6 +278,21 @@ export async function executeSubagentTurn(
           if (badParam === "reasoning_effort") delete body.thinking;
           if (badParam === "thinking") delete body.reasoning_effort;
           console.warn(`[subagent] provider rejected '${badParam}' — stripped and retrying`);
+          continue;
+        }
+        // STRICT-GATEWAY LADDER (LLM HTTP 400 fix): mirrors the main
+        // runtime's streamRound ladder — tool-text mode, compact system,
+        // dropped system, no-tools — each learned per provider+model for
+        // the session and applied on the next iteration's body rebuild.
+        const healReason = nextStrictGatewayStep({
+          baseUrl: config.baseUrl,
+          model: config.model,
+          messages: apiMessages,
+          hasToolsParam: body.tools !== undefined,
+          errorText: errText,
+        });
+        if (healReason) {
+          console.warn(`[subagent] 400 self-healing: ${healReason} — retrying`);
           continue;
         }
         throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);

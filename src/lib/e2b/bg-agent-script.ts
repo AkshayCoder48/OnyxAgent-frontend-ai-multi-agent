@@ -564,7 +564,7 @@ function readWithTimeout(reader, ms) {
  *  regain reasoning_content for the rest of the run. */
 function buildRequestMessages(state) {
   const replay = state.replayReasoning === true;
-  return (Array.isArray(state.messages) ? state.messages : []).map((m) => {
+  const stripped = (Array.isArray(state.messages) ? state.messages : []).map((m) => {
     if (!m || typeof m !== "object") return m;
     if (m.role !== "assistant" || m.reasoning === undefined) return m;
     if (replay && m.reasoning) {
@@ -574,6 +574,117 @@ function buildRequestMessages(state) {
     void reasoning;
     return rest;
   });
+  return applyWireCompat(stripped, wireMode(state));
+}
+
+// ── STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix) ─────────────────────────
+// Mirrors src/lib/agent/wire-compat.ts (this script is self-contained —
+// the copy stays inlined on purpose, like the param policy above).
+// VERIFIED failure modes on gen.pollinations.ai community routes
+// (upstream dg-ai.daivikdagar.workers.dev, 2026-09-26): role:"tool"
+// messages → 400 "Invalid role tool"; assistant.tool_calls + a system
+// message → generic 400; system prompts containing agent-workload wording
+// ("assistant", "directive", tool-USE instructions) → generic 400.
+// VERIFIED-compatible: no/tiny-neutral system, tools param, tool calls as
+// TEXT + <tool_result> user messages, stream_options with stream:true.
+const COMPAT_SYSTEM_PROMPT = "You are helpful. Be concise.";
+
+function wireMode(state) {
+  if (!state.wireCompat || typeof state.wireCompat !== "object") {
+    state.wireCompat = { toolText: false, system: "native", noTools: false };
+  }
+  return state.wireCompat;
+}
+
+function applyWireCompat(list, mode) {
+  const out = [];
+  let sawFirstSystem = false;
+  for (const m of list) {
+    if (m && m.role === "system") {
+      if (!sawFirstSystem) {
+        sawFirstSystem = true;
+        if (mode.system === "dropped") continue;
+        if (mode.system === "compact") { out.push({ ...m, content: COMPAT_SYSTEM_PROMPT }); continue; }
+        out.push({ ...m });
+        continue;
+      }
+      // Mid-conversation system notes (wrap-up round) → user messages in
+      // downgraded modes — the content filter rejects them as system too.
+      if (mode.system !== "native") { out.push({ ...m, role: "user" }); continue; }
+      out.push({ ...m });
+      continue;
+    }
+    out.push({ ...m });
+  }
+  if (!mode.toolText) return out;
+  const transformed = [];
+  let pending = [];
+  const flush = () => {
+    if (!pending.length) return;
+    transformed.push({ role: "user", content: pending.join("\n") });
+    pending = [];
+  };
+  for (const m of out) {
+    if (!m) continue;
+    if (m.role === "tool") {
+      const header =
+        m.name || m.tool_call_id
+          ? "<tool_result" + (m.name ? ' name="' + m.name + '"' : "") + (m.tool_call_id ? ' tool_call_id="' + m.tool_call_id + '"' : "") + ">"
+          : "<tool_result>";
+      const body = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      pending.push(header + "\n" + body + "\n</tool_result>");
+      continue;
+    }
+    flush();
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const callText = m.tool_calls
+        .map((tc) => {
+          let args = (tc.function && tc.function.arguments) || "{}";
+          if (args.length > 2000) args = args.slice(0, 2000) + "…";
+          return "[Calling " + ((tc.function && tc.function.name) || "tool") + " with " + args + "]";
+        })
+        .join("\n");
+      const base = typeof m.content === "string" && m.content.trim() ? m.content.trim() + "\n" : "";
+      const copy = { ...m };
+      delete copy.tool_calls;
+      copy.content = base + callText;
+      transformed.push(copy);
+      continue;
+    }
+    transformed.push(m);
+  }
+  flush();
+  return transformed;
+}
+
+/** Ladder decision — learns the next downgrade into state.wireCompat and
+ *  returns the reason (or null when exhausted). Mirrors
+ *  nextStrictGatewayStep in wire-compat.ts. */
+function nextWireCompatStep(state, opts) {
+  const mode = wireMode(state);
+  const messages = Array.isArray(opts.messages) ? opts.messages : [];
+  const hasToolStructures = messages.some(
+    (m) => m && (m.role === "tool" || (Array.isArray(m.tool_calls) && m.tool_calls.length > 0)),
+  );
+  const hasSystem = messages.some((m) => m && m.role === "system");
+  const invalidRoleTool = /invalid role\s*["']?tool/i.test(String(opts.errorText || ""));
+  if (!mode.toolText && (hasToolStructures || invalidRoleTool)) {
+    mode.toolText = true;
+    return "tool-text mode (tool results as user messages)";
+  }
+  if (hasSystem && mode.system === "native") {
+    mode.system = "compact";
+    return "compact system prompt (provider filters system content)";
+  }
+  if (hasSystem && mode.system === "compact") {
+    mode.system = "dropped";
+    return "no system message (provider rejects system prompts)";
+  }
+  if (opts.hasToolsParam && !mode.noTools) {
+    mode.noTools = true;
+    return "no tools param (provider rejects tool declarations)";
+  }
+  return null;
 }
 
 /** Defensive JSON-Schema validation for tool parameters (LLM HTTP 400 fix).
@@ -608,7 +719,7 @@ function sanitizeToolParameters(schema) {
 }
 
 // ── The streaming LLM call ──────────────────────────────────────────────
-const MAX_ATTEMPTS = 4;
+const MAX_ATTEMPTS = 8; // 4 + headroom for the strict-gateway self-heal ladder
 const IDLE_TIMEOUT_MS = 240_000;
 
 /**
@@ -851,6 +962,25 @@ async function streamRoundEvents(state, round, finalRound) {
         clearTimeout(hardTimer);
         continue;
       }
+      // STRICT-GATEWAY LADDER (LLM HTTP 400 fix): tool-text mode →
+      // compact system → dropped system → no tools. Each step is learned
+      // into state.wireCompat for the rest of this run; the body is
+      // rebuilt (messages re-transformed, tools omitted when learned).
+      const healReason = nextWireCompatStep(state, {
+        messages: state.messages,
+        hasToolsParam: body.tools !== undefined,
+        errorText: detail400,
+      });
+      if (healReason) {
+        body.messages = buildRequestMessages(state);
+        if (state.wireCompat.noTools) {
+          delete body.tools;
+          delete body.tool_choice;
+        }
+        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "self-heal: " + healReason });
+        clearTimeout(hardTimer);
+        continue;
+      }
     }
     if (res && !res.ok) {
       const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
@@ -983,7 +1113,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   const dp = Array.isArray(p.disabledParams) ? p.disabledParams : [];
   if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;
   if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: sanitizeToolParameters(t.parameters) } }));
-  if (dp.includes("tools") || state.paramBans.includes("tools")) delete nb.tools;
+  if (dp.includes("tools") || state.paramBans.includes("tools") || wireMode(state).noTools) delete nb.tools;
   try {
     const res = await fetch(url, {
       method: "POST",

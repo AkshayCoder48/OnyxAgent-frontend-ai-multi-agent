@@ -209,12 +209,11 @@ export function useChat(options: UseChatOptions = {}) {
       emit?: (event: import("@/types").WSEvent) => void,
     ): Promise<AgentTurnOptions | null> => {
       // Provider: explicit override (providerIdRef) → first active provider.
-      let providers = await aiProviderService.list(userId, true);
-      // If no providers found for this user ID (non-auth migration), load ALL
-      if (providers.length === 0) {
-        const { db } = await import("@/lib/db");
-        providers = await db.ai_providers.toArray();
-      }
+      // NOTE (stale "OnyxAI" ghost fix): no load-ALL fallback. The old
+      // `db.ai_providers.toArray()` fallback pulled rows belonging to OTHER
+      // (obsolete/transient) user ids — deleted legacy seed rows could ride
+      // a turn on the wrong provider. An honest empty list errors below.
+      const providers = await aiProviderService.list(userId, true);
       if (providers.length === 0) {
         emit?.({
           type: "error",

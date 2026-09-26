@@ -26,6 +26,7 @@
  */
 
 import { applyParamPolicy } from "@/lib/agent/param-policy";
+import { buildWireMessages, getWireCompat } from "@/lib/agent/wire-compat";
 
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
@@ -249,7 +250,14 @@ export async function generateChatTitle(opts: {
 
     const body: Record<string, unknown> = {
       model: provider.model,
-      messages: buildTitleMessages(firstMessage),
+      // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): apply any modes the
+      // session already learned for this provider+model (e.g. the system
+      // prompt is content-filtered → compact/dropped). No probing ladder
+      // here on purpose — the naming call must fail fast to its fallback.
+      messages: buildWireMessages(
+        buildTitleMessages(firstMessage),
+        getWireCompat(provider.baseUrl, provider.model),
+      ),
       stream: false, // one tiny JSON reply — no SSE needed
     };
     // Strip params the user disabled / the session auto-learned to ban.
@@ -273,7 +281,45 @@ export async function generateChatTitle(opts: {
         cache: "no-store",
       },
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      // STRICT-GATEWAY one-shot retry (LLM HTTP 400 fix): providers that
+      // content-filter system prompts (e.g. gen.pollinations.ai community
+      // routes reject this very naming prompt — verified live) get ONE
+      // immediate retry with the system message dropped. The model can
+      // still name the chat from the user message alone; any other failure
+      // resolves null and the caller applies the fallback title. No
+      // probing ladder — the naming call must fail fast.
+      if (response.status === 400 && Array.isArray(body.messages)) {
+        const withoutSystem = (body.messages as Array<{ role: string }>).filter(
+          (m) => m.role !== "system",
+        );
+        if (withoutSystem.length !== (body.messages as unknown[]).length) {
+          const retry = await fetch(
+            `${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-target-url": targetUrl,
+                Authorization: `Bearer ${provider.apiKey}`,
+              },
+              body: JSON.stringify({ ...body, messages: withoutSystem }),
+              signal: controller.signal,
+              cache: "no-store",
+            },
+          );
+          if (retry.ok) {
+            const rawRetry = parseChatTitleBody(await retry.text());
+            if (rawRetry !== null) {
+              const titleRetry = sanitizeChatTitle(rawRetry);
+              if (titleRetry) return titleRetry;
+            }
+            return null;
+          }
+        }
+      }
+      return null;
+    }
 
     const raw = parseChatTitleBody(await response.text());
     if (raw === null) return null;

@@ -268,11 +268,9 @@ export async function resolveProviderSnapshot(): Promise<ProviderSnapshot | null
     const { useAuthStore } = await import("@/stores");
     const uid = useAuthStore.getState().user?.id;
     if (!uid) return null;
-    let providers = await aiProviderService.list(uid, true);
-    if (providers.length === 0) {
-      const { db } = await import("@/lib/db");
-      providers = await db.ai_providers.toArray();
-    }
+    // NOTE (stale "OnyxAI" ghost fix): no load-ALL fallback — rows under
+    // obsolete/transient user ids must never ride an unattended run.
+    const providers = await aiProviderService.list(uid, true);
     if (providers.length === 0) return null;
     const storeSelection = useChatStore.getState();
     const providerOverrideId = storeSelection.selectedProviderId ?? null;

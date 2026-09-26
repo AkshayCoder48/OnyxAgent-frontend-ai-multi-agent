@@ -15,9 +15,21 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import type { ID } from "@/types";
 
+// ── AUTH-RESOLVED GATING (stale "OnyxAI" ghost fix) ─────────────────────────
+// The auth store SYNCHRONOUSLY starts with the transient "local-user" id;
+// init() swaps in the real (nanoid) id shortly after. Queries keyed on the
+// transient id would read rows belonging to no real account — deleted
+// legacy seed rows ("OnyxAI") resurfaced in pickers while the user's own
+// rows stayed hidden until a remount. Every per-user list query is gated
+// on `authResolved` so it fires exactly once, against the FINAL id.
+function useAuthScope() {
+  const userId = useAuthStore((s) => s.user?.id);
+  const authResolved = useAuthStore((s) => s.authResolved);
+  return { userId: authResolved ? userId : null, authResolved };
+}
+
 export function useProviders() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["ai-providers", userId],
@@ -53,8 +65,7 @@ export function useProviders() {
 }
 
 export function useSettings() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["user-settings", userId],
@@ -91,8 +102,7 @@ export function useSettings() {
 }
 
 export function useSlashCommands() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["slash-commands", userId],
@@ -133,8 +143,7 @@ export function useSlashCommands() {
 }
 
 export function useMCPServers() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["mcp-servers", userId],
@@ -165,8 +174,7 @@ export function useMCPServers() {
 }
 
 export function useCustomTools() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["custom-tools", userId],
@@ -197,8 +205,7 @@ export function useCustomTools() {
 }
 
 export function useSkills() {
-  const { user } = useAuthStore();
-  const userId = user?.id;
+  const { userId } = useAuthScope();
   const qc = useQueryClient();
   const query = useQuery({
     queryKey: ["skills", userId],

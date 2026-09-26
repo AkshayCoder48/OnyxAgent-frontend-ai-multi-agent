@@ -54,6 +54,12 @@ import {
   learnParamBan,
   parseUnsupportedParam,
 } from "@/lib/agent/param-policy";
+import {
+  buildWireMessages,
+  getWireCompat,
+  nextStrictGatewayStep,
+  wireAllowsTools,
+} from "@/lib/agent/wire-compat";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -703,37 +709,49 @@ async function streamRound(
     ? base
     : `${base}/chat/completions`;
 
-  const body: Record<string, unknown> = {
-    model: provider.model,
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
+  // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of the
+  // messages is rebuilt through buildWireMessages on EVERY request (and
+  // re-rebuilt by each self-healing retry) so the runtime's own `messages`
+  // array — which persistence and later rounds still read in NATIVE form —
+  // is never mutated by a downgrade. `wireMode` is a live reference into the
+  // session-scoped registry: steps learned by nextStrictGatewayStep below
+  // are honored by the next buildBody() call.
+  const wireMode = getWireCompat(provider.baseUrl, provider.model);
+  const buildBody = (): Record<string, unknown> => {
+    const b: Record<string, unknown> = {
+      model: provider.model,
+      messages: buildWireMessages(messages, wireMode),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (
+      tools.length > 0 &&
+      provider.toolsEnabled !== false &&
+      wireAllowsTools(provider.baseUrl, provider.model)
+    ) {
+      b.tools = tools;
+      b.tool_choice = "auto";
+    }
+    if (typeof temperature === "number") b.temperature = temperature;
+    // Provider-specific thinking toggle (e.g. Poolside's chat_template_kwargs).
+    if (provider.thinkingEnabled) {
+      b.chat_template_kwargs = { enable_thinking: true };
+    }
+    if (thinkingEffort) {
+      // OpenAI reasoning effort hint + DeepSeek-style `thinking` flag — the
+      // proxy passes both through; the provider ignores whichever it doesn't
+      // recognise.
+      b.reasoning_effort = thinkingEffort;
+      b.thinking = { type: "enabled", effort: thinkingEffort };
+    }
+    applyParamPolicy(b, {
+      baseUrl: provider.baseUrl,
+      model: provider.model,
+      disabledParams: provider.disabledParams,
+    });
+    return b;
   };
-  if (tools.length > 0 && provider.toolsEnabled !== false) {
-    body.tools = tools;
-    body.tool_choice = "auto";
-  }
-  if (typeof temperature === "number") body.temperature = temperature;
-  // Provider-specific thinking toggle (e.g. Poolside's chat_template_kwargs).
-  if (provider.thinkingEnabled) {
-    body.chat_template_kwargs = { enable_thinking: true };
-  }
-  if (thinkingEffort) {
-    // OpenAI reasoning effort hint + DeepSeek-style `thinking` flag — the
-    // proxy passes both through; the provider ignores whichever it doesn't
-    // recognise.
-    body.reasoning_effort = thinkingEffort;
-    body.thinking = { type: "enabled", effort: thinkingEffort };
-  }
-
-  // PARAMETER POLICY: strip params the user disabled for this provider AND
-  // params auto-learned to be rejected (session scope) — model routes that
-  // reject e.g. `temperature` with HTTP 400 unsupported_parameter.
-  applyParamPolicy(body, {
-    baseUrl: provider.baseUrl,
-    model: provider.model,
-    disabledParams: provider.disabledParams,
-  });
+  let body = buildBody();
   // Self-healing bookkeeping: params stripped below land here so the loop
   // can't strip forever.
   const strippedParams = new Set<string>();
@@ -832,6 +850,26 @@ async function streamRound(
           }
         }
         console.warn("[agent] provider requires reasoning_content replay — restoring it and retrying");
+        continue;
+      }
+      // STRICT-GATEWAY LADDER (LLM HTTP 400 fix, 2026-09-26): providers like
+      // the gen.pollinations.ai community routes reject — with a GENERIC 400
+      // "Something was wrong with the input data" — (a) role:"tool" result
+      // messages, (b) assistant.tool_calls fields while a system message is
+      // present, and (c) system prompts containing agent-workload wording
+      // ("assistant", "directive", tool-USE instructions). Each ladder step
+      // is learned per provider+model for the session and the body is
+      // rebuilt; when the ladder is exhausted the original error surfaces.
+      const healReason = nextStrictGatewayStep({
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        messages,
+        hasToolsParam: body.tools !== undefined,
+        errorText: errText,
+      });
+      if (healReason) {
+        console.warn(`[agent] 400 self-healing: ${healReason} — retrying`);
+        body = buildBody();
         continue;
       }
     }

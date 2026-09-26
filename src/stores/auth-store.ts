@@ -9,6 +9,13 @@ interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  /** True once `init()` has resolved the real user (register/login/rehydrate
+   *  or fallback). Data hooks key their queries on `user.id` — but the store
+   *  SYNCHRONOUSLY starts with the transient "local-user" id, so reading
+   *  providers/settings before `authResolved` would query the WRONG id and
+   *  render stale rows (deleted "OnyxAI" ghosts) while hiding the user's
+   *  real data. Consumers gate on this flag instead of racing init(). */
+  authResolved: boolean;
   vaultUnlocked: boolean;
   avatarVersion: number;
   /** Transient auth error message (set by login/register failures). */
@@ -88,6 +95,71 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+// ── AI-PROVIDER OWNERSHIP RECONCILE (stale "OnyxAI" ghost fix) ────────────
+// Old app versions seeded an "OnyxAI" provider row under the TRANSIENT
+// pre-auth id ("local-user") and adopted rows across ids, so rows survive
+// in Dexie that no Settings view (keyed on the resolved user id) can show
+// or delete — they resurfaced in the chat model picker via the old
+// load-ALL fallback. Once init resolves the REAL user we heal the table:
+//  - the user HAS providers under their own id → PURGE foreign rows that
+//    belong to the transient id or to users that no longer exist (the
+//    ghosts die permanently); other LIVE users' rows are never touched.
+//  - the user has NO providers but foreign rows exist → ADOPT them
+//    (rare race: providers created while the transient id was active),
+//    EXCEPT rows that are recognizably the legacy OnyxAI seed (name
+//    "OnyxAI"/"Onyx AI" or the QVAC base URL http://localhost:11434/v1)
+//    — those are purged, never adopted (they would resurrect as ghosts).
+let reconcileDone = false;
+async function reconcileProviderOwnership(userId: string): Promise<void> {
+  if (reconcileDone) return;
+  reconcileDone = true;
+  try {
+    const { db } = await import("@/lib/db");
+    const isLegacySeed = (r: { name?: string; base_url?: string }) =>
+      /^onyx\s*ai$/i.test((r.name ?? "").trim()) ||
+      /^https?:\/\/localhost:11434\/v1\/?$/i.test((r.base_url ?? "").trim());
+    const own = await db.ai_providers.where("user_id").equals(userId).toArray();
+    const foreign = (await db.ai_providers.toArray()).filter(
+      (r) => r.user_id !== userId,
+    );
+    if (own.length > 0) {
+      if (foreign.length === 0) return;
+      const liveIds = new Set((await db.users.toArray()).map((u) => u.id));
+      liveIds.add(userId);
+      const stale = foreign.filter(
+        (r) => r.user_id === DEFAULT_USER_ID || !liveIds.has(r.user_id),
+      );
+      if (stale.length > 0) {
+        await db.ai_providers.bulkDelete(stale.map((r) => r.id));
+        console.info(
+          `[auth] purged ${stale.length} stale AI provider row(s) left under obsolete user ids`,
+        );
+      }
+      return;
+    }
+    if (foreign.length === 0) return;
+    const adoptable = foreign.filter((r) => !isLegacySeed(r));
+    const ghosts = foreign.filter((r) => isLegacySeed(r));
+    if (adoptable.length > 0) {
+      await db.ai_providers.bulkPut(
+        adoptable.map((r) => ({ ...r, user_id: userId, updated_at: new Date().toISOString() })),
+      );
+      console.info(
+        `[auth] adopted ${adoptable.length} AI provider row(s) created before auth resolved`,
+      );
+    }
+    if (ghosts.length > 0) {
+      await db.ai_providers.bulkDelete(ghosts.map((r) => r.id));
+      console.info(
+        `[auth] purged ${ghosts.length} legacy OnyxAI seed row(s)`,
+      );
+    }
+  } catch {
+    // Dexie unavailable (private mode / SSR) — non-fatal; the reactive
+    // loading fix alone already prevents the ghosts from rendering.
+  }
+}
+
 /**
  * Build the default local User object. Used as a fallback when Dexie is
  * unavailable (e.g. SSR / private mode) so the UI still renders something.
@@ -121,6 +193,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
   isAuthenticated: true,
   isLoading: false,
+  // The transient id above is NOT authoritative until init() resolves.
+  authResolved: false,
   vaultUnlocked: true,
   avatarVersion: 0,
   error: null,
@@ -153,6 +227,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         vaultUnlocked: true,
         isLoading: false,
         error: null,
+        authResolved: true,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Login failed";
@@ -172,6 +247,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         vaultUnlocked: true,
         isLoading: false,
         error: null,
+        authResolved: true,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Registration failed";
@@ -265,7 +341,13 @@ export const useAuthStore = create<AuthState>((set) => ({
             isAuthenticated: true,
             vaultUnlocked: true,
             isLoading: false,
+            authResolved: true,
           });
+          // Heal the ai_providers table (stale OnyxAI ghosts under the
+          // transient pre-auth id) once the real user id is known.
+          if (user.id !== DEFAULT_USER_ID) {
+            void reconcileProviderOwnership(user.id);
+          }
         })(), 5000);
       } catch {
         // Timeout or error — fall back to the default local user so the UI
@@ -277,6 +359,7 @@ export const useAuthStore = create<AuthState>((set) => ({
           isAuthenticated: true,
           vaultUnlocked: true,
           isLoading: false,
+          authResolved: true,
         });
       } finally {
         initDone = true;
@@ -302,6 +385,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       isAuthenticated: true,
       isLoading: false,
       vaultUnlocked: true,
+      authResolved: true,
     });
   },
 }));

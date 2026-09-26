@@ -6,10 +6,11 @@ import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders } fro
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
-import { useConversationStore, useChatStore } from "@/stores";
+import { useConversationStore, useChatStore, useAuthStore } from "@/stores";
 import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display-store";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { useExperimentalStore } from "@/stores/experimental-store";
+import { useProviders } from "@/hooks/use-data";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -93,107 +94,103 @@ export function ChatControls({
   const [availableModels] = useState<{ value: string; label: string }[]>([
     { value: "", label: "Default" },
   ]);
-  const [providers, setProviders] = useState<CustomProvider[]>([]);
+
+  // ── PROVIDERS — REACTIVE, AUTH-RESOLVED (stale "OnyxAI" ghost fix) ──────
+  // The old one-shot effect read `useAuthStore.getState().user?.id` on mount
+  // — BEFORE init() resolved the real user id — so it queried the transient
+  // "local-user" id and fell back to loading ALL rows from Dexie. That
+  // rendered deleted legacy rows (old "OnyxAI" seeds under obsolete ids)
+  // while hiding the user's actual providers until a Settings round-trip
+  // remounted the component. Now the picker subscribes to the SAME TanStack
+  // query Settings uses (["ai-providers", userId], gated on authResolved):
+  // it re-keys when init swaps in the real id, and mutations in Settings
+  // (add/edit/delete) invalidate it live — no remount needed.
+  const authResolved = useAuthStore((s) => s.authResolved);
+  const { providers: providerRows } = useProviders();
+  const providers = useMemo<CustomProvider[]>(
+    () =>
+      providerRows.map((p) => ({
+        id: p.id,
+        name: p.name,
+        base_url: p.base_url,
+        has_api_key: !!p.api_key_encrypted,
+        models: p.models || [],
+        is_active: p.is_active,
+      })),
+    [providerRows],
+  );
 
   useEffect(() => {
-    // Load AI providers from IndexedDB (backendless — no API route).
-    // Each provider has a list of models; we show them all grouped by provider.
-    (async () => {
-      try {
-        const { aiProviderService } = await import("@/lib/services");
-        const { useAuthStore } = await import("@/stores");
-        const { db } = await import("@/lib/db");
-        const userId = useAuthStore.getState().user?.id;
-        let userProviders = userId ? await aiProviderService.list(userId) : [];
+    // Selection resolution (PRD §12–§14) — runs whenever the RESOLVED
+    // provider list changes. Initialize ONLY when there is no valid
+    // selection — never overwrite one. Order: live store (session) →
+    // persisted preference → default. Skipped entirely until auth resolved
+    // (an empty/transient list would misvalidate the persisted pick) and
+    // while no providers exist.
+    if (!authResolved || providers.length === 0) return;
+    const customProviders = providers;
 
-        // If no providers found for this user ID (e.g. after non-auth migration
-        // where the user ID changed), try loading ALL providers from the DB.
-        if (userProviders.length === 0) {
-          userProviders = await db.ai_providers.toArray();
+    const store = useChatStore.getState();
+    /** "default" = explicit no-selection; "valid" = usable; null = gone.
+     *  Validation is provider-existence only: a model id NOT in the
+     *  provider's list is still valid — the "Custom model ID" input
+     *  intentionally sends arbitrary ids to the provider, and the
+     *  runtime surfaces a provider error if the id is genuinely dead. */
+    const validate = (
+      providerId: string | null | undefined,
+      model: string | null | undefined,
+    ): "default" | "valid" | null => {
+      if (providerId == null && (model == null || model === "")) return "default";
+      const p = customProviders.find((x) => x.id === providerId);
+      if (!p) return null; // provider disappeared → selection unusable
+      return "valid";
+    };
+
+    let nextProviderId: string | null = store.selectedProviderId;
+    let nextModel: string | null = store.selectedModel;
+    const storeStatus = validate(nextProviderId, nextModel);
+
+    if (storeStatus !== "valid") {
+      const persisted = loadModelPref();
+      if (persisted && validate(persisted.providerId, persisted.model) !== null) {
+        // Restored preference — covers an explicit "Default" pick too
+        // ({null, null} validates as "default", not null).
+        nextProviderId = persisted.providerId;
+        nextModel = persisted.model;
+      } else if (persisted === null) {
+        // No preference was EVER saved → first-visit initialization: the
+        // active provider's first model. This is the ONLY path that
+        // picks a model on the user's behalf (PRD §12: initialization
+        // happens only when the active model is genuinely undefined).
+        const activeProvider =
+          customProviders.find((p) => p.is_active) || customProviders[0];
+        if (activeProvider && activeProvider.models.length > 0) {
+          nextProviderId = activeProvider.id;
+          nextModel = activeProvider.models[0]!;
+        } else {
+          nextProviderId = null;
+          nextModel = null;
         }
-
-        // Map to the CustomProvider shape the component expects
-        const customProviders: CustomProvider[] = userProviders.map((p) => ({
-          id: p.id,
-          name: p.name,
-          base_url: p.base_url,
-          has_api_key: !!p.api_key_encrypted,
-          models: p.models || [],
-          is_active: p.is_active,
-        }));
-        setProviders(customProviders);
-
-        // ── SELECTION RESOLUTION (PRD §12–§14) ────────────────────────────
-        // Initialize ONLY when there is no valid selection — never overwrite
-        // one. Order: live store (session) → persisted preference → default.
-        // A fresh page load starts the store at null/null, which is
-        // indistinguishable from an explicit "Default" pick — so the
-        // persisted localStorage preference (saved on every pick) decides.
-        const store = useChatStore.getState();
-        /** "default" = explicit no-selection; "valid" = usable; null = gone.
-         *  Validation is provider-existence only: a model id NOT in the
-         *  provider's list is still valid — the "Custom model ID" input
-         *  intentionally sends arbitrary ids to the provider, and the
-         *  runtime surfaces a provider error if the id is genuinely dead. */
-        const validate = (
-          providerId: string | null | undefined,
-          model: string | null | undefined,
-        ): "default" | "valid" | null => {
-          if (providerId == null && (model == null || model === "")) return "default";
-          const p = customProviders.find((x) => x.id === providerId);
-          if (!p) return null; // provider disappeared → selection unusable
-          return "valid";
-        };
-
-        let nextProviderId: string | null = store.selectedProviderId;
-        let nextModel: string | null = store.selectedModel;
-        const storeStatus = validate(nextProviderId, nextModel);
-
-        if (storeStatus !== "valid") {
-          const persisted = loadModelPref();
-          if (persisted && validate(persisted.providerId, persisted.model) !== null) {
-            // Restored preference — covers an explicit "Default" pick too
-            // ({null, null} validates as "default", not null).
-            nextProviderId = persisted.providerId;
-            nextModel = persisted.model;
-          } else if (persisted === null) {
-            // No preference was EVER saved → first-visit initialization: the
-            // active provider's first model. This is the ONLY path that
-            // picks a model on the user's behalf (PRD §12: initialization
-            // happens only when the active model is genuinely undefined).
-            const activeProvider =
-              customProviders.find((p) => p.is_active) || customProviders[0];
-            if (activeProvider && activeProvider.models.length > 0) {
-              nextProviderId = activeProvider.id;
-              nextModel = activeProvider.models[0]!;
-            } else {
-              nextProviderId = null;
-              nextModel = null;
-            }
-          }
-          // else: a persisted preference EXISTS but is invalid (provider or
-          // model removed since it was saved) → fall back to the "Default"
-          // no-selection; buildTurnOptions's provider-default fallback keeps
-          // requests working, and the UI honestly shows "Default".
-        }
-
-        // Apply ONLY when it differs from what the store already holds — a
-        // valid existing selection is never touched, and the runtime refs
-        // (modelRef/providerIdRef) are synced by the same setters.
-        if (nextProviderId !== store.selectedProviderId || nextModel !== store.selectedModel) {
-          const provider = nextProviderId
-            ? customProviders.find((x) => x.id === nextProviderId) ?? null
-            : null;
-          onProviderSelect?.(provider);
-          onModelChange?.(nextModel);
-          saveModelPref(nextProviderId, nextModel);
-        }
-      } catch {
-        // Vault locked or DB unavailable — model list stays empty
       }
-    })();
+      // else: a persisted preference EXISTS but is invalid (provider or
+      // model removed since it was saved) → fall back to the "Default"
+      // no-selection; buildTurnOptions's provider-default fallback keeps
+      // requests working, and the UI honestly shows "Default".
+    }
+
+    // Apply ONLY when it differs from what the store already holds — a
+    // valid existing selection is never touched, and the runtime refs
+    // (modelRef/providerIdRef) are synced by the same setters.
+    if (nextProviderId !== store.selectedProviderId || nextModel !== store.selectedModel) {
+      const provider = nextProviderId
+        ? customProviders.find((x) => x.id === nextProviderId) ?? null
+        : null;
+      onProviderSelect?.(provider);
+      onModelChange?.(nextModel);
+      saveModelPref(nextProviderId, nextModel);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [providers, authResolved]);
 
   const [temperature, setTemperature] = useState<number | null>(null);
   const [effort, setEffort] = useState<ThinkingEffort>("off");
