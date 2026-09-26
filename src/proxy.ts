@@ -1,3 +1,7 @@
+// Next.js 16 "proxy" convention (replaces the deprecated middleware.ts —
+// the build warned: 'The "middleware" file convention is deprecated.
+// Please use "proxy" instead'). next-intl's createMiddleware returns a
+// standard request handler, which serves as the default proxy export.
 import createMiddleware from "next-intl/middleware";
 import { locales, defaultLocale } from "./i18n";
 

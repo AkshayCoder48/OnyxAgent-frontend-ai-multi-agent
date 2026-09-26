@@ -761,13 +761,17 @@ async function streamRound(
   emit({ type: "llm_started", timestamp: nowISO() });
 
   // RATE-LIMIT POLICY (user-requested change): NO automatic retries on
-  // 429/529/rate-limit or transient 5xx — the old backoff loop silently
-  // burned 3+ extra requests per failure (devouring rate-limited providers'
-  // quotas) while the UI showed "retrying automatically". Now a rate limit
-  // or gateway error FAILS FAST with a clear, actionable message + full
-  // provider body in the Logs panel. Only the 400 self-healing ladder
-  // below still retries (it FIXES the request, not just re-sends it).
+  // 429/529/rate-limit — the old backoff loop silently burned 3+ extra
+  // requests per failure (devouring rate-limited providers' quotas) while
+  // the UI showed "retrying automatically". A rate limit now FAILS FAST
+  // with a clear, actionable message + full provider body in the Logs
+  // panel. Two narrow exceptions still retry because they never reach the
+  // model (zero quota cost): the 400 self-healing ladder (it FIXES the
+  // request, not just re-sends it) and the transient-gateway retry below.
   let response: Response;
+  // TRANSIENT GATEWAY RETRY (HTTP 502 fix): 502/503/504 blips get up to 2
+  // quick retries inside this loop — see the retry block below.
+  let gatewayRetries = 0;
   // Set when a 400 exhausted the self-healing ladder — the failure is NOT
   // structural, so the error branch surfaces the honest content-filter
   // explanation instead of the provider's cryptic generic body.
@@ -869,8 +873,47 @@ async function streamRound(
       ladderExhausted = true;
     }
 
-    // No rate-limit / 5xx auto-retry (removed per user request) — fall
-    // through; the !response.ok branch below surfaces a clear error.
+    // TRANSIENT GATEWAY RETRY (HTTP 502 fix): 502/503/504 come from the
+    // provider's load balancer (e.g. the AWS ALB "502 Bad Gateway" HTML
+    // page) when its upstream briefly hiccups — the request was NEVER
+    // processed, so an immediate retry costs no quota and almost always
+    // succeeds. Deliberately NOT rate-limit retrying (429/529 stay
+    // fail-fast): the model never saw this request. Max 2 quick retries;
+    // a failure that survives them surfaces below with the full body + an
+    // honest explanation.
+    if (
+      (response.status === 502 || response.status === 503 || response.status === 504) &&
+      gatewayRetries < 2
+    ) {
+      gatewayRetries += 1;
+      const delayMs = gatewayRetries === 1 ? 700 : 1600;
+      console.warn(
+        `[agent] provider gateway hiccup (HTTP ${response.status}) — retrying in ${delayMs}ms (${gatewayRetries}/2)`,
+      );
+      logWarn("llm", `Provider gateway hiccup (HTTP ${response.status}) — retrying in ${delayMs}ms (${gatewayRetries}/2)`, {
+        context: { model: provider.model, status: response.status, retry_in_ms: delayMs },
+      });
+      // Sleep, but wake early if the user aborts — the next fetch then
+      // throws AbortError immediately, which keeps the clean user-stop path.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delayMs);
+        if (signal) {
+          if (signal.aborted) {
+            clearTimeout(timer);
+            resolve();
+            return;
+          }
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        }
+      });
+      continue;
+    }
+
+    // No rate-limit auto-retry (removed per user request) — fall through;
+    // the !response.ok branch below surfaces a clear error.
     break;
   }
 
@@ -907,6 +950,18 @@ async function streamRound(
     // obvious instead of a cryptic provider string.
     if (response.status === 429 || response.status === 529 || /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(rawBody)) {
       detail = `Rate limit reached (HTTP ${response.status}) — the provider is throttling requests. Wait a moment and send again, or switch model/provider. ${detail.slice(0, 200)}`;
+    }
+    // HONEST GATEWAY-DOWN ERROR (HTTP 502 fix): a 502/503/504 that survived
+    // both quick retries means the provider's server is genuinely
+    // unreachable right now — their load balancer answers with an HTML
+    // error page ("502 Bad Gateway … alb") and the request was never
+    // processed. Replace the wall of HTML with what actually happened +
+    // the next step; the raw body stays in the Logs panel detail below.
+    if (response.status === 502 || response.status === 503 || response.status === 504) {
+      detail =
+        `Provider gateway is down (HTTP ${response.status}) — the provider's server is temporarily unreachable ` +
+        `(their load balancer returned an error page; the request was never processed, so no quota was used). ` +
+        `This is transient on the provider's side — wait a moment and send again, or switch model/provider.`;
     }
     // HONEST CONTENT-FILTER ERROR (ladder exhausted): a 400 that survived
     // every structural downgrade is almost always a provider-side content

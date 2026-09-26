@@ -201,6 +201,9 @@ export async function executeSubagentTurn(
     const targetUrl = config.noPrefix ? base : `${base}/chat/completions`;
     let fullResponse = "";
     let maxIterations = 10;
+    // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
+    // bounded per subagent run so a dead provider can't loop forever.
+    let gatewayRetries = 0;
 
     while (maxIterations-- > 0) {
       // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of
@@ -263,6 +266,24 @@ export async function executeSubagentTurn(
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
+        // TRANSIENT GATEWAY RETRY (HTTP 502 fix): 502/503/504 come from the
+        // provider's load balancer ("502 Bad Gateway … alb" HTML page) when
+        // its upstream briefly hiccups — the request was never processed,
+        // so an immediate retry costs no quota. NOT rate-limit retrying
+        // (429/529 stay fail-fast). Max 2 quick retries per subagent run.
+        if (
+          (res.status === 502 || res.status === 503 || res.status === 504) &&
+          gatewayRetries < 2
+        ) {
+          gatewayRetries += 1;
+          const delayMs = gatewayRetries === 1 ? 700 : 1600;
+          console.warn(`[subagent] provider gateway hiccup (HTTP ${res.status}) — retrying in ${delayMs}ms (${gatewayRetries}/2)`);
+          logWarn("subagent", `Subagent LLM: provider gateway hiccup (HTTP ${res.status}) — retrying in ${delayMs}ms (${gatewayRetries}/2)`, {
+            context: { model: config.model, status: res.status, retry_in_ms: delayMs },
+          });
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
         // PARAMETER SELF-HEALING: a 400 unsupported_parameter names the
         // offending field — learn the ban, strip it, retry once.
         const badParam = parseUnsupportedParam(errText);
@@ -308,6 +329,18 @@ export async function executeSubagentTurn(
         if (res.status === 429 || res.status === 529) {
           throw new Error(
             `Rate limit reached (HTTP ${res.status}) — the provider is throttling requests. Wait a moment and try again. ${errText.slice(0, 200)}`,
+          );
+        }
+        // HONEST GATEWAY-DOWN ERROR (HTTP 502 fix): a 502/503/504 that
+        // survived both quick retries — provider's server is unreachable
+        // (their load balancer's HTML error page); replace the wall of HTML
+        // with what happened + the next step. Raw body stays in the log
+        // detail above.
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          throw new Error(
+            `Provider gateway is down (HTTP ${res.status}) — the provider's server is temporarily unreachable ` +
+            `(their load balancer returned an error page; the request was never processed, so no quota was used). ` +
+            `This is transient on the provider's side — wait a moment and try again, or switch model/provider.`,
           );
         }
         throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);
