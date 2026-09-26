@@ -983,7 +983,10 @@ async function streamRoundEvents(state, round, finalRound) {
       }
     }
     if (res && !res.ok) {
-      const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
+      // RATE-LIMIT POLICY (user-requested change): 429/529 is NOT retried
+      // — fail fast with a clear message (auto-retrying burns the quota).
+      // Only transient 5xx / 408 still retry with backoff.
+      const retryable = (res.status >= 500 || res.status === 408) && res.status !== 529;
       if (retryable && attempt < MAX_ATTEMPTS) {
         const delay = Math.min(2000 * attempt, 15_000);
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "HTTP " + res.status });
@@ -993,9 +996,12 @@ async function streamRoundEvents(state, round, finalRound) {
       }
       const detail = await res.text().catch(() => "");
       clearTimeout(hardTimer);
+      if (res.status === 429 || res.status === 529) {
+        return { content: "", reasoning: "", toolCalls: [], error: "Rate limit reached (HTTP " + res.status + ") — the provider is throttling requests. Wait a moment and send again. " + cleanDetail(detail, res.status) };
+      }
       // 4xx on stream:true → MAY be "streaming not supported" — one
       // non-streaming fallback attempt before giving up.
-      if (res.status < 500 && res.status !== 429 && res.status !== 408) {
+      if (res.status < 500 && res.status !== 408) {
         return await nonStreamFallback(state, round, feedDeltas, finishStream);
       }
       return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) + requestShapeHint(state, round, body) };

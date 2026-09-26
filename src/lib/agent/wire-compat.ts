@@ -69,7 +69,10 @@ export interface WireMessage {
 export const COMPAT_SYSTEM_PROMPT = "You are helpful. Be concise.";
 
 // ---------------------------------------------------------------------------
-// Session-scoped learning (per provider base URL + model).
+// Session-scoped learning (per provider base URL + model) — PERSISTED to
+// localStorage so a strict gateway's quirks are learned ONCE per provider
+// ever, not once per browser session (each re-learn cost 1-3 extra 400s on
+// rate-limited providers).
 // ---------------------------------------------------------------------------
 
 export interface WireCompatMode {
@@ -84,16 +87,52 @@ export interface WireCompatMode {
 const DEFAULT_MODE: WireCompatMode = { toolText: false, system: "native", noTools: false };
 
 const learnedModes = new Map<string, WireCompatMode>();
+// v2 — bumped when noTools stopped persisting (false-positive protection:
+// a provider-side CONTENT filter (verified live on gen.pollinations.ai
+// community routes — they filter USER messages mentioning tools/MCP
+// workloads) made the ladder's noTools step learn permanently even though
+// the provider accepts tools fine).
+const PERSIST_KEY = "onyx-wire-compat-v2";
 
 function modeKey(baseUrl: string, model: string): string {
   return `${baseUrl.replace(/\/+$/, "")}|${model}`;
+}
+
+/** Read the persisted modes map (SSR/test-safe — {} when unavailable). */
+function readPersistedModes(): Record<string, WireCompatMode> {
+  try {
+    if (typeof localStorage === "undefined") return {};
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, WireCompatMode>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Persist one mode under its key (best-effort — never throws). */
+function persistMode(key: string, mode: WireCompatMode): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const all = readPersistedModes();
+    all[key] = mode;
+    localStorage.setItem(PERSIST_KEY, JSON.stringify(all));
+  } catch {
+    // Quota / private-mode — session memory still works.
+  }
 }
 
 function modesFor(baseUrl: string, model: string): WireCompatMode {
   const key = modeKey(baseUrl, model);
   let mode = learnedModes.get(key);
   if (!mode) {
-    mode = { ...DEFAULT_MODE };
+    // Hydrate from persistence on first touch this session.
+    const persisted = readPersistedModes()[key];
+    mode =
+      persisted && typeof persisted === "object" && typeof persisted.system === "string"
+        ? { toolText: !!persisted.toolText, system: persisted.system as WireCompatMode["system"], noTools: !!persisted.noTools }
+        : { ...DEFAULT_MODE };
     learnedModes.set(key, mode);
   }
   return mode;
@@ -229,8 +268,31 @@ export function nextStrictGatewayStep(opts: {
   /** Extra params the user already disabled — no point keeping tools then. */
 }): string | null {
   const { baseUrl, model, messages, hasToolsParam, errorText = "" } = opts;
+  const key = modeKey(baseUrl, model);
   const mode = modesFor(baseUrl, model);
+  const before = JSON.stringify(mode);
+  const reason = nextStep(mode, messages, hasToolsParam, errorText);
+  // Persist learning — EXCEPT the final noTools step. When the real cause
+  // of a 400 is a provider-side CONTENT filter (generic "input data" errors
+  // the ladder can't fix), every structural step is a FALSE positive. The
+  // toolText/system steps only change message ENCODING (safe to keep);
+  // noTools permanently disables tool calling for that provider — the most
+  // damaging false positive — so it stays session-scoped only. A provider
+  // that genuinely rejects tool declarations re-learns it with one extra
+  // call per session.
+  if (reason && !mode.noTools && JSON.stringify(mode) !== before) {
+    persistMode(key, mode);
+  }
+  return reason;
+}
 
+/** The pure ladder-step decision (mutates `mode`). */
+function nextStep(
+  mode: WireCompatMode,
+  messages: readonly WireMessage[],
+  hasToolsParam: boolean,
+  errorText: string,
+): string | null {
   const hasToolStructures = wireHasToolStructures(messages);
   const hasSystem = messages.some((m) => m && m.role === "system");
   const invalidRoleTool = /invalid role\s*["']?tool/i.test(errorText);

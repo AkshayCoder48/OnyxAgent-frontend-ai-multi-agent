@@ -16,11 +16,6 @@ import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { startBackgroundTurn } from "@/lib/agent/background-turn";
-import {
-  generateChatTitle,
-  fallbackChatTitle,
-  TITLE_WAIT_CAP_MS,
-} from "@/lib/agent/title-generator";
 import { notifyConversationsChanged } from "@/lib/scheduler/chat-sync";
 import {
   executionHub,
@@ -390,28 +385,21 @@ export function useChat(options: UseChatOptions = {}) {
       const turnGenerationId = nanoid();
       opts.generationId = turnGenerationId;
 
-      // ── PRD §12 — FIRST CALL = CHAT NAMING CALL ────────────────────────
-      // New chats ONLY (and only now that the turn options resolved — a
-      // provider failure must not leave a stray empty chat row behind):
-      //  1. create the conversation eagerly with an EMPTY title (the
-      //     subheader shows a shimmer skeleton for the empty title space);
-      //  2. run a small DEDICATED naming call with the SAME provider+model
-      //     the user selected — its reply NEVER enters the chat messages;
-      //  3. apply the generated title (fade/slide/blur reveal);
-      //  4. only THEN start the main agent call below — waiting at most
-      //     TITLE_WAIT_CAP_MS, so a slow provider never stalls the chat
-      //     (the title then lands late and the reveal plays whenever it
-      //     arrives; the skeleton holds the space until then).
+      // ── FIRST MESSAGE = INSTANT FALLBACK TITLE ─────────────────────────
+      // Chat name generation (the old PRD §12 dedicated naming call) was
+      // REMOVED per user request: the extra AI call doubled request volume
+      // on every new chat, burned rate-limited providers, and was itself a
+      // frequent HTTP 400 source (strict gateways reject the naming prompt).
+      // The title is now the first 60 chars of the user's message, applied
+      // instantly — zero extra API calls, the main agent call starts
+      // immediately.
       //
-      // GEM VISIBILITY (logo-invisible-during-naming fix): the naming call
-      // can hold the turn open for seconds — firing `model_request_start`
-      // FIRST creates the streaming assistant placeholder immediately, so
-      // the OnyxAgent gem header + shimmering "Thinking" indicator are
-      // visible for the WHOLE naming phase (previously the area below the
-      // user bubble was blank until the main call started). Both the
-      // background and foreground main-call paths re-run this event with
-      // the same round/generation — the placeholder is reused, never
-      // duplicated.
+      // GEM VISIBILITY: `model_request_start` fires FIRST and creates the
+      // streaming assistant placeholder immediately, so the OnyxAgent gem
+      // header + shimmering "Thinking" indicator are visible from the very
+      // first moment. Both the background and foreground main-call paths
+      // re-run this event with the same round/generation — the placeholder
+      // is reused, never duplicated.
       execution.processor.handle({
         type: "model_request_start",
         data: { round: 1, generation_id: turnGenerationId },
@@ -432,33 +420,12 @@ export function useChat(options: UseChatOptions = {}) {
           data: { conversation_id: conv.id },
         });
 
-        const namingPromise = generateChatTitle({
-          provider: {
-            baseUrl: opts.provider.baseUrl,
-            apiKey: opts.provider.apiKey,
-            model: opts.provider.model,
-            noPrefix: opts.provider.noPrefix,
-            disabledParams: opts.provider.disabledParams,
-          },
-          firstMessage: content,
-        });
-        let title: string | null = null;
-        try {
-          const capped = Promise.race([
-            namingPromise,
-            new Promise<null>((resolve) =>
-              setTimeout(() => resolve(null), TITLE_WAIT_CAP_MS),
-            ),
-          ]);
-          title = await capped;
-        } catch {
-          title = null; // generateChatTitle never rejects — belt & braces
-        }
-        const finalTitle = title ?? fallbackChatTitle(content);
+        const collapsed = content.replace(/\s+/g, " ").trim();
+        const finalTitle =
+          collapsed.length > 60 ? `${collapsed.slice(0, 60)}…` : collapsed;
         await conversationService.update(conv.id, { title: finalTitle });
         // Sidebar + subheader re-render with the new title (React Query
-        // refetch via the conversations-changed event) — the empty title
-        // space reveals the title with the fade/slide/blur animation.
+        // refetch via the conversations-changed event).
         notifyConversationsChanged();
       }
 

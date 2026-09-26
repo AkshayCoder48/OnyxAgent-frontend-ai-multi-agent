@@ -237,12 +237,12 @@ export async function executeSubagentTurn(
 
       // Use ?url= query param + Accept: text/event-stream + cache: no-store
       // (curl -N equivalent — no buffering anywhere in the pipeline).
-      // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + rate-limit error
-      // bodies with backoff + jitter, honoring Retry-After. Mirrors the
-      // main runtime's streamRound retry loop.
+      // RATE-LIMIT POLICY (user-requested change): NO auto-retry on
+      // 429/529 — fail fast with a clear message (mirrors the main
+      // runtime). Only the 400 self-healing ladder still retries (it
+      // FIXES the request, not just re-sends it).
       const requestUrl = `/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`;
       let res: Response;
-      let rateLimitAttempts = 0;
       for (;;) {
         res = await fetch(requestUrl, {
           method: "POST",
@@ -256,16 +256,8 @@ export async function executeSubagentTurn(
           cache: "no-store",
         });
 
-        const rl = res.status === 429 || res.status === 529;
-        if (rl && rateLimitAttempts < 3) {
-          rateLimitAttempts += 1;
-          const ra = res.headers.get("retry-after");
-          const headerMs = ra && Number.isFinite(Number(ra)) ? Number(ra) * 1000 : null;
-          const backoff = Math.min(1000 * 2 ** (rateLimitAttempts - 1), 8000);
-          const delay = Math.min(Math.max(headerMs ?? backoff, 500), 30_000);
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
+        // No rate-limit auto-retry (removed per user request) — fall
+        // through to the !res.ok handler with a clear error message.
         break;
       }
 
@@ -313,6 +305,11 @@ export async function executeSubagentTurn(
             status: res.status,
           },
         });
+        if (res.status === 429 || res.status === 529) {
+          throw new Error(
+            `Rate limit reached (HTTP ${res.status}) — the provider is throttling requests. Wait a moment and try again. ${errText.slice(0, 200)}`,
+          );
+        }
         throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);
       }
 

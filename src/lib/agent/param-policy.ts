@@ -33,12 +33,39 @@ export type ChatParam =
   | "tools"
   | "tool_choice";
 
-/** Session-level memory of params a provider+model rejected with a 400 —
- *  auto-learned via the self-healing retry. */
+/** Learned bans — PERSISTED to localStorage so a provider's rejected
+ *  params are learned ONCE ever, not once per browser session (each relearn
+ *  cost an extra 400 on rate-limited providers). */
 const learnedBans = new Map<string, Set<string>>();
+const PERSIST_KEY = "onyx-param-bans-v1";
 
 function banKey(baseUrl: string, model: string): string {
   return `${baseUrl.replace(/\/+$/, "")}|${model}`;
+}
+
+/** Read the persisted bans map (SSR/test-safe — {} when unavailable). */
+function readPersistedBans(): Record<string, string[]> {
+  try {
+    if (typeof localStorage === "undefined") return {};
+    const raw = localStorage.getItem(PERSIST_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Persist one provider's ban set (best-effort — never throws). */
+function persistBans(key: string, bans: Set<string>): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const all = readPersistedBans();
+    all[key] = [...bans];
+    localStorage.setItem(PERSIST_KEY, JSON.stringify(all));
+  } catch {
+    // Quota / private-mode — session memory still works.
+  }
 }
 
 /** Record that `param` was rejected by this provider+model. */
@@ -46,15 +73,22 @@ export function learnParamBan(baseUrl: string, model: string, param: string): vo
   const key = banKey(baseUrl, model);
   let set = learnedBans.get(key);
   if (!set) {
-    set = new Set();
+    set = new Set(readPersistedBans()[key] ?? []);
     learnedBans.set(key, set);
   }
+  if (set.has(param)) return;
   set.add(param);
+  persistBans(key, set);
 }
 
-/** Params learned to be banned for this provider+model (session scope). */
+/** Params learned to be banned for this provider+model (persisted). */
 export function getLearnedParamBans(baseUrl: string, model: string): Set<string> {
-  return learnedBans.get(banKey(baseUrl, model)) ?? new Set();
+  const key = banKey(baseUrl, model);
+  const cached = learnedBans.get(key);
+  if (cached) return cached;
+  const hydrated = new Set(readPersistedBans()[key] ?? []);
+  learnedBans.set(key, hydrated);
+  return hydrated;
 }
 
 /**

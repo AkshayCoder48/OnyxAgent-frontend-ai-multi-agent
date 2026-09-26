@@ -451,13 +451,23 @@ export class AgentEventProcessor {
       }
 
       case "rate_limited": {
-        const d = wsEvent.data as { retryAfterMs?: number; attempt?: number; maxAttempts?: number };
-        const secs = Math.max(1, Math.round((d.retryAfterMs ?? 1000) / 1000));
+        // Rate-limit auto-retry was REMOVED (user request) — the foreground
+        // runtime no longer emits this event. The background runner still
+        // emits it for its SELF-HEAL / transient-5xx / network retries (and
+        // for the sandbox reconnect banner). Show the honest reason.
+        const d = wsEvent.data as {
+          retryAfterMs?: number;
+          attempt?: number;
+          maxAttempts?: number;
+          reason?: string;
+        };
         const attempt = d.attempt ?? 1;
         const max = d.maxAttempts ?? 3;
-        this.store.getState().setRateLimitStatus(
-          `Rate limit reached — retrying automatically in ${secs}s… (attempt ${attempt}/${max})`,
-        );
+        const secs = Math.max(1, Math.round((d.retryAfterMs ?? 1000) / 1000));
+        const text = d.reason
+          ? `Provider hiccup — retrying in ${secs}s (attempt ${attempt}/${max}): ${d.reason}`
+          : `Provider hiccup — retrying automatically in ${secs}s… (attempt ${attempt}/${max})`;
+        this.store.getState().setRateLimitStatus(text);
         break;
       }
 

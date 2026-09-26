@@ -760,44 +760,18 @@ async function streamRound(
 
   emit({ type: "llm_started", timestamp: nowISO() });
 
-  // RATE-LIMIT RESILIENCE (PRD §7): retry 429/529 + provider rate-limit
-  // errors with exponential backoff + jitter, honoring Retry-After /
-  // x-ratelimit-reset-headers when present. Mirrors the proven pattern
-  // from src/lib/e2b/client.ts. Each wait emits a `rate_limited` event so
-  // the UI can show "Rate limit reached — retrying automatically in Ns…"
-  // instead of silently dying. Retries are inherently single-flight (this
-  // loop is sequential within the turn) and the abort signal is honored
-  // during the wait.
-  //
-  // TRANSIENT 5xx RESILIENCE: gateways like freeaixyz4all wrap upstream
-  // failures (e.g. "upstream_error" 502 "The edge runtime does not support
-  // Node.js 'crypto' module") — these are usually TRANSIENT, so we retry
-  // 502/503/504 with the same backoff instead of killing the whole turn.
-  const MAX_RATE_LIMIT_RETRIES = 3;
-  const parseRetryAfterMs = (resp: Response): number | null => {
-    const ra = resp.headers.get("retry-after");
-    if (ra) {
-      const asSeconds = Number(ra);
-      if (Number.isFinite(asSeconds) && asSeconds >= 0) return asSeconds * 1000;
-      const asDate = Date.parse(ra);
-      if (!Number.isNaN(asDate)) return Math.max(0, asDate - Date.now());
-    }
-    // OpenAI-style reset hints (seconds until the window resets).
-    const reset =
-      resp.headers.get("x-ratelimit-reset-requests") ??
-      resp.headers.get("x-ratelimit-reset-tokens");
-    if (reset) {
-      const m = reset.match(/[\d.]+/);
-      if (m) {
-        const secs = parseFloat(m[0]);
-        if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 30_000);
-      }
-    }
-    return null;
-  };
-
+  // RATE-LIMIT POLICY (user-requested change): NO automatic retries on
+  // 429/529/rate-limit or transient 5xx — the old backoff loop silently
+  // burned 3+ extra requests per failure (devouring rate-limited providers'
+  // quotas) while the UI showed "retrying automatically". Now a rate limit
+  // or gateway error FAILS FAST with a clear, actionable message + full
+  // provider body in the Logs panel. Only the 400 self-healing ladder
+  // below still retries (it FIXES the request, not just re-sends it).
   let response: Response;
-  let rateLimitAttempts = 0;
+  // Set when a 400 exhausted the self-healing ladder — the failure is NOT
+  // structural, so the error branch surfaces the honest content-filter
+  // explanation instead of the provider's cryptic generic body.
+  let ladderExhausted = false;
   // Pass the target URL via ?url= query param — Vercel can't strip query
   // params. Use Accept: text/event-stream to signal streaming intent to
   // all proxies.
@@ -886,53 +860,17 @@ async function streamRound(
         body = buildBody();
         continue;
       }
+      // Ladder exhausted: every structural downgrade has been tried and the
+      // provider still rejects the request — this is NOT a shape problem.
+      // Verified live failure mode: the gen.pollinations.ai community routes
+      // CONTENT-FILTER USER MESSAGES that mention tools/MCP/agent workloads
+      // (benign messages with the same request shape pass) — no downgrade
+      // can fix the user's own words.
+      ladderExhausted = true;
     }
 
-    const status = response.status;
-    let isRateLimited = status === 429 || status === 529;
-    const isTransient5xx = status === 502 || status === 503 || status === 504;
-    if (!isRateLimited && !isTransient5xx && status >= 400) {
-      // Some providers/proxies normalize 429 to an error-body with another
-      // status — sniff the body BEFORE deciding.
-      const text = await response.clone().text().catch(() => "");
-      isRateLimited = /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(text);
-    }
-
-    const shouldRetry = isRateLimited || isTransient5xx;
-    if (shouldRetry && rateLimitAttempts < MAX_RATE_LIMIT_RETRIES) {
-      rateLimitAttempts += 1;
-      const headerMs = parseRetryAfterMs(response);
-      const backoffMs = Math.min(1000 * 2 ** (rateLimitAttempts - 1), 8000);
-      const jitter = backoffMs * (0.7 + Math.random() * 0.6); // ±30%
-      const delayMs = Math.min(Math.max(headerMs ?? jitter, 500), 30_000);
-      emit({
-        type: "rate_limited",
-        data: {
-          retryAfterMs: Math.round(delayMs),
-          attempt: rateLimitAttempts,
-          maxAttempts: MAX_RATE_LIMIT_RETRIES,
-          status,
-        },
-        timestamp: nowISO(),
-      });
-      logWarn("llm", `Rate limited (HTTP ${status}) — auto-retrying in ${Math.round(delayMs / 1000)}s`, {
-        context: {
-          model: provider.model,
-          status,
-          attempt: rateLimitAttempts,
-          maxAttempts: MAX_RATE_LIMIT_RETRIES,
-        },
-      });
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, delayMs);
-        signal?.addEventListener("abort", () => {
-          clearTimeout(t);
-          resolve();
-        }, { once: true });
-      });
-      if (signal?.aborted) break;
-      continue;
-    }
+    // No rate-limit / 5xx auto-retry (removed per user request) — fall
+    // through; the !response.ok branch below surfaces a clear error.
     break;
   }
 
@@ -964,6 +902,22 @@ async function streamRound(
     // Give the user an actionable hint instead of a wall of HTML.
     if (response.status === 404) {
       detail = `${detail.slice(0, 200)} — endpoint not found. Check the provider Base URL: the app calls {base}/chat/completions, so gateways like freeaixyz4all need the base "https://freeaixyz4all.vercel.app/api/v1" (not the site root).`;
+    }
+    // RATE-LIMIT fast-fail message (no auto-retry): make the next step
+    // obvious instead of a cryptic provider string.
+    if (response.status === 429 || response.status === 529 || /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(rawBody)) {
+      detail = `Rate limit reached (HTTP ${response.status}) — the provider is throttling requests. Wait a moment and send again, or switch model/provider. ${detail.slice(0, 200)}`;
+    }
+    // HONEST CONTENT-FILTER ERROR (ladder exhausted): a 400 that survived
+    // every structural downgrade is almost always a provider-side content
+    // filter on the CONVERSATION itself. Say so — the provider's generic
+    // "Something was wrong with the input data" string explains nothing.
+    if (response.status === 400 && ladderExhausted) {
+      detail =
+        `Provider rejected this request even in its most compatible form (HTTP 400). ` +
+        `This is usually a provider-side CONTENT FILTER — some gateways (e.g. the gen.pollinations.ai community routes) reject messages that mention tools/MCP/agent workloads, which no request downgrade can fix. ` +
+        `Rephrase your message (avoid words like "MCP", "tool", "Slack"), or switch model/provider. ` +
+        `Raw: ${detail.slice(0, 150)}`;
     }
     // IN-APP ERROR LOG: the full provider error body + request context so
     // ANY provider failure is diagnosable from the Logs panel without
@@ -1611,13 +1565,53 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   // 2. Load history from Dexie → ChatCompletionMessage[].
   const history = await conversationService.getMessages(conversationId);
 
+  // 2.5 HOT-LOAD DYNAMIC TOOLS BEFORE THE TOOLS SNAPSHOT. Custom tools
+  // (IndexedDB) and MCP servers (session catalog + the mcp_search_tools /
+  // mcp_call_tool meta-tools) must be registered BEFORE `listTools()` below
+  // — previously MCP registration happened AFTER the snapshot, so MCP tools
+  // only appeared from the NEXT turn (a full turn late). Per-server failures
+  // are swallowed — a bad MCP server doesn't block the turn.
+  try {
+    const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
+    await loadDynamicTools(opts.userId);
+  } catch {
+    // Non-fatal — built-in tools still work
+  }
+  try {
+    const { loadMCPTools, mcpToolCount } = await import("@/lib/tools/mcp_tools");
+    const discovery = await loadMCPTools(opts.userId);
+    const failed = discovery.filter((d) => d.error);
+    if (failed.length > 0) {
+      console.warn(
+        `[agent] MCP discovery: ${mcpToolCount()} tools across ${
+          discovery.length - failed.length
+        } server(s); ${failed.length} server(s) failed:`,
+        failed.map((f) => `${f.server.name}: ${f.error}`),
+      );
+    } else if (discovery.length > 0) {
+      console.log(
+        `[agent] MCP discovery: ${mcpToolCount()} tools across ${discovery.length} server(s) (on-demand via mcp_search_tools/mcp_call_tool)`,
+      );
+    }
+  } catch (err) {
+    // Non-fatal — built-in tools still work.
+    console.warn("[agent] MCP tool loading failed:", err);
+  }
+
   // 3. Build the tools list + system prompt. We inject the real tool list
   // into the system prompt so the model knows exactly which tools it has —
   // prevents hallucinating fake tool names like "get_lec_infos" or
   // "write_code" that don't exist.
   const toolCtxForList = { ...toolCtx, conversationId };
   const registeredTools = listTools(toolCtxForList);
-  const tools: ChatCompletionTool[] = registeredTools.map((t) => ({
+
+  // HARD CAP (MCP tool-flood fix): no matter how many tools the registry
+  // holds, the request NEVER carries more than MAX_LLM_TOOLS definitions.
+  // Built-ins + the MCP/Composio meta-tools are always tiny (~66); this cap
+  // is the safety net for pathological cases (a rogue source registering
+  // hundreds of tools). Truncation is logged loudly.
+  const MAX_LLM_TOOLS = 96;
+  let tools: ChatCompletionTool[] = registeredTools.map((t) => ({
     type: "function",
     function: {
       name: t.name,
@@ -1625,6 +1619,20 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
       parameters: t.parameters as Record<string, unknown>,
     },
   }));
+  if (tools.length > MAX_LLM_TOOLS) {
+    logWarn(
+      "llm",
+      `Tool flood guard: ${tools.length} tools registered — sending only the first ${MAX_LLM_TOOLS}`,
+      {
+        context: {
+          registered: tools.length,
+          sent: MAX_LLM_TOOLS,
+          dropped: tools.slice(MAX_LLM_TOOLS).map((t) => t.function?.name).slice(0, 20).join(", "),
+        },
+      },
+    );
+    tools = tools.slice(0, MAX_LLM_TOOLS);
+  }
 
   // Debug: log the tool count so we can verify all built-in tools are registered
   console.log(`[agent] Tools registered: ${registeredTools.length}`, registeredTools.map(t => t.name));
@@ -1632,7 +1640,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   // Build the enhanced system prompt with the tool list + usage knowledge.
   // PRD §13/§14/§38 — RUNTIME-GROUNDED availability: this list is built from
   // the LIVE registry at turn time (never a static copy), so dynamically
-  // registered tools (MCP `mcp_<server>__<tool>`, custom tools) appear the
+  // registered tools (custom tools, the MCP/Composio meta-tools) appear the
   // turn they load. Built-in capabilities live in the TOOL DIGEST below (one
   // line per tool, generated from Onyx.md) — here we only anchor the exact
   // names that exist THIS TURN, plus one-line blurbs for tools the digest
@@ -1711,7 +1719,7 @@ Available tools for incremental writing:
 Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\`; steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
 
 ### Skills, MCP & dynamic tools
-- MCP servers expose their tools DYNAMICALLY as \`mcp_<server>__<tool>\` — they appear in your tool definitions when active (configure servers with \`manage_mcp\`). Custom tools work the same way (\`manage_custom_tool\`).
+- MCP servers expose their tools ON DEMAND via \`mcp_search_tools\` → \`mcp_call_tool\` (a single server can host hundreds of tools, so they are NOT pre-loaded into your tool list — search first when a task might need one; configure servers with \`manage_mcp\`). Composio integrations work the same way (\`composio_search_tools\` → \`composio_execute_tool\`).
 - Skills (\`manage_skill\`) are contextual instruction files — \`read\` a skill before applying it.
 
 ### When to THINK (reasoning) vs ACT (tools)
@@ -1937,40 +1945,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
   let priorMessages = buildPriorMessages();
 
-  // 3. Build the tools array from the registry.
-  // First, hot-load any user-defined custom tools from IndexedDB so they're
-  // available to the agent this turn.
-  try {
-    const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
-    await loadDynamicTools(opts.userId);
-  } catch {
-    // Non-fatal — built-in tools still work
-  }
-  // Then, hot-load MCP tools (one client per active server). Each MCP tool
-  // is registered with a `mcp_<server>__<tool>` name so the agent can call
-  // it like any built-in tool. Per-server failures are swallowed — a bad
-  // MCP server doesn't block the turn.
-  try {
-    const { loadMCPTools, mcpToolCount } = await import("@/lib/tools/mcp_tools");
-    const discovery = await loadMCPTools(opts.userId);
-    const failed = discovery.filter((d) => d.error);
-    if (failed.length > 0) {
-      console.warn(
-        `[agent] MCP discovery: ${mcpToolCount()} tools across ${
-          discovery.length - failed.length
-        } server(s); ${failed.length} server(s) failed:`,
-        failed.map((f) => `${f.server.name}: ${f.error}`),
-      );
-    } else if (discovery.length > 0) {
-      console.log(
-        `[agent] MCP discovery: ${mcpToolCount()} tools across ${discovery.length} server(s)`,
-      );
-    }
-  } catch (err) {
-    // Non-fatal — built-in tools still work.
-    console.warn("[agent] MCP tool loading failed:", err);
-  }
-
+  // (Custom tools + MCP servers were already hot-loaded at step 2.5, BEFORE
+  // the tools snapshot — see above. Nothing more to load here.)
 
   // 4. Agent loop — max MAX_ROUNDS.
   let round = 0;
@@ -2035,15 +2011,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // AUTO CONTEXT ERROR DETECTION: If the error is related to context
       // window overflow or DEGRADED functions, automatically generate a
       // handoff letter, reduce history, and retry ONCE.
-      // AUTO RETRY: If the error is a timeout (524), rate limit, or network
-      // blip, retry the round up to 2 times before giving up. These are
-      // transient errors that happen between rounds when the connection
-      // drops momentarily. Rate-limit messages are the second line of
-      // defense — streamRound already retries 429/529 with backoff before
-      // the error ever reaches this handler (PRD §7).
+      // TRANSIENT RETRY: a genuine timeout / connection blip / anomalous
+      // stream gets up to 3 quiet retries (each logged). Rate-limit errors
+      // are deliberately NOT retried (user request): 429 fails fast with a
+      // clear message — auto-retrying would keep burning the quota.
       const isTimeout =
-        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error/i.test(message) ||
-        /429|rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(message);
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error/i.test(message);
       if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
         retryCountThisTurn += 1;
         console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));

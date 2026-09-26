@@ -732,7 +732,7 @@ function replayEvent(
           retryAfterMs: ev.delayMs ?? 2_000,
           attempt: ev.attempt ?? 1,
           maxAttempts: 4,
-          status: 429,
+          reason: typeof ev.reason === "string" ? ev.reason : undefined,
           ts,
         });
       }
