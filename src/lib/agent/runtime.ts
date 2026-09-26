@@ -61,6 +61,7 @@ import {
   wireAllowsTools,
 } from "@/lib/agent/wire-compat";
 import { logError, logWarn } from "@/lib/client-logger";
+import { extractStreamError } from "@/lib/agent/stream-guards";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -1021,9 +1022,23 @@ async function streamRound(
   let aborted = false;
   const roundIndex = 0; // monotonically increasing part index for the UI.
 
+  // SILENT-STOP DIAGNOSTICS (auto-stop fix): providers that fail AFTER a
+  // 200 (error payload inside the SSE stream, or a clean-but-empty stream)
+  // used to end the turn as a "normal" empty final answer — the AI just
+  // stopped with no error anywhere. These give every stop a visible reason.
+  let chunksReceived = 0;
+  let streamError: string | null = null;
+  const rawTail: string[] = []; // last few raw chunks — the "why" for the Logs panel
+
   const reader = response.body.getReader();
   try {
     for await (const chunk of parseSSEStream(reader, signal)) {
+      chunksReceived += 1;
+      const raw = JSON.stringify(chunk);
+      rawTail.push(raw.length > 400 ? `${raw.slice(0, 400)}…` : raw);
+      if (rawTail.length > 6) rawTail.shift();
+      const se = extractStreamError(chunk);
+      if (se && !streamError) streamError = se; // remember; keep streaming in case content still arrives
       const delta = extractDelta(chunk);
       if (delta) {
         if (delta.text) {
@@ -1283,6 +1298,74 @@ async function streamRound(
     const fenceResult = parseFencedToolCalls(content);
     if (fenceResult) {
       content = fenceResult.cleanText;
+    }
+  }
+
+  // SILENT-STOP GUARDS (auto-stop fix): after a 200 OK, every ending must
+  // have a REASON. An error payload inside the stream, or a clean-but-empty
+  // stream, now becomes an explicit (logged + retryable) error instead of a
+  // silent "complete with no output".
+  if (!aborted) {
+    if (streamError && !content.trim() && toolCalls.length === 0) {
+      logError(
+        "llm",
+        `Provider stream error (HTTP 200): ${streamError}`,
+        {
+          detail: rawTail.join("\n"),
+          context: {
+            model: provider.model,
+            endpoint: provider.noPrefix ? base : targetUrl,
+            status: 200,
+            chunks: chunksReceived,
+          },
+        },
+      );
+      throw new Error(`Provider stream error: ${streamError}`);
+    }
+    if (streamError && (content.trim() || toolCalls.length > 0)) {
+      // Error chunk arrived but real content followed — recovered; still
+      // leave a trace so the Logs panel explains any truncated output.
+      logWarn("llm", `Provider sent an error chunk mid-stream (recovered with partial content): ${streamError}`, {
+        context: { model: provider.model, status: 200, chunks: chunksReceived },
+      });
+    }
+    if (
+      !content.trim() &&
+      !thinking.trim() &&
+      !reasoning.trim() &&
+      toolCalls.length === 0
+    ) {
+      const reason =
+        finishReason === "content_filter"
+          ? "the provider's content filter blocked the output"
+          : finishReason === "length"
+            ? "the output was cut off by the provider's token limit"
+            : "the model produced no content";
+      logWarn(
+        "llm",
+        `Provider returned an empty response — ${reason} (finish_reason: ${finishReason ?? "none"}, ${chunksReceived} chunk${chunksReceived === 1 ? "" : "s"})`,
+        {
+          detail: rawTail.length > 0 ? rawTail.join("\n") : "(stream produced no parseable chunks)",
+          context: {
+            model: provider.model,
+            endpoint: provider.noPrefix ? base : targetUrl,
+            status: 200,
+            chunks: chunksReceived,
+            finish_reason: finishReason ?? "none",
+          },
+        },
+      );
+      throw new Error(
+        `Provider returned an empty response — ${reason} (finish_reason: ${finishReason ?? "none"}). ` +
+          (finishReason === "content_filter"
+            ? "Try rephrasing the message or switching models."
+            : "The provider may be overloaded — retrying, or switching models, usually helps."),
+      );
+    }
+    if (finishReason === "content_filter") {
+      logWarn("llm", "Provider flagged the output with finish_reason=content_filter (content may be truncated)", {
+        context: { model: provider.model, status: 200 },
+      });
     }
   }
 
@@ -1959,7 +2042,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // defense — streamRound already retries 429/529 with backoff before
       // the error ever reaches this handler (PRD §7).
       const isTimeout =
-        /524|timeout|ECONNRESET|socket hang up|fetch failed|network/i.test(message) ||
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error/i.test(message) ||
         /429|rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(message);
       if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
         retryCountThisTurn += 1;
@@ -2436,6 +2519,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // Hit max rounds — persist whatever content was generated (don't error).
   // The agent may have produced useful intermediate text or tool results;
   // surfacing those is better than dropping them on the floor with an error.
+  logWarn("agent", `Stopped: reached max rounds (${effectiveMaxRounds}) — showing the last response`, {
+    context: { model: opts.provider.model, rounds: effectiveMaxRounds, tool_calls: allToolCalls.length },
+  });
   const savedMessage = await conversationService.saveAgentCheckpoint(
     conversationId,
     opts.userId,

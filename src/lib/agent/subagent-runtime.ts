@@ -19,6 +19,7 @@ import {
 } from "@/lib/agent/wire-compat";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { logError, logWarn } from "@/lib/client-logger";
+import { extractStreamError } from "@/lib/agent/stream-guards";
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
@@ -321,7 +322,14 @@ export async function executeSubagentTurn(
         // Non-streaming response (some providers don't support stream:true).
         const data = await res.json();
         const choice = data.choices?.[0];
-        if (!choice) throw new Error("No response from API");
+        if (!choice) {
+          const se = extractStreamError(data as Record<string, unknown>);
+          logError("subagent", `Subagent LLM: no response — ${se ?? "response had no choices"}`, {
+            detail: JSON.stringify(data).slice(0, 1500),
+            context: { model: config.model, status: res.status },
+          });
+          throw new Error(se ?? "No response from API");
+        }
         const msg = choice.message;
 
         // Handle tool calls.
@@ -367,6 +375,13 @@ export async function executeSubagentTurn(
       accumulatedReasoning = "";
       const toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
 
+      // SILENT-STOP DIAGNOSTICS (auto-stop fix, mirrors the main runtime):
+      // error payloads inside a 200 stream used to be dropped silently
+      // (`if (!delta) continue`) → empty answer → looked like the subagent
+      // just stopped. Capture them so every stop has a reason in the logs.
+      let subStreamError: string | null = null;
+      const subRawTail: string[] = [];
+
       // Track which tool calls we've already shown as "running" to avoid duplicates
       const shownToolCalls = new Set<string>();
 
@@ -390,7 +405,16 @@ export async function executeSubagentTurn(
             try {
               const chunk = JSON.parse(dataStr);
               const delta = chunk.choices?.[0]?.delta;
-              if (!delta) continue;
+              if (!delta) {
+                // SILENT-STOP FIX: no delta ≠ harmless — it may be the
+                // provider's error payload (the real failure after a 200).
+                const se = extractStreamError(chunk as Record<string, unknown>);
+                if (se && !subStreamError) {
+                  subStreamError = se;
+                  subRawTail.push(dataStr.slice(0, 400));
+                }
+                continue;
+              }
 
               // Text delta — flush immediately (no throttle)
               if (delta.content) {
@@ -458,6 +482,26 @@ export async function executeSubagentTurn(
               // partial JSON — skip
             }
           }
+        }
+      }
+
+      // SILENT-STOP GUARDS (auto-stop fix, mirrors the main runtime): a
+      // finished stream with no text, no reasoning, and no tool calls must
+      // surface WHY instead of ending as a normal empty answer.
+      if (toolCallsBuffer.length === 0) {
+        if (subStreamError && !accumulatedText.trim()) {
+          logError("subagent", `Subagent LLM stream error (HTTP 200): ${subStreamError}`, {
+            detail: subRawTail.join("\n"),
+            context: { model: config.model, status: 200 },
+          });
+          throw new Error(`Provider stream error: ${subStreamError}`);
+        }
+        if (!accumulatedText.trim() && !accumulatedReasoning.trim()) {
+          logWarn("subagent", "Subagent LLM returned an empty response — the model produced no content", {
+            detail: subRawTail.length > 0 ? subRawTail.join("\n") : "(stream produced no usable chunks)",
+            context: { model: config.model, status: 200 },
+          });
+          throw new Error("Provider returned an empty response — the model produced no content");
         }
       }
 
