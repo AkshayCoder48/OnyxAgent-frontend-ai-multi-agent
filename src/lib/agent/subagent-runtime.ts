@@ -18,6 +18,7 @@ import {
   wireAllowsTools,
 } from "@/lib/agent/wire-compat";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
+import { logError, logWarn } from "@/lib/client-logger";
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
@@ -278,6 +279,10 @@ export async function executeSubagentTurn(
           if (badParam === "reasoning_effort") delete body.thinking;
           if (badParam === "thinking") delete body.reasoning_effort;
           console.warn(`[subagent] provider rejected '${badParam}' — stripped and retrying`);
+          logWarn("subagent", `Subagent LLM: provider rejected parameter '${badParam}' — stripped and retrying`, {
+            detail: errText,
+            context: { model: config.model, status: res.status },
+          });
           continue;
         }
         // STRICT-GATEWAY LADDER (LLM HTTP 400 fix): mirrors the main
@@ -293,8 +298,20 @@ export async function executeSubagentTurn(
         });
         if (healReason) {
           console.warn(`[subagent] 400 self-healing: ${healReason} — retrying`);
+          logWarn("subagent", `Subagent LLM: HTTP 400 self-healing (${healReason}) — retrying`, {
+            detail: errText,
+            context: { model: config.model, status: 400 },
+          });
           continue;
         }
+        logError("subagent", `Subagent LLM request failed (HTTP ${res.status})`, {
+          detail: errText,
+          context: {
+            model: config.model,
+            endpoint: targetUrl,
+            status: res.status,
+          },
+        });
         throw new Error(`API ${res.status}: ${errText.slice(0, 500)}`);
       }
 

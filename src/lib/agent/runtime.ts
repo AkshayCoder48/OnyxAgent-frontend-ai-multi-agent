@@ -60,6 +60,7 @@ import {
   nextStrictGatewayStep,
   wireAllowsTools,
 } from "@/lib/agent/wire-compat";
+import { logError, logWarn } from "@/lib/client-logger";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -829,6 +830,10 @@ async function streamRound(
         if (badParam === "reasoning_effort") delete body.thinking; // paired
         if (badParam === "thinking") delete body.reasoning_effort; // paired
         console.warn(`[agent] provider rejected '${badParam}' — stripped it and retrying`);
+        logWarn("llm", `Provider rejected parameter '${badParam}' — stripped it and retrying`, {
+          detail: errText,
+          context: { model: provider.model, status: 400, fix: `removed '${badParam}'` },
+        });
         continue;
       }
       // REASONING-REPLAY SELF-HEALING (LLM HTTP 400 fix): DeepSeek-style
@@ -850,6 +855,10 @@ async function streamRound(
           }
         }
         console.warn("[agent] provider requires reasoning_content replay — restoring it and retrying");
+        logWarn("llm", "Provider requires reasoning_content replay — restoring it and retrying", {
+          detail: errText,
+          context: { model: provider.model, status: 400 },
+        });
         continue;
       }
       // STRICT-GATEWAY LADDER (LLM HTTP 400 fix, 2026-09-26): providers like
@@ -869,6 +878,10 @@ async function streamRound(
       });
       if (healReason) {
         console.warn(`[agent] 400 self-healing: ${healReason} — retrying`);
+        logWarn("llm", `HTTP 400 self-healing: ${healReason} — retrying`, {
+          detail: errText,
+          context: { model: provider.model, status: 400 },
+        });
         body = buildBody();
         continue;
       }
@@ -901,6 +914,14 @@ async function streamRound(
         },
         timestamp: nowISO(),
       });
+      logWarn("llm", `Rate limited (HTTP ${status}) — auto-retrying in ${Math.round(delayMs / 1000)}s`, {
+        context: {
+          model: provider.model,
+          status,
+          attempt: rateLimitAttempts,
+          maxAttempts: MAX_RATE_LIMIT_RETRIES,
+        },
+      });
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, delayMs);
         signal?.addEventListener("abort", () => {
@@ -916,8 +937,10 @@ async function streamRound(
 
   if (!response.ok || !response.body) {
     let detail = `Provider returned ${response.status}`;
+    let rawBody = "";
     try {
       const text = await response.text();
+      rawBody = text;
       if (text) {
         try {
           const obj = JSON.parse(text);
@@ -941,6 +964,22 @@ async function streamRound(
     if (response.status === 404) {
       detail = `${detail.slice(0, 200)} — endpoint not found. Check the provider Base URL: the app calls {base}/chat/completions, so gateways like freeaixyz4all need the base "https://freeaixyz4all.vercel.app/api/v1" (not the site root).`;
     }
+    // IN-APP ERROR LOG: the full provider error body + request context so
+    // ANY provider failure is diagnosable from the Logs panel without
+    // devtools. Secrets are redacted inside the logger.
+    logError(
+      "llm",
+      `LLM request failed (HTTP ${response.status}${response.ok ? ", empty response body" : ""}): ${detail.slice(0, 300)}`,
+      {
+        detail: rawBody || undefined,
+        context: {
+          model: provider.model,
+          endpoint: provider.noPrefix ? base : targetUrl,
+          status: response.status,
+          stripped_params: Array.from(strippedParams).join(", ") || "none",
+        },
+      },
+    );
     throw new Error(detail);
   }
 
@@ -1925,6 +1964,10 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
         retryCountThisTurn += 1;
         console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));
+        logWarn("agent", `Transient network/timeout error — auto-retrying (attempt ${retryCountThisTurn}/3)`, {
+          detail: message,
+          context: { round, model: opts.provider.model },
+        });
         // Wait 1 second before retrying to let the connection recover
         await new Promise((r) => setTimeout(r, 1000));
         round -= 1; // don't consume a round on retry
@@ -1934,6 +1977,10 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       const isContextError = /degraded|context.*length|too many tokens|maximum context|context window|too long/i.test(message);
       if (isContextError && !handoffContext) {
         console.warn("[agent] Context error detected, generating handoff + retrying...", message.slice(0, 100));
+        logWarn("agent", "Context window error — generating handoff letter and retrying with reduced history", {
+          detail: message,
+          context: { round, model: opts.provider.model },
+        });
         // Generate handoff letter (saves full chat to file + builds summary)
         handoffContext = await generateHandoff();
         // Reduce history to last 10 messages (even more aggressive)
@@ -1958,6 +2005,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           });
         } catch (retryErr) {
           // Retry also failed — give up and report the original error
+          // (the emitted error event is mirrored into the Logs store by
+          // the event processor — no double-logging here).
           const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
           emit({
             type: "error",
@@ -1987,7 +2036,10 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           };
         }
       } else {
-        // Non-context error, or already retried — report it
+        // Non-context error, or already retried — report it. (The emitted
+        // error event is mirrored into the Logs store by the event
+        // processor — no double-logging here; the deeper "llm" entry with
+        // the full provider response body is already logged by streamRound.)
         emit({
           type: "error",
           data: { message },

@@ -18,6 +18,7 @@
  */
 
 import { nanoid } from "nanoid";
+import { logError, logInfo } from "@/lib/client-logger";
 import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type MessageRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
 import {
   createVault,
@@ -1084,6 +1085,18 @@ export const aiProviderService = {
       } catch {
         sample = text.slice(0, 200);
       }
+      // IN-APP ERROR LOG: the Settings "Test" button result lands in the
+      // Logs panel with the full provider response body.
+      if (res.ok) {
+        logInfo("provider-test", `Provider test OK (${provider.name ?? "provider"})`, {
+          context: { model: targetModel, status: res.status },
+        });
+      } else {
+        logError("provider-test", `Provider test failed (HTTP ${res.status}): ${provider.name ?? "provider"}`, {
+          detail: text,
+          context: { model: targetModel, status: res.status, endpoint: targetUrl },
+        });
+      }
       return {
         ok: res.ok,
         status_code: res.status,
@@ -1091,6 +1104,9 @@ export const aiProviderService = {
         sample_response: sample,
       };
     } catch (err) {
+      logError("provider-test", `Provider test crashed: ${err instanceof Error ? err.message : String(err)}`, {
+        context: { model: targetModel, endpoint: targetUrl },
+      });
       return {
         ok: false,
         status_code: 0,

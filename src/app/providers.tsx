@@ -6,6 +6,7 @@ import { Toaster } from "sonner";
 import { ThemeProvider } from "@/components/theme";
 import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
+import { ErrorLogCollector } from "@/components/dev/error-log-collector";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -77,6 +78,8 @@ export function Providers({ children }: ProvidersProps) {
         <ExperimentalUiSync />
         <TooltipProvider>{children}</TooltipProvider>
         <Toaster richColors position="bottom-right" />
+        {/* In-app devtools: global error capture + floating Logs button */}
+        <ErrorLogCollector />
       </ThemeProvider>
     </QueryClientProvider>
   );

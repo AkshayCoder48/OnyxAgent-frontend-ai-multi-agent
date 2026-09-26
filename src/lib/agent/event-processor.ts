@@ -13,6 +13,7 @@ import { setUrlParam } from "@/lib/utils";
 import { persistTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
+import { logError } from "@/lib/client-logger";
 import type { ExecutionChatStore } from "@/stores/chat-store";
 
 /**
@@ -740,10 +741,14 @@ export class AgentEventProcessor {
         this.store.getState().setRateLimitStatus(null);
         this.flush();
         this.endActiveRound(this.activeRound);
+        // IN-APP ERROR LOG: mirror the surfaced chat error into the Logs
+        // store so the full trail (LLM body, self-heal steps, retries) is
+        // one click away.
+        logError("chat", (wsEvent.data as { message?: string })?.message || "Unknown chat error");
         if (this.currentMessageId) {
           const id = this.currentMessageId;
           const { message } = wsEvent.data as { message: string };
-          const errText = `\n\n❌ Error: ${message || "Unknown error"}`;
+          const errText = `\n\n❌ Error: ${message || "Unknown error"}\n\n_Full details in the Logs panel — click the 🐛 button (bottom-left) or the Logs icon in the top bar._`;
           const cur = this.store.getState().messages.find((m) => m.id === id);
           if (cur?.parts) {
             this.store.getState().appendTextDelta(id, errText, this.activeRound);

@@ -27,6 +27,7 @@
 
 import { applyParamPolicy } from "@/lib/agent/param-policy";
 import { buildWireMessages, getWireCompat } from "@/lib/agent/wire-compat";
+import { logWarn } from "@/lib/client-logger";
 
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
@@ -282,6 +283,11 @@ export async function generateChatTitle(opts: {
       },
     );
     if (!response.ok) {
+      const errBody = await response.clone().text().catch(() => "");
+      logWarn("title", `Chat title generation failed (HTTP ${response.status}) — using fallback title`, {
+        detail: errBody,
+        context: { model: provider.model, status: response.status },
+      });
       // STRICT-GATEWAY one-shot retry (LLM HTTP 400 fix): providers that
       // content-filter system prompts (e.g. gen.pollinations.ai community
       // routes reject this very naming prompt — verified live) get ONE
@@ -325,9 +331,15 @@ export async function generateChatTitle(opts: {
     if (raw === null) return null;
     const title = sanitizeChatTitle(raw);
     return title || null;
-  } catch {
+  } catch (err) {
     // Abort (timeout/stop), network error, body read failure — any failure
     // means "use the fallback title". Never throw to the caller.
+    if (!(err instanceof DOMException && err.name === "AbortError")) {
+      logWarn("title", "Chat title generation threw — using fallback title", {
+        detail: err instanceof Error ? err.message : String(err),
+        context: { model: provider.model },
+      });
+    }
     return null;
   } finally {
     clearTimeout(timer);

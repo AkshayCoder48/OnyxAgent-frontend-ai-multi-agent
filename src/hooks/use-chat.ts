@@ -215,6 +215,8 @@ export function useChat(options: UseChatOptions = {}) {
       // a turn on the wrong provider. An honest empty list errors below.
       const providers = await aiProviderService.list(userId, true);
       if (providers.length === 0) {
+        // (The emitted error event is mirrored into the Logs store by the
+        // event processor — no double-logging here.)
         emit?.({
           type: "error",
           data: {

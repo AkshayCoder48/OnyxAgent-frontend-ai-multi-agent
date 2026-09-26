@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
@@ -9,10 +9,12 @@ import { Button } from "@/components/ui/button";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
+import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
-import { FolderOpen, Menu, Bot, ListTree } from "lucide-react";
+import { LogsViewer } from "@/components/dev/logs-viewer";
+import { FolderOpen, Menu, Bot, ListTree, ScrollText } from "lucide-react";
 
-type SidePanel = "files" | "timeline" | null;
+type SidePanel = "files" | "timeline" | "logs" | null;
 
 export default function ChatPage() {
   // Files / timeline panels — the user's last right-panel choice, closed by
@@ -31,6 +33,10 @@ export default function ChatPage() {
   // local panel state).
   const subagentOpen = useSubagentStore((s) => s.sidebarOpen);
   const setSubagentOpen = useSubagentStore((s) => s.setSidebarOpen);
+  // Error-log badge: unseen error count on the Logs toggle (resets when any
+  // logs surface is opened).
+  const unseenErrors = useLogStore((s) => s.unseenErrors);
+  const markLogsSeen = useLogStore((s) => s.markSeen);
 
   // Only one right-hand panel VISIBLE at a time — fully DERIVED during
   // render (no state syncing, so it is React-Compiler-safe): while the
@@ -38,6 +44,11 @@ export default function ChatPage() {
   // over the dock; closing it restores the panel that was open before.
   const filesOpen = sidePanel === "files" && !subagentOpen;
   const timelineOpen = sidePanel === "timeline" && !subagentOpen;
+  const logsOpen = sidePanel === "logs" && !subagentOpen;
+  // Opening the docked logs panel counts as "seeing" the errors.
+  useEffect(() => {
+    if (logsOpen) markLogsSeen();
+  }, [logsOpen, markLogsSeen]);
 
   const closeSubagent = useCallback(() => {
     setSubagentOpen(false);
@@ -48,7 +59,7 @@ export default function ChatPage() {
     // Opening a side panel takes over the dock from the subagent panel
     // (setSubagentOpen is a no-op when the value is unchanged).
     setSubagentOpen(false);
-    const wasVisible = panel === "files" ? filesOpen : timelineOpen;
+    const wasVisible = panel === "files" ? filesOpen : panel === "timeline" ? timelineOpen : logsOpen;
     setSidePanel(wasVisible ? null : panel);
   };
 
@@ -123,6 +134,21 @@ export default function ChatPage() {
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => toggleSidePanel("logs")}
+              className={logsOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground relative h-8 w-8 p-0"}
+              title="Error logs"
+              aria-label="Toggle error logs panel"
+              aria-expanded={logsOpen}
+              aria-controls="logs-panel"
+            >
+              <ScrollText className="h-4 w-4" />
+              {unseenErrors > 0 && (
+                <span className="bg-destructive absolute top-1 right-1 h-2 w-2 rounded-full" aria-hidden />
+              )}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => toggleSidePanel("files")}
               className={filesOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Show files"
@@ -171,6 +197,20 @@ export default function ChatPage() {
         sheetClassName="w-[85vw] max-w-sm"
       >
         <FileSidebar />
+      </DockedPanel>
+
+      <DockedPanel
+        id="logs-panel"
+        label="Error logs"
+        open={logsOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="logs-sidebar-width"
+        defaultWidth={420}
+        minWidth={320}
+        maxWidth={720}
+        sheetClassName="w-[92vw] sm:max-w-md"
+      >
+        <LogsViewer />
       </DockedPanel>
 
       <DockedPanel

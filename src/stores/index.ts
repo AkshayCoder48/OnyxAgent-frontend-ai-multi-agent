@@ -9,3 +9,4 @@ export { useFilePreviewStore } from "./file-preview-store";
 export { useKBSelectionStore } from "./kb-selection-store";
 export { useSourcesPanelStore } from "./sources-panel-store";
 export { useResearchStore } from "./research-store";
+export { useLogStore } from "./log-store";
