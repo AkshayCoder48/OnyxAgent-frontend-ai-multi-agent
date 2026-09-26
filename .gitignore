@@ -72,3 +72,6 @@ cli/node_modules/
 .onyxagent/
 cli/.npmrc
 3005
+
+# Local debugging mini-services (mock providers etc.)
+mini-services/

@@ -290,6 +290,10 @@ interface ChatCompletionTool {
 export async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal?: AbortSignal,
+  /** Out-param: set to true when the provider's `data: [DONE]` marker
+   *  arrives. Lets the caller distinguish a COMPLETED stream from one the
+   *  gateway/proxy cut off mid-generation (premature-EOF detection). */
+  meta?: { sawDone?: boolean },
 ): AsyncGenerator<Record<string, unknown>> {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -308,7 +312,10 @@ export async function* parseSSEStream(
           const trimmed = line.trim();
           if (!trimmed.startsWith("data:")) continue;
           const payload = trimmed.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
+          if (!payload || payload === "[DONE]") {
+            if (payload === "[DONE]" && meta) meta.sawDone = true;
+            continue;
+          }
           try {
             yield JSON.parse(payload) as Record<string, unknown>;
           } catch {
@@ -323,7 +330,10 @@ export async function* parseSSEStream(
         const trimmed = line.trim();
         if (!trimmed.startsWith("data:")) continue;
         const payload = trimmed.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
+        if (!payload || payload === "[DONE]") {
+          if (payload === "[DONE]" && meta) meta.sawDone = true;
+          continue;
+        }
         try {
           yield JSON.parse(payload) as Record<string, unknown>;
         } catch {
@@ -1030,6 +1040,13 @@ async function streamRound(
   let usage: RoundResult["usage"];
   let aborted = false;
   const roundIndex = 0; // monotonically increasing part index for the UI.
+  // PREMATURE-EOF DETECTION (auto-stop fix): a stream that ends without
+  // `data: [DONE]`, without any finish_reason, and without a usage chunk
+  // was CUT OFF (provider worker died / proxy closed early / Vercel
+  // function limit) — not completed. Without this, a mid-generation cut
+  // was treated as a normal final answer: the AI "auto stopped" with
+  // partial text, no error, and nothing in the Logs panel.
+  const streamMeta: { sawDone?: boolean } = {};
 
   // SILENT-STOP DIAGNOSTICS (auto-stop fix): providers that fail AFTER a
   // 200 (error payload inside the SSE stream, or a clean-but-empty stream)
@@ -1041,7 +1058,7 @@ async function streamRound(
 
   const reader = response.body.getReader();
   try {
-    for await (const chunk of parseSSEStream(reader, signal)) {
+    for await (const chunk of parseSSEStream(reader, signal, streamMeta)) {
       chunksReceived += 1;
       const raw = JSON.stringify(chunk);
       rawTail.push(raw.length > 400 ? `${raw.slice(0, 400)}…` : raw);
@@ -1241,6 +1258,11 @@ async function streamRound(
 
   emit({ type: "llm_completed", timestamp: nowISO() });
 
+  // Capture the NATURAL finish signal BEFORE the fence parser may
+  // synthesize finish_reason="tool_calls" — the cut detector must only see
+  // what the provider actually sent.
+  const naturalFinishReason = finishReason;
+
   // Parse tool-call args from accumulated JSON strings.
   const toolCalls = Array.from(toolCallAccumulator.values()).map((tc) => {
     let args: Record<string, unknown> = {};
@@ -1375,6 +1397,60 @@ async function streamRound(
       logWarn("llm", "Provider flagged the output with finish_reason=content_filter (content may be truncated)", {
         context: { model: provider.model, status: 200 },
       });
+    }
+    // PREMATURE STREAM CUT (auto-stop fix): the stream produced output but
+    // ended with NO finish_reason, NO `data: [DONE]` marker and NO usage
+    // chunk — the connection was severed mid-generation (dead upstream
+    // worker, proxy timeout, function limit). Previously this was treated
+    // as a normal completion: the AI silently "auto stopped" with partial
+    // text and NOTHING in the Logs panel. Now: visible inline notice + a
+    // Logs entry with the raw chunk tail, and truncated tool calls are
+    // dropped instead of executed with half-written JSON args.
+    if (
+      !signal?.aborted && // user-stopped mid-stream ≠ provider cut
+      naturalFinishReason === null &&
+      !streamMeta.sawDone &&
+      usage === undefined &&
+      chunksReceived > 0 &&
+      (content.trim() || thinking.trim() || reasoning.trim() || toolCalls.length > 0)
+    ) {
+      // Drop tool calls whose argument JSON was cut mid-string — executing
+      // them would fail on truncated args.
+      const completeToolCalls = toolCalls.filter(
+        (tc) => !(tc.args && typeof tc.args === "object" && Object.keys(tc.args).length === 1 && "_raw" in tc.args),
+      );
+      const droppedCalls = toolCalls.length - completeToolCalls.length;
+      if (droppedCalls > 0) toolCalls.length = 0;
+      toolCalls.push(...completeToolCalls);
+
+      logWarn(
+        "llm",
+        `Response stream was cut off mid-generation (no finish signal) — ${content.length} chars received, possibly incomplete`,
+        {
+          detail: rawTail.length > 0 ? rawTail.join("\n") : "(no parseable chunks retained)",
+          context: {
+            model: provider.model,
+            endpoint: provider.noPrefix ? base : targetUrl,
+            status: 200,
+            chunks: chunksReceived,
+            finish_reason: "none",
+            done_marker: false,
+            usage: "none",
+            chars_received: content.length,
+            tool_calls_dropped: droppedCalls,
+          },
+        },
+      );
+      const cutNotice =
+        "\n\n---\n⚠️ **The provider ended this response without a completion signal** — it was likely cut off mid-generation" +
+        (droppedCalls > 0 ? ` (and ${droppedCalls} tool call${droppedCalls === 1 ? " was" : "s were"} dropped as incomplete)` : "") +
+        ". The text above may be incomplete — regenerate or continue if it looks truncated.";
+      emit({
+        type: "text_delta",
+        data: { index: roundIndex, content: cutNotice },
+        timestamp: nowISO(),
+      });
+      content += cutNotice;
     }
   }
 

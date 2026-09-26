@@ -411,6 +411,12 @@ export async function executeSubagentTurn(
       // just stopped. Capture them so every stop has a reason in the logs.
       let subStreamError: string | null = null;
       const subRawTail: string[] = [];
+      // PREMATURE-EOF DETECTION (mirrors the main runtime): a stream that
+      // ends without [DONE] / finish_reason / usage was cut off mid-
+      // generation, not completed.
+      let sawDoneMarker = false;
+      let sawFinishReason = false;
+      let sawUsage = false;
 
       // Track which tool calls we've already shown as "running" to avoid duplicates
       const shownToolCalls = new Set<string>();
@@ -430,10 +436,16 @@ export async function executeSubagentTurn(
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith("data:")) continue;
             const dataStr = trimmed.slice(5).trim();
-            if (!dataStr || dataStr === "[DONE]") continue;
+            if (!dataStr || dataStr === "[DONE]") {
+              if (dataStr === "[DONE]") sawDoneMarker = true;
+              continue;
+            }
 
             try {
               const chunk = JSON.parse(dataStr);
+              if (chunk.usage) sawUsage = true;
+              const fr = chunk.choices?.[0]?.finish_reason ?? chunk.choices?.[0]?.stop_reason;
+              if (fr) sawFinishReason = true;
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) {
                 // SILENT-STOP FIX: no delta ≠ harmless — it may be the
@@ -533,6 +545,59 @@ export async function executeSubagentTurn(
           });
           throw new Error("Provider returned an empty response — the model produced no content");
         }
+      }
+
+      // PREMATURE STREAM CUT (auto-stop fix, mirrors the main runtime):
+      // output arrived but the stream ended with no finish_reason, no
+      // [DONE] marker and no usage chunk — the connection was severed
+      // mid-generation. Surface it instead of silently treating the
+      // partial text as a complete subagent answer.
+      if (
+        !sawFinishReason &&
+        !sawDoneMarker &&
+        !sawUsage &&
+        (accumulatedText.trim() || accumulatedReasoning.trim() || toolCallsBuffer.length > 0)
+      ) {
+        // Drop tool calls whose args JSON was cut mid-string.
+        const completeCalls = toolCallsBuffer.filter(
+          (tc) => {
+            if (!tc.function.arguments) return true;
+            try {
+              JSON.parse(tc.function.arguments);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+        );
+        const droppedCalls = toolCallsBuffer.length - completeCalls.length;
+        toolCallsBuffer.length = 0;
+        toolCallsBuffer.push(...completeCalls);
+
+        logWarn(
+          "subagent",
+          `Subagent response stream was cut off mid-generation (no finish signal) — ${accumulatedText.length} chars received, possibly incomplete`,
+          {
+            detail: subRawTail.length > 0 ? subRawTail.join("\n") : "(no chunks retained)",
+            context: {
+              model: config.model,
+              status: 200,
+              finish_reason: "none",
+              done_marker: false,
+              usage: "none",
+              tool_calls_dropped: droppedCalls,
+            },
+          },
+        );
+        const cutNotice =
+          "\n\n---\n⚠️ **The provider ended this response without a completion signal** — it was likely cut off mid-generation" +
+          (droppedCalls > 0 ? ` (and ${droppedCalls} tool call${droppedCalls === 1 ? " was" : "s were"} dropped as incomplete)` : "") +
+          ". The text above may be incomplete.";
+        accumulatedText += cutNotice;
+        useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+          content: stripFunctionCallTags(accumulatedText),
+          isStreaming: true,
+        });
       }
 
       // Process any buffered tool calls.

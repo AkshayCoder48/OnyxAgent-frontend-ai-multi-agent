@@ -478,9 +478,12 @@ function parseBareToolCall(text) {
 /** Extract every COMPLETE SSE frame from a buffer. Returns the parsed JSON
  *  payloads + the remainder (partial frame kept for the next chunk). Handles
  *  \n\n and \r\n\r\n separators, multi-line data:, [DONE], keep-alive
- *  comments, and malformed frames (skipped, never fatal). */
+ *  comments, and malformed frames (skipped, never fatal). out.sawDone is
+ *  set when the provider's data: [DONE] marker was seen (premature-EOF
+ *  detection — see the stream loop). */
 function parseSSEFrames(buffer) {
   const events = [];
+  let sawDone = false;
   let rest = buffer;
   for (;;) {
     let idx = -1;
@@ -499,10 +502,11 @@ function parseSSEFrames(buffer) {
     }
     if (!data.length) continue; // comment/keep-alive/empty
     const payload = data.join("\n").trim();
-    if (!payload || payload === "[DONE]") continue;
+    if (!payload) continue;
+    if (payload === "[DONE]") { sawDone = true; continue; }
     try { events.push(JSON.parse(payload)); } catch { /* malformed frame */ }
   }
-  return { events, rest };
+  return { events, rest, sawDone };
 }
 
 /** Pull content / reasoning / tool-call fragments out of one streamed chunk
@@ -1036,6 +1040,13 @@ async function streamRoundEvents(state, round, finalRound) {
     const decoder = new TextDecoder();
     let sseBuf = "";
     let streamError = null;
+    // PREMATURE-EOF DETECTION (auto-stop fix): a stream that ends with no
+    // finish_reason, no [DONE] marker and no usage chunk was severed
+    // mid-generation — not completed. Without this the round ended as a
+    // normal (truncated) answer with no error anywhere.
+    let sawDoneMarker = false;
+    let sawFinishReason = false;
+    let sawUsageChunk = false;
     try {
       for (;;) {
         let readResult;
@@ -1052,7 +1063,11 @@ async function streamRoundEvents(state, round, finalRound) {
         sseBuf += decoder.decode(value, { stream: true });
         const parsed = parseSSEFrames(sseBuf);
         sseBuf = parsed.rest;
+        if (parsed.sawDone) sawDoneMarker = true;
         for (const ev of parsed.events) {
+          if (ev && ev.usage) sawUsageChunk = true;
+          const fr = ev && ev.choices && ev.choices[0] ? (ev.choices[0].finish_reason ?? ev.choices[0].stop_reason) : null;
+          if (fr) sawFinishReason = true;
           const d = extractDeltas(ev);
           if (d && d.error) {
             const msg = d.error && d.error.message ? d.error.message : JSON.stringify(d.error);
@@ -1066,7 +1081,11 @@ async function streamRoundEvents(state, round, finalRound) {
       if (!streamError) {
         sseBuf += decoder.decode();
         const parsed = parseSSEFrames(sseBuf + "\n\n"); // flush trailing frame
+        if (parsed.sawDone) sawDoneMarker = true;
         for (const ev of parsed.events) {
+          if (ev && ev.usage) sawUsageChunk = true;
+          const fr = ev && ev.choices && ev.choices[0] ? (ev.choices[0].finish_reason ?? ev.choices[0].stop_reason) : null;
+          if (fr) sawFinishReason = true;
           const d = extractDeltas(ev);
           if (d && d.error) {
             const msg = d.error && d.error.message ? d.error.message : JSON.stringify(d.error);
@@ -1081,6 +1100,17 @@ async function streamRoundEvents(state, round, finalRound) {
     } finally {
       clearTimeout(hardTimer);
       try { ac.abort(); } catch {} // release the connection
+    }
+    // PREMATURE STREAM CUT: output arrived but the stream ended with no
+    // completion signal at all. Route it through the SAME handling as a
+    // mid-stream failure below: zero-content cuts retry (duplicate-free),
+    // partial-content cuts end in an error state (PRD §26 — the user is
+    // told the answer is truncated, never a silent "done").
+    if (
+      !streamError && !sawFinishReason && !sawDoneMarker && !sawUsageChunk &&
+      (content || reasoning || toolAcc.size > 0)
+    ) {
+      streamError = "Response stream was cut off mid-generation (no finish signal) — the answer may be incomplete";
     }
     if (streamError && !content && !reasoning && toolAcc.size === 0) {
       // Nothing streamed yet — a retry is duplicate-free.
