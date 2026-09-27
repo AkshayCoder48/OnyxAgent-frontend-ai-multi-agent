@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import type { ChatMessage, ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
+import { WorkedPanel, deriveGenerationDurationMs } from "./worked-panel";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
@@ -1135,35 +1136,182 @@ export const MessageItem = React.memo(function MessageItem({
                   }
 
                   // ── Assemble round segments in order of first appearance.
-                  const roundOrder: number[] = [];
-                  for (const p of message.parts ?? []) {
-                    const r = p.round ?? 0;
-                    if (!roundOrder.includes(r)) roundOrder.push(r);
-                  }
-                  const itemsByRound = new Map<number, RoundRenderItem[]>();
-                  for (const item of renderItems) {
-                    const arr = itemsByRound.get(item.round) ?? [];
-                    arr.push(item);
-                    itemsByRound.set(item.round, arr);
-                  }
-                  const segments: RoundSegmentData[] = roundOrder
-                    .map((r) => {
-                      let startedAt: number | undefined;
-                      let endedAt: number | undefined;
-                      for (const p of message.parts ?? []) {
-                        if ((p.round ?? 0) !== r) continue;
-                        if (p.roundStartedAt !== undefined && startedAt === undefined) startedAt = p.roundStartedAt;
-                        if (p.roundEndedAt !== undefined && endedAt === undefined) endedAt = p.roundEndedAt;
+                  // Parameterized by the item list so the "Worked {time}"
+                  // panel can re-assemble segments from the SUBSET of items
+                  // that belongs inside the collapsed panel (everything
+                  // except the final answer text).
+                  const assembleSegments = (items: RoundRenderItem[]): RoundSegmentData[] => {
+                    const roundOrder: number[] = [];
+                    for (const p of message.parts ?? []) {
+                      const r = p.round ?? 0;
+                      if (!roundOrder.includes(r)) roundOrder.push(r);
+                    }
+                    const itemsByRound = new Map<number, RoundRenderItem[]>();
+                    for (const item of items) {
+                      const arr = itemsByRound.get(item.round) ?? [];
+                      arr.push(item);
+                      itemsByRound.set(item.round, arr);
+                    }
+                    return roundOrder
+                      .map((r) => {
+                        let startedAt: number | undefined;
+                        let endedAt: number | undefined;
+                        for (const p of message.parts ?? []) {
+                          if ((p.round ?? 0) !== r) continue;
+                          if (p.roundStartedAt !== undefined && startedAt === undefined) startedAt = p.roundStartedAt;
+                          if (p.roundEndedAt !== undefined && endedAt === undefined) endedAt = p.roundEndedAt;
+                        }
+                        return {
+                          round: r,
+                          startedAt,
+                          endedAt,
+                          thinkingParts: thinkByRound.get(r) ?? [],
+                          items: itemsByRound.get(r) ?? [],
+                        };
+                      })
+                      .filter((seg) => seg.thinkingParts.length > 0 || seg.items.length > 0);
+                  };
+                  const segments = assembleSegments(renderItems);
+
+                  // ── "WORKED {TIME}" COLLAPSE PANEL (PRD §§12–22): once the
+                  // generation settles, ALL of its activity (thinking, tool
+                  // calls, intermediate text) collapses into ONE expandable
+                  // "Worked {duration}" panel. The FINAL user-facing answer
+                  // stays outside (rendered below the panel). While streaming,
+                  // the live activity UI remains exactly as before — the panel
+                  // wraps the SAME event renderers, never a second system.
+                  const settled = !isLastStreaming;
+                  const textItemCount = renderItems.reduce(
+                    (n, it) => n + (it.kind === "text" ? 1 : 0),
+                    0,
+                  );
+                  const hasToolWork = renderItems.some(
+                    (it) => it.kind === "tool" || it.kind === "toolGroup",
+                  );
+                  const hasThinking = segments.some((s) => s.thinkingParts.length > 0);
+                  // Work = tools, thinking, or intermediate text beyond the
+                  // single final answer. A plain one-shot text answer gets NO
+                  // panel (nothing to collapse).
+                  const workedMode =
+                    settled &&
+                    (hasToolWork ||
+                      hasThinking ||
+                      textItemCount > 1 ||
+                      (textItemCount === 0 && renderItems.length > 0));
+
+                  let finalTextItem: RoundRenderItem | null = null;
+                  let panelItems: RoundRenderItem[] = renderItems;
+                  if (workedMode) {
+                    // The LAST text item is the final answer — it stays
+                    // OUTSIDE the panel (when one exists).
+                    let lastTextIdx = -1;
+                    for (let ri = renderItems.length - 1; ri >= 0; ri--) {
+                      if (renderItems[ri]!.kind === "text") {
+                        lastTextIdx = ri;
+                        break;
                       }
-                      return {
-                        round: r,
-                        startedAt,
-                        endedAt,
-                        thinkingParts: thinkByRound.get(r) ?? [],
-                        items: itemsByRound.get(r) ?? [],
-                      };
-                    })
-                    .filter((seg) => seg.thinkingParts.length > 0 || seg.items.length > 0);
+                    }
+                    if (lastTextIdx !== -1) {
+                      finalTextItem = renderItems[lastTextIdx]!;
+                      panelItems = renderItems.filter((it) => it !== finalTextItem);
+                    }
+                    // No text at all (tools-only / failed turn) → EVERYTHING
+                    // goes inside the panel; nothing renders outside.
+                  }
+
+                  if (workedMode) {
+                    const panelSegments = assembleSegments(panelItems);
+                    const panelMultiRound = panelSegments.length > 1;
+                    const panelThinkingParts = panelSegments[0]?.thinkingParts ?? [];
+                    return (
+                      <>
+                        <WorkedPanel
+                          durationMs={deriveGenerationDurationMs(message)}
+                          failed={message.generation?.failed}
+                          stopped={message.generation?.stopped}
+                        >
+                          {panelMultiRound
+                            ? panelSegments.map((seg, si) => (
+                                <RoundPanel
+                                  key={`worked-round-${seg.round}-${si}`}
+                                  segment={seg}
+                                  isLastSegment={si === panelSegments.length - 1}
+                                  isStreaming={false}
+                                  isUser={isUser}
+                                  turnId={message.conversationId}
+                                  onCiteClick={onCiteClick}
+                                  sources={sources}
+                                  genuiNodes={undefined}
+                                  onTodoDismiss={onTodoDismiss}
+                                />
+                              ))
+                            : (() => {
+                                // Single-segment panel body: thinking + items.
+                                return (
+                                  <>
+                                    {panelThinkingParts.map((part) => {
+                                      if (part.type === "thinking") {
+                                        return <ThinkingBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={false} />;
+                                      }
+                                      return <ReasoningBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={false} />;
+                                    })}
+                                    {panelItems.map((item) => {
+                                      if (item.kind === "todoPanel") {
+                                        return (
+                                          <div key="inline-todo-panel" className="w-full">
+                                            <ResearchPanel onDismiss={onTodoDismiss} />
+                                          </div>
+                                        );
+                                      }
+                                      if (item.kind === "toolGroup") {
+                                        return (
+                                          <CollapsibleToolGroup
+                                            key={`worked-group-${item.parts[0]!.id}`}
+                                            parts={item.parts}
+                                            turnId={message.conversationId}
+                                          />
+                                        );
+                                      }
+                                      if (item.kind === "tool" && item.part.toolCall) {
+                                        return (
+                                          <div key={`worked-${item.part.id}`} className="w-full">
+                                            <ToolCallCard toolCall={item.part.toolCall} turnId={message.conversationId} />
+                                          </div>
+                                        );
+                                      }
+                                      // Intermediate text — frameless inside
+                                      // the panel (it is NOT the final answer).
+                                      return (
+                                        <TextBubble
+                                          key={`worked-${item.part.id}`}
+                                          text={item.part.content ?? ""}
+                                          showCursor={false}
+                                          isUser={isUser}
+                                          isStreaming={false}
+                                        />
+                                      );
+                                    })}
+                                  </>
+                                );
+                              })()}
+                        </WorkedPanel>
+
+                        {/* The FINAL answer — outside the collapsed work panel. */}
+                        {finalTextItem && finalTextItem.kind === "text" && (
+                          <TextBubble
+                            key={finalTextItem.part.id}
+                            text={finalTextItem.part.content ?? ""}
+                            showCursor={false}
+                            isUser={isUser}
+                            onCiteClick={onCiteClick}
+                            sources={sources}
+                            genuiNodes={!message.isStreaming ? message.genui : undefined}
+                            isStreaming={false}
+                          />
+                        )}
+                      </>
+                    );
+                  }
 
                   const multiRound = segments.length > 1;
 
@@ -1394,6 +1542,9 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.parts === next.message.parts &&
     prev.message.toolCalls === next.message.toolCalls &&
     prev.message.genui === next.message.genui &&
+    // "Worked {time}" panel summary — stamped on settle; without this the
+    // memo blocked the re-render and the panel never appeared.
+    prev.message.generation === next.message.generation &&
     // Rating feedback mutates ONLY these two fields — without them in the
     // comparator the memo blocked the re-render and the selected thumb never
     // appeared (the "rating does nothing" half of the actions bug).

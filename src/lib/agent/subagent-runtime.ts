@@ -20,6 +20,11 @@ import {
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
+import {
+  malformedToolResult,
+  parseToolCallArguments,
+  wireSafeArguments,
+} from "@/lib/agent/tool-args";
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
@@ -602,16 +607,16 @@ export async function executeSubagentTurn(
 
       // Process any buffered tool calls.
       if (toolCallsBuffer.length > 0 && config.toolsEnabled) {
-        // Parse args and update tool call cards to "running"
-        const parsedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+        // Parse args and update tool call cards to "running". Malformed /
+        // truncated argument JSON is REPAIRED when possible and otherwise
+        // short-circuits to a structured MALFORMED_TOOL_ARGUMENTS tool
+        // result — never executed, never replayed raw (tool-args.ts).
+        const parsedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown>; malformed: boolean; raw?: string }> = [];
         for (const tc of toolCallsBuffer) {
-          let toolArgs: Record<string, unknown> = {};
-          try {
-            toolArgs = JSON.parse(tc.function.arguments || "{}");
-          } catch {
-            toolArgs = { _raw: tc.function.arguments };
-          }
-          parsedToolCalls.push({ id: tc.id, name: tc.function.name, args: toolArgs });
+          const parsed = parseToolCallArguments(tc.function.arguments);
+          const toolArgs = parsed.args;
+          const malformed = parsed.malformed && !parsed.repaired;
+          parsedToolCalls.push({ id: tc.id, name: tc.function.name, args: toolArgs, malformed, raw: parsed.raw });
 
           // Update card to "running" with parsed args
           const msg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
@@ -624,7 +629,9 @@ export async function executeSubagentTurn(
           }
         }
 
-        // Add assistant message with tool calls + reasoning_content to API history
+        // Add assistant message with tool calls + reasoning_content to API
+        // history. The replayed argument string is ALWAYS valid JSON
+        // (repaired copy / {}) — never the raw truncated text.
         apiMessages.push({
           role: "assistant",
           content: accumulatedText || "",
@@ -632,7 +639,10 @@ export async function executeSubagentTurn(
           tool_calls: toolCallsBuffer.map((tc) => ({
             id: tc.id,
             type: "function" as const,
-            function: tc.function,
+            function: {
+              name: tc.function.name,
+              arguments: wireSafeArguments(tc.function.arguments),
+            },
           })),
         });
 
@@ -641,6 +651,12 @@ export async function executeSubagentTurn(
           const tool = allTools.find((t) => t.name === ptc.name);
           let toolResult: unknown;
           let toolStatus: "completed" | "error" = "completed";
+          if (ptc.malformed) {
+            // Structured tool error — the model re-issues a valid call on
+            // the next round; NEVER executed, NEVER a provider error.
+            toolResult = malformedToolResult(ptc.raw ?? "");
+            toolStatus = "error";
+          } else {
           try {
             if (tool) {
               const ctx = {
@@ -663,6 +679,7 @@ export async function executeSubagentTurn(
           } catch (e) {
             toolResult = { error: e instanceof Error ? e.message : String(e) };
             toolStatus = "error";
+          }
           }
 
           // Update tool call card with result
@@ -719,12 +736,10 @@ async function executeToolCallsParallel(
   envVars: Record<string, string>,
 ) {
   await Promise.all(toolCalls.map(async (tc) => {
-    let toolArgs: Record<string, unknown> = {};
-    try {
-      toolArgs = JSON.parse(tc.function.arguments || "{}");
-    } catch {
-      toolArgs = { _raw: tc.function.arguments };
-    }
+    const parsed = parseToolCallArguments(tc.function.arguments);
+    const toolArgs = parsed.args;
+    // Malformed + unrepairable → structured tool error, never executed.
+    const malformed = parsed.malformed && !parsed.repaired;
 
     const tool = allTools.find((t) => t.name === tc.function.name);
 
@@ -739,6 +754,11 @@ async function executeToolCallsParallel(
 
     let toolResult: unknown;
     let toolStatus: "completed" | "error" = "completed";
+    if (malformed) {
+      // Structured tool error — never executed, never a provider error.
+      toolResult = malformedToolResult(parsed.raw);
+      toolStatus = "error";
+    } else {
     try {
       if (tool) {
         const ctx = {
@@ -761,6 +781,7 @@ async function executeToolCallsParallel(
     } catch (e) {
       toolResult = { error: e instanceof Error ? e.message : String(e) };
       toolStatus = "error";
+    }
     }
 
     // Update tool call card with result

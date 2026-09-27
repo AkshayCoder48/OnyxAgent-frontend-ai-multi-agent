@@ -220,7 +220,12 @@ describe("runner sanitizeToolParameters (malformed schema defense)", () => {
 
 describe("runner script content invariants (LLM 400 fix)", () => {
   it("serializes request messages through buildRequestMessages in both call paths", () => {
-    expect(BG_AGENT_SCRIPT).toContain("messages: buildRequestMessages(state)");
+    // Every request path routes the history through buildRequestMessages
+    // AND the tool-call-argument sanitizer (malformed replayed arguments
+    // poison the provider stream — see tool-args.ts).
+    expect(BG_AGENT_SCRIPT).toContain(
+      "messages: sanitizeToolCallHistory(buildRequestMessages(state))",
+    );
     // Both the streaming round and the non-stream fallback.
     const occurrences = BG_AGENT_SCRIPT.split("buildRequestMessages(state)").length - 1;
     expect(occurrences).toBeGreaterThanOrEqual(2);
@@ -236,5 +241,16 @@ describe("runner script content invariants (LLM 400 fix)", () => {
 
   it("carries the reasoning self-healing branch for DeepSeek-style providers", () => {
     expect(BG_AGENT_SCRIPT).toContain("state.replayReasoning = true");
+  });
+
+  it("repairs / short-circuits malformed tool-call arguments (PRD tool-error fix)", () => {
+    // The repair + structured-error pipeline is present in the runner…
+    expect(BG_AGENT_SCRIPT).toContain("const repairJsonArgs =");
+    expect(BG_AGENT_SCRIPT).toContain("const parseToolArgsSafe =");
+    expect(BG_AGENT_SCRIPT).toContain("const malformedArgsResult =");
+    // …malformed calls are never executed…
+    expect(BG_AGENT_SCRIPT).toContain("if (tc._malformed) {");
+    // …and the replayed arguments are ALWAYS wire-safe JSON.
+    expect(BG_AGENT_SCRIPT).toContain("arguments: wireSafeArgs(tc.function.arguments)");
   });
 });

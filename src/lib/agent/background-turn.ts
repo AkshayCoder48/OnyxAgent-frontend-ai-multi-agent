@@ -197,6 +197,9 @@ async function persistCheckpoint(
       : undefined,
     parts: msg.parts,
     toolCalls: msg.toolCalls,
+    // "Worked {time}" summary — the event processor stamps it on the store
+    // message at complete/error; the final (settling) checkpoint persists it.
+    generation: msg.generation,
     isStreaming,
   });
 }

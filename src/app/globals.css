@@ -468,6 +468,16 @@
   .scrollbar-thin::-webkit-scrollbar-corner {
     background: transparent;
   }
+
+  /* Hidden-scrollbar scroll region (carousel dot rows etc.): scrollable,
+     but no visible scrollbar on any engine. */
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* =========================================================================
@@ -1541,15 +1551,53 @@
    40×40 made the 18px badge balloon into a huge circle that dominated
    every line (the "citation circle too big" bug). The chip keeps its
    compact 18px visual and stays tappable via its ::before hit-area
-   extension (-inset-2 ≈ 34px total). */
+   extension (-inset-2 ≈ 34px total).
+   `.dot-nav` (carousel/pagination indicator dots) is EXCLUDED for the same
+   reason: the blanket 40×40 ballooned the 4px dots into 40×40 circles that
+   dwarfed the image they sit on (the "giant preview dots" bug on phones).
+   The dot keeps its small visual (h-1/w-3 pill) and stays tappable via the
+   ::before hit-area extension below. */
 @media (max-width: 768px) {
-  button:not([role="switch"]):not(.cite-chip),
-  [role="button"]:not(.cite-chip),
+  button:not([role="switch"]):not(.cite-chip):not(.dot-nav),
+  [role="button"]:not(.cite-chip):not(.dot-nav),
   a {
     min-height: 40px;
     min-width: 40px;
   }
-  
+
+  /* Hit-area extension for the tiny dot-nav buttons: a transparent
+     ::before pad (-inset-2 ≈ 20px total) makes them comfortably tappable
+     without enlarging the visible dot. */
+  .dot-nav {
+    position: relative;
+  }
+  .dot-nav::before {
+    content: "";
+    position: absolute;
+    inset: -10px;
+    border-radius: 9999px;
+  }
+
+  /* CHAT ROW MENU REVEAL (three-dot button on conversation rows): devices
+     WITH hover (mice) hide the button until its row is hovered/focused —
+     the clean desktop look. Devices WITHOUT hover (phones/tablets) always
+     show it. The old `touch:opacity-100` utility was a DEAD class (no such
+     Tailwind variant) which left the button invisible-but-tappable on
+     touch — the exact reported bug. */
+  .row-menu-btn {
+    transition: opacity 150ms ease;
+  }
+  @media (hover: hover) {
+    .row-menu-btn {
+      opacity: 0;
+    }
+    .group:hover .row-menu-btn,
+    .group:focus-within .row-menu-btn,
+    .row-menu-btn[aria-expanded="true"] {
+      opacity: 1;
+    }
+  }
+
   /* Allow text selection but prevent callout popup on long press */
   * {
     -webkit-touch-callout: none;

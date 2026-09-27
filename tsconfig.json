@@ -45,6 +45,7 @@
     "examples/**",
     "capacitor.config.ts",
     "cli/**",
-    "mini-services/**"
+    "mini-services/**",
+    "mock-llm"
   ]
 }

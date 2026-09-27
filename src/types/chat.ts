@@ -69,6 +69,24 @@ export interface ChatMessage {
    *  ``<<<genui>>>...<<</genui>>>`` block. Persisted to Dexie so the rich
    *  components survive reloads. Rendered by ``GenUIBlock`` after the text. */
   genui?: GenUINode[];
+  /** GENERATION SUMMARY (the "Worked {time}" panel): stamped by the event
+   *  processor the moment the turn settles — completed, failed, or stopped.
+   *  Persisted with the message so reopening the chat shows the same
+   *  "Worked 18s" collapse panel with the REAL streamed events inside
+   *  (thinking, tool calls, intermediate text — in exact chronological
+   *  order). Legacy rows without it derive timing from part stamps. */
+  generation?: {
+    /** Epoch ms when generation STARTED. */
+    startedAt: number;
+    /** Epoch ms when generation SETTLED (completed/failed/stopped). */
+    completedAt: number;
+    /** completedAt − startedAt, precomputed for display. */
+    durationMs: number;
+    /** True when the turn ended in an error (panel shows "· Failed"). */
+    failed?: boolean;
+    /** True when the user stopped the generation mid-flight. */
+    stopped?: boolean;
+  };
 }
 
 export interface ToolCall {

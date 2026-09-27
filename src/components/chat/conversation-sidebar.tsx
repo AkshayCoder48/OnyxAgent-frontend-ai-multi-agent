@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
+import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useConversations } from "@/hooks";
@@ -38,6 +40,10 @@ import {
 } from "@/lib/scheduler/chat-sync";
 import { ShareDialog } from "./share-dialog";
 import { RunningExecutionsSection } from "./running-executions";
+
+/** Window event broadcast when a row menu opens — every OTHER open row menu
+ *  closes itself (single-open menus, like native context menus). */
+const CHAT_ROW_MENU_OPEN_EVENT = "onyx:chat-row-menu-open";
 
 /* ---------------------------------------------------------------------------
  * Date grouping for the Terra editorial history: tracked-caps day buckets.
@@ -107,9 +113,76 @@ function ConversationItem({
   onShare,
 }: ConversationItemProps) {
   const t = useTranslations("chat");
+  // PORTAL POP-UP MENU: the old in-row `absolute` popover was clipped by
+  // the sidebar's scroll container (overflow-y auto also clips the x-axis)
+  // — the menu rendered half-transparent/half-cut over the rows below and
+  // taps landed on the ROWS, not the menu items ("options aren't working").
+  // The menu now portals to document.body with fixed coordinates measured
+  // from the button's rect: never clipped, always opaque, always on top.
   const [showMenu, setShowMenu] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const menuBtnRef = useRef<HTMLButtonElement | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(conversation.title || "");
+
+  const closeMenu = useCallback(() => setShowMenu(false), []);
+
+  // SINGLE-OPEN MENUS: only ONE row menu can be open at a time — opening a
+  // menu broadcasts a window event; every OTHER row's menu closes itself.
+  useEffect(() => {
+    if (!showMenu) return;
+    const onOtherOpen = (e: Event) => {
+      if ((e as CustomEvent<string>).detail !== conversation.id) closeMenu();
+    };
+    window.addEventListener(CHAT_ROW_MENU_OPEN_EVENT, onOtherOpen);
+    return () => window.removeEventListener(CHAT_ROW_MENU_OPEN_EVENT, onOtherOpen);
+  }, [showMenu, conversation.id, closeMenu]);
+
+  // Open at the button's rect, clamped to the viewport (flips above when
+  // there is no room below). A plain function (not useCallback): the React
+  // compiler could not preserve memoization through the conditional
+  // early-return, and this is a one-tap handler — per-render identity is
+  // irrelevant.
+  const openMenu = () => {
+    window.dispatchEvent(new CustomEvent(CHAT_ROW_MENU_OPEN_EVENT, { detail: conversation.id }));
+    const rect = menuBtnRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setMenuPos(null);
+      setShowMenu(true);
+      return;
+    }
+    const MENU_W = 176; // w-44
+    const MENU_H = 216; // 4 items ≈ 4×48 + padding
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left = rect.right - MENU_W;
+    left = Math.max(8, Math.min(left, vw - MENU_W - 8));
+    let top = rect.bottom + 6;
+    if (top + MENU_H > vh - 8) top = Math.max(8, rect.top - MENU_H - 6);
+    setMenuPos({ top, left });
+    setShowMenu(true);
+  };
+
+  // Escape closes; any scroll (the list scrolls INSIDE the sidebar, so use
+  // capture phase) or resize closes so the fixed menu can't detach from its
+  // row. Cleanup on unmount.
+  useEffect(() => {
+    if (!showMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeMenu();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("resize", closeMenu);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu);
+    };
+  }, [showMenu, closeMenu]);
 
   const handleRename = () => {
     if (editTitle.trim()) {
@@ -119,6 +192,28 @@ function ConversationItem({
   };
 
   const displayTitle = conversation.title || t("newConversation");
+
+  // Menu items — built once per open; each carries THIS row's conversation
+  // id via the closure (PRD §11: the action can never target another chat).
+  const menuItems: Array<{
+    key: string;
+    icon: typeof Pencil;
+    label: string;
+    danger?: boolean;
+    run: () => void;
+  }> = conversation.is_archived
+    ? [
+        { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
+        { key: "share", icon: Share2, label: t("share"), run: onShare },
+        { key: "restore", icon: ArchiveRestore, label: "Restore", run: onUnarchive },
+        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: onDelete },
+      ]
+    : [
+        { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
+        { key: "share", icon: Share2, label: t("share"), run: onShare },
+        { key: "archive", icon: Archive, label: t("archive"), run: onArchive },
+        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: onDelete },
+      ];
 
   return (
     <div
@@ -170,87 +265,94 @@ function ConversationItem({
         />
       )}
 
-      <div className="relative">
+      <div className="relative shrink-0">
         <Button
+          ref={menuBtnRef}
           variant="ghost"
           size="sm"
+          aria-haspopup="menu"
+          aria-expanded={showMenu}
+          aria-label={`${t("rename")} / ${t("archive")} / ${t("delete")}`}
           className={cn(
-            "touch:opacity-100 h-8 w-8 p-0 opacity-0 group-hover:opacity-100",
-            showMenu && "opacity-100",
+            // VISIBILITY (see .row-menu-btn in globals.css): devices WITH
+            // hover reveal the button on row hover/focus or while its menu
+            // is open; devices WITHOUT hover (phones/tablets) always show
+            // it. The old `touch:opacity-100` utility was a dead class —
+            // the button sat invisible-but-tappable on touch devices.
+            "row-menu-btn text-foreground/60 hover:text-foreground h-8 w-8 p-0",
           )}
           onClick={(e) => {
             e.stopPropagation();
-            setShowMenu(!showMenu);
+            if (showMenu) closeMenu();
+            else openMenu();
           }}
         >
           <MoreVertical className="h-4 w-4" />
         </Button>
 
-        {showMenu && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setShowMenu(false)} />
-            <div className="bg-popover absolute top-8 right-0 z-20 w-40 rounded-md border shadow-lg">
-              <button
-                className="hover:bg-secondary flex min-h-[44px] w-full items-center gap-2 px-3 py-3 text-sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIsEditing(true);
-                  setShowMenu(false);
-                }}
-              >
-                <Pencil className="h-4 w-4" />
-                {t("rename")}
-              </button>
-              <button
-                className="hover:bg-secondary flex min-h-[44px] w-full items-center gap-2 px-3 py-3 text-sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onShare();
-                  setShowMenu(false);
-                }}
-              >
-                <Share2 className="h-4 w-4" />
-                {t("share")}
-              </button>
-              {conversation.is_archived ? (
-                <button
-                  className="hover:bg-secondary flex min-h-[44px] w-full items-center gap-2 px-3 py-3 text-sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onUnarchive();
-                    setShowMenu(false);
-                  }}
-                >
-                  <ArchiveRestore className="h-4 w-4" />
-                  Restore
-                </button>
-              ) : (
-                <button
-                  className="hover:bg-secondary flex min-h-[44px] w-full items-center gap-2 px-3 py-3 text-sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onArchive();
-                    setShowMenu(false);
-                  }}
-                >
-                  <Archive className="h-4 w-4" />
-                  {t("archive")}
-                </button>
+        {/* PORTAL MENU — fixed-position, opaque, animated (enter/exit via
+            the app's framer-motion system). Renders outside the sidebar's
+            clipping scroll container. */}
+        {typeof document !== "undefined" &&
+          createPortal(
+            <AnimatePresence>
+              {showMenu && (
+                <>
+                  {/* Transparent backdrop — click/right-click closes. */}
+                  <motion.div
+                    key="chat-menu-backdrop"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.12 }}
+                    className="fixed inset-0 z-[70]"
+                    onClick={closeMenu}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      closeMenu();
+                    }}
+                    aria-hidden
+                  />
+                  <motion.div
+                    key="chat-menu-popover"
+                    role="menu"
+                    aria-label={displayTitle}
+                    initial={{ opacity: 0, scale: 0.96, y: -2 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.97, y: -2 }}
+                    transition={{ duration: 0.16, ease: [0.32, 0.72, 0, 1] }}
+                    style={
+                      menuPos
+                        ? { top: menuPos.top, left: menuPos.left }
+                        : { top: "50%", left: "50%", transform: "translate(-50%, -50%)" }
+                    }
+                    className="bg-popover text-popover-foreground fixed z-[71] w-44 origin-top-right overflow-hidden rounded-xl border border-border shadow-xl shadow-foreground/10"
+                  >
+                    {menuItems.map((item) => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        role="menuitem"
+                        className={cn(
+                          "hover:bg-secondary focus-visible:bg-secondary active:bg-secondary flex w-full items-center gap-2.5 px-3 py-3 text-left text-[13px] font-medium outline-none transition-colors",
+                          item.danger ? "text-destructive hover:text-destructive" : "text-foreground/90",
+                        )}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeMenu();
+                          item.run();
+                        }}
+                      >
+                        <item.icon className="h-4 w-4 shrink-0" aria-hidden />
+                        {item.label}
+                      </button>
+                    ))}
+                  </motion.div>
+                </>
               )}
-              <button
-                className="text-destructive hover:bg-destructive/10 flex min-h-[44px] w-full items-center gap-2 px-3 py-3 text-sm"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete();
-                  setShowMenu(false);
-                }}
-              >
-                <Trash2 className="h-4 w-4" />
-                {t("delete")}
-              </button>
-            </div>
-          </>
-        )}
+            </AnimatePresence>,
+            document.body,
+          )}
       </div>
     </div>
   );

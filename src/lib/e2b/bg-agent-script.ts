@@ -150,6 +150,117 @@ const safePath = (p) => {
   return abs;
 };
 
+// ── TOOL-ARG REPAIR (PRD "Create File causes provider SSE failure") ──────
+// Self-contained mirror of src/lib/agent/tool-args.ts (this script is
+// standalone by design, like the param policy above).
+//
+// Tool arguments stream across MANY SSE chunks; a stream cut mid-argument
+// leaves e.g. '{"path": "/home/user/gym_cutting_diet.md' — invalid JSON.
+// Previously that raw string was (a) EXECUTED as {_raw:…} → the tool saw
+// args.path === undefined → "Invalid path", and (b) REPLAYED VERBATIM as
+// tool_calls[].function.arguments on the next round → the gateway failed
+// every subsequent request with "JSON error injected into SSE stream" and
+// the retry loop burned all attempts on a poisoned history.
+//
+// repairJsonArgs closes what truncation left open (string literal first,
+// then open containers, dangling commas trimmed) and returns a PARSEABLE
+// string, or null when the payload is unrecoverable.
+const repairJsonArgs = (raw) => {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const text = raw.trim();
+  if (!text.startsWith("{") && !text.startsWith("[")) return null;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; escaped = false; }
+    else if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") {
+      const open = stack.pop();
+      if (open === undefined) return null;
+      if ((open === "{" && ch !== "}") || (open === "[" && ch !== "]")) return null;
+    }
+  }
+  let candidate = text;
+  if (inString) {
+    if (escaped) candidate = candidate.slice(0, -1);
+    candidate += '"';
+  }
+  candidate = candidate.replace(/,\s*$/, "");
+  for (let i = stack.length - 1; i >= 0; i--) candidate += stack[i] === "{" ? "}" : "]";
+  try { JSON.parse(candidate); return candidate; } catch { return null; }
+};
+
+// Parse + repair a tool-call argument string. NEVER throws. Returns
+// { args, malformed, raw } — malformed:true means the payload was invalid;
+// args holds the REPAIRED object when repair worked, {} when it did not.
+const parseToolArgsSafe = (raw) => {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return { args: {}, malformed: false, raw: "{}" };
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { args: parsed, malformed: false, raw: text };
+    }
+  } catch {}
+  const repaired = repairJsonArgs(text);
+  if (repaired !== null) {
+    try {
+      const parsed = JSON.parse(repaired);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { args: parsed, malformed: true, raw: text };
+      }
+    } catch {}
+  }
+  return { args: {}, malformed: true, raw: text };
+};
+
+// Arguments safe to replay on the wire: repaired copy when possible, valid
+// "{}" when not. The raw truncated text NEVER goes back to the provider.
+const wireSafeArgs = (raw) => {
+  const parsed = parseToolArgsSafe(raw);
+  if (!parsed.malformed) return JSON.stringify(parsed.args);
+  if (Object.keys(parsed.args).length > 0) return JSON.stringify(parsed.args);
+  return "{}";
+};
+
+// The structured tool result a malformed call resolves to — fed back
+// through the NORMAL tool-result protocol so the model can re-issue the
+// call (a tool failure never escalates into a provider error/retry).
+const malformedArgsResult = (raw) => ({
+  error: {
+    code: "MALFORMED_TOOL_ARGUMENTS",
+    message: "The tool call arguments arrived truncated or malformed and could not be parsed. Re-issue the complete tool call with valid JSON arguments.",
+    raw: typeof raw === "string" && raw.length > 500 ? raw.slice(0, 500) + "…" : raw,
+  },
+});
+
+// Sanitize a messages array for the wire: ANY assistant tool_calls entry
+// whose arguments do not parse gets valid "{}" (or the repaired copy).
+// Defense-in-depth so a poisoned history can never wedge the retry loop —
+// run before EVERY provider request.
+const sanitizeToolCallHistory = (msgs) => {
+  if (!Array.isArray(msgs)) return msgs;
+  return msgs.map((m) => {
+    if (!m || m.role !== "assistant" || !Array.isArray(m.tool_calls)) return m;
+    let changed = false;
+    const tool_calls = m.tool_calls.map((tc) => {
+      if (!tc || !tc.function || typeof tc.function.arguments !== "string") return tc;
+      try { JSON.parse(tc.function.arguments); return tc; } catch {}
+      changed = true;
+      return { ...tc, function: { ...tc.function, arguments: wireSafeArgs(tc.function.arguments) } };
+    });
+    return changed ? { ...m, tool_calls } : m;
+  });
+};
+
 async function readState() {
   // BOOT RESILIENCE (PRD "System Not Found Error"): a crash-recovery resume
   // can point at a run dir whose state.json was never written (killed
@@ -738,7 +849,11 @@ async function streamRoundEvents(state, round, finalRound) {
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
   const body = {
     model: p.model,
-    messages: buildRequestMessages(state),
+    // WIRE SAFETY: the history is sanitized — every assistant tool_calls
+    // entry carries VALID JSON arguments (repaired copy / "{}"). A
+    // truncated-argument replay is what made the gateway answer every
+    // subsequent round with "JSON error injected into SSE stream".
+    messages: sanitizeToolCallHistory(buildRequestMessages(state)),
     temperature: p.temperature ?? 0.7,
     stream: true,
   };
@@ -881,21 +996,40 @@ async function streamRoundEvents(state, round, finalRound) {
       bareMode = false;
     }
     await emitChain; // wait for the last append to land
-    // Finalize accumulated tool calls (parse args JSON).
+    // Finalize accumulated tool calls (parse + REPAIR args JSON). The
+    // normalized 'arguments' string is ALWAYS valid JSON — repaired copy
+    // when possible, "{}" when not — so the replay can never poison the
+    // provider history. '_malformed' marks unrepairable calls: the tool is
+    // NOT executed; it resolves to a structured MALFORMED_TOOL_ARGUMENTS
+    // result instead (tool errors stay tool errors).
     const calls = [];
     for (const [idx, tc] of toolAcc) {
-      let args = {};
-      try { args = JSON.parse(tc.args || "{}"); } catch { args = { _raw: tc.args }; }
-      calls.push({ id: tc.id || "bg_" + round + "_" + idx, type: "function", function: { name: tc.name || "unknown", arguments: tc.args || "{}" }, _args: args });
+      const parsed = parseToolArgsSafe(tc.args);
+      const wireArgs = parsed.malformed
+        ? (Object.keys(parsed.args).length > 0 ? JSON.stringify(parsed.args) : "{}")
+        : JSON.stringify(parsed.args);
+      calls.push({
+        id: tc.id || "bg_" + round + "_" + idx,
+        type: "function",
+        function: { name: tc.name || "unknown", arguments: wireArgs },
+        _args: parsed.args,
+        _malformed: parsed.malformed && Object.keys(parsed.args).length === 0,
+        _rawArgs: parsed.raw,
+      });
     }
     // Post-stream normalize: fence/DSML tool calls embedded in content.
     const norm = normalizeMessage({ content, tool_calls: calls });
     const normCalls = Array.isArray(norm.tool_calls) ? norm.tool_calls : [];
     const finalCalls = normCalls.map((tc) => {
-      let args = {};
       const raw = tc.function ? tc.function.arguments : "{}";
-      try { args = JSON.parse(raw || "{}"); } catch { args = { _raw: raw }; }
-      return { ...tc, _args: args };
+      const parsed = parseToolArgsSafe(raw);
+      return {
+        ...tc,
+        function: { ...tc.function, arguments: wireSafeArgs(raw) },
+        _args: parsed.args,
+        _malformed: parsed.malformed && Object.keys(parsed.args).length === 0,
+        _rawArgs: parsed.raw,
+      };
     });
     return { content: norm.content, reasoning, toolCalls: finalCalls };
   };
@@ -961,7 +1095,7 @@ async function streamRoundEvents(state, round, finalRound) {
         /must be passed|required|pass(ed)? back|include/i.test(detail400)
       ) {
         state.replayReasoning = true;
-        body.messages = buildRequestMessages(state);
+        body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "restored reasoning_content replay (provider requires it)" });
         clearTimeout(hardTimer);
         continue;
@@ -976,7 +1110,7 @@ async function streamRoundEvents(state, round, finalRound) {
         errorText: detail400,
       });
       if (healReason) {
-        body.messages = buildRequestMessages(state);
+        body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
         if (state.wireCompat.noTools) {
           delete body.tools;
           delete body.tool_choice;
@@ -1145,7 +1279,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
-  const nb = { model: p.model, messages: buildRequestMessages(state), temperature: p.temperature ?? 0.7 };
+  const nb = { model: p.model, messages: sanitizeToolCallHistory(buildRequestMessages(state)), temperature: p.temperature ?? 0.7 };
   const dp = Array.isArray(p.disabledParams) ? p.disabledParams : [];
   if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;
   if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: sanitizeToolParameters(t.parameters) } }));
@@ -2446,17 +2580,37 @@ async function main() {
     // reasoning_content replay (see the 400 handler in streamRoundEvents).
     // 'content' is a STRING ("" when the model only called tools) — null
     // is spec-legal but some strict gateways type it as str.
+    // 'arguments' was normalized in finishStream() — ALWAYS valid JSON
+    // (repaired copy / "{}"), never the raw truncated stream text.
     state.messages.push({
       role: "assistant",
       content: result.content || "",
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),
-      tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } })),
+      tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: wireSafeArgs(tc.function.arguments) } })),
     });
+    // IDEMPOTENT EXECUTION (PRD §5): every toolCallId runs exactly once per
+    // run — retries/resumes/replays can never double-execute side effects.
+    // The executed-id list lives on state (persisted per round by writeState)
+    // so a crash-resume of this run can never re-execute a finished call.
+    if (!Array.isArray(state._executedToolCallIds)) state._executedToolCallIds = [];
     for (const tc of toolCalls) {
       const fn = tc.function ?? {};
       const args = tc._args ?? {};
       const id = tc.id ?? "bg-" + Math.random().toString(36).slice(2, 10);
       await emitEvent({ t: "tool_call", round, id, name: fn.name ?? "unknown", args });
+      // MALFORMED ARGS: never execute — resolve to a structured
+      // MALFORMED_TOOL_ARGUMENTS tool result through the normal tool-result
+      // protocol so the model can re-issue the call. A tool failure is NOT
+      // a provider failure: it never triggers the provider retry ladder.
+      if (tc._malformed) {
+        const toolResult = malformedArgsResult(tc._rawArgs ?? "");
+        const resultStr = cap(JSON.stringify(toolResult), 64 * 1024);
+        await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
+        state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
+        continue;
+      }
+      if (state._executedToolCallIds.includes(id)) continue; // duplicate — already ran
+      state._executedToolCallIds.push(id);
       const tool = ALL_TOOLS.find((x) => x.name === fn.name);
       let toolResult;
       try {

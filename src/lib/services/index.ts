@@ -216,6 +216,9 @@ export interface AddMessageInput {
   reasoning?: string;
   /** Ordered timeline parts (assistant turns). Persisted as JSON in `parts`. */
   parts?: import("@/types/chat").MessagePart[];
+  /** Generation summary ("Worked {time}" panel) — persisted on the message
+   *  row so a reload restores the same collapse-panel timing. */
+  generation?: import("@/types/chat").ChatMessage["generation"];
   toolCalls?: Array<{
     id: string;
     name: string;
@@ -448,6 +451,7 @@ export const conversationService = {
       thinking: input.thinking ?? null,
       reasoning: input.reasoning ?? null,
       parts: input.parts ?? null,
+      generation: input.generation ?? null,
     };
     await db.messages.add(messageRow);
     await bumpConversationTimestamp(conversationId);
@@ -528,6 +532,8 @@ export const conversationService = {
       thinking: input.thinking ?? null,
       reasoning: input.reasoning ?? null,
       parts: input.parts ?? null,
+      /** "Worked {time}" panel summary — persists with the settled row. */
+      generation: input.generation ?? null,
       /** Extra (non-indexed) property — marks an interrupted turn after a
        *  refresh. The final save omits it. */
       is_streaming: input.isStreaming ?? true,

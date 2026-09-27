@@ -76,6 +76,12 @@ export class AgentEventProcessor {
   // ── ROUND TRACKING (PRD §9–16) ────────────────────────────────────────
   private activeRound = 1;
 
+  // ── GENERATION TIMING ("Worked {time}" panel) ──────────────────────
+  /** Wall-clock when the CURRENT generation's first event arrived — the
+   *  "Worked 18s" start point. Stamped per generation (a new generation
+   * resets it). */
+  private turnStartedAt: number | null = null;
+
   // ── STREAMING BUFFERS (render batching — see original comments) ───────
   private textDeltaBuffer = "";
   private textDeltaTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,8 +232,50 @@ export class AgentEventProcessor {
     ) {
       return; // same generation still streaming — reuse the message
     }
+    // New generation → new "Worked {time}" window.
+    this.turnStartedAt = Date.now();
     this.createNewMessage("");
     this.currentMessageGeneration = this.activeGenerationId;
+  }
+
+  // ── GENERATION SUMMARY ("Worked {time}" panel) ─────────────────────
+  /** Stamp `generation` metadata on the current message so the settled
+   *  turn collapses into a "Worked {duration}" panel (PRD §§12–22).
+   *  Prefers the processor's wall-clock window; falls back to the part
+   *  stamps (roundStartedAt/tool startedAt) when the turn predates the
+   *  timer (resumed background runs). */
+  private stampGeneration(outcome: { failed?: boolean; stopped?: boolean }): void {
+    const id = this.currentMessageId;
+    if (!id) return;
+    const store = this.store.getState();
+    const msg = store.messages.find((m) => m.id === id);
+    if (!msg || msg.generation) return; // never overwrite a settled summary
+    const completedAt = Date.now();
+    let startedAt = this.turnStartedAt ?? undefined;
+    if (startedAt === undefined) {
+      // Fallback: earliest part stamp on the message.
+      for (const p of msg.parts ?? []) {
+        if (p.roundStartedAt !== undefined && (startedAt === undefined || p.roundStartedAt < startedAt)) {
+          startedAt = p.roundStartedAt;
+        }
+        const tcStarted = (p as { toolCall?: { startedAt?: number } }).toolCall?.startedAt;
+        if (tcStarted !== undefined && (startedAt === undefined || tcStarted < startedAt)) {
+          startedAt = tcStarted;
+        }
+      }
+    }
+    if (startedAt === undefined) startedAt = msg.timestamp instanceof Date ? msg.timestamp.getTime() : completedAt;
+    const durationMs = Math.max(0, completedAt - startedAt);
+    store.updateMessage(id, (m) => ({
+      ...m,
+      generation: {
+        startedAt,
+        completedAt,
+        durationMs,
+        ...(outcome.failed ? { failed: true } : {}),
+        ...(outcome.stopped ? { stopped: true } : {}),
+      },
+    }));
   }
 
   // ── STOP PATH (explicit user stop only) ────────────────────────────────
@@ -251,12 +299,15 @@ export class AgentEventProcessor {
         if (p.type === "tool" && p.toolCall) markStopped(p.toolCall);
       });
       this.store.getState().updateMessage(msgId, (m) => ({ ...m, isStreaming: false }));
+      // User-stopped turns keep their work summary too ("Worked {time}").
+      this.stampGeneration({ stopped: true });
     }
     this.flush();
     this.currentMessageId = null;
     this.currentGroupId = null;
     this.activeGenerationId = null;
     this.currentMessageGeneration = null;
+    this.turnStartedAt = null;
     this.store.getState().setPendingQuestions(null);
     this.store.getState().setProcessing(false);
   }
@@ -751,6 +802,9 @@ export class AgentEventProcessor {
         this.store.getState().setRateLimitStatus(null);
         this.flush();
         this.endActiveRound(this.activeRound);
+        // "Worked {time} · Failed" — the work done before the failure stays
+        // inspectable in the collapsed panel (PRD §22).
+        this.stampGeneration({ failed: true });
         // IN-APP ERROR LOG: mirror the surfaced chat error into the Logs
         // store so the full trail (LLM body, self-heal steps, retries) is
         // one click away.
@@ -823,10 +877,13 @@ export class AgentEventProcessor {
         if (!isFromActiveGeneration()) break;
         this.flush();
         this.endActiveRound(this.activeRound);
+        // Settled — the whole generation collapses into "Worked {time}".
+        this.stampGeneration({});
         this.store.getState().setProcessing(false);
         this.currentMessageId = null;
         this.activeGenerationId = null;
         this.currentMessageGeneration = null;
+        this.turnStartedAt = null;
         this.opts.onTurnEnd?.("completed");
         break;
       }

@@ -480,19 +480,23 @@ export function ImageSearchResults({ result }: ResultProps) {
           </>
         )}
 
-        {/* Dot indicators — small, subtle */}
+        {/* Dot indicators — small, subtle. `.dot-nav` exempts them from the
+            blanket 40px mobile touch-target rule (which ballooned these 4px
+            dots into giant circles on phones); tappability is preserved via
+            the ::before hit-area pad. */}
         {total > 1 && (
-          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex gap-0.5">
+          <div className="scrollbar-none absolute bottom-2 left-1/2 flex max-w-[85%] -translate-x-1/2 gap-1 overflow-x-auto">
             {results.map((_, i) => (
               <button
                 key={i}
                 type="button"
                 onClick={() => setCurrentIdx(i)}
                 className={cn(
-                  "h-1 rounded-full transition-all",
-                  i === idx ? "w-3 bg-white" : "w-1 bg-white/40 hover:bg-white/60",
+                  "dot-nav h-1.5 shrink-0 rounded-full transition-all",
+                  i === idx ? "w-4 bg-white" : "w-1.5 bg-white/40 hover:bg-white/60",
                 )}
                 aria-label={`Go to image ${i + 1}`}
+                aria-current={i === idx}
               />
             ))}
           </div>

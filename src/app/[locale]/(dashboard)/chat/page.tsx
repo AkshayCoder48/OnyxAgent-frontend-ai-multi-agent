@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
@@ -79,6 +79,9 @@ function readPersistedWidth(storageKey: string, fallback: number) {
   return Number.isFinite(stored) && stored > 0 ? stored : fallback;
 }
 
+/** No-op subscription for `useSyncExternalStore` hydration gates. */
+const emptySubscribe = () => () => {};
+
 export default function ChatPage() {
   // Files / timeline panels — the user's last right-panel choice, closed by
   // default. The DockedPanel container renders each as a docked column on
@@ -89,6 +92,20 @@ export default function ChatPage() {
   const { conversations } = useConversations();
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
+
+  // HYDRATION-SAFE TITLE (fixes the "Hydration failed" mismatch on ?id=
+  // reloads): the conversation store rehydrates SYNCHRONOUSLY from
+  // sessionStorage on the client, so the first client render knows the
+  // active conversation id while the SSR pass could not — the server frame
+  // rendered the plain "New conversation" heading, the client frame the
+  // shimmer/title → mismatch. `useSyncExternalStore` with a false SERVER
+  // snapshot gives a lint-clean mounted gate: false during SSR AND the
+  // hydration render (matching the server frame exactly), true afterwards.
+  const titleHydrated = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false,
+  );
 
   // Composio gate — the Platforms chat sidebar exists ONLY while a Composio
   // API key is stored (Settings → Integrations). `composio_api_key_present`
@@ -223,7 +240,12 @@ export default function ChatPage() {
             >
               <Menu className="h-4 w-4" />
             </Button>
-            {currentConversationId && !conversationTitle ? (
+            {!titleHydrated ? (
+              /* Pre-hydration frame: the deterministic server shape. */
+              <h1 className="title-reveal font-display truncate text-[17px] font-medium tracking-tight sm:text-lg">
+                New conversation
+              </h1>
+            ) : currentConversationId && !conversationTitle ? (
               /* PRD §12 — the naming call is in flight: a shimmer skeleton
                  holds the empty title space (no layout jump when the title
                  lands). */

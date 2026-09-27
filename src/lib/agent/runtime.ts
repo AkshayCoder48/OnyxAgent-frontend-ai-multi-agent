@@ -35,6 +35,10 @@
  */
 
 import { nanoid } from "nanoid";
+import {
+  parseToolCallArguments,
+  wireSafeArguments,
+} from "./tool-args";
 import type {
   WSEvent,
   MessagePart,
@@ -677,6 +681,16 @@ interface RoundResult {
     id: string;
     name: string;
     args: Record<string, unknown>;
+    /** True when the streamed argument JSON was invalid. When `true` and
+     *  the payload could not be repaired, the tool is NEVER executed —
+     *  the runtime resolves it to a structured MALFORMED_TOOL_ARGUMENTS
+     *  tool result instead (tool errors stay tool errors; they never
+     *  escalate into provider errors/retries). */
+    malformed?: boolean;
+    /** The RAW argument string as accumulated from the stream — the wire
+     *  replay goes through `wireSafeArguments(rawArgs)` so a truncated
+     *  payload is NEVER sent back to the provider verbatim. */
+    rawArgs?: string;
   }>;
   finishReason: string | null;
   usage?: {
@@ -1265,17 +1279,19 @@ async function streamRound(
   // what the provider actually sent.
   const naturalFinishReason = finishReason;
 
-  // Parse tool-call args from accumulated JSON strings.
+  // Parse tool-call args from accumulated JSON strings — with best-effort
+  // REPAIR for truncated streaming payloads (a stream cut mid-argument used
+  // to produce `{_raw: …}` objects that leaked into tool execution AND were
+  // replayed verbatim to the provider, poisoning the next round: "JSON
+  // error injected into SSE stream"). See lib/agent/tool-args.ts.
   const toolCalls = Array.from(toolCallAccumulator.values()).map((tc) => {
-    let args: Record<string, unknown> = {};
-    if (tc.args) {
-      try {
-        args = JSON.parse(tc.args) as Record<string, unknown>;
-      } catch {
-        args = { _raw: tc.args };
-      }
-    }
-    return { id: tc.id, name: tc.name, args };
+    const parsed = parseToolCallArguments(tc.args);
+    return {
+      id: tc.id,
+      name: tc.name,
+      args: parsed.args,
+      ...(parsed.malformed ? { malformed: true, rawArgs: parsed.raw } : {}),
+    };
   });
 
   // DSML PARSER: Some providers (FreeGPT/freeaixyz4all) don't support the
@@ -1288,13 +1304,13 @@ async function streamRound(
     if (dsmlResult && dsmlResult.toolCalls.length > 0) {
       content = dsmlResult.cleanText;
       for (const tc of dsmlResult.toolCalls) {
-        let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(tc.arguments) as Record<string, unknown>;
-        } catch {
-          args = { _raw: tc.arguments };
-        }
-        toolCalls.push({ id: tc.id, name: tc.name, args });
+        const parsed = parseToolCallArguments(tc.arguments);
+        toolCalls.push({
+          id: tc.id,
+          name: tc.name,
+          args: parsed.args,
+          ...(parsed.malformed ? { malformed: true, rawArgs: parsed.raw } : {}),
+        });
       }
     }
   } else {
@@ -1315,13 +1331,13 @@ async function streamRound(
     if (fenceResult && fenceResult.toolCalls.length > 0) {
       content = fenceResult.cleanText;
       for (const tc of fenceResult.toolCalls) {
-        let args: Record<string, unknown> = {};
-        try {
-          args = JSON.parse(tc.arguments) as Record<string, unknown>;
-        } catch {
-          args = { _raw: tc.arguments };
-        }
-        toolCalls.push({ id: tc.id, name: tc.name, args });
+        const parsed = parseToolCallArguments(tc.arguments);
+        toolCalls.push({
+          id: tc.id,
+          name: tc.name,
+          args: parsed.args,
+          ...(parsed.malformed ? { malformed: true, rawArgs: parsed.raw } : {}),
+        });
       }
       if (!finishReason) finishReason = "tool_calls";
     }
@@ -1416,11 +1432,13 @@ async function streamRound(
       chunksReceived > 0 &&
       (content.trim() || thinking.trim() || reasoning.trim() || toolCalls.length > 0)
     ) {
-      // Drop tool calls whose argument JSON was cut mid-string — executing
-      // them would fail on truncated args.
-      const completeToolCalls = toolCalls.filter(
-        (tc) => !(tc.args && typeof tc.args === "object" && Object.keys(tc.args).length === 1 && "_raw" in tc.args),
-      );
+      // Drop tool calls whose argument JSON was cut mid-string AND could
+      // not be repaired — executing them would fail on truncated args.
+      // (Repaired calls keep their recovered payload; unrepaired ones
+      // resolve to a structured MALFORMED_TOOL_ARGUMENTS tool result in
+      // the execution path — but on a confirmed stream CUT the model
+      // never finished asking, so dropping entirely is cleaner.)
+      const completeToolCalls = toolCalls.filter((tc) => !(tc.malformed && Object.keys(tc.args).length === 0));
       const droppedCalls = toolCalls.length - completeToolCalls.length;
       if (droppedCalls > 0) toolCalls.length = 0;
       toolCalls.push(...completeToolCalls);
@@ -2129,7 +2147,25 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
   const allToolCalls: ToolCall[] = [];
+  // IDEMPOTENT TOOL EXECUTION (PRD §5): every toolCallId executes exactly
+  // once per turn — SSE reconnects, provider retries, React rerenders and
+  // event replays can never trigger a second execution.
+  const executedToolCallIds = new Set<string>();
   let retryCountThisTurn = 0;
+  // "WORKED {TIME}" PANEL (PRD §§12–22): wall-clock window of this
+  // generation — persisted on the final saves so a reload shows the same
+  // "Worked 18s" summary (the panel's contents come from the persisted
+  // parts, which are already saved per round).
+  const turnStartedAt = Date.now();
+  const generationSummary = (failed?: boolean) => {
+    const completedAt = Date.now();
+    return {
+      startedAt: turnStartedAt,
+      completedAt,
+      durationMs: Math.max(0, completedAt - turnStartedAt),
+      ...(failed ? { failed: true as const } : {}),
+    };
+  };
   // Accumulated ordered parts (thinking/reasoning/text/tool) across all
   // rounds — persisted on the assistant message so a page refresh restores
   // the exact same card ordering the user saw live.
@@ -2252,6 +2288,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               toolCalls: allToolCalls,
               modelName: opts.provider.model,
               isStreaming: false,
+              generation: generationSummary(true),
             },
           );
           emit({ type: "complete", timestamp: nowISO() });
@@ -2295,6 +2332,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             toolCalls: allToolCalls,
             modelName: opts.provider.model,
             isStreaming: false,
+            generation: generationSummary(true),
           },
         );
         emit({ type: "complete", timestamp: nowISO() });
@@ -2432,6 +2470,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           toolCalls: allToolCalls,
           modelName: opts.provider.model,
           isStreaming: false,
+          generation: generationSummary(false),
         },
       );
       emit({
@@ -2471,7 +2510,15 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         type: "function",
         function: {
           name: tc.name,
-          arguments: safeStringifyArgs(truncateToolArgs(tc.name, tc.args)),
+          // WIRE SAFETY (PRD §1/§3): NEVER replay malformed/truncated
+          // argument JSON back to the provider — the raw payload goes
+          // through `wireSafeArguments` (repaired copy when possible,
+          // valid `{}` when not). Replaying the raw truncated string is
+          // what made the gateway fail every subsequent round with
+          // "JSON error injected into SSE stream".
+          arguments: tc.malformed
+            ? wireSafeArguments(tc.rawArgs)
+            : safeStringifyArgs(truncateToolArgs(tc.name, tc.args)),
         },
       })),
     };
@@ -2520,6 +2567,65 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     const resultPromises = roundResult.toolCalls.map(
       async (tc): Promise<void> => {
         const toolDef = getTool(tc.name);
+
+        // MALFORMED ARGUMENTS (PRD §1/§3): a tool call whose streamed
+        // argument JSON was invalid AND unrepairable is NEVER executed.
+        // It resolves to a structured tool result (MALFORMED_TOOL_ARGUMENTS)
+        // through the NORMAL tool-result protocol — a tool failure stays a
+        // tool result; it never escalates into a provider error/retry. The
+        // model sees the structured error and can re-issue a valid call.
+        if (tc.malformed && Object.keys(tc.args).length === 0) {
+          const malformedResult = {
+            error: {
+              code: "MALFORMED_TOOL_ARGUMENTS",
+              message:
+                "The tool call arguments arrived truncated or malformed and could not be parsed. " +
+                "Re-issue the complete tool call with valid JSON arguments.",
+              raw: tc.rawArgs && tc.rawArgs.length > 500 ? `${tc.rawArgs.slice(0, 500)}…` : tc.rawArgs,
+            },
+          };
+          const fullResultStr = JSON.stringify(malformedResult);
+          for (const part of assistantParts) {
+            if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+              part.toolCall.result = malformedResult;
+              part.toolCall.status = "error";
+            }
+          }
+          emit({
+            type: "tool_result",
+            data: { tool_call_id: tc.id, content: fullResultStr },
+            timestamp: nowISO(),
+          });
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            name: tc.name,
+            content: fullResultStr,
+          });
+          allToolCalls.push({
+            id: tc.id,
+            name: tc.name,
+            args: tc.args,
+            result: malformedResult,
+            status: "error",
+          });
+          logWarn("agent", `Tool '${tc.name}' called with malformed arguments — returned structured error (not executed)`, {
+            context: { tool: tc.name, tool_call_id: tc.id, raw_len: tc.rawArgs?.length ?? 0 },
+          });
+          return;
+        }
+
+        // IDEMPOTENT EXECUTION (PRD §5): a toolCallId executes exactly
+        // once per turn — retries, rerenders and event replays can never
+        // double-execute. A repeat id resolves to the recorded result.
+        if (executedToolCallIds.has(tc.id)) {
+          logWarn("agent", `Tool call ${tc.name} (${tc.id}) already executed this turn — skipping duplicate`, {
+            context: { tool: tc.name, tool_call_id: tc.id },
+          });
+          return;
+        }
+        executedToolCallIds.add(tc.id);
+
         if (!toolDef) {
           const errMsg = `Tool '${tc.name}' is not registered`;
           const fullResultStr = JSON.stringify({ error: errMsg });
@@ -2690,6 +2796,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       toolCalls: allToolCalls,
       modelName: opts.provider.model,
       isStreaming: false,
+      generation: generationSummary(false),
     },
   );
   emit({

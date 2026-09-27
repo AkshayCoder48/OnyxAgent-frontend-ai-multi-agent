@@ -75,4 +75,5 @@ cli/.npmrc
 
 # Local debugging mini-services (mock providers etc.)
 mini-services/
+mock-llm/
 .debug/
