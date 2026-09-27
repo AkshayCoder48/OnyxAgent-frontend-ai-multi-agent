@@ -12,7 +12,7 @@ import { MessageList } from "./message-list";
 import { PendingMessages } from "./pending-messages";
 import { QuestionPrompt } from "@/components/ui";
 import type { AskUserQuestion, AskUserAnswer } from "@/types";
-import { useConversationStore, useChatStore } from "@/stores";
+import { useConversationStore, useChatStore, useAuthStore } from "@/stores";
 import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-store";
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
@@ -23,6 +23,37 @@ import { currentResponseOrb } from "@/components/assistant-ui/elements/response-
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { Hourglass } from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// LAST-ACTIVE CONVERSATION — a tiny localStorage companion to the in-memory
+// selection so a FRESH page load on /chat (no ?id=, e.g. after a Settings
+// visit and a reload) re-opens the thread the user was last in instead of
+// an empty welcome screen. A deliberate "New Chat" persists null and is
+// honored across reloads.
+// ---------------------------------------------------------------------------
+const LAST_ACTIVE_CONV_KEY = "onyx:last-conversation-id";
+
+function setLastActiveConversation(id: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (id === null) {
+      window.localStorage.removeItem(LAST_ACTIVE_CONV_KEY);
+    } else {
+      window.localStorage.setItem(LAST_ACTIVE_CONV_KEY, id);
+    }
+  } catch {
+    // Storage unavailable (private mode / quota) — non-fatal, session-only.
+  }
+}
+
+function getLastActiveConversation(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(LAST_ACTIVE_CONV_KEY);
+  } catch {
+    return null;
+  }
+}
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
 
@@ -186,7 +217,7 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     isLoading: isConversationLoading,
   } = useConversationStore();
   const { addMessage: addChatMessage, restorePersisted } = useChatStore();
-  const { fetchConversations } = useConversations();
+  const { fetchConversations, selectConversation } = useConversations();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
   const handleConversationCreated = useCallback(
@@ -254,6 +285,12 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
   // can't check "was the previous ID null?" by reading prevConversationIdRef.
   const wasNewChatTransitionRef = useRef(false);
 
+  // The exact messages ARRAY last painted into the chat store by the
+  // load-effect. A NEW array reference for the same conversation (a fresh
+  // DB fetch landing after the mount-refresh below, or server-appended
+  // messages) repaints; an unchanged reference is a no-op.
+  const paintedMessagesRef = useRef<unknown[] | null>(null);
+
   // Clear messages when conversation changes, but NOT when going from null to a new ID
   // (that happens when a new chat is saved - we want to keep the messages)
   useEffect(() => {
@@ -271,8 +308,16 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       // client render matches the server HTML (sessionStorage is
       // client-only). Now that hydration has completed, restore the
       // persisted messages — reconcilePersisted above already wiped them
-      // when they belong to a different conversation.
-      restorePersisted();
+      // when they belong to a different conversation, and the orphan guard
+      // inside drops key-less/foreign snapshots.
+      restorePersisted(currId);
+      // Remember the selection as the last-active conversation so a fresh
+      // page load on /chat (no ?id=) can restore it (see the restore effect
+      // below). On the INITIAL mount only a REAL selection is recorded —
+      // writing null here would wipe the marker before the restore effect
+      // below reads it (a fresh load starts unselected). A deliberate
+      // "New Chat" writes null via the id-change path below.
+      if (currId) setLastActiveConversation(currId);
       return;
     }
 
@@ -330,6 +375,10 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     // "A" from the first visit — the load-effect would think A was already
     // loaded and short-circuit, leaving the chat store empty.
     loadedConvIdRef.current = null;
+    paintedMessagesRef.current = null;
+
+    // Track the last-active conversation for the fresh-load restore below.
+    setLastActiveConversation(currId);
 
     // Remember which conversation the persisted messages belong to.
     setPersistedConversationId(currId);
@@ -382,12 +431,48 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
     // sessionStorage messages or a previous paint) — never blank out.
     if (hydratedConversationId !== currentConversationId) return;
 
-    // Already painted this conversation's messages into the chat store.
-    if (loadedConvIdRef.current === currentConversationId) return;
+    // Already painted THIS EXACT array for this conversation — a re-run with
+    // unchanged deps (or an unrelated store update) must not clear + re-add
+    // the same messages. A NEW array reference for the same id (a fresh DB
+    // fetch from the mount-refresh below, or server-appended messages)
+    // repaints with the newer copy.
+    if (
+      loadedConvIdRef.current === currentConversationId &&
+      paintedMessagesRef.current === currentMessages
+    ) {
+      return;
+    }
+
+    // REMOUNT PROTECTION (the "chat gone empty after visiting Settings"
+    // bug): on a FRESH mount of this component (route round-trip, e.g.
+    // chat → settings → chat) the conversation store's `currentMessages`
+    // can be STALE or outright EMPTY for the selected conversation —
+    // runtime-created conversations hydrate via `attachConversation`, which
+    // marks them hydrated with `currentMessages: []` because the live chat
+    // store was authoritative. Painting that array here would clearMessages()
+    // — wiping the SURVIVING live thread (zustand stores survive route
+    // changes) and leaving the chat empty until the user switched chats.
+    // When the chat store already holds this conversation's messages, they
+    // are at least as fresh as any snapshot: keep them and let the
+    // mount-refresh effect land the authoritative DB copy.
+    if (loadedConvIdRef.current === undefined) {
+      const surviving = useChatStore.getState().messages;
+      const survivorsBelongToSelection =
+        surviving.length > 0 &&
+        surviving.every(
+          (m) => m.conversationId == null || m.conversationId === currentConversationId,
+        );
+      if (survivorsBelongToSelection) {
+        loadedConvIdRef.current = currentConversationId;
+        paintedMessagesRef.current = currentMessages; // consume the stale array
+        return;
+      }
+    }
 
     // Mark as painted BEFORE mutating so a synchronous re-render doesn't
     // double-apply.
     loadedConvIdRef.current = currentConversationId;
+    paintedMessagesRef.current = currentMessages;
 
     clearMessages();
     currentMessages.forEach((msg) => {
@@ -414,6 +499,69 @@ export function ChatContainer({ onOpenSettings }: { onOpenSettings?: () => void 
       addChatMessage(chatMsg);
     });
   }, [currentMessages, hydratedConversationId, addChatMessage, clearMessages, currentConversationId]);
+
+  // ── MOUNT REFRESH ─────────────────────────────────────────────────────
+  // Once per mount: when the selected conversation is ALREADY marked
+  // hydrated in the conversation store (a remount after a route round-trip,
+  // e.g. chat → settings → chat), no loader will ever re-fetch it — yet its
+  // `currentMessages` may be stale or empty (runtime-created conversations
+  // attach with []). Fetch the authoritative DB copy in the background and
+  // land it via setMessagesFor; the NEW array reference makes the load-effect
+  // above repaint (paintedMessagesRef mismatch) with the full, fresh thread.
+  // The surviving chat-store messages stay on screen until the fetch lands —
+  // no destructive clear, no empty flash.
+  useEffect(() => {
+    const id = useConversationStore.getState().currentConversationId;
+    if (!id) return;
+    // Only refresh conversations the store considers already-hydrated: one
+    // that isn't hydrated yet is being fetched right now by the URL
+    // auto-hydration / sidebar selection (double fetch would be redundant).
+    if (useConversationStore.getState().hydratedConversationId !== id) return;
+    // A live turn is authoritative — never repaint over it.
+    if (useChatStore.getState().isStreaming) return;
+    if (executionHub.getFor(id)?.status === "running") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { conversationService } = await import("@/lib/services");
+        const userId = useAuthStore.getState().user?.id;
+        const msgs = await conversationService.getMessages(id, userId);
+        if (cancelled) return;
+        const st = useConversationStore.getState();
+        // setMessagesFor drops the result unless this conversation is still
+        // the selected one (stale-fetch guard inside).
+        if (st.currentConversationId === id) {
+          st.setMessagesFor(id, msgs);
+        }
+      } catch {
+        // Non-fatal — the surviving chat-store messages stay on screen.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Mount-only by design: one refresh per ChatContainer mount.
+  }, []);
+
+  // ── LAST-ACTIVE RESTORE ───────────────────────────────────────────────
+  // Landing on /chat with NO conversation selected (a fresh page load with
+  // no ?id= — e.g. after visiting Settings and coming back) re-selects the
+  // LAST ACTIVE conversation instead of showing an empty welcome screen over
+  // an existing thread. Guards: nothing selected yet this session, no ?id in
+  // the URL (auto-hydration owns that path), chat store empty (a deliberate
+  // new-chat/draft state is respected), and a non-null last-active id (a
+  // deliberate "New Chat" persists null and is honored).
+  useEffect(() => {
+    const st = useConversationStore.getState();
+    if (st.currentConversationId !== null) return;
+    if (new URLSearchParams(window.location.search).get("id")) return;
+    if (useChatStore.getState().messages.length > 0) return;
+    const lastId = getLastActiveConversation();
+    if (!lastId) return;
+    // Guarded loader: atomically selects + fetches; drops the selection when
+    // the conversation no longer exists (verifyInList).
+    void selectConversation(lastId, { verifyInList: true });
+  }, [selectConversation]);
   // Auto-scroll is owned ENTIRELY by useChatScrollController above (see its
   // doc comment). The old per-flush `messagesEndRef.scrollIntoView()` was
   // removed: it scrolled every scrollable ancestor (not just the chat

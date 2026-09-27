@@ -17,7 +17,10 @@ import type { User } from "@/types";
 const DEFAULT_USER: User = {
   id: "local-user",
   email: "user@onyxagent.local",
-  full_name: "Local User",
+  // Hydration-stable placeholder — matches the auth store's pre-init name
+  // ("Guest"). init() replaces it with the per-install random guest name;
+  // this literal exists only as a never-null fallback for client callbacks.
+  full_name: "Guest",
   is_active: true,
   role: "ADMIN",
   created_at: new Date().toISOString(),

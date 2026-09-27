@@ -580,8 +580,9 @@ interface ChatState extends MessageActions {
   setSelectedModel: (model: string | null) => void;
   /** One-shot post-hydration restore of the sessionStorage-persisted
    *  messages (see the restorePersisted body for why it is NOT done in
-   *  create()). Called from ChatContainer's mount effect. */
-  restorePersisted: () => void;
+   *  create()). Called from ChatContainer's mount effect with the active
+   *  conversation id so only a matching snapshot can be restored. */
+  restorePersisted: (activeConversationId?: string | null) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
 }
@@ -604,12 +605,27 @@ export const useChatStore = create<ChatState>((set) => ({
   setSelectedProviderId: (id) => set({ selectedProviderId: id }),
   setSelectedModel: (model) => set({ selectedModel: model }),
 
-  restorePersisted: () =>
+  restorePersisted: (activeConversationId?: string | null) =>
     set((state) => {
       if (persistedRestored || state.messages.length > 0) return state;
       persistedRestored = true;
+      // ORPHAN GUARD: only restore messages that PROVABLY belong to the
+      // active conversation (the persisted conversation key matches). A
+      // key-less snapshot is leftover junk from a wiped selection —
+      // restoring it painted a previous conversation's messages under the
+      // "New conversation" state after navigating away and back.
       const persisted = loadPersisted();
-      return persisted.length > 0 ? { messages: persisted } : state;
+      if (persisted.length === 0) return state;
+      const persistedFor = getPersistedConversationId();
+      const activeId = activeConversationId ?? null;
+      if (persistedFor === null || (activeId !== null && persistedFor !== activeId)) {
+        // Key-less or foreign snapshot — drop it instead of painting orphans.
+        if (typeof window !== "undefined") {
+          window.sessionStorage.removeItem(PERSIST_KEY);
+        }
+        return state;
+      }
+      return { messages: persisted };
     }),
 
   setStreaming: (streaming) => {

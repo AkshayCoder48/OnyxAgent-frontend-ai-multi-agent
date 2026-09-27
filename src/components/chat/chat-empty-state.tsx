@@ -71,69 +71,80 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
   }, [user]);
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-2xl flex-col items-center justify-center overflow-y-auto scrollbar-thin px-3 py-4 sm:px-4 sm:py-8">
-      {/* Title — "Welcome to" + decorated OnyxAgent logo text */}
-      <h2 className="text-center text-xl font-bold tracking-tight sm:text-2xl md:text-3xl">
-        {firstName ? (
-          <>
-            Welcome to{" "}
-            <span className="onyx-logo-text text-xl sm:text-2xl md:text-3xl">
-              <span className="onyx-logo-o">O</span>nyx<span className="onyx-logo-agent">Agent</span>
-            </span>
-            {`, ${firstName}`}
-          </>
-        ) : (
-          <>
-            Welcome to{" "}
-            <span className="onyx-logo-text text-xl sm:text-2xl md:text-3xl">
-              <span className="onyx-logo-o">O</span>nyx<span className="onyx-logo-agent">Agent</span>
-            </span>
-          </>
-        )}
-      </h2>
+    /* SCROLLER + m-auto CENTERING (mobile logo-visibility fix): the old
+       `justify-center` + `overflow-y-auto` combination CLIPS THE TOP when
+       the content is taller than the viewport — flex centering overflows
+       equally above and below, but scrollTop starts at 0, so the "Welcome
+       to OnyxAgent" logo sat above the unreachable region and was never
+       visible on phones. With an auto-margin wrapper the content centers
+       when it fits and scrolls FROM THE TOP when it doesn't. */
+    <div className="mx-auto h-full w-full max-w-2xl overflow-y-auto scrollbar-thin px-3 py-4 sm:px-4 sm:py-8">
+      <div className="m-auto flex w-full flex-col items-center">
+        {/* Title — "Welcome to" + decorated OnyxAgent logo text */}
+        <h2 className="text-center text-xl font-bold tracking-tight sm:text-2xl md:text-3xl">
+          {firstName ? (
+            <>
+              Welcome to{" "}
+              <span className="onyx-logo-text text-xl sm:text-2xl md:text-3xl">
+                <span className="onyx-logo-o">O</span>nyx<span className="onyx-logo-agent">Agent</span>
+              </span>
+              {`, ${firstName}`}
+            </>
+          ) : (
+            <>
+              Welcome to{" "}
+              <span className="onyx-logo-text text-xl sm:text-2xl md:text-3xl">
+                <span className="onyx-logo-o">O</span>nyx<span className="onyx-logo-agent">Agent</span>
+              </span>
+            </>
+          )}
+        </h2>
 
-      {/* Subtitle */}
-      <p className="mt-2 max-w-md text-center text-xs leading-relaxed text-muted-foreground sm:text-sm">
-        Your AI-powered assistant with 51 tools, code execution, web search,
-        file management, memory, and more. Start a conversation or pick a prompt below.
-      </p>
+        {/* Subtitle */}
+        <p className="mt-2 max-w-md text-center text-xs leading-relaxed text-muted-foreground sm:mt-3 sm:text-sm">
+          Your AI-powered assistant with 51 tools, code execution, web search,
+          file management, memory, and more. Start a conversation or pick a prompt below.
+        </p>
 
-      {/* Feature badges */}
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5 sm:mt-6 sm:gap-2">
-        {FEATURES.map((f) => (
-          <div
-            key={f.label}
-            className="flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground sm:px-3 sm:py-1 sm:text-xs"
-          >
-            <f.icon className="h-3 w-3" />
-            {f.label}
-          </div>
-        ))}
-      </div>
-
-      {/* Prompt cards */}
-      <div className="stagger-in mt-4 grid w-full grid-cols-1 gap-2 sm:mt-6 sm:grid-cols-2 sm:gap-3">
-        {PROMPTS.map((p) => (
-          <button
-            key={p.title}
-            onClick={() => onPick(p.prompt)}
-            className="glass-card hover-lift ripple-tap mb-press group flex items-start gap-2.5 rounded-xl border border-border p-3 text-left sm:p-3.5 sm:gap-3"
-          >
-            <p.icon className={`mt-0.5 h-4 w-4 shrink-0 ${p.color} group-hover:scale-110 transition-transform`} />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">{p.title}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{p.prompt}</div>
+        {/* Feature badges — compact on phones (part of the "other things
+            are large" crowding that hid the logo). */}
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 sm:mt-6 sm:gap-2">
+          {FEATURES.map((f) => (
+            <div
+              key={f.label}
+              className="flex items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-[10px] font-medium text-muted-foreground sm:px-3 sm:py-1 sm:text-xs"
+            >
+              <f.icon className="h-3 w-3" />
+              {f.label}
             </div>
-            <ArrowUpRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-          </button>
-        ))}
-      </div>
+          ))}
+        </div>
 
-      {/* Footer */}
-      <div className="mt-4 flex items-center justify-center gap-2 text-[11px] text-muted-foreground sm:mt-6 sm:text-xs">
-        <span>Powered by {frameworkLabel}</span>
-        <span>·</span>
-        <span>Start chatting from the sidebar</span>
+        {/* Prompt cards — single-line descriptions on phones so the four
+            cards stay short; full two-line clamp from sm up. */}
+        <div className="stagger-in mt-3 grid w-full grid-cols-1 gap-2 sm:mt-6 sm:grid-cols-2 sm:gap-3">
+          {PROMPTS.map((p) => (
+            <button
+              key={p.title}
+              onClick={() => onPick(p.prompt)}
+              className="glass-card hover-lift ripple-tap mb-press group flex items-start gap-2.5 rounded-xl border border-border p-2.5 text-left sm:p-3.5 sm:gap-3"
+            >
+              <p.icon className={`mt-0.5 h-4 w-4 shrink-0 ${p.color} group-hover:scale-110 transition-transform`} />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{p.title}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground line-clamp-1 sm:line-clamp-2">{p.prompt}</div>
+              </div>
+              <ArrowUpRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+            </button>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="mt-3 flex items-center justify-center gap-2 text-[11px] text-muted-foreground sm:mt-6 sm:text-xs">
+          <span>Powered by {frameworkLabel}</span>
+          <span>·</span>
+          <span>Start chatting from the sidebar</span>
+        </div>
       </div>
     </div>
   );

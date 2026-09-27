@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useConversations } from "@/hooks";
@@ -43,6 +43,10 @@ import { RunningExecutionsSection } from "./running-executions";
  * Date grouping for the Terra editorial history: tracked-caps day buckets.
  * ------------------------------------------------------------------------- */
 const GROUP_ORDER = ["Today", "Yesterday", "This week", "Older"] as const;
+
+/** Collapsed icon-rail width in px (w-12). Keep in sync with ChatPage's
+ *  COLLAPSED_RAIL_WIDTH — the auto-rail math there assumes this width. */
+const COLLAPSED_RAIL_WIDTH = 48;
 type DateGroup = (typeof GROUP_ORDER)[number];
 
 function groupKeyFor(iso: string): DateGroup {
@@ -537,28 +541,6 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     200,
     450,
   );
-  const handleConvResize = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startX = e.clientX;
-      const startWidth = convSidebarWidth;
-      const handleMouseMove = (moveEvent: MouseEvent) => {
-        const delta = moveEvent.clientX - startX;
-        setConvSidebarWidth(startWidth + delta);
-      };
-      const handleMouseUp = () => {
-        document.removeEventListener("mousemove", handleMouseMove);
-        document.removeEventListener("mouseup", handleMouseUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-      document.addEventListener("mousemove", handleMouseMove);
-      document.addEventListener("mouseup", handleMouseUp);
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-    },
-    [convSidebarWidth, setConvSidebarWidth],
-  );
   const {
     conversations,
     currentConversationId,
@@ -634,57 +616,86 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     onLoadMore: fetchMoreConversations,
   };
 
-  // Collapsed rail — expand + new chat only (scheduled chats are ordinary
-  // conversation rows, they are simply not listed while collapsed).
-  if (isCollapsed) {
-    return (
-      <div
-        className={cn(
-          "bg-secondary hidden w-12 flex-col items-center border-r py-4 md:flex",
-          className,
-        )}
-      >
-        <Button
-          variant="ghost"
-          size="sm"
-          className="mb-4 h-10 w-10 p-0"
-          onClick={expand}
-          aria-label="Expand conversations sidebar"
-        >
-          <ChevronRight className="h-4 w-4" aria-hidden />
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-10 w-10 p-0"
-          onClick={startNewChat}
-          title="New Chat"
-          aria-label="New chat"
-        >
-          <SquarePen className="h-4 w-4" aria-hidden />
-        </Button>
-      </div>
-    );
-  }
+  // ── ANIMATED COLLAPSE/EXPAND (user request: "the chat sidebar appears
+  // suddenly — copy the other sidebars' animation"). Same motion language
+  // as the right-hand docked panels: ONE persistent aside whose WIDTH
+  // transitions between the icon-rail width and the persisted sidebar
+  // width (250ms cubic-bezier(0.32, 0.72, 0, 1) — see .conv-sidebar in
+  // globals.css). The full pane keeps a FIXED inner width (content never
+  // reflows mid-animation) and cross-fades with the icon-rail overlay.
+  // The two states used to be two SEPARATE DOM trees — the swap was an
+  // instant jump with no transition at all.
+  //
+  // While collapsed (or mid-animation) the aside clips its content
+  // (overflow hidden); at rest EXPANDED it returns to overflow visible so
+  // the conversation rows' context menus can hang past the sidebar edge
+  // exactly like before. The transient data-animating flag is written
+  // DIRECTLY on the DOM node (no React state → no cascading renders).
+  const asideRef = useRef<HTMLElement | null>(null);
+  const [resizing, setResizing] = useState(false);
+  const prevCollapsedRef = useRef(isCollapsed);
+  useEffect(() => {
+    if (prevCollapsedRef.current === isCollapsed) return;
+    prevCollapsedRef.current = isCollapsed;
+    const aside = asideRef.current;
+    if (!aside) return;
+    // Any collapse/expand — user chevron, auto-rail from ChatPage, anything
+    // that flips the store flag — runs the width transition; clip for its
+    // duration (320ms covers the 250ms curve + tail). Direct DOM mutation:
+    // React does not manage this attribute, and no re-render is needed.
+    aside.setAttribute("data-animating", "true");
+    const t = window.setTimeout(() => {
+      aside.setAttribute("data-animating", "false");
+    }, 320);
+    return () => window.clearTimeout(t);
+  }, [isCollapsed]);
+
+  const handleConvResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setResizing(true);
+      const startX = e.clientX;
+      const startWidth = convSidebarWidth;
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = moveEvent.clientX - startX;
+        setConvSidebarWidth(startWidth + delta);
+      };
+      const handleMouseUp = () => {
+        setResizing(false);
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [convSidebarWidth, setConvSidebarWidth],
+  );
 
   return (
     <>
       <aside
-        className={cn("bg-secondary hidden shrink-0 flex-col border-r md:flex relative overflow-visible", className)}
-        style={{ width: `${convSidebarWidth}px` }}
+        ref={asideRef}
+        data-collapsed={isCollapsed}
+        data-resizing={resizing}
+        aria-label={t("conversations")}
+        className={cn(
+          "conv-sidebar bg-secondary relative hidden shrink-0 border-r md:flex",
+          className,
+        )}
+        style={{ width: isCollapsed ? COLLAPSED_RAIL_WIDTH : convSidebarWidth }}
       >
-        {/* Resize handle on the right edge */}
+        {/* Full sidebar pane — fixed inner width so nothing reflows while
+            the outer aside animates; fades out while collapsed. */}
         <div
-          onMouseDown={handleConvResize}
-          className="absolute top-0 bottom-0 right-0 z-50 cursor-col-resize transition-colors hover:bg-primary/40"
-          style={{ width: "4px", marginRight: "-2px" }}
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize conversations sidebar"
+          className="conv-sidebar-pane flex h-full flex-col"
+          style={{ width: convSidebarWidth }}
+          inert={isCollapsed}
+          aria-hidden={isCollapsed}
         >
-          {/* Invisible wider hit area for easier grabbing */}
-          <div className="absolute inset-y-0 -inset-x-2" />
-        </div>
           <div className="flex h-11 shrink-0 items-center justify-between px-4 pt-1">
             <h2 className="font-display text-[15px] font-semibold tracking-tight">{t("conversations")}</h2>
             <Button
@@ -697,33 +708,78 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
               <ChevronLeft className="h-4 w-4" aria-hidden />
             </Button>
           </div>
-        <ConversationList {...listProps} />
-        {/* Account row pinned to the base (Terra spec): ink initial avatar +
-            name + plan + gear. */}
-        <div className="flex shrink-0 items-center gap-2.5 border-t px-3 py-2.5">
-          <span
-            aria-hidden
-            className="bg-foreground text-background flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
-          >
-            {accountInitials(user)}
-          </span>
-          <div className="min-w-0 flex-1 leading-tight">
-            <p className="truncate text-[13px] font-medium text-foreground">
-              {user?.full_name || user?.email || "Guest"}
-            </p>
-            <p className="text-muted-foreground truncate text-[10px]">Free plan</p>
+          <ConversationList {...listProps} />
+          {/* Account row pinned to the base (Terra spec): ink initial avatar +
+              name + plan + gear. */}
+          <div className="flex shrink-0 items-center gap-2.5 border-t px-3 py-2.5">
+            <span
+              aria-hidden
+              className="bg-foreground text-background flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+            >
+              {accountInitials(user)}
+            </span>
+            <div className="min-w-0 flex-1 leading-tight">
+              <p className="truncate text-[13px] font-medium text-foreground">
+                {user?.full_name || user?.email || "Guest"}
+              </p>
+              <p className="text-muted-foreground truncate text-[10px]">Free plan</p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
+              onClick={() => router.push("/en/settings")}
+              title="Settings"
+              aria-label="Settings"
+            >
+              <Settings className="h-4 w-4" />
+            </Button>
           </div>
+        </div>
+
+        {/* Icon rail overlay — expand + new chat only; fades in as the pane
+            fades out (scheduled chats are ordinary conversation rows, they
+            are simply not listed while collapsed). */}
+        <div
+          className="conv-sidebar-rail absolute inset-y-0 left-0 z-10 flex w-12 flex-col items-center py-4"
+          inert={!isCollapsed}
+          aria-hidden={!isCollapsed}
+        >
           <Button
             variant="ghost"
             size="sm"
-            className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
-            onClick={() => router.push("/en/settings")}
-            title="Settings"
-            aria-label="Settings"
+            className="mb-4 h-10 w-10 p-0"
+            onClick={expand}
+            aria-label="Expand conversations sidebar"
           >
-            <Settings className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4" aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-10 w-10 p-0"
+            onClick={startNewChat}
+            title="New Chat"
+            aria-label="New chat"
+          >
+            <SquarePen className="h-4 w-4" aria-hidden />
           </Button>
         </div>
+
+        {/* Resize handle on the right edge — only while expanded (the rail
+            has no resizable width). */}
+        {!isCollapsed && (
+          <div
+            onMouseDown={handleConvResizeStart}
+            className="absolute inset-y-0 right-0 z-50 w-1 cursor-col-resize transition-colors hover:bg-primary/40"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize conversations sidebar"
+          >
+            {/* Invisible wider hit area for easier grabbing */}
+            <div className="absolute inset-y-0 -inset-x-2" />
+          </div>
+        )}
       </aside>
 
       <Sheet open={isOpen} onOpenChange={close}>

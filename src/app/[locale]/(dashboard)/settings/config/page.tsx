@@ -235,7 +235,20 @@ export default function ConfigSettingsPage() {
         toast.success("Provider updated");
       } else {
         await aiProviderService.create(user.id, input);
-        toast.success("Provider added");
+        // Recommendation (user request): the chat model picker usually
+        // picks the new provider up live via the shared query, but some
+        // surfaces (an already-open chat route, the runtime's provider
+        // resolution) can serve a stale list until reload — tell the user
+        // a refresh guarantees it, with a one-click action.
+        toast.success("Provider added", {
+          description:
+            "Refresh the page if the new provider doesn't show up in the chat model picker yet.",
+          duration: 9000,
+          action: {
+            label: "Refresh",
+            onClick: () => window.location.reload(),
+          },
+        });
       }
       await load();
       cancel();

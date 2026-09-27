@@ -2847,6 +2847,61 @@ body.sidebar-open {
 }
 
 /* ============================================================
+   TERRA CONVERSATION SIDEBAR — animated collapse/expand
+   (user request: "the chat sidebar appears suddenly — use the
+   other sidebars' animation"). Same motion language as the
+   docked panels: ONE persistent aside whose width transitions
+   between the 48px icon rail and the persisted sidebar width.
+   Used by ConversationSidebar
+   (src/components/chat/conversation-sidebar.tsx).
+   ============================================================ */
+.conv-sidebar {
+  /* At rest EXPANDED the sidebar lets row context menus hang past its
+     edge (the conversation rows' dropdowns are not portaled). */
+  overflow: visible;
+  transition: width 250ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+/* While collapsed — or for the duration of the width animation — the
+   shrinking pane must clip (data-animating is set by the component for
+   ~320ms around any collapse/expand flip). */
+.conv-sidebar[data-collapsed="true"],
+.conv-sidebar[data-animating="true"] {
+  overflow: hidden;
+}
+/* While the user drags the resize handle the width must track the
+   pointer 1:1 — no transition lag (mirrors the docked panels). */
+.conv-sidebar[data-resizing="true"] {
+  transition: none;
+}
+/* The full pane: fixed inner width (content never reflows mid-animation),
+   cross-fading with the icon rail as the state flips. */
+.conv-sidebar-pane {
+  opacity: 1;
+  transition: opacity 200ms ease-out;
+}
+.conv-sidebar[data-collapsed="true"] .conv-sidebar-pane {
+  opacity: 0;
+  pointer-events: none;
+}
+/* The icon-rail overlay fades in as the pane fades out. */
+.conv-sidebar-rail {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease-out;
+}
+.conv-sidebar[data-collapsed="true"] .conv-sidebar-rail {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .conv-sidebar,
+  .conv-sidebar-pane,
+  .conv-sidebar-rail {
+    transition: none;
+  }
+}
+
+/* ============================================================
    TERRA TITLE REVEAL — Task 4-b (PRD §12)
    The first AI call of a new chat generates the title; the empty
    title space (a shimmer skeleton while the naming call runs)

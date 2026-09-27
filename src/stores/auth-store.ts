@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type { User } from "@/types";
 import { authService } from "@/lib/services";
 import { isVaultUnlocked, restoreVaultFromSession } from "@/lib/crypto/vault";
+import { getOrCreateGuestName, isLegacyLocalName } from "@/lib/guest-name";
 
 interface AuthState {
   user: User | null;
@@ -51,8 +52,13 @@ const LAST_USER_ID_KEY = "agent-chat-app:last-user-id";
 
 const DEFAULT_USER_ID = "local-user";
 const DEFAULT_EMAIL = "user@onyxagent.local";
-const DEFAULT_FULL_NAME = "Local User";
 const DEFAULT_PASSPHRASE = "local-default-passphrase";
+
+/** Hydration-stable placeholder for the initial (pre-init) user name —
+ *  the same string on the server and the first client render, so no
+ *  hydration mismatch. init() swaps in the real (random, per-install)
+ *  guest name from getOrCreateGuestName() once the user resolves. */
+const INITIAL_USER_NAME = "Guest";
 
 // Module-level init guard — but with a TIMEOUT so it can never hang forever.
 let initDone = false;
@@ -168,7 +174,9 @@ function makeDefaultUser(): User {
   return {
     id: DEFAULT_USER_ID,
     email: DEFAULT_EMAIL,
-    full_name: DEFAULT_FULL_NAME,
+    // Random friendly name, stable per install ("Brave Falcon"-style) —
+    // replaces the old literal "Local User".
+    full_name: getOrCreateGuestName(),
     is_active: true,
     role: "ADMIN",
     created_at: new Date().toISOString(),
@@ -184,7 +192,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   user: {
     id: DEFAULT_USER_ID,
     email: DEFAULT_EMAIL,
-    full_name: "Local User",
+    // "Guest" pre-init (hydration-stable); init() replaces it with the
+    // per-install random guest name — or the healed legacy name.
+    full_name: INITIAL_USER_NAME,
     is_active: true,
     role: "ADMIN",
     created_at: new Date().toISOString(),
@@ -294,7 +304,7 @@ export const useAuthStore = create<AuthState>((set) => ({
             try {
               const { user: created } = await authService.register(
                 DEFAULT_EMAIL,
-                DEFAULT_FULL_NAME,
+                getOrCreateGuestName(),
                 DEFAULT_PASSPHRASE,
               );
               user = created;
@@ -333,6 +343,27 @@ export const useAuthStore = create<AuthState>((set) => ({
                 sessionStorage.removeItem("__vault_key_jwk__");
               } catch {}
             }
+          }
+
+          // LEGACY NAME HEALING: installs created before the random-guest-
+          // name change still carry the literal "Local User" in their Dexie
+          // users row (surfacing as "Welcome to OnyxAgent, Local"). Rename
+          // to this install's random guest name — stable across reloads
+          // (persisted by getOrCreateGuestName) and updated in the DB so
+          // the heal runs exactly once.
+          if (isLegacyLocalName(user.full_name)) {
+            const guestName = getOrCreateGuestName();
+            try {
+              const { db } = await import("@/lib/db");
+              await db.users.update(user.id, {
+                full_name: guestName,
+                updated_at: new Date().toISOString(),
+              });
+            } catch {
+              // Dexie unavailable — the in-memory rename below still applies
+              // for this session; the DB row heals on a later launch.
+            }
+            user = { ...user, full_name: guestName };
           }
 
           setLastUserId(user.id);
