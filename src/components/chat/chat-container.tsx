@@ -6,6 +6,7 @@ import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
+import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
@@ -813,6 +814,9 @@ function ChatUI({
                   />
                   {isConnected ? tc("live") : tc("offline")}
                 </span>
+                {/* Context usage pill (Onyx Infinite Context PRD §29) — opens
+                    the inspector popover on click. */}
+                <ContextIndicator />
               </div>
               <div className="flex min-w-0 items-center gap-1">
                 {/* "⏎ to send" hint (Terra spec) */}

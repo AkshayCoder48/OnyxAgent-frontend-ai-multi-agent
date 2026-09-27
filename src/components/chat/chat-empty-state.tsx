@@ -58,7 +58,7 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
         const fw = await settingsService.getAIFramework(user.id);
         const labels: Record<string, string> = {
           default: "OnyxAgent",
-          pydantic_ai: "PydanticAI",
+          onyx_ai: "Onyx AI",
           langchain: "LangChain",
           crewai: "CrewAI",
           openai_assistants: "OpenAI Assistants",

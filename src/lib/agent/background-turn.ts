@@ -22,6 +22,7 @@ import {
   collectBridgeableTools,
   handleBrowserToolCall,
 } from "@/lib/agent/browser-tool-bridge";
+import { manageContext } from "@/lib/agent/context/context-manager";
 
 /**
  * Background agent turn — runs the agent loop INSIDE the E2B sandbox as a
@@ -150,7 +151,24 @@ function buildHistory(turn: AgentTurnOptions, store?: ExecutionChatStore): Array
       history.push({ role: msg.role, content: text });
     }
   }
-  return history.slice(-20); // cap the context window
+  // ONYX CONTEXT MANAGER (Infinite Context PRD): budget-aware window instead
+  // of the old fixed slice(-20) — the same tiered compaction the foreground
+  // runtime uses, so background turns get identical context shaping.
+  const managed = manageContext({
+    systemPrompt: turn.systemPrompt ?? "",
+    tools: [],
+    history: history.slice(-80), // bounded default window (cost control)
+    model: turn.provider.model,
+  });
+  // Managed messages minus the LEADING system prompt (the sandbox runner
+  // receives the system prompt separately in the turn payload).
+  const shaped = managed.messages.filter((m, idx) => !(idx === 0 && m.role === "system"));
+  console.log(
+    `[context:bg] model=${turn.provider.model} window=${managed.usage.modelLabel} ` +
+      `${Math.round(managed.usage.usagePercentage * 100)}% ${managed.usage.status} ` +
+      `compaction=${managed.compaction.level} removed=${managed.compaction.removedMessages}`,
+  );
+  return shaped;
 }
 
 /** Global-store read (legacy callers without an execution store). */

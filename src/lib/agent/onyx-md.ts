@@ -25,7 +25,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (60 tools)
+## Tool Compendium (62 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
@@ -41,7 +41,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 | **manage_skill** | list · read · create · edit · delete | Installed skills (SKILL.md instruction files). \`read\` a skill before applying it. |
 | **manage_mcp** | list · create · edit · delete | MCP server configs (sse / streamable_http transports; stdio unsupported). Find \`id\`s with \`list\`. |
 | **manage_custom_tool** | create · edit · delete | Build reusable custom tools: \`http_webhook\` (POSTs args as JSON) or \`python_snippet\` (runs \`run(**params)\` in the sandbox). |
-| **manage_env_var** | list · get · add · set · edit · delete | Sandbox env vars. \`list\` shows names only; \`get\` returns the real value. \`run_terminal\` / \`run_python\` also receive all env vars. |
+| **manage_env_var** | list · get · add · set · edit · delete | Sandbox env vars. \`list\` shows names only; \`get\` returns the real value. Tools receive them automatically. |
 | **manage_chats** | list · read | Recall past conversations ("what did we talk about earlier?"). \`list\` → \`conversation_id\` → \`read\` the transcript. |
 | **manage_subagent_chat** | create · delete · edit_title · pin | Persistent chat sessions with subagents (auto-creates the subagent). Message them via \`query_subagent\`. |
 | **workflow** | create · list · get · edit · delete · run | Multi-step pipelines where each step is an AI prompt or a tool call. |
@@ -54,6 +54,8 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 |---|---|
 | **list_folder** | Discover what exists in a directory. |
 | **read_file** | Read a UTF-8 text file — full content, no truncation. |
+| **read_uploaded_file** | Read a user-uploaded file by \`name\`/\`file_id\` from the uploads registry (text → contents; binary → base64 preview). |
+| **list_uploaded_files** | List the uploads registry (stable \`file_id\`s, sizes). |
 | **read_file_section** | Read a line range (0-based). Verify chunks, resume large writes. |
 | **create_file** | Create a new file (refuses to overwrite unless \`overwrite: true\`). |
 | **write_file** | Overwrite/replace entire file content. |
@@ -87,7 +89,7 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | Tool | Use |
 |---|---|
 | **spawn_subagent** | Delegate a task: \`subagent_name\`, \`description\`, \`task_type\` (research/code/analysis/writing/general), \`role\`, \`disposable\`. |
-| **set_subagent_config** | Give a subagent its own AI: \`provider_id + model\`, or \`custom_base_url + custom_model + custom_api_key\`; \`list_ai_providers: true\` shows options. |
+| **set_subagent_config** | Give a subagent its own AI: \`provider_id + model\`, or \`custom_base_url + custom_model + custom_api_key\`. |
 | **query_subagent** | Message a subagent, get its reply (it may call tools). |
 | **steer_subagent** | Mid-run course correction or extra guidance. |
 | **complete_subagent** / **cancel_subagent** | Finish (auto-disposes if disposable) / abort a task. |
@@ -117,8 +119,8 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 
 | Tool | Use |
 |---|---|
-| **push_workspace** | Synchronize the COMPLETE workspace to the persistent cloud (id \`workspace_default\`). Call after EVERY meaningful task that changes files — even small ones. Overwrites the cloud state (obsolete files removed); >50 MB files + secrets + generated dirs skipped automatically; unchanged files reused by SHA-256 so re-runs after interruptions are cheap. Budget-limited (10 min hard cap): a timeout aborts SAFELY (nothing committed, cloud untouched) — just re-run. A \`warnings\` field on an otherwise successful result is informational (OnyxBase instance lag), not a failure. No arguments needed. |
-| **retrieve_workspace** | Restore the persistent cloud workspace into the current sandbox. \`mode "check"\` probes the cloud; \`mode "restore"\` (default) writes the files and verifies SHA-256 per file. Call BEFORE workspace-dependent work when a fresh environment starts. If records read as missing right after a push, OnyxBase instance lag is the usual cause — re-running after ~1 minute fixes it; the tool also retries and salvages automatically. |
+| **push_workspace** | Synchronize the COMPLETE workspace to the persistent cloud (id \`workspace_default\`). Call after EVERY meaningful task that changes files — even small ones. Overwrites the cloud state (obsolete files removed); >50 MB files + secrets + generated dirs skipped automatically; unchanged files reused by SHA-256 so re-runs are cheap. Budget-limited (10 min hard cap): a timeout aborts SAFELY (nothing committed) — just re-run. A \`warnings\` field on a successful result is informational, not a failure. No arguments needed. |
+| **retrieve_workspace** | Restore the persistent cloud workspace into the current sandbox. \`mode "check"\` probes the cloud; \`mode "restore"\` (default) writes the files and verifies SHA-256 per file. Call BEFORE workspace-dependent work when a fresh environment starts. If records read as missing right after a push, OnyxBase instance lag is the usual cause — re-run after ~1 minute; the tool retries and salvages automatically. |
 
 ### External apps (Composio — 250+ platforms)
 
@@ -136,12 +138,12 @@ Scheduled tasks are AUTONOMOUS AGENT JOBS that run on a server-side schedule —
 
 | Tool | Use |
 |---|---|
-| **create_scheduled_task** | Turn any recurring/future intent into automation. The task gets its own dedicated chat (the name becomes its title). Args: \`name\`, \`instructions\` (the COMPLETE agent job, executed verbatim by an autonomous agent with no user available — self-contained: what to do, files to write with paths), \`schedule\` {type: once/daily/weekly/monthly/interval/cron, expression, time, timezone (IANA — default the user's local tz), startAt?, endAt?}. Daily="HH:MM"; weekly=weekday numbers 0-6 (0=Sun)+time; monthly=day+time; interval=seconds≥60; once=ISO datetime; cron=5-field. |
-| **update_scheduled_task** | Change name/description/instructions/schedule/enabled by task id (the dedicated chat stays attached for life). Find ids with \`list_scheduled_tasks\`. |
-| **delete_scheduled_task** | Permanently remove a task + its history (the dedicated chat and workspace files stay — the chat becomes a normal conversation). |
+| **create_scheduled_task** | Turn any recurring/future intent into automation. The task gets its own dedicated chat (the name becomes its title). Args: \`name\`, \`instructions\` (the COMPLETE agent job, executed verbatim by an autonomous agent with no user available — self-contained: what to do, files to write with paths), \`schedule\` {type: once/daily/weekly/monthly/interval/cron, expression, time, timezone (IANA — default the user's local tz), startAt?, endAt?}. Daily="HH:MM"; weekly=weekday 0-6 (0=Sun)+time; monthly=day+time; interval=seconds≥60; once=ISO datetime; cron=5-field. |
+| **update_scheduled_task** | Change name/description/instructions/schedule/enabled by task id. Find ids with \`list_scheduled_tasks\`. |
+| **delete_scheduled_task** | Permanently remove a task + its history (its dedicated chat stays as a normal conversation). |
 | **pause_scheduled_task** / **resume_scheduled_task** | Stop executions / resume the schedule. |
 | **run_scheduled_task_now** | Execute immediately (background sandbox) without touching future runs — the result lands in the task's chat. |
-| **list_scheduled_tasks** | All tasks with id/name/schedule/timezone/status/next+last run/dedicated chat — filter active/paused/failed/upcoming. Use BEFORE any update/delete/pause to find the id. |
+| **list_scheduled_tasks** | All tasks with id/name/schedule/timezone/status/next+last run/dedicated chat — filter active/paused/failed/upcoming. |
 | **get_scheduled_task_history** | Execution history: time, duration, status, error, result, files changed, tool calls (the full result messages live in the task's chat). "Did my morning task run?" → this. |
 
 ---
@@ -637,7 +639,7 @@ Here's the Q4 overview:
 <<<genui>>>
 {"type":"custom_html","title":"🪐 Gravity Wells","height":340,
  "html":"<canvas id='cv' width='340' height='300' style='border:1px solid var(--chat-border);border-radius:8px;background:var(--chat-muted)'></canvas><p style='font-size:11px;margin-top:4px'>Click to add a gravity well. Particles orbit it.</p>",
- "js":"var cv=document.getElementById('cv'),c=cv.getContext('2d');var wells=[],parts=[];for(var i=0;i<60;i++){parts.push({x:Math.random()*340,y:Math.random()*300,vx:(Math.random()-0.5)*1.2,vy:(Math.random()-0.5)*1.2});}cv.addEventListener('mousedown',function(e){var r=cv.getBoundingClientRect();wells.push({x:e.clientX-r.left,y:e.clientY-r.top});});function loop(){c.clearRect(0,0,340,300);parts.forEach(function(p){wells.forEach(function(w){var dx=w.x-p.x,dy=w.y-p.y,d=Math.max(20,Math.hypot(dx,dy));p.vx+=dx/d*0.15;p.vy+=dy/d*0.15;});p.vx*=0.995;p.vy*=0.995;p.x+=p.vx;p.y+=p.vy;if(p.x<0||p.x>340){p.vx*=-1;}if(p.y<0||p.y>300){p.vy*=-1;}c.fillStyle='#a97451';c.beginPath();c.arc(p.x,p.y,1.5,0,Math.PI*2);c.fill();});wells.forEach(function(w){c.fillStyle='#0891B2';c.beginPath();c.arc(w.x,w.y,5,0,Math.PI*2);c.fill();});requestAnimationFrame(loop);}loop();"}
+ "js":"var cv=document.getElementById('cv'),c=cv.getContext('2d');var wells=[],parts=[];for(var i=0;i<60;i++){parts.push({x:Math.random()*340,y:Math.random()*300,vx:(Math.random()-0.5)*1.2,vy:(Math.random()-0.5)*1.2});}cv.addEventListener('mousedown',function(e){var r=cv.getBoundingClientRect();wells.push({x:e.clientX-r.left,y:e.clientY-r.top});});function loop(){c.clearRect(0,0,340,300);parts.forEach(function(p){wells.forEach(function(w){var dx=w.x-p.x,dy=w.y-p.y,d=Math.max(20,Math.hypot(dx,dy));p.vx+=dx/d*0.15;p.vy+=dy/d*0.15;});p.vx*=0.995;p.vy*=0.995;p.x+=p.vx;p.y+=p.vy;if(p.x<0||p.x>340){p.vx*=-1;}if(p.y<0||p.y>300){p.vy*=-1;}c.fillStyle='#a97451';c.beginPath();c.arc(p.x,p.y,1.5,0,Math.PI*2);c.fill();});wells.forEach(function(w){c.fillStyle='#C4552F';c.beginPath();c.arc(w.x,w.y,5,0,Math.PI*2);c.fill();});requestAnimationFrame(loop);}loop();"}
 <<</genui>>>
 \`\`\`
 

@@ -6,6 +6,7 @@ import type { AgentTurnOptions } from "@/lib/agent/runtime";
 import { respondToAskUser } from "@/lib/agent/runtime";
 import { aiProviderService, conversationService, settingsService } from "@/lib/services";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
+import { stripUploadTags } from "@/lib/uploads/registry";
 import { useChatStore, useAuthStore } from "@/stores";
 import type {
   AskUserAnswer,
@@ -62,8 +63,19 @@ const WEB_RESEARCH_DIRECTIVE = `## Web Research & Citations (MANDATORY)
 
 const FRAMEWORK_PROMPTS: Record<string, string> = {
   default: DEFAULT_SYSTEM_PROMPT,
-  pydantic_ai: `You are an AI agent built with PydanticAI. You have access to tools that you can call to help the user.
-Follow PydanticAI conventions:
+  // Onyx AI — OnyxAgent's native agent framework preset (renamed from the
+  // legacy "pydantic_ai" option; stored values are normalized on read).
+  onyx_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+Follow Onyx AI conventions:
+- Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
+- Structure your responses clearly with markdown
+- When using tools, explain what you're doing briefly
+- Handle errors gracefully and suggest alternatives
+- Be precise and type-safe in your reasoning`,
+  // Legacy alias: installs that stored "pydantic_ai" before the rename get
+  // the Onyx AI preset (same behavior, new name).
+  pydantic_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+Follow Onyx AI conventions:
 - Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
 - Structure your responses clearly with markdown
 - When using tools, explain what you're doing briefly
@@ -293,6 +305,12 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
+      // TAG NORMALIZATION (File Persistence PRD §29): a regenerate-after-
+      // refresh re-sends a message whose content may still carry the hidden
+      // upload tags. Strip them up front — the fresh tags are appended below
+      // exactly once, so a turn can never accumulate duplicate tags.
+      content = stripUploadTags(content) || content.trim();
+
       // ── CREATE THE EXECUTION FIRST ─────────────────────────────────────
       // The hub owns it from here on: its headless store carries the
       // optimistic user message + every agent event, its consumer/checkpoint
@@ -325,36 +343,31 @@ export function useChat(options: UseChatOptions = {}) {
         files,
       });
 
-      // Upload attached files to the E2B sandbox if cloud mode is active.
+      // Mirror attached files into the E2B sandbox (best-effort, when a key
+      // exists) so the sandbox-native tools (list_folder / read_file) see
+      // them at uploads/<name>. Binary-safe (base64 over batch_write_bytes) —
+      // the old text() path corrupted binaries. The CANONICAL AI access path
+      // is the uploads registry (read_uploaded_file), which works even
+      // without a sandbox.
       if (fileIds && fileIds.length > 0) {
         try {
-          const [fsMode, sandboxKey] = await Promise.all([
-            settingsService.getFileSystemMode(userId),
-            settingsService.getDecryptedSandboxKey(userId),
-          ]);
-          // Sandbox mode is always "shared" — all conversations share one sandbox.
-          const sandboxMode = "shared" as const;
-          if ((fsMode === "auto" || fsMode === "hopx") && sandboxKey) {
-            const { uploadFileToSandbox, readFileBytes } = await import("@/lib/file-api");
-            // Fire-and-forget — don't block the chat turn on sandbox upload.
+          const sandboxKey = await settingsService.getDecryptedSandboxKey(userId);
+          if (sandboxKey) {
+            const { getUpload, mirrorUploadToSandbox } = await import("@/lib/uploads/registry");
+            // Fire-and-forget — don't block the chat turn on the mirror.
             void (async () => {
               for (const fid of fileIds) {
                 try {
-                  const blob = await readFileBytes(fid);
-                  if (blob) {
-                    const file = new File([blob], files?.find((f) => f.id === fid)?.filename ?? fid, {
-                      type: files?.find((f) => f.id === fid)?.mime_type,
-                    });
-                    await uploadFileToSandbox(file, sandboxKey, convId, sandboxMode);
-                  }
+                  const record = await getUpload(fid, userId);
+                  if (record) await mirrorUploadToSandbox(record, sandboxKey);
                 } catch (err) {
-                  console.warn("[useChat] sandbox upload failed for", fid, err);
+                  console.warn("[useChat] sandbox mirror failed for", fid, err);
                 }
               }
             })();
           }
         } catch (err) {
-          console.warn("[useChat] failed to check file system mode for sandbox upload:", err);
+          console.warn("[useChat] failed to check sandbox key for upload mirror:", err);
         }
       }
 
@@ -363,15 +376,16 @@ export function useChat(options: UseChatOptions = {}) {
       // the turn's signal (fg) — both owned by the hub, both surviving
       // navigation.
       //
-      // INVISIBLE FILE TAG: when files are attached, append a hidden tag to
-      // the message sent to the AI so it knows what files were uploaded and
-      // can check the workspace. This tag is NOT shown in the UI.
+      // STRUCTURED HIDDEN FILE TAG (File Persistence PRD §7): attached files
+      // ride along as machine-readable `<user_uploaded_file file_id="…"
+      // name="…" …/>` tags. The tag references the persistent registry record
+      // (stable fileId) so the AI can read the file with read_uploaded_file
+      // and the renderer reconstructs the attachment chip after a refresh.
+      // The tag is NEVER shown to the user (message-item strips it).
       let aiContent = content;
       if (files && files.length > 0) {
-        const fileTags = files
-          .map((f) => `<@${f.filename} is uploaded check the workspace>`)
-          .join(" ");
-        aiContent = `${content}\n\n${fileTags}`;
+        const { buildUploadTags } = await import("@/lib/uploads/registry");
+        aiContent = `${content}\n\n${buildUploadTags(files)}`;
       }
       const opts = await buildTurnOptions(userId, aiContent, fileIds, execution.processor.handle);
       if (!opts) {

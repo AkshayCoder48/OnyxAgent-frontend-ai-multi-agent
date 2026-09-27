@@ -64,6 +64,27 @@ function nowISO(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Sidebar-preview text for a message: strips the internal upload tags
+ * (`<user_uploaded_file …/>` + the legacy `<@… is uploaded …>` form) so the
+ * conversation list shows the user's actual words, never protocol markup.
+ */
+function previewTextOf(content: string | null | undefined): string | null {
+  if (!content) return null;
+  const stripped = content
+    .replace(/<user_uploaded_file\s+[^>]*\/>/g, "")
+    .replace(/<@([^>]+? is uploaded[^>]*)>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const collapsed = stripped.length > 0 ? collapsedPreview(stripped) : collapsedPreview(content);
+  return collapsed;
+}
+
+function collapsedPreview(text: string): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  return t.length > 200 ? `${t.slice(0, 200)}…` : t;
+}
+
 async function bumpConversationTimestamp(conversationId: string): Promise<void> {
   const ts = nowISO();
   await db.conversations.update(conversationId, { updated_at: ts });
@@ -344,9 +365,25 @@ export const conversationService = {
       arr.push(rr);
       ratingsByMessage.set(rr.message_id, arr);
     }
+    // FILE HYDRATION (File Persistence PRD §9): the chat_files registry is
+    // the canonical attachment record — message rows persist `files: []` and
+    // only the fileIds→message_id link. Re-join the registry here so user
+    // messages reconstruct their FileCard attachments after a refresh (the
+    // message's hidden <user_uploaded_file/> tag remains the fallback path).
+    const fileRows = messageIds.length > 0
+      ? await db.chat_files.where("message_id").anyOf(messageIds).toArray()
+      : [];
+    const filesByMessage = new Map<string, typeof fileRows>();
+    for (const fr of fileRows) {
+      if (!fr.message_id) continue;
+      const arr = filesByMessage.get(fr.message_id) ?? [];
+      arr.push(fr);
+      filesByMessage.set(fr.message_id, arr);
+    }
     return rows.map((m) => {
       const myTools = toolsByMessage.get(m.id) ?? [];
       const myRatings = ratingsByMessage.get(m.id) ?? [];
+      const myFiles = filesByMessage.get(m.id) ?? [];
       // Single-user local app: prefer the caller's row, fall back to the
       // first row. The fallback matters because the caller's id can be the
       // transient pre-auth "local-user" while the row was written with the
@@ -363,6 +400,17 @@ export const conversationService = {
           likes: myRatings.filter((r) => r.rating === RatingValue.LIKE).length,
           dislikes: myRatings.filter((r) => r.rating === RatingValue.DISLIKE).length,
         },
+        // Reconstructed attachments (registry join) — same shape the live
+        // optimistic message carries, so fresh and restored attachments use
+        // the SAME renderer.
+        files: myFiles.map((f) => ({
+          id: f.id,
+          filename: f.filename,
+          mime_type: f.mime_type,
+          file_type: f.file_type,
+          size: f.size,
+        })),
+        file_ids: myFiles.map((f) => f.id),
         tool_calls: myTools.map((t) => ({
           id: t.id,
           message_id: t.message_id,
@@ -403,9 +451,10 @@ export const conversationService = {
     };
     await db.messages.add(messageRow);
     await bumpConversationTimestamp(conversationId);
-    // Update last-message preview on the conversation.
+    // Update last-message preview on the conversation. Upload tags are
+    // internal — the sidebar preview must show the user's actual text.
     await db.conversations.update(conversationId, {
-      last_message_preview: input.content.slice(0, 200),
+      last_message_preview: previewTextOf(input.content),
       last_message_at: ts,
     });
     // Persist tool calls if any.
@@ -527,7 +576,7 @@ export const conversationService = {
       void userId; // reserved for future scoping
     }
     await db.conversations.update(conversationId, {
-      last_message_preview: input.content.slice(0, 200),
+      last_message_preview: previewTextOf(input.content),
       last_message_at: ts,
     });
     return row as unknown as ConversationMessage;
@@ -663,7 +712,7 @@ export const conversationService = {
     const last = messages[messages.length - 1]!;
     const ts = nowISO();
     await db.conversations.update(conversationId, {
-      last_message_preview: (last.content ?? "").slice(0, 200),
+      last_message_preview: previewTextOf(last.content ?? ""),
       last_message_at: last.createdAt,
       updated_at: ts,
     });
@@ -1192,8 +1241,10 @@ export interface UserSettings {
    *  Stored under `extra.sandbox_mode`. */
   sandbox_mode?: "shared" | "separate";
   /** AI framework preset — changes the system prompt to match the framework's
-   *  conventions. "default" = generic assistant, "pydantic_ai" = PydanticAI,
-   *  "langchain" = LangChain, "autogen" = AutoGen, "crewai" = CrewAI.
+   *  conventions. "default" = generic assistant, "onyx_ai" = Onyx AI
+   *  (OnyxAgent's native framework; stored "pydantic_ai" values from before
+   *  the rename are normalized to it on read), "langchain" = LangChain,
+   *  "autogen" = AutoGen, "crewai" = CrewAI.
    *  Stored under `extra.ai_framework`. */
   ai_framework?: string;
   /** Default model name (e.g. "gpt-4o-mini") — stored under `extra`. */
@@ -1706,7 +1757,9 @@ export const settingsService = {
   /** Get the AI framework preset. Returns "default" by default. */
   async getAIFramework(userId: string): Promise<string> {
     const settings = await this.get(userId);
-    return settings.ai_framework ?? "default";
+    const fw = settings.ai_framework ?? "default";
+    // Legacy normalization: "pydantic_ai" was renamed to "onyx_ai" (Onyx AI).
+    return fw === "pydantic_ai" ? "onyx_ai" : fw;
   },
 };
 

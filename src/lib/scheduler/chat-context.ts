@@ -28,8 +28,17 @@ const WEB_RESEARCH_DIRECTIVE = `## Web Research & Citations (MANDATORY)
 
 const FRAMEWORK_PROMPTS: Record<string, string> = {
   default: DEFAULT_SYSTEM_PROMPT,
-  pydantic_ai: `You are an AI agent built with PydanticAI. You have access to tools that you can call to help the user.
-Follow PydanticAI conventions:
+  // Onyx AI — OnyxAgent's native agent framework (renamed from "pydantic_ai";
+  // the legacy key stays as an alias for stored settings).
+  onyx_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+Follow Onyx AI conventions:
+- Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
+- Structure your responses clearly with markdown
+- When using tools, explain what you're doing briefly
+- Handle errors gracefully and suggest alternatives
+- Be precise and type-safe in your reasoning`,
+  pydantic_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+Follow Onyx AI conventions:
 - Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
 - Structure your responses clearly with markdown
 - When using tools, explain what you're doing briefly

@@ -12,7 +12,7 @@ import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
 import { ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import { RatingButtons } from "./rating-buttons";
-import { getFileUrl } from "@/lib/file-api";
+import { getFileUrl, loadFileUrls } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
@@ -33,6 +33,7 @@ import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { extractGenUINodes, buildTextSegments } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
+import { stripUploadTags } from "@/lib/uploads/registry";
 
 /**
  * Extract + validate GenUI nodes from a message's full text (content + parts).
@@ -197,6 +198,11 @@ function TextBubble({
   const { segments } = useGenUIFromText(text, !isStreaming);
 
   if (isUser) {
+    // HIDDEN UPLOAD TAGS (File Persistence PRD §30): persisted user messages
+    // carry internal `<user_uploaded_file …/>` (and legacy `<@…>`) markup for
+    // the AI + attachment reconstruction. The user must NEVER see it — the
+    // bubble renders the stripped text; the FileCard chips render above it.
+    const displayText = stripUploadTags(text);
     // User turn — right-aligned soft-terracotta card with a small tail
     // (Terra spec: #F0E3D5 fill, #EAD6C4 hairline, ink text, rounded-tr-sm).
     return (
@@ -210,7 +216,13 @@ function TextBubble({
           color: "var(--chat-user-fg, var(--color-foreground))",
         }}
       >
-        <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">{text}</p>
+        {displayText ? (
+          <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">{displayText}</p>
+        ) : (
+          <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">
+            <span className="opacity-70">Sent an attachment</span>
+          </p>
+        )}
       </div>
     );
   }
@@ -778,6 +790,21 @@ export const MessageItem = React.memo(function MessageItem({
   const openSources = useSourcesPanelStore((s) => s.open);
   const isGrouped = groupPosition && groupPosition !== "single";
 
+  // ATTACHMENT URL WARM-UP (File Persistence PRD §25): after a refresh the
+  // blob-URL cache is cold — image previews (and file-preview opens) need
+  // `loadFileUrls()` to repopulate it from persistent OPFS storage. Fire-and-
+  // forget, once per attachment set; the cache write triggers the store
+  // subscription cycle and the next render shows the preview.
+  const warmedAttachmentKeyRef = React.useRef<string>("");
+  React.useEffect(() => {
+    const ids = message.files?.map((f) => f.id) ?? message.fileIds ?? [];
+    if (ids.length === 0) return;
+    const key = ids.join(",");
+    if (warmedAttachmentKeyRef.current === key) return;
+    warmedAttachmentKeyRef.current = key;
+    void loadFileUrls(ids);
+  }, [message.files, message.fileIds]);
+
   // PERF: Memoize extractSources + parts filtering so they don't re-run on
   // every parent re-render. These were previously called inline on every
   // render, causing O(n) work per message per store update.
@@ -807,6 +834,7 @@ export const MessageItem = React.memo(function MessageItem({
   // hidden UI content"). GenUI widget specs live inline in the raw content
   // between <<<genui>>> … <<</genui>>> sentinels — the clipboard gets the
   // plain text the user actually SEES, with the raw JSON specs stripped.
+  // Upload tags are equally internal — they never reach the clipboard.
   const copyText = React.useMemo(() => {
     const raw =
       message.content ||
@@ -823,7 +851,7 @@ export const MessageItem = React.memo(function MessageItem({
         .join("\n\n")
         .trim();
     }
-    return raw;
+    return stripUploadTags(raw);
   }, [message.content, message.parts]);
 
   // Id of the LAST research/todo tool part in the original parts order —
@@ -957,7 +985,7 @@ export const MessageItem = React.memo(function MessageItem({
             return (
               <div className="flex flex-wrap gap-2">
                 {attachments.map((att) =>
-                  att.kind === "image" ? (
+                  att.kind === "image" && getFileUrl(att.file.id) ? (
                     <FileCardImage
                       key={att.file.id}
                       filename={att.file.filename}

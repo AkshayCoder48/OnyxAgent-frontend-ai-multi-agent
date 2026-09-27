@@ -17,9 +17,10 @@
 
 import { ApiError } from "./api-client";
 import { fileService } from "@/lib/services";
-import { writeFileAtPath, makeBlobURL, readFile } from "@/lib/storage/opfs";
+import { writeFileAtPath, makeBlobURL, readFile, isOPFSAvailable } from "@/lib/storage/opfs";
 import { db } from "@/lib/db";
 import { useAuthStore } from "@/stores";
+import { notifyUploadsChanged } from "@/lib/uploads/registry";
 
 export interface FileUploadResponse {
   id: string;
@@ -97,6 +98,10 @@ export async function uploadFile(
     // Report 30% before OPFS write.
     onProgress?.(30);
 
+    if (!isOPFSAvailable()) {
+      throw new Error("Persistent storage (OPFS) is not available in this browser.");
+    }
+
     // Use the EXACT SAME pattern as the skill installer:
     //   1. Read into ArrayBuffer
     //   2. Copy into a fresh ArrayBuffer (avoids the modern
@@ -110,17 +115,39 @@ export async function uploadFile(
     const blob = new Blob([buf], { type: mimeType });
     const storagePath = await writeFileAtPath(dirPath, safeName, blob);
 
-    // ALSO copy the file to the workspace directory so it appears in the
-    // file sidebar. The chat attachment path (files/<id>/) is for the
-    // chat's internal use; the workspace path (workspace/) is what the
-    // file sidebar lists and what the AI's file tools access.
-    try {
-      await writeFileAtPath(`users/${userId}/workspace`, safeName, new Blob([buf], { type: mimeType }));
-    } catch {
-      // best-effort — the chat attachment still works even if the workspace copy fails
+    // VERIFY PERSISTENCE (PRD §3): the upload only becomes "uploaded" after
+    // the stored bytes are read back and their size matches. No fake success.
+    const stored = await readFile(storagePath);
+    if (!stored || stored.size !== blob.size) {
+      throw new Error(
+        `Persistence verification failed for ${safeName} (stored ${stored?.size ?? 0}B of ${blob.size}B).`,
+      );
     }
 
-    // Report 70% after OPFS write, before DB insert.
+    // Workspace copy: users/<uid>/workspace/uploads/<name> — this is the
+    // folder the Files sidebar's Uploads section and the workspace tooling
+    // operate on. COLLISION-SAFE: never overwrite an unrelated file with the
+    // same name — a collision gets a short fileId prefix.
+    try {
+      let wsName = safeName;
+      try {
+        const existing = await readFile(`users/${userId}/workspace/uploads/${safeName}`);
+        if (existing && existing.size !== blob.size) {
+          wsName = `${id.slice(0, 6)}-${safeName}`;
+        }
+      } catch {
+        /* no existing file — keep the clean name */
+      }
+      await writeFileAtPath(
+        `users/${userId}/workspace/uploads`,
+        wsName,
+        new Blob([buf], { type: mimeType }),
+      );
+    } catch {
+      // best-effort — the canonical copy (files/<id>/) is already verified.
+    }
+
+    // Report 70% after OPFS write + verification, before DB insert.
     onProgress?.(70);
 
     await fileService.create(userId, {
@@ -132,7 +159,10 @@ export async function uploadFile(
       file_type: fileType,
     });
 
-    // Report 100% — upload complete.
+    // Registry changed — the Files sidebar's Uploads section refreshes.
+    notifyUploadsChanged();
+
+    // Report 100% — upload complete (persisted + verified + registered).
     onProgress?.(100);
   } catch (err) {
     if (err instanceof ApiError) throw err;

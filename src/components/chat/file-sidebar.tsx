@@ -34,6 +34,15 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { getE2BClient, E2BClient, type E2BFile } from "@/lib/e2b/client";
 import { settingsService } from "@/lib/services";
+import { uploadFile } from "@/lib/file-api";
+import {
+  listUploads,
+  deleteUpload,
+  readUploadBytes,
+  mirrorUploadToSandbox,
+  UPLOADS_CHANGED_EVENT,
+  type UploadedFileRecord,
+} from "@/lib/uploads/registry";
 
 interface WorkspaceEntry {
   name: string;
@@ -173,6 +182,38 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   // re-fetches. Driven by both the parent's `onRefreshKey` prop and the
   // local WS-listener below.
   const [refreshTick, setRefreshTick] = useState(0);
+
+  // ── PERSISTENT UPLOADS (File Persistence PRD §4) ─────────────────────
+  // The Uploads section is backed by the canonical uploads registry
+  // (chat_files + OPFS bytes) — NOT a virtual UI list. It survives refresh,
+  // navigation and app restarts, and works with or without a sandbox key.
+  const [uploads, setUploads] = useState<UploadedFileRecord[]>([]);
+  const [uploadsLoading, setUploadsLoading] = useState(true);
+
+  const fetchUploads = useCallback(async () => {
+    const uid = user?.id;
+    if (!uid) {
+      setUploads([]);
+      setUploadsLoading(false);
+      return;
+    }
+    try {
+      setUploads(await listUploads(uid));
+    } catch (e) {
+      console.warn("[file-sidebar] Failed to load uploads:", e);
+    } finally {
+      setUploadsLoading(false);
+    }
+  }, [user?.id]);
+
+  // Registry changes (upload added here, in chat, or a deletion anywhere)
+  // refresh the section — the folder always reflects persistent state.
+  useEffect(() => {
+    void fetchUploads();
+    const handler = () => void fetchUploads();
+    window.addEventListener(UPLOADS_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(UPLOADS_CHANGED_EVENT, handler);
+  }, [fetchUploads]);
 
   // Resolve the E2B sandbox client from the user's stored API key. All file
   // operations (list, read, write, delete) go through E2B now — OPFS is no
@@ -345,9 +386,13 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   };
 
   const entries = listing?.entries || [];
+  const searchLower = search.toLowerCase();
   const filtered = search
-    ? entries.filter((e) => e.name.toLowerCase().includes(search.toLowerCase()))
+    ? entries.filter((e) => e.name.toLowerCase().includes(searchLower))
     : entries;
+  const filteredUploads = search
+    ? uploads.filter((u) => u.filename.toLowerCase().includes(searchLower))
+    : uploads;
   const dirs = filtered.filter((e) => e.type === "dir");
   const files = filtered.filter((e) => e.type === "file");
 
@@ -355,8 +400,9 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   const noSandbox = clientLoaded && !client;
 
   // File upload from the sidebar — opens the native file selector, then
-  // uploads the file to the E2B sandbox. Shows a toast with progress, then
-  // refreshes the file listing.
+  // runs the CANONICAL upload flow (OPFS persist + verify + registry
+  // record) and mirrors into the E2B sandbox when a key exists. This is the
+  // exact same pipeline chat attachments use — one identity everywhere.
   const sidebarFileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingToSidebar, setUploadingToSidebar] = useState(false);
 
@@ -372,39 +418,29 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
       console.error("[file-sidebar] Upload aborted: no authenticated user");
       return;
     }
-    if (!client) {
-      toast.error("No sandbox available", {
-        description: "Add an E2B Sandbox API key in Settings → Config to upload files.",
-      });
-      return;
-    }
 
     setUploadingToSidebar(true);
     let successCount = 0;
     let failureCount = 0;
-    const uploadedFileMetas: Array<{ name: string; size: number; mime_type: string; uploaded_at: string }> = [];
+    let sandboxKey: string | null = null;
+    try {
+      sandboxKey = await settingsService.getDecryptedSandboxKey(user.id);
+    } catch {
+      sandboxKey = null;
+    }
     for (const file of fileArray) {
       try {
-        const parts = file.name.split("/");
-        const filename = (parts.pop() || file.name).replace(/[\\/]+/g, "_");
-        // Compute the destination path relative to /home/user (the sandbox
-        // workspace root). When the user is inside a subfolder, drop the
-        // file there; otherwise drop it at the workspace root.
-        const fullPath = currentPath === "." ? filename : `${currentPath}/${filename}`;
-        // Read as text and write to E2B. (Note: text() is lossy for binary
-        // files — matches the existing client.uploadFile behavior. For
-        // lossless binary uploads, use the chat attachment flow.)
-        const content = await file.text();
-        await client.writeFile(fullPath, content);
-        // Track metadata for the manifest file (invisible tagging for AI).
-        uploadedFileMetas.push({
-          name: filename,
-          size: file.size,
-          mime_type: file.type || "application/octet-stream",
-          uploaded_at: new Date().toISOString(),
-        });
+        // 1. Canonical: OPFS persist (verified) + registry record.
+        const uploaded = await uploadFile(file);
         successCount++;
-        toast.success(`Uploaded ${file.name}`);
+        // 2. Best-effort sandbox mirror so the sandbox-native AI tools see
+        //    the file at uploads/<name> too.
+        if (sandboxKey) {
+          const record = await (await import("@/lib/uploads/registry")).getUpload(uploaded.id, user.id);
+          if (record) {
+            void mirrorUploadToSandbox(record, sandboxKey).catch(() => {});
+          }
+        }
       } catch (err) {
         failureCount++;
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -413,48 +449,10 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
       }
     }
 
-    // === INVISIBLE FILE TAGGING FOR AI ===
-    // Write/update a `.onyxagent_files.json` manifest at the workspace root
-    // listing ALL uploaded files with their metadata. The AI can read it
-    // from the sandbox to discover what files exist in the workspace.
-    if (successCount > 0 && client) {
-      try {
-        const manifestFile = ".onyxagent_files.json";
-
-        // Read the existing manifest (if any) and merge new files.
-        let existing: Array<{ name: string; size: number; mime_type: string; uploaded_at: string }> = [];
-        try {
-          const oldContent = await client.readFile(manifestFile);
-          if (oldContent) {
-            const parsed = JSON.parse(oldContent);
-            if (Array.isArray(parsed?.files)) existing = parsed.files;
-          }
-        } catch {
-          // No existing manifest — start fresh.
-        }
-
-        // Merge: add new files, deduplicate by name (keep latest).
-        const byName = new Map<string, typeof uploadedFileMetas[number]>();
-        for (const f of existing) byName.set(f.name, f);
-        for (const f of uploadedFileMetas) byName.set(f.name, f);
-        const merged = Array.from(byName.values());
-
-        await client.writeFile(
-          manifestFile,
-          JSON.stringify({
-            description: "Auto-generated manifest of uploaded files. The AI can read this to discover what files exist in the workspace.",
-            generated_at: new Date().toISOString(),
-            files: merged,
-          }, null, 2),
-        );
-      } catch (manifestErr) {
-        console.warn("[file-sidebar] Failed to write file manifest:", manifestErr);
-      }
-    }
-
     setUploadingToSidebar(false);
 
     setRefreshTick((t) => t + 1);
+    await fetchUploads();
     try {
       await fetchListing(currentPath);
     } catch (e) {
@@ -466,7 +464,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     } else if (failureCount > 0 && successCount > 0) {
       toast.message(`Uploaded ${successCount}, failed ${failureCount}`);
     }
-  }, [user, client, currentPath, fetchListing]);
+  }, [user, currentPath, fetchListing, fetchUploads]);
 
   return (
     <div className="flex h-full flex-col bg-card">
@@ -525,7 +523,6 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="h-7 pl-7 text-xs"
-            disabled={noSandbox}
           />
         </div>
         {/* Breadcrumb */}
@@ -557,7 +554,113 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         </div>
       </div>
 
-      {/* File list */}
+      {/* ── PERSISTENT UPLOADS SECTION (File Persistence PRD §4) ──────────
+       * Registry-backed (chat_files + OPFS) — reflects the canonical records,
+       * survives refresh/navigation, works with or without a sandbox. */}
+
+      {(() => {
+        if (uploadsLoading && uploads.length === 0) {
+          return (
+            <div className="border-b border-border px-3 py-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Uploads
+              </div>
+            </div>
+          );
+        }
+        if (uploads.length === 0 && !search) {
+          return (
+            <div className="border-b border-border px-3 py-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <Upload className="h-3 w-3" /> Uploads
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground/80 leading-relaxed">
+                Files you upload in chat or here persist here — visible to you and the AI across refreshes.
+              </p>
+            </div>
+          );
+        }
+        if (uploads.length === 0 && search) return null;
+        return (
+          <div className="border-b border-border">
+            <div className="flex items-center justify-between px-3 pt-2 pb-1">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                <Upload className="h-3 w-3 text-primary" /> Uploads
+                <span className="rounded-full bg-muted px-1.5 text-[9px] font-semibold text-muted-foreground">
+                  {filteredUploads.length}
+                </span>
+              </div>
+              <span className="text-[9px] text-muted-foreground">persistent</span>
+            </div>
+            <ul className="pb-1 animate-fade-in">
+              {filteredUploads.map((u) => {
+                const ext = fileExtension(u.filename);
+                const IconComp = EXT_ICONS[ext] || FileIcon;
+                const iconColor = FILE_ICON_COLORS[ext] || "text-muted-foreground";
+                return (
+                  <li
+                    key={u.fileId}
+                    className="group flex items-center hover:bg-foreground/5 transition-colors"
+                  >
+                    <div className="flex flex-1 items-center gap-2 px-3 py-1.5 text-xs min-w-0">
+                      <IconComp className={cn("h-3.5 w-3.5 shrink-0", iconColor)} />
+                      <span className="truncate" title={u.filename}>
+                        {u.filename}
+                      </span>
+                      <span className="text-muted-foreground text-[10px] shrink-0 ml-auto pr-1">
+                        {formatSize(u.size)}
+                      </span>
+                    </div>
+                    <UploadItemMenu
+                      onDownload={async () => {
+                        try {
+                          const blob = await readUploadBytes(u);
+                          if (!blob) {
+                            toast.error("Download failed", {
+                              description: "The stored file could not be read (it may have been deleted from this device).",
+                            });
+                            return;
+                          }
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = u.filename;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          URL.revokeObjectURL(url);
+                        } catch (e) {
+                          toast.error("Download failed", {
+                            description: e instanceof Error ? e.message : "Unknown error",
+                          });
+                        }
+                      }}
+                      onDelete={async () => {
+                        try {
+                          const ok = await deleteUpload(u.fileId, u.userId);
+                          if (ok) {
+                            toast.success(`Deleted: ${u.filename}`);
+                            await fetchUploads();
+                            setRefreshTick((t) => t + 1);
+                          } else {
+                            toast.error("Delete failed", { description: "File not found in the registry." });
+                          }
+                        } catch (e) {
+                          toast.error("Delete failed", {
+                            description: e instanceof Error ? e.message : "Unknown error",
+                          });
+                        }
+                      }}
+                    />
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })()}
+
+      {/* Sandbox file list */}
       <div className="flex-1 overflow-y-auto scrollbar-thin">
         {loading && !listing ? (
           <div className="flex items-center justify-center py-8">
@@ -570,13 +673,13 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
               <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
                 <ServerOff className="h-4 w-4" />
               </div>
-              <p className="text-xs font-medium text-foreground">No sandbox available</p>
+              <p className="text-xs font-medium text-foreground">No sandbox workspace</p>
               <p className="text-[11px] text-muted-foreground max-w-[200px] leading-relaxed">
-                Add an E2B Sandbox API key in{" "}
+                Uploads above persist locally and stay available to the AI. Add an E2B Sandbox API key in{" "}
                 <Link href="/settings/config" className="font-medium text-foreground underline underline-offset-2">
                   Settings → Config
                 </Link>{" "}
-                to enable workspace files.
+                for the full sandbox workspace.
               </p>
             </div>
           </div>
@@ -742,11 +845,14 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
       </div>
 
       {/* Footer stats */}
-      {listing && (
-        <div className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-          {dirs.length} folders · {files.length} files
-        </div>
-      )}
+      <div className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
+        {uploads.length > 0 && <>{uploads.length} upload{uploads.length !== 1 ? "s" : ""} · </>}
+        {listing ? (
+          <>{dirs.length} folders · {files.length} files</>
+        ) : !clientLoaded ? null : (
+          <>no sandbox workspace</>
+        )}
+      </div>
     </div>
   );
 }
@@ -809,6 +915,40 @@ function FileItemMenu({
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => { setOpen(false); setRenaming(true); }}>
           <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => { setOpen(false); onDelete(); }}
+          className="text-rose-600 focus:text-rose-600"
+        >
+          <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// ---- Upload Item Menu (persistent uploads registry entries) ----
+function UploadItemMenu({
+  onDownload,
+  onDelete,
+}: {
+  onDownload: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="px-2 py-1 text-muted-foreground hover:text-foreground"
+          title="More options"
+        >
+          <MoreVertical className="h-3.5 w-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-40">
+        <DropdownMenuItem onClick={() => { setOpen(false); onDownload(); }}>
+          <Download className="h-3.5 w-3.5 mr-2" /> Download
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={() => { setOpen(false); onDelete(); }}

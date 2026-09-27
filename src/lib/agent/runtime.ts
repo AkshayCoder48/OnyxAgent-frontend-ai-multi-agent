@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * Agent runtime — the backendless replacement for the original PydanticAI
- * agent + WebSocket backend.
+ * Agent runtime — the backendless replacement for the original Python-agent
+ * (now superseded by Onyx AI, OnyxAgent's native agent framework) +
+ * WebSocket backend.
  *
  * The runtime drives a custom agent loop:
  *   1. Build an OpenAI-compatible Chat Completions request (system prompt +
@@ -62,6 +63,7 @@ import {
 } from "@/lib/agent/wire-compat";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
+import { manageContext } from "@/lib/agent/context/context-manager";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -1904,7 +1906,11 @@ Automatically delegate when ANY of these are true:
 **Planning is Mandatory:** Skipping planning for large requests is an error. Always plan before executing.
 
 ### File Uploads
-When the user uploads a file, you'll see a tag like \`<@filename is uploaded check the workspace>\` in their message. The file is in your workspace — use \`list_folder\` or \`read_file\` to access it. A manifest file \`.onyxagent_files.json\` lists all uploaded files with their metadata.
+When the user uploads a file, their message carries a machine-readable tag like \`<user_uploaded_file file_id="abc123" name="example.xml" mime_type="application/xml" size="1204" />\`. The tag is an internal protocol — never quote it back or mention it to the user; the UI renders it as a normal attachment chip.
+- EVERY uploaded file lives in the persistent uploads registry with that stable \`file_id\`. Read it with \`read_uploaded_file\` (by \`file_id\` or \`name\`) — text-like files return their contents; binaries return metadata + a base64 preview.
+- \`list_uploaded_files\` lists the full registry at any time (uploads from earlier turns included — file_ids stay valid across the whole conversation).
+- When an E2B sandbox is configured, uploads are also mirrored at \`uploads/<name>\` in the workspace (\`list_folder\` / \`read_file\` work there).
+- Resolve the file the user means through the tag's \`file_id\` — do not ask them to re-upload or repeat the filename.
 
 ${ONYX_MD_DIGEST}
 
@@ -1960,14 +1966,50 @@ ${genuiThemePromptBlock(readChatTheme())}`;
       `(tools=${registeredTools.length}, digest=${enhancedSystemPrompt.includes("## TOOL DIGEST") ? "injected" : "MISSING"})`,
   );
 
-  // CONTEXT WINDOW MANAGEMENT: Always strip tool_calls from history to
-  // prevent DEGRADED errors. The AI doesn't need old tool calls to continue.
-  // Handoff letter is triggered DYNAMICALLY when a context error is detected
-  // (not at a fixed message count) — see the error handler in the agent loop.
-  const MAX_HISTORY_MESSAGES = 20;
-  let trimmedHistory = history.length > MAX_HISTORY_MESSAGES
-    ? history.slice(-MAX_HISTORY_MESSAGES)
+  // CONTEXT WINDOW MANAGEMENT — the Onyx Context Manager (Infinite Context
+  // PRD §3–§14): history is no longer a crude fixed slice. The FULL text
+  // history (tool_calls already excluded below) goes through a budget-aware
+  // tiered compaction: cheap cleanup → long-message trims → sliding window
+  // with first-user-message + recent preservation → extractive digest →
+  // emergency minimum. Tool roles never reach the request (pair safety,
+  // PRD §22), the persistent Dexie history is NEVER deleted (compaction
+  // only shapes the ACTIVE context, PRD §6), and the handoff letter remains
+  // the dynamic fallback when a provider still rejects the request.
+  const DEFAULT_MAX_HISTORY = 80; // bounded default window (cost control, PRD §36)
+  const preCappedHistory = history.length > DEFAULT_MAX_HISTORY
+    ? history.slice(-DEFAULT_MAX_HISTORY)
     : history;
+  const contextHistory: Array<{ role: "user" | "assistant" | "system"; content: string; reasoning?: string | null }> =
+    preCappedHistory
+      .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
+      .map((m) => ({
+        role: m.role as "user" | "assistant" | "system",
+        content: m.content ?? "",
+        reasoning: (m as { reasoning?: string | null }).reasoning ?? null,
+      }));
+  const managedContext = manageContext({
+    systemPrompt: enhancedSystemPrompt,
+    tools: tools.map((t) => t.function ?? {}),
+    history: contextHistory,
+    model: opts.provider.model,
+  });
+  // Managed messages minus the LEADING system prompt (buildPriorMessages
+  // prepends that itself); any compaction digest stays as a system note.
+  let trimmedHistory = managedContext.messages.filter(
+    (m, idx) => !(idx === 0 && m.role === "system"),
+  );
+  console.log(
+    `[context] model=${opts.provider.model} window=${managedContext.usage.modelLabel} ` +
+      `(${managedContext.usage.modelSource}) used=${Math.round(
+        managedContext.usage.systemTokens +
+          managedContext.usage.toolsTokens +
+          managedContext.usage.historyTokens +
+          managedContext.usage.inputTokens,
+      )}/${managedContext.usage.inputBudget} ` +
+      `(${Math.round(managedContext.usage.usagePercentage * 100)}% ${managedContext.usage.status}) ` +
+      `compaction=${managedContext.compaction.level} removed=${managedContext.compaction.removedMessages} ` +
+      `trimmed=${managedContext.compaction.trimmedMessages} digested=${managedContext.compaction.digestedMessages}`,
+  );
 
   let handoffContext = "";
 
@@ -2023,7 +2065,7 @@ ${genuiThemePromptBlock(readChatTheme())}`;
 This is a continuation of a long conversation. ${fileSaved ? `The full chat history (${history.length} messages) has been saved to a file.` : "The full history was too large to save; a summary follows."}
 
 ${fileSection}### Summary
-- **Total messages:** ${history.length} (showing last ${MAX_HISTORY_MESSAGES})
+- **Total messages:** ${history.length} (active window: ${trimmedHistory.length})
 - **User messages:** ${userMessages.length}
 - **Tools used:** ${Array.from(allToolNames).join(", ") || "none"}
 

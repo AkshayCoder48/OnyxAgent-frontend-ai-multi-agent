@@ -1271,7 +1271,7 @@ function AIFrameworkSection() {
       await settingsService.setAIFramework(user.id, newFramework);
       const labels: Record<string, string> = {
         default: "Default Assistant",
-        pydantic_ai: "PydanticAI",
+        onyx_ai: "Onyx AI",
         langchain: "LangChain",
         crewai: "CrewAI",
         openai_assistants: "OpenAI Assistants",
@@ -1291,7 +1291,7 @@ function AIFrameworkSection() {
 
   const frameworks = [
     { value: "default", label: "Default Assistant", description: "Generic helpful AI assistant. No framework-specific behavior." },
-    { value: "pydantic_ai", label: "PydanticAI", description: "Type-safe agent with structured tool calls. Precise, validated reasoning. Matches the original backend." },
+    { value: "onyx_ai", label: "Onyx AI", description: "OnyxAgent's native agent framework. Type-safe agent with structured tool calls. Precise, validated reasoning." },
     { value: "langchain", label: "LangChain", description: "ReAct pattern: Think → Act → Observe → Answer. Chain tool calls with transparent reasoning." },
     { value: "openai_assistants", label: "OpenAI Assistants", description: "OpenAI Assistants API conventions. Function calling, clear structured responses." },
     { value: "crewai", label: "CrewAI", description: "Role-based crew agent. Focused on specific tasks (research, analyze, create, execute)." },

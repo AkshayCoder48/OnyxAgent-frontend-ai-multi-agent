@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (60 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (62 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -26,7 +26,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_skill [list / read / create / edit / delete] — Installed skills (SKILL.md instruction files). read a skill before applying it.
 - manage_mcp [list / create / edit / delete] — MCP server configs (sse / streamable_http transports; stdio unsupported). Find ids with list.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params) in the sandbox).
-- manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the real value. run_terminal / run_python also receive all env vars.
+- manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the real value. Tools receive them automatically.
 - manage_chats [list / read] — Recall past conversations ("what did we talk about earlier?"). list → conversation_id → read the transcript.
 - manage_subagent_chat [create / delete / edit_title / pin] — Persistent chat sessions with subagents (auto-creates the subagent). Message them via query_subagent.
 - workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
@@ -36,6 +36,8 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 ### Files & workspace (E2B sandbox — /home/user)
 - list_folder — Discover what exists in a directory.
 - read_file — Read a UTF-8 text file — full content, no truncation.
+- read_uploaded_file — Read a user-uploaded file by name/file_id from the uploads registry (text → contents; binary → base64 preview).
+- list_uploaded_files — List the uploads registry (stable file_ids, sizes).
 - read_file_section — Read a line range (0-based). Verify chunks, resume large writes.
 - create_file — Create a new file (refuses to overwrite unless overwrite: true).
 - write_file — Overwrite/replace entire file content.
@@ -61,7 +63,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Subagent orchestration
 - spawn_subagent — Delegate a task: subagent_name, description, task_type (research/code/analysis/writing/general), role, disposable.
-- set_subagent_config — Give a subagent its own AI: provider_id + model, or custom_base_url + custom_model + custom_api_key; list_ai_providers: true shows options.
+- set_subagent_config — Give a subagent its own AI: provider_id + model, or custom_base_url + custom_model + custom_api_key.
 - query_subagent — Message a subagent, get its reply (it may call tools).
 - steer_subagent — Mid-run course correction or extra guidance.
 - complete_subagent — Finish (auto-disposes if disposable) / abort a task.
@@ -91,19 +93,19 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Scheduled tasks & automation (8 tools)
 - create_scheduled_task — Turn any recurring/future intent into automation. The task gets its own dedicated chat (the name becomes its title). Args: name, instructions (the COMPLETE agent job, executed…
-- update_scheduled_task — Change name/description/instructions/schedule/enabled by task id (the dedicated chat stays attached for life). Find ids with list_scheduled_tasks.
-- delete_scheduled_task — Permanently remove a task + its history (the dedicated chat and workspace files stay — the chat becomes a normal conversation).
+- update_scheduled_task — Change name/description/instructions/schedule/enabled by task id. Find ids with list_scheduled_tasks.
+- delete_scheduled_task — Permanently remove a task + its history (its dedicated chat stays as a normal conversation).
 - pause_scheduled_task — Stop executions / resume the schedule.
 - resume_scheduled_task — Stop executions / resume the schedule.
 - run_scheduled_task_now — Execute immediately (background sandbox) without touching future runs — the result lands in the task's chat.
-- list_scheduled_tasks — All tasks with id/name/schedule/timezone/status/next+last run/dedicated chat — filter active/paused/failed/upcoming. Use BEFORE any update/delete/pause to find the id.
+- list_scheduled_tasks — All tasks with id/name/schedule/timezone/status/next+last run/dedicated chat — filter active/paused/failed/upcoming.
 - get_scheduled_task_history — Execution history: time, duration, status, error, result, files changed, tool calls (the full result messages live in the task's chat). "Did my morning task run?" → this.
 
 ### Availability rules (anti-hallucination)
 - EVERY tool listed above is REAL and CALLABLE. If a tool is in your tool definitions, you HAVE it — NEVER say "I don't have access to that tool" or "I forgot I had those tools" without trying the call first.
-- Tool availability is defined ONLY by your active tool definitions this turn — not by your memory, not by this digest alone, not by Onyx.md alone. MCP tools live behind \`mcp_search_tools\` → \`mcp_call_tool\` (on demand, never pre-loaded); custom tools appear in your definitions when active.
+- Tool availability is defined ONLY by your active tool definitions this turn — not by your memory, not by this digest alone, not by Onyx.md alone. Dynamic tools (MCP \`mcp_<server>__<tool>\`, custom tools) appear in your definitions when they are active.
 - Be honest BOTH ways: never deny a tool you have; never claim or call a tool that is absent from your definitions this turn.
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","push_workspace","retrieve_workspace","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","push_workspace","retrieve_workspace","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];

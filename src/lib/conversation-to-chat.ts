@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatMessageFile, MessagePart, ToolCall } from "@/types";
+import { parseUploadTags } from "@/lib/uploads/registry";
 
 /**
  * Shape of a persisted message as returned by the backend (MessageRead).
@@ -112,7 +113,30 @@ export function conversationMessageToChatMessage(msg: RawMessage): ChatMessage {
   const thinking = msg.thinking ?? undefined;
   const reasoning = msg.reasoning ?? undefined;
 
-  const files = Array.isArray(msg.files) ? msg.files : undefined;
+  // ATTACHMENT RECONSTRUCTION (File Persistence PRD §9): the registry join
+  // (chat_files by message_id) is the primary path. When it comes up empty
+  // (legacy rows / lost registry link), the structured hidden tags persisted
+  // in the message content reconstruct the attachments — same renderer, and
+  // the renderer strips the tags so the raw markup never surfaces.
+  let files = Array.isArray(msg.files) ? msg.files : undefined;
+  if ((!files || files.length === 0) && msg.role === "user") {
+    const parsed = parseUploadTags(msg.content);
+    if (parsed.length > 0) {
+      files = parsed.map(
+        (t): ChatMessageFile => ({
+          id: t.fileId,
+          filename: t.name,
+          mime_type: t.mimeType,
+          file_type: t.mimeType.startsWith("image/")
+            ? "image"
+            : t.mimeType === "application/pdf"
+              ? "pdf"
+              : "text",
+          size: t.size,
+        }),
+      );
+    }
+  }
 
   return {
     id: msg.id,
