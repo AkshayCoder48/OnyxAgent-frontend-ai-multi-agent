@@ -6,7 +6,7 @@ import { Toaster } from "sonner";
 import { ThemeProvider } from "@/components/theme";
 import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
-import { ErrorLogCollector } from "@/components/dev/error-log-collector";
+import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -78,8 +78,9 @@ export function Providers({ children }: ProvidersProps) {
         <ExperimentalUiSync />
         <TooltipProvider>{children}</TooltipProvider>
         <Toaster richColors position="bottom-right" />
-        {/* In-app devtools: global error capture + floating Logs button */}
-        <ErrorLogCollector />
+        {/* Global error nets — every capture lands in the log store, shown
+            by the docked Logs panel in the chat workspace (no floating UI). */}
+        <GlobalErrorCapture />
       </ThemeProvider>
     </QueryClientProvider>
   );

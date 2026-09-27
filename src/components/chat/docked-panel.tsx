@@ -10,16 +10,25 @@ import { cn } from "@/lib/utils";
  * DockedPanel — a right-hand panel that is a REAL part of the layout, not a
  * floating overlay (PRD §16/§17).
  *
- * Desktop (lg+): the panel is an in-flow flex column docked against the
- * right edge of the viewport — it participates in normal layout flow, so
- * the main chat column's width smoothly decreases while it opens (animated
- * width, ~250ms ease-out via the `.docked-panel` class in globals.css; no
- * overlay, no backdrop, no blur). A compact chevron docked on the panel's
- * left edge collapses it; a drag handle on the same edge resizes it. The
- * width persists to localStorage (via useResizableSidebar), so the user's
- * sizing choice survives reloads.
+ * Desktop (md+, i.e. ≥768px): the panel is an in-flow flex column docked
+ * against the right edge of the viewport — it participates in normal layout
+ * flow, so the main chat column's width smoothly decreases while it opens
+ * (animated width, ~250ms ease-out via the `.docked-panel` class in
+ * globals.css; no overlay, no backdrop, no blur). A compact chevron docked
+ * on the panel's left edge collapses it; a drag handle on the same edge
+ * resizes it. The width persists to localStorage (via useResizableSidebar),
+ * so the user's sizing choice survives reloads.
  *
- * Mobile (< lg): the same content becomes a full-height drawer sliding in
+ * SPLIT LAYOUT FROM md (768px) — the split workspace is NOT a ≥1024px-only
+ * luxury: the previous `lg` threshold left the whole 768–1023px band
+ * (half-maximized windows, small laptops, embedded preview panes) with
+ * full-screen overlay drawers that covered the chat — "one tab at a time".
+ * From md up, the panel docks beside the chat; the conversation sidebar
+ * auto-collapses to its icon rail (see ChatPage) and the panel width is
+ * CSS-clamped (`min(width, 100vw - 448px)`) so the chat column NEVER shrinks
+ * below ~400px.
+ *
+ * Mobile (< md): the same content becomes a full-height drawer sliding in
  * from the right edge (scrim + body scroll lock — standard mobile
  * navigation), rendered with the same Sheet primitive the conversation
  * sidebar uses, so it feels part of the navigation system rather than a
@@ -27,13 +36,21 @@ import { cn } from "@/lib/utils";
  *
  * Children mount on the first open and stay mounted afterwards, so the
  * close animation always has content to slide away and panel state
- * (drafts, scroll position) is preserved between toggles.
+ * (drafts, scroll position) is preserved between toggles — switching
+ * between panels keeps each panel's scroll/state alive as well.
  */
 
-/** Below the lg breakpoint the docked column becomes a mobile drawer. */
-const DESKTOP_QUERY = "(min-width: 1024px)";
+/** Below the md breakpoint the docked column becomes a mobile drawer. */
+const DESKTOP_QUERY = "(min-width: 768px)";
 
-/** Is the viewport in the docked-panel (lg+) range? Lazily initialized from
+/** Space the docked panel must always leave for the rest of the workspace:
+ * 48px collapsed conversation rail + a ~400px usable chat column. The
+ * panel's rendered width is clamped with CSS `min()` against
+ * `calc(100vw - ${PANEL_FIT_RESERVE}px)` so the chat can never be starved,
+ * no JS resize listener needed, and browser resizes adapt live. */
+const PANEL_FIT_RESERVE = 448;
+
+/** Is the viewport in the docked-panel (md+) range? Lazily initialized from
  *  matchMedia (client) so the FIRST render already knows the branch — no
  *  one-frame mobile-Sheet flash on desktop, no hydration issue (both
  *  branches render null while the panel is closed, which it is at mount). */
@@ -125,6 +142,22 @@ export function DockedPanel({
     }
   }, [open]);
 
+  // ESC closes the open desktop panel (PRD §28) — but only when no modal
+  // surface (dialog / sheet / popover / command palette) is open: those own
+  // the Escape key first. The docked panel is a persistent workspace surface,
+  // not a modal, so it must never steal Escape from a focused dialog.
+  useEffect(() => {
+    if (!open || !isDesktop) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector('[data-state="open"]')) return;
+      e.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, isDesktop, onClose]);
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -155,10 +188,16 @@ export function DockedPanel({
   // the keyboard-operable affordance, matching the conversation sidebar's
   // handle pattern used across the app.
 
+  // Viewport-fit width: the user's persisted size, clamped live by CSS so
+  // the panel can never push the chat column below ~400px (both the outer
+  // animated shell and the fixed inner column use the SAME expression, so
+  // the content is never clipped — it reflows to the fitted width).
+  const fittedWidth = `min(${width}px, calc(100vw - ${PANEL_FIT_RESERVE}px))`;
+
   return (
     <>
       {/* Docked desktop column — always in the DOM (it is the aria-controls
-          target of the header toggle); `hidden lg:block` keeps it out of the
+          target of the header toggle); `hidden md:block` keeps it out of the
           mobile layout, where the Sheet below takes over. Its width is the
           animated property, so the main chat column shrinks seamlessly. */}
       <aside
@@ -169,8 +208,8 @@ export function DockedPanel({
         inert={!open}
         data-dragging={dragging}
         data-open={open}
-        className="docked-panel relative hidden shrink-0 overflow-hidden lg:block"
-        style={{ width: open ? width : 0 }}
+        className="docked-panel relative hidden shrink-0 overflow-hidden md:block"
+        style={{ width: open ? fittedWidth : 0 }}
       >
         {/* Fixed-width inner column — the content never reflows while the
             outer aside animates its width; the outer clips it edge-to-edge
@@ -181,7 +220,7 @@ export function DockedPanel({
             (skipped entirely under prefers-reduced-motion). */}
         <div
           className="docked-panel-inner border-border flex h-full flex-col border-l"
-          style={{ width }}
+          style={{ width: fittedWidth }}
         >
           {isDesktop && contentMounted ? children : null}
         </div>

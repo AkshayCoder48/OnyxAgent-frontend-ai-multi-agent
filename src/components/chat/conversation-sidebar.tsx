@@ -526,8 +526,11 @@ interface ConversationSidebarProps {
 export function ConversationSidebar({ className }: ConversationSidebarProps) {
   const t = useTranslations("chat");
   const router = useRouter();
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const { isOpen, close } = useChatSidebarStore();
+  // Collapse state lives in the chat-sidebar store (not local state) so the
+  // workspace layout (ChatPage) can auto-collapse the rail to its icon form
+  // when a right-hand panel needs the horizontal space.
+  const { isOpen, close, expand, collapse } = useChatSidebarStore();
+  const isCollapsed = useChatSidebarStore((s) => s.collapsed);
   const [convSidebarWidth, setConvSidebarWidth] = useResizableSidebar(
     "conversation-sidebar-width",
     256,
@@ -645,7 +648,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
           variant="ghost"
           size="sm"
           className="mb-4 h-10 w-10 p-0"
-          onClick={() => setIsCollapsed(false)}
+          onClick={expand}
           aria-label="Expand conversations sidebar"
         >
           <ChevronRight className="h-4 w-4" aria-hidden />
@@ -688,7 +691,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              onClick={() => setIsCollapsed(true)}
+              onClick={collapse}
               aria-label="Collapse conversations sidebar"
             >
               <ChevronLeft className="h-4 w-4" aria-hidden />

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
@@ -16,10 +16,70 @@ import { FolderOpen, Menu, Bot, ListTree, ScrollText } from "lucide-react";
 
 type SidePanel = "files" | "timeline" | "logs" | null;
 
+/* ------------------------------------------------------------------
+ * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
+ *
+ * From md (768px) up, the right-hand panels dock BESIDE the chat as real
+ * layout columns. Two rules keep that split usable on every width:
+ *
+ *   1. PANEL FIT CLAMP — the DockedPanel renders at
+ *      `min(userWidth, 100vw - 448px)` (CSS, live), so the chat column
+ *      never drops below ~400px.
+ *   2. AUTO RAIL — when the viewport cannot fit
+ *      [conversation sidebar + 400px chat + the fitted panel], the
+ *      conversation sidebar collapses to its 48px icon rail. Only a
+ *      collapse THIS layout performed is reverted (on panel close or
+ *      viewport growth); the user's own collapse/expand choice is never
+ *      overridden.
+ *
+ * The prefs below must stay in sync with the DockedPanel props further
+ * down (storage keys + default widths) and with the conversation
+ * sidebar's own resizable-width key.
+ * ------------------------------------------------------------------ */
+
+/** Chat column floor (px) — panels may never starve the chat below this. */
+const MIN_CHAT_WIDTH = 400;
+/** Conversation sidebar width when collapsed to its icon rail (w-12). */
+const COLLAPSED_RAIL_WIDTH = 48;
+/** Conversation sidebar default width (matches its useResizableSidebar). */
+const CONV_SIDEBAR_DEFAULT_WIDTH = 256;
+
+/** Persisted width prefs of the docked panels — mirrors the DockedPanel
+ * props below (storageKey/defaultWidth), used by the auto-rail math. */
+const PANEL_WIDTH_PREFS = {
+  subagents: { storageKey: "subagent-sidebar-width", defaultWidth: 360 },
+  files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
+  timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
+  logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
+} as const;
+
+type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
+
+/** Live viewport width (re-renders on resize only). */
+function useViewportWidth() {
+  const [width, setWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
+  useEffect(() => {
+    const onResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return width;
+}
+
+/** Read a persisted resizable width (localStorage, same keys
+ * useResizableSidebar writes) with its default as fallback. */
+function readPersistedWidth(storageKey: string, fallback: number) {
+  if (typeof window === "undefined") return fallback;
+  const stored = parseInt(window.localStorage.getItem(storageKey) ?? "", 10);
+  return Number.isFinite(stored) && stored > 0 ? stored : fallback;
+}
+
 export default function ChatPage() {
   // Files / timeline panels — the user's last right-panel choice, closed by
   // default. The DockedPanel container renders each as a docked column on
-  // lg+ and a full-height drawer below, so this single state drives both.
+  // md+ and a full-height drawer below, so this single state drives both.
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
   const { open: openChatSidebar } = useChatSidebarStore();
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
@@ -45,10 +105,68 @@ export default function ChatPage() {
   const filesOpen = sidePanel === "files" && !subagentOpen;
   const timelineOpen = sidePanel === "timeline" && !subagentOpen;
   const logsOpen = sidePanel === "logs" && !subagentOpen;
+  // The panel currently occupying the right-hand dock (drives the
+  // auto-rail math below).
+  const activeDockedPanel: DockedPanelId | null = subagentOpen ? "subagents" : sidePanel;
+
   // Opening the docked logs panel counts as "seeing" the errors.
   useEffect(() => {
     if (logsOpen) markLogsSeen();
   }, [logsOpen, markLogsSeen]);
+
+  // ── AUTO RAIL (split workspace, PRD §7/§20) ──
+  // With a panel docked at md+, collapse the conversation sidebar to its
+  // icon rail when the viewport cannot fit sidebar + chat floor + the
+  // fitted panel. Revert when the last panel closes or the viewport grows
+  // — but ONLY the collapse this layout performed; if the user collapses
+  // or expands the sidebar themselves, their choice wins from then on.
+  const viewportWidth = useViewportWidth();
+  const convCollapsed = useChatSidebarStore((s) => s.collapsed);
+  const collapseConv = useChatSidebarStore((s) => s.collapse);
+  const expandConv = useChatSidebarStore((s) => s.expand);
+  const autoCollapsedByPanelRef = useRef(false);
+
+  useEffect(() => {
+    if (!activeDockedPanel) {
+      // Last panel closed — restore the sidebar if (and only if) the split
+      // layout is what collapsed it.
+      if (autoCollapsedByPanelRef.current) {
+        autoCollapsedByPanelRef.current = false;
+        expandConv();
+      }
+      return;
+    }
+    // The user manually expanded while a panel is docked — respect it and
+    // stop managing the collapse state for this panel session.
+    if (autoCollapsedByPanelRef.current && !convCollapsed) {
+      autoCollapsedByPanelRef.current = false;
+      return;
+    }
+    // Below md the panels are mobile drawers — the rail math is moot.
+    if (viewportWidth < 768) return;
+
+    const convWidth = readPersistedWidth(
+      "conversation-sidebar-width",
+      CONV_SIDEBAR_DEFAULT_WIDTH,
+    );
+    const pref = PANEL_WIDTH_PREFS[activeDockedPanel];
+    const panelWidth = readPersistedWidth(pref.storageKey, pref.defaultWidth);
+    // Same fit clamp the DockedPanel applies via CSS (100vw - 448px).
+    const fitCap = viewportWidth - COLLAPSED_RAIL_WIDTH - MIN_CHAT_WIDTH;
+    const effectivePanelWidth = Math.min(panelWidth, Math.max(fitCap, 0));
+    const fitsExpanded =
+      viewportWidth >= convWidth + MIN_CHAT_WIDTH + effectivePanelWidth;
+
+    if (!fitsExpanded && !convCollapsed) {
+      autoCollapsedByPanelRef.current = true;
+      collapseConv();
+    } else if (fitsExpanded && autoCollapsedByPanelRef.current && convCollapsed) {
+      // Viewport grew (window maximized, panel switched to a narrower one) —
+      // the rail is no longer needed.
+      autoCollapsedByPanelRef.current = false;
+      expandConv();
+    }
+  }, [activeDockedPanel, viewportWidth, convCollapsed, collapseConv, expandConv]);
 
   const closeSubagent = useCallback(() => {
     setSubagentOpen(false);
@@ -165,11 +283,12 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Right-hand docked panels (PRD §16/§17): in-flow columns on lg+
+      {/* Right-hand docked panels (PRD §16/§17): in-flow columns on md+
           whose open/close is an animated width change (the main chat
           column shrinks seamlessly — no overlay, no backdrop, no blur),
-          and full-height drawers below lg. One at a time; each is
-          resizable with the width persisted. */}
+          and full-height drawers below md. One at a time; each is
+          resizable with the width persisted and CSS-fitted so the chat
+          column never drops below ~400px. */}
       <DockedPanel
         id="subagent-panel"
         label="Subagent chat"
