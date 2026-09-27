@@ -1040,6 +1040,35 @@ export const aiProviderService = {
   },
 
   /**
+   * Everything the provider-diagnostics runner (PRD §21) needs to exercise
+   * a provider: decrypted key + the request-shaping flags from the row.
+   * Read-only — diagnostics never mutates provider state.
+   */
+  async diagnosticContext(
+    id: string,
+  ): Promise<{
+    name: string;
+    baseUrl: string;
+    apiKey: string;
+    models: string[];
+    noPrefix: boolean;
+    disabledParams: string[];
+    toolsEnabled: boolean;
+  }> {
+    const row = await db.ai_providers.get(id);
+    if (!row) throw new Error("Provider not found");
+    return {
+      name: row.name,
+      baseUrl: row.base_url,
+      apiKey: row.api_key_encrypted ? await vaultDecrypt(row.api_key_encrypted) : "",
+      models: row.models ?? [],
+      noPrefix: !!row.no_prefix,
+      disabledParams: row.disabled_params ?? [],
+      toolsEnabled: row.tools_enabled !== false,
+    };
+  },
+
+  /**
    * Probe a provider with a 16-token "Reply pong" Chat Completions request.
    * Routes through `/api/chat-proxy` for CORS. Returns `{ ok, status_code,
    * detail, sample_response }` — same shape as the original backend's

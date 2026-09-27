@@ -10,6 +10,7 @@ import {
   Pencil,
   PlugZap,
   Plus,
+  Stethoscope,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -57,6 +58,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useProviders } from "@/hooks/use-data";
 import type { AIProvider, AIModelType } from "@/types";
 import { MoreOptions } from "@/components/settings/more-options";
+import { ProviderDiagnosticsDialog } from "@/components/settings/provider-diagnostics";
 
 interface FormState {
   name: string;
@@ -92,6 +94,7 @@ export function SectionProviders() {
   const [showKey, setShowKey] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [testingId, setTestingId] = React.useState<string | null>(null);
+  const [diagnoseTarget, setDiagnoseTarget] = React.useState<AIProvider | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<AIProvider | null>(null);
 
   function openCreate() {
@@ -283,6 +286,15 @@ export function SectionProviders() {
                           <PlugZap className="size-3.5" />
                         )}
                         <span className="hidden sm:inline">Test</span>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDiagnoseTarget(p)}
+                        title="Run 6 progressive diagnostics (connection, basic, streaming, agent shape, tools, long response)"
+                      >
+                        <Stethoscope className="size-3.5" />
+                        <span className="hidden sm:inline">Diagnose</span>
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => openEdit(p)}>
                         <Pencil className="size-3.5" />
@@ -520,6 +532,12 @@ export function SectionProviders() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ProviderDiagnosticsDialog
+        provider={diagnoseTarget}
+        open={!!diagnoseTarget}
+        onOpenChange={(o) => !o && setDiagnoseTarget(null)}
+      />
 
       <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <AlertDialogContent>

@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Server,
+  Stethoscope,
   Trash2,
   Upload,
   X,
@@ -35,6 +36,7 @@ import {
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
 import { MoreOptions } from "@/components/settings/more-options";
+import { ProviderDiagnosticsDialog } from "@/components/settings/provider-diagnostics";
 import { useAuth } from "@/hooks";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { cn } from "@/lib/utils";
@@ -151,6 +153,7 @@ export default function ConfigSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [diagnoseTarget, setDiagnoseTarget] = useState<AIProvider | null>(null);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -325,6 +328,7 @@ export default function ConfigSettingsPage() {
                 onDelete={() => void remove(p.id)}
                 onToggle={(v) => void toggleActive(p, v)}
                 onTest={() => void test(p)}
+                onDiagnose={() => setDiagnoseTarget(p)}
                 testing={testingId === p.id}
                 testResult={testResults[p.id]}
               />
@@ -332,6 +336,13 @@ export default function ConfigSettingsPage() {
           </div>
         )}
       </SectionCard>
+
+      {/* Provider diagnostics (PRD §21) — 6 progressive tests */}
+      <ProviderDiagnosticsDialog
+        provider={diagnoseTarget}
+        open={!!diagnoseTarget}
+        onOpenChange={(o) => !o && setDiagnoseTarget(null)}
+      />
 
       {/* Editor dialog (inline panel, not a modal) */}
       {draft && (
@@ -496,6 +507,7 @@ function ProviderRow({
   onDelete,
   onToggle,
   onTest,
+  onDiagnose,
   testing,
   testResult,
 }: {
@@ -504,6 +516,7 @@ function ProviderRow({
   onDelete: () => void;
   onToggle: (v: boolean) => void;
   onTest: () => void;
+  onDiagnose: () => void;
   testing: boolean;
   testResult?: TestResult;
 }) {
@@ -584,6 +597,15 @@ function ProviderRow({
             <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
           )}
           Test
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onDiagnose}
+          title="Run 6 progressive diagnostics (connection, basic, streaming, agent shape, tools, long response)"
+        >
+          <Stethoscope className="h-3.5 w-3.5 mr-1.5" />
+          Diagnose
         </Button>
         {testResult && (
           <div
