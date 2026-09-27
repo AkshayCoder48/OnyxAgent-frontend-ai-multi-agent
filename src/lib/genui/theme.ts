@@ -28,14 +28,15 @@ export interface GenUITheme {
   primary: string;
 }
 
-/** Terra defaults (match the light preset) — used for SSR / missing vars. */
+/** App defaults (match the light preset: white canvas, black ink, cyan
+ *  accent) — used for SSR / missing vars. */
 export const DEFAULT_GENUI_THEME: GenUITheme = {
-  background: "#faf6f0",
-  foreground: "#1a1a1a",
-  muted: "#f4ece1",
-  border: "#e7dccc",
-  surface: "#fffdf9",
-  primary: "#c4552f",
+  background: "#ffffff",
+  foreground: "#0a0a0a",
+  muted: "#f1f5f9",
+  border: "#e2e8f0",
+  surface: "#ffffff",
+  primary: "#0891b2",
 };
 
 /** Read the app's current theme from the document root's CSS variables. */

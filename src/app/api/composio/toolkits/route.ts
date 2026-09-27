@@ -1,13 +1,14 @@
 // ============================================================================
 // GET /api/composio/toolkits — proxy the Composio platform catalog.
 //
-//   Query: ?cursor=&search=&category=&limit=100&withCategories=1
+//   Query: ?cursor=&search=&category=&sort=usage|alphabetically&limit=100&withCategories=1
 //   Headers: x-composio-key
 //
 // Server-side proxy of GET /api/v3/toolkits so the API key never reaches the
-// browser bundle beyond the transient header. Search/category filtering and
-// cursor pagination are performed BY COMPOSIO (server-side) — this route does
-// NOT client-side-filter the first page. A short-TTL module cache (safe on
+// browser bundle beyond the transient header. Search/category filtering,
+// sorting (usage = popularity, alphabetically = A→Z) and cursor pagination
+// are performed BY COMPOSIO (server-side) — this route does NOT
+// client-side-filter the first page. A short-TTL module cache (safe on
 // serverless — it only speeds up repeat loads within one warm instance)
 // keeps the catalog snappy.
 //
@@ -21,6 +22,10 @@ import type { ComposioCategory, ComposioToolkitPage } from "@/lib/composio/clien
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** Sort keys the upstream API accepts (Composio `sort_by`). */
+const SORT_KEYS = ["usage", "alphabetically"] as const;
+type SortKey = (typeof SORT_KEYS)[number];
 
 // ── Module cache (per warm instance; key includes an api-key hash so
 //    different users' catalogs can never cross) ────────────────────────────
@@ -69,8 +74,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const cursor = (sp.get("cursor") ?? "").trim();
   const limit = Math.min(Math.max(Number(sp.get("limit") ?? 100) || 100, 1), 100);
   const withCategories = sp.get("withCategories") === "1";
+  const rawSort = (sp.get("sort") ?? "").trim() as SortKey;
+  const sortBy: SortKey | undefined = SORT_KEYS.includes(rawSort) ? rawSort : undefined;
 
-  const params = `search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&cursor=${encodeURIComponent(cursor)}&limit=${limit}&cats=${withCategories ? 1 : 0}`;
+  const params = `search=${encodeURIComponent(search)}&category=${encodeURIComponent(category)}&cursor=${encodeURIComponent(cursor)}&limit=${limit}&sort=${sortBy ?? ""}&cats=${withCategories ? 1 : 0}`;
   const key = await cacheKey(req.headers.get("x-composio-key") ?? "", params);
   const cached = cacheGet(key);
   if (cached) {
@@ -85,7 +92,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const page = await client.listToolkits({ search, category, cursor: cursor || undefined, limit });
+    const page = await client.listToolkits({
+      search,
+      category,
+      cursor: cursor || undefined,
+      limit,
+      ...(sortBy ? { sortBy } : {}),
+    });
     let categories: ComposioCategory[] | undefined;
     if (withCategories) {
       try {

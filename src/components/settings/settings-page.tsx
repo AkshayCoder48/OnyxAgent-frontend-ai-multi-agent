@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useTheme } from "next-themes";
 import {
   ArrowLeft,
   Bot,
@@ -19,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { getResolvedTheme, useThemeStore } from "@/stores/theme-store";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
@@ -145,10 +145,13 @@ const NAV_GROUPS: NavGroup[] = [
 const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
 function ThemeToggle() {
-  const { resolvedTheme, setTheme } = useTheme();
+  // Zustand theme store (the app's real theme system). next-themes' useTheme
+  // no-ops here — its provider is not mounted anywhere in the app.
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
-  const isDark = mounted && resolvedTheme === "dark";
+  const isDark = mounted && getResolvedTheme(theme) === "dark";
   return (
     <Button
       variant="outline"
@@ -206,7 +209,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
                             className={cn(
                               "group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
                               isActive
-                                ? "bg-accent text-accent-foreground border border-[#ead6c4] dark:border-[#4c3d2a]"
+                                ? "bg-accent text-accent-foreground border border-[#a5f3fc] dark:border-[#155e75]"
                                 : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent",
                             )}
                           >

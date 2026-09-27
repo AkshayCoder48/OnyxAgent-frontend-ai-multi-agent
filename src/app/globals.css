@@ -22,46 +22,47 @@
 
 @theme {
   /* ============================================================
-     Brand — warm terracotta "editorial" palette (Terra spec).
-     A cream/paper canvas (#FAF6F0), near-black ink (#1A1A1A) and
-     ONE warm accent: terracotta (#C4552F, deep #A8421F on hover /
+     Brand — clean "cyan on white" palette.
+     A pure white canvas (#FFFFFF), near-black ink (#0A0A0A) and
+     ONE crisp accent: cyan (#0891B2, deep #0E7490 on hover /
      inline code). No purple / indigo / violet anywhere.
      Single brand var drives the whole app; the in-app picker
      (/settings/appearance) can still override on `<html>`.
      ============================================================ */
-  /* Preset: TERRACOTTA (#C4552F). Brand vars drive the in-app picker.
-     h/c/l are the oklch coordinates of #C4552F so picker-derived colors
-     match the hex tokens below exactly (oklch(58.5% 0.152 38.8)). */
-  --brand-h: 38.8;
-  --brand-c: 0.152;
-  --brand-l: 58.5%;
-  --color-brand-foreground: #faf6f0;
+  /* Preset: CYAN (#0891B2). Brand vars drive the in-app picker.
+     h/c/l are the oklch coordinates of #0891B2 so picker-derived
+     colors match the hex tokens below exactly
+     (oklch(60.9% 0.111 221.7)). */
+  --brand-h: 221.7;
+  --brand-c: 0.111;
+  --brand-l: 60.9%;
+  --color-brand-foreground: #ffffff;
 
-  --color-brand: #c4552f;
-  --color-brand-hover: #a8421f;
-  --color-brand-muted: #d98d68;
-  /* Chart strokes/fills — darker terracotta for readability on cream bg. */
-  --color-chart: #a8421f;
+  --color-brand: #0891b2;
+  --color-brand-hover: #0e7490;
+  --color-brand-muted: #67c3d9;
+  /* Chart strokes/fills — deeper cyan for readability on white bg. */
+  --color-chart: #0e7490;
 
-  /* Light theme — cream canvas, near-black ink, terracotta accents */
-  --color-background: #faf6f0;                /* cream / paper canvas */
-  --color-foreground: #1a1a1a;                /* near-black ink */
-  --color-card: #fffdf9;                      /* lifted cream card */
-  --color-card-foreground: #1a1a1a;
-  --color-popover: #fffdf9;
-  --color-popover-foreground: #1a1a1a;
-  --color-primary: #c4552f;                   /* terracotta */
-  --color-primary-foreground: #faf6f0;
-  --color-secondary: #f4ece1;                 /* paper surface */
-  --color-secondary-foreground: #1a1a1a;
-  --color-muted: #f4ece1;                     /* paper surface */
-  --color-muted-foreground: #7c6b5b;          /* warm taupe on cream */
-  --color-accent: #f0e3d5;                    /* soft terracotta */
-  --color-accent-foreground: #1a1a1a;
-  --color-destructive: #a63a22;               /* deep warm red */
-  --color-destructive-foreground: #faf6f0;
-  --color-border: #e7dccc;                    /* hairline */
-  --color-input: #e7dccc;                     /* hairline input */
+  /* Light theme (DEFAULT) — white canvas, near-black ink, cyan accents */
+  --color-background: #ffffff;                  /* pure white canvas */
+  --color-foreground: #0a0a0a;                  /* near-black ink */
+  --color-card: #ffffff;                        /* white card (hairline-bordered) */
+  --color-card-foreground: #0a0a0a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0a0a0a;
+  --color-primary: #0891b2;                     /* cyan */
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f1f5f9;                   /* cool paper surface */
+  --color-secondary-foreground: #0a0a0a;
+  --color-muted: #f1f5f9;                       /* cool paper surface */
+  --color-muted-foreground: #64748b;            /* slate ink on white */
+  --color-accent: #ecfeff;                      /* soft cyan wash */
+  --color-accent-foreground: #0a0a0a;
+  --color-destructive: #dc2626;                 /* red */
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e2e8f0;                      /* hairline */
+  --color-input: #e2e8f0;                       /* hairline input */
   --color-ring: var(--color-brand);
 
   /* Radius */
@@ -85,62 +86,58 @@
   --duration-slow: 400ms;
 }
 
-/* Dark theme — dark green background, light green tint text.
-   When a custom color scheme is applied (via JS inline styles), the
-   .custom-scheme class is added to <html> to PREVENT this media query
-   from overriding the inline styles. */
-/* Dark theme — warm charcoal counterpart of the Terra cream canvas.
-   Keeps the same terracotta accent so both themes share one voice.
+/* Dark theme — cool neutral counterpart of the white canvas.
+   Keeps the same cyan accent so both themes share one voice.
    When a custom color scheme is applied (via JS inline styles), the
    .custom-scheme class is added to <html> to PREVENT this media query
    from overriding the inline styles. */
 @media (prefers-color-scheme: dark) {
   :root:not(.light):not(.custom-scheme) {
-    --color-background: #211a13;                 /* deep warm charcoal */
-    --color-foreground: #f4ece1;                 /* warm cream text */
-    --color-card: #2a2119;                       /* warm charcoal surface */
-    --color-card-foreground: #f4ece1;
-    --color-popover: #2a2119;
-    --color-popover-foreground: #f4ece1;
-    --color-primary: #d4693f;                    /* slightly lifted terracotta */
-    --color-primary-foreground: #211a13;
-    --color-secondary: #2f261c;                  /* dark warm surface */
-    --color-secondary-foreground: #f4ece1;
-    --color-muted: #2f261c;
-    --color-muted-foreground: #b3a28d;           /* muted warm taupe */
-    --color-accent: #39301f;                     /* warm dim accent */
-    --color-accent-foreground: #f4ece1;
-    --color-destructive: #d05b3f;
-    --color-destructive-foreground: #211a13;
-    --color-border: #453a2b;                     /* warm hairline */
-    --color-input: #453a2b;
-    --color-brand: #d4693f;
-    --color-brand-hover: #e07c50;
+    --color-background: #0c1116;                 /* near-black slate */
+    --color-foreground: #e2e8f0;                 /* light slate text */
+    --color-card: #131a21;                       /* dark slate surface */
+    --color-card-foreground: #e2e8f0;
+    --color-popover: #131a21;
+    --color-popover-foreground: #e2e8f0;
+    --color-primary: #22d3ee;                    /* bright cyan */
+    --color-primary-foreground: #06222b;
+    --color-secondary: #1a232c;                  /* dark slate surface */
+    --color-secondary-foreground: #e2e8f0;
+    --color-muted: #1a232c;
+    --color-muted-foreground: #8b98a5;           /* muted slate */
+    --color-accent: #18242e;                     /* dim cyan accent */
+    --color-accent-foreground: #e2e8f0;
+    --color-destructive: #f87171;
+    --color-destructive-foreground: #0c1116;
+    --color-border: #263241;                     /* cool hairline */
+    --color-input: #263241;
+    --color-brand: #22d3ee;
+    --color-brand-hover: #06b6d4;
     --color-chart: var(--color-brand);
   }
 }
 
 :root.dark:not(.custom-scheme) {
-  --color-background: #211a13;
-  --color-foreground: #f4ece1;
-  --color-card: #2a2119;
-  --color-card-foreground: #f4ece1;
-  --color-popover: #2a2119;
-  --color-popover-foreground: #f4ece1;
-  --color-primary: #d4693f;
-  --color-primary-foreground: #211a13;
-  --color-secondary: #2f261c;
-  --color-secondary-foreground: #f4ece1;
-  --color-muted: #2f261c;
-  --color-muted-foreground: #b3a28d;
-  --color-accent: #39301f;
-  --color-accent-foreground: #f4ece1;
-  --color-destructive: #d05b3f;
-  --color-destructive-foreground: #211a13;
-  --color-border: #453a2b;
-  --color-input: #453a2b;
-  --color-brand: #d4693f;
-  --color-brand-hover: #e07c50;
+  --color-background: #0c1116;
+  --color-foreground: #e2e8f0;
+  --color-card: #131a21;
+  --color-card-foreground: #e2e8f0;
+  --color-popover: #131a21;
+  --color-popover-foreground: #e2e8f0;
+  --color-primary: #22d3ee;
+  --color-primary-foreground: #06222b;
+  --color-secondary: #1a232c;
+  --color-secondary-foreground: #e2e8f0;
+  --color-muted: #1a232c;
+  --color-muted-foreground: #8b98a5;
+  --color-accent: #18242e;
+  --color-accent-foreground: #e2e8f0;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #0c1116;
+  --color-border: #263241;
+  --color-input: #263241;
+  --color-brand: #22d3ee;
+  --color-brand-hover: #06b6d4;
   --color-chart: var(--color-brand);
 }
 
@@ -152,22 +149,22 @@
    these var() fallbacks take over.
    ========================================================================= */
 :root {
-  /* User turn = soft-terracotta card with ink text (Terra spec). */
-  --chat-user-bg: #f0e3d5;
-  --chat-user-fg: #1a1a1a;
-  --chat-user-border: #ead6c4;
+  /* User turn = soft-cyan card with ink text. */
+  --chat-user-bg: #ecfeff;
+  --chat-user-fg: #0a0a0a;
+  --chat-user-border: #cffafe;
   /* Assistant turn = frameless (no bubble) — flat editorial text. */
   --chat-assistant-bg: transparent;
   --chat-assistant-fg: var(--color-foreground);
-  /* Warm charcoal code block — used by the chat markdown `pre` renderer. */
-  --chat-code-bg: #262019;
-  --chat-code-header-bg: #1f1a15;
-  --chat-code-fg: #e8decc;
+  /* Deep slate code block — used by the chat markdown `pre` renderer. */
+  --chat-code-bg: #10161c;
+  --chat-code-header-bg: #0c1116;
+  --chat-code-fg: #d5e3ec;
 }
 :root.dark:not(.custom-scheme) {
-  --chat-user-bg: #3b2e20;
-  --chat-user-fg: #f4ece1;
-  --chat-user-border: #4c3d2a;
+  --chat-user-bg: #12333d;
+  --chat-user-fg: #e2e8f0;
+  --chat-user-border: #1d4653;
   --chat-assistant-bg: transparent;
 }
 
@@ -177,23 +174,23 @@
    ========================================================================= */
 
 .theme-light {
-  --color-background: #faf6f0;
-  --color-foreground: #1a1a1a;
-  --color-card: #fffdf9;
-  --color-card-foreground: #1a1a1a;
-  --color-muted: #f4ece1;
-  --color-muted-foreground: #7c6b5b;
-  --color-border: #e7dccc;
+  --color-background: #ffffff;
+  --color-foreground: #0a0a0a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0a0a0a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-border: #e2e8f0;
 }
 
 .theme-dark {
-  --color-background: #211a13;
-  --color-foreground: #f4ece1;
-  --color-card: #2a2119;
-  --color-card-foreground: #f4ece1;
-  --color-muted: #2f261c;
-  --color-muted-foreground: #b3a28d;
-  --color-border: #453a2b;
+  --color-background: #0c1116;
+  --color-foreground: #e2e8f0;
+  --color-card: #131a21;
+  --color-card-foreground: #e2e8f0;
+  --color-muted: #1a232c;
+  --color-muted-foreground: #8b98a5;
+  --color-border: #263241;
   --color-chart: var(--color-brand);
 }
 
@@ -1200,70 +1197,70 @@
     padding: 3px 5px;
   }
 
-  /* Light mode (default) — warm editorial tones on cream/paper. */
+  /* Light mode (default) — cool cyan/teal/slate tones on white. */
   .hljs {
-    color: #1a1a1a;
+    color: #0a0a0a;
   }
   .hljs-comment,
   .hljs-quote {
-    color: #8a7e6c;
+    color: #94a3b8;
     font-style: italic;
   }
   .hljs-keyword,
   .hljs-selector-tag,
   .hljs-literal {
-    color: #a8421f;
+    color: #0e7490;
   }
   .hljs-name,
   .hljs-tag {
-    color: #7c4a1e;
+    color: #155e75;
   }
   .hljs-attr,
   .hljs-attribute {
-    color: #9a5f33;
+    color: #475569;
   }
   .hljs-variable,
   .hljs-template-variable,
   .hljs-regexp,
   .hljs-link {
-    color: #8a5a20;
+    color: #be185d;
   }
   .hljs-string,
   .hljs-symbol,
   .hljs-bullet {
-    color: #6f5a2c;
+    color: #15803d;
   }
   .hljs-number {
-    color: #b36a1f;
+    color: #b45309;
   }
   .hljs-meta,
   .hljs-built_in,
   .hljs-builtin-name,
   .hljs-type,
   .hljs-params {
-    color: #a3582c;
+    color: #0f766e;
   }
   .hljs-function .hljs-title {
-    color: #a8421f;
+    color: #0891b2;
   }
   .hljs-addition {
-    color: #52701e;
-    background-color: #eef3e0;
+    color: #15803d;
+    background-color: #ecfdf5;
   }
   .hljs-deletion {
-    color: #a63a22;
-    background-color: #f7e4d8;
+    color: #dc2626;
+    background-color: #fef2f2;
   }
 
-  /* Dark mode — warm charcoal code tones (#262019 canvas). Applies to
+  /* Dark mode — cool slate code tones (#10161c canvas). Applies to
      .dark, .theme-dark, .custom-scheme, AND `.chat-code` blocks, which are
-     warm charcoal in EVERY theme (per the Terra design spec: "a warm
-     charcoal code block … never neon"). */
+     deep slate in EVERY theme (a dark code block reads best in both
+     light and dark surfaces). */
   .dark .hljs,
   .theme-dark .hljs,
   .custom-scheme .hljs,
   .chat-code .hljs {
-    color: #e8decc;
+    color: #d5e3ec;
   }
   .dark .hljs-comment,
   .dark .hljs-quote,
@@ -1273,7 +1270,7 @@
   .custom-scheme .hljs-quote,
   .chat-code .hljs-comment,
   .chat-code .hljs-quote {
-    color: #8a7e6c;
+    color: #7d8da0;
     font-style: italic;
   }
   .dark .hljs-keyword,
@@ -1288,7 +1285,7 @@
   .chat-code .hljs-keyword,
   .chat-code .hljs-selector-tag,
   .chat-code .hljs-literal {
-    color: #e39b6e;
+    color: #67e8f9;
   }
   .dark .hljs-name,
   .dark .hljs-tag,
@@ -1298,7 +1295,7 @@
   .custom-scheme .hljs-tag,
   .chat-code .hljs-name,
   .chat-code .hljs-tag {
-    color: #d8b88c;
+    color: #5eead4;
   }
   .dark .hljs-attr,
   .dark .hljs-attribute,
@@ -1308,7 +1305,7 @@
   .custom-scheme .hljs-attribute,
   .chat-code .hljs-attr,
   .chat-code .hljs-attribute {
-    color: #d8b88c;
+    color: #9fb3c8;
   }
   .dark .hljs-string,
   .dark .hljs-symbol,
@@ -1322,13 +1319,13 @@
   .chat-code .hljs-string,
   .chat-code .hljs-symbol,
   .chat-code .hljs-bullet {
-    color: #c9b78e;
+    color: #86efac;
   }
   .dark .hljs-number,
   .theme-dark .hljs-number,
   .custom-scheme .hljs-number,
   .chat-code .hljs-number {
-    color: #d8a15f;
+    color: #fcd34d;
   }
   .dark .hljs-variable,
   .dark .hljs-template-variable,
@@ -1346,7 +1343,7 @@
   .chat-code .hljs-template-variable,
   .chat-code .hljs-regexp,
   .chat-code .hljs-link {
-    color: #d8a15f;
+    color: #f9a8d4;
   }
   .dark .hljs-meta,
   .dark .hljs-built_in,
@@ -1368,27 +1365,27 @@
   .chat-code .hljs-builtin-name,
   .chat-code .hljs-type,
   .chat-code .hljs-params {
-    color: #e39b6e;
+    color: #5eead4;
   }
   .dark .hljs-function .hljs-title,
   .theme-dark .hljs-function .hljs-title,
   .custom-scheme .hljs-function .hljs-title,
   .chat-code .hljs-function .hljs-title {
-    color: #ead9be;
+    color: #a5f3fc;
   }
   .dark .hljs-addition,
   .theme-dark .hljs-addition,
   .custom-scheme .hljs-addition,
   .chat-code .hljs-addition {
-    color: #b8d98a;
-    background-color: #2a331a;
+    color: #86efac;
+    background-color: #14361f;
   }
   .dark .hljs-deletion,
   .theme-dark .hljs-deletion,
   .custom-scheme .hljs-deletion,
   .chat-code .hljs-deletion {
-    color: #e8a08c;
-    background-color: #3d231a;
+    color: #fca5a5;
+    background-color: #3d1a1a;
   }
 }
 

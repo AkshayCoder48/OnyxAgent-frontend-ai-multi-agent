@@ -4,17 +4,19 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
+import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
 import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
+import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
-import { FolderOpen, Menu, Bot, ListTree, ScrollText } from "lucide-react";
+import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks } from "lucide-react";
 
-type SidePanel = "files" | "timeline" | "logs" | null;
+type SidePanel = "platforms" | "files" | "timeline" | "logs" | null;
 
 /* ------------------------------------------------------------------
  * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
@@ -47,6 +49,7 @@ const CONV_SIDEBAR_DEFAULT_WIDTH = 256;
 /** Persisted width prefs of the docked panels — mirrors the DockedPanel
  * props below (storageKey/defaultWidth), used by the auto-rail math. */
 const PANEL_WIDTH_PREFS = {
+  platforms: { storageKey: "platforms-sidebar-width", defaultWidth: 360 },
   subagents: { storageKey: "subagent-sidebar-width", defaultWidth: 360 },
   files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
@@ -87,6 +90,13 @@ export default function ChatPage() {
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
+  // Composio gate — the Platforms chat sidebar exists ONLY while a Composio
+  // API key is stored (Settings → Integrations). `composio_api_key_present`
+  // is a non-secret flag on the settings row (the key itself is encrypted in
+  // the vault and never leaves it except as the transient proxy header).
+  const { settings } = useSettings();
+  const composioConnected = !!settings?.composio_api_key_present;
+
   // Subagent panel — the store is the single source of truth: the event
   // processor flips `sidebarOpen` the moment a sub-agent tool call starts
   // (PRD §15), and the docked panel reads it directly (no mirroring into
@@ -102,12 +112,17 @@ export default function ChatPage() {
   // render (no state syncing, so it is React-Compiler-safe): while the
   // subagent panel is open (manually or auto-opened by the agent) it takes
   // over the dock; closing it restores the panel that was open before.
+  // The Platforms panel is additionally gated on the Composio key being
+  // present — removing the key in Settings closes it here (derived), and
+  // re-adding the key restores it if it was the user's last choice.
+  const platformsOpen = sidePanel === "platforms" && !subagentOpen && composioConnected;
   const filesOpen = sidePanel === "files" && !subagentOpen;
   const timelineOpen = sidePanel === "timeline" && !subagentOpen;
   const logsOpen = sidePanel === "logs" && !subagentOpen;
-  // The panel currently occupying the right-hand dock (drives the
-  // auto-rail math below).
-  const activeDockedPanel: DockedPanelId | null = subagentOpen ? "subagents" : sidePanel;
+  // The panel currently occupying the right-hand dock (drives the auto-rail
+  // math below) — a "platforms" choice with the key absent closes the dock.
+  const activeDockedPanel: DockedPanelId | null =
+    subagentOpen ? "subagents" : platformsOpen ? "platforms" : sidePanel === "platforms" ? null : sidePanel;
 
   // Opening the docked logs panel counts as "seeing" the errors.
   useEffect(() => {
@@ -177,7 +192,14 @@ export default function ChatPage() {
     // Opening a side panel takes over the dock from the subagent panel
     // (setSubagentOpen is a no-op when the value is unchanged).
     setSubagentOpen(false);
-    const wasVisible = panel === "files" ? filesOpen : panel === "timeline" ? timelineOpen : logsOpen;
+    const wasVisible =
+      panel === "platforms"
+        ? platformsOpen
+        : panel === "files"
+          ? filesOpen
+          : panel === "timeline"
+            ? timelineOpen
+            : logsOpen;
     setSidePanel(wasVisible ? null : panel);
   };
 
@@ -222,6 +244,27 @@ export default function ChatPage() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* Composio Platforms — a docked catalog sidebar that exists ONLY
+                while a Composio key is stored (direct platform connections
+                from chat: search, sort, filter, OAuth connect). */}
+            {composioConnected && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => toggleSidePanel("platforms")}
+                className={
+                  platformsOpen
+                    ? "h-8 w-8 bg-foreground/5 p-0"
+                    : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+                }
+                title="Platforms (Composio)"
+                aria-label="Toggle platforms panel"
+                aria-expanded={platformsOpen}
+                aria-controls="platforms-panel"
+              >
+                <Blocks className="h-4 w-4" />
+              </Button>
+            )}
             {/* Tool timeline — a DOCKED SIDEBAR (not a popup): the whole
                 working session as a fixed, scrollable, real-time panel on
                 the right. */}
@@ -289,6 +332,21 @@ export default function ChatPage() {
           and full-height drawers below md. One at a time; each is
           resizable with the width persisted and CSS-fitted so the chat
           column never drops below ~400px. */}
+      <DockedPanel
+        id="platforms-panel"
+        label="Platforms"
+        open={platformsOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="platforms-sidebar-width"
+        defaultWidth={360}
+        minWidth={280}
+        maxWidth={640}
+        sheetCloseButton
+        sheetClassName="w-[90vw] max-w-sm"
+      >
+        <PlatformsSidebar />
+      </DockedPanel>
+
       <DockedPanel
         id="subagent-panel"
         label="Subagent chat"

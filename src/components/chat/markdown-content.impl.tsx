@@ -405,7 +405,7 @@ const SHARED_COMPONENTS = {
       // Inline code = paper chip with deep-terracotta text (Terra spec).
       return (
         <code
-          className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[0.85em] text-[#a8421f] dark:text-[#e39b6e]"
+          className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[0.85em] text-[#0e7490] dark:text-[#67e8f9]"
           {...props}
         >
           {children}

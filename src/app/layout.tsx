@@ -57,10 +57,31 @@ export const viewport: Viewport = {
   // used by the mobile bottom tab bar.
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#faf6f0" },
-    { media: "(prefers-color-scheme: dark)", color: "#211a13" },
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0c1116" },
   ],
 };
+
+/**
+ * Pre-paint theme class. The app defaults to LIGHT (white canvas, black
+ * ink, cyan accents); without this script a dark-OS machine would paint
+ * the dark palette for the first frames (globals.css `@media
+ * (prefers-color-scheme: dark)`) before React hydration applies the
+ * persisted/default "light" — a visible dark→light flash. Reads the same
+ * persisted zustand store the ThemeProvider uses (`theme-storage`) and
+ * stamps `.light`/`.dark` on <html> before first paint. `system` is left
+ * to the media query. suppressHydrationWarning on <html> absorbs the
+ * class difference (same technique next-themes uses).
+ */
+const themeInitScript = `(function(){try{
+var t="light";
+var raw=localStorage.getItem("theme-storage");
+if(raw){var p=JSON.parse(raw);if(p&&p.state&&p.state.theme){t=p.state.theme;}}
+if(t==="system"){t=window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+var r=document.documentElement;
+r.classList.add(t);
+r.style.colorScheme=t;
+}catch(e){}})();`;
 
 export default function RootLayout({
   children,
@@ -69,6 +90,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang={defaultLocale} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className="font-body">{children}</body>
     </html>
   );

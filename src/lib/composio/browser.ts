@@ -141,15 +141,24 @@ export async function apiComposioStatus(headers: ComposioHeaders): Promise<Compo
   return jsonFetch<ComposioStatus>("/api/composio/status", { headers, cache: "no-store" });
 }
 
-/** GET /api/composio/toolkits — catalog page (server-side search/pagination). */
+/** GET /api/composio/toolkits — catalog page (server-side search/sort/pagination). */
 export async function apiComposioToolkits(
   headers: ComposioHeaders,
-  params: { cursor?: string; search?: string; category?: string; limit?: number; withCategories?: boolean } = {},
+  params: {
+    cursor?: string;
+    search?: string;
+    category?: string;
+    /** "usage" (popularity) or "alphabetically" (A→Z) — upstream sort_by. */
+    sortBy?: "usage" | "alphabetically";
+    limit?: number;
+    withCategories?: boolean;
+  } = {},
 ): Promise<ComposioToolkitsResponse> {
   const qs = new URLSearchParams();
   if (params.cursor) qs.set("cursor", params.cursor);
   if (params.search) qs.set("search", params.search);
   if (params.category) qs.set("category", params.category);
+  if (params.sortBy) qs.set("sort", params.sortBy);
   qs.set("limit", String(params.limit ?? 100));
   if (params.withCategories) qs.set("withCategories", "1");
   const raw = await jsonFetch<{

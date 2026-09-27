@@ -310,7 +310,7 @@ export function ChatInput({
               size="icon"
               disabled={disabled || !canSend}
               className={cn(
-                "h-9 w-9 shrink-0 rounded-full bg-primary text-primary-foreground transition-all hover:bg-[#a8421f] disabled:opacity-40",
+                "h-9 w-9 shrink-0 rounded-full bg-primary text-primary-foreground transition-all hover:bg-[#0e7490] disabled:opacity-40",
                 canSend && !disabled && "shadow-sm",
               )}
               title="Send message"

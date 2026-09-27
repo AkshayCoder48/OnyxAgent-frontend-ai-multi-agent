@@ -54,7 +54,7 @@ function badgeColorFor(ext: string): string {
   }
   // Purple: images
   if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(e)) {
-    return "bg-[#c4552f] text-white";
+    return "bg-[#0891b2] text-white";
   }
   // Red: documents
   if (["pdf", "doc", "docx"].includes(e)) {

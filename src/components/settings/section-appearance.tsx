@@ -3,9 +3,9 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { Check, Monitor, Moon, Sun } from "lucide-react";
-import { useTheme } from "next-themes";
 
 import { cn } from "@/lib/utils";
+import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { MoreOptions } from "@/components/settings/more-options";
@@ -17,7 +17,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type ThemeChoice = "light" | "dark" | "system";
 type FontSize = "sm" | "base" | "lg";
 
 interface BrandPreset {
@@ -31,11 +30,18 @@ interface BrandPreset {
   swatch: string;
 }
 
-// Warm-first preset list. Terracotta is the app default (Terra editorial
-// design); no purple/violet/indigo presets, per the design spec. Picking
-// Terracotta clears the overrides so the design tokens from globals.css
-// take over again.
+// Cyan-first preset list. Cyan is the app default (white canvas, black
+// ink, cyan buttons); no purple/violet/indigo presets, per the design
+// spec. Picking Cyan clears the overrides so the design tokens from
+// globals.css take over again.
 const BRAND_PRESETS: BrandPreset[] = [
+  {
+    id: "cyan",
+    label: "Cyan",
+    primary: "#0891b2",
+    primaryForeground: "#ffffff",
+    swatch: "#0891b2",
+  },
   {
     id: "terracotta",
     label: "Terracotta",
@@ -94,7 +100,7 @@ const BRAND_OVERRIDES = [
 
 function applyBrand(preset: BrandPreset) {
   const root = document.documentElement;
-  if (preset.id === "terracotta") {
+  if (preset.id === "cyan") {
     // Restore theme defaults by removing inline overrides.
     for (const prop of BRAND_OVERRIDES) root.style.removeProperty(prop);
     return;
@@ -112,18 +118,24 @@ function applyFont(size: FontSize) {
 }
 
 export function SectionAppearance() {
-  const { theme, setTheme } = useTheme();
+  // The zustand theme store is the app's SINGLE source of truth (the custom
+  // ThemeProvider + ThemeToggle use it). next-themes' useTheme silently
+  // no-ops here because its provider was never mounted — these buttons did
+  // nothing until this swap.
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
   const [mounted, setMounted] = React.useState(false);
-  const [brand, setBrand] = React.useState<string>("terracotta");
+  const [brand, setBrand] = React.useState<string>("cyan");
   const [fontSize, setFontSize] = React.useState<FontSize>("base");
 
   React.useEffect(() => {
     setMounted(true);
-    // Map the legacy "neutral"/unknown ids onto the terracotta default.
-    const rawSaved = localStorage.getItem(BRAND_KEY) ?? "terracotta";
+    // Map unknown/legacy ids onto the cyan default ("neutral" was a
+    // legacy default; "terracotta" remains a valid pick).
+    const rawSaved = localStorage.getItem(BRAND_KEY) ?? "cyan";
     const savedBrand =
       rawSaved === "neutral" || !BRAND_PRESETS.some((p) => p.id === rawSaved)
-        ? "terracotta"
+        ? "cyan"
         : rawSaved;
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
     setBrand(savedBrand);
@@ -222,7 +234,7 @@ export function SectionAppearance() {
           variant="outline"
           size="sm"
           onClick={() => handleBrand(BRAND_PRESETS[0]!)}
-          disabled={brand === "terracotta"}
+          disabled={brand === "cyan"}
         >
           Reset to default
         </Button>

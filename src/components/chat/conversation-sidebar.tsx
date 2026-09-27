@@ -124,7 +124,7 @@ function ConversationItem({
         // New rows materialize softly (PRD §20 motion system).
         "mb-fade-in-soft group relative flex min-h-[40px] cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-all",
         isActive
-          ? "bg-accent text-accent-foreground border border-[#ead6c4] dark:border-[#4c3d2a]"
+          ? "bg-accent text-accent-foreground border border-[#a5f3fc] dark:border-[#155e75]"
           : "text-foreground/70 hover:bg-foreground/5 hover:text-foreground border border-transparent",
       )}
       onClick={onSelect}
@@ -382,7 +382,7 @@ function ConversationList({
         <button
           type="button"
           onClick={handleNewChat}
-          className="bg-primary text-primary-foreground hover:bg-[#a8421f] flex h-10 w-full items-center justify-between gap-2 rounded-xl px-3.5 text-sm font-medium shadow-sm transition-colors"
+          className="bg-primary text-primary-foreground hover:bg-[#0e7490] flex h-10 w-full items-center justify-between gap-2 rounded-xl px-3.5 text-sm font-medium shadow-sm transition-colors"
         >
           <span className="inline-flex items-center gap-2">
             <SquarePen className="h-4 w-4 shrink-0" />

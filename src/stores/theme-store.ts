@@ -13,7 +13,9 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      theme: "system",
+      // LIGHT is the app default: white canvas, black ink, cyan accents.
+      // ("system" remains a user choice — persisted choices always win.)
+      theme: "light",
       setTheme: (theme) => set({ theme }),
     }),
     {

@@ -264,7 +264,7 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
             <button
               type="button"
               onClick={() => openChat(task.chatId)}
-              className="inline-flex min-h-[28px] shrink-0 items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
+              className="inline-flex min-h-[28px] shrink-0 items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#0e7490]"
             >
               Open chat
             </button>
@@ -430,7 +430,7 @@ export function ScheduledTaskResult({ toolCall }: { toolCall: ToolCall }) {
             <button
               type="button"
               onClick={() => openChat(task.chatId)}
-              className="inline-flex min-h-[28px] items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#a8421f]"
+              className="inline-flex min-h-[28px] items-center gap-1.5 rounded-md px-1 font-medium text-primary transition-colors hover:text-[#0e7490]"
             >
               <MessageSquare className="size-3" aria-hidden />
               View chat
