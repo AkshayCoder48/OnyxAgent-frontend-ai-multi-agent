@@ -196,6 +196,7 @@ export type WSEventType =
   | "tool_call"
   | "tool_result"
   | "tool_output"
+  | "round_retry"
   | "final_result_start"
   | "final_result"
   | "complete"

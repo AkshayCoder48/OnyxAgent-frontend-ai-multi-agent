@@ -40,10 +40,9 @@ const FADE = 16; // top/bottom fade once the viewport is capped
  * streaming … with motion blur and fade-in … like thinking and all"):
  * useTypewriter buffers the growing sentence and reveals one character at a
  * time; LetterStream fades + blurs each fresh letter in exactly once. The
- * FIRST sentence of a thinking block holds the spec's 0.5s stream-start
- * delay; later sentences flow with a tiny 80ms pacing gap (the delay is a
- * stream-start event, not a per-sentence tax). A caret rides at the end
- * while streaming.
+ * FIRST sentence of a thinking block holds the stream-start delay (180ms —
+ * the retuned "a bit faster" pace); later sentences flow with a tiny 40ms
+ * pacing gap. A caret rides at the end while streaming.
  */
 function StreamingSentence({ text, holdMs }: { text: string; holdMs: number }) {
   const { text: revealed, freshFrom, animating } = useTypewriter(text, true, {
@@ -185,7 +184,7 @@ export function ThinkingReasoning({
               {sentences.slice(0, count).map((line, i) => (
                 <p key={i} className={styles.trSentence}>
                   {!done && i === count - 1 ? (
-                    <StreamingSentence text={line} holdMs={count === 1 ? 500 : 80} />
+                    <StreamingSentence text={line} holdMs={count === 1 ? 180 : 40} />
                   ) : (
                     line
                   )}

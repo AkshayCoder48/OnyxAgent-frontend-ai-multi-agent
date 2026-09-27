@@ -8,16 +8,17 @@ import { cn } from "@/lib/utils";
  *
  * User spec: "make single letter streaming — every letter would stream, not
  * paragraphs, single letter only, with motion blur and fade-in … and a 0.5
- * second delay in streaming."
+ * second delay in streaming" — later retuned (“a bit faster, lower delay”):
+ * a 180ms initial hold and a brisker base pace.
  *
  * Buffers the growing `target` text and reveals it CHARACTER BY CHARACTER on
  * a fixed tick, independent of how the deltas arrived — SSE chunks of any
  * size collapse into one smooth letter flow:
  *
- *  - 0.5s INITIAL HOLD: when the stream is live, the first reveal waits
- *    `initialDelayMs` (500ms default) so the buffer can smooth over
- *    provider chunking; the content then fades in letter by letter.
- *  - ADAPTIVE PACE: base ~65 letters/sec; when the backlog grows the pace
+ *  - 180ms INITIAL HOLD: when the stream is live, the first reveal waits
+ *    `initialDelayMs` so the buffer can smooth over provider chunking; the
+ *    content then fades in letter by letter.
+ *  - ADAPTIVE PACE: base ~90 letters/sec; when the backlog grows the pace
  *    rises proportionally (≈ 1s max lag) and huge backlogs jump ahead so
  *    only the tail animates.
  *  - FINISH, DON'T FLUSH: when the stream settles mid-reveal (fast turns,
@@ -34,9 +35,9 @@ import { cn } from "@/lib/utils";
  * is safe to render as plain text.
  */
 export interface TypewriterOptions {
-  /** Hold before the first reveal while streaming (ms). Default 500. */
+  /** Hold before the first reveal while streaming (ms). Default 180. */
   initialDelayMs?: number;
-  /** Base reveal pace, letters per second. Default 65. */
+  /** Base reveal pace, letters per second. Default 90. */
   baseCps?: number;
   /** Reveal tick interval (ms). Default 20. */
   tickMs?: number;
@@ -67,10 +68,10 @@ export function useTypewriter(
   active: boolean,
   options?: TypewriterOptions,
 ): TypewriterState {
-  const initialDelayMs = options?.initialDelayMs ?? 500;
-  const baseCps = options?.baseCps ?? 65;
+  const initialDelayMs = options?.initialDelayMs ?? 180;
+  const baseCps = options?.baseCps ?? 90;
   const tickMs = options?.tickMs ?? 20;
-  const finishCps = options?.finishCps ?? 240;
+  const finishCps = options?.finishCps ?? 320;
 
   // Reduced motion → never animate (checked once, SSR-safe).
   const reducedMotion = React.useMemo(
@@ -167,7 +168,7 @@ export function useTypewriter(
       });
     };
 
-    // 0.5s initial hold while LIVE; a finishing catch-up starts immediately.
+    // Initial hold while LIVE; a finishing catch-up starts immediately.
     const hold = window.setTimeout(
       () => {
         if (stopped) return;

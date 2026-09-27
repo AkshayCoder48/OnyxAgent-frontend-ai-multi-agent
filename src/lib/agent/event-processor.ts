@@ -11,6 +11,12 @@ import type {
 import { getGenerationId } from "@/types";
 import { setUrlParam } from "@/lib/utils";
 import { persistTodos } from "@/lib/tools/todos";
+import {
+  markerHoldbackIndex,
+  resolveToolCall,
+  stripInternalMarkers,
+  timelineDebug,
+} from "@/lib/agent/timeline";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { logError } from "@/lib/client-logger";
@@ -40,9 +46,10 @@ import type { ExecutionChatStore } from "@/stores/chat-store";
  * handler — see the preserved comments.
  */
 
-/** STREAM-START GATE: one-time visual pause (~0.30s) before a response
- *  begins visibly streaming — the request itself is never delayed. */
-const STREAM_START_DELAY_MS = 300;
+/** STREAM-START GATE: one-time visual pause before a response begins
+ *  visibly streaming — the request itself is never delayed. (Timeline PRD
+ *  speed pass: 300ms → 120ms — “a bit faster, lower delay”.) */
+const STREAM_START_DELAY_MS = 120;
 
 export interface AgentEventProcessorOptions {
   /** The execution's headless chat store — the message-state target. */
@@ -97,6 +104,17 @@ export class AgentEventProcessor {
   private toolOutputBuffer = new Map<string, { stdout: string; stderr: string }>();
   private toolOutputTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ── TIMELINE NORMALIZATION STATE (timeline PRD §2–§7/§17) ────────────
+  /** Part ids of pre-emit placeholder tool parts still awaiting adoption
+   *  by their finalized `tool_call` event, in emission order. Each
+   *  placeholder is consumed at most once — one underlying execution →
+   *  exactly one UI component. */
+  private preemitPartIds: string[] = [];
+  /** Arrival-order sequence for normalized events (providers rarely send
+   *  one — stamped at ingestion, §4; the parts array position IS the
+   *  timeline). */
+  private eventSeq = 0;
+
   // ── STREAM-START GATE ──────────────────────────────────────────────────
   private streamGate: { messageId: string | null; opened: boolean } = {
     messageId: null,
@@ -147,10 +165,20 @@ export class AgentEventProcessor {
   }
 
   // ── FLUSH (force — final_result / error / complete) ─────────────────────
-  flush(): void {
+  /** Flush ONLY the text/thinking/reasoning delta buffers (§20 boundary
+   *  flush): called synchronously before a tool part is added so text
+   *  that ARRIVED before the tool call lands in an earlier timeline
+   *  position — the parts array keeps true arrival order. Tool-arg and
+   *  tool-output buffers are untouched. */
+  private flushTextBuffers(): void {
     if (this.textDeltaTimer) { clearTimeout(this.textDeltaTimer); this.textDeltaTimer = null; }
     if (this.textDeltaBuffer && this.currentMessageId) {
-      this.store.getState().appendTextDelta(this.currentMessageId, this.textDeltaBuffer, this.activeRound, this.textAt ?? undefined);
+      // §8 second pass: a marker split across SSE chunks is only whole in
+      // the accumulated buffer.
+      const clean = stripInternalMarkers(this.textDeltaBuffer);
+      if (clean) {
+        this.store.getState().appendTextDelta(this.currentMessageId, clean, this.activeRound, this.textAt ?? undefined);
+      }
       this.textDeltaBuffer = "";
       this.textAt = null;
     }
@@ -166,6 +194,12 @@ export class AgentEventProcessor {
       this.reasoningBuffer = "";
       this.reasoningAt = null;
     }
+    // Content became visible — later flushes use steady cadence.
+    this.openStreamGate();
+  }
+
+  flush(): void {
+    this.flushTextBuffers();
     if (this.toolArgTimer) { clearTimeout(this.toolArgTimer); this.toolArgTimer = null; }
     this.toolArgBuffer.clear();
     if (this.toolOutputTimer) { clearTimeout(this.toolOutputTimer); this.toolOutputTimer = null; }
@@ -195,6 +229,9 @@ export class AgentEventProcessor {
     // Flush any pending delta buffers into the PREVIOUS message before
     // switching (cross-generation contamination guard).
     this.flush();
+    // New message → new adoption queue (placeholders belong to their own
+    // message's timeline).
+    this.preemitPartIds = [];
     if (this.currentMessageId) {
       this.store.getState().updateMessage(this.currentMessageId, (msg) => ({
         ...msg,
@@ -425,19 +462,32 @@ export class AgentEventProcessor {
         if (!isFromActiveGeneration()) break;
         if (this.currentMessageId) {
           const d = wsEvent.data as { index: number; content: string; ts?: number };
-          if (d.content) {
+          // §8 PARSER-LAYER GUARD: whole-chunk internal lifecycle markers
+          // (PROCESS & friends) never enter the text timeline. The
+          // flush-time pass in flushTextBuffers catches markers split
+          // across SSE chunks.
+          const content = stripInternalMarkers(d.content ?? "");
+          if (content) {
+            this.eventSeq += 1;
             if (!this.textDeltaBuffer) this.textAt = typeof d.ts === "number" ? d.ts : Date.now();
-            this.textDeltaBuffer += d.content;
+            this.textDeltaBuffer += content;
             if (!this.textDeltaTimer) {
               this.textDeltaTimer = setTimeout(() => {
                 if (this.textDeltaBuffer && this.currentMessageId) {
-                  this.store.getState().appendTextDelta(this.currentMessageId, this.textDeltaBuffer, this.activeRound, this.textAt ?? undefined);
-                  this.textDeltaBuffer = "";
-                  this.textAt = null;
+                  // §8 cadence pass: drop whole markers + hold back a
+                  // trailing marker PREFIX (a marker split across chunks
+                  // stays recognizable by the next pass).
+                  const safeEnd = markerHoldbackIndex(this.textDeltaBuffer);
+                  const safe = stripInternalMarkers(this.textDeltaBuffer.slice(0, safeEnd));
+                  if (safe) {
+                    this.store.getState().appendTextDelta(this.currentMessageId, safe, this.activeRound, this.textAt ?? undefined);
+                  }
+                  this.textDeltaBuffer = this.textDeltaBuffer.slice(safeEnd);
+                  if (!this.textDeltaBuffer) this.textAt = null;
                   this.openStreamGate();
                 }
                 this.textDeltaTimer = null;
-              }, this.gateDelayFor(1)); // ~300ms start-gate, then 1ms
+              }, this.gateDelayFor(1)); // ~120ms start-gate, then 1ms
             }
           }
         }
@@ -561,34 +611,48 @@ export class AgentEventProcessor {
               if (!this.currentMessageId) return;
               const msgs = this.store.getState().messages;
               const msg = msgs.find((m) => m.id === this.currentMessageId);
-              if (!msg?.toolCalls) return;
+              if (!msg?.parts) return;
 
               for (const [index, buffered] of this.toolArgBuffer) {
-                let existing = msg.toolCalls.find((t) => t.id === buffered.id);
-                if (!existing) {
-                  existing = msg.toolCalls.find((t) => t.id === `pending-${index}`);
+                // Live arg fragments update the EXISTING placeholder part
+                // (by part id — safe id swaps) — they never create cards
+                // (only the tool_call event does, §18).
+                const parts = msg.parts.filter(
+                  (p) => p.type === "tool" && p.toolCall,
+                ) as Array<import("@/types/chat").MessagePart & {
+                  toolCall: import("@/types").ToolCall;
+                }>;
+                let target = parts.find((p) => p.toolCall.id === buffered.id);
+                if (!target) {
+                  target = parts.find((p) => p.toolCall.id === `pending-${index}`);
                 }
                 const realName = buffered.name && !buffered.name.startsWith("pending-")
                   ? buffered.name
                   : "";
-                if (!existing && realName) {
-                  existing = msg.toolCalls.find(
-                    (t) => t.name === realName && (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined),
+                if (!target && realName) {
+                  target = parts.find(
+                    (p) =>
+                      p.toolCall.name === realName &&
+                      (p.toolCall.status === "pending" ||
+                        (p.toolCall.args as { _streaming?: string })?._streaming !== undefined),
                   );
                 }
-                if (!existing) {
-                  existing = msg.toolCalls.find(
-                    (t) => (t.status === "pending" || (t.args as { _streaming?: string })?._streaming !== undefined) && (!t.name || t.name.startsWith("pending-") || t.name === ""),
-                  );
-                }
-                if (existing && this.currentMessageId) {
-                  this.store.getState().updateToolCallPart(this.currentMessageId, existing.id, {
-                    args: { _streaming: buffered.args },
-                    name: realName || existing.name,
-                    ...(buffered.id && !buffered.id.startsWith("pending-") && existing.id.startsWith("pending-")
+                if (target && this.currentMessageId) {
+                  const idSwap =
+                    buffered.id &&
+                    !buffered.id.startsWith("pending-") &&
+                    target.toolCall.id.startsWith("pending-")
                       ? { id: buffered.id }
-                      : {}),
-                  });
+                      : {};
+                  this.store.getState().updateToolCallPartByPart(
+                    this.currentMessageId,
+                    target.id,
+                    {
+                      args: { _streaming: buffered.args },
+                      name: realName || target.toolCall.name,
+                      ...idSwap,
+                    },
+                  );
                 }
                 // DO NOT create a new card here — only the tool_call event
                 // (pre-emit or final) creates cards.
@@ -618,84 +682,107 @@ export class AgentEventProcessor {
           }
         }
 
-        if (this.currentMessageId) {
-          const data = wsEvent.data as {
-            tool_name: string;
-            args: Record<string, unknown>;
-            tool_call_id: string;
-            _preemit?: boolean;
-            ts?: number;
-          };
-          const { tool_name, args, tool_call_id } = data;
-          const toolCall: ToolCall = {
-            id: tool_call_id,
-            name: tool_name,
-            args,
-            status: data._preemit ? "pending" : "running",
-          };
+        if (!this.currentMessageId) break;
+        const data = wsEvent.data as {
+          tool_name: string;
+          args: Record<string, unknown>;
+          tool_call_id: string;
+          _preemit?: boolean;
+          ts?: number;
+        };
+        const { tool_name, args, tool_call_id } = data;
+        const isPreemit = !!data._preemit;
+        const ts = typeof data.ts === "number" ? data.ts : undefined;
+        this.eventSeq += 1;
 
-          if (!data._preemit) {
-            for (const [idx, buffered] of this.toolArgBuffer) {
-              if (
-                buffered.name === tool_name ||
-                buffered.id === tool_call_id ||
-                buffered.id === `pending-${idx}`
-              ) {
-                this.toolArgBuffer.delete(idx);
-                break;
-              }
-            }
-          }
+        // ── TIMELINE NORMALIZER + DEDUPLICATOR (§2/§6/§17) ─────────────
+        // Raw provider events never reach the renderer directly. The
+        // resolution decides EXACTLY ONE disposition for this call:
+        // update the existing part (replay / pre-emit→final with same
+        // id), adopt the pre-emit placeholder (provider id arrived after
+        // pre-emit), or create the one new part. A second card can never
+        // appear for the same underlying execution.
 
-          // Card matching rules — see the original comments in use-chat.ts
-          // (exact id → placeholder-pending → composing → placeholder adopt).
-          const msgs = this.store.getState().messages;
-          const msg = msgs.find((m) => m.id === this.currentMessageId);
-          let existingTc = msg?.toolCalls?.find((t) => t.id === tool_call_id);
-          if (!existingTc) {
-            existingTc = msg?.toolCalls?.find(
-              (t) =>
-                t.status === "pending" &&
-                t.name === tool_name &&
-                (t.id.startsWith("dsml_") || t.id.startsWith("pending-")),
-            );
-          }
-          if (!existingTc) {
-            existingTc = msg?.toolCalls?.find(
-              (t) =>
-                t.status === "pending" &&
-                (t.id.startsWith("fence_composing_") || t.id.startsWith("dsml_composing_")),
-            );
-          }
-          if (!existingTc && (!tool_name || tool_name === "tool" || tool_name.startsWith("pending-"))) {
-            existingTc = msg?.toolCalls?.find(
-              (t) =>
-                t.status === "pending" &&
-                (!t.name || t.name === "tool" || t.name.startsWith("pending-")),
-            );
-          }
+        // §20 BOUNDARY FLUSH: text/thinking that arrived BEFORE this tool
+        // call occupies its timeline position first — the parts array
+        // keeps true arrival order (text above this tool part).
+        this.flushTextBuffers();
 
-          if (existingTc && this.currentMessageId) {
-            const existingArgs = existingTc.args as { _streaming?: string };
-            const hasStreamingArgs = existingArgs?._streaming !== undefined;
-            const isPreemit = !!data._preemit;
-            this.store.getState().updateToolCallPart(this.currentMessageId, existingTc.id, {
-              id: tool_call_id,
-              args: !isPreemit
-                ? args
-                : (hasStreamingArgs ? existingTc.args : args),
-              status: isPreemit ? "pending" : "running",
-            });
-          } else if (data._preemit) {
-            if (this.currentMessageId) {
-              this.store.getState().addToolCallPart(this.currentMessageId, toolCall, this.activeRound, typeof data.ts === "number" ? data.ts : undefined);
-            }
-          } else {
-            if (this.currentMessageId) {
-              this.store.getState().addToolCallPart(this.currentMessageId, toolCall, this.activeRound, typeof data.ts === "number" ? data.ts : undefined);
+        const store = this.store.getState();
+        const msg = store.messages.find((m) => m.id === this.currentMessageId);
+        const toolParts = (msg?.parts ?? []).flatMap((p) =>
+          p.type === "tool" && p.toolCall
+            ? [{ partId: p.id, toolCall: p.toolCall }]
+            : [],
+        );
+
+        const resolution = resolveToolCall({
+          toolCallId: tool_call_id,
+          toolName: tool_name,
+          preemit: isPreemit,
+          toolParts,
+          preemitQueue: this.preemitPartIds,
+        });
+
+        // The pre-emit arg stream's buffered entry is spent once the final
+        // call lands — a stale entry must not clobber the parsed args.
+        if (!isPreemit) {
+          for (const [idx, buffered] of this.toolArgBuffer) {
+            if (
+              buffered.name === tool_name ||
+              buffered.id === tool_call_id ||
+              buffered.id === `pending-${idx}`
+            ) {
+              this.toolArgBuffer.delete(idx);
+              break;
             }
           }
         }
+
+        if (resolution.action === "update") {
+          const existing = toolParts.find((p) => p.toolCall.id === tool_call_id)!;
+          const hasStreamingArgs =
+            (existing.toolCall.args as { _streaming?: string } | undefined)?._streaming !== undefined;
+          store.updateToolCallPart(this.currentMessageId, tool_call_id, {
+            name: tool_name || existing.toolCall.name,
+            args: !isPreemit ? args : (hasStreamingArgs ? existing.toolCall.args : args),
+            status: isPreemit ? "pending" : "running",
+          });
+          timelineDebug(
+            `tool_call ${tool_call_id} (${tool_name || "?"}) → updated existing part${isPreemit ? " (pre-emit)" : ""}`,
+          );
+          break;
+        }
+
+        if (resolution.action === "adopt") {
+          this.preemitPartIds = this.preemitPartIds.filter((id) => id !== resolution.partId);
+          store.updateToolCallPartByPart(this.currentMessageId, resolution.partId, {
+            id: tool_call_id,
+            name: tool_name,
+            args,
+            status: "running",
+          });
+          timelineDebug(
+            `tool_call ${tool_call_id} (${tool_name || "?"}) → adopted placeholder part ${resolution.partId}`,
+          );
+          break;
+        }
+
+        const partId = store.addToolCallPart(
+          this.currentMessageId,
+          {
+            id: tool_call_id,
+            name: tool_name,
+            args,
+            status: isPreemit ? "pending" : "running",
+          },
+          this.activeRound,
+          ts,
+        );
+        if (isPreemit && partId) this.preemitPartIds.push(partId);
+        timelineDebug(
+          `tool_call ${tool_call_id} (${tool_name || "?"}) → created part ${partId}${isPreemit ? " (pre-emit placeholder)" : ""}`,
+        );
         break;
       }
 
@@ -706,6 +793,7 @@ export class AgentEventProcessor {
             tool_call_id: string;
             content: string;
           };
+          this.eventSeq += 1;
           if (this.toolOutputBuffer.has(tool_call_id)) {
             const chunks = this.toolOutputBuffer.get(tool_call_id)!;
             if (chunks.stdout) this.store.getState().appendToolStreamingOutput(this.currentMessageId, tool_call_id, chunks.stdout, "stdout");
@@ -716,10 +804,14 @@ export class AgentEventProcessor {
               this.toolOutputTimer = null;
             }
           }
+          // §7: the result attaches to ITS tool call's existing part —
+          // it never renders as an independent assistant message, and a
+          // replayed result only re-writes the same part (idempotent).
           this.store.getState().updateToolCallPart(this.currentMessageId, tool_call_id, {
             result: content,
             status: "completed",
           });
+          timelineDebug(`tool_result ${tool_call_id} attached (${String(content).length} chars)`);
         }
         // Broadcast a window event so other components (e.g. FileSidebar)
         // can auto-refresh when the agent mutates the workspace.
@@ -774,6 +866,42 @@ export class AgentEventProcessor {
             }, 50);
           }
         }
+        break;
+      }
+
+      case "round_retry": {
+        if (!isFromActiveGeneration()) break;
+        // IDEMPOTENT INGESTION (§17): the provider is about to RE-STREAM
+        // this round. Drop the unflushed delta buffers (their content is
+        // re-sent) and rewind everything the failed attempt already
+        // flushed — partial text, thinking/reasoning, pre-emit tool
+        // placeholders — so the retry can never duplicate content.
+        for (const t of [this.textDeltaTimer, this.thinkingTimer, this.reasoningTimer]) {
+          if (t) clearTimeout(t);
+        }
+        this.textDeltaTimer = this.thinkingTimer = this.reasoningTimer = null;
+        this.textDeltaBuffer = "";
+        this.textAt = null;
+        this.thinkingBuffer = "";
+        this.thinkingAt = null;
+        this.reasoningBuffer = "";
+        this.reasoningAt = null;
+        const retryRoundRaw = (wsEvent.data as { round?: unknown }).round;
+        const retryRound =
+          typeof retryRoundRaw === "number" && retryRoundRaw >= 1
+            ? Math.floor(retryRoundRaw)
+            : this.activeRound;
+        if (this.currentMessageId) {
+          this.store.getState().rewindRoundParts(this.currentMessageId, retryRound);
+          // Pre-emit placeholders of the rewound round are gone — drop
+          // their part ids from the adoption queue.
+          const msg = this.store
+            .getState()
+            .messages.find((m) => m.id === this.currentMessageId);
+          const liveIds = new Set((msg?.parts ?? []).map((p) => p.id));
+          this.preemitPartIds = this.preemitPartIds.filter((id) => liveIds.has(id));
+        }
+        timelineDebug(`round_retry round=${retryRound} → rewound streamed parts`);
         break;
       }
 

@@ -2233,6 +2233,16 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           detail: message,
           context: { round, model: opts.provider.model },
         });
+        // IDEMPOTENT RETRY (timeline PRD §17): this round is about to be
+        // RE-STREAMED. Everything the failed attempt already emitted
+        // (partial text, thinking, pre-emit tool cards) must be rewound in
+        // the UI timeline first — otherwise the retry duplicates every
+        // chunk that arrived before the failure.
+        emit({
+          type: "round_retry",
+          data: { round, attempt: retryCountThisTurn },
+          timestamp: nowISO(),
+        });
         // Wait 1 second before retrying to let the connection recover
         await new Promise((r) => setTimeout(r, 1000));
         round -= 1; // don't consume a round on retry

@@ -243,7 +243,7 @@ describe("chat store streaming integrity", () => {
     expect(thinkingParts[0]!.content).toBe("think A think B");
   });
 
-  it("same-round text after a tool call merges into the round's text part (no mid-sentence cuts)", () => {
+  it("same-round text after a tool call keeps its chronological position (timeline PRD §23)", () => {
     resetStore();
     const id = addAssistant();
     const store = useChatStore.getState();
@@ -257,18 +257,19 @@ describe("chat store streaming integrity", () => {
     });
     store.appendTextDelta(id, "After tools.");
 
-    // ONE message, ONE text part for the round: the message content is a
-    // single narrative that precedes its tool calls — even when the provider
-    // interleaves content deltas around tool_call deltas. The old behavior
-    // ([text, tool, text]) cut sentences in half and pushed the tail below
-    // the tool cards.
+    // ONE message; the timeline stays faithful to the stream: text that
+    // arrived AFTER the tool call renders AFTER it (`text → tool → text`
+    // stays `text → tool → text` — timeline PRD §23/§25). Text chunks
+    // still merge into the trailing same-round text part, so the tail is
+    // never fragmented further.
     const msgs = useChatStore.getState().messages;
     expect(msgs).toHaveLength(1);
     const partTypes = get(id).parts!.map((p) => p.type);
-    expect(partTypes).toEqual(["text", "tool"]);
+    expect(partTypes).toEqual(["text", "tool", "text"]);
     const textParts = get(id).parts!.filter((p) => p.type === "text");
-    expect(textParts).toHaveLength(1);
-    expect(textParts[0]!.content).toBe("Before tools. After tools.");
+    expect(textParts).toHaveLength(2);
+    expect(textParts[0]!.content).toBe("Before tools. ");
+    expect(textParts[1]!.content).toBe("After tools.");
   });
 
   it("NEW-ROUND text lands below the previous round's tools (chronological)", () => {
@@ -293,7 +294,7 @@ describe("chat store streaming integrity", () => {
     expect(textParts[1]!.round).toBe(2);
   });
 
-  it("appendTextDelta appends to the same text bubble when reasoning interleaves", () => {
+  it("text chunks reassemble into one part; reasoning between them keeps its own part (timeline PRD §23)", () => {
     resetStore();
     const id = addAssistant();
     const store = useChatStore.getState();
@@ -302,10 +303,15 @@ describe("chat store streaming integrity", () => {
     store.appendReasoningDelta(id, "(thinking)");
     store.appendTextDelta(id, "lo");
 
-    // "Hel" + "lo" reassemble into the SAME text part — no broken half words.
-    const textParts = get(id).parts!.filter((p) => p.type === "text");
-    expect(textParts).toHaveLength(1);
-    expect(textParts[0]!.content).toBe("Hello");
+    // The reasoning interlude splits the narrative: "Hel" precedes it,
+    // "lo" follows — the parts keep that order (chronology wins, §25).
+    // Within a run of adjacent text chunks the part still merges, so
+    // uninterrupted words are never fragmented.
+    const parts = get(id).parts!;
+    expect(parts.map((p) => p.type)).toEqual(["text", "reasoning", "text"]);
+    const textParts = parts.filter((p) => p.type === "text");
+    expect(textParts[0]!.content).toBe("Hel");
+    expect(textParts[1]!.content).toBe("lo");
   });
 
   it("tool result updates the existing card instead of creating a duplicate", () => {

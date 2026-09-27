@@ -2,6 +2,7 @@
 
 import { create, createStore, type StoreApi } from "zustand";
 import type { AskUserQuestion, ChatMessage, MessagePart, ToolCall } from "@/types";
+import { canMergeIntoLastTextPart } from "@/lib/agent/timeline";
 
 function newPartId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -224,73 +225,22 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
         });
         if (reasoningSettled) parts.splice(0, parts.length, ...stamped);
       }
-      const last = parts[parts.length - 1];
-      // WHOLE-SENTENCE TEXT (no mid-sentence cuts): ONE agent round = ONE
-      // LLM message, and a message's content is a single narrative block
-      // that semantically PRECEDES its tool calls — even when the provider
-      // interleaves content deltas and tool_call deltas in the stream
-      // (kilo-auto & friends stream text → tool args → more text). So
-      // same-round text ALWAYS merges into that round's text part (which
-      // renders above the round's tool cards), instead of creating a NEW
-      // text part after the tools. The old behavior split a sentence in
-      // half at the first tool-call delta and rendered the tail BELOW the
-      // tool cards — the "response looks cut" bug. Text in a NEW round (the
-      // model's post-tool narration) still lands at its chronological
-      // position at the end.
-      const roundKey = round ?? 0;
-      const isThinkingPart = (p: MessagePart) => p.type === "thinking" || p.type === "reasoning";
-      // Last text part of the SAME round (search backwards — it may sit
-      // above this round's tool parts).
-      let lastTextIdx = -1;
-      for (let i = parts.length - 1; i >= 0; i--) {
-        if (parts[i]!.type === "text") {
-          lastTextIdx = i;
-          break;
-        }
-      }
-      if (lastTextIdx >= 0 && (parts[lastTextIdx]!.round ?? 0) === roundKey) {
-        // Same round → continue the same text part (whole sentence stays
-        // whole, above the round's tool cards).
-        parts[lastTextIdx] = {
-          ...parts[lastTextIdx]!,
-          content: (parts[lastTextIdx]!.content ?? "") + text,
+      // ── CHRONOLOGICAL TEXT (timeline PRD §20/§23/§25) ─────────────────
+      // Text chunks merge ONLY into a TRAILING same-round text part (the
+      // adjacent chunk of the same assistant round). Text is NEVER
+      // re-ordered above an earlier tool part and NEVER merges across a
+      // tool boundary — `text → tool → text` stays `text → tool → text`.
+      // Arrival order at tool boundaries is guaranteed by the event
+      // processor, which flushes pending text buffers BEFORE a tool part
+      // is added, so the parts array is the true execution timeline.
+      if (canMergeIntoLastTextPart(parts, round ?? 0)) {
+        const last = parts[parts.length - 1]!;
+        parts[parts.length - 1] = {
+          ...last,
+          content: (last.content ?? "") + text,
         };
-      } else if (
-        lastTextIdx >= 0 &&
-        (parts[lastTextIdx]!.round ?? 0) !== roundKey &&
-        !parts.some((p) => p.type === "tool" && (p.round ?? 0) === roundKey)
-      ) {
-        // Text after a DIFFERENT round's text with no same-round tools yet —
-        // a new round's text at its chronological position (push at end).
-        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
-      } else if (
-        lastTextIdx === -1 &&
-        last &&
-        isThinkingPart(last) &&
-        (last.round ?? 0) === roundKey
-      ) {
-        // No text yet this round, thinking/reasoning streaming → new text
-        // part after the thinking (chronological, same round).
-        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
-      } else if (
-        !parts.some((p) => p.type === "tool" && (p.round ?? 0) === roundKey)
-      ) {
-        // No same-round text, no same-round tools → new round's opening
-        // text at the end (after earlier rounds' parts).
-        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
       } else {
-        // Same round has tool parts but no text part yet — the message
-        // content precedes its tool calls: INSERT the text part ABOVE the
-        // round's first tool part so the sentence renders whole.
-        const insertAt = parts.findIndex(
-          (p) => p.type === "tool" && (p.round ?? 0) === roundKey,
-        );
-        parts.splice(insertAt === -1 ? parts.length : insertAt, 0, {
-          id: newPartId(),
-          type: "text" as const,
-          content: text,
-          round,
-        });
+        parts.push({ id: newPartId(), type: "text" as const, content: text, round });
       }
 
       const messages = [...state.messages];
@@ -383,7 +333,8 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
     toolCall: ToolCall,
     round?: number,
     at?: number,
-  ) =>
+  ): string => {
+    const partId = newPartId();
     set((state: S) => {
       const idx = state.messages.findIndex((m) => m.id === messageId);
       if (idx === -1) return {} as Partial<S>;
@@ -406,7 +357,7 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
         parts: [
           ...baseParts,
           {
-            id: newPartId(),
+            id: partId,
             type: "tool" as const,
             // Stamp the start time (event `ts` in bg mode, runner clock) for
             // the live elapsed timer + settled duration badge.
@@ -421,6 +372,8 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
       persist(messages);
       return { messages } as Partial<S>;
     });
+    return partId;
+  }
 
   const endRound = (messageId: string, round: number, endedAt?: number) =>
     set((state: S) => {
@@ -506,6 +459,94 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
       return { messages } as Partial<S>;
     });
 
+  /** Update a tool part by its PART id — the deterministic adoption path
+   *  (timeline PRD §6/§17): a finalized `tool_call` whose provider id
+   *  differs from the pre-emit placeholder's id re-identifies the
+   *  placeholder IN PLACE (same part, new toolCallId) instead of adding a
+   *  second card. The flat `toolCalls` mirror is matched on BOTH the old
+   *  and the new id so it stays in sync. */
+  const updateToolCallPartByPart = (
+    messageId: string,
+    partId: string,
+    update: Partial<ToolCall>,
+  ) =>
+    set((state: S) => {
+      const idx = state.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return {} as Partial<S>;
+
+      const msg = state.messages[idx]!;
+      const target = (msg.parts ?? []).find((p) => p.id === partId);
+      if (!target || target.type !== "tool" || !target.toolCall) {
+        return {} as Partial<S>;
+      }
+      const oldToolCallId = target.toolCall.id;
+      const isTerminal =
+        (update.status === "completed" || update.status === "error") &&
+        update.endedAt === undefined;
+      const withEnd = isTerminal ? { ...update, endedAt: Date.now() } : update;
+      const newToolCallId =
+        typeof withEnd.id === "string" && withEnd.id ? withEnd.id : oldToolCallId;
+      const messages = [...state.messages];
+      messages[idx] = {
+        ...msg,
+        parts: (msg.parts ?? []).map((p) =>
+          p.type === "tool" && p.id === partId && p.toolCall
+            ? { ...p, toolCall: { ...p.toolCall, ...withEnd } }
+            : p,
+        ),
+        toolCalls: (msg.toolCalls ?? []).map((tc) =>
+          tc.id === oldToolCallId || tc.id === newToolCallId
+            ? { ...tc, ...withEnd, ...(withEnd.id ? { id: newToolCallId } : {}) }
+            : tc,
+        ),
+      };
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
+
+  /** Rewind one round's streamed parts (timeline PRD §17 — idempotent
+   *  ingestion): before a failed round attempt is re-streamed, everything
+   *  it already flushed (partial text, thinking/reasoning, pre-emit tool
+   *  placeholders) is removed so the retry cannot duplicate it. The flat
+   *  content/thinking/reasoning fields are rebuilt from the remaining
+   *  parts (they are exact concatenations of part content). */
+  const rewindRoundParts = (messageId: string, round: number) =>
+    set((state: S) => {
+      const idx = state.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return {} as Partial<S>;
+
+      const msg = state.messages[idx]!;
+      if (!msg.parts) return {} as Partial<S>;
+      const roundKey = round ?? 0;
+      const keep = msg.parts.filter((p) => (p.round ?? 0) !== roundKey);
+      if (keep.length === msg.parts.length) return {} as Partial<S>; // nothing streamed for that round
+
+      const removedToolIds = new Set(
+        msg.parts
+          .filter(
+            (p) =>
+              p.type === "tool" &&
+              p.toolCall != null &&
+              (p.round ?? 0) === roundKey,
+          )
+          .map((p) => (p as { toolCall: { id: string } }).toolCall.id),
+      );
+      const rebuild = (type: MessagePart["type"]) =>
+        keep.filter((p) => p.type === type).map((p) => p.content ?? "").join("");
+
+      const messages = [...state.messages];
+      messages[idx] = {
+        ...msg,
+        parts: keep,
+        content: rebuild("text"),
+        thinking: rebuild("thinking"),
+        reasoning: rebuild("reasoning"),
+        toolCalls: (msg.toolCalls ?? []).filter((tc) => !removedToolIds.has(tc.id)),
+      };
+      persist(messages);
+      return { messages } as Partial<S>;
+    });
+
   const appendToolStreamingOutput = (
     messageId: string,
     toolCallId: string,
@@ -562,6 +603,8 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
     endRound,
     endReasoning,
     updateToolCallPart,
+    updateToolCallPartByPart,
+    rewindRoundParts,
     appendToolStreamingOutput,
   };
 }
