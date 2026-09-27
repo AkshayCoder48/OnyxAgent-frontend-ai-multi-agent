@@ -450,6 +450,11 @@ export function useChat(options: UseChatOptions = {}) {
             userId,
             conversationId: opts.conversationId,
             emit: execution.processor.handle,
+            // Checkpoint coherence: land the processor's buffered render
+            // deltas before each Dexie checkpoint so the persisted seq
+            // cursor never runs ahead of the persisted content (an abrupt
+            // reload would otherwise skip the last buffered token).
+            flush: () => execution.processor.flush(),
             onFinished: () => {
               // Last-resort safety net — the terminal events (done/error)
               // route through the processor and finish the execution with

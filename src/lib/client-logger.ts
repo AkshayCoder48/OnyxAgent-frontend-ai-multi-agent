@@ -111,6 +111,22 @@ export function installGlobalErrorCapture() {
         (el as HTMLLinkElement).href ||
         (el as HTMLScriptElement).src ||
         "";
+      // EXTERNAL DEBUG TOOLS ARE NOT APP FAILURES: third-party scripts the
+      // app itself never references (e.g. cdn.jsdelivr.net/npm/eruda,
+      // injected by a browser extension or the hosting environment) used to
+      // be logged as "[network] Resource failed to load" on every message —
+      // pure noise: we can neither fix nor load them, and their absence
+      // never affects the app. Only resources from OUR origin (app chunks,
+      // icons, same-origin assets) are ours to report. (blob: URLs created
+      // by this app share its origin and still pass.)
+      if (url) {
+        try {
+          const resolved = new URL(url, window.location.href);
+          if (resolved.origin !== window.location.origin) return;
+        } catch {
+          // Unparseable URL — keep it (odd, but potentially ours).
+        }
+      }
       logWarn("network", `Resource failed to load: ${el.tagName?.toLowerCase()}`, {
         detail: url,
       });

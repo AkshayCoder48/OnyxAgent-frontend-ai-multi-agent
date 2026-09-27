@@ -110,6 +110,15 @@ interface RunContext {
   /** The emit callback from the ExecutionHub's processor (the WSEvent
    *  pipeline — survives React unmounts). */
   emit: (event: WSEvent) => void;
+  /** Synchronously land the processor's buffered render deltas (text /
+   *  thinking / reasoning / tool args) into the store BEFORE a checkpoint
+   * reads it. The processor batches render updates on a ~1ms macrotask
+   * timer; without this flush a mid-run checkpoint persists content that
+   * lags the last processed event by one delta while the seq cursor
+   * already covers it — an abrupt kill (reload mid-stream) then lost
+   * exactly that token on resume (cursor ahead of the checkpoint).
+   * PRD §38: replay must be idempotent, never lossy. */
+  flush?: () => void;
   /** Called when the turn finishes (done or error). */
   onFinished: () => void;
   /** The EXECUTION's headless chat store (ExecutionHub). History building
@@ -219,6 +228,10 @@ export async function consumeRun(ctx: {
   bridgeAbort?: AbortController;
   /** The execution's store (checkpointing source — survives navigation). */
   store?: ExecutionChatStore;
+  /** Land the processor's buffered render deltas before checkpoints (see
+   *  RunContext.flush — keeps the seq cursor strictly behind the persisted
+   *  content, never ahead). */
+  flush?: () => void;
 }): Promise<void> {
   const { e2bApiKey, job } = ctx;
   /** Seq cursor — starts at the persisted lastSeq (resume lands AFTER the
@@ -256,6 +269,16 @@ export async function consumeRun(ctx: {
   /** Checkpoint + cursor in the coherence order (see above). */
   const checkpointAndAdvance = async (isStreaming: boolean) => {
     try {
+      // Flush the processor's render buffers FIRST so the checkpoint
+      // content covers every event the seq cursor is about to cover.
+      // (The buffers land on a ~1ms macrotask; reading the store without
+      // flushing persisted content one delta BEHIND the cursor — an abrupt
+      // kill then skipped exactly that delta on resume.)
+      try {
+        ctx.flush?.();
+      } catch {
+        // best-effort — the 1ms buffer timer still lands the content
+      }
       await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, isStreaming, ctx.store);
       persistCursor(true);
     } catch {
@@ -510,7 +533,20 @@ export async function consumeRun(ctx: {
  * the launch failed (caller falls back to the in-browser runtime).
  */
 export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTurnHandle | null> {
-  const generationId = `bg-${nanoid(10)}`;
+  // GENERATION IDENTITY (the "streaming behind, Thinking forever" fix):
+  // useChat.doSend primes the ExecutionHub's processor with an early
+  // `model_request_start` carrying `turn.generationId` — the processor then
+  // DISCARDS every event whose generation_id doesn't match it (stale-turn
+  // guard). Minting a separate `bg-…` id here meant the live consumer's
+  // every event (text/thinking/tool deltas, message_saved, complete) was
+  // dropped as "stale": the sandbox streamed fine, but the UI stayed on the
+  // Thinking orb with zero rendered text and no Dexie checkpoints (the
+  // bgmsg row never materialized in the execution store) — only a page
+  // reload "fixed" it because the resumed processor was unprimed and
+  // accepted the fresh generation. Stamp this turn's events with the SAME
+  // generation doSend primed; fall back to a fresh one for callers that
+  // don't provide one (their processors are unprimed).
+  const generationId = ctx.turn.generationId ?? `bg-${nanoid(10)}`;
   let conversationId = ctx.conversationId;
 
   const emit = (type: WSEvent["type"], data: Record<string, unknown>) => {
@@ -624,6 +660,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         aiApiKey: ctx.turn.provider.apiKey,
         bridgeAbort,
         store: ctx.store,
+        flush: ctx.flush,
       });
     })().catch(() => {
       // LAST-RESORT net only: transport failures are handled INSIDE
@@ -777,6 +814,9 @@ export async function resumeBackgroundTurn(ctx: {
   userId: string;
   conversationId: string;
   emit: (event: WSEvent) => void;
+  /** Land the processor's buffered render deltas before checkpoints (see
+   *  RunContext.flush — same coherence contract as the live path). */
+  flush?: () => void;
   onFinished: () => void;
   /** The execution's store (checkpointing source — the hub provides it). */
   store?: ExecutionChatStore;
@@ -809,6 +849,7 @@ export async function resumeBackgroundTurn(ctx: {
       isStopped: () => stopped,
       bridgeAbort,
       store: ctx.store,
+      flush: ctx.flush,
     });
   })().catch(() => {
     // best-effort — the next reload resumes again.

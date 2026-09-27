@@ -415,6 +415,9 @@ export const executionHub = {
         userId,
         conversationId,
         emit: (ev) => record.processor.handle(ev),
+        // Checkpoint coherence: flush the processor's buffered render
+        // deltas before each Dexie checkpoint (see background-turn.ts).
+        flush: () => record.processor.flush(),
         onFinished: () => {
           // The consumer's terminal events already routed through the
           // processor (onTurnEnd). This is the safety net for paths that
