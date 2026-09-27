@@ -1246,11 +1246,10 @@ export interface UserSettings {
    *  sandbox per conversation — isolation at the cost of more sandboxes).
    *  Stored under `extra.sandbox_mode`. */
   sandbox_mode?: "shared" | "separate";
-  /** AI framework preset — changes the system prompt to match the framework's
-   *  conventions. "default" = generic assistant, "onyx_ai" = Onyx AI
-   *  (OnyxAgent's native framework; stored "pydantic_ai" values from before
-   *  the rename are normalized to it on read), "langchain" = LangChain,
-   *  "autogen" = AutoGen, "crewai" = CrewAI.
+  /** @deprecated Framework selection was removed — the app ALWAYS uses
+   *  Onyx AI (OnyxAgent's native agent framework). Legacy field kept only
+   *  so stored values ("onyx_ai", or "pydantic_ai"/"langchain"/… from
+   *  older installs) normalize to "onyx_ai" on read.
    *  Stored under `extra.ai_framework`. */
   ai_framework?: string;
   /** Default model name (e.g. "gpt-4o-mini") — stored under `extra`. */
@@ -1323,7 +1322,9 @@ export const settingsService = {
       })),
       file_system_mode: (row.extra?.file_system_mode as "auto" | "local" | "hopx") ?? "auto",
       sandbox_mode: (row.extra?.sandbox_mode as "shared" | "separate") ?? "shared",
-      ai_framework: (row.extra?.ai_framework as string) ?? "default",
+      // Framework selection removed — the app always uses Onyx AI. Legacy
+      // stored values ("pydantic_ai", "langchain", …) normalize to "onyx_ai".
+      ai_framework: "onyx_ai",
       onyxbase_api_key_present: !!row.extra?.onyxbase_api_key_encrypted,
       onyxbase_base_url: (row.extra?.onyxbase_base_url as string | undefined) ?? undefined,
       onyxbase_workspace_id: ONYXBASE_WORKSPACE_ID,
@@ -1745,27 +1746,27 @@ export const settingsService = {
     return settings.sandbox_mode ?? "shared";
   },
 
-  /** Set the AI framework preset. */
-  async setAIFramework(userId: string, framework: string): Promise<void> {
-    let row = await db.user_settings.where("user_id").equals(userId).first();
-    if (!row) {
-      await this.get(userId);
-      row = await db.user_settings.where("user_id").equals(userId).first();
-    }
-    if (!row) throw new Error("Could not initialize user settings");
-    const extra = { ...(row.extra ?? {}), ai_framework: framework };
-    await db.user_settings.update(row.id, {
-      extra,
-      updated_at: nowISO(),
-    });
+  /**
+   * @deprecated Framework selection removed — the app always uses Onyx AI.
+   * Kept only so legacy stored values normalize to onyx_ai; this is now a
+   * no-op that resolves without writing (any missed caller can't break).
+   */
+  async setAIFramework(_userId: string, _framework: string): Promise<void> {
+    // No-op: Onyx AI is the only framework — nothing to select or persist.
+    // Legacy note: "pydantic_ai" was renamed to "onyx_ai" (Onyx AI) before
+    // framework selection was removed entirely.
+    return;
   },
 
-  /** Get the AI framework preset. Returns "default" by default. */
-  async getAIFramework(userId: string): Promise<string> {
-    const settings = await this.get(userId);
-    const fw = settings.ai_framework ?? "default";
-    // Legacy normalization: "pydantic_ai" was renamed to "onyx_ai" (Onyx AI).
-    return fw === "pydantic_ai" ? "onyx_ai" : fw;
+  /**
+   * @deprecated Framework selection removed — the app always uses Onyx AI.
+   * Kept only so legacy stored values normalize to onyx_ai; this now always
+   * returns "onyx_ai" (any missed caller can't break).
+   */
+  async getAIFramework(_userId: string): Promise<string> {
+    // Legacy normalization: "pydantic_ai" was renamed to "onyx_ai" (Onyx AI)
+    // before framework selection was removed — everything is Onyx AI now.
+    return "onyx_ai";
   },
 };
 

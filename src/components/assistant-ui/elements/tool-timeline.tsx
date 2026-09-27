@@ -22,6 +22,12 @@ export interface TimelineStat {
  * file stats. One collapsed line expands into a vertical trace: a verb, an
  * icon, and a chip per step, ending in a row of file-change stats
  * (assistant-ui `elements-tool-timeline` recipe, Terra retheme).
+ *
+ * EXTENDED for the OnyxAgent "working" UI: `children` renders the FULL
+ * process (the real event renderers — thinking blocks, tool cards,
+ * intermediate text) below the step trace, behind the same disclosure, so
+ * the whole run lives in ONE working panel. `failed` / `stopped` add
+ * status suffixes to the resting label.
  */
 export function ToolTimeline({
   steps,
@@ -34,6 +40,10 @@ export function ToolTimeline({
   stats,
   className,
   embedded,
+  children,
+  childrenLabel,
+  failed,
+  stopped,
 }: {
   steps: readonly TimelineStep[];
   visibleSteps: number;
@@ -47,6 +57,15 @@ export function ToolTimeline({
   /** Embedded (e.g. inside the timeline sidebar): hide the collapse trigger
    *  and always show the trace — the host provides its own header. */
   embedded?: boolean;
+  /** The FULL process — real event renderers shown below the step trace
+   *  inside the same disclosure (the "whole working session" view). */
+  children?: React.ReactNode;
+  /** Micro-label above the children section (e.g. "Process"). */
+  childrenLabel?: string;
+  /** Adds a "· Failed" suffix to the resting label. */
+  failed?: boolean;
+  /** Adds a "· Stopped" suffix to the resting label. */
+  stopped?: boolean;
 }) {
   const shown = Math.max(0, Math.min(Math.floor(visibleSteps) || 0, steps.length));
 
@@ -68,7 +87,15 @@ export function ToolTimeline({
           {streaming ? (
             <ShimmerLabel className="text-sm font-medium">{activeLabel}</ShimmerLabel>
           ) : (
-            <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
+            <>
+              <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
+              {failed && (
+                <span className="text-sm font-medium text-destructive/90">· Failed</span>
+              )}
+              {!failed && stopped && (
+                <span className="text-sm font-medium text-muted-foreground">· Stopped</span>
+              )}
+            </>
           )}
         </button>
       )}
@@ -101,6 +128,18 @@ export function ToolTimeline({
               ))}
             </div>
           )}
+          {/* The FULL process — the real event renderers (thinking, tool
+              cards, intermediate text) below the summarized trace. */}
+          {children ? (
+            <div className="border-border/70 mt-2 border-t pt-2">
+              {childrenLabel ? (
+                <p className="text-muted-foreground mb-1.5 font-mono text-[10px] tracking-wider uppercase">
+                  {childrenLabel}
+                </p>
+              ) : null}
+              <div className="space-y-1.5">{children}</div>
+            </div>
+          ) : null}
         </div>
       </CollapsePanel>
     </div>

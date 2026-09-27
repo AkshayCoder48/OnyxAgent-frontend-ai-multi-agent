@@ -42,15 +42,14 @@ interface UseChatOptions {
   onConversationCreated?: (conversationId: string) => void;
 }
 
-const DEFAULT_SYSTEM_PROMPT =
-  "You are a helpful AI assistant. You have access to tools — call them using the FUNCTION-CALLING API (the tool_calls mechanism) when they would help answer the user's request. NEVER write tool calls as plain text (e.g. 'Thought: ... Action: run_terminal Input: {...}'). ALWAYS use the tool-calling mechanism. Be concise.";
-
-// AI Framework presets — each changes the system prompt to match the
-// framework's conventions and behavior patterns.
+// The system-prompt base for every turn: the Onyx AI framework prompt.
+// Onyx AI is OnyxAgent's native agent framework — and the ONLY framework;
+// there is no framework selection anymore, so this preset is always used
+// unless the user enables a custom system-prompt override in settings.
 //
-// CRITICAL: ALL framework presets MUST instruct the AI to use the
-// FUNCTION-CALLING API (not text) to invoke tools (see the original long
-// comment in git history).
+// CRITICAL: the prompt MUST instruct the AI to use the FUNCTION-CALLING
+// API (not text) to invoke tools (see the original long comment in git
+// history).
 // Beta V1.2 — mandatory web research + inline citations. Appended to every
 // turn's system prompt so the agent ALWAYS grounds factual answers in a live
 // web search and cites sources with [n] markers.
@@ -61,47 +60,16 @@ const WEB_RESEARCH_DIRECTIVE = `## Web Research & Citations (MANDATORY)
 - Use web_fetch to deep-read a promising result when a short snippet is not enough.
 - Purely creative tasks (write a story, refactor this file) do not need citations — but anything you state as fact does.`;
 
-const FRAMEWORK_PROMPTS: Record<string, string> = {
-  default: DEFAULT_SYSTEM_PROMPT,
-  // Onyx AI — OnyxAgent's native agent framework preset (renamed from the
-  // legacy "pydantic_ai" option; stored values are normalized on read).
-  onyx_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+// Onyx AI — OnyxAgent's native agent framework (renamed from the legacy
+// "pydantic_ai" option; stored values are normalized on read). This is THE
+// framework prompt: Onyx AI is the only framework the app uses.
+const ONYX_AI_SYSTEM_PROMPT = `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
 Follow Onyx AI conventions:
 - Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
 - Structure your responses clearly with markdown
 - When using tools, explain what you're doing briefly
 - Handle errors gracefully and suggest alternatives
-- Be precise and type-safe in your reasoning`,
-  // Legacy alias: installs that stored "pydantic_ai" before the rename get
-  // the Onyx AI preset (same behavior, new name).
-  pydantic_ai: `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
-Follow Onyx AI conventions:
-- Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
-- Structure your responses clearly with markdown
-- When using tools, explain what you're doing briefly
-- Handle errors gracefully and suggest alternatives
-- Be precise and type-safe in your reasoning`,
-  langchain: `You are an AI agent powered by LangChain. You have access to tools through LangChain's agent framework.
-Follow LangChain conventions:
-- Use the ReAct (Reasoning + Acting) pattern: think about what to do, call a tool, observe the result, repeat
-- CRITICAL: Call tools using the FUNCTION-CALLING API. NEVER write "Thought:", "Action:", "Input:", "Observation:", or "Final Answer:" as text. The ReAct pattern is a reasoning framework — reason internally, then invoke tools via the tool-calling mechanism, NOT by writing text.
-- Chain tool calls together when needed
-- Use memory of previous interactions to provide context-aware responses
-- Be transparent about your reasoning process in your text responses, but tool invocations MUST go through the function-calling API`,
-  crewai: `You are a CrewAI agent working as part of a crew. You have specific tools and a role to fulfill.
-Follow CrewAI conventions:
-- Focus on your role: research, analyze, create, or execute
-- Use tools by calling them through the FUNCTION-CALLING API. NEVER write tool calls as text.
-- Report findings clearly and concisely
-- Collaborate effectively by sharing context
-- Deliver structured, actionable outputs`,
-  openai_assistants: `You are an OpenAI Assistant with access to tools. Follow OpenAI Assistants API conventions:
-- Use FUNCTION CALLING to interact with available tools. NEVER write tool calls as text.
-- Provide clear, helpful responses
-- When tools return results, analyze them and continue the conversation
-- Be concise but thorough
-- Use markdown formatting for readability`,
-};
+- Be precise and type-safe in your reasoning`;
 
 /**
  * Backendless chat hook — now a thin adapter over the ExecutionHub.
@@ -259,16 +227,15 @@ export function useChat(options: UseChatOptions = {}) {
         );
       }
 
-      // Load user settings (system prompt, framework, auto-approve, etc.)
+      // Load user settings (system prompt, auto-approve, etc.)
       const settings = await settingsService.get(userId);
 
-      // System prompt: user override (if enabled) → framework preset → default
-      const framework = settings.ai_framework ?? "default";
-      const frameworkPrompt = FRAMEWORK_PROMPTS[framework] ?? FRAMEWORK_PROMPTS.default;
+      // System prompt: user override (if enabled) → Onyx AI framework prompt
+      // (Onyx AI is the only framework — no selection anymore).
       const basePrompt =
         (settings.system_prompt_enabled && settings.system_prompt
           ? settings.system_prompt
-          : frameworkPrompt) ?? "";
+          : ONYX_AI_SYSTEM_PROMPT) ?? "";
       const systemPrompt = basePrompt.trim()
         ? `${basePrompt.trim()}\n\n${WEB_RESEARCH_DIRECTIVE}`
         : WEB_RESEARCH_DIRECTIVE;

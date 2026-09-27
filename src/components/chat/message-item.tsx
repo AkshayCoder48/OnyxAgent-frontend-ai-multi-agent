@@ -5,7 +5,8 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import type { ChatMessage, ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
-import { WorkedPanel, deriveGenerationDurationMs } from "./worked-panel";
+import { WorkingTimeline, deriveGenerationDurationMs } from "./working-timeline";
+import { useTypewriter } from "@/components/assistant-ui/elements/letter-stream";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { CopyButton } from "./copy-button";
@@ -187,6 +188,13 @@ function TextBubble({
    *  gate ("Creating …" line → cross-fade into the rendered block). */
   isStreaming?: boolean;
 }) {
+  // SINGLE-LETTER STREAMING (user spec): while this bubble streams, the
+  // text is buffered and revealed letter by letter — a 0.5s initial hold,
+  // then one smooth adaptive letter flow with fade-in, regardless of how
+  // the SSE chunks arrived. Settled/hydrated messages are a pure
+  // pass-through (no timers, full text immediately).
+  const { text: revealedText } = useTypewriter(text, Boolean(isStreaming));
+
   // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
   // (text / genui / text / genui / ...) so interleaved text between multiple
   // GenUI blocks is preserved.
@@ -196,7 +204,7 @@ function TextBubble({
   // persisted messages re-rendered after a refresh — an unterminated block
   // is treated as CLOSED so a wrongly-written close marker still renders
   // the card instead of leaking raw `<<<genui>>>` JSON as markdown.
-  const { segments } = useGenUIFromText(text, !isStreaming);
+  const { segments } = useGenUIFromText(revealedText, !isStreaming);
 
   if (isUser) {
     // HIDDEN UPLOAD TAGS (File Persistence PRD §30): persisted user messages
@@ -204,6 +212,18 @@ function TextBubble({
     // the AI + attachment reconstruction. The user must NEVER see it — the
     // bubble renders the stripped text; the FileCard chips render above it.
     const displayText = stripUploadTags(text);
+    // QUOTED REPLY (assistant-ui "Quote" element flow): a message sent via
+    // the quote toolbar carries the quoted assistant text as leading
+    // markdown `> ` blockquote lines. Render them as a styled quote block
+    // (left accent bar, italic, muted) instead of literal ">" characters.
+    const quoteMatch = displayText.match(/^((?:>[^\n]*\n?)+)([\s\S]*)$/);
+    const quotedLines = quoteMatch?.[1];
+    const restText = quoteMatch?.[2]?.replace(/^\n+/, "") ?? displayText;
+    const quotedBlock = quotedLines
+      ?.split("\n")
+      .map((l) => l.replace(/^>\s?/, ""))
+      .join("\n")
+      .trim();
     // User turn — right-aligned soft-terracotta card with a small tail
     // (Terra spec: #F0E3D5 fill, #EAD6C4 hairline, ink text, rounded-tr-sm).
     return (
@@ -217,13 +237,20 @@ function TextBubble({
           color: "var(--chat-user-fg, var(--color-foreground))",
         }}
       >
-        {displayText ? (
-          <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">{displayText}</p>
-        ) : (
+        {quotedBlock ? (
+          <blockquote
+            className="mb-1.5 rounded-r-md border-l-2 border-l-primary/70 bg-background/40 py-1 pr-2 pl-2.5 text-[13px] leading-relaxed italic opacity-80"
+          >
+            <p className="line-clamp-4 break-words whitespace-pre-wrap">{quotedBlock}</p>
+          </blockquote>
+        ) : null}
+        {restText ? (
+          <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">{restText}</p>
+        ) : !quotedBlock ? (
           <p className="text-sm leading-relaxed break-words whitespace-pre-wrap overflow-wrap-anywhere text-inherit">
             <span className="opacity-70">Sent an attachment</span>
           </p>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -250,7 +277,7 @@ function TextBubble({
           )}
         >
           <MarkdownContent
-            content={stripFunctionCallTags(text)}
+            content={stripFunctionCallTags(revealedText)}
             onCiteClick={onCiteClick}
             sources={sources}
             showCursor={showCursor}
@@ -266,7 +293,7 @@ function TextBubble({
   const renderSegments = hasLiveSentinels
     ? segments
     : persistedSpec
-      ? [{ type: "text" as const, text }, { type: "genui" as const, spec: persistedSpec, streaming: false }]
+      ? [{ type: "text" as const, text: revealedText }, { type: "genui" as const, spec: persistedSpec, streaming: false }]
       : segments;
 
   // Determine if cursor should show on the last text segment
@@ -957,6 +984,7 @@ export const MessageItem = React.memo(function MessageItem({
       )}
     >
       <div
+        data-quoteable={isUser ? undefined : "true"}
         className={cn(
           "min-w-0 space-y-2",
           isUser
@@ -1173,14 +1201,17 @@ export const MessageItem = React.memo(function MessageItem({
                   };
                   const segments = assembleSegments(renderItems);
 
-                  // ── "WORKED {TIME}" COLLAPSE PANEL (PRD §§12–22): once the
-                  // generation settles, ALL of its activity (thinking, tool
-                  // calls, intermediate text) collapses into ONE expandable
-                  // "Worked {duration}" panel. The FINAL user-facing answer
-                  // stays outside (rendered below the panel). While streaming,
-                  // the live activity UI remains exactly as before — the panel
-                  // wraps the SAME event renderers, never a second system.
-                  const settled = !isLastStreaming;
+                  // ── THE WORKING TIMELINE (assistant-ui ToolTimeline element):
+                  // the WHOLE process — thinking, tool calls, intermediate
+                  // text — lives inside ONE working panel, live AND after
+                  // settle ("add this when AI is working … the whole process
+                  // should be in this working's UI, not only steps").
+                  //  - While streaming: "Working" shimmer trigger, expanded,
+                  //    live step trace (verb · chip per call) + file stats +
+                  //    the REAL event renderers streaming beneath.
+                  //  - On settle: collapses to "Worked 18s · N steps · N
+                  //    files changed"; expanding reveals the same real events.
+                  // The FINAL user-facing answer stays OUTSIDE (below).
                   const textItemCount = renderItems.reduce(
                     (n, it) => n + (it.kind === "text" ? 1 : 0),
                     0,
@@ -1193,11 +1224,10 @@ export const MessageItem = React.memo(function MessageItem({
                   // single final answer. A plain one-shot text answer gets NO
                   // panel (nothing to collapse).
                   const workedMode =
-                    settled &&
-                    (hasToolWork ||
-                      hasThinking ||
-                      textItemCount > 1 ||
-                      (textItemCount === 0 && renderItems.length > 0));
+                    hasToolWork ||
+                    hasThinking ||
+                    textItemCount > 1 ||
+                    (textItemCount === 0 && renderItems.length > 0);
 
                   let finalTextItem: RoundRenderItem | null = null;
                   let panelItems: RoundRenderItem[] = renderItems;
@@ -1223,9 +1253,16 @@ export const MessageItem = React.memo(function MessageItem({
                     const panelSegments = assembleSegments(panelItems);
                     const panelMultiRound = panelSegments.length > 1;
                     const panelThinkingParts = panelSegments[0]?.thinkingParts ?? [];
+                    // Every tool call of this generation, in order — the
+                    // step trace + file stats derive from them.
+                    const generationToolCalls = (message.parts ?? [])
+                      .map((p) => (p.type === "tool" ? p.toolCall : undefined))
+                      .filter((tc): tc is NonNullable<typeof tc> => Boolean(tc));
                     return (
                       <>
-                        <WorkedPanel
+                        <WorkingTimeline
+                          toolCalls={generationToolCalls}
+                          streaming={isLastStreaming}
                           durationMs={deriveGenerationDurationMs(message)}
                           failed={message.generation?.failed}
                           stopped={message.generation?.stopped}
@@ -1236,7 +1273,7 @@ export const MessageItem = React.memo(function MessageItem({
                                   key={`worked-round-${seg.round}-${si}`}
                                   segment={seg}
                                   isLastSegment={si === panelSegments.length - 1}
-                                  isStreaming={false}
+                                  isStreaming={isLastStreaming}
                                   isUser={isUser}
                                   turnId={message.conversationId}
                                   onCiteClick={onCiteClick}
@@ -1250,10 +1287,14 @@ export const MessageItem = React.memo(function MessageItem({
                                 return (
                                   <>
                                     {panelThinkingParts.map((part) => {
+                                      // Live phase only while this part's
+                                      // reasoning stream is genuinely open.
+                                      const partActive =
+                                        isLastStreaming && part.reasoningEndedAt === undefined;
                                       if (part.type === "thinking") {
-                                        return <ThinkingBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={false} />;
+                                        return <ThinkingBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={partActive} />;
                                       }
-                                      return <ReasoningBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={false} />;
+                                      return <ReasoningBlock key={part.id} text={part.content ?? ""} open={false} isStreaming={partActive} />;
                                     })}
                                     {panelItems.map((item) => {
                                       if (item.kind === "todoPanel") {
@@ -1264,12 +1305,20 @@ export const MessageItem = React.memo(function MessageItem({
                                         );
                                       }
                                       if (item.kind === "toolGroup") {
+                                        // Inside the working panel each call
+                                        // renders as its own ToolCallCard —
+                                        // the step trace above already
+                                        // summarizes the group.
                                         return (
-                                          <CollapsibleToolGroup
-                                            key={`worked-group-${item.parts[0]!.id}`}
-                                            parts={item.parts}
-                                            turnId={message.conversationId}
-                                          />
+                                          <React.Fragment key={`worked-group-${item.parts[0]!.id}`}>
+                                            {item.parts.map((p) =>
+                                              p.toolCall ? (
+                                                <div key={p.id} className="w-full">
+                                                  <ToolCallCard toolCall={p.toolCall} turnId={message.conversationId} />
+                                                </div>
+                                              ) : null,
+                                            )}
+                                          </React.Fragment>
                                         );
                                       }
                                       if (item.kind === "tool" && item.part.toolCall) {
@@ -1294,19 +1343,20 @@ export const MessageItem = React.memo(function MessageItem({
                                   </>
                                 );
                               })()}
-                        </WorkedPanel>
+                        </WorkingTimeline>
 
-                        {/* The FINAL answer — outside the collapsed work panel. */}
+                        {/* The FINAL answer — outside the working panel.
+                            Streams live below the panel while generating. */}
                         {finalTextItem && finalTextItem.kind === "text" && (
                           <TextBubble
                             key={finalTextItem.part.id}
                             text={finalTextItem.part.content ?? ""}
-                            showCursor={false}
+                            showCursor={isLastStreaming}
                             isUser={isUser}
                             onCiteClick={onCiteClick}
                             sources={sources}
                             genuiNodes={!message.isStreaming ? message.genui : undefined}
-                            isStreaming={false}
+                            isStreaming={isLastStreaming}
                           />
                         )}
                       </>

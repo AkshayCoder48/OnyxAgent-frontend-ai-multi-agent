@@ -15,6 +15,8 @@ import { FileCard, FileCardImage } from "./file-card";
 import { getFileUrl } from "@/lib/file-api";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { ComposerQuotePreview } from "@/components/assistant-ui/elements";
+import { useQuoteStore } from "@/stores";
 
 interface ChatInputProps {
   onSend: (message: string, fileIds?: string[], files?: FileUploadResponse[]) => void;
@@ -56,6 +58,11 @@ export function ChatInput({
   const [sendPulse, setSendPulse] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // QUOTED REPLY (assistant-ui "Quote" element flow): text quoted from an
+  // assistant message rides above the composer until sent (or dismissed).
+  const quote = useQuoteStore((s) => s.quote);
+  const clearQuote = useQuoteStore((s) => s.clearQuote);
 
   const showPalette = !!slashContext && message.startsWith("/") && !message.includes("\n");
   const allCommands = commands ?? BUILTIN_COMMANDS;
@@ -130,11 +137,20 @@ export function ChatInput({
     if (!trimmed && attachedFiles.length === 0) return;
     if (disabled) return;
 
+    // A quoted reply carries the quoted assistant text as a markdown
+    // blockquote prefix — the user bubble renders it as a styled quote
+    // block, and the AI sees exactly what's being referenced.
+    const quotedPrefix = quote
+      ? `> ${quote.text.replace(/\n/g, "\n> ")}\n\n`
+      : "";
+    const outgoing = `${quotedPrefix}${trimmed || "Analyze the attached file(s)"}`;
+
     const fileIds = attachedFiles.length > 0 ? attachedFiles.map((f) => f.id) : undefined;
     const files = attachedFiles.length > 0 ? attachedFiles : undefined;
-    onSend(trimmed || "Analyze the attached file(s)", fileIds, files);
+    onSend(outgoing, fileIds, files);
     setMessage("");
     setAttachedFiles([]);
+    clearQuote();
     pulseComposer();
   };
 
@@ -223,6 +239,10 @@ export function ChatInput({
           onPick={runSlashCommand}
         />
       )}
+
+      {/* QUOTE PREVIEW — quoted assistant text rides above the composer
+          (assistant-ui "Quote" element) until sent or dismissed. */}
+      {quote && <ComposerQuotePreview quote={quote} onDismiss={clearQuote} className="pb-2" />}
 
       {/* Attachment preview row */}
       {attachedFiles.length > 0 && (

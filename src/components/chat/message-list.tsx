@@ -4,6 +4,8 @@ import * as React from "react";
 import type { ChatMessage } from "@/types";
 import { MessageItem } from "./message-item";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
+import { SelectionToolbar } from "@/components/assistant-ui/elements";
+import { useQuoteStore } from "@/stores";
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -116,6 +118,7 @@ function hasResearchPart(message: ChatMessage): boolean {
 
 export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerating = false }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
+  const setQuote = useQuoteStore((s) => s.setQuote);
 
   // PERF: Find the last assistant message index once (O(n) single pass)
   // instead of on every render's map callback.
@@ -142,6 +145,11 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerat
 
   return (
     <div className="space-y-0">
+      {/* QUOTE SELECTION TOOLBAR (assistant-ui "Quote" element): one
+          instance for the whole transcript — it portals to body and appears
+          above any text selected inside an assistant message
+          ([data-quoteable]). Quoting carries the text into the composer. */}
+      <SelectionToolbar onQuote={setQuote} />
       {messages.map((message, index) => {
         const groupPos = groupPositions.get(message.id);
         const isLastInGroup = !groupPos || groupPos === "last" || groupPos === "single";

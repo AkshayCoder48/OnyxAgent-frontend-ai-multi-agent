@@ -369,14 +369,6 @@ export default function ConfigSettingsPage() {
         />
       )}
 
-      {/* AI Framework selector */}
-      <SectionCard
-        title="AI framework"
-        description="Choose the AI agent framework preset. Changes the system prompt to match the framework's conventions. Applies instantly — no reset needed."
-      >
-        <AIFrameworkSection />
-      </SectionCard>
-
       {/* E2B Sandbox + SkillsMP + LangSearch API keys moved to the
           dedicated /settings/api-keys page (PRD §11). */}
 
@@ -1235,106 +1227,6 @@ function DataManagementSection() {
           Export downloads all your data (conversations, files, settings, skills) as a JSON file.
           Import restores from a previously exported file. All files are included in exports (no size limit).
         </span>
-      </div>
-    </div>
-  );
-}
-
-
-
-// AI Framework selector — changes the system prompt to match the framework.
-function AIFrameworkSection() {
-  const { user } = useAuth();
-  const [framework, setFramework] = useState("default");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const f = await settingsService.getAIFramework(user.id);
-        setFramework(f);
-      } catch {
-        // ignore
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [user]);
-
-  const changeFramework = async (newFramework: string) => {
-    if (!user || saving) return;
-    setSaving(true);
-    setFramework(newFramework);
-    try {
-      await settingsService.setAIFramework(user.id, newFramework);
-      const labels: Record<string, string> = {
-        default: "Default Assistant",
-        onyx_ai: "Onyx AI",
-        langchain: "LangChain",
-        crewai: "CrewAI",
-        openai_assistants: "OpenAI Assistants",
-      };
-      toast.success(`Framework: ${labels[newFramework] ?? newFramework}`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
-      setFramework(framework);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>;
-  }
-
-  const frameworks = [
-    { value: "default", label: "Default Assistant", description: "Generic helpful AI assistant. No framework-specific behavior." },
-    { value: "onyx_ai", label: "Onyx AI", description: "OnyxAgent's native agent framework. Type-safe agent with structured tool calls. Precise, validated reasoning." },
-    { value: "langchain", label: "LangChain", description: "ReAct pattern: Think → Act → Observe → Answer. Chain tool calls with transparent reasoning." },
-    { value: "openai_assistants", label: "OpenAI Assistants", description: "OpenAI Assistants API conventions. Function calling, clear structured responses." },
-    { value: "crewai", label: "CrewAI", description: "Role-based crew agent. Focused on specific tasks (research, analyze, create, execute)." },
-  ];
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <AlertTriangle className="h-3.5 w-3.5" />
-        <span>
-          The framework preset changes the system prompt to match the
-          framework&apos;s conventions. Applies on the next chat turn — no
-          reset needed. Your custom system prompt (if enabled) overrides this.
-        </span>
-      </div>
-      <div className="space-y-2">
-        {frameworks.map((fw) => (
-          <label
-            key={fw.value}
-            htmlFor={`ai-framework-${fw.value}`}
-            className={cn(
-              "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
-              framework === fw.value
-                ? "border-primary bg-primary/5"
-                : "border-border hover:bg-muted/50",
-              saving && "pointer-events-none opacity-50",
-            )}
-          >
-            <input
-              type="radio"
-              id={`ai-framework-${fw.value}`}
-              name="ai-framework"
-              value={fw.value}
-              checked={framework === fw.value}
-              onChange={() => changeFramework(fw.value)}
-              className="mt-1"
-            />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium text-foreground">{fw.label}</div>
-              <div className="text-xs text-muted-foreground mt-0.5">{fw.description}</div>
-            </div>
-          </label>
-        ))}
       </div>
     </div>
   );

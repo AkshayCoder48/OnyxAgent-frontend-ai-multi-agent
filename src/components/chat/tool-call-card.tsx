@@ -25,7 +25,7 @@ import {
   Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ShimmerLabel, chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
+import { ShimmerLabel, chipClass, CollapsePanel, LetterStream, useTypewriter, LinkPreview } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
@@ -187,6 +187,16 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
 
   const isShowTodo = toolCall.name === "show_todo";
   const isManageTodo = toolCall.name === "manage_todo" || toolCall.name === "manage_todos";
+  // LINK PREVIEW (assistant-ui "Link preview" element): the URL a web
+  // fetch read unfurls into a compact card beneath the line — the
+  // destination is the payload of a fetch, always visible (content, not
+  // chrome) even in simple mode.
+  const fetchUrlPreview = useMemo(() => {
+    if (!isCompleted) return null;
+    if (toolCall.name !== "web_fetch" && toolCall.name !== "fetch_url") return null;
+    const url = typeof toolCall.args?.url === "string" ? toolCall.args.url : "";
+    return /^https?:\/\//.test(url) ? url : null;
+  }, [isCompleted, toolCall.name, toolCall.args]);
   // Merged manage_memory actions keep the old per-tool rendering paths:
   // save → "added" chip, list → "existing" chips, search → disclosure chips.
   const memoryAction = toolCall.name === "manage_memory" ? String(toolCall.args?.action ?? "") : null;
@@ -275,6 +285,9 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
+      {fetchUrlPreview && (
+        <LinkPreview href={fetchUrlPreview} layout="compact" className="px-1.5 sm:px-2" />
+      )}
       {isAskUser && (
         <AskUserResult
           args={toolCall.args}
@@ -888,27 +901,17 @@ function tailText(s: string | undefined, max: number = STREAM_TAIL_BYTES): strin
   return "…" + s.slice(s.length - max);
 }
 
-/** Line-grouped streaming text (onyx butter-streaming): every logical line
- *  is its own inline span with a stable line-index key, so appended text
- *  extends the current line's span (the fade never restarts) and each NEW
- *  line plays the `onyx-stream-line` blue-tint fade exactly once. Inline
- *  wrappers are layout-invisible — no height/scroll jitter.
- *  `tint: false` keeps class colors (e.g. stderr red) and fades opacity
- *  only. */
+/** Live streaming text (SINGLE-LETTER streaming, user spec): useTypewriter
+ *  buffers the growing text and reveals it one character at a time — 0.5s
+ *  initial hold, adaptive pace — while LetterStream gives every fresh
+ *  letter a motion-blur + fade-in (`.letter-in`). `tint: false` keeps error
+ *  red (the color rides `className`). */
 function StreamLines({ text, tint = true, className }: { text: string; tint?: boolean; className?: string }) {
-  const lines = text.split("\n");
+  const { text: revealed, freshFrom, animating } = useTypewriter(text, true);
   return (
-    <>
-      {lines.map((line, i) => (
-        <span
-          key={i}
-          className={cn("onyx-stream-line", !tint && "onyx-stream-line-plain", className)}
-        >
-          {line}
-          {i < lines.length - 1 ? "\n" : null}
-        </span>
-      ))}
-    </>
+    <span className={cn(tint ? "text-foreground/85" : undefined, className)}>
+      <LetterStream text={revealed} freshFrom={freshFrom} animating={animating} />
+    </span>
   );
 }
 

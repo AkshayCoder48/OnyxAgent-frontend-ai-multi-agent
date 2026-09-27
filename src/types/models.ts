@@ -139,7 +139,9 @@ export interface UserSettings {
   file_system_mode?: "auto" | "local" | "hopx";
   /** Sandbox allocation strategy: "shared" or "separate". */
   sandbox_mode?: "shared" | "separate";
-  /** AI framework preset — changes the system prompt to match the framework. */
+  /** @deprecated Framework selection removed — the app always uses Onyx AI
+   *  (OnyxAgent's native agent framework). Legacy field; kept only so stored
+   *  values normalize to "onyx_ai". */
   ai_framework?: string;
   /** Default model name (e.g. "gpt-4o-mini") — stored under `extra`. */
   default_model?: string | null;

@@ -43,3 +43,11 @@ export {
   type GenerativeUILibrary,
   type GenerativeUINode as GenerativeUISpecNode,
 } from "./generative-ui";
+export { LinkPreview, extractFirstUrl, extractUrls, type LinkPreviewProps } from "./link-preview";
+export { SelectionToolbar, ComposerQuotePreview } from "./quote-reply";
+export {
+  useTypewriter,
+  LetterStream,
+  type TypewriterOptions,
+  type TypewriterState,
+} from "./letter-stream";

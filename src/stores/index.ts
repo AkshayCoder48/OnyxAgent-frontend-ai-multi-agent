@@ -10,3 +10,4 @@ export { useKBSelectionStore } from "./kb-selection-store";
 export { useSourcesPanelStore } from "./sources-panel-store";
 export { useResearchStore } from "./research-store";
 export { useLogStore } from "./log-store";
+export { useQuoteStore } from "./quote-store";

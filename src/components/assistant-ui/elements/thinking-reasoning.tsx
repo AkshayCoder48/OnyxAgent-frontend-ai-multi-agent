@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import styles from "./ThinkingReasoning.module.css";
+import { useTypewriter, LetterStream } from "./letter-stream";
 
 /**
  * ThinkingReasoning — an animated, collapsible thinking block (AICSS
@@ -35,29 +36,22 @@ const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
 const FADE = 16; // top/bottom fade once the viewport is capped
 
 /**
- * The live sentence's words: all plain except the newest few, which render
- * tinted blue and settle into the normal ink over ~900ms as they leave the
- * trailing window (onyx butter-streaming — matches the main text recipe).
- * A caret rides at the end while streaming. Word spans keep stable
- * word-index keys so a word leaving the window transitions color rather
- * than remounting.
+ * The live sentence streams in LETTER BY LETTER (user spec: "single letter
+ * streaming … with motion blur and fade-in … like thinking and all"):
+ * useTypewriter buffers the growing sentence and reveals one character at a
+ * time; LetterStream fades + blurs each fresh letter in exactly once. The
+ * FIRST sentence of a thinking block holds the spec's 0.5s stream-start
+ * delay; later sentences flow with a tiny 80ms pacing gap (the delay is a
+ * stream-start event, not a per-sentence tax). A caret rides at the end
+ * while streaming.
  */
-const TINT_WINDOW = 5;
-
-function StreamingSentence({ text }: { text: string }) {
-  const words = text.split(" ").filter(Boolean);
-  const tintFrom = Math.max(0, words.length - TINT_WINDOW);
+function StreamingSentence({ text, holdMs }: { text: string; holdMs: number }) {
+  const { text: revealed, freshFrom, animating } = useTypewriter(text, true, {
+    initialDelayMs: holdMs,
+  });
   return (
     <>
-      {words.map((w, wi) => (
-        <span
-          key={wi}
-          className={styles.trWord + (wi >= tintFrom ? " " + styles.trWordTint : "")}
-        >
-          {w}
-          {wi < words.length - 1 ? " " : ""}
-        </span>
-      ))}
+      <LetterStream text={revealed} freshFrom={freshFrom} animating={animating} />
       <span className={styles.trCaret} aria-hidden="true" />
     </>
   );
@@ -191,7 +185,7 @@ export function ThinkingReasoning({
               {sentences.slice(0, count).map((line, i) => (
                 <p key={i} className={styles.trSentence}>
                   {!done && i === count - 1 ? (
-                    <StreamingSentence text={line} />
+                    <StreamingSentence text={line} holdMs={count === 1 ? 500 : 80} />
                   ) : (
                     line
                   )}

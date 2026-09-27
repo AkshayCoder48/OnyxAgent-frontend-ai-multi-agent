@@ -1054,7 +1054,9 @@
   .glow-breathe,
   .pulse-dot,
   .flow-dash,
-  .comet {
+  .comet,
+  .quote-toolbar-in,
+  .letter-in {
     animation: none !important;
   }
   .reveal {
@@ -3212,5 +3214,52 @@ body.sidebar-open {
   [role="menu"],
   [role="tooltip"] {
     transition: none !important;
+  }
+}
+
+/* ===== Quote selection toolbar + link preview (assistant-ui elements) ===== */
+
+/* Floating quote toolbar — fades + scales in above the selected text. The
+   static transform mirrors the keyframes' end state, so killing the
+   animation under prefers-reduced-motion (the class list above) still lands
+   the toolbar exactly where it belongs. */
+.quote-toolbar-in {
+  transform: translate(-50%, -100%);
+  animation: quote-toolbar-in 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes quote-toolbar-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -100%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%) scale(1);
+  }
+}
+
+/* ===== Letter stream — single-letter typewriter (motion blur + fade) =====
+   Every freshly revealed letter of a streaming surface (thinking text, tool
+   output, captions) mounts as a .letter-in span exactly once (stable index
+   keys): it fades from transparent + 3px blur into ink over ~280ms. Pair
+   with useTypewriter/LetterStream — chars outside the fresh window render
+   as plain text, so long streams carry no per-letter DOM once settled. */
+.letter-in {
+  display: inline-block;
+  animation: letter-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes letter-in {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateY(0.08em);
+  }
+  55% {
+    filter: blur(0.5px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
   }
 }

@@ -1,10 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { ArrowUpRight, Code2, FileSearch, Globe, Sparkles, Wrench, Brain } from "lucide-react";
 
 import { useAuth } from "@/hooks";
-import { settingsService } from "@/lib/services";
 
 const PROMPTS = [
   {
@@ -48,27 +46,7 @@ interface ChatEmptyStateProps {
 
 export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
   const { user } = useAuth();
-  const [frameworkLabel, setFrameworkLabel] = useState("OnyxAgent");
   const firstName = user?.full_name?.split(" ")[0] || user?.email?.split("@")[0];
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const fw = await settingsService.getAIFramework(user.id);
-        const labels: Record<string, string> = {
-          default: "OnyxAgent",
-          onyx_ai: "Onyx AI",
-          langchain: "LangChain",
-          crewai: "CrewAI",
-          openai_assistants: "OpenAI Assistants",
-        };
-        setFrameworkLabel(labels[fw] ?? "OnyxAgent");
-      } catch {
-        // keep default
-      }
-    })();
-  }, [user]);
 
   return (
     /* SCROLLER + m-auto CENTERING (mobile logo-visibility fix): the old
@@ -141,7 +119,7 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
 
         {/* Footer */}
         <div className="mt-3 flex items-center justify-center gap-2 text-[11px] text-muted-foreground sm:mt-6 sm:text-xs">
-          <span>Powered by {frameworkLabel}</span>
+          <span>Powered by Onyx AI Framework</span>
           <span>·</span>
           <span>Start chatting from the sidebar</span>
         </div>
