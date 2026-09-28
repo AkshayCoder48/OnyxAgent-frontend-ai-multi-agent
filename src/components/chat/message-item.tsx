@@ -20,14 +20,14 @@ import type { SourceItem } from "@/lib/chat-sources";
 import { FileCard, FileCardImage } from "./file-card";
 import { CitationsFooter } from "./citations";
 import { FilesFooter, deriveStreamingTree } from "./streaming-file-tree";
-import { formatDuration, useLiveElapsed } from "./tool-duration";
+import { formatDuration } from "./tool-duration";
 import {
+  CollapsePanel,
   Orb,
   ShimmerLabel,
   ThinkingIndicator,
   ThinkingReasoning,
 } from "@/components/assistant-ui/elements";
-import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
 import { GenUICreationGate } from "@/components/genui/GenUICreationGate";
@@ -60,23 +60,21 @@ function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
 }
 
 /**
- * ThinkingBlock / ReasoningBlock — collapsible reasoning display.
- *
- * Built on the assistant-ui "ThinkingReasoning" element (AICSS recipe): a
- * shimmering label expands to reveal the agent's reasoning sentences, then
- * folds into a "Thought for Ns" / "Reasoned for Ns" summary once the turn
- * settles. Frameless basic-text UI — no card, no border — per the reference
- * design. Elapsed seconds are measured locally from the moment streaming
- * starts until it ends.
+ * ThinkingBlock / ReasoningBlock — the CLASSIC (tool-less) reasoning
+ * display: the full ThinkingReasoning element with its own header — the
+ * live reasoning streams visibly, letter by letter ("Thinking…" header),
+ * then folds into a "Thought for Ns" / "Reasoned for Ns" summary once
+ * the stream ends. Turns WITH tool calls stream their reasoning inside
+ * the WorkingPanel instead (PanelThinkingRun, headerless live mode).
+ * Elapsed seconds are measured locally from the moment streaming starts
+ * until it ends.
  */
 function ReasoningPanel({
   text,
-  open: _open,
   isStreaming,
   variant,
 }: {
   text: string;
-  open: boolean;
   isStreaming: boolean;
   variant: "thinking" | "reasoning";
 }) {
@@ -84,20 +82,9 @@ function ReasoningPanel({
 
   // Split the (possibly still-streaming) reasoning text into sentences —
   // the element reveals them row by row. PRD §5 (reasoning formatting):
-  // normalize ONLY unintended repeated whitespace (3+ blank lines → one
-  // paragraph break, long space runs → one space) — never a blanket trim
+  // normalize ONLY unintended repeated whitespace — never a blanket trim
   // on the raw stream, which would damage legitimate formatting.
-  const sentences = React.useMemo(() => {
-    const normalized = (text ?? "")
-      .replace(/\n{3,}/g, "\n\n") // collapse 3+ newlines to a paragraph break
-      .replace(/[^\S\n]{2,}/g, " ") // collapse space/tab runs (keep newlines)
-      .trim();
-    if (!normalized) return [] as string[];
-    return normalized
-      .split(/(?<=[.!?;])\s+/)
-      .map((s) => s.replace(/\s+/g, " ").trim())
-      .filter((s) => s.length > 0);
-  }, [text]);
+  const sentences = React.useMemo(() => splitReasoningSentences(text), [text]);
 
   // Measure how long the block has been / was streaming so the settled
   // summary can say "Thought for Ns".
@@ -144,11 +131,11 @@ function ReasoningPanel({
   );
 }
 
-function ThinkingBlock(props: { text: string; open: boolean; isStreaming: boolean }) {
+function ThinkingBlock(props: { text: string; isStreaming: boolean }) {
   return <ReasoningPanel {...props} variant="thinking" />;
 }
 
-function ReasoningBlock(props: { text: string; open: boolean; isStreaming: boolean }) {
+function ReasoningBlock(props: { text: string; isStreaming: boolean }) {
   return <ReasoningPanel {...props} variant="reasoning" />;
 }
 
@@ -166,18 +153,19 @@ function ResponseOrbGlyph({ size = 28 }: { size?: number }) {
 }
 
 /**
- * AgentStatusLine — THE one in-place execution status for a streaming
- * assistant message (timeline PRD §12–§14). Exactly one instance per
- * message, rendered at the END of the parts flow; it never stacks with
- * itself across transitions — the label updates in place:
+ * AgentStatusLine — THE one in-place execution status for a STREAMING
+ * assistant message WITHOUT tool calls (the classic flow and the legacy
+ * fallback). Exactly one instance per message, rendered at the END of the
+ * parts flow; it never stacks with itself across transitions — the label
+ * updates in place:
  *
- *   Thinking  — the model is generating (reasoning panel open elsewhere,
- *               opening text, or the final answer after tools).
+ *   Thinking  — the model is generating (opening text or the answer).
  *   Working   — a tool call is executing / its result is being awaited.
  *
- * The phase comes from `deriveAgentPhase` (pure, part-driven, §13
- * precedence). While a live reasoning stream is open the ThinkingReasoning
- * panel header IS the “Thinking…” status, so this line hides (no duplicate
+ * Turns WITH tool calls render the WorkingPanel instead — its trigger
+ * line IS the Thinking ⇄ Working status (plus "Worked {time}" at rest).
+ * While a live reasoning stream is open the ThinkingReasoning panel
+ * header IS the “Thinking…” status, so this line hides (no duplicate
  * status components). Settled messages render nothing (completed state).
  */
 function AgentStatusLine({ message }: { message: ChatMessage }) {
@@ -395,173 +383,257 @@ interface MessageItemProps {
   isRegenerating?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// WORKING PANEL (user spec, 2026-09-27) — ONE collapsible unit owning the
+// ENTIRE generation process of an assistant turn. See WorkingPanel below.
+// ---------------------------------------------------------------------------
+
+/** Content-payload tools that render a deliverable inline in their card
+ *  (charts, downloads, image previews, Q&A). A process holding one of
+ *  these does NOT force-collapse at settle — the deliverable must stay
+ *  visible (the same exception the old tool stacks had). */
+const PAYLOAD_TOOL_NAMES = new Set([
+  "create_chart",
+  "send_file",
+  "send_folder",
+  "preview_image",
+  "ask_user",
+]);
+
+/** One chronological step of the generation process, built by walking the
+ *  message parts (the execution timeline). Runs of consecutive thinking /
+ *  reasoning parts merge into ONE item while the run is open; tool and
+ *  text parts stay in place. Research/todo tools are already filtered out
+ *  of `parts` (they surface as the inline ResearchPanel instead). */
+type FlowItem =
+  | {
+      kind: "thinking";
+      partId: string;
+      text: string;
+      variant: "thinking" | "reasoning";
+      /** The reasoning stream is still open (no reasoningEndedAt stamp). */
+      open: boolean;
+      /** Round start stamp — drives the "Thought for Ns" duration. */
+      startedAt?: number;
+      /** reasoningEndedAt stamp of the run's last part. */
+      endedAt?: number;
+    }
+  | { kind: "tool"; partId: string; toolCall: import("@/types").ToolCall }
+  | { kind: "text"; partId: string; text: string };
+
+/** Walk the message parts into chronological FlowItems. A closed reasoning
+ *  run is never merged into — the next round's thinking starts a fresh
+ *  row (each "Thought for Ns" belongs to its own round). */
+function buildFlowItems(
+  parts: readonly import("@/types/chat").MessagePart[],
+): FlowItem[] {
+  const items: FlowItem[] = [];
+  for (const p of parts) {
+    if ((p.type === "thinking" || p.type === "reasoning") && p.content) {
+      const last = items[items.length - 1];
+      if (
+        last &&
+        last.kind === "thinking" &&
+        last.variant === p.type &&
+        last.open
+      ) {
+        last.text += "\n" + p.content;
+        last.open = p.reasoningEndedAt === undefined;
+        if (p.reasoningEndedAt !== undefined) last.endedAt = p.reasoningEndedAt;
+        if (p.roundStartedAt !== undefined && last.startedAt === undefined) {
+          last.startedAt = p.roundStartedAt;
+        }
+        continue;
+      }
+      items.push({
+        kind: "thinking",
+        partId: p.id,
+        text: p.content,
+        variant: p.type,
+        open: p.reasoningEndedAt === undefined,
+        startedAt: p.roundStartedAt,
+        endedAt: p.reasoningEndedAt,
+      });
+    } else if (p.type === "tool" && p.toolCall) {
+      items.push({ kind: "tool", partId: p.id, toolCall: p.toolCall });
+    } else if (p.type === "text" && p.content) {
+      items.push({ kind: "text", partId: p.id, text: p.content });
+    }
+  }
+  return items;
+}
+
+/** Split reasoning text into sentences for the ThinkingReasoning element
+ *  (timeline PRD §5: normalize ONLY unintended whitespace — 3+ blank lines
+ *  → one paragraph break, long space runs → one space — never a blanket
+ *  trim on the raw stream, which would damage legitimate formatting). */
+function splitReasoningSentences(text: string): string[] {
+  const normalized = (text ?? "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[^\S\n]{2,}/g, " ")
+    .trim();
+  if (!normalized) return [];
+  return normalized
+    .split(/(?<=[.!?;])\s+/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length > 0);
+}
+
 /**
- * CollapsibleToolGroup — TOOL STACKING (Beta V1.3): when 2+ consecutive tool
- * calls happen without any text between them, they collapse into ONE stack
- * line — "N steps · N files changed · 12s" — with a row of per-tool pills
- * (icon + short name + status dot; first 3 + "+N") so the group tells its
- * story WITHOUT expanding. Expanding reveals the tool call cards themselves
- * (ONE UI per tool call, in the display mode's style), stacked under a
- * timeline rail.
- *
- * The stack AUTO-EXPANDS while any tool in it runs (visibility into live
- * work), then auto-collapses when everything settles — unless the user
- * toggled it manually (their choice wins for the lifetime of the group).
+ * A reasoning run INSIDE the WorkingPanel. While the stream is open the
+ * sentences stream LIVE, letter by letter — HEADERLESS (the panel's own
+ * trigger line owns the "Thinking" status, so the two shimmer labels never
+ * stack). The moment reasoning ends, the same element folds into its
+ * "Thought for Ns" summary row (collapsed, expandable to re-read).
  */
-function CollapsibleToolGroup({
-  parts,
-  turnId,
+function PanelThinkingRun({
+  item,
+  streaming,
 }: {
-  parts: import("@/types/chat").MessagePart[];
-  turnId?: string | null;
+  item: Extract<FlowItem, { kind: "thinking" }>;
+  streaming: boolean;
 }) {
-  const [expanded, setExpanded] = React.useState(() =>
-    // Settled pages (reload/restore) with a content-payload tool mount OPEN.
-    parts.some(
-      (p) =>
-        p.type === "tool" &&
-        p.toolCall &&
-        (p.toolCall.name === "show_todo" ||
-          p.toolCall.name === "create_chart" ||
-          p.toolCall.name === "send_file" ||
-          p.toolCall.name === "send_folder" ||
-          p.toolCall.name === "preview_image" ||
-          p.toolCall.name === "ask_user"),
-    ),
+  const sentences = React.useMemo(
+    () => splitReasoningSentences(item.text),
+    [item.text],
   );
+  if (sentences.length === 0) return null;
+  const open = streaming && item.open;
+  const elapsed =
+    item.startedAt !== undefined && item.endedAt !== undefined
+      ? Math.max(0, (item.endedAt - item.startedAt) / 1000)
+      : 0;
+  return (
+    <ThinkingReasoning
+      sentences={sentences}
+      phase={open ? "thinking" : "done"}
+      elapsedSeconds={elapsed}
+      verb={item.variant === "thinking" ? "Thought" : "Reasoned"}
+      activeLabel={item.variant === "thinking" ? "Thinking…" : "Reasoning…"}
+      headerlessLive
+    />
+  );
+}
+
+/** "Worked {time}" resting summary for a settled turn. Prefers the
+ *  processor-stamped `generation` window; falls back to the part stamps
+ *  (legacy rows); a turn with no timing at all still says "Worked". */
+function workedSummary(message: ChatMessage): {
+  time: string | null;
+  failed: boolean;
+  stopped: boolean;
+} {
+  const g = message.generation;
+  if (g) {
+    return {
+      time: formatDuration(g.durationMs) || null,
+      failed: Boolean(g.failed),
+      stopped: Boolean(g.stopped),
+    };
+  }
+  let start: number | undefined;
+  let end: number | undefined;
+  for (const p of message.parts ?? []) {
+    if (p.roundStartedAt !== undefined && (start === undefined || p.roundStartedAt < start)) {
+      start = p.roundStartedAt;
+    }
+    if (p.roundEndedAt !== undefined && (end === undefined || p.roundEndedAt > end)) {
+      end = p.roundEndedAt;
+    }
+    if (p.reasoningEndedAt !== undefined && (end === undefined || p.reasoningEndedAt > end)) {
+      end = p.reasoningEndedAt;
+    }
+    if (p.type === "tool" && p.toolCall) {
+      if (p.toolCall.startedAt !== undefined && (start === undefined || p.toolCall.startedAt < start)) {
+        start = p.toolCall.startedAt;
+      }
+      if (p.toolCall.endedAt !== undefined && (end === undefined || p.toolCall.endedAt > end)) {
+        end = p.toolCall.endedAt;
+      }
+    }
+  }
+  return {
+    time:
+      start !== undefined && end !== undefined
+        ? formatDuration(Math.max(0, end - start)) || null
+        : null,
+    failed: false,
+    stopped: false,
+  };
+}
+
+/**
+ * WorkingPanel — ONE collapsible unit owning the ENTIRE generation process
+ * of an assistant turn (user spec, 2026-09-27):
+ *
+ *   Thinking ⇄ Working — while the turn streams, the trigger label is the
+ *   live phase: "Thinking" while the model reasons or generates, "Working"
+ *   while a tool executes — one line, switching in place, never a second
+ *   status row. The live reasoning STREAMS VISIBLY inside (letter by
+ *   letter, headerless); each round's thinking then folds into its own
+ *   "Thought for Ns" row the moment it ends. All tool calls, inner
+ *   thinking and texts generated during the process live inside — strict
+ *   chronological order (timeline PRD §25: array position is the truth).
+ *
+ *   The final answer (text after the last tool) streams at the tail of the
+ *   process while live — no mid-stream jumps: a tool arriving later simply
+ *   appends after it — then renders BELOW the panel once the turn settles
+ *   and the panel collapses into its "Worked {time}" resting row. No
+ *   PROCESS divider or label — nothing but the real event renderers.
+ */
+function WorkingPanel({
+  message,
+  hasDeliverables,
+  children,
+}: {
+  message: ChatMessage;
+  /** A payload tool (chart / download / preview / Q&A) or the live plan
+   *  panel keeps the panel from force-collapsing at settle. */
+  hasDeliverables: boolean;
+  /** The process content — thinking runs, tool cards, texts. */
+  children: React.ReactNode;
+}) {
+  const streaming = Boolean(message.isStreaming);
+  // Live phase: deriveAgentPhase returns null while a reasoning stream is
+  // open (the classic flow's ThinkingReasoning header owns the status
+  // there) — inside the panel the trigger owns it, so null ⇒ "Thinking".
+  const phase = streaming ? (deriveAgentPhase(message) ?? "thinking") : null;
+
+  const [expanded, setExpanded] = React.useState(streaming || hasDeliverables);
   const [userToggled, setUserToggled] = React.useState(false);
-  // Display mode wording — simple narrates in plain words ("steps", "didn't
-  // work"), technical counts tool calls and failures.
-  const displayMode = useToolDisplayStore((s) => s.mode);
-  const isSimple = displayMode === "simple";
-
-  const { toolParts, filesChanged, errorCount, anyRunning, settledCount, hasInlinePayload } =
-    React.useMemo(() => {
-      const tp = parts.filter((p) => p.type === "tool" && p.toolCall);
-      const tcs = tp.map((p) => p.toolCall!);
-      // Content-payload tools (todo plan, charts, downloads, Q&A, image
-      // previews) render their payload INSIDE the stack — a group holding
-      // one must not auto-collapse at settle, or the payload disappears.
-      const hasInlinePayload = tcs.some(
-        (tc) =>
-          tc.name === "show_todo" ||
-          ((tc.name === "manage_todo" || tc.name === "manage_todos") &&
-            typeof tc.result === "string" &&
-            tc.result.includes('"todos"')) ||
-          (tc.name === "manage_todo" &&
-            typeof tc.result === "object" &&
-            tc.result !== null &&
-            "todos" in (tc.result as Record<string, unknown>)) ||
-          tc.name === "create_chart" ||
-          tc.name === "send_file" ||
-          tc.name === "send_folder" ||
-          tc.name === "preview_image" ||
-          tc.name === "ask_user",
-      );
-      return {
-        toolParts: tp,
-        filesChanged: new Set(
-          tcs
-            .filter(
-              (tc) =>
-                tc.status === "completed" &&
-                (tc.name === "create_file" ||
-                  tc.name === "write_file" ||
-                  tc.name === "create_file_chunk" ||
-                  tc.name === "edit_file" ||
-                  tc.name === "delete_file" ||
-                  tc.name === "move_file" ||
-                  tc.name === "rename_file"),
-            )
-            .map((tc) => {
-              const p = typeof tc.args?.path === "string" ? tc.args.path : "";
-              return p || "";
-            })
-            .filter(Boolean),
-        ).size,
-        errorCount: tcs.filter((tc) => tc.status === "error").length,
-        anyRunning: tcs.some(
-          (tc) => tc.status === "running" || tc.status === "pending",
-        ),
-        settledCount: tcs.filter(
-          (tc) => tc.status === "completed" || tc.status === "error",
-        ).length,
-        hasInlinePayload,
-      };
-    }, [parts]);
-
-  // AUTO-EXPAND/COLLAPSE (render-time adjustment pattern — no effect, no
-  // cascading renders): expand the moment work starts, collapse when it all
-  // settles — UNLESS the group carries a content payload (todo plan, chart,
-  // download…), which must stay visible, or the user toggled it manually
-  // (their choice wins for the lifetime of the group).
-  const autoTarget = anyRunning ? true : hasInlinePayload;
+  // AUTO EXPAND/COLLAPSE (render-time adjustment — no effect, no cascading
+  // renders): expanded for the whole live stream, force-collapsed the
+  // moment the turn settles ("collapsed at end") — unless the process
+  // carries a deliverable, which must stay visible. A manual toggle during
+  // the stream wins until settle; after settle the user is free again.
+  const autoTarget = streaming;
   const [prevAuto, setPrevAuto] = React.useState(autoTarget);
   if (autoTarget !== prevAuto) {
     setPrevAuto(autoTarget);
-    if (!userToggled) setExpanded(autoTarget);
+    if (autoTarget) {
+      if (!userToggled) setExpanded(true);
+    } else if (!hasDeliverables) {
+      setExpanded(false);
+      setUserToggled(false);
+    }
   }
 
-  // Total span of the stack: first call's start → last settled call's end
-  // (ticks live while running via the shared elapsed hook).
-  const { spanStart, spanEnd } = React.useMemo(() => {
-    let start: number | undefined;
-    let end: number | undefined;
-    for (const p of toolParts) {
-      const tc = p.toolCall!;
-      if (tc.startedAt !== undefined && (start === undefined || tc.startedAt < start)) start = tc.startedAt;
-      if (tc.endedAt !== undefined && (end === undefined || tc.endedAt > end)) end = tc.endedAt;
-    }
-    return { spanStart: start, spanEnd: end };
-  }, [toolParts]);
-  const liveNow = useLiveElapsed(spanStart, anyRunning);
-  const spanMs =
-    spanStart === undefined
-      ? null
-      : anyRunning
-        ? Math.max(0, liveNow - spanStart)
-        : spanEnd !== undefined
-          ? spanEnd - spanStart
-          : null;
-  const spanLabel = spanMs !== null ? formatDuration(spanMs) : null;
-
-  const count = toolParts.length;
-  const stepWord = isSimple
-    ? count === 1
-      ? "step"
-      : "steps"
-    : count === 1
-      ? "tool call"
-      : "tool calls";
-  const fileWord = filesChanged === 1 ? "file" : "files";
-  const restingLabel =
-    count === 0
-      ? "Working"
-      : errorCount > 0
-        ? `${count} ${stepWord} · ${isSimple ? `${errorCount} didn't work` : `${errorCount} failed`}`
-        : `${count} ${stepWord}${filesChanged > 0 ? ` · ${filesChanged} ${fileWord} changed` : ""}`;
-
-  // Per-tool pills: icon + short name + status tint. First 3, then "+N".
-  const pills = React.useMemo(() => {
-    const tcs = toolParts.map((p) => p.toolCall!);
-    return tcs.map((tc) => {
-      const short = shortToolLabel(tc);
-      return {
-        id: tc.id,
-        label: short,
-        status: tc.status,
-      };
-    });
-  }, [toolParts]);
-  const shownPills = pills.slice(0, 3);
-  const restPills = pills.length - shownPills.length;
+  const worked = workedSummary(message);
 
   return (
-    <div className="mb-1.5">
-      {/* ONE trigger line — expands into the tool call cards. */}
+    <div className="mb-2 min-w-0 max-w-full">
+      {/* ONE trigger line — the live Thinking/Working status while
+          streaming, the "Worked {time}" resting summary after settle. */}
       <button
         type="button"
         aria-expanded={expanded}
+        aria-label={
+          streaming
+            ? phase === "working"
+              ? "Agent is working (toggle process details)"
+              : "Agent is thinking (toggle process details)"
+            : "Toggle work summary"
+        }
         onClick={() => {
           setUserToggled(true);
           setExpanded((o) => !o);
@@ -575,265 +647,35 @@ function CollapsibleToolGroup({
           )}
           aria-hidden
         />
-        {anyRunning ? (
-          <ShimmerLabel className="text-sm font-medium">
-            {settledCount > 0 ? `Working · ${settledCount}/${count} done` : "Working"}
-          </ShimmerLabel>
+        {streaming ? (
+          // ThinkingIndicator without its dot: a keyed shimmer label —
+          // the fade replays every time Thinking switches to Working and
+          // back, per the spec.
+          <ThinkingIndicator
+            showDot={false}
+            label={phase === "working" ? "Working" : "Thinking"}
+            className="min-w-0"
+          />
         ) : (
-          <span className="text-sm font-medium text-foreground/90">{restingLabel}</span>
-        )}
-        {spanLabel && (
-          <span className="text-muted-foreground/70 shrink-0 font-mono text-[10px] tabular-nums">
-            {spanLabel}
+          <span className="text-sm font-medium text-foreground/90">
+            Worked{worked.time ? ` ${worked.time}` : ""}
           </span>
         )}
+        {worked.failed && (
+          <span className="text-sm font-medium text-destructive/90">· Failed</span>
+        )}
+        {!worked.failed && worked.stopped && (
+          <span className="text-sm font-medium text-muted-foreground">· Stopped</span>
+        )}
       </button>
-
-      {/* STACK PILLS — the at-a-glance story of the group (status dots +
-          tool names), visible without expanding. */}
-      {!expanded && pills.length > 0 && (
-        <div className="mb-0.5 ml-[26px] flex flex-wrap items-center gap-1">
-          {shownPills.map((pill) => (
-            <span
-              key={pill.id}
-              className={cn(
-                "border-foreground/10 bg-foreground/[0.04] inline-flex max-w-[10rem] items-center gap-1 rounded-full border px-1.5 py-[2px]",
-                pill.status === "error" && "border-destructive/30 bg-destructive/[0.07]",
-              )}
-              title={pill.label}
-            >
-              <span
-                className={cn(
-                  "h-1.5 w-1.5 shrink-0 rounded-full",
-                  pill.status === "running" || pill.status === "pending"
-                    ? "bg-primary animate-pulse"
-                    : pill.status === "error"
-                      ? "bg-destructive/70"
-                      : "bg-emerald-500/70",
-                )}
-                aria-hidden
-              />
-              <span className="text-muted-foreground truncate text-[10.5px] font-medium">
-                {pill.label}
-              </span>
-            </span>
-          ))}
-          {restPills > 0 && (
-            <span className="text-muted-foreground/70 shrink-0 font-mono text-[10.5px] tabular-nums">
-              +{restPills}
-            </span>
-          )}
+      <CollapsePanel open={expanded}>
+        {/* The whole process, on one timeline rail — no PROCESS label,
+            no divider: thinking rows, tool cards and texts in the exact
+            order they happened. */}
+        <div className="mt-1 ml-1.5 space-y-1.5 border-l border-border/70 pl-3">
+          {children}
         </div>
-      )}
-
-      {/* The tool call cards — exactly one UI per tool call, in the current
-          display mode's style (simple: non-expandable friendly lines;
-          technical: disclosure cards with args + output), stacked under a
-          timeline rail. */}
-      {expanded && (
-        <div className="mt-1 ml-1.5 space-y-1 border-l border-border/70 pl-3">
-          {toolParts.map((part) => (
-            <div key={part.id} className="w-full">
-              <ToolCallCard toolCall={part.toolCall!} turnId={turnId} />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Short label for a stack pill — tool name without the _noise, 22 chars. */
-function shortToolLabel(tc: import("@/types").ToolCall): string {
-  const raw = tc.name || "tool";
-  const cleaned = raw
-    .replace(/^(pending-)/, "")
-    .replace(/_/g, " ")
-    .trim();
-  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
-}
-
-// ---------------------------------------------------------------------------
-// ROUND-BASED RENDERING (PRD §9–16) — every agent round gets its own
-// reasoning panel + its own tool stack. Timing belongs to the round: while
-// active the elapsed badge ticks; once the next round starts (or the turn
-// completes) roundEndedAt freezes that round's duration forever — starting
-// Round 2 never resets Round 1's displayed duration.
-// ---------------------------------------------------------------------------
-
-/** Elapsed seconds for a round. Ticks while `active`; frozen once the round
- *  ended. Falls back to a local measure when the part carried no timestamps
- *  (legacy rows). */
-function useRoundElapsed(
-  startedAt: number | undefined,
-  endedAt: number | undefined,
-  active: boolean,
-): number {
-  const [now, setNow] = React.useState(() => Date.now());
-  const [localStart, setLocalStart] = React.useState<number | null>(null);
-  React.useEffect(() => {
-    if (!active) return;
-    setLocalStart((s) => (s === null ? Date.now() : s));
-    const id = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(id);
-  }, [active]);
-  const start = startedAt ?? localStart;
-  const end = endedAt ?? (active ? now : null);
-  if (start == null || end == null) return 0;
-  return Math.max(0, (end - start) / 1000);
-}
-
-interface RoundSegmentData {
-  round: number;
-  startedAt?: number;
-  endedAt?: number;
-  /** Merged thinking/reasoning parts of THIS round only. */
-  thinkingParts: import("@/types/chat").MessagePart[];
-  /** Render items (tool / toolGroup / text / todoPanel) of this round. */
-  items: RoundRenderItem[];
-}
-type RoundRenderItem =
-  | { kind: "text"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
-  | { kind: "tool"; part: import("@/types/chat").MessagePart; isLast: boolean; round: number }
-  | { kind: "toolGroup"; parts: import("@/types/chat").MessagePart[]; isLast: boolean; round: number }
-  | { kind: "todoPanel"; isLast: boolean; round: number };
-
-/**
- * One agent round: a "Thought for Ns" reasoning panel (or a bare
- * status row when the round has no reasoning text) with the round's tool
- * stack visually attached beneath it (left hairline). Tool calls generated
- * during the same round group together here — "these tools belong to this
- * agent round."
- */
-function RoundPanel({
-  segment,
-  isLastSegment,
-  isStreaming,
-  isUser,
-  turnId,
-  onCiteClick,
-  sources,
-  genuiNodes,
-  onTodoDismiss,
-}: {
-  segment: RoundSegmentData;
-  isLastSegment: boolean;
-  isStreaming: boolean;
-  isUser: boolean;
-  turnId?: string | null;
-  onCiteClick?: (index: number) => void;
-  sources?: readonly SourceItem[];
-  genuiNodes?: GenUINode[];
-  onTodoDismiss?: () => void;
-}) {
-  const active = isStreaming && isLastSegment && segment.endedAt === undefined;
-  const elapsedSeconds = useRoundElapsed(segment.startedAt, segment.endedAt, active);
-
-  // REASONING SETTLEMENT (instant "-ed"): the thinking panel is in
-  // "Thinking…" phase ONLY while reasoning is genuinely still streaming —
-  // i.e. the round is active AND the round's thinking parts haven't been
-  // stamped `reasoningEndedAt` (the store stamps it the moment the first
-  // text delta / tool call / llm_completed arrives after reasoning). As
-  // soon as it's stamped, the panel flips to "Thought for Ns" and
-  // auto-collapses with the 360ms fold — never waiting for the round to
-  // end. Legacy parts without the stamp keep the old behavior.
-  const reasoningSettled = segment.thinkingParts.some(
-    (p) => p.reasoningEndedAt !== undefined,
-  );
-  const reasoningActive = active && !reasoningSettled;
-  // The reasoning duration freezes at reasoningEndedAt — not at round end —
-  // so "Thought for Ns" reports how long the model was actually thinking.
-  const reasoningEnd = (() => {
-    for (let i = segment.thinkingParts.length - 1; i >= 0; i--) {
-      const t = segment.thinkingParts[i]?.reasoningEndedAt;
-      if (t !== undefined) return t;
-    }
-    return undefined;
-  })();
-  const reasoningStart = segment.startedAt;
-  const reasoningElapsed = React.useMemo(() => {
-    if (reasoningEnd !== undefined && reasoningStart !== undefined) {
-      return Math.max(0, (reasoningEnd - reasoningStart) / 1000);
-    }
-    return elapsedSeconds;
-  }, [reasoningEnd, reasoningStart, elapsedSeconds]);
-
-  // Split the (possibly still-streaming) reasoning text into sentences for
-  // the ThinkingReasoning element. Each round's reasoning merges into one
-  // panel — but NEVER across rounds.
-  // PRD §5: normalize unintended whitespace only (see ReasoningPanel).
-  const reasoningText = segment.thinkingParts
-    .map((p) => p.content ?? "")
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[^\S\n]{2,}/g, " ")
-    .trim();
-
-  const sentences = React.useMemo(() => {
-    if (!reasoningText) return [] as string[];
-    return reasoningText
-      .split(/(?<=[.!?;])\s+/)
-      .map((s) => s.replace(/\s+/g, " ").trim())
-      .filter((s) => s.length > 0);
-  }, [reasoningText]);
-
-  return (
-    <div className="round-in mb-1 min-w-0 max-w-full">
-      {/* Round header — the ThinkingReasoning panel header ("Thought for
-          Ns" / shimmering "Thinking…") when reasoning text exists. A round
-          with no reasoning renders NO header at all — its tool cards and
-          text speak for themselves (the running cards narrate their own
-          state). Rounds are NOT labeled "Round N" — each round simply
-          reads as its own thought session. */}
-      {sentences.length > 0 ? (
-        <ThinkingReasoning
-          sentences={sentences}
-          phase={reasoningActive ? "thinking" : "done"}
-          elapsedSeconds={reasoningElapsed}
-          verb="Thought"
-          activeLabel="Thinking…"
-        />
-      ) : null}
-
-      {/* The round's tool stack + text, in order. Tools get a left hairline
-          so the stack reads as belonging to this round (PRD §16). */}
-      {segment.items.map((item, idx) => {
-        if (item.kind === "todoPanel") {
-          return (
-            <div key="inline-todo-panel" className="w-full">
-              <ResearchPanel onDismiss={onTodoDismiss} />
-            </div>
-          );
-        }
-        if (item.kind === "toolGroup") {
-          return (
-            <div key={`group-${item.parts[0]!.id}`} className="border-border/70 mt-1 ml-1.5 border-l pl-3">
-              <CollapsibleToolGroup parts={item.parts} turnId={turnId} />
-            </div>
-          );
-        }
-        if (item.kind === "tool" && item.part.toolCall) {
-          return (
-            <div key={item.part.id} className="border-border/70 mt-1 ml-1.5 border-l pl-3">
-              <ToolCallCard toolCall={item.part.toolCall} turnId={turnId} />
-            </div>
-          );
-        }
-        // Text part — frameless, below the round's reasoning/tools.
-        const isLastItem = idx === segment.items.length - 1;
-        return (
-          <TextBubble
-            key={item.part.id}
-            text={item.part.content ?? ""}
-            showCursor={active && isLastItem && item.isLast}
-            isUser={isUser}
-            onCiteClick={onCiteClick}
-            sources={sources}
-            genuiNodes={!isStreaming ? genuiNodes : undefined}
-            isStreaming={active && isLastItem}
-          />
-        );
-      })}
+      </CollapsePanel>
     </div>
   );
 }
@@ -928,37 +770,6 @@ export const MessageItem = React.memo(function MessageItem({
     }
     return last;
   }, [message.parts]);
-  // The flow parts (tools-not-research + text) in original order, so the
-  // panel can be spliced in at its generation position.
-  const flowParts = React.useMemo(
-    () =>
-      (message.parts ?? []).filter(
-        (p) =>
-          (p.type === "text" && p.content) ||
-          (p.type === "tool" &&
-            p.toolCall &&
-            !RESEARCH_TOOL_NAMES.has(p.toolCall.name)),
-      ),
-    [message.parts],
-  );
-  // Index (into flowParts) where the inline todo panel goes: right before
-  // the first flow part that comes AFTER the last research part in the
-  // original parts order. When every research part trails the flow, the
-  // panel lands at the end (after all rendered content).
-  const todoInsertIndex = React.useMemo(() => {
-    if (!showTodoPanel || !lastResearchPartId) return -1;
-    let seenResearch = false;
-    for (const p of message.parts ?? []) {
-      if (p.id === lastResearchPartId) {
-        seenResearch = true;
-        continue;
-      }
-      if (seenResearch && (flowParts.includes(p))) {
-        return flowParts.indexOf(p);
-      }
-    }
-    return flowParts.length;
-  }, [showTodoPanel, lastResearchPartId, message.parts, flowParts]);
 
   // Parts flow rendering applies when there are non-research parts, OR when
   // this message owns the live todo plan (a research-only message still
@@ -1078,269 +889,219 @@ export const MessageItem = React.memo(function MessageItem({
 
         {(() => {
           // `parts` is memoized at the top of the component (above).
-          // NOTE (timeline PRD §12–§14): there is deliberately NO separate
-          // "Thinking" placeholder block anymore — the ONE AgentStatusLine
-          // below the parts flow owns the initial state (nothing streamed →
-          // orb + "Thinking"), every phase transition, and disappears on
-          // settle. It never stacks duplicates per transition.
+          //
+          // WORKING-PANEL FLOW (user spec, 2026-09-27): a turn that made
+          // tool calls renders ONE collapsible WorkingPanel owning the
+          // whole process — every round's inner thinking (live while it
+          // streams, then a "Thought for Ns" row), every tool call and
+          // every text generated along the way, in strict chronological
+          // order. The trigger label switches Thinking ⇄ Working in place
+          // and the panel collapses into "Worked {time}" when the turn
+          // settles. The final answer (text after the last tool) renders
+          // below the panel. Tool-less turns keep the classic frameless
+          // flow (thinking block → text) + the one AgentStatusLine.
 
+          // ── Legacy fallback: user / pre-parts messages. ────────────────
+          if (!useParts) {
+            return (
+              <>
+                {!isUser && message.thinking && (
+                  <ThinkingBlock
+                    text={message.thinking}
+                    isStreaming={Boolean(message.isStreaming)}
+                  />
+                )}
+                {!isUser && message.reasoning && (
+                  <ReasoningBlock
+                    text={message.reasoning}
+                    isStreaming={Boolean(message.isStreaming)}
+                  />
+                )}
+                {message.content && (
+                  <TextBubble
+                    text={message.content}
+                    showCursor={!isUser && Boolean(message.isStreaming)}
+                    isUser={isUser}
+                    onCiteClick={onCiteClick}
+                    sources={sources}
+                    genuiNodes={!message.isStreaming ? message.genui : undefined}
+                    isStreaming={Boolean(message.isStreaming)}
+                  />
+                )}
+                {message.toolCalls && message.toolCalls.length > 0 && (
+                  <div className="w-full space-y-2">
+                    {message.toolCalls.map((toolCall) => (
+                      <ToolCallCard key={toolCall.id} toolCall={toolCall} />
+                    ))}
+                  </div>
+                )}
+                {/* ONE in-place status line — the model is generating. */}
+                {!isUser && <AgentStatusLine message={message} />}
+              </>
+            );
+          }
+
+          // ── Walk the timeline into chronological process items. ────────
+          const items = buildFlowItems(parts);
+          const streaming = Boolean(message.isStreaming);
+
+          // Last TOOL item — the process/final-answer boundary. Text
+          // generated after the last tool is the FINAL ANSWER: while the
+          // turn streams it stays at the tail of the process (inside the
+          // panel — a tool arriving later simply appends after it, so
+          // nothing ever jumps mid-stream); when the turn settles it
+          // renders BELOW the collapsed panel as the message body.
+          let lastToolItemIdx = -1;
+          for (let i = 0; i < items.length; i++) {
+            if (items[i]!.kind === "tool") lastToolItemIdx = i;
+          }
+          const hasPanel = lastToolItemIdx >= 0;
+
+          const processItems = hasPanel
+            ? items.filter(
+                (it, i) =>
+                  it.kind !== "text" || i < lastToolItemIdx || streaming,
+              )
+            : items;
+          const trailingItems =
+            hasPanel && !streaming
+              ? items.filter(
+                  (it, i) => it.kind === "text" && i > lastToolItemIdx,
+                )
+              : [];
+
+          // The text part currently streaming (the active tail), if any.
+          const lastItem = items[items.length - 1];
+          const streamingTextTailId =
+            streaming && lastItem && lastItem.kind === "text"
+              ? lastItem.partId
+              : null;
+
+          // Todo-panel splice (legacy research tools): the inline plan
+          // renders right before the first part that follows the last
+          // research part in the original order, or at the very end when
+          // every research part trails the flow.
+          const todoSplice: { beforePartId?: string; atEnd?: boolean } | null =
+            (() => {
+              if (!showTodoPanel || !lastResearchPartId) return null;
+              let seen = false;
+              for (const p of message.parts ?? []) {
+                if (p.id === lastResearchPartId) {
+                  seen = true;
+                  continue;
+                }
+                if (
+                  seen &&
+                  (((p.type === "text" || p.type === "thinking" || p.type === "reasoning") &&
+                    p.content) ||
+                    (p.type === "tool" && p.toolCall))
+                ) {
+                  return { beforePartId: p.id };
+                }
+              }
+              return { atEnd: true };
+            })();
+
+          const renderTodoPanel = (key: string) => (
+            <div key={key} className="w-full">
+              <ResearchPanel onDismiss={onTodoDismiss} />
+            </div>
+          );
+
+          // Render one process item. `inPanel` decides the two
+          // Working/classic differences: live reasoning streams HEADERLESS
+          // inside the panel (the trigger owns the "Thinking" status) but
+          // with its own header in the classic flow; process text is
+          // slightly muted inside the panel.
+          const renderItem = (it: FlowItem, inPanel: boolean) => {
+            if (it.kind === "thinking") {
+              if (inPanel) {
+                return <PanelThinkingRun key={it.partId} item={it} streaming={streaming} />;
+              }
+              const openNow = streaming && it.open;
+              return openNow ? (
+                <ThinkingBlock key={it.partId} text={it.text} isStreaming />
+              ) : (
+                <PanelThinkingRun key={it.partId} item={it} streaming={false} />
+              );
+            }
+            if (it.kind === "tool") {
+              return (
+                <div key={it.partId} className="w-full">
+                  <ToolCallCard toolCall={it.toolCall} turnId={message.conversationId} />
+                </div>
+              );
+            }
+            const isTail = it.partId === streamingTextTailId;
+            const bubble = (
+              <TextBubble
+                text={it.text}
+                showCursor={isTail}
+                isUser={false}
+                onCiteClick={onCiteClick}
+                sources={sources}
+                genuiNodes={!streaming ? message.genui : undefined}
+                isStreaming={isTail}
+              />
+            );
+            if (!inPanel) return <React.Fragment key={it.partId}>{bubble}</React.Fragment>;
+            return (
+              <div key={it.partId} className="w-full opacity-85">
+                {bubble}
+              </div>
+            );
+          };
+
+          // ── PANEL PATH: one WorkingPanel + the final answer below it. ──
+          if (hasPanel) {
+            // Deliverables (charts, downloads, previews, Q&A, live plan)
+            // keep the panel from force-collapsing at settle — they must
+            // stay visible.
+            const hasDeliverables =
+              processItems.some(
+                (it) => it.kind === "tool" && PAYLOAD_TOOL_NAMES.has(it.toolCall.name),
+              ) || todoSplice !== null;
+
+            return (
+              <>
+                <WorkingPanel message={message} hasDeliverables={hasDeliverables}>
+                  {processItems.map((it) => (
+                    <React.Fragment key={it.partId}>
+                      {todoSplice?.beforePartId === it.partId
+                        ? renderTodoPanel(`todo-${it.partId}`)
+                        : null}
+                      {renderItem(it, true)}
+                    </React.Fragment>
+                  ))}
+                </WorkingPanel>
+                {trailingItems.map((it) => (
+                  <React.Fragment key={it.partId}>
+                    {todoSplice?.beforePartId === it.partId
+                      ? renderTodoPanel(`todo-${it.partId}`)
+                      : null}
+                    {renderItem(it, false)}
+                  </React.Fragment>
+                ))}
+                {todoSplice?.atEnd ? renderTodoPanel("todo-end") : null}
+                {/* NO AgentStatusLine — the WorkingPanel trigger IS the
+                    live status for the whole turn. */}
+              </>
+            );
+          }
+
+          // ── CLASSIC PATH (no tool calls): frameless editorial flow. ────
           return (
             <>
-              {useParts ? (
-                /* ROUND-BASED TIMELINE (PRD §9–21): every agent round renders
-                 * its OWN reasoning panel ("Thought for Ns", with
-                 * the round's own frozen/ticking timer) and its OWN tool
-                 * stack — reasoning from different rounds is never merged,
-                 * and rounds carry no visible "Round N" numbering. Turns with
-                 * one round segment keep the classic layout (one thinking
-                 * block, then tools + text in order). */
-                (() => {
-                  const isLastStreaming = Boolean(message.isStreaming);
-                  const lastPart = parts[parts.length - 1];
-
-                  // ── Walk the flow parts into render items (tool grouping
-                  // + inline todo panel splice), tagged with each part's
-                  // round stamp (0 = legacy/unstamped).
-                  const renderItems: RoundRenderItem[] = [];
-                  let i = 0;
-                  const emitTodoAt =
-                    todoInsertIndex >= 0 && showTodoPanel ? todoInsertIndex : Number.POSITIVE_INFINITY;
-                  let todoEmitted = false;
-                  // Round of the last research part — the inline todo panel
-                  // (legacy research tools only) splices into that round.
-                  let todoRound = 0;
-                  for (const p of message.parts ?? []) {
-                    if (p.type === "tool" && p.toolCall && RESEARCH_TOOL_NAMES.has(p.toolCall.name)) {
-                      todoRound = p.round ?? 0;
-                    }
-                  }
-                  const emitTodoIfDue = (emittedCount: number, isLast: boolean, _round: number) => {
-                    if (!todoEmitted && emittedCount >= emitTodoAt) {
-                      renderItems.push({ kind: "todoPanel", isLast, round: todoRound });
-                      todoEmitted = true;
-                    }
-                  };
-                  while (i < flowParts.length) {
-                    emitTodoIfDue(renderItems.length, i === flowParts.length - 1, flowParts[i]!.round ?? 0);
-                    const part = flowParts[i]!;
-                    const isLast = i === flowParts.length - 1;
-                    const round = part.round ?? 0;
-                    if (part.type === "tool" && part.toolCall) {
-                      // Start collecting consecutive tool parts — but ONLY
-                      // within the SAME round. Consecutive tools from
-                      // different rounds (round N's last tool followed
-                      // directly by round N+1's tools, with no text between)
-                      // must NOT merge: the group's parts all land in one
-                      // round's panel, so a cross-round group would drag
-                      // round N+1's tool cards into round N's segment while
-                      // round N+1's thinking renders elsewhere — splitting
-                      // the round's panel from its own tools (timeline PRD
-                      // §7: a tool call belongs to the round that made it).
-                      const groupRound = part.round ?? 0;
-                      const group: typeof flowParts = [];
-                      while (
-                        i < flowParts.length &&
-                        flowParts[i]!.type === "tool" &&
-                        (flowParts[i]!.round ?? 0) === groupRound
-                      ) {
-                        group.push(flowParts[i]!);
-                        i++;
-                      }
-                      if (group.length >= 2) {
-                        // 2+ consecutive tools → collapsible group
-                        renderItems.push({ kind: "toolGroup", parts: group, isLast: i === flowParts.length, round: group[0]!.round ?? round });
-                      } else {
-                        // Single tool → render as-is
-                        renderItems.push({ kind: "tool", part: group[0]!, isLast: i === flowParts.length, round });
-                      }
-                    } else {
-                      // Text part
-                      renderItems.push({ kind: "text", part, isLast, round });
-                      i++;
-                    }
-                  }
-                  // Panel generated after every flow part → append at the end.
-                  emitTodoIfDue(renderItems.length, true, todoRound);
-
-                  // ── Merge thinking/reasoning parts WITHIN each round (never
-                  // across rounds — that's the whole point of the round
-                  // system: rounds 2+ create separate panels).
-                  const thinkByRound = new Map<number, import("@/types/chat").MessagePart[]>();
-                  for (const p of parts) {
-                    if ((p.type !== "thinking" && p.type !== "reasoning") || !p.content) continue;
-                    const r = p.round ?? 0;
-                    const arr = thinkByRound.get(r) ?? [];
-                    const last = arr[arr.length - 1];
-                    if (last && last.type === p.type && last.content) {
-                      last.content += "\n" + p.content;
-                    } else {
-                      arr.push({ ...p });
-                    }
-                    thinkByRound.set(r, arr);
-                  }
-
-                  // ── Assemble round segments in order of first appearance.
-                  const assembleSegments = (items: RoundRenderItem[]): RoundSegmentData[] => {
-                    const roundOrder: number[] = [];
-                    for (const p of message.parts ?? []) {
-                      const r = p.round ?? 0;
-                      if (!roundOrder.includes(r)) roundOrder.push(r);
-                    }
-                    const itemsByRound = new Map<number, RoundRenderItem[]>();
-                    for (const item of items) {
-                      const arr = itemsByRound.get(item.round) ?? [];
-                      arr.push(item);
-                      itemsByRound.set(item.round, arr);
-                    }
-                    return roundOrder
-                      .map((r) => {
-                        let startedAt: number | undefined;
-                        let endedAt: number | undefined;
-                        for (const p of message.parts ?? []) {
-                          if ((p.round ?? 0) !== r) continue;
-                          if (p.roundStartedAt !== undefined && startedAt === undefined) startedAt = p.roundStartedAt;
-                          if (p.roundEndedAt !== undefined && endedAt === undefined) endedAt = p.roundEndedAt;
-                        }
-                        return {
-                          round: r,
-                          startedAt,
-                          endedAt,
-                          thinkingParts: thinkByRound.get(r) ?? [],
-                          items: itemsByRound.get(r) ?? [],
-                        };
-                      })
-                      .filter((seg) => seg.thinkingParts.length > 0 || seg.items.length > 0);
-                  };
-                  const segments = assembleSegments(renderItems);
-
-                  const multiRound = segments.length > 1;
-
-                  // ── MULTI-ROUND path: one RoundPanel per round.
-                  if (multiRound) {
-                    return (
-                      <>
-                        {segments.map((seg, si) => (
-                          <RoundPanel
-                            key={`round-${seg.round}-${si}`}
-                            segment={seg}
-                            isLastSegment={si === segments.length - 1}
-                            isStreaming={isLastStreaming}
-                            isUser={isUser}
-                            turnId={message.conversationId}
-                            onCiteClick={onCiteClick}
-                            sources={sources}
-                            genuiNodes={!message.isStreaming ? message.genui : undefined}
-                            onTodoDismiss={onTodoDismiss}
-                          />
-                        ))}
-                      </>
-                    );
-                  }
-
-                  // ── Single-segment path (classic): one thinking block, then
-                  // tools + text in chronological order.
-                  const thinkingParts = segments[0]?.thinkingParts ?? [];
-                  return (
-                    <>
-                      {/* Reasoning/Thinking block (single) */}
-                      {thinkingParts.map((part, j) => {
-                        const isLast = j === thinkingParts.length - 1 && flowParts.length === 0;
-                        // REASONING SETTLEMENT: same rule as RoundPanel — the
-                        // panel stays "-ing" only while this part's reasoning
-                        // stream is genuinely open (no reasoningEndedAt stamp).
-                        const partReasoningActive =
-                          isLastStreaming && part.reasoningEndedAt === undefined;
-                        if (part.type === "thinking") {
-                          return <ThinkingBlock key={part.id} text={part.content ?? ""} open={partReasoningActive && isLast} isStreaming={partReasoningActive} />;
-                        }
-                        return <ReasoningBlock key={part.id} text={part.content ?? ""} open={partReasoningActive && isLast} isStreaming={partReasoningActive} />;
-                      })}
-
-                      {/* Tool calls + text in chronological order, with the
-                          inline todo plan panel spliced in exactly where the
-                          todo tool ran (not stuck at the thread bottom). */}
-                      {renderItems.map((item) => {
-                        if (item.kind === "todoPanel") {
-                          return (
-                            <div key="inline-todo-panel" className="w-full">
-                              <ResearchPanel onDismiss={onTodoDismiss} />
-                            </div>
-                          );
-                        }
-                        if (item.kind === "toolGroup") {
-                          return (
-                            <CollapsibleToolGroup key={`group-${item.parts[0]!.id}`} parts={item.parts} turnId={message.conversationId} />
-                          );
-                        }
-                        if (item.kind === "tool" && item.part.toolCall) {
-                          return (
-                            <div key={item.part.id} className="w-full">
-                              <ToolCallCard toolCall={item.part.toolCall} turnId={message.conversationId} />
-                            </div>
-                          );
-                        }
-                        // Text part
-                        return (
-                          <TextBubble
-                            key={item.part.id}
-                            text={item.part.content ?? ""}
-                            showCursor={isLastStreaming && item.isLast && lastPart?.type === "text"}
-                            isUser={isUser}
-                            onCiteClick={onCiteClick}
-                            sources={sources}
-                            genuiNodes={!message.isStreaming ? message.genui : undefined}
-                            isStreaming={isLastStreaming && item.isLast}
-                          />
-                        );
-                      })}
-                    </>
-                  );
-                })()
-              ) : (
-                /* Legacy fallback: user / pre-parts messages. */
-                <>
-                  {!isUser && message.thinking && (
-                    <ThinkingBlock
-                      text={message.thinking}
-                      open={Boolean(message.isStreaming)}
-                      isStreaming={Boolean(message.isStreaming)}
-                    />
-                  )}
-                  {!isUser && message.reasoning && (
-                    <ReasoningBlock
-                      text={message.reasoning}
-                      open={Boolean(message.isStreaming)}
-                      isStreaming={Boolean(message.isStreaming)}
-                    />
-                  )}
-                  {message.content && (
-                    <TextBubble
-                      text={message.content}
-                      showCursor={!isUser && Boolean(message.isStreaming)}
-                      isUser={isUser}
-                      onCiteClick={onCiteClick}
-                      sources={sources}
-                      genuiNodes={!message.isStreaming ? message.genui : undefined}
-                      isStreaming={Boolean(message.isStreaming)}
-                    />
-                  )}
-                  {message.toolCalls && message.toolCalls.length > 0 && (
-                    <div className="w-full space-y-2">
-                      {message.toolCalls.map((toolCall) => (
-                        <ToolCallCard key={toolCall.id} toolCall={toolCall} />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* ── ONE IN-PLACE EXECUTION STATUS (timeline PRD §12–§14) ──
-                  Thinking while the model generates, Working while a tool
-                  executes / its result is awaited; updates in place at the
-                  end of the flow and disappears on settle. While a live
-                  reasoning stream is open, the ThinkingReasoning panel
-                  header owns the "Thinking…" status (the line hides — no
-                  duplicate status components). */}
+              {items.map((it) => (
+                <React.Fragment key={it.partId}>
+                  {todoSplice?.beforePartId === it.partId
+                    ? renderTodoPanel(`todo-${it.partId}`)
+                    : null}
+                  {renderItem(it, false)}
+                </React.Fragment>
+              ))}
+              {todoSplice?.atEnd ? renderTodoPanel("todo-end") : null}
+              {/* ONE in-place status line — the model is generating. */}
               {!isUser && <AgentStatusLine message={message} />}
             </>
           );

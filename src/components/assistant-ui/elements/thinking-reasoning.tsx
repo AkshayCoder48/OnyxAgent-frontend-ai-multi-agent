@@ -30,6 +30,12 @@ export interface ThinkingReasoningProps {
   verb?: string;
   /** Label while streaming — "Thinking…" or "Reasoning…". */
   activeLabel?: string;
+  /** HEADERLESS LIVE MODE (WorkingPanel): while streaming, skip the
+   *  header button entirely — the sentences stream bare and the host
+   *  panel's own trigger line owns the "Thinking" status (no duplicate
+   *  shimmer labels stacked). The settled "Thought for Ns" header still
+   *  renders once the stream ends. */
+  headerlessLive?: boolean;
 }
 
 const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
@@ -62,6 +68,7 @@ export function ThinkingReasoning({
   elapsedSeconds,
   verb = "Thought",
   activeLabel = "Thinking…",
+  headerlessLive = false,
 }: ThinkingReasoningProps) {
   const [open, setOpen] = useState(false);
   const [capped, setCapped] = useState(false);
@@ -131,41 +138,43 @@ export function ThinkingReasoning({
 
   return (
     <div className={styles.tr}>
-      <button
-        type="button"
-        className={styles.trHeader + (done ? " " + styles.isClickable : "")}
-        aria-expanded={expanded}
-        aria-label="Toggle thought"
-        onClick={done ? toggle : undefined}
-      >
-        {done ? (
-          <span className={styles.trLabel}>
-            <span className={styles.trVerb}>{verb}</span> for {elapsedS}s
-          </span>
-        ) : (
-          <span className={styles.trLabel + " " + styles.trShimmer}>
-            {activeLabel}
-          </span>
-        )}
-        {done && (
-          <svg
-            className={styles.trChevron}
-            viewBox="0 0 24 24"
-            width="12"
-            height="12"
-            aria-hidden="true"
-          >
-            <path
-              d="m4.5 15.75 7.5-7.5 7.5 7.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        )}
-      </button>
+      {headerlessLive && !done ? null : (
+        <button
+          type="button"
+          className={styles.trHeader + (done ? " " + styles.isClickable : "")}
+          aria-expanded={expanded}
+          aria-label="Toggle thought"
+          onClick={done ? toggle : undefined}
+        >
+          {done ? (
+            <span className={styles.trLabel}>
+              <span className={styles.trVerb}>{verb}</span> for {elapsedS}s
+            </span>
+          ) : (
+            <span className={styles.trLabel + " " + styles.trShimmer}>
+              {activeLabel}
+            </span>
+          )}
+          {done && (
+            <svg
+              className={styles.trChevron}
+              viewBox="0 0 24 24"
+              width="12"
+              height="12"
+              aria-hidden="true"
+            >
+              <path
+                d="m4.5 15.75 7.5-7.5 7.5 7.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </button>
+      )}
       <div
         className={styles.trCollapsible + (expanded ? "" : " " + styles.isCollapsed)}
       >
