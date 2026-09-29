@@ -1,6 +1,7 @@
 "use client";
 
-import { Feather, MessageSquare, Search, Settings2 } from "lucide-react";
+import { CloudOff, Feather, Loader2, MessageSquare, RefreshCw, Search, Settings2, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useTerra } from "./store";
 
@@ -9,14 +10,84 @@ interface SidebarContentProps {
   onNavigate?: () => void;
 }
 
+function relativeTime(at: number | null): string {
+  if (at === null) return "never";
+  const seconds = Math.max(0, (Date.now() - at) / 1000);
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+function SyncPill() {
+  const status = useTerra((s) => s.syncStatus);
+  const lastSyncedAt = useTerra((s) => s.lastSyncedAt);
+  const autoSync = useTerra((s) => s.autoSync);
+  const pullSync = useTerra((s) => s.pullSync);
+  const pushSync = useTerra((s) => s.pushSync);
+  const syncError = useTerra((s) => s.syncError);
+
+  const busy = status === "syncing" || status === "booting";
+  const offline = status === "offline" || status === "error";
+  const label = !autoSync
+    ? "Cloud sync off"
+    : busy
+      ? "Syncing…"
+      : offline
+        ? (syncError ?? "Offline")
+        : `Synced · ${relativeTime(lastSyncedAt)}`;
+
+  const onSyncNow = () => {
+    if (busy) return;
+    void pullSync().then(() => pushSync());
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onSyncNow}
+      title={busy ? "Cloud sync in progress" : "Sync with the cloud now"}
+      aria-label={`Cloud sync status: ${label}. Sync now.`}
+      className={cn(
+        "flex h-8 w-full items-center gap-2 rounded-lg border px-2.5 text-left text-[12px] transition-colors",
+        offline && autoSync
+          ? "border-terra-soft-border bg-terra-soft/60 text-terra-deep hover:bg-terra-soft"
+          : "border-hairline bg-background text-ink-muted hover:border-terra-soft-border hover:bg-terra-soft/50",
+      )}
+    >
+      {busy ? (
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-terra" aria-hidden />
+      ) : offline && autoSync ? (
+        <CloudOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      ) : (
+        <span
+          className={cn(
+            "h-[7px] w-[7px] shrink-0 rounded-full",
+            autoSync && status === "synced" ? "bg-[#5F7A45]" : "bg-ink-muted/50",
+          )}
+          aria-hidden
+        />
+      )}
+      <span className="truncate">{label}</span>
+      <RefreshCw
+        className="ml-auto h-3 w-3 shrink-0 text-ink-muted/70 transition-transform hover:rotate-180"
+        aria-hidden
+      />
+    </button>
+  );
+}
+
 export function SidebarContent({ onNavigate }: SidebarContentProps) {
   const conversations = useTerra((s) => s.conversations);
   const activeId = useTerra((s) => s.activeId);
   const search = useTerra((s) => s.search);
+  const booted = useTerra((s) => s.booted);
   const setSearch = useTerra((s) => s.setSearch);
   const setActive = useTerra((s) => s.setActive);
   const newConversation = useTerra((s) => s.newConversation);
   const setSettingsOpen = useTerra((s) => s.setSettingsOpen);
+  const deleteConversation = useTerra((s) => s.deleteConversation);
+  const undoDelete = useTerra((s) => s.undoDelete);
 
   const needle = search.trim().toLowerCase();
   const filtered = needle
@@ -29,7 +100,20 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
       label: "Yesterday",
       items: filtered.filter((c) => c.group === "yesterday"),
     },
+    {
+      key: "earlier",
+      label: "Earlier",
+      items: filtered.filter((c) => c.group === "earlier"),
+    },
   ].filter((group) => group.items.length > 0);
+
+  const onDelete = (id: string, title: string) => {
+    deleteConversation(id);
+    toast(`${title} deleted`, {
+      action: { label: "Undo", onClick: () => undoDelete() },
+      duration: 8000,
+    });
+  };
 
   return (
     <div className="flex h-full flex-col bg-paper">
@@ -78,9 +162,21 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
         </div>
       </div>
 
+      {/* Cloud sync status */}
+      <div className="px-3 pt-3">
+        <SyncPill />
+      </div>
+
       {/* Chat history */}
       <nav aria-label="Chat history" className="terra-scroll mt-4 flex-1 overflow-y-auto px-3 pb-4">
-        {groups.length === 0 && (
+        {!booted && (
+          <div className="space-y-2 px-2 pt-1" aria-hidden>
+            <div className="h-8 rounded-lg bg-background/70" />
+            <div className="h-8 rounded-lg bg-background/70" />
+            <div className="h-8 rounded-lg bg-background/70" />
+          </div>
+        )}
+        {booted && groups.length === 0 && (
           <p className="px-2 pt-2 text-[13px] leading-relaxed text-ink-muted">
             No chats match “{search.trim()}”.
           </p>
@@ -94,7 +190,7 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
               {group.items.map((conversation) => {
                 const isActive = conversation.id === activeId;
                 return (
-                  <li key={conversation.id}>
+                  <li key={conversation.id} className="group/item relative">
                     <button
                       type="button"
                       onClick={() => {
@@ -116,7 +212,16 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
                         )}
                         aria-hidden
                       />
-                      <span className="truncate">{conversation.title}</span>
+                      <span className="truncate pr-6">{conversation.title}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(conversation.id, conversation.title)}
+                      aria-label={`Delete conversation ${conversation.title}`}
+                      title="Delete"
+                      className="absolute top-1/2 right-1.5 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-ink-muted opacity-0 transition-opacity hover:bg-terra-soft hover:text-terra-deep focus-visible:opacity-100 group-hover/item:opacity-100"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
                     </button>
                   </li>
                 );

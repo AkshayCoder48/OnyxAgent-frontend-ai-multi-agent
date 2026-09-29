@@ -2,19 +2,24 @@ import type { Conversation, ModelOption } from "./types";
 
 export const MODELS: ModelOption[] = [
   {
-    id: "terra-1.5-editorial",
-    label: "Terra 1.5 · Editorial",
-    description: "Balanced, warm phrasing — the default voice",
+    id: "auto",
+    label: "Auto · Router",
+    description: "Picks the best profile per message",
   },
   {
-    id: "terra-1.5-precise",
-    label: "Terra 1.5 · Precise",
-    description: "Tighter answers, fewer flourishes",
+    id: "fast",
+    label: "Terra Mini · Fast",
+    description: "Short, quick answers — greetings and lookups",
   },
   {
-    id: "terra-mini-draft",
-    label: "Terra Mini · Draft",
-    description: "Fastest, for quick iterations",
+    id: "balanced",
+    label: "Terra 1.5 · Balanced",
+    description: "The default editorial voice",
+  },
+  {
+    id: "deep",
+    label: "Terra Deep · Reasoning",
+    description: "Thinks step by step, shows its plan",
   },
 ];
 
@@ -37,12 +42,19 @@ export function LikeButton({ count = 0 }: { count?: number }) {
   );
 }`;
 
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = Date.now();
+const TODAY = NOW - 2 * 60 * 60 * 1000;      // seed threads are "this afternoon"
+const YESTERDAY = NOW - DAY - 3 * 60 * 60 * 1000;
+
 export const seedConversations: Conversation[] = [
   {
     id: "conv-like-button",
     title: "Like button & Terraform state",
     group: "today",
     separator: "Today · 2:14 PM",
+    createdAt: TODAY,
+    version: 0,
     messages: [
       {
         id: "msg-seed-1",
@@ -119,6 +131,8 @@ export const seedConversations: Conversation[] = [
     title: "Warm palette contrast check",
     group: "today",
     separator: "Today · 11:02 AM",
+    createdAt: TODAY,
+    version: 0,
     messages: [
       {
         id: "msg-pal-1",
@@ -145,6 +159,8 @@ export const seedConversations: Conversation[] = [
     title: "Naming conventions for tool cards",
     group: "today",
     separator: "Today · 9:41 AM",
+    createdAt: TODAY,
+    version: 0,
     messages: [
       {
         id: "msg-tc-1",
@@ -171,6 +187,8 @@ export const seedConversations: Conversation[] = [
     title: "Refactoring the markdown renderer",
     group: "yesterday",
     separator: "Yesterday · 4:32 PM",
+    createdAt: YESTERDAY,
+    version: 0,
     messages: [
       {
         id: "msg-md-1",

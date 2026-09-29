@@ -8,7 +8,10 @@ const ICON_BUTTON =
   "flex h-9 w-9 items-center justify-center rounded-lg text-ink-soft transition-colors hover:bg-terra-soft hover:text-ink";
 
 export function TopBar() {
-  const title = useTerra((s) => s.conversations.find((c) => c.id === s.activeId)?.title ?? "Terra");
+  const booted = useTerra((s) => s.booted);
+  const title = useTerra(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.title ?? "Terra",
+  );
   const setMobileNav = useTerra((s) => s.setMobileNav);
 
   return (
@@ -22,7 +25,7 @@ export function TopBar() {
       >
         <Menu className="h-5 w-5" aria-hidden />
       </button>
-      <h1 className="truncate pl-1 font-serif text-[18px] font-semibold text-ink">{title}</h1>
+      <h1 className="truncate pl-1 font-serif text-[18px] font-semibold text-ink">{booted ? title : "Terra"}</h1>
       <div className="ml-auto flex items-center gap-0.5">
         <button type="button" aria-label="Conversation history" title="History" className={ICON_BUTTON}>
           <Clock className="h-[18px] w-[18px]" aria-hidden />

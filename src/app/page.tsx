@@ -13,6 +13,12 @@ export default function Page() {
   const mobileNavOpen = useTerra((s) => s.mobileNavOpen);
   const setMobileNav = useTerra((s) => s.setMobileNav);
   const newConversation = useTerra((s) => s.newConversation);
+  const hydrate = useTerra((s) => s.hydrate);
+
+  // Restore the local snapshot instantly, then reconcile with the cloud.
+  useEffect(() => {
+    hydrate();
+  }, [hydrate]);
 
   // ⌘N / Ctrl+N starts a new conversation.
   useEffect(() => {

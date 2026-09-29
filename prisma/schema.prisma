@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,20 +10,20 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model Post {
-  id        String   @id @default(cuid())
+// Cloud-synced conversation snapshot. Messages are stored as a single JSON
+// payload per conversation — one row read/write keeps sync round-trips at a
+// single digit millisecond level, which is what "near-instant retrieve" needs.
+model CloudConversation {
+  id        String   @id
   title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  group     String
+  separator String
+  messages  String // JSON-encoded Message[] payload
+  version   Int      @default(0)
+  deletedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([updatedAt])
+  @@index([deletedAt])
 }

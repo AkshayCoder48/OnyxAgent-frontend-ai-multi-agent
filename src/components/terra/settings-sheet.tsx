@@ -1,20 +1,29 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { toast } from "sonner";
 import {
   Bell,
   Bot,
+  Brain,
   Cable,
+  Cloud,
+  CloudOff,
+  Database,
   FileJson,
   KeyRound,
+  Loader2,
   Lock,
   Palette,
+  RefreshCw,
+  Route,
   Sparkles,
   SquareSlash,
   Type,
   Wrench,
+  Zap,
 } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -59,7 +68,203 @@ function RowIcon({ children }: { children: ReactNode }) {
   );
 }
 
-function ToggleRow({
+function InfoRow({
+  icon,
+  name,
+  description,
+  value,
+}: {
+  icon: ReactNode;
+  name: string;
+  description: string;
+  value: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-14 items-center gap-3 px-4 py-3">
+      <RowIcon>{icon}</RowIcon>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-ink">{name}</p>
+        <p className="text-[12px] leading-snug text-ink-muted">{description}</p>
+      </div>
+      <span className="shrink-0 text-[12px] text-ink-muted">{value}</span>
+    </div>
+  );
+}
+
+function relativeTime(at: number | null): string {
+  if (at === null) return "never";
+  const seconds = Math.max(0, (Date.now() - at) / 1000);
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+function CloudSyncSection() {
+  const syncStatus = useTerra((s) => s.syncStatus);
+  const lastSyncedAt = useTerra((s) => s.lastSyncedAt);
+  const autoSync = useTerra((s) => s.autoSync);
+  const setAutoSync = useTerra((s) => s.setAutoSync);
+  const pullSync = useTerra((s) => s.pullSync);
+  const pushSync = useTerra((s) => s.pushSync);
+  const conversations = useTerra((s) => s.conversations);
+
+  const busy = syncStatus === "syncing";
+  const offline = syncStatus === "offline" || syncStatus === "error";
+  const statusLabel = busy
+    ? "Syncing…"
+    : offline
+      ? "Offline — will retry"
+      : autoSync
+        ? "Up to date"
+        : "Paused";
+
+  let snapshotKb = "—";
+  try {
+    const raw = window.localStorage.getItem("terra.v1.snapshot");
+    snapshotKb = raw ? `${Math.max(1, Math.round(raw.length / 1024))} KB` : "empty";
+  } catch {
+    snapshotKb = "unavailable";
+  }
+
+  const onSyncNow = () => {
+    if (busy) return;
+    void pullSync().then(() => {
+      void pushSync();
+      toast("Cloud sync complete");
+    });
+  };
+
+  return (
+    <SettingsGroup title="Cloud sync">
+      <InfoRow
+        icon={
+          offline ? (
+            <CloudOff className="h-4 w-4 text-terra" />
+          ) : busy ? (
+            <Loader2 className="h-4 w-4 animate-spin text-terra" />
+          ) : (
+            <Cloud className="h-4 w-4 text-terra" />
+          )
+        }
+        name={statusLabel}
+        description={`Conversations sync to the cloud · last sync ${relativeTime(lastSyncedAt)}`}
+        value={`${conversations.length} chats`}
+      />
+      <div className="flex min-h-14 items-center gap-3 px-4 py-3">
+        <RowIcon>
+          <RefreshCw className="h-4 w-4 text-terra" />
+        </RowIcon>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink">Auto-sync</p>
+          <p className="text-[12px] leading-snug text-ink-muted">
+            Push changes as you type, pull on return
+          </p>
+        </div>
+        <Switch
+          checked={autoSync}
+          onCheckedChange={(checked) => {
+            setAutoSync(checked);
+            toast(`Auto-sync ${checked ? "enabled" : "disabled"}`);
+          }}
+          aria-label="Toggle auto-sync"
+        />
+      </div>
+      <div className="flex min-h-14 items-center gap-3 px-4 py-3">
+        <RowIcon>
+          <Database className="h-4 w-4 text-terra" />
+        </RowIcon>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink">Local snapshot</p>
+          <p className="text-[12px] leading-snug text-ink-muted">
+            Instant-restore cache on this device
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onSyncNow}
+          disabled={busy}
+          className="h-8 border-hairline bg-background px-3 text-[12px] text-ink-soft hover:bg-terra-soft hover:text-terra"
+        >
+          {busy ? "Syncing…" : "Sync now"}
+        </Button>
+      </div>
+      <InfoRow
+        icon={<Database className="h-4 w-4 text-terra" />}
+        name="Snapshot size"
+        description="Local storage footprint"
+        value={snapshotKb}
+      />
+    </SettingsGroup>
+  );
+}
+
+function ModelRouterSection() {
+  const modelId = useTerra((s) => s.modelId);
+  const setModel = useTerra((s) => s.setModel);
+  const routeStats = useTerra((s) => s.routeStats);
+  const autoRouting = modelId === "auto";
+
+  const total = routeStats.fast + routeStats.balanced + routeStats.deep;
+
+  return (
+    <SettingsGroup title="Model router">
+      <div className="flex min-h-14 items-center gap-3 px-4 py-3">
+        <RowIcon>
+          <Route className="h-4 w-4 text-terra" />
+        </RowIcon>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink">Auto routing</p>
+          <p className="text-[12px] leading-snug text-ink-muted">
+            Picks fast, balanced or deep per message
+          </p>
+        </div>
+        <Switch
+          checked={autoRouting}
+          onCheckedChange={(checked) => {
+            setModel(checked ? "auto" : "balanced");
+            toast(checked ? "Router on — profiles chosen automatically" : "Router off — using Terra 1.5");
+          }}
+          aria-label="Toggle automatic model routing"
+        />
+      </div>
+      <InfoRow
+        icon={<Sparkles className="h-4 w-4 text-terra" />}
+        name="Routing history"
+        description="How the router has classified your messages"
+        value={
+          <span className="flex items-center gap-2 font-mono text-[11px]">
+            <span className="inline-flex items-center gap-1">
+              <Zap className="h-3 w-3 text-[#8A7E6C]" aria-hidden />
+              {routeStats.fast}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Route className="h-3 w-3 text-terra" aria-hidden />
+              {routeStats.balanced}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <Brain className="h-3 w-3 text-terra-deep" aria-hidden />
+              {routeStats.deep}
+            </span>
+          </span>
+        }
+      />
+      <InfoRow
+        icon={<Brain className="h-4 w-4 text-terra" />}
+        name="Current profile"
+        description={
+          total === 0
+            ? "Send a message to see routing in action"
+            : "Each reply carries its route — see the badge beside Terra's name"
+        }
+        value={autoRouting ? "Auto" : modelId === "fast" ? "Fast" : modelId === "deep" ? "Deep" : "Balanced"}
+      />
+    </SettingsGroup>
+  );
+}
+
+function LocalToggleRow({
   icon,
   name,
   description,
@@ -90,33 +295,9 @@ function ToggleRow({
   );
 }
 
-function InfoRow({
-  icon,
-  name,
-  description,
-  value,
-}: {
-  icon: ReactNode;
-  name: string;
-  description: string;
-  value: string;
-}) {
-  return (
-    <div className="flex min-h-14 items-center gap-3 px-4 py-3">
-      <RowIcon>{icon}</RowIcon>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-ink">{name}</p>
-        <p className="text-[12px] leading-snug text-ink-muted">{description}</p>
-      </div>
-      <span className="shrink-0 text-[12px] text-ink-muted">{value}</span>
-    </div>
-  );
-}
-
 export function SettingsSheet() {
   const open = useTerra((s) => s.settingsOpen);
   const setOpen = useTerra((s) => s.setSettingsOpen);
-  const [notifications, setNotifications] = useState(true);
   const [density, setDensity] = useState("comfortable");
   const [fontSize, setFontSize] = useState(15);
 
@@ -150,26 +331,19 @@ export function SettingsSheet() {
                 className="h-9 bg-background"
               />
             </div>
-            <div className="flex min-h-14 items-center gap-3 px-4 py-3">
-              <RowIcon>
-                <Bell className="h-4 w-4 text-terra" />
-              </RowIcon>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-ink">Notifications</p>
-                <p className="text-[12px] leading-snug text-ink-muted">
-                  Digest of shared threads and mentions
-                </p>
-              </div>
-              <Switch
-                checked={notifications}
-                onCheckedChange={(checked) => {
-                  setNotifications(checked);
-                  toast(`Notifications ${checked ? "enabled" : "disabled"}`);
-                }}
-                aria-label="Toggle notifications"
-              />
-            </div>
+            <LocalToggleRow
+              icon={<Bell className="h-4 w-4 text-terra" />}
+              name="Notifications"
+              description="Digest of shared threads and mentions"
+              defaultOn
+            />
           </SettingsGroup>
+
+          {/* Cloud sync */}
+          <CloudSyncSection />
+
+          {/* Model router */}
+          <ModelRouterSection />
 
           {/* Appearance */}
           <SettingsGroup title="Appearance">
@@ -235,31 +409,31 @@ export function SettingsSheet() {
 
           {/* Agents & Tools — consolidated into one group */}
           <SettingsGroup title="Agents & Tools">
-            <ToggleRow
+            <LocalToggleRow
               icon={<Wrench className="h-4 w-4 text-terra" />}
               name="Tools"
               description="Web search, code interpreter, file tools"
               defaultOn
             />
-            <ToggleRow
+            <LocalToggleRow
               icon={<Bot className="h-4 w-4 text-terra" />}
               name="Subagents"
               description="Specialized agents for research and drafts"
               defaultOn
             />
-            <ToggleRow
+            <LocalToggleRow
               icon={<Sparkles className="h-4 w-4 text-terra" />}
               name="Skills"
               description="Reusable prompt skills from the library"
               defaultOn={false}
             />
-            <ToggleRow
+            <LocalToggleRow
               icon={<Cable className="h-4 w-4 text-terra" />}
               name="MCPs"
               description="Model context protocol servers"
               defaultOn={false}
             />
-            <ToggleRow
+            <LocalToggleRow
               icon={<SquareSlash className="h-4 w-4 text-terra" />}
               name="Slash commands"
               description="Custom shortcuts in the composer"

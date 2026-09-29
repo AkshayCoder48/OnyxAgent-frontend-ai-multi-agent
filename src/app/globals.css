@@ -198,3 +198,22 @@
 .terra-scroll::-webkit-scrollbar-thumb:hover {
   background: #dfc5a9;
 }
+
+/* Streaming caret shown while a reply is being written */
+@keyframes terra-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.terra-caret {
+  animation: terra-caret 1s step-end infinite;
+}
+
+/* Last block of a streaming reply: keep margins tight while the caret rides along */
+.terra-streaming .terra-stream-last > :last-child {
+  margin-bottom: 0;
+}

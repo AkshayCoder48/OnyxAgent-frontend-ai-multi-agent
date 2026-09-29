@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp, Paperclip } from "lucide-react";
+import { ArrowUp, Paperclip, Square } from "lucide-react";
 import { toast } from "sonner";
 import { ModelChip } from "./model-chip";
 import { useTerra } from "./store";
@@ -10,6 +10,7 @@ export function Composer() {
   const [value, setValue] = useState("");
   const send = useTerra((s) => s.send);
   const sending = useTerra((s) => s.sending);
+  const stop = useTerra((s) => s.stop);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow the textarea between 44px and 200px.
@@ -66,18 +67,30 @@ export function Composer() {
             </button>
             <ModelChip />
             <span className="ml-auto hidden pr-1 text-[11px] whitespace-nowrap text-ink-muted sm:block" aria-hidden>
-              ⏎ to send
+              {sending ? "streaming…" : "⏎ to send"}
             </span>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!canSend}
-              aria-label="Send message"
-              title="Send"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-terra text-white shadow-[0_1px_3px_rgba(166,63,26,0.35)] transition-colors hover:bg-terra-deep disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <ArrowUp className="h-4 w-4" aria-hidden />
-            </button>
+            {sending ? (
+              <button
+                type="button"
+                onClick={stop}
+                aria-label="Stop generating"
+                title="Stop"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-terra-soft-border bg-terra-soft text-terra-deep transition-colors hover:bg-terra-soft/70"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!canSend}
+                aria-label="Send message"
+                title="Send"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-terra text-white shadow-[0_1px_3px_rgba(166,63,26,0.35)] transition-colors hover:bg-terra-deep disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ArrowUp className="h-4 w-4" aria-hidden />
+              </button>
+            )}
           </div>
         </div>
         <p className="pt-2 text-center text-[11px] text-ink-muted">

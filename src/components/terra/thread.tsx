@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { Feather } from "lucide-react";
 import { EMPTY_STATE_SUGGESTIONS } from "./seed";
 import { useTerra } from "./store";
-import { AssistantTurn, TypingIndicator, UserCard } from "./turns";
+import { AssistantTurn, UserCard } from "./turns";
 
 function DateSeparator({ label }: { label: string }) {
   return (
@@ -44,33 +44,62 @@ function EmptyState({ onSuggest }: { onSuggest: (text: string) => void }) {
   );
 }
 
+/** One-frame shell while the localStorage snapshot is restored.
+ *  Keeps first paint from flashing the seed data. */
+function BootSkeleton() {
+  return (
+    <div className="mx-auto flex w-full max-w-[760px] flex-1 flex-col gap-6 px-4 py-10 sm:px-6" aria-hidden>
+      <div className="h-3 w-40 rounded-full bg-paper" />
+      <div className="space-y-3 pt-4">
+        <div className="ml-auto h-12 w-2/3 rounded-2xl rounded-tr-sm bg-terra-soft/60" />
+        <div className="h-3 w-28 rounded-full bg-paper" />
+        <div className="space-y-2 pt-3">
+          <div className="h-3 w-full rounded-full bg-paper" />
+          <div className="h-3 w-11/12 rounded-full bg-paper" />
+          <div className="h-3 w-3/4 rounded-full bg-paper" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Thread() {
   const active = useTerra((s) => s.conversations.find((c) => c.id === s.activeId));
+  const booted = useTerra((s) => s.booted);
   const sending = useTerra((s) => s.sending);
   const send = useTerra((s) => s.send);
   const topRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const prevRef = useRef<{ id: string; count: number; sending: boolean } | null>(null);
+  const prevRef = useRef<{
+    id: string;
+    count: number;
+    sending: boolean;
+    lastLength: string;
+  } | null>(null);
 
   const activeId = active?.id;
   const messageCount = active?.messages.length ?? 0;
+  const lastMessage = active?.messages[messageCount - 1];
+  // Track streaming growth so the thread follows the reply as it arrives.
+  const lastLength = lastMessage ? `${lastMessage.role}:${lastMessage.text.length}:${lastMessage.reasoning?.length ?? 0}` : "";
+
   useEffect(() => {
     const prev = prevRef.current;
-    prevRef.current = { id: activeId ?? "", count: messageCount, sending };
-    // Initial load: keep the thread at its top so the opening turn is visible.
+    prevRef.current = { id: activeId ?? "", count: messageCount, sending, lastLength };
     if (!prev) return;
     if (prev.id !== (activeId ?? "")) {
-      // Conversation switch: reset scroll to the top of the thread.
       topRef.current?.scrollIntoView({ block: "start" });
       return;
     }
     const grew = messageCount > prev.count;
     const startedTyping = !prev.sending && sending;
-    if ((grew || startedTyping) && messageCount > 0) {
+    const streamed = prev.lastLength !== lastLength;
+    if ((grew || startedTyping || streamed) && messageCount > 0) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [activeId, messageCount, sending]);
+  }, [activeId, messageCount, sending, lastLength]);
 
+  if (!booted) return <BootSkeleton />;
   if (!active) return null;
 
   return (
@@ -92,7 +121,6 @@ export function Thread() {
               />
             ),
           )}
-          {sending && <TypingIndicator />}
           <div ref={bottomRef} aria-hidden className="scroll-mb-36" />
         </div>
       )}
