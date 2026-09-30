@@ -132,16 +132,43 @@ let pushTimer: ReturnType<typeof setTimeout> | null = null;
 let syncChain: Promise<void> = Promise.resolve();
 let pullRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Sleep that a "tab became visible" event can cut short: while hidden,
+ * browsers clamp timers hard (down to ~1/minute), so backoff waits must
+ * never block a reconnect that could start immediately on return.
+ */
+const wakeWaiters = new Set<() => void>();
+function sleepOrWake(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      wakeWaiters.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    wakeWaiters.add(done);
+  });
+}
+function wakeAll(): void {
+  for (const wake of [...wakeWaiters]) {
+    try {
+      wake();
+    } catch {
+      // A broken waiter never blocks the others.
+    }
+  }
 }
 
 /** Sentinel for errors the server already retried — never retried client-side. */
 class FinalStreamError extends Error {}
+/** The server no longer knows this turn (restart / expiry) — caller rebuilds. */
+class GoneError extends Error {}
 
 interface StreamDraft {
   convId: string;
   msgId: string;
+  /** Server job id — stable across every re-attach. */
+  turnId: string;
   reasoning: string;
   answer: string;
   route: RouteInfo | null;
@@ -150,6 +177,8 @@ interface StreamDraft {
   thinkStart: number | null;
   thinkMs: number | null;
   timer: ReturnType<typeof setTimeout> | null;
+  /** Route stats counted once per turn (replays never double-count). */
+  statsCounted: boolean;
 }
 
 let draft: StreamDraft | null = null;
@@ -157,7 +186,10 @@ let streamAbort: AbortController | null = null;
 let userStopped = false;
 
 /* ------------------------------------------------------------------ */
-/* SSE client — heartbeats ignored, transport failures surfaced        */
+/* SSE client — attach to a server-side background turn job.           */
+/* The connection is a detachable viewer: if it dies (background tab,  */
+/* network blip, proxy kill) the job keeps running server-side and we  */
+/* re-attach with a `since` cursor to receive exactly what we missed.  */
 /* ------------------------------------------------------------------ */
 
 type StreamEvent =
@@ -168,27 +200,46 @@ type StreamEvent =
   | { type: "status"; text: string }
   | { type: "warning"; text: string }
   | { type: "done"; elapsedMs?: number; partial?: boolean }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "cancelled" };
+
+interface AttachArgs {
+  history: ChatHistoryMessage[];
+  model: ModelPreferenceId;
+  turnId: string;
+  /** Cursor: index of the first event we have NOT applied yet. */
+  since: number;
+  /** Create the job if it does not exist (false = attach-only). */
+  create: boolean;
+  resumeFrom: string | null;
+}
 
 async function consumeChatStream(
-  history: ChatHistoryMessage[],
-  model: ModelPreferenceId,
-  resumeFrom: string | null,
+  args: AttachArgs,
   signal: AbortSignal,
   onEvent: (event: StreamEvent) => void,
-): Promise<void> {
+  onReset: () => void,
+): Promise<number> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      messages: history.slice(-14),
-      model,
-      ...(resumeFrom ? { resumeFrom } : {}),
+      messages: args.history.slice(-14),
+      model: args.model,
+      turnId: args.turnId,
+      since: args.since,
+      create: args.create,
+      ...(args.resumeFrom ? { resumeFrom: args.resumeFrom } : {}),
     }),
     signal,
   });
 
   if (!response.ok || !response.body) {
+    if (response.status === 404) {
+      // The server no longer has this job (restart / expiry). The caller
+      // decides how to rebuild — never silently restart from scratch.
+      throw new GoneError("Turn job is gone");
+    }
     let message = "Terra could not be reached — please try again.";
     try {
       const data = (await response.json()) as { error?: string };
@@ -202,13 +253,32 @@ async function consumeChatStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let nextSince = args.since;
 
   const handleLine = (line: string) => {
     if (!line.startsWith("data:")) return; // heartbeats arrive as ": ping …"
     const payload = line.slice(5).trim();
     if (!payload) return;
     try {
-      onEvent(JSON.parse(payload) as StreamEvent);
+      const parsed = JSON.parse(payload) as {
+        type?: string;
+        index?: number;
+        reset?: boolean;
+      };
+      if (parsed.type === "hello") {
+        if (parsed.reset) {
+          // The job's log does not match our cursor (new job under the
+          // same id) — rebuild the draft from the full replay that follows.
+          nextSince = 0;
+          onReset();
+        }
+        return;
+      }
+      if (typeof parsed.index === "number") {
+        if (parsed.index < nextSince) return; // stale duplicate guard
+        nextSince = parsed.index + 1;
+      }
+      onEvent(parsed as StreamEvent);
     } catch {
       // Ignore malformed fragments — the next event usually repairs.
     }
@@ -216,7 +286,7 @@ async function consumeChatStream(
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) return;
+    if (done) return nextSince;
     buffer += decoder.decode(value, { stream: true });
     let newline: number;
     while ((newline = buffer.indexOf("\n")) !== -1) {
@@ -398,6 +468,13 @@ export const useTerra = create<TerraState>()((set, get) => {
   const doPush = async (): Promise<void> => {
     const state = get();
     if (!state.booted) return;
+    // Prune dirty ids whose conversation no longer exists client-side
+    // (e.g. tombstoned away by a pull while still unsynced) — they could
+    // otherwise produce an empty payload and an error loop.
+    const known = new Set(state.conversations.map((c) => c.id));
+    for (const id of [...dirtyIds]) {
+      if (!known.has(id)) dirtyIds.delete(id);
+    }
     // Never push a conversation that is mid-stream — it is pushed on finish.
     const streamingConv = draft?.convId;
     const pendingConvIds = [...dirtyIds].filter((id) => id !== streamingConv);
@@ -564,77 +641,134 @@ export const useTerra = create<TerraState>()((set, get) => {
     }));
   };
 
-  const runStream = async (convId: string, history: ChatHistoryMessage[]) => {
+  const runStream = async (
+    convId: string,
+    history: ChatHistoryMessage[],
+    turnId: string,
+    options?: { allowRestart?: boolean },
+  ) => {
     const model = get().modelId;
+    const allowRestart = options?.allowRestart ?? true;
+    let since = 0;
+    let create = true;
     let resumeFrom: string | null = null;
-    let attempt = 0;
+    let attempts = 0;
     let sawDone = false;
+    // ~2 minutes of reconnecting (longer with hidden-tab timer throttling);
+    // the server job keeps running the whole time regardless.
+    const MAX_ATTACH_ATTEMPTS = 30;
+
+    /** Draft has content — OR the live message already does (a recovered
+     *  turn resumes with an empty draft but a partially-filled message,
+     *  and that partial must never be thrown away). */
+    const draftHasContent = (): boolean => {
+      const current = draft;
+      if (!current) return false;
+      if (current.answer.trim().length > 0) return true;
+      const live = get()
+        .conversations.find((c) => c.id === current.convId)
+        ?.messages.find((m) => m.id === current.msgId);
+      if (!live) return false;
+      return (
+        live.text.trim().length > 0 ||
+        (live.parts ?? []).some((p) => p.type === "text" && p.text.trim().length > 0)
+      );
+    };
+
+    const applyEvent = (event: StreamEvent) => {
+      if (!draft) return;
+      switch (event.type) {
+        case "route": {
+          draft.route = {
+            route: event.route,
+            label: event.label,
+            reason: event.reason,
+            model: event.model,
+          };
+          if (!draft.statsCounted) {
+            draft.statsCounted = true;
+            set((s) => ({
+              routeStats: {
+                ...s.routeStats,
+                [event.route]: (s.routeStats[event.route] ?? 0) + 1,
+              },
+            }));
+            scheduleSnapshot();
+          }
+          queueFlush();
+          break;
+        }
+        case "reasoning": {
+          if (draft.thinkStart === null) draft.thinkStart = Date.now();
+          draft.reasoning += event.text;
+          queueFlush();
+          break;
+        }
+        case "delta": {
+          draft.answer += event.text;
+          queueFlush();
+          break;
+        }
+        case "replace": {
+          draft.reasoning = event.reasoning;
+          draft.answer = event.answer;
+          queueFlush();
+          break;
+        }
+        case "status": {
+          draft.notice = event.text;
+          queueFlush();
+          break;
+        }
+        case "warning": {
+          draft.warn = event.text;
+          queueFlush();
+          break;
+        }
+        case "done": {
+          sawDone = true;
+          finalizeDraft({});
+          break;
+        }
+        case "cancelled": {
+          // Stop pressed (possibly in another tab): keep what arrived.
+          sawDone = true;
+          if (draftHasContent()) {
+            finalizeDraft({});
+          } else {
+            removeDraftMessage();
+          }
+          break;
+        }
+        case "error": {
+          sawDone = true;
+          throw new FinalStreamError(event.message);
+        }
+      }
+    };
 
     while (true) {
       streamAbort = new AbortController();
       userStopped = false;
       sawDone = false;
       try {
-        await consumeChatStream(history, model, resumeFrom, streamAbort.signal, (event) => {
-          if (!draft) return;
-          switch (event.type) {
-            case "route": {
-              draft.route = {
-                route: event.route,
-                label: event.label,
-                reason: event.reason,
-                model: event.model,
-              };
-              set((s) => ({
-                routeStats: {
-                  ...s.routeStats,
-                  [event.route]: (s.routeStats[event.route] ?? 0) + 1,
-                },
-              }));
-              queueFlush();
-              break;
+        since = await consumeChatStream(
+          { history, model, turnId, since, create, resumeFrom },
+          streamAbort.signal,
+          applyEvent,
+          () => {
+            // hello.reset — the incoming replay rebuilds the whole draft.
+            if (draft) {
+              draft.reasoning = "";
+              draft.answer = "";
+              draft.route = null;
+              draft.notice = null;
             }
-            case "reasoning": {
-              if (draft.thinkStart === null) draft.thinkStart = Date.now();
-              draft.reasoning += event.text;
-              queueFlush();
-              break;
-            }
-            case "delta": {
-              draft.answer += event.text;
-              queueFlush();
-              break;
-            }
-            case "replace": {
-              draft.reasoning = event.reasoning;
-              draft.answer = event.answer;
-              queueFlush();
-              break;
-            }
-            case "status": {
-              draft.notice = event.text;
-              queueFlush();
-              break;
-            }
-            case "warning": {
-              draft.warn = event.text;
-              queueFlush();
-              break;
-            }
-            case "done": {
-              sawDone = true;
-              finalizeDraft(event.partial ? {} : {});
-              break;
-            }
-            case "error": {
-              sawDone = true;
-              throw new FinalStreamError(event.message);
-            }
-          }
-        });
+          },
+        );
         if (draft && !sawDone) {
-          // Server leg closed without a completion marker — treat exactly
-          // like a client-leg drop and resume transparently.
+          // Viewer leg closed without a completion marker — treat exactly
+          // like a drop and re-attach; the job may still be running.
           throw new Error("Stream closed before the completion marker.");
         }
         if (draft) finalizeDraft({});
@@ -642,7 +776,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       } catch (error) {
         // User pressed stop: keep whatever arrived, finish silently.
         if (userStopped) {
-          if (draft && draft.answer.trim().length > 0) {
+          if (draft && draftHasContent()) {
             finalizeDraft({});
           } else {
             removeDraftMessage();
@@ -653,7 +787,7 @@ export const useTerra = create<TerraState>()((set, get) => {
         // Server already retried and gave up — surface honestly.
         if (error instanceof FinalStreamError) {
           const message = error.message;
-          if (draft && draft.answer.trim().length > 0) {
+          if (draft && draftHasContent()) {
             finalizeDraft({ warn: message });
           } else {
             finalizeDraft({
@@ -664,34 +798,45 @@ export const useTerra = create<TerraState>()((set, get) => {
           return;
         }
 
-        // Client-leg transport failure (fetch aborted in a background tab,
-        // network blip, socket reset, premature close). Auto-heal instead
-        // of erroring — this is the "Stream read failed: operation aborted"
-        // class of problem, and it now recovers on its own.
-        const haveAnswer = (draft?.answer ?? "").trim().length > 0;
-        if (haveAnswer && attempt < 2) {
-          attempt += 1;
-          resumeFrom = draft?.answer ?? null;
-          if (draft) {
-            draft.notice = "Connection dropped — resuming your reply…";
-            queueFlush();
+        attempts += 1;
+
+        // The server lost the job (restart / expiry). Rebuild it once with
+        // the partial answer as the resume base — never silently restart a
+        // turn the user may have forgotten about.
+        if (error instanceof GoneError) {
+          if (allowRestart && attempts <= 3) {
+            resumeFrom = (draft?.answer ?? "").trim().length > 0 ? draft?.answer ?? null : null;
+            since = 0;
+            create = true;
+            continue;
           }
-          await sleep(600);
-          continue;
+          if (draft && draftHasContent()) {
+            finalizeDraft({
+              warn: "This reply was interrupted and could not be recovered — it may be incomplete.",
+            });
+          } else {
+            removeDraftMessage();
+          }
+          return;
         }
-        if (!haveAnswer && attempt < 2) {
-          attempt += 1;
+
+        // Transport failure on the viewer leg (background-tab eviction,
+        // network blip, socket reset, premature close). The job keeps
+        // running server-side — re-attach and replay what we missed.
+        if (attempts <= MAX_ATTACH_ATTEMPTS) {
+          create = false; // attach-only; a missing job surfaces as GoneError
           if (draft) {
-            draft.notice = "Reconnecting…";
+            draft.notice =
+              attempts === 1 ? "Reconnecting…" : `Reconnecting (attempt ${attempts})…`;
             queueFlush();
           }
-          await sleep(800 * attempt);
+          await sleepOrWake(Math.min(400 * 2 ** Math.min(attempts, 4), 5000));
           continue;
         }
 
         const message =
           "The connection dropped mid-reply and could not recover. Your message is safe — tap the refresh button to try again.";
-        if (draft && draft.answer.trim().length > 0) {
+        if (draft && draftHasContent()) {
           finalizeDraft({ warn: message });
         } else {
           finalizeDraft({ isError: true, parts: [{ type: "text", text: message }] });
@@ -713,6 +858,7 @@ export const useTerra = create<TerraState>()((set, get) => {
     draft = {
       convId: conversationId,
       msgId: assistantId,
+      turnId: assistantId,
       reasoning: "",
       answer: "",
       route: null,
@@ -721,12 +867,101 @@ export const useTerra = create<TerraState>()((set, get) => {
       thinkStart: null,
       thinkMs: null,
       timer: null,
+      statsCounted: false,
     };
     const history: ChatHistoryMessage[] = historyMessages.map((m) => ({
       role: m.role,
       content: messageContent(m),
     }));
-    await runStream(conversationId, history);
+    await runStream(conversationId, history, assistantId);
+  };
+
+  /**
+   * Turns that were still streaming when the page went away (background
+   * tab frozen/discarded, crash, reload) are re-attached to their
+   * server-side job: a finished job replays its full reply near-instantly,
+   * a live one keeps streaming. Stuck messages we cannot recover are
+   * finalized as partials instead of spinning forever.
+   */
+  const recoverInterruptedTurns = () => {
+    const state = get();
+    const hasContent = (m: Message) =>
+      m.text.trim().length > 0 ||
+      (m.parts ?? []).some((p) => p.type === "text" && p.text.trim().length > 0);
+
+    // Newest conversation with a stuck turn that carries a server job id
+    // (conversations are sorted newest-first); its last such message wins.
+    let targetConvId: string | null = null;
+    let targetIndex = -1;
+    let targetMsg: Message | null = null;
+    for (const conversation of state.conversations) {
+      for (let i = 0; i < conversation.messages.length; i++) {
+        const message = conversation.messages[i];
+        if (message.role === "assistant" && message.streaming && message.turnId) {
+          targetConvId = conversation.id;
+          targetIndex = i;
+          targetMsg = message;
+        }
+      }
+      if (targetMsg) break;
+    }
+    if (targetMsg && targetIndex === 0) {
+      // Nothing to replay from — cannot recover meaningfully.
+      targetMsg = null;
+      targetConvId = null;
+    }
+
+    const recoverId = targetMsg?.id ?? null;
+    const conversations = state.conversations.map((conversation) => {
+      let changed = false;
+      const messages: Message[] = [];
+      for (const message of conversation.messages) {
+        if (message.role === "assistant" && message.streaming && message.id !== recoverId) {
+          changed = true;
+          if (hasContent(message)) {
+            messages.push({
+              ...message,
+              streaming: false,
+              warn: "Recovered after the page reloaded — this reply may be incomplete.",
+            });
+          }
+          continue; // empty + unrecoverable → drop
+        }
+        messages.push(message);
+      }
+      return changed ? { ...conversation, messages } : conversation;
+    });
+    set({ conversations });
+    for (const c of conversations) {
+      if (c !== state.conversations.find((o) => o.id === c.id)) markDirty(c.id);
+    }
+
+    if (!targetMsg || !targetConvId || !targetMsg.turnId) return;
+    const conversation = get().conversations.find((c) => c.id === targetConvId);
+    if (!conversation) return;
+    const historyMessages = conversation.messages.slice(0, targetIndex);
+    if (historyMessages.length === 0) return;
+
+    draft = {
+      convId: targetConvId,
+      msgId: targetMsg.id,
+      turnId: targetMsg.turnId,
+      reasoning: "",
+      answer: "",
+      route: null,
+      notice: "Resuming your reply…",
+      warn: null,
+      thinkStart: null,
+      thinkMs: null,
+      timer: null,
+      statsCounted: true, // replays never double-count
+    };
+    set({ sending: true });
+    const history: ChatHistoryMessage[] = historyMessages.map((m) => ({
+      role: m.role,
+      content: messageContent(m),
+    }));
+    void runStream(targetConvId, history, targetMsg.turnId, { allowRestart: false });
   };
 
   const sendMessage = async (text: string, mode: "send" | "regenerate") => {
@@ -746,6 +981,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       feedback: null,
       streaming: true,
       parts: [],
+      turnId: assistantId,
     };
 
     if (mode === "send") {
@@ -827,17 +1063,33 @@ export const useTerra = create<TerraState>()((set, get) => {
         routeStats: prefs.routeStats ?? { fast: 0, balanced: 0, deep: 0 },
         booted: true,
       });
-      if (!snapshot) for (const c of conversations) dirtyIds.add(c.id);
+      // First boot on this device (no local snapshot): the cloud wins where
+      // it already knows the conversation — only rows the server does NOT
+      // have (still version 0 after the initial pull) are pushed as fresh.
+      const markUnsyncedSeeds = () => {
+        for (const c of get().conversations) {
+          if (c.version === 0 && !tombstones.has(c.id)) dirtyIds.add(c.id);
+        }
+      };
+      if (!snapshot && !get().autoSync) markUnsyncedSeeds();
       scheduleSnapshot();
+      // Turns that were still streaming when the page died (backgrounded
+      // tab frozen/discarded, crash, reload) resume from the server-side
+      // job — a finished job replays instantly, a live one keeps streaming.
+      recoverInterruptedTurns();
       if (get().autoSync) {
         // Pull first (respects tombstones), then push anything pending.
         void enqueueSync(doPull).then(() => {
-          if (dirtyIds.size > 0) enqueueSync(doPush);
+          if (!snapshot) markUnsyncedSeeds();
+          if (dirtyIds.size > 0 || pendingTombstones.size > 0) enqueueSync(doPush);
         });
       }
-      // Resync whenever the tab becomes visible again.
+      // Resync + shortcut reconnect backoff whenever the tab becomes
+      // visible again (hidden tabs throttle timers to ~1/minute).
       document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible" && get().booted && get().autoSync) {
+        if (document.visibilityState !== "visible") return;
+        wakeAll();
+        if (get().booted && get().autoSync) {
           void enqueueSync(doPull);
         }
       });
@@ -905,7 +1157,17 @@ export const useTerra = create<TerraState>()((set, get) => {
 
     stop: () => {
       userStopped = true;
+      const turnId = draft?.turnId ?? null;
       streamAbort?.abort();
+      // The turn now runs as a server-side job — aborting the viewer is
+      // not enough, tell the job to stop spending tokens too.
+      if (turnId) {
+        void fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "cancel", turnId }),
+        }).catch(() => undefined);
+      }
     },
 
     deleteConversation: (id) => {
@@ -915,7 +1177,15 @@ export const useTerra = create<TerraState>()((set, get) => {
       // If this conversation is mid-stream, abort the stream first.
       if (draft?.convId === id) {
         userStopped = true;
+        const turnId = draft.turnId;
         streamAbort?.abort();
+        if (turnId) {
+          void fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "cancel", turnId }),
+          }).catch(() => undefined);
+        }
       }
       const remaining = state.conversations.filter((c) => c.id !== id);
       tombstones.add(id);

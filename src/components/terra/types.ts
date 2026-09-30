@@ -50,6 +50,9 @@ export interface Message {
   route?: RouteInfo;
   /** Live reply still streaming in */
   streaming?: boolean;
+  /** Server job id — lets the client re-attach to a background turn after
+   *  the tab was backgrounded, frozen, discarded or reloaded. */
+  turnId?: string;
   /** Transient status note ("recovering your reply…") while streaming */
   notice?: string;
   /** Persistent inline warning (e.g. recovery failed, reply partial) */
