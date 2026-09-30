@@ -24,7 +24,12 @@ export default function CodeLayout({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <CodeTabs />
-      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      {/* Flex column (not a plain block): ChatWorkspace's root relies on
+          flex-1 to stretch to the full height. With a block wrapper the
+          chat column collapsed to content height, leaving the prompt box
+          floating mid-screen instead of pinned to the device bottom —
+          exactly like /chat, the workspace must fill the remaining space. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>
   );
 }

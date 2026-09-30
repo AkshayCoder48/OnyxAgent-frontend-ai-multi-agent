@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { Loader2, Paperclip, Rocket, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -18,7 +24,9 @@ import { cn } from "@/lib/utils";
  *   the EXACT model selector used in normal chat (ChatControls — same store,
  *   same provider list), and the primary "Create" CTA.
  * - Quick-start chips pre-fill the textarea (they do NOT auto-send).
- * - ⌘⏎ / Ctrl+⏎ sends. Enter inserts a newline (multi-line by design).
+ * - Enter sends, Shift+Enter inserts a newline — the same behaviour as the
+ *   normal chat composer, so the box feels like every other prompt in the
+ *   app. ⌘⏎ / Ctrl+⏎ also sends (window-level).
  */
 
 const QUICK_STARTS: { label: string; prompt: string }[] = [
@@ -91,7 +99,21 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
     requestAnimationFrame(resize);
   }, [value, disabled, uploading, uploads, onSend, resize]);
 
-  // ⌘⏎ / Ctrl+⏎ sends (multi-line textarea — plain Enter is a newline).
+  // Enter sends, Shift+Enter is a newline — identical to the normal chat
+  // composer (chat-input.tsx), so tapping Enter on a project prompt behaves
+  // the way every chat box in the app does. ⌘⏎ / Ctrl+⏎ still works via the
+  // window-level listener below (e.g. right after clicking a quick-start chip).
+  const handleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    },
+    [send],
+  );
+
+  // ⌘⏎ / Ctrl+⏎ sends from anywhere on the page.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -142,12 +164,7 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
           disabled={disabled}
           className="placeholder:text-muted-foreground/60 scrollbar-thin w-full resize-none bg-transparent px-4 py-3.5 text-[15px] leading-relaxed outline-none disabled:opacity-60"
           style={{ minHeight: 180 }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              send();
-            }
-          }}
+          onKeyDown={handleKeyDown}
         />
 
         {/* Attached files */}
@@ -209,7 +226,7 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
 
           <div className="flex items-center gap-2">
             <kbd className="text-muted-foreground/60 hidden select-none font-mono text-[10px] sm:inline-flex">
-              ⌘⏎
+              ⏎ to create
             </kbd>
             <button
               type="button"
