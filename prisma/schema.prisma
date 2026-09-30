@@ -14,16 +14,58 @@ datasource db {
 // payload per conversation — one row read/write keeps sync round-trips at a
 // single digit millisecond level, which is what "near-instant retrieve" needs.
 model CloudConversation {
-  id        String   @id
+  id        String    @id
   title     String
   group     String
   separator String
   messages  String // JSON-encoded Message[] payload
-  version   Int      @default(0)
+  mode      String    @default("agent") // "agent" | "code" — OnyxCode conversations
+  version   Int       @default(0)
   deletedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([updatedAt])
   @@index([deletedAt])
+}
+
+// OnyxCode — a code-mode workspace (one per code-mode conversation). Files are
+// stored as a single JSON {path: content} map; one row read/write keeps
+// scaffold + edit operations at millisecond level.
+model CodeWorkspace {
+  id        String   @id // = code conversation id
+  appMeta   String   @default("{}") // JSON: { framework, name, description }
+  files     String   @default("{}") // JSON: { path: content }
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// OnyxCode — Database tab / manage_database tool records (workspace-scoped
+// key → JSON document store).
+model CodeRecord {
+  id          String   @id @default(uuid())
+  workspaceId String
+  key         String
+  kind        String   @default("document") // document | kv
+  data        String   @default("{}") // JSON payload
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+}
+
+// OnyxCode — Preview tab session records (metadata survives refreshes; the
+// live server lives in the preview mini-service).
+model PreviewSession {
+  id          String   @id
+  workspaceId String
+  name        String
+  url         String // path + query, relative to the app origin
+  status      String   @default("running") // running | stopped | error
+  entry       String   @default("preview/index.html")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([workspaceId])
 }

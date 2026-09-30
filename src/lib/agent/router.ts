@@ -11,6 +11,7 @@
 
 export type RouteName = "fast" | "balanced" | "deep";
 export type ModelPreference = "auto" | RouteName;
+export type TurnMode = "agent" | "code";
 
 export interface RouteSignal {
   id: string;
@@ -81,6 +82,35 @@ Begin your entire reply with a line that says exactly THINKING: followed on the 
   },
 };
 
+const CODE_BASE =
+  "You are OnyxCode, a focused coding and app-building agent. You scaffold real projects, edit workspace files, start live previews, test web pages with a headless browser, and store project data — all through your tools. Be concise and structural: short intro, then what you did, then next steps. Use markdown lists and code blocks for file contents when showing them to the user.";
+
+const CODE_PROFILES: Record<RouteName, RouteProfile> = {
+  fast: {
+    label: "OnyxCode Mini · Fast",
+    thinking: false,
+    historyWindow: 6,
+    reasoningProtocol: false,
+    systemPrompt: `${CODE_BASE} Keep prose minimal — get to the tool or the answer immediately.`,
+  },
+  balanced: {
+    label: "OnyxCode · Balanced",
+    thinking: false,
+    historyWindow: 10,
+    reasoningProtocol: false,
+    systemPrompt: CODE_BASE,
+  },
+  deep: {
+    label: "OnyxCode · Deep reasoning",
+    thinking: true,
+    historyWindow: 12,
+    reasoningProtocol: true,
+    systemPrompt: `${CODE_BASE}
+
+Begin your entire reply with a line that says exactly THINKING: followed on the same or next lines by a brief private plan of 3-8 sentences (what to build, which tools, in what order). Then a line that says exactly ANSWER: followed by the reply for the user. If your plan needs a tool, the ANSWER part ends with the single onyxtool block — nothing after it. Never mention the plan or these markers inside the answer itself.`,
+  },
+};
+
 export const REASONING_OPEN = "THINKING:";
 export const REASONING_CLOSE = "ANSWER:";
 
@@ -94,12 +124,15 @@ const MULTI_QUESTION_RE = /\?[^?]*\?/;
 
 /**
  * Pure scoring router. Preference "auto" lets the signals decide; any other
- * value pins that route (the reason notes the manual override).
+ * value pins that route (the reason notes the manual override). In code mode
+ * the same scoring drives the OnyxCode profile set.
  */
 export function routeRequest(
   messages: RouterMessage[],
   preference: ModelPreference = "auto",
+  mode: TurnMode = "agent",
 ): RouteDecision {
+  const profiles = mode === "code" ? CODE_PROFILES : PROFILES;
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const text = lastUser?.content ?? "";
   const trimmed = text.trim();
@@ -108,8 +141,8 @@ export function routeRequest(
 
   if (preference !== "auto") {
     return {
-      ...buildDecision(preference),
-      reason: `Pinned manually to ${PROFILES[preference].label}.`,
+      ...buildDecision(preference, profiles),
+      reason: `Pinned manually to ${profiles[preference].label}.`,
       signals: [{ id: "manual", label: "Manual selection", weight: 0 }],
     };
   }
@@ -156,18 +189,21 @@ export function routeRequest(
   }
 
   const route: RouteName = score >= 4 ? "deep" : score <= 0 ? "fast" : "balanced";
-  const profile = PROFILES[route];
+  const profile = profiles[route];
   const top = [...signals].sort((a, b) => b.weight - a.weight).slice(0, 3);
   const reason =
     top.length > 0
       ? `Routed to ${profile.label} — ${top.map((s) => s.label.toLowerCase()).join(", ")}.`
       : `Routed to ${profile.label} — plain conversational prompt.`;
 
-  return { ...buildDecision(route), reason, signals };
+  return { ...buildDecision(route, profiles), reason, signals };
 }
 
-function buildDecision(route: RouteName): RouteDecision {
-  const profile = PROFILES[route];
+function buildDecision(
+  route: RouteName,
+  profiles: Record<RouteName, RouteProfile> = PROFILES,
+): RouteDecision {
+  const profile = profiles[route];
   return {
     route,
     label: profile.label,

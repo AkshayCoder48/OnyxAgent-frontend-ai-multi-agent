@@ -20,6 +20,19 @@ export default function Page() {
     hydrate();
   }, [hydrate]);
 
+  // `/` is the Terra agent's route — Code Mode lives at /code*. If the last
+  // snapshot left Code Mode active (or a sync restores it), clear it so the
+  // sidebar always matches the page the user is actually on.
+  useEffect(() => {
+    const clearStaleCodeMode = () => {
+      if (useTerra.getState().appMode === "code") {
+        useTerra.getState().exitCodeMode();
+      }
+    };
+    clearStaleCodeMode();
+    return useTerra.subscribe(clearStaleCodeMode);
+  }, []);
+
   // ⌘N / Ctrl+N starts a new conversation.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -48,7 +61,7 @@ export default function Page() {
         </SheetContent>
       </Sheet>
 
-      {/* Main column: one scroll container with pinned glass bars */}
+      {/* Main column — the Terra agent. OnyxCode has its own shell at /code. */}
       <main className="relative h-full min-w-0 flex-1">
         <div className="terra-scroll flex h-full flex-col overflow-y-auto">
           <TopBar />

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Bell,
   Bot,
@@ -18,6 +19,7 @@ import {
   Route,
   Sparkles,
   SquareSlash,
+  SquareTerminal,
   Type,
   Wrench,
   Zap,
@@ -73,11 +75,13 @@ function InfoRow({
   name,
   description,
   value,
+  action,
 }: {
   icon: ReactNode;
   name: string;
   description: string;
   value: ReactNode;
+  action?: ReactNode;
 }) {
   return (
     <div className="flex min-h-14 items-center gap-3 px-4 py-3">
@@ -86,7 +90,7 @@ function InfoRow({
         <p className="text-sm font-medium text-ink">{name}</p>
         <p className="text-[12px] leading-snug text-ink-muted">{description}</p>
       </div>
-      <span className="shrink-0 text-[12px] text-ink-muted">{value}</span>
+      {action ?? <span className="shrink-0 text-[12px] text-ink-muted">{value}</span>}
     </div>
   );
 }
@@ -296,8 +300,12 @@ function LocalToggleRow({
 }
 
 export function SettingsSheet() {
+  const router = useRouter();
   const open = useTerra((s) => s.settingsOpen);
   const setOpen = useTerra((s) => s.setSettingsOpen);
+  const appMode = useTerra((s) => s.appMode);
+  const enterCodeMode = useTerra((s) => s.enterCodeMode);
+  const exitCodeMode = useTerra((s) => s.exitCodeMode);
   const [density, setDensity] = useState("comfortable");
   const [fontSize, setFontSize] = useState(15);
 
@@ -409,6 +417,30 @@ export function SettingsSheet() {
 
           {/* Agents & Tools — consolidated into one group */}
           <SettingsGroup title="Agents & Tools">
+            <InfoRow
+              icon={<SquareTerminal className="h-4 w-4 text-terra" />}
+              name="Code Mode"
+              description="OnyxCode — scaffold apps, live previews, database"
+              value={appMode === "code" ? "Active" : "Available"}
+              action={
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (appMode === "code") {
+                      exitCodeMode();
+                      router.push("/");
+                    } else {
+                      enterCodeMode();
+                      router.push("/code");
+                    }
+                    setOpen(false);
+                  }}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-terra px-3 text-[12px] font-semibold text-white shadow-[0_1px_3px_rgba(166,63,26,0.35)] transition-colors hover:bg-terra-deep"
+                >
+                  {appMode === "code" ? "Back to Terra" : "Open OnyxCode"}
+                </button>
+              }
+            />
             <LocalToggleRow
               icon={<Wrench className="h-4 w-4 text-terra" />}
               name="Tools"

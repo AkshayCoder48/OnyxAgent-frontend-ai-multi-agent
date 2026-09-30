@@ -23,6 +23,7 @@ interface CachedRow {
   separator: string;
   /** JSON-encoded message payload */
   messages: string;
+  mode: string;
   version: number;
   deletedAt: Date | null;
   updatedAt: Date;
@@ -57,6 +58,7 @@ function toCached(row: CloudConversation): CachedRow {
     group: row.group,
     separator: row.separator,
     messages: row.messages,
+    mode: row.mode,
     version: row.version,
     deletedAt: row.deletedAt,
     updatedAt: row.updatedAt,
@@ -69,6 +71,7 @@ interface SyncUpdate {
   group: string;
   separator: string;
   messages: string;
+  mode: string;
   version: number;
   deleted: boolean;
   updatedAt: string;
@@ -81,6 +84,7 @@ function toUpdate(row: CachedRow): SyncUpdate {
     group: row.group,
     separator: row.separator,
     messages: row.messages,
+    mode: row.mode,
     version: row.version,
     deleted: row.deletedAt !== null,
     updatedAt: row.updatedAt.toISOString(),
@@ -133,6 +137,7 @@ interface PushConversation {
   group?: unknown;
   separator?: unknown;
   messages?: unknown;
+  mode?: unknown;
   deleted?: unknown;
 }
 
@@ -171,6 +176,7 @@ export async function POST(request: NextRequest) {
       const separator = typeof raw.separator === "string" ? raw.separator.slice(0, 120) : "";
       const deleted = raw.deleted === true;
       const messages = typeof raw.messages === "string" ? raw.messages : "[]";
+      const mode = raw.mode === "code" ? "code" : "agent";
       if (messages.length > 1_500_000) continue; // ~1.5 MB safety cap per row
 
       const existing = cache.get(id);
@@ -183,6 +189,7 @@ export async function POST(request: NextRequest) {
           group,
           separator,
           messages,
+          mode,
           deletedAt: deleted ? new Date() : null,
         },
         create: {
@@ -191,6 +198,7 @@ export async function POST(request: NextRequest) {
           group,
           separator,
           messages,
+          mode,
           version: nextVersion,
           deletedAt: deleted ? new Date() : null,
         },
