@@ -52,3 +52,9 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Sensitive / runtime artifacts — do not commit
+/tool-results/
+/worklog.md
+/db/
+/upload/
+/t404.out
