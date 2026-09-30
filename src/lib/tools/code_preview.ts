@@ -1,9 +1,10 @@
 "use client";
 
 import { registerTool } from "./registry";
+import { getE2BClient } from "@/lib/e2b/client";
 import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { getScaffold, normalizeAppName } from "@/lib/code/scaffolds";
-import { startPreview, stopPreviewSession, isUrlServing } from "@/lib/code/preview-ops";
+import { startPreview, stopPreviewSession, isUrlServing, detectScaffold } from "@/lib/code/preview-ops";
 import { usePreviewSessionStore } from "@/stores/preview-session-store";
 
 const NO_KEY_ERROR =
@@ -24,29 +25,38 @@ async function doStart(
   ctx: import("./registry").ToolContext,
 ): Promise<Record<string, unknown>> {
   const appName = normalizeAppName(args.name as string | undefined);
-  // Resolve the scaffold: explicit framework, or infer from the session
-  // history (the app the agent just created with create_app), or default
-  // to a static server over the existing project directory.
-  const scaffold = getScaffold(args.framework as string | undefined);
-  const sessions = usePreviewSessionStore.getState().sessions;
-  const lastSession = sessions.find((s) => s.name === appName);
-
   const apiKey = await ensureFreshSandboxForCtx(ctx);
   if (!apiKey) {
     return { ok: false, error: NO_KEY_ERROR };
   }
 
+  // Resolve the scaffold: explicit framework → the project files on disk
+  // (detected) → the app's session history → static. Detecting matters:
+  // serving a Next.js/Vite project with a plain static server (the old
+  // default) rendered a broken or placeholder page instead of the real app
+  // the agent built.
+  const explicit = getScaffold(args.framework as string | undefined);
+  let scaffold = explicit;
+  if (!scaffold) {
+    const client = getE2BClient(apiKey, null, "shared");
+    scaffold = await detectScaffold(client, appName);
+    ctx.onToolOutput?.(
+      "",
+      `Detected ${scaffold.label} project for "${appName}".`,
+      "stdout",
+    );
+  }
+  const sessions = usePreviewSessionStore.getState().sessions;
+  const lastSession = sessions.find((s) => s.name === appName);
+  if (!explicit && lastSession) {
+    const fromHistory = getScaffold(lastSession.framework);
+    if (fromHistory && fromHistory.key === "cli") scaffold = fromHistory;
+  }
+
   const result = await startPreview({
     apiKey,
     appName,
-    scaffold:
-      scaffold ??
-      (lastSession
-        ? {
-            // Restart an existing app whose framework we already know.
-            ...getScaffold(lastSession.framework)!,
-          }
-        : getScaffold("static")!),
+    scaffold,
     port: (args.port as number | undefined) ?? undefined,
     conversationId: ctx.conversationId ?? undefined,
     onProgress: (line) => ctx.onToolOutput?.("", line, "stdout"),
@@ -69,14 +79,14 @@ async function doStart(
     status: s.status,
     message:
       s.status === "running"
-        ? `Preview is live at ${s.url} — it is embedded in the Preview tab (/code/preview) and the user can open it in a new tab.`
-        : `Preview server started at ${s.url} but it is still booting — tell the user to check the Preview tab in a moment.`,
+        ? `Preview is live at ${s.url} — it is embedded in the Web preview panel (MonitorPlay button in the chat sub-header) and the user can open it in a new tab.`
+        : `Preview server started at ${s.url} but it is still booting — tell the user to check the Web preview panel in a moment.`,
   };
 }
 
 registerTool(
   "start_preview",
-  "Start (or restart) the live preview for an app in the E2B sandbox: installs dependencies when needed, starts the dev server in the background, waits for the public URL to respond, and returns it. The URL is embedded in the Code Mode Preview tab. Use after create_app, or to restart a stopped preview.",
+  "Start (or restart) the live preview for an app in the E2B sandbox: detects the project's framework from its files (or uses the explicit framework argument), installs dependencies when needed, starts the dev server in the background, waits for the public URL to respond, and returns it. The URL is embedded in the Web preview panel (the MonitorPlay button beside the chat title). Use after create_app — IMPORTANT: only after you have written the REAL app content into projects/<name>/ (the scaffold ships a placeholder landing page; replace it with the actual site the user asked for BEFORE previewing).",
   {
     type: "object",
     properties: {
@@ -86,7 +96,7 @@ registerTool(
       },
       framework: {
         type: "string",
-        description: "Optional framework key (nextjs, vite-react, fastapi, node, static). Inferred from the app's history when omitted.",
+        description: "Optional framework key (nextjs, vite-react, fastapi, node, static). Auto-detected from the project files when omitted.",
       },
       port: { type: "number", description: "Optional port (default 3000)." },
     },

@@ -24,7 +24,7 @@ const NO_KEY_ERROR =
  */
 registerTool(
   "create_app",
-  `Scaffold a new application project in the E2B sandbox workspace (OnyxCode). Supported frameworks: ${scaffoldKeysDescription()}. Creates the project under /home/user/projects/<name> with real, runnable files. After creating the app, call the start_preview tool to install dependencies and serve it at a public live URL. For CLI tools there is no preview — run them with run_terminal.`,
+  `Scaffold a new application project in the E2B sandbox workspace (OnyxCode). Supported frameworks: ${scaffoldKeysDescription()}. Creates the project under /home/user/projects/<name> with real, runnable files. The scaffold ships a PLACEHOLDER landing page — after creating the app you MUST write the REAL app the user asked for (replace the placeholder index/app page with the actual content, pages, styles and behavior) using create_file_chunk with paths like projects/<name>/app/page.tsx, then call start_preview. Never present the placeholder scaffold page as the finished app. For CLI tools there is no preview — run them with run_terminal.`,
   {
     type: "object",
     properties: {
@@ -100,7 +100,7 @@ registerTool(
         fileCount: files.length,
         hasServer: !!scaffold.serverCommand,
         instructions: scaffold.serverCommand
-          ? "Call start_preview next to install dependencies and serve the app at a public live URL."
+          ? `The scaffold files are a STARTING POINT ONLY (the landing page is a placeholder). Now write the REAL app the user asked for with create_file_chunk — overwrite projects/${appName}/ index/app pages with the actual content (paths may be written as "projects/${appName}/..." or "/home/user/projects/${appName}/...", both resolve the same). THEN call start_preview.`
           : "This scaffold has no web server — run it with run_terminal (e.g. `node cli.js .`).",
       };
     } catch (e) {

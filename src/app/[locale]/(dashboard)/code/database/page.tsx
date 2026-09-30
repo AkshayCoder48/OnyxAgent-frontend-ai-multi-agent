@@ -1,12 +1,20 @@
 "use client";
 
-import { DatabasePanel } from "@/components/code/database-panel";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+
+import { ROUTES } from "@/lib/constants";
+import { useCodePanelStore } from "@/stores/code-panel-store";
 
 /**
- * OnyxCode — Database tab (/code/database). A live browser over the
- * OnyxBase KV store for the current workspace (records under code:db:*),
- * shared with the agent's manage_database tool.
+ * OnyxCode — legacy /code/database route. The Database tab is now a docked
+ * panel in the chat workspace: redirect to /code and open it.
  */
-export default function CodeDatabasePage() {
-  return <DatabasePanel />;
+export default function CodeDatabaseRedirect() {
+  const router = useRouter();
+  useEffect(() => {
+    useCodePanelStore.getState().setOpen("database");
+    router.replace(ROUTES.CODE);
+  }, [router]);
+  return null;
 }

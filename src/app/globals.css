@@ -1737,20 +1737,30 @@ body.sidebar-open {
   touch-action: none;
 }
 
-/* Smooth theme transition */
-* {
+/* Smooth theme transition — SCOPED (was `*`, a global transition on every
+   element that made the whole app repaint-transition on every state change:
+   streaming updates, hover, panel toggles all felt mushy and CPU-heavy —
+   the "extremely laggy" OnyxCode experience). ThemeProvider toggles
+   .theme-transitioning on <html> ONLY while a light/dark switch is in
+   flight, so the theme still cross-fades without taxing every interaction.
+   Components that want hover transitions already carry their own
+   transition-colors utilities. */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
   transition-property: background-color, border-color, color, fill, stroke;
   transition-duration: 150ms;
   transition-timing-function: ease-out;
 }
 
 /* But not for animations that have their own timing */
-.animate-message-in,
-.animate-slide-in-left,
-.animate-slide-in-right,
-.animate-fade-scale,
-.animate-press,
-.animate-backdrop {
+html.theme-transitioning .animate-message-in,
+html.theme-transitioning .animate-slide-in-left,
+html.theme-transitioning .animate-slide-in-right,
+html.theme-transitioning .animate-fade-scale,
+html.theme-transitioning .animate-press,
+html.theme-transitioning .animate-backdrop {
   transition: none;
 }
 

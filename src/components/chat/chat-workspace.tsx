@@ -8,6 +8,7 @@ import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
 import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
 import { useChatSidebarStore, useChatStore, useConversationStore } from "@/stores";
+import { useCodePanelStore } from "@/stores/code-panel-store";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
 import { useSettings } from "@/hooks/use-data";
@@ -19,7 +20,9 @@ import {
   rememberAgentConversation,
 } from "@/lib/code-mode";
 import { setUrlParam } from "@/lib/utils";
-import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks } from "lucide-react";
+import { Database, FolderOpen, Menu, Bot, ListTree, MonitorPlay, ScrollText, Blocks } from "lucide-react";
+import { DatabasePanel } from "@/components/code/database-panel";
+import { PreviewPanel } from "@/components/code/preview-panel";
 
 type SidePanel = "platforms" | "files" | "timeline" | "logs" | null;
 
@@ -61,6 +64,8 @@ const PANEL_WIDTH_PREFS = {
   files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
+  database: { storageKey: "database-panel-width", defaultWidth: 440 },
+  preview: { storageKey: "preview-panel-width", defaultWidth: 560 },
 } as const;
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
@@ -200,6 +205,10 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // local panel state).
   const subagentOpen = useSubagentStore((s) => s.sidebarOpen);
   const setSubagentOpen = useSubagentStore((s) => s.setSidebarOpen);
+  // OnyxCode panels (Database / Preview) — store-backed so tool-result cards
+  // and the legacy /code/<tab> routes can open them directly.
+  const codePanel = useCodePanelStore((s) => s.open);
+  const setCodePanel = useCodePanelStore((s) => s.setOpen);
   // Error-log badge: unseen error count on the Logs toggle (resets when any
   // logs surface is opened).
   const unseenErrors = useLogStore((s) => s.unseenErrors);
@@ -213,13 +222,26 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // present — removing the key in Settings closes it here (derived), and
   // re-adding the key restores it if it was the user's last choice.
   const platformsOpen = sidePanel === "platforms" && !subagentOpen && composioConnected;
-  const filesOpen = sidePanel === "files" && !subagentOpen;
-  const timelineOpen = sidePanel === "timeline" && !subagentOpen;
-  const logsOpen = sidePanel === "logs" && !subagentOpen;
+  const filesOpen = sidePanel === "files" && !subagentOpen && !codePanel;
+  const timelineOpen = sidePanel === "timeline" && !subagentOpen && !codePanel;
+  const logsOpen = sidePanel === "logs" && !subagentOpen && !codePanel;
+  // Code Mode panels — dock beside the chat exactly like the others.
+  const databaseOpen = isCode && codePanel === "database" && !subagentOpen;
+  const previewOpen = isCode && codePanel === "preview" && !subagentOpen;
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
-    subagentOpen ? "subagents" : platformsOpen ? "platforms" : sidePanel === "platforms" ? null : sidePanel;
+    subagentOpen
+      ? "subagents"
+      : databaseOpen
+        ? "database"
+        : previewOpen
+          ? "preview"
+          : platformsOpen
+            ? "platforms"
+            : sidePanel === "platforms"
+              ? null
+              : sidePanel;
 
   // Opening the docked logs panel counts as "seeing" the errors.
   useEffect(() => {
@@ -284,11 +306,16 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
     setSubagentOpen(false);
   }, [setSubagentOpen]);
 
-  const toggleSubagents = () => setSubagentOpen(!subagentOpen);
+  const toggleSubagents = () => {
+    setSubagentOpen(!subagentOpen);
+    setCodePanel(null);
+  };
   const toggleSidePanel = (panel: Exclude<SidePanel, null>) => {
-    // Opening a side panel takes over the dock from the subagent panel
-    // (setSubagentOpen is a no-op when the value is unchanged).
+    // Opening a side panel takes over the dock from the subagent panel and
+    // the Code Mode panels (setSubagentOpen/setCodePanel are no-ops when the
+    // value is unchanged).
     setSubagentOpen(false);
+    setCodePanel(null);
     const wasVisible =
       panel === "platforms"
         ? platformsOpen
@@ -298,6 +325,12 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
             ? timelineOpen
             : logsOpen;
     setSidePanel(wasVisible ? null : panel);
+  };
+  // Code Mode panel toggle — same single-occupancy rules as above.
+  const toggleCodePanel = (panel: "database" | "preview") => {
+    setSubagentOpen(false);
+    setSidePanel(null);
+    setCodePanel(codePanel === panel ? null : panel);
   };
 
   return (
@@ -346,6 +379,45 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* OnyxCode panels (Code Mode only) — Database + the live web
+                Preview dock beside the chat exactly like the panels below:
+                same button, same animated open, same resizable column. */}
+            {isCode && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => toggleCodePanel("database")}
+                className={
+                  databaseOpen
+                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
+                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+                }
+                title="Database (OnyxBase)"
+                aria-label="Toggle database panel"
+                aria-expanded={databaseOpen}
+                aria-controls="database-panel"
+              >
+                <Database className="h-4 w-4" />
+              </Button>
+            )}
+            {isCode && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => toggleCodePanel("preview")}
+                className={
+                  previewOpen
+                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
+                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+                }
+                title="Web preview"
+                aria-label="Toggle preview panel"
+                aria-expanded={previewOpen}
+                aria-controls="preview-panel"
+              >
+                <MonitorPlay className="h-4 w-4" />
+              </Button>
+            )}
             {/* Composio Platforms — a docked catalog sidebar that exists ONLY
                 while a Composio key is stored (direct platform connections
                 from chat: search, sort, filter, OAuth connect). */}
@@ -356,8 +428,8 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
                 onClick={() => toggleSidePanel("platforms")}
                 className={
                   platformsOpen
-                    ? "h-8 w-8 bg-foreground/5 p-0"
-                    : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
+                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
                 }
                 title="Platforms (Composio)"
                 aria-label="Toggle platforms panel"
@@ -374,7 +446,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("timeline")}
-              className={timelineOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className={timelineOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Tool timeline"
               aria-label="Show tool timeline"
               aria-expanded={timelineOpen}
@@ -386,7 +458,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={toggleSubagents}
-              className={subagentOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className={subagentOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Subagent chat"
               aria-label="Toggle subagent panel"
               aria-expanded={subagentOpen}
@@ -398,7 +470,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("logs")}
-              className={logsOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground relative h-8 w-8 p-0"}
+              className={logsOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground relative h-8 w-8 p-0"}
               title="Error logs"
               aria-label="Toggle error logs panel"
               aria-expanded={logsOpen}
@@ -413,7 +485,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("files")}
-              className={filesOpen ? "h-8 w-8 bg-foreground/5 p-0" : "text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className={filesOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
               title="Show files"
               aria-label="Toggle files panel"
               aria-expanded={filesOpen}
@@ -505,6 +577,44 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
       >
         <TimelineSidebar onClose={() => setSidePanel(null)} />
       </DockedPanel>
+
+      {/* OnyxCode panels — Database + live web Preview, docked beside the
+          chat on md+ (full-height drawers below). Same open/close animation
+          and resizing as every other panel; content stays mounted across
+          toggles so the preview iframe and the DB list keep their state. */}
+      {isCode && (
+        <DockedPanel
+          id="database-panel"
+          label="Database"
+          open={databaseOpen}
+          onClose={() => setCodePanel(null)}
+          storageKey="database-panel-width"
+          defaultWidth={440}
+          minWidth={340}
+          maxWidth={720}
+          sheetCloseButton
+          sheetClassName="w-[92vw] sm:max-w-md"
+        >
+          <DatabasePanel />
+        </DockedPanel>
+      )}
+
+      {isCode && (
+        <DockedPanel
+          id="preview-panel"
+          label="Web preview"
+          open={previewOpen}
+          onClose={() => setCodePanel(null)}
+          storageKey="preview-panel-width"
+          defaultWidth={560}
+          minWidth={380}
+          maxWidth={960}
+          sheetCloseButton
+          sheetClassName="w-[95vw] sm:max-w-2xl"
+        >
+          <PreviewPanel />
+        </DockedPanel>
+      )}
     </div>
   );
 }

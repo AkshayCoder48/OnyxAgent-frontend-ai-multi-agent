@@ -123,7 +123,7 @@ export function DatabasePanel() {
   }, [state, query]);
 
   return (
-    <div className="scrollbar-thin h-full overflow-y-auto">
+    <div className="animate-in fade-in duration-150 scrollbar-thin h-full overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
         {/* Header */}
         <div className="flex flex-wrap items-end justify-between gap-3">

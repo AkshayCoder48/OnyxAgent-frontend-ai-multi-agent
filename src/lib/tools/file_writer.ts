@@ -35,11 +35,22 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
 // Helpers.
 // ---------------------------------------------------------------------------
 
-/** Sanitize a path — strip leading `/`, normalize `.`, refuse `..`. Mirrors
- *  the `safePath` in e2b_files.ts so both modules agree on path semantics. */
+/** Sanitize a path — normalize the sandbox workspace root, strip leading
+ *  `/`, refuse `..`. Mirrors the `safePath` in e2b_files.ts so both modules
+ *  agree on path semantics.
+ *
+ *  Absolute sandbox paths are accepted: tools like create_app report
+ *  `/home/user/projects/<name>` and the model naturally reuses that prefix
+ *  when writing files. Without this normalization those writes landed under
+ *  `/home/user/home/user/…` — the agent's real website never appeared in
+ *  the previewed project (the scaffold placeholder kept showing). */
 function safePath(p: string | undefined | null, fallback = "."): string {
   if (!p || typeof p !== "string") return fallback;
-  const cleaned = p.replace(/^\/+/, "").trim();
+  let cleaned = p.trim();
+  // Workspace-root prefix (absolute form) → drop it; the client resolves
+  // everything against /home/user anyway.
+  cleaned = cleaned.replace(/^\/home\/user\/+/, "");
+  cleaned = cleaned.replace(/^\/+/, "");
   if (cleaned.includes("..")) {
     throw new Error(`Path traversal not allowed: ${p}`);
   }

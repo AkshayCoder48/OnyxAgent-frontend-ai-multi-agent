@@ -5,6 +5,7 @@ import { ExternalLink, MonitorPlay, Square, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ROUTES } from "@/lib/constants";
+import { useCodePanelStore } from "@/stores/code-panel-store";
 import { usePreviewSessionStore } from "@/stores/preview-session-store";
 import { stopPreviewSession } from "@/lib/code/preview-ops";
 import { cn } from "@/lib/utils";
@@ -60,10 +61,18 @@ function statusChip(status: string | undefined): string {
 
 /**
  * Rich card for the OnyxCode preview tools (extension PRD §3.7): public URL,
- * status, "Open in Preview tab" action, and for `list` the session table.
+ * status, "Open preview panel" action, and for `list` the session table.
  */
 export function PreviewResult({ data }: { data: PreviewPayload }) {
   const router = useRouter();
+
+  // Opens the docked web-preview panel — on /code it docks beside the chat;
+  // from anywhere else (an agent-mode chat, a shared link) it routes to
+  // /code first so the panel has somewhere to render.
+  const openPreviewPanel = () => {
+    useCodePanelStore.getState().setOpen("preview");
+    if (!window.location.pathname.startsWith("/code")) router.push(ROUTES.CODE);
+  };
 
   if (data.action === "list" && data.sessions) {
     return (
@@ -76,7 +85,7 @@ export function PreviewResult({ data }: { data: PreviewPayload }) {
             <button
               key={s.sessionId}
               type="button"
-              onClick={() => router.push(ROUTES.CODE_PREVIEW)}
+              onClick={() => openPreviewPanel()}
               className="hover:bg-foreground/[0.03] flex w-full items-center gap-2 px-3 py-2 text-left"
             >
               <MonitorPlay className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -124,9 +133,9 @@ export function PreviewResult({ data }: { data: PreviewPayload }) {
       )}
       {data.action === "start" && data.url && (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" className="h-8 gap-1.5" onClick={() => router.push(ROUTES.CODE_PREVIEW)}>
+          <Button size="sm" className="animate-press h-8 gap-1.5" onClick={openPreviewPanel}>
             <MonitorPlay className="h-3.5 w-3.5" aria-hidden />
-            Open in Preview tab
+            Open preview panel
           </Button>
           <Button
             size="sm"

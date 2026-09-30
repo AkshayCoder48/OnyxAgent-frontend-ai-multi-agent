@@ -23,9 +23,46 @@ import {
   usePreviewSessionStore,
   type PreviewSession,
 } from "@/stores/preview-session-store";
-import type { CodeScaffold } from "@/lib/code/scaffolds";
+import { getScaffold, projectDir, type CodeScaffold } from "@/lib/code/scaffolds";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Detect what kind of project lives at projects/<appName> by probing the
+ * sandbox — used when start_preview is called without an explicit framework
+ * (and no session history). Serving, say, a Next.js project with a static
+ * file server (or a Node/Express app without its deps) renders a broken or
+ * placeholder page instead of the real app the agent built, so we look at
+ * the project files themselves.
+ */
+export async function detectScaffold(
+  client: ReturnType<typeof getE2BClient>,
+  appName: string,
+): Promise<CodeScaffold> {
+  const read = (rel: string) =>
+    client.readFile(`${projectDir(appName)}/${rel}`).catch(() => null);
+
+  const pkgRaw = await read("package.json");
+  if (pkgRaw) {
+    try {
+      const pkg = JSON.parse(pkgRaw) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      if (deps.next) return getScaffold("nextjs")!;
+      if (deps.vite || deps["@vitejs/plugin-react"]) return getScaffold("vite-react")!;
+      if (deps.express) return getScaffold("node")!;
+    } catch {
+      /* unparseable package.json — fall through */
+    }
+  }
+  const mainPy = await read("main.py");
+  if (mainPy) return getScaffold("fastapi")!;
+  const indexHtml = await read("index.html");
+  if (indexHtml) return getScaffold("static")!;
+  return getScaffold("static")!;
+}
 
 export interface StartPreviewOptions {
   apiKey: string;

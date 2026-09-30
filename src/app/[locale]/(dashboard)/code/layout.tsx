@@ -2,14 +2,19 @@
 
 import { useEffect } from "react";
 
-import { CodeTabs } from "@/components/code/code-tabs";
 import { setCodeMode } from "@/lib/code-mode";
 
 /**
- * OnyxCode layout — mirrors the (dashboard) layout's Header above and adds
- * the Code Mode tab bar (Chat / Database / Preview) below it. Also owns the
+ * OnyxCode layout — the mode frame under the dashboard header. Also owns the
  * imperative Code Mode flag used by the agent runtime to stamp newly created
  * conversations with `mode: "code"`.
+ *
+ * There is no tab bar anymore: Database and the live web Preview are docked
+ * panels opened from the workspace's glass sub-header (next to Files /
+ * Timeline), exactly like every other right-hand panel — no route change, no
+ * remount, the chat keeps its scroll and streaming state. The legacy
+ * /code/database and /code/preview routes redirect here and open the
+ * matching panel.
  */
 export default function CodeLayout({
   children,
@@ -23,13 +28,7 @@ export default function CodeLayout({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <CodeTabs />
-      {/* Flex column (not a plain block): ChatWorkspace's root relies on
-          flex-1 to stretch to the full height. With a block wrapper the
-          chat column collapsed to content height, leaving the prompt box
-          floating mid-screen instead of pinned to the device bottom —
-          exactly like /chat, the workspace must fill the remaining space. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
+      {children}
     </div>
   );
 }

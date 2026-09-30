@@ -73,6 +73,19 @@ Follow Onyx AI conventions:
 - Be precise and type-safe in your reasoning`;
 
 /**
+ * OnyxCode Code Mode directive — appended to the system prompt while the user
+ * is on /code. Codifies the app-building workflow so the user always gets
+ * the REAL app they asked for in the live preview, never the scaffold's
+ * placeholder landing page.
+ */
+const ONYXCODE_DIRECTIVE = `You are currently in OnyxCode (Code Mode) — the user is building apps. Follow this workflow for every app request:
+1. create_app to scaffold the project (choose the framework that fits the request).
+2. IMMEDIATELY write the REAL app the user asked for with create_file_chunk — REPLACE the scaffold's placeholder landing page (index.html / app/page.tsx / src/App.jsx / server.js) with the actual pages, content, styles and behavior the user described. The scaffold is a starting point, NEVER the finished app.
+3. start_preview to serve the project at a public live URL (the framework is auto-detected from the files you wrote).
+4. Optionally verify with start_web_session, and store any app data with manage_database.
+File paths are relative to the sandbox workspace root (e.g. "projects/my-app/index.html"); absolute /home/user/... paths are also accepted. Never claim the app is done while the preview still shows the placeholder scaffold page.`;
+
+/**
  * Backendless chat hook — now a thin adapter over the ExecutionHub.
  *
  * ARCHITECTURE (the "navigation never aborts" contract):
@@ -232,14 +245,16 @@ export function useChat(options: UseChatOptions = {}) {
       const settings = await settingsService.get(userId);
 
       // System prompt: user override (if enabled) → Onyx AI framework prompt
-      // (Onyx AI is the only framework — no selection anymore).
+      // (Onyx AI is the only framework — no selection anymore), plus the
+      // OnyxCode directive while the user is in Code Mode (/code).
       const basePrompt =
         (settings.system_prompt_enabled && settings.system_prompt
           ? settings.system_prompt
           : ONYX_AI_SYSTEM_PROMPT) ?? "";
-      const systemPrompt = basePrompt.trim()
-        ? `${basePrompt.trim()}\n\n${WEB_RESEARCH_DIRECTIVE}`
-        : WEB_RESEARCH_DIRECTIVE;
+      const parts = [basePrompt.trim()];
+      if (basePrompt.trim()) parts.push(WEB_RESEARCH_DIRECTIVE);
+      if (isCodeMode()) parts.push(ONYXCODE_DIRECTIVE);
+      const systemPrompt = parts.filter(Boolean).join("\n\n");
 
       return {
         userId,

@@ -17,9 +17,9 @@ export function Header() {
   const isActive = useActiveRoute();
   const t = useTranslations("nav");
   // OnyxCode Code Mode — any /code* route swaps the wordmark + adds the
-  // permanent black Beta badge (OnyxCode PRD §4.1). The tab navigation
-  // (Chat / Database / Preview) is rendered by the /code layout's CodeTabs
-  // directly under this header.
+  // permanent black Beta badge (OnyxCode PRD §4.1). Database and the live
+  // web Preview are docked panels opened from the workspace's glass
+  // sub-header (no tab bar anymore — panels never remount the chat).
   const codeMode = isActive(ROUTES.CODE);
 
   return (

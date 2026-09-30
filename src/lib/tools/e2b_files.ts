@@ -49,7 +49,12 @@ import { zipSync } from "fflate";
 /** Sanitize a path — strip leading `/`, normalize `.`, refuse `..`. */
 function safePath(p: string | undefined | null, fallback = "."): string {
   if (!p || typeof p !== "string") return fallback;
-  const cleaned = p.replace(/^\/+/, "").trim();
+  let cleaned = p.trim();
+  // Accept the absolute workspace-root prefix tools report (/home/user/…):
+  // strip it so writes land in the right project directory instead of a
+  // bogus /home/user/home/user/… path. See file_writer.ts safePath.
+  cleaned = cleaned.replace(/^\/home\/user\/+/, "");
+  cleaned = cleaned.replace(/^\/+/, "");
   if (cleaned.includes("..")) {
     throw new Error(`Path traversal not allowed: ${p}`);
   }
