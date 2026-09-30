@@ -17,6 +17,7 @@ import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { startBackgroundTurn } from "@/lib/agent/background-turn";
+import { isCodeMode } from "@/lib/code-mode";
 import { notifyConversationsChanged } from "@/lib/scheduler/chat-sync";
 import {
   executionHub,
@@ -386,7 +387,13 @@ export function useChat(options: UseChatOptions = {}) {
         data: { round: 1, generation_id: turnGenerationId },
       });
       if (!convId) {
-        const conv = await conversationService.create(userId, "");
+        // OnyxCode Code Mode: turns started on /code stamp their lazily-created
+        // conversation with mode:"code" so the sidebars can filter them.
+        const conv = await conversationService.create(
+          userId,
+          "",
+          isCodeMode() ? "code" : undefined,
+        );
         convId = conv.id;
         // The pre-created conversation is what this turn runs against
         // (buildTurnOptions read the conversation id from the RENDER scope,

@@ -6,6 +6,7 @@ import type { WSEvent } from "@/types";
 import { useChatStore, type ExecutionChatStore } from "@/stores/chat-store";
 import { useResearchStore } from "@/stores";
 import { conversationService } from "@/lib/services";
+import { isCodeMode } from "@/lib/code-mode";
 import {
   launchBackgroundTurn,
   streamBackgroundTurn,
@@ -577,7 +578,13 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
   try {
     // 1. Ensure a conversation exists (new chat → create + notify).
     if (!conversationId) {
-      const conv = await conversationService.create(ctx.userId);
+      // OnyxCode Code Mode: turns started on /code stamp their lazily-created
+      // conversation with mode:"code" so the sidebars can filter them.
+      const conv = await conversationService.create(
+        ctx.userId,
+        undefined,
+        isCodeMode() ? "code" : undefined,
+      );
       conversationId = conv.id;
       // The pipeline's conversation_created handler attaches the id, fixes
       // the URL, and notifies the host — no separate callback needed.

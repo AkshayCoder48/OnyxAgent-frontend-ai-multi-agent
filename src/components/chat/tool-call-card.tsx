@@ -8,6 +8,7 @@ import {
   Clock,
   Search,
   Globe,
+  Boxes,
   ChevronRight,
   Code2,
   Download,
@@ -21,6 +22,7 @@ import {
   MessageCircleQuestion,
   Loader2,
   BarChart3,
+  MonitorPlay,
   PenLine,
   Brain,
 } from "lucide-react";
@@ -32,6 +34,7 @@ import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
 import { ToolDurationBadge, ToolLiveElapsed } from "./tool-duration";
+import { SkipWaitButton } from "./skip-wait-button";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
@@ -43,6 +46,9 @@ import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
+import { CreateAppResult, parseCreateAppResult } from "./tool-results/create-app";
+import { PreviewResult, parsePreviewResult } from "./tool-results/preview";
+import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
 import { WorkspaceSyncResult, isWorkspaceSyncTool } from "./tool-results/workspace-sync";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
@@ -229,6 +235,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               {liveCaption}
             </ShimmerLabel>
             <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
+            <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
             <span className="streaming-dots" aria-hidden="true">
               <span /> <span /> <span />
             </span>
@@ -534,21 +541,56 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [isEditFile, toolCall],
   );
   const isEditDiff = editDiffSpec !== null;
+  // OnyxCode Code Mode tools — rich cards for create_app / previews /
+  // web sessions (extension PRD §3.7). Same memoized-parse pattern as the
+  // chart/fileDownload specs above.
+  const createAppSpec = useMemo(
+    () =>
+      toolCall.name === "create_app" && toolCall.status === "completed"
+        ? parseCreateAppResult(toolCall.result)
+        : null,
+    [toolCall.name, toolCall.status, toolCall.result],
+  );
+  const isCreateApp = createAppSpec !== null;
+  const previewResultSpec = useMemo(
+    () =>
+      (toolCall.name === "start_preview" || toolCall.name === "manage_preview") &&
+      toolCall.status === "completed"
+        ? parsePreviewResult(toolCall.result)
+        : null,
+    [toolCall.name, toolCall.status, toolCall.result],
+  );
+  const isPreviewResult = previewResultSpec !== null;
+  const webSessionResultSpec = useMemo(
+    () =>
+      (toolCall.name === "start_web_session" || toolCall.name === "manage_web_session") &&
+      toolCall.status === "completed"
+        ? parseWebSessionResult(toolCall.result)
+        : null,
+    [toolCall.name, toolCall.status, toolCall.result],
+  );
+  const isWebSessionResult = webSessionResultSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
   // Same for file_download cards and the edit_file diff (the card IS the
   // content). Uses the same render-time adjustment pattern as the running
   // auto-expand above (no effect → no cascading render).
   const [prevAutoExpand, setPrevAutoExpand] = useState(false);
-  const autoExpand = isChart || isFileDownload || isEditDiff;
+  const autoExpand = isChart || isFileDownload || isEditDiff || isCreateApp || isPreviewResult;
   if (autoExpand !== prevAutoExpand) {
     setPrevAutoExpand(autoExpand);
     if (autoExpand) setExpanded(true);
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview;
-  const friendlyName = isDateTime
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isCreateApp || isPreviewResult || isWebSessionResult;
+  const friendlyName = isCreateApp
+    ? "Create App"
+    : isPreviewResult
+      ? "Live Preview"
+      : isWebSessionResult
+        ? "Web Session"
+        : isDateTime
     ? "Current Date & Time"
     : isRAGSearch
       ? "Knowledge Base Search"
@@ -612,7 +654,13 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                       ? "Composing…"
                       : toolCall.name;
 
-  const ToolIcon = isDateTime
+  const ToolIcon = isCreateApp
+    ? Boxes
+    : isPreviewResult
+      ? MonitorPlay
+      : isWebSessionResult
+        ? Globe
+        : isDateTime
     ? Clock
     : isRAGSearch
       ? Search
@@ -738,7 +786,10 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           className="mb-fade-in-soft ml-auto flex shrink-0 items-center gap-0.5"
         >
           {isRunning ? (
-            <ToolLiveElapsed startedAt={toolCall.startedAt} />
+            <>
+              <ToolLiveElapsed startedAt={toolCall.startedAt} />
+              <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
+            </>
           ) : (
             <>
               <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} />
@@ -808,7 +859,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // and would otherwise render an empty body. The panel surfaces
             // the tool's command/args so the user can see exactly what's
             // executing (e.g. the shell command for `run_terminal`).
-            <RunningToolPanel toolCall={toolCall} />
+            <RunningToolPanel toolCall={toolCall} turnId={turnId ?? undefined} />
           ) : isWsSync ? (
             // push_workspace / retrieve_workspace → glassmorphic sync card.
             // Rendered for ALL statuses (running handled above; settled
@@ -819,6 +870,12 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // confirmation, task lists, run history, slim status cards).
             // Rendered for ALL statuses (running handled above).
             <ScheduledTaskResult toolCall={toolCall} />
+          ) : toolCall.status === "completed" && isCreateApp && createAppSpec ? (
+            <CreateAppResult data={createAppSpec} />
+          ) : toolCall.status === "completed" && isPreviewResult && previewResultSpec ? (
+            <PreviewResult data={previewResultSpec} />
+          ) : toolCall.status === "completed" && isWebSessionResult && webSessionResultSpec ? (
+            <WebSessionResult data={webSessionResultSpec} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (
@@ -917,8 +974,10 @@ function StreamLines({ text, tint = true, className }: { text: string; tint?: bo
 
 function RunningToolPanel({
   toolCall,
+  turnId,
 }: {
   toolCall: ToolCall;
+  turnId?: string | null;
 }) {
   // Handle streaming args (when tool call is still being built by the LLM).
   // Show streaming args when the tool is pending (LLM composing) OR running
@@ -943,7 +1002,7 @@ function RunningToolPanel({
 
   return (
     <div className="space-y-3 py-2">
-      {/* Header — tool name + spinner */}
+      {/* Header — tool name + spinner + skip-wait */}
       <div className="flex items-center gap-2.5">
         <Loader2 className="text-primary h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
         <span className="text-foreground/90 text-sm font-medium">
@@ -951,6 +1010,9 @@ function RunningToolPanel({
         </span>
         <span className="streaming-dots" aria-hidden="true">
           <span /> <span /> <span />
+        </span>
+        <span className="ml-auto">
+          <SkipWaitButton toolCall={toolCall} turnId={turnId} />
         </span>
       </div>
 

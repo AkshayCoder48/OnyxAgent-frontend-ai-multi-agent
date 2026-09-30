@@ -21,6 +21,7 @@ const ContentSecurityPolicy = `
   img-src 'self' blob: data: https:;
   font-src 'self' data:;
   connect-src 'self' https: ws: wss:;
+  frame-src 'self' https://*.e2b.dev https://*.e2b.app;
   ${_frameAncestors}
   base-uri 'self';
   form-action 'self';

@@ -437,6 +437,31 @@ export class E2BClient {
     }
   }
 
+  /**
+   * OnyxCode previews — resolve the PUBLIC https URL for a sandbox port
+   * (https://{sandboxId}-{port}.e2b.dev). Server-side action `get_host`.
+   */
+  async getHostUrl(port: number): Promise<{ host: string; url: string; sandboxId: string }> {
+    return this.call<{ host: string; url: string; sandboxId: string }>("get_host", { port });
+  }
+
+  /**
+   * OnyxCode previews — start a LONG-RUNNING dev server (npm run dev, uvicorn,
+   * http.server…) as a detached background command. Returns once the process
+   * is launched; the server keeps running in the sandbox independently of
+   * this request. Server-side action `start_server`.
+   */
+  async startServer(
+    command: string,
+    opts?: { cwd?: string; envs?: Record<string, string> },
+  ): Promise<{ sandboxId: string; pid: number; started: boolean }> {
+    return this.call<{ sandboxId: string; pid: number; started: boolean }>("start_server", {
+      command,
+      cwd: opts?.cwd ?? "/home/user",
+      ...(opts?.envs ? { envs: opts.envs } : {}),
+    });
+  }
+
   async runPython(
     code: string,
     opts?: { timeout?: number },

@@ -293,7 +293,7 @@ export const conversationService = {
     return row !== undefined;
   },
 
-  async create(userId: string, title?: string): Promise<Conversation> {
+  async create(userId: string, title?: string, mode?: "agent" | "code"): Promise<Conversation> {
     const id = nanoid();
     const ts = nowISO();
     const row: ConversationRow = {
@@ -306,6 +306,8 @@ export const conversationService = {
       is_demo: false,
       last_message_preview: null,
       last_message_at: null,
+      // OnyxCode Code Mode chats are tagged so the sidebars can filter them.
+      ...(mode === "code" ? { mode: "code" as const } : {}),
     };
     await db.conversations.add(row);
     return toConversation(row);
@@ -313,12 +315,13 @@ export const conversationService = {
 
   async update(
     id: string,
-    patch: Partial<Pick<Conversation, "title" | "is_archived" | "is_demo" | "active_knowledge_base_ids">>,
+    patch: Partial<Pick<Conversation, "title" | "is_archived" | "is_demo" | "active_knowledge_base_ids" | "mode">>,
   ): Promise<void> {
     const update: Partial<ConversationRow> = { updated_at: nowISO() };
     if (patch.title !== undefined) update.title = patch.title;
     if (patch.is_archived !== undefined) update.is_archived = patch.is_archived;
     if (patch.is_demo !== undefined) update.is_demo = patch.is_demo;
+    if (patch.mode !== undefined) update.mode = patch.mode;
     if (patch.active_knowledge_base_ids !== undefined) {
       update.active_knowledge_base_ids = patch.active_knowledge_base_ids;
     }
@@ -738,6 +741,7 @@ function toConversation(row: {
   active_knowledge_base_ids?: string[];
   last_message_preview?: string | null;
   last_message_at?: string | null;
+  mode?: "agent" | "code";
 }): Conversation {
   const {
     id,
@@ -748,6 +752,7 @@ function toConversation(row: {
     is_archived,
     is_demo,
     active_knowledge_base_ids,
+    mode,
   } = row;
   return {
     id,
@@ -758,6 +763,7 @@ function toConversation(row: {
     is_archived,
     is_demo,
     active_knowledge_base_ids,
+    ...(mode ? { mode } : {}),
   };
 }
 

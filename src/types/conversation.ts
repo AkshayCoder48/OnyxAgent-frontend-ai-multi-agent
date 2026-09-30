@@ -9,6 +9,10 @@ export interface Conversation {
   is_archived: boolean;
   is_demo: boolean;
   active_knowledge_base_ids?: string[];
+  /** Which experience this conversation belongs to. "code" = OnyxCode
+   *  (Code Mode) chats — filtered out of the normal Agent sidebar; absent
+   *  or "agent" = normal OnyxAgent chats. */
+  mode?: "agent" | "code";
 }
 
 export interface ConversationMessage {

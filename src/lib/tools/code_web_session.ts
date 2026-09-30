@@ -1,0 +1,317 @@
+"use client";
+
+import { registerTool } from "./registry";
+import { getE2BClient } from "@/lib/e2b/client";
+import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { bumpWorkspaceVersion } from "./workspace-snapshot";
+import type { E2BClient } from "@/lib/e2b/client";
+
+/**
+ * OnyxCode web sessions (OnyxCode PRD §6 — `start_web_session`) — a real
+ * headless Chromium (Playwright) running INSIDE the E2B sandbox, driven
+ * over a small file protocol:
+ *
+ *   /home/user/.onyx/websession/driver.mjs   — long-running driver (Node)
+ *   /home/user/.onyx/websession/cmd.json     — {id, action, …} request
+ *   /home/user/.onyx/websession/res-<id>.json — driver's reply
+ *   /home/user/.onyx/websession/shots/*.png  — screenshots
+ *
+ * `start_web_session` installs Playwright once per sandbox, boots the
+ * driver, and navigates to the start URL. `manage_web_session` performs
+ * the interaction actions (navigate / click / type / screenshot / extract /
+ * title / content / status / close). Everything runs sandbox-side, so it
+ * works for the agent's own previews (http://localhost:PORT inside the
+ * sandbox) AND public URLs.
+ */
+
+const NO_KEY_ERROR =
+  "Web sessions require an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
+
+const WS_DIR = "/home/user/.onyx/websession";
+const INSTALL_TIMEOUT_S = 280;
+
+const DRIVER_SOURCE = String.raw`#!/usr/bin/env node
+// OnyxCode web-session driver — file-protocol Playwright runner.
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+
+const DIR = "/home/user/.onyx/websession";
+const CMD = join(DIR, "cmd.json");
+const SHOTS = join(DIR, "shots");
+mkdirSync(SHOTS, { recursive: true });
+
+let seen = "";
+let browser = null;
+let page = null;
+let shotN = 0;
+
+async function getBrowser() {
+  if (browser) return browser;
+  const { chromium } = await import("playwright");
+  browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  return browser;
+}
+
+async function getPage() {
+  if (page) return page;
+  const b = await getBrowser();
+  page = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  return page;
+}
+
+async function handle(cmd) {
+  const p = await getPage();
+  switch (cmd.action) {
+    case "navigate": {
+      const resp = await p.goto(cmd.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      return { ok: true, action: "navigate", url: p.url(), status: resp ? resp.status() : null, title: await p.title() };
+    }
+    case "click": {
+      await p.click(cmd.selector, { timeout: 10000 });
+      await p.waitForTimeout(400);
+      return { ok: true, action: "click", selector: cmd.selector, url: p.url() };
+    }
+    case "type": {
+      await p.fill(cmd.selector, String(cmd.text ?? ""), { timeout: 10000 });
+      return { ok: true, action: "type", selector: cmd.selector };
+    }
+    case "press": {
+      await p.press(cmd.selector || "body", cmd.key, { timeout: 10000 });
+      return { ok: true, action: "press", key: cmd.key };
+    }
+    case "screenshot": {
+      shotN += 1;
+      const name = "shot-" + shotN + ".png";
+      const path = join(SHOTS, name);
+      await p.screenshot({ path, fullPage: !!cmd.fullPage });
+      const buf = readFileSync(path);
+      return { ok: true, action: "screenshot", path, dataUrl: "data:image/png;base64," + buf.toString("base64") };
+    }
+    case "extract": {
+      const text = cmd.selector ? await p.textContent(cmd.selector, { timeout: 10000 }).catch(() => null) : await p.evaluate(() => document.body.innerText);
+      return { ok: true, action: "extract", text: (text || "").slice(0, 8000) };
+    }
+    case "title": {
+      return { ok: true, action: "title", title: await p.title() };
+    }
+    case "content": {
+      const html = await p.content();
+      return { ok: true, action: "content", html: html.slice(0, 40000) };
+    }
+    case "status": {
+      return { ok: true, action: "status", alive: !!browser && browser.isConnected(), url: page ? page.url() : null };
+    }
+    case "close": {
+      if (browser) { await browser.close().catch(() => {}); }
+      browser = null; page = null;
+      return { ok: true, action: "close" };
+    }
+    default:
+      return { ok: false, error: "Unknown action " + cmd.action };
+  }
+}
+
+async function main() {
+  writeFileSync(join(DIR, ".ready"), "1");
+  for (;;) {
+    if (!existsSync(CMD)) { await new Promise(r => setTimeout(r, 300)); continue; }
+    let cmd;
+    try { cmd = JSON.parse(readFileSync(CMD, "utf8")); } catch { await new Promise(r => setTimeout(r, 300)); continue; }
+    const id = String(cmd.id || "");
+    if (!id || id === seen) { await new Promise(r => setTimeout(r, 300)); continue; }
+    seen = id;
+    let result;
+    try { result = await handle(cmd); }
+    catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err) }; }
+    writeFileSync(join(DIR, "res-" + id + ".json"), JSON.stringify(result));
+  }
+}
+
+main().catch((err) => { console.error("driver fatal:", err); process.exit(1); });
+`;
+
+/* ------------------------------------------------------------------ */
+/* File-protocol helpers                                               */
+/* ------------------------------------------------------------------ */
+
+function toB64(s: string): string {
+  // Browser-safe UTF-8 → base64.
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
+}
+
+async function sendCommand(
+  client: E2BClient,
+  cmd: Record<string, unknown>,
+  opts?: { timeoutMs?: number },
+): Promise<Record<string, unknown>> {
+  const id = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const payload = JSON.stringify({ id, ...cmd });
+  await client.exec(`echo '${toB64(payload)}' | base64 -d > ${WS_DIR}/cmd.json`, { timeout: 15 });
+  const timeoutMs = opts?.timeoutMs ?? 45_000;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const r = await client.exec(`cat ${WS_DIR}/res-${id}.json 2>/dev/null || echo __PENDING__`, {
+      timeout: 15,
+    });
+    if (r.stdout.trim() && r.stdout.trim() !== "__PENDING__") {
+      try {
+        return JSON.parse(r.stdout.trim()) as Record<string, unknown>;
+      } catch {
+        return { ok: false, error: "Driver returned an unreadable result." };
+      }
+    }
+    await new Promise((res) => setTimeout(res, 1200));
+  }
+  return { ok: false, error: "Web session command timed out." };
+}
+
+/** Install Playwright + boot the driver (idempotent — once per sandbox). */
+async function ensureDriver(
+  client: E2BClient,
+  onProgress?: (line: string) => void,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const ready = await client.exec(`test -f ${WS_DIR}/.ready && echo READY || echo NO`, {
+    timeout: 15,
+  });
+  if (ready.stdout.trim() === "READY") return { ok: true };
+
+  onProgress?.("Preparing the web-session driver (first run installs headless Chromium)…");
+  await client.exec(`mkdir -p ${WS_DIR}`, { timeout: 15 });
+  await client.batchWrite([{ path: `${WS_DIR}/driver.mjs`, content: DRIVER_SOURCE }]);
+  await client.exec(`rm -f ${WS_DIR}/.ready ${WS_DIR}/res-*.json`, { timeout: 15 });
+
+  // Install playwright locally in the driver dir (npm i + chromium).
+  let installErr = "";
+  let ok = false;
+  for await (const chunk of client.runCommandStream(
+    `npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund --loglevel=error playwright && npx playwright install chromium --with-deps`,
+    { cwd: WS_DIR, timeout: INSTALL_TIMEOUT_S },
+  )) {
+    if ((chunk.type === "stdout" || chunk.type === "stderr") && chunk.data) {
+      const line = chunk.data.trim().split("\n").pop();
+      if (line) onProgress?.(line);
+      if (chunk.type === "stderr") installErr += chunk.data;
+    } else if (chunk.type === "result") {
+      ok = (chunk.exit_code ?? 0) === 0;
+    }
+  }
+  if (!ok) {
+    return {
+      ok: false,
+      error: `Failed to install Playwright/Chromium in the sandbox: ${installErr.slice(-300) || "npm install failed"}`,
+    };
+  }
+
+  // Boot the driver as a detached background process.
+  await client.startServer(`cd ${WS_DIR} && node driver.mjs`, { cwd: "/home/user" });
+  // Wait for the .ready marker.
+  const start = Date.now();
+  while (Date.now() - start < 15_000) {
+    const r = await client.exec(`test -f ${WS_DIR}/.ready && echo READY || echo NO`, {
+      timeout: 15,
+    });
+    if (r.stdout.trim() === "READY") return { ok: true };
+    await new Promise((res) => setTimeout(res, 800));
+  }
+  return { ok: false, error: "The web-session driver did not start in time." };
+}
+
+/* ------------------------------------------------------------------ */
+/* Tool: start_web_session                                             */
+/* ------------------------------------------------------------------ */
+
+registerTool(
+  "start_web_session",
+  "Start a headless Chromium (Playwright) web session INSIDE the sandbox for testing and interacting with web pages — including the agent's own live previews (use http://localhost:PORT, e.g. http://localhost:3000, to test apps you just started with start_preview). Installs Chromium on first use (can take a couple of minutes; consider skip-wait). Returns a session id; drive it with manage_web_session (navigate, click, type, screenshot, extract…).",
+  {
+    type: "object",
+    properties: {
+      url: {
+        type: "string",
+        description:
+          "URL to open first (public https:// URL, or http://localhost:PORT to test a preview running in the sandbox).",
+      },
+    },
+    required: ["url"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const url = String(args.url ?? "");
+    if (!url) return { ok: false, error: "url is required." };
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { ok: false, error: NO_KEY_ERROR };
+    const client = getE2BClient(apiKey, null, "shared");
+    const progress = (line: string) => ctx.onToolOutput?.("", line, "stdout");
+
+    const booted = await ensureDriver(client, progress);
+    if (!booted.ok) return { ok: false, error: booted.error };
+
+    const nav = await sendCommand(client, { action: "navigate", url }, { timeoutMs: 60_000 });
+    bumpWorkspaceVersion();
+    if (!nav.ok) return { ok: false, error: String(nav.error ?? "Navigation failed.") };
+    return {
+      kind: "web_session",
+      ok: true,
+      action: "start",
+      sessionId: "ws_default",
+      url: nav.url ?? url,
+      title: nav.title ?? null,
+      status: typeof nav.status === "number" ? nav.status : null,
+      message:
+        "Web session ready. Drive it with manage_web_session actions: navigate, click, type, press, screenshot, extract, title, content, status, close.",
+    };
+  },
+  false,
+  "code",
+);
+
+/* ------------------------------------------------------------------ */
+/* Tool: manage_web_session                                            */
+/* ------------------------------------------------------------------ */
+
+registerTool(
+  "manage_web_session",
+  "Drive an active OnyxCode web session (headless Chromium in the sandbox, started by start_web_session). Actions: `navigate` (url), `click` (selector), `type` (selector, text), `press` (key), `screenshot` (returns the image), `extract` (visible text, optional selector), `title`, `content` (HTML), `status`, `close`. Selectors are CSS. Use http://localhost:PORT to interact with your own previews.",
+  {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["navigate", "click", "type", "press", "screenshot", "extract", "title", "content", "status", "close"],
+        description: "The interaction to perform.",
+      },
+      url: { type: "string", description: "For navigate." },
+      selector: { type: "string", description: "CSS selector (click/type/press/extract)." },
+      text: { type: "string", description: "Text to type (type action)." },
+      key: { type: "string", description: "Key to press (press action), e.g. Enter." },
+      fullPage: { type: "boolean", description: "Screenshot the full page (optional)." },
+    },
+    required: ["action"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const action = String(args.action ?? "");
+    const apiKey = await ensureFreshSandboxForCtx(ctx);
+    if (!apiKey) return { ok: false, error: NO_KEY_ERROR };
+    const client = getE2BClient(apiKey, null, "shared");
+
+    const booted = await ensureDriver(client);
+    if (!booted.ok) return { ok: false, error: booted.error };
+
+    const cmd: Record<string, unknown> = { action };
+    if (args.url !== undefined) cmd.url = String(args.url);
+    if (args.selector !== undefined) cmd.selector = String(args.selector);
+    if (args.text !== undefined) cmd.text = String(args.text);
+    if (args.key !== undefined) cmd.key = String(args.key);
+    if (args.fullPage !== undefined) cmd.fullPage = !!args.fullPage;
+
+    const result = await sendCommand(client, cmd, { timeoutMs: 60_000 });
+    return { kind: "web_session", ok: result.ok !== false, action, ...result };
+  },
+  false,
+  "code",
+);

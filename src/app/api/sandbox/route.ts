@@ -1064,6 +1064,61 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      case "get_host": {
+        // OnyxCode previews — resolve the PUBLIC host for a sandbox port
+        // (https://{sandboxId}-{port}.e2b.dev). Used by start_preview to
+        // give the agent (and the Preview tab iframe) a live URL.
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const port = (args.port as number) ?? 3000;
+        let host: string;
+        try {
+          host =
+            typeof sandbox.getHost === "function"
+              ? sandbox.getHost(port)
+              : `${sandbox.sandboxId}-${port}.e2b.dev`;
+        } catch {
+          // Fallback: the well-known E2B public port-host pattern.
+          host = `${sandbox.sandboxId}-${port}.e2b.dev`;
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          host,
+          url: `https://${host}`,
+        });
+      }
+
+      case "start_server": {
+        // OnyxCode previews — start a LONG-RUNNING dev server as a
+        // background command (detached from this request; timeoutMs: 0 =
+        // runs until explicitly killed via `pkill` in a later exec).
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const command = args.command as string;
+        const cwd = (args.cwd as string) ?? DEFAULT_CWD;
+        const envs = (args.envs as Record<string, string> | undefined) ?? undefined;
+        if (!command || typeof command !== "string") {
+          return NextResponse.json({ error: "command is required" }, { status: 400 });
+        }
+        try {
+          const handle = await sandbox.commands.run(command, {
+            cwd,
+            timeoutMs: 0,
+            background: true,
+            ...(envs ? { envs } : {}),
+          });
+          return NextResponse.json({
+            sandboxId: sandbox.sandboxId,
+            pid: handle.pid,
+            started: true,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json(
+            { sandboxId: sandbox.sandboxId, started: false, error: errMsg },
+            { status: 500 },
+          );
+        }
+      }
+
       case "exec_stream": {
         // REAL STREAMING via Server-Sent Events (SSE). The E2B SDK supports
         // onStdout/onStderr callbacks that fire as output is produced — we

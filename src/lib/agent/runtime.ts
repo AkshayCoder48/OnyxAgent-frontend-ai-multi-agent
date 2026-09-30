@@ -51,6 +51,8 @@ import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest
 import { promptKb } from "@/lib/agent/tool-digest";
 import { waitForAskUser, ASK_USER_RESPONSE_EVENT } from "@/lib/agent/ask-user-wait";
 import { conversationService, settingsService } from "@/lib/services";
+import { isCodeMode } from "@/lib/code-mode";
+import { clearSkipWait, getSkipWaitRace } from "@/lib/agent/skip-wait";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
 import { normalizeGenUISentinels } from "@/lib/genui/stream-parser";
@@ -1685,7 +1687,13 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   if (!conversationId) {
     const title =
       opts.userMessage.slice(0, 60) + (opts.userMessage.length > 60 ? "…" : "");
-    const conv = await conversationService.create(opts.userId, title);
+    // OnyxCode Code Mode: turns started on /code stamp their lazily-created
+    // conversation with mode:"code" so the sidebars can filter them.
+    const conv = await conversationService.create(
+      opts.userId,
+      title,
+      isCodeMode() ? "code" : undefined,
+    );
     conversationId = conv.id;
     emit({
       type: "conversation_created",
@@ -2184,6 +2192,11 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
   const effectiveMaxRounds = MAX_ROUNDS;
 
+  // SKIP-WAIT (OnyxCode PRD §4.4): stays true while this turn is running;
+  // the late-result handlers of backgrounded tools re-checkpoint only
+  // while it is (after the turn ends, the final save owns the row).
+  let turnActive = true;
+
   while (round < effectiveMaxRounds) {
     round += 1;
     roundStartTimes[round] = Date.now();
@@ -2302,6 +2315,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             },
           );
           emit({ type: "complete", timestamp: nowISO() });
+          turnActive = false;
           return {
             conversationId,
             assistantMessageId,
@@ -2346,6 +2360,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           },
         );
         emit({ type: "complete", timestamp: nowISO() });
+        turnActive = false;
         return {
           conversationId,
           assistantMessageId,
@@ -2494,6 +2509,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         timestamp: nowISO(),
       });
       emit({ type: "complete", timestamp: nowISO() });
+      turnActive = false;
       return {
         conversationId,
         assistantMessageId: savedMessage.id,
@@ -2693,15 +2709,127 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           },
         };
 
-        // Execute.
-        let result: unknown;
-        let status: ToolCall["status"] = "completed";
-        try {
-          result = await toolDef.handler(effectiveArgs, streamingToolCtx);
-        } catch (err) {
-          result = { error: err instanceof Error ? err.message : String(err) };
-          status = "error";
+        // Execute — with SKIP-WAIT support (OnyxCode PRD §4.4, shared by
+        // the normal Agent and Code Mode). The handler promise races a
+        // user-triggered skip; when the skip wins, the round continues with
+        // a placeholder tool result and the REAL handler keeps running —
+        // its late result replaces the placeholder in the message history,
+        // updates the UI card in place (a normal tool_result event), and
+        // re-checkpoints while the turn is still active.
+        const execHandler = async (): Promise<{
+          result: unknown;
+          status: ToolCall["status"];
+        }> => {
+          try {
+            const r = await toolDef.handler(effectiveArgs, streamingToolCtx);
+            return { result: r, status: "completed" };
+          } catch (err) {
+            return {
+              result: { error: err instanceof Error ? err.message : String(err) },
+              status: "error",
+            };
+          }
+        };
+
+        const skipRace = conversationId
+          ? getSkipWaitRace(conversationId, tc.id)
+          : null;
+
+        let outcome: { result: unknown; status: ToolCall["status"] };
+        if (skipRace) {
+          const handlerPromise = execHandler();
+          const first = await Promise.race([
+            handlerPromise.then((o) => ({ kind: "done" as const, o })),
+            skipRace.then(() => ({ kind: "skip" as const })),
+          ]);
+          if (first.kind === "skip") {
+            streamingToolCtx.onToolOutput?.(
+              "",
+              "⏳ Continued in background — the result will land here when it completes.",
+              "stdout",
+            );
+            outcome = {
+              result: {
+                ok: true,
+                status: "backgrounded",
+                note:
+                  "The user chose to continue while this tool runs in the background. " +
+                  "Proceed with other work now — the tool's real result will replace this " +
+                  "placeholder in the conversation as soon as it completes.",
+              },
+              status: "completed",
+            };
+            // Late-result injection (fire-and-forget; the race promise is
+            // already settled so this closure runs detached).
+            void handlerPromise.then((real) => {
+              for (const part of assistantParts) {
+                if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+                  part.toolCall.result = real.result;
+                  part.toolCall.status = real.status;
+                }
+              }
+              const realResultStr =
+                typeof real.result === "string" ? real.result : JSON.stringify(real.result);
+              const realContent = truncateResult(tc.name, realResultStr);
+              // REPLACE the placeholder tool message in place — exactly one
+              // tool message per tool_call_id keeps the wire format valid.
+              const midx = messages.findIndex(
+                (m) => m.role === "tool" && m.tool_call_id === tc.id,
+              );
+              if (midx >= 0) {
+                messages[midx] = {
+                  role: "tool",
+                  tool_call_id: tc.id,
+                  name: tc.name,
+                  content: realContent,
+                } as (typeof messages)[number];
+              } else {
+                messages.push({
+                  role: "tool",
+                  tool_call_id: tc.id,
+                  name: tc.name,
+                  content: realContent,
+                } as (typeof messages)[number]);
+              }
+              const entry = {
+                id: tc.id,
+                name: tc.name,
+                args: effectiveArgs,
+                result: real.result,
+                status: real.status,
+              };
+              const aidx = allToolCalls.findIndex((c) => c.id === tc.id);
+              if (aidx >= 0) allToolCalls[aidx] = entry;
+              else allToolCalls.push(entry);
+              emit({
+                type: "tool_result",
+                data: { tool_call_id: tc.id, content: realResultStr },
+                timestamp: nowISO(),
+              });
+              clearSkipWait(conversationId, tc.id);
+              if (turnActive) {
+                void conversationService
+                  .saveAgentCheckpoint(conversationId, opts.userId, assistantMessageId, {
+                    content: lastAssistantContent || "",
+                    thinking: lastAssistantThinking || undefined,
+                    reasoning: lastAssistantReasoning || undefined,
+                    parts: assistantParts,
+                    toolCalls: allToolCalls,
+                    modelName: opts.provider.model,
+                    isStreaming: true,
+                  })
+                  .catch(() => {
+                    /* non-fatal — the next checkpoint or final save retries */
+                  });
+              }
+            });
+          } else {
+            outcome = first.o;
+          }
+        } else {
+          outcome = await execHandler();
         }
+        const { result, status } = outcome;
 
         // PERSISTENCE FIX (PRD §3/§26 — "Web Search UI persistence" /
         // "UI Rendering Architecture"): the tool PART pushed into
@@ -2820,6 +2948,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     timestamp: nowISO(),
   });
   emit({ type: "complete", timestamp: nowISO() });
+  turnActive = false;
   return {
     conversationId,
     assistantMessageId: savedMessage.id,

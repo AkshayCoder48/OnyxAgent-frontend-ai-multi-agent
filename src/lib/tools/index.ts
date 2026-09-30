@@ -41,5 +41,11 @@ import "./workspace_sync";
 import "./scheduled_tasks";
 import "./composio_tools";
 import "./uploaded_files";
+// OnyxCode Code Mode tools (PRD §6) — registered for BOTH modes (no hard
+// isolation); Code Mode simply surfaces them prominently.
+import "./code_app";
+import "./code_preview";
+import "./code_database";
+import "./code_web_session";
 
 export {};
