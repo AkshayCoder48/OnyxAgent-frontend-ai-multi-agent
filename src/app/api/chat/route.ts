@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import {
   cancelTurnJob,
   getTurnJob,
+  skipToolWait,
   startTurnJob,
   type TurnJob,
 } from "@/lib/agent/turn-jobs";
@@ -33,11 +34,14 @@ interface IncomingMessage {
 interface ChatRequestBody {
   action?: unknown;
   turnId?: unknown;
+  toolId?: unknown;
   since?: unknown;
   create?: unknown;
   messages?: unknown;
   model?: unknown;
   resumeFrom?: unknown;
+  mode?: unknown;
+  workspaceId?: unknown;
 }
 
 function sanitizeMessages(
@@ -90,6 +94,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Skip-wait action — "Continue while this runs": unblock the      */
+  /* pipeline; the tool keeps running detached in the job.           */
+  /* ---------------------------------------------------------------- */
+  if (body.action === "skip_wait") {
+    if (typeof body.turnId === "string" && typeof body.toolId === "string") {
+      const skipped = skipToolWait(body.turnId, body.toolId);
+      return NextResponse.json({ ok: true, skipped });
+    }
+    return NextResponse.json({ ok: false, error: "turnId and toolId are required." }, { status: 400 });
+  }
+
   const turnId =
     typeof body.turnId === "string" && body.turnId.trim().length > 0
       ? body.turnId.trim()
@@ -139,9 +155,14 @@ export async function POST(request: NextRequest) {
       typeof body.resumeFrom === "string" && body.resumeFrom.trim().length > 0
         ? body.resumeFrom.trim()
         : null;
+    const mode = body.mode === "code" ? "code" : "agent";
+    const workspaceId =
+      mode === "code" && typeof body.workspaceId === "string" && body.workspaceId.trim().length > 0
+        ? body.workspaceId.trim()
+        : undefined;
 
     const id = turnId ?? `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    job = startTurnJob(id, parsed.messages, preference, resumeFrom);
+    job = startTurnJob(id, parsed.messages, preference, resumeFrom, { mode, workspaceId });
     createdHere = true;
   }
 

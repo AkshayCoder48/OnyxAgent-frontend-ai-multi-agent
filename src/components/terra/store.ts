@@ -3,7 +3,9 @@
 import { create } from "zustand";
 import { MODELS, seedConversations } from "./seed";
 import type {
+  AppMode,
   ChatHistoryMessage,
+  CodeTab,
   Conversation,
   Message,
   MessagePart,
@@ -11,6 +13,9 @@ import type {
   RouteInfo,
   RouteStats,
   SyncStatus,
+  ToolCallData,
+  ToolIconKind,
+  ToolResultData,
 } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -39,8 +44,39 @@ function partContent(part: MessagePart): string {
     case "code":
       return `\`\`\`${part.language}\n${part.code}\n\`\`\``;
     case "tool":
-      return `[used tool ${part.tool.name}: ${part.tool.subtitle}]`;
+      return `[used tool ${part.tool.name}: ${part.tool.subtitle}]${
+        part.tool.result ? `\n${part.tool.result.slice(0, 600)}` : ""
+      }`;
   }
+}
+
+/** Icon chip for a tool name (code-mode tools included). */
+function toolIconFor(name: string): ToolIconKind {
+  switch (name) {
+    case "create_app":
+    case "manage_files":
+      return "folder";
+    case "start_preview":
+    case "manage_preview":
+    case "start_web_session":
+      return "monitor";
+    case "manage_database":
+      return "database";
+    case "web_search":
+      return "globe";
+    default:
+      return "wrench";
+  }
+}
+
+/** The conversations that belong to a mode (OnyxCode keeps its own list). */
+function conversationsForMode(conversations: Conversation[], mode: AppMode): Conversation[] {
+  return conversations.filter((c) => (c.mode === "code") === (mode === "code"));
+}
+
+function ensureActiveInMode(conversations: Conversation[], activeId: string, mode: AppMode): string {
+  const pool = conversationsForMode(conversations, mode);
+  return pool.some((c) => c.id === activeId) ? activeId : (pool[0]?.id ?? "");
 }
 
 function messageContent(message: Message): string {
@@ -68,10 +104,6 @@ function sortConversations(conversations: Conversation[]): Conversation[] {
   return [...conversations].sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function ensureActive(conversations: Conversation[], activeId: string): string {
-  return conversations.some((c) => c.id === activeId) ? activeId : (conversations[0]?.id ?? "");
-}
-
 /* ------------------------------------------------------------------ */
 /* Persistence (localStorage snapshot → instant boot)                  */
 /* ------------------------------------------------------------------ */
@@ -89,6 +121,8 @@ interface Prefs {
   modelId: ModelPreferenceId;
   autoSync: boolean;
   routeStats: RouteStats;
+  appMode?: AppMode;
+  activeCodeId?: string;
 }
 
 function loadSnapshot(): Snapshot | null {
@@ -171,6 +205,8 @@ interface StreamDraft {
   turnId: string;
   reasoning: string;
   answer: string;
+  /** Finalized segments: complete text parts + tool cards, in order. */
+  builtParts: MessagePart[];
   route: RouteInfo | null;
   notice: string | null;
   warn: string | null;
@@ -184,6 +220,15 @@ interface StreamDraft {
 let draft: StreamDraft | null = null;
 let streamAbort: AbortController | null = null;
 let userStopped = false;
+
+/** Find a live tool card inside the draft by its server tool id. */
+function draftTool(current: StreamDraft, toolId: string): ToolCallData | null {
+  for (let i = current.builtParts.length - 1; i >= 0; i--) {
+    const part = current.builtParts[i];
+    if (part.type === "tool" && part.tool.toolId === toolId) return part.tool;
+  }
+  return null;
+}
 
 /* ------------------------------------------------------------------ */
 /* SSE client — attach to a server-side background turn job.           */
@@ -199,6 +244,16 @@ type StreamEvent =
   | { type: "replace"; reasoning: string; answer: string }
   | { type: "status"; text: string }
   | { type: "warning"; text: string }
+  | { type: "tool_call"; toolId: string; name: string; subtitle: string; args: string }
+  | { type: "tool_status"; toolId: string; backgrounded: boolean; subtitle: string }
+  | {
+      type: "tool_result";
+      toolId: string;
+      ok: boolean;
+      result: string;
+      subtitle: string;
+      resultData?: { kind: string; payload: Record<string, unknown> };
+    }
   | { type: "done"; elapsedMs?: number; partial?: boolean }
   | { type: "error"; message: string }
   | { type: "cancelled" };
@@ -212,6 +267,9 @@ interface AttachArgs {
   /** Create the job if it does not exist (false = attach-only). */
   create: boolean;
   resumeFrom: string | null;
+  /** OnyxCode turns run the tool-capable pipeline on a workspace. */
+  mode: AppMode;
+  workspaceId?: string;
 }
 
 async function consumeChatStream(
@@ -230,6 +288,9 @@ async function consumeChatStream(
       since: args.since,
       create: args.create,
       ...(args.resumeFrom ? { resumeFrom: args.resumeFrom } : {}),
+      ...(args.mode === "code"
+        ? { mode: "code", workspaceId: args.workspaceId ?? args.turnId }
+        : {}),
     }),
     signal,
   });
@@ -304,6 +365,10 @@ async function consumeChatStream(
 interface TerraState {
   conversations: Conversation[];
   activeId: string;
+  /** OnyxCode — the code-mode experience state. */
+  appMode: AppMode;
+  codeTab: CodeTab;
+  activeCodeId: string;
   modelId: ModelPreferenceId;
   search: string;
   sending: boolean;
@@ -334,6 +399,12 @@ interface TerraState {
   pullSync: () => Promise<void>;
   pushSync: () => Promise<void>;
   setAutoSync: (value: boolean) => void;
+  /* OnyxCode */
+  enterCodeMode: () => void;
+  exitCodeMode: () => void;
+  setCodeTab: (tab: CodeTab) => void;
+  newCodeConversation: () => void;
+  skipToolWait: (toolId: string) => void;
 }
 
 export const useTerra = create<TerraState>()((set, get) => {
@@ -355,6 +426,8 @@ export const useTerra = create<TerraState>()((set, get) => {
           modelId: get().modelId,
           autoSync: get().autoSync,
           routeStats: get().routeStats,
+          appMode: get().appMode,
+          activeCodeId: get().activeCodeId,
         };
         window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
       } catch {
@@ -397,6 +470,7 @@ export const useTerra = create<TerraState>()((set, get) => {
           group: string;
           separator: string;
           messages: string;
+          mode?: string;
           version: number;
           deleted: boolean;
         }[];
@@ -432,6 +506,7 @@ export const useTerra = create<TerraState>()((set, get) => {
               // Keep local createdAt when we already know it — better grouping.
               createdAt: existing?.createdAt ?? Date.now(),
               version: update.version,
+              mode: update.mode === "code" ? "code" : undefined,
             };
             const merged = normalizeConversation(incoming);
             if (existing) {
@@ -441,7 +516,11 @@ export const useTerra = create<TerraState>()((set, get) => {
             }
           }
           conversations = sortConversations(conversations);
-          return { conversations, activeId: ensureActive(conversations, s.activeId) };
+          return {
+            conversations,
+            activeId: ensureActiveInMode(conversations, s.activeId, "agent"),
+            activeCodeId: ensureActiveInMode(conversations, s.activeCodeId, "code"),
+          };
         });
       }
       set({ syncStatus: "synced", lastSyncedAt: Date.now() });
@@ -491,6 +570,7 @@ export const useTerra = create<TerraState>()((set, get) => {
             group: c.group,
             separator: c.separator,
             messages: JSON.stringify(c.messages),
+            mode: c.mode === "code" ? "code" : "agent",
           })),
         ...pendingTombIds.map((id) => ({
           id,
@@ -544,6 +624,10 @@ export const useTerra = create<TerraState>()((set, get) => {
       clearTimeout(current.timer);
       current.timer = null;
     }
+    const parts: MessagePart[] = [
+      ...current.builtParts,
+      ...(current.answer.length > 0 ? [{ type: "text" as const, text: current.answer }] : []),
+    ];
     set((s) => ({
       conversations: s.conversations.map((c) =>
         c.id === current.convId
@@ -561,10 +645,7 @@ export const useTerra = create<TerraState>()((set, get) => {
                       thinkMs:
                         current.thinkStart !== null ? Date.now() - current.thinkStart : undefined,
                       text: current.answer,
-                      parts:
-                        current.answer.length > 0
-                          ? [{ type: "text", text: current.answer }]
-                          : [],
+                      parts,
                     }
                   : m,
               ),
@@ -592,6 +673,10 @@ export const useTerra = create<TerraState>()((set, get) => {
     const warn = patch.warn ?? current.warn ?? undefined;
     const isError = patch.isError ?? false;
     const answer = current.answer;
+    const finalParts: MessagePart[] = [
+      ...current.builtParts,
+      ...(answer.length > 0 ? [{ type: "text" as const, text: answer }] : []),
+    ];
     set((s) => ({
       conversations: s.conversations.map((c) =>
         c.id === current.convId
@@ -612,9 +697,7 @@ export const useTerra = create<TerraState>()((set, get) => {
                       text: patch.text ?? answer,
                       parts:
                         patch.parts ??
-                        (answer.length > 0
-                          ? [{ type: "text", text: answer }]
-                          : (m.parts ?? [])),
+                        (finalParts.length > 0 ? finalParts : (m.parts ?? [])),
                     }
                   : m,
               ),
@@ -645,10 +728,12 @@ export const useTerra = create<TerraState>()((set, get) => {
     convId: string,
     history: ChatHistoryMessage[],
     turnId: string,
-    options?: { allowRestart?: boolean },
+    options?: { allowRestart?: boolean; codeWorkspaceId?: string | null },
   ) => {
     const model = get().modelId;
     const allowRestart = options?.allowRestart ?? true;
+    const mode: AppMode = options?.codeWorkspaceId ? "code" : "agent";
+    const workspaceId = options?.codeWorkspaceId ?? undefined;
     let since = 0;
     let create = true;
     let resumeFrom: string | null = null;
@@ -725,6 +810,55 @@ export const useTerra = create<TerraState>()((set, get) => {
           queueFlush();
           break;
         }
+        case "tool_call": {
+          // A tool started server-side: close the current text segment and
+          // pin a live tool card onto the timeline at this exact position.
+          if (draft.answer.length > 0) {
+            draft.builtParts.push({ type: "text", text: draft.answer });
+            draft.answer = "";
+          }
+          draft.builtParts.push({
+            type: "tool",
+            tool: {
+              name: event.name,
+              icon: toolIconFor(event.name),
+              subtitle: event.subtitle,
+              status: "running",
+              args: event.args,
+              result: "",
+              toolId: event.toolId,
+            },
+          });
+          queueFlush();
+          break;
+        }
+        case "tool_status": {
+          const tool = draftTool(draft, event.toolId);
+          if (tool) {
+            tool.backgrounded = event.backgrounded;
+            if (event.subtitle) tool.subtitle = event.subtitle;
+            queueFlush();
+          }
+          break;
+        }
+        case "tool_result": {
+          const tool = draftTool(draft, event.toolId);
+          if (tool) {
+            tool.status = "completed";
+            tool.result = event.result;
+            if (event.subtitle) tool.subtitle = event.subtitle;
+            tool.error = event.ok ? undefined : true;
+            if (event.resultData) {
+              const data: ToolResultData = {
+                kind: event.resultData.kind as ToolResultData["kind"],
+                payload: event.resultData.payload,
+              };
+              tool.resultData = data;
+            }
+            queueFlush();
+          }
+          break;
+        }
         case "done": {
           sawDone = true;
           finalizeDraft({});
@@ -753,7 +887,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       sawDone = false;
       try {
         since = await consumeChatStream(
-          { history, model, turnId, since, create, resumeFrom },
+          { history, model, turnId, since, create, resumeFrom, mode, workspaceId },
           streamAbort.signal,
           applyEvent,
           () => {
@@ -761,6 +895,7 @@ export const useTerra = create<TerraState>()((set, get) => {
             if (draft) {
               draft.reasoning = "";
               draft.answer = "";
+              draft.builtParts = [];
               draft.route = null;
               draft.notice = null;
             }
@@ -855,12 +990,15 @@ export const useTerra = create<TerraState>()((set, get) => {
     historyMessages: Message[],
     assistantId: string,
   ) => {
+    const isCode =
+      get().conversations.find((c) => c.id === conversationId)?.mode === "code";
     draft = {
       convId: conversationId,
       msgId: assistantId,
       turnId: assistantId,
       reasoning: "",
       answer: "",
+      builtParts: [],
       route: null,
       notice: null,
       warn: null,
@@ -873,7 +1011,9 @@ export const useTerra = create<TerraState>()((set, get) => {
       role: m.role,
       content: messageContent(m),
     }));
-    await runStream(conversationId, history, assistantId);
+    await runStream(conversationId, history, assistantId, {
+      codeWorkspaceId: isCode ? conversationId : null,
+    });
   };
 
   /**
@@ -948,6 +1088,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       turnId: targetMsg.turnId,
       reasoning: "",
       answer: "",
+      builtParts: [],
       route: null,
       notice: "Resuming your reply…",
       warn: null,
@@ -961,14 +1102,20 @@ export const useTerra = create<TerraState>()((set, get) => {
       role: m.role,
       content: messageContent(m),
     }));
-    void runStream(targetConvId, history, targetMsg.turnId, { allowRestart: false });
+    const isCode =
+      get().conversations.find((c) => c.id === targetConvId)?.mode === "code";
+    void runStream(targetConvId, history, targetMsg.turnId, {
+      allowRestart: false,
+      codeWorkspaceId: isCode ? targetConvId : null,
+    });
   };
 
   const sendMessage = async (text: string, mode: "send" | "regenerate") => {
     const trimmed = text.trim();
     const state = get();
     if (state.sending) return;
-    const conversation = state.conversations.find((c) => c.id === state.activeId);
+    const activeConvId = state.appMode === "code" ? state.activeCodeId : state.activeId;
+    const conversation = state.conversations.find((c) => c.id === activeConvId);
     if (!conversation) return;
 
     let historyMessages: Message[];
@@ -992,8 +1139,11 @@ export const useTerra = create<TerraState>()((set, get) => {
         text: trimmed,
         time: nowLabel(),
       };
-      const title =
-        conversation.title === "New conversation" ? titleFrom(trimmed) : conversation.title;
+      const isUntitled =
+        conversation.title === "New conversation" ||
+        conversation.title === "New app" ||
+        conversation.title.trim().length === 0;
+      const title = isUntitled ? titleFrom(trimmed) : conversation.title;
       historyMessages = [...conversation.messages, userMessage];
       set((s) => ({
         conversations: s.conversations.map((c) =>
@@ -1031,6 +1181,9 @@ export const useTerra = create<TerraState>()((set, get) => {
   return {
     conversations: seedConversations,
     activeId: seedConversations[0].id,
+    appMode: "agent",
+    codeTab: "chat",
+    activeCodeId: "",
     modelId: "auto",
     search: "",
     sending: false,
@@ -1055,9 +1208,16 @@ export const useTerra = create<TerraState>()((set, get) => {
       for (const t of (snapshot as { pendingTombstones?: string[] } | null)?.pendingTombstones ?? []) {
         pendingTombstones.add(t);
       }
+      const codeConversations = conversations.filter((c) => c.mode === "code");
+      const restoredMode: AppMode =
+        prefs.appMode === "code" && codeConversations.length > 0 ? "code" : "agent";
       set({
         conversations,
-        activeId: conversations[0]?.id ?? "",
+        activeId: ensureActiveInMode(conversations, conversations[0]?.id ?? "", "agent"),
+        activeCodeId: restoredMode === "code"
+          ? ensureActiveInMode(conversations, prefs.activeCodeId ?? "", "code")
+          : "",
+        appMode: restoredMode,
         modelId: prefs.modelId ?? "auto",
         autoSync: prefs.autoSync ?? true,
         routeStats: prefs.routeStats ?? { fast: 0, balanced: 0, deep: 0 },
@@ -1095,32 +1255,48 @@ export const useTerra = create<TerraState>()((set, get) => {
       });
     },
 
-    setActive: (id) => set({ activeId: id }),
+    setActive: (id) =>
+      set((s) => {
+        const conversation = s.conversations.find((c) => c.id === id);
+        if (!conversation) return {};
+        return conversation.mode === "code"
+          ? { activeCodeId: id }
+          : { activeId: id, appMode: s.appMode === "code" ? "agent" : s.appMode };
+      }),
 
     newConversation: () => {
       set((state) => {
+        const inCode = state.appMode === "code";
         const existingEmpty = state.conversations.find(
-          (c) => c.title === "New conversation" && c.messages.length === 0,
+          (c) =>
+            (c.mode === "code") === inCode &&
+            c.title === (inCode ? "New app" : "New conversation") &&
+            c.messages.length === 0,
         );
         if (existingEmpty) {
-          return { activeId: existingEmpty.id, mobileNavOpen: false };
+          return inCode
+            ? { activeCodeId: existingEmpty.id, mobileNavOpen: false }
+            : { activeId: existingEmpty.id, mobileNavOpen: false };
         }
         const conversation: Conversation = {
           id: makeId(),
-          title: "New conversation",
+          title: inCode ? "New app" : "New conversation",
           group: "today",
           separator: `Today · ${nowLabel()}`,
           messages: [],
           createdAt: Date.now(),
           version: 0,
+          ...(inCode ? { mode: "code" as const } : {}),
         };
         return {
           conversations: [conversation, ...state.conversations],
-          activeId: conversation.id,
+          ...(inCode
+            ? { activeCodeId: conversation.id }
+            : { activeId: conversation.id }),
           mobileNavOpen: false,
         };
       });
-      markDirty(get().activeId);
+      markDirty(get().appMode === "code" ? get().activeCodeId : get().activeId);
     },
 
     setSearch: (search) => set({ search }),
@@ -1190,10 +1366,18 @@ export const useTerra = create<TerraState>()((set, get) => {
       const remaining = state.conversations.filter((c) => c.id !== id);
       tombstones.add(id);
       pendingTombstones.add(id);
-      const nextActive = state.activeId === id ? (remaining[0]?.id ?? "") : state.activeId;
+      const wasCode = target.mode === "code";
+      const pool = remaining.filter((c) => (c.mode === "code") === wasCode);
+      const nextActive = wasCode
+        ? state.activeCodeId === id
+          ? (pool[0]?.id ?? "")
+          : state.activeCodeId
+        : state.activeId === id
+          ? (pool[0]?.id ?? "")
+          : state.activeId;
       set({
         conversations: remaining,
-        activeId: nextActive,
+        ...(wasCode ? { activeCodeId: nextActive } : { activeId: nextActive }),
         lastDeleted: { conversation: target, at: Date.now() },
       });
       scheduleSnapshot();
@@ -1232,6 +1416,94 @@ export const useTerra = create<TerraState>()((set, get) => {
         set({ syncStatus: "synced" });
       }
       scheduleSnapshot();
+    },
+
+    /* ---------------- OnyxCode -------------------------------------- */
+
+    enterCodeMode: () => {
+      const state = get();
+      const codeConversations = conversationsForMode(state.conversations, "code");
+      if (codeConversations.length === 0) {
+        const conversation: Conversation = {
+          id: makeId(),
+          title: "New app",
+          group: "today",
+          separator: `Today · ${nowLabel()}`,
+          messages: [],
+          createdAt: Date.now(),
+          version: 0,
+          mode: "code",
+        };
+        set({
+          appMode: "code",
+          codeTab: "chat",
+          activeCodeId: conversation.id,
+          conversations: [conversation, ...state.conversations],
+          mobileNavOpen: false,
+        });
+        markDirty(conversation.id);
+      } else {
+        set({
+          appMode: "code",
+          codeTab: "chat",
+          activeCodeId: state.activeCodeId || codeConversations[0].id,
+          mobileNavOpen: false,
+        });
+      }
+      scheduleSnapshot();
+    },
+
+    exitCodeMode: () => {
+      set({ appMode: "agent", mobileNavOpen: false });
+      scheduleSnapshot();
+    },
+
+    setCodeTab: (codeTab) => set({ codeTab }),
+
+    newCodeConversation: () => {
+      set((state) => {
+        const existingEmpty = state.conversations.find(
+          (c) => c.mode === "code" && c.title === "New app" && c.messages.length === 0,
+        );
+        if (existingEmpty) {
+          return { activeCodeId: existingEmpty.id, appMode: "code", mobileNavOpen: false };
+        }
+        const conversation: Conversation = {
+          id: makeId(),
+          title: "New app",
+          group: "today",
+          separator: `Today · ${nowLabel()}`,
+          messages: [],
+          createdAt: Date.now(),
+          version: 0,
+          mode: "code",
+        };
+        return {
+          conversations: [conversation, ...state.conversations],
+          activeCodeId: conversation.id,
+          appMode: "code",
+          mobileNavOpen: false,
+        };
+      });
+      markDirty(get().activeCodeId);
+    },
+
+    skipToolWait: (toolId) => {
+      const current = draft;
+      if (!current) return;
+      // Optimistic: the card flips to "running in background" immediately;
+      // the server confirms via a tool_status event right after.
+      const tool = draftTool(current, toolId);
+      if (tool) {
+        tool.backgrounded = true;
+        tool.subtitle = "Running in background";
+        flushDraft();
+      }
+      void fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "skip_wait", turnId: current.turnId, toolId }),
+      }).catch(() => undefined);
     },
   };
 });

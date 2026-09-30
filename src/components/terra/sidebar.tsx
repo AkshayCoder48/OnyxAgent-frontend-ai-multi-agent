@@ -1,6 +1,18 @@
 "use client";
 
-import { CloudOff, Feather, Loader2, MessageSquare, RefreshCw, Search, Settings2, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  CloudOff,
+  Code2,
+  Feather,
+  Loader2,
+  MessageSquare,
+  RefreshCw,
+  Search,
+  Settings2,
+  SquareTerminal,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useTerra } from "./store";
@@ -79,20 +91,25 @@ function SyncPill() {
 
 export function SidebarContent({ onNavigate }: SidebarContentProps) {
   const conversations = useTerra((s) => s.conversations);
-  const activeId = useTerra((s) => s.activeId);
+  const appMode = useTerra((s) => s.appMode);
+  const activeId = useTerra((s) => (s.appMode === "code" ? s.activeCodeId : s.activeId));
   const search = useTerra((s) => s.search);
   const booted = useTerra((s) => s.booted);
   const setSearch = useTerra((s) => s.setSearch);
   const setActive = useTerra((s) => s.setActive);
   const newConversation = useTerra((s) => s.newConversation);
+  const enterCodeMode = useTerra((s) => s.enterCodeMode);
+  const exitCodeMode = useTerra((s) => s.exitCodeMode);
   const setSettingsOpen = useTerra((s) => s.setSettingsOpen);
   const deleteConversation = useTerra((s) => s.deleteConversation);
   const undoDelete = useTerra((s) => s.undoDelete);
 
+  const inCode = appMode === "code";
   const needle = search.trim().toLowerCase();
+  const modeConversations = conversations.filter((c) => (c.mode === "code") === inCode);
   const filtered = needle
-    ? conversations.filter((c) => c.title.toLowerCase().includes(needle))
-    : conversations;
+    ? modeConversations.filter((c) => c.title.toLowerCase().includes(needle))
+    : modeConversations;
   const groups = [
     { key: "today", label: "Today", items: filtered.filter((c) => c.group === "today") },
     {
@@ -117,13 +134,31 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
 
   return (
     <div className="flex h-full flex-col bg-paper">
-      {/* Brand row */}
+      {/* Brand row — OnyxCode branding while in Code Mode */}
       <div className="flex h-14 shrink-0 items-center gap-2.5 px-4">
-        <Feather className="h-[18px] w-[18px] text-terra" aria-hidden />
-        <span className="font-serif text-[18px] font-semibold text-ink">Terra</span>
+        {inCode ? (
+          <>
+            <span
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-terra-soft-border bg-terra-soft"
+              aria-hidden
+            >
+              <Feather className="h-3.5 w-3.5 text-terra" />
+            </span>
+            <span className="font-serif text-[18px] font-semibold text-ink">OnyxCode</span>
+            <span className="rounded bg-black px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
+              Beta
+            </span>
+            <Code2 className="ml-auto h-4 w-4 text-ink-muted" aria-hidden />
+          </>
+        ) : (
+          <>
+            <Feather className="h-[18px] w-[18px] text-terra" aria-hidden />
+            <span className="font-serif text-[18px] font-semibold text-ink">Terra</span>
+          </>
+        )}
       </div>
 
-      {/* New conversation */}
+      {/* New conversation (mode-aware) */}
       <div className="px-3">
         <button
           type="button"
@@ -133,11 +168,55 @@ export function SidebarContent({ onNavigate }: SidebarContentProps) {
           }}
           className="flex h-9 w-full items-center rounded-lg bg-terra px-3 text-white shadow-[0_1px_3px_rgba(166,63,26,0.35)] transition-colors hover:bg-terra-deep"
         >
-          <span className="text-sm font-medium">New conversation</span>
+          <span className="text-sm font-medium">{inCode ? "New app" : "New conversation"}</span>
           <kbd className="ml-auto rounded border border-white/25 bg-white/10 px-1.5 py-0.5 font-mono text-[11px] leading-none text-white/60">
             ⌘N
           </kbd>
         </button>
+      </div>
+
+      {/* Code Mode toggle — enter from the agent, exit from Code Mode */}
+      <div className="px-3 pt-2">
+        {inCode ? (
+          <button
+            type="button"
+            onClick={() => {
+              exitCodeMode();
+              onNavigate?.();
+            }}
+            className="flex h-9 w-full items-center gap-2.5 rounded-lg border border-hairline bg-background px-3 text-sm text-ink-soft transition-colors hover:border-terra-soft-border hover:bg-terra-soft hover:text-ink"
+          >
+            <ArrowLeft className="h-4 w-4 shrink-0 text-ink-muted" aria-hidden />
+            <span className="font-medium">Back to Terra agent</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              enterCodeMode();
+              onNavigate?.();
+            }}
+            aria-label="Open OnyxCode (Beta) — the code mode experience"
+            title="OnyxCode — build apps with the agent"
+            className="group flex h-10 w-full items-center gap-2.5 rounded-lg border border-hairline bg-background px-3 transition-colors hover:border-terra-soft-border hover:bg-terra-soft"
+          >
+            <span
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-terra-soft-border bg-terra-soft"
+              aria-hidden
+            >
+              <SquareTerminal className="h-3.5 w-3.5 text-terra" />
+            </span>
+            <span className="flex min-w-0 flex-1 items-baseline gap-2">
+              <span className="text-sm font-medium text-ink">Code Mode</span>
+              <span className="rounded bg-black px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white">
+                Beta
+              </span>
+            </span>
+            <span className="ml-auto text-[11px] text-ink-muted transition-colors group-hover:text-terra-deep">
+              OnyxCode
+            </span>
+          </button>
+        )}
       </div>
 
       {/* Search */}

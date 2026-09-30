@@ -1,12 +1,31 @@
 export type MessageRole = "user" | "assistant";
 
-export type ToolIconKind = "globe" | "wrench" | "search";
+export type ToolIconKind =
+  | "globe"
+  | "wrench"
+  | "search"
+  | "database"
+  | "monitor"
+  | "folder"
+  | "sparkles";
 
 export type ToolStatus = "completed" | "running";
 
 export type RouteName = "fast" | "balanced" | "deep";
 
 export type ModelPreferenceId = "auto" | RouteName;
+
+/** Which app experience is active — the Terra agent or OnyxCode. */
+export type AppMode = "agent" | "code";
+
+/** OnyxCode's primary tabs. */
+export type CodeTab = "chat" | "database" | "preview";
+
+/** Rich card payload for a code-mode tool result. */
+export interface ToolResultData {
+  kind: "create_app" | "preview" | "preview_list" | "web_session" | "database" | "files";
+  payload: Record<string, unknown>;
+}
 
 export interface ToolCallData {
   /** Raw tool identifier, rendered in mono (e.g. web_search) */
@@ -19,6 +38,14 @@ export interface ToolCallData {
   args: string;
   /** Result preview shown when expanded */
   result: string;
+  /** Server tool id — powers skip-wait + live result updates. */
+  toolId?: string;
+  /** Skip-wait: tool is running detached in the background. */
+  backgrounded?: boolean;
+  /** The tool finished with an error. */
+  error?: boolean;
+  /** Rich card payload (create_app / preview / web_session / …). */
+  resultData?: ToolResultData;
 }
 
 export type MessagePart =
@@ -74,6 +101,8 @@ export interface Conversation {
   createdAt: number;
   /** Last cloud version acknowledged for this row */
   version: number;
+  /** OnyxCode conversations live in their own list + workspace. */
+  mode?: AppMode;
 }
 
 export interface ModelOption {
@@ -93,4 +122,33 @@ export interface RouteStats {
   fast: number;
   balanced: number;
   deep: number;
+}
+
+/* ------------------------------------------------------------------ */
+/* OnyxCode panels (Database / Preview tabs)                           */
+/* ------------------------------------------------------------------ */
+
+export interface CodeRecordView {
+  id: string;
+  key: string;
+  kind: string;
+  /** JSON-encoded payload */
+  data: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PreviewSessionView {
+  sessionId: string;
+  name: string;
+  /** Path + gateway query, relative to the app origin. */
+  url: string;
+  status: string;
+  entry: string;
+  createdAt: number;
+}
+
+export interface WorkspaceFileView {
+  path: string;
+  bytes: number;
 }

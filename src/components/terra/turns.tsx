@@ -214,7 +214,15 @@ function TypingDots() {
   );
 }
 
-export function AssistantTurn({ message, isLast }: { message: Message; isLast: boolean }) {
+export function AssistantTurn({
+  message,
+  isLast,
+  workspaceId,
+}: {
+  message: Message;
+  isLast: boolean;
+  workspaceId?: string;
+}) {
   const setFeedback = useTerra((s) => s.setFeedback);
   const regenerate = useTerra((s) => s.regenerate);
   const sending = useTerra((s) => s.sending);
@@ -295,7 +303,14 @@ export function AssistantTurn({ message, isLast }: { message: Message; isLast: b
                       code={part.code}
                     />
                   );
-                return <ToolCard key={index} tool={part.tool} />;
+                return (
+                  <ToolCard
+                    key={index}
+                    tool={part.tool}
+                    streaming={streaming}
+                    workspaceId={workspaceId}
+                  />
+                );
               })}
             </div>
           ) : streaming && !message.reasoning ? (

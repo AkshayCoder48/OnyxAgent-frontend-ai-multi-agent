@@ -64,7 +64,10 @@ function BootSkeleton() {
 }
 
 export function Thread() {
-  const active = useTerra((s) => s.conversations.find((c) => c.id === s.activeId));
+  const appMode = useTerra((s) => s.appMode);
+  const active = useTerra((s) =>
+    s.conversations.find((c) => c.id === (s.appMode === "code" ? s.activeCodeId : s.activeId)),
+  );
   const booted = useTerra((s) => s.booted);
   const sending = useTerra((s) => s.sending);
   const send = useTerra((s) => s.send);
@@ -78,6 +81,8 @@ export function Thread() {
   } | null>(null);
 
   const activeId = active?.id;
+  // OnyxCode tool cards get the workspace id so their actions work.
+  const workspaceId = appMode === "code" && active?.mode === "code" ? active.id : undefined;
   const messageCount = active?.messages.length ?? 0;
   const lastMessage = active?.messages[messageCount - 1];
   // Track streaming growth so the thread follows the reply as it arrives.
@@ -118,6 +123,7 @@ export function Thread() {
                 key={message.id}
                 message={message}
                 isLast={index === active.messages.length - 1}
+                workspaceId={workspaceId}
               />
             ),
           )}
