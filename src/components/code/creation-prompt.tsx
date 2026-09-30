@@ -117,7 +117,10 @@ export function CreationPrompt({ workspaceId }: { workspaceId?: string }) {
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    // Enter sends, Shift+Enter is a newline — identical to the normal chat
+    // composer, so tapping Enter on a project prompt behaves like every
+    // other prompt box in the app. ⌘/Ctrl+Enter still sends too.
+    if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       submit();
     }
@@ -225,7 +228,7 @@ export function CreationPrompt({ workspaceId }: { workspaceId?: string }) {
           <ModelChip />
 
           <span className="ml-auto hidden text-[11px] text-ink-muted sm:block" aria-hidden>
-            ⌘⏎ to create
+            ⏎ to create · ⇧⏎ newline
           </span>
         </div>
 
