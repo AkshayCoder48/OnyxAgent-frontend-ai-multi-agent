@@ -11,6 +11,7 @@ import {
   Boxes,
   ChevronRight,
   Code2,
+  Database,
   Download,
   FileMinus,
   FilePlus,
@@ -49,8 +50,10 @@ import { MemoryResult } from "./tool-results/memory";
 import { CreateAppResult, parseCreateAppResult } from "./tool-results/create-app";
 import { PreviewResult, parsePreviewResult } from "./tool-results/preview";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
+import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { WorkspaceSyncResult, isWorkspaceSyncTool } from "./tool-results/workspace-sync";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
+import { DatabaseToolResult, parseDatabaseResult } from "./tool-results/database";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
@@ -379,6 +382,11 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       {isWsSync && <WorkspaceSyncResult toolCall={toolCall} />}
       {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
+      {/* inspect_image (Runtime PRD §54/§111) — the analyzed image + the
+          vision description render inline; content, not chrome. */}
+      {toolCall.name === "inspect_image" && isCompleted && (
+        <ImageInspectionResult result={toolCall.result} />
+      )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
       {fetchUrlPreview && (
         <LinkPreview href={fetchUrlPreview} layout="compact" className="px-1.5 sm:px-2" />
@@ -665,6 +673,17 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [toolCall.name, toolCall.status, toolCall.result],
   );
   const isWebSessionResult = webSessionResultSpec !== null;
+  // OnyxCode database/storage tools (kv_*/storage_*/schema_upsert/
+  // inspect_database) — compact rich cards dispatched on the RESULT payload's
+  // `kind: "database"` marker (same pattern as preview/web-session).
+  const databaseResultSpec = useMemo(
+    () =>
+      toolCall.status === "completed"
+        ? parseDatabaseResult(toolCall.result)
+        : null,
+    [toolCall.status, toolCall.result],
+  );
+  const isDatabaseResult = databaseResultSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
   // Same for file_download cards and the edit_file diff (the card IS the
@@ -678,14 +697,16 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isCreateApp || isPreviewResult || isWebSessionResult;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isCreateApp || isPreviewResult || isWebSessionResult || isDatabaseResult;
   const friendlyName = isCreateApp
     ? "Create App"
     : isPreviewResult
       ? "Live Preview"
       : isWebSessionResult
         ? "Web Session"
-        : isDateTime
+        : isDatabaseResult
+          ? "Database"
+          : isDateTime
     ? "Current Date & Time"
     : isRAGSearch
       ? "Knowledge Base Search"
@@ -755,7 +776,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       ? MonitorPlay
       : isWebSessionResult
         ? Globe
-        : isDateTime
+        : isDatabaseResult
+          ? Database
+          : isDateTime
     ? Clock
     : isRAGSearch
       ? Search
@@ -984,6 +1007,8 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <PreviewResult data={previewResultSpec} />
           ) : toolCall.status === "completed" && isWebSessionResult && webSessionResultSpec ? (
             <WebSessionResult data={webSessionResultSpec} />
+          ) : toolCall.status === "completed" && isDatabaseResult && databaseResultSpec ? (
+            <DatabaseToolResult data={databaseResultSpec} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (
@@ -994,6 +1019,8 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <ChartMessage spec={chartSpec} />
           ) : toolCall.status === "completed" && isImagePreview && imagePreviewSpec ? (
             <ImagePreviewResult spec={imagePreviewSpec} />
+          ) : toolCall.status === "completed" && toolCall.name === "inspect_image" ? (
+            <ImageInspectionResult result={toolCall.result} />
           ) : toolCall.status === "completed" && isFileDownload && fileDownloadSpec ? (
             <FileDownloadResult payload={fileDownloadSpec} />
           ) : toolCall.status === "completed" && isDDGWebSearch ? (

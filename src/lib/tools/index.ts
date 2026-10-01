@@ -36,6 +36,7 @@ import "./counterfactual";
 import "./subagents";
 import "./workspace_analysis";
 import "./image_preview";
+import "./inspect_image";
 import "./ocr";
 import "./workspace_sync";
 import "./scheduled_tasks";

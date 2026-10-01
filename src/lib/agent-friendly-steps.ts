@@ -152,6 +152,7 @@ const RULES: Record<string, TenseRule> = {
     icon: Download,
   },
   preview_image: { past: "Showed an image", present: "Showing an image", icon: ImageIcon },
+  inspect_image: { past: "Inspected an image", present: "Inspecting an image", icon: ImageIcon },
 
   // ── Merged multi-function tools (tool-count cap) ─────────────────────
   // Each maps to the old family it absorbed; sentences stay generic and
@@ -249,6 +250,18 @@ function friendlyDetail(toolCall: ToolCall): string | undefined {
   if (typeof args.url === "string" && args.url.trim()) {
     const domain = domainOf(args.url.trim());
     if (domain) return `on ${domain}`;
+  }
+  // inspect_image's source: a path or URL (data URLs show as no detail —
+  // a wall of base64 is never human-friendly).
+  if (
+    toolCall.name === "inspect_image" &&
+    typeof args.source === "string" &&
+    args.source.trim() &&
+    !args.source.startsWith("data:")
+  ) {
+    const s = args.source.trim();
+    const domain = domainOf(s);
+    return domain ? `on ${domain}` : clip(basename(s));
   }
   const path =
     (typeof args.path === "string" && args.path) ||
