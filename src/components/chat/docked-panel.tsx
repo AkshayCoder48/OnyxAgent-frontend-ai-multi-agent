@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { ChevronsRight, X } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useResizableSidebar } from "@/components/ui/resize-handle";
@@ -32,16 +38,24 @@ import { cn } from "@/lib/utils";
  * from the right edge (scrim + body scroll lock — standard mobile
  * navigation), rendered with the same Sheet primitive the conversation
  * sidebar uses, so it feels part of the navigation system rather than a
- * random floating overlay.
+ * random floating overlay. keepAlive panels keep their content mounted
+ * inside the (hidden) Sheet after the first open, so re-opens are instant.
  *
- * Children mount on the first open and stay mounted afterwards, so the
- * close animation always has content to slide away and panel state
- * (drafts, scroll position) is preserved between toggles — switching
- * between panels keeps each panel's scroll/state alive as well.
+ * Content lifecycle (see usePanelContent): the open itself is immediate
+ * (width transition starts on the tap's next frame); the content mount is
+ * deferred one frame and committed inside startTransition so heavy panels
+ * never block the animation or input. keepAlive panels stay mounted once
+ * opened; the store-backed panels unmount shortly after closing so hidden
+ * panels do zero work.
  */
 
 /** Below the md breakpoint the docked column becomes a mobile drawer. */
 const DESKTOP_QUERY = "(min-width: 768px)";
+
+/** How long children stay mounted after a close flip — covers the 250ms
+ * width/slide exit animation (+ tail) so the panel never visually empties
+ * before it finishes animating out. Only used by non-keepAlive panels. */
+const CLOSE_GRACE_MS = 320;
 
 /** Space the docked panel must always leave for the rest of the workspace:
  * 48px collapsed conversation rail + a ~400px usable chat column. The
@@ -69,29 +83,49 @@ function useIsDesktop() {
 }
 
 /**
- * Children mount once the panel has been opened (via effect — one frame
- * after the open animation starts) and stay mounted forever after.
+ * Panel content lifecycle (the zero-lag sidebar contract):
  *
- * Deliberately NO render-time "adjust state when a prop changes"
- * setState here: the React Compiler (on by default in Next.js 16)
- * mis-compiles that pattern (set state during render from an inlined
- * custom hook) and silently drops the update — the panel would open with
- * an empty shell. Effect-based state (like useResizableSidebar's stored
- * width) compiles and runs correctly.
+ *   - OPEN is IMMEDIATE: the `open` prop flips in the tap's own render —
+ *     the aside's width transition starts painting on the very next frame.
+ *     Nothing about opening waits for data, fetches, or the content mount.
+ *   - The CONTENT MOUNT is deferred one animation frame and committed inside
+ *     `startTransition`, so a heavy first render (Database/File/Preview)
+ *     can never block the open animation or input — the shell slides in on
+ *     the compositor while React renders the content interruptibly.
+ *   - keepAlive panels (Database, Preview — state worth preserving: the
+ *     preview IFRAME would reload, the DB panel holds editor/scroll state)
+ *     stay mounted forever once opened; closing only animates the shell.
+ *   - Non-keepAlive panels (files/timeline/logs/subagents/platforms — all
+ *     store/query-backed) unmount CLOSE_GRACE_MS after closing, so their
+ *     live subscriptions do ZERO work while the panel is hidden. Their data
+ *     lives in stores/React-Query caches, so a re-open rehydrates instantly.
+ *
+ * Deliberately NO render-time "adjust state when a prop changes" setState
+ * here: the React Compiler mis-compiles that pattern and silently drops the
+ * update. Effect-based state compiles and runs correctly.
  */
-function useMountedOnceOpen(open: boolean) {
-  const [mounted, setMounted] = useState(false);
+function usePanelContent(open: boolean, keepAlive: boolean) {
+  const [visible, setVisible] = useState(false);
   useEffect(() => {
-    if (!open) return;
-    // Mount children one frame after the open animation starts. The setState
-    // lives inside the rAF callback (never synchronously in the effect body)
-    // so the react-compiler lint is satisfied; once mounted it stays mounted
-    // forever — there is no setMounted(false) anywhere, so the close
-    // animation always has content and panel state survives toggles.
-    const raf = requestAnimationFrame(() => setMounted(true));
-    return () => cancelAnimationFrame(raf);
-  }, [open]);
-  return mounted;
+    if (open) {
+      // One frame after the open flip: the shell's width transition has
+      // started painting; now mount the content inside a transition so the
+      // commit is interruptible (input/taps keep priority).
+      const raf = requestAnimationFrame(() => {
+        startTransition(() => {
+          setVisible(true);
+        });
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+    // Closing — keepAlive panels keep their content mounted (state
+    // preservation); others hold through the exit animation, then unmount
+    // so hidden panels cost nothing.
+    if (keepAlive) return;
+    const t = window.setTimeout(() => setVisible(false), CLOSE_GRACE_MS);
+    return () => window.clearTimeout(t);
+  }, [open, keepAlive]);
+  return visible;
 }
 
 interface DockedPanelProps {
@@ -112,6 +146,10 @@ interface DockedPanelProps {
   sheetCloseButton?: boolean;
   /** Extra classes for the mobile SheetContent (width, e.g. w-[85vw]). */
   sheetClassName?: string;
+  /** Keep content mounted once the panel has been opened (state-heavy
+   *  panels: the preview iframe, the database panel). Non-keepAlive panels
+   *  unmount shortly after closing — hidden panels must do zero work. */
+  keepAlive?: boolean;
 }
 
 export function DockedPanel({
@@ -126,12 +164,13 @@ export function DockedPanel({
   children,
   sheetCloseButton = false,
   sheetClassName,
+  keepAlive = false,
 }: DockedPanelProps) {
   const isDesktop = useIsDesktop();
   const [width, setWidth] = useResizableSidebar(storageKey, defaultWidth, minWidth, maxWidth);
   const [dragging, setDragging] = useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
-  const contentMounted = useMountedOnceOpen(open);
+  const contentVisible = usePanelContent(open, keepAlive);
 
   // Closing must never leave focus inside the (now inert) panel.
   useEffect(() => {
@@ -222,7 +261,7 @@ export function DockedPanel({
           className="docked-panel-inner border-border flex h-full flex-col border-l"
           style={{ width: fittedWidth }}
         >
-          {isDesktop && contentMounted ? children : null}
+          {isDesktop && contentVisible ? children : null}
         </div>
 
         {/* Resize handle — the panel's left edge (same sash pattern as
@@ -242,7 +281,7 @@ export function DockedPanel({
 
         {/* Compact collapse chevron — docked on the panel's edge; closing
             animates the width back smoothly. */}
-        {isDesktop && contentMounted && (
+        {isDesktop && contentVisible && (
           <button
             type="button"
             onClick={onClose}
@@ -256,13 +295,18 @@ export function DockedPanel({
         )}
       </aside>
 
-      {/* Mobile drawer (< lg) — full height, hugging the right edge. */}
+      {/* Mobile drawer (< md) — full height, hugging the right edge.
+          keepAlive panels keep their content mounted inside a hidden Sheet
+          after the first open (re-opens are INSTANT — no remount-per-tap);
+          non-keepAlive panels unmount with the Sheet after the exit
+          animation, same lifecycle as the desktop column. */}
       {!isDesktop && (
         <Sheet
           open={open}
           onOpenChange={(o) => {
             if (!o) onClose();
           }}
+          keepMountedOnceOpen={keepAlive}
         >
           <SheetContent
             side="right"
@@ -279,7 +323,7 @@ export function DockedPanel({
                 <X className="h-4 w-4" />
               </button>
             )}
-            {children}
+            {contentVisible ? children : null}
           </SheetContent>
         </Sheet>
       )}

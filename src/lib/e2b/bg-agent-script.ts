@@ -851,6 +851,17 @@ function sanitizeToolParameters(schema) {
 
 // ── The streaming LLM call ──────────────────────────────────────────────
 const MAX_ATTEMPTS = 8; // 4 + headroom for the strict-gateway self-heal ladder
+// DEAD-WIRE GUARD (not a duration cap): reader.read() rejecting after this
+// many milliseconds with ZERO bytes on the wire. Provider keep-alive comments
+// (": ping" / empty SSE frames) arrive as bytes and reset it, so an ACTIVE
+// stream — including a reasoning model that thinks for many minutes while
+// dripping deltas — never trips it. Only a connection that has gone fully
+// silent (dead upstream, severed socket) does, which is genuinely
+// indistinguishable from a dead peer at the transport level. There is NO
+// total execution timeout anywhere in this runner: a round may legitimately
+// run as long as the provider keeps sending bytes (the ~567s "Stream read
+// failed" failures were the old 600s hard abort killing healthy
+// max-thinking streams mid-reasoning — removed 2026-10).
 const IDLE_TIMEOUT_MS = 240_000;
 
 /**
@@ -1068,8 +1079,15 @@ async function streamRoundEvents(state, round, finalRound) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     let res = null;
     let fetchErr = null;
+    // NO HARD TIMEOUT: the previous 600-second setTimeout(ac.abort) was
+    // an arbitrary application-level execution cap — it killed every
+    // healthy long-reasoning stream at the same wall-clock mark (visible as
+    // a ~567s "Stream read failed: The operation was aborted" with
+    // truncated reasoning). The only liveness guard left is IDLE_TIMEOUT_MS
+    // (zero BYTES on the wire); duration itself is never failure. ac
+    // exists purely to release the connection in the finally below.
     const ac = new AbortController();
-    const hardTimer = setTimeout(() => { try { ac.abort(); } catch {} }, 600_000);
+    const roundStart = Date.now();
     try {
       res = await fetch(url, {
         method: "POST",
@@ -1096,7 +1114,6 @@ async function streamRoundEvents(state, round, finalRound) {
         if (badParam === "reasoning_effort") delete body.thinking;
         if (badParam === "thinking") delete body.reasoning_effort;
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "stripped unsupported param '" + badParam + "'" });
-        clearTimeout(hardTimer);
         continue;
       }
       // REASONING-REPLAY SELF-HEALING: DeepSeek-style thinking endpoints
@@ -1113,7 +1130,6 @@ async function streamRoundEvents(state, round, finalRound) {
         state.replayReasoning = true;
         body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "restored reasoning_content replay (provider requires it)" });
-        clearTimeout(hardTimer);
         continue;
       }
       // STRICT-GATEWAY LADDER (LLM HTTP 400 fix): tool-text mode →
@@ -1132,7 +1148,6 @@ async function streamRoundEvents(state, round, finalRound) {
           delete body.tool_choice;
         }
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "self-heal: " + healReason });
-        clearTimeout(hardTimer);
         continue;
       }
     }
@@ -1145,11 +1160,9 @@ async function streamRoundEvents(state, round, finalRound) {
         const delay = Math.min(2000 * attempt, 15_000);
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "HTTP " + res.status });
         await sleep(delay);
-        clearTimeout(hardTimer);
         continue;
       }
       const detail = await res.text().catch(() => "");
-      clearTimeout(hardTimer);
       if (res.status === 429 || res.status === 529) {
         return { content: "", reasoning: "", toolCalls: [], error: "Rate limit reached (HTTP " + res.status + ") — the provider is throttling requests. Wait a moment and send again. " + cleanDetail(detail, res.status) };
       }
@@ -1165,17 +1178,14 @@ async function streamRoundEvents(state, round, finalRound) {
         const delay = Math.min(2000 * attempt, 15_000);
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "network: " + fetchErr });
         await sleep(delay);
-        clearTimeout(hardTimer);
         continue;
       }
-      clearTimeout(hardTimer);
       return { content: "", reasoning: "", toolCalls: [], error: "LLM network error: " + (fetchErr ?? "no response body") };
     }
     // Some gateways ignore stream:true and answer plain JSON — route that
     // through the same delta pipeline (one honest bulk delivery).
     const ct = String(res.headers.get("content-type") || "");
     if (ct.includes("application/json")) {
-      clearTimeout(hardTimer);
       try {
         const json = await res.json();
         const msg = json.choices?.[0]?.message ?? {};
@@ -1190,6 +1200,7 @@ async function streamRoundEvents(state, round, finalRound) {
     const decoder = new TextDecoder();
     let sseBuf = "";
     let streamError = null;
+    let chunksReceived = 0; // wire reads with bytes — stream diagnostics
     // PREMATURE-EOF DETECTION (auto-stop fix): a stream that ends with no
     // finish_reason, no [DONE] marker and no usage chunk was severed
     // mid-generation — not completed. Without this the round ended as a
@@ -1203,13 +1214,28 @@ async function streamRoundEvents(state, round, finalRound) {
         try {
           readResult = await readWithTimeout(reader, IDLE_TIMEOUT_MS);
         } catch (e) {
-          streamError = e && e.message === "idle"
-            ? "Idle timeout (" + Math.round(IDLE_TIMEOUT_MS / 1000) + "s without a chunk)"
-            : "Stream read failed: " + (e && e.message ? e.message : String(e));
+          // FAILURE TAXONOMY (the old single "Stream read failed: …" string
+          // collapsed unrelated causes into one vague message). Classify:
+          // idle dead-wire / aborted / network / reader — each carries
+          // elapsed + received-chunk diagnostics so a failure is answerable
+          // (how long had it run? was data flowing before the cut?).
+          const raw = e && e.message ? e.message : String(e);
+          const elapsed = Math.round((Date.now() - roundStart) / 1000);
+          const diag = elapsed + "s elapsed, " + chunksReceived + " chunks received";
+          if (raw === "idle") {
+            streamError = "Idle timeout — the provider sent no bytes at all for " + Math.round(IDLE_TIMEOUT_MS / 1000) + "s (" + diag + "). The connection is dead, not slow.";
+          } else if ((e && e.name === "AbortError") || /abort/i.test(raw)) {
+            streamError = "Request aborted (" + diag + ").";
+          } else if ((e && e.name === "TypeError") || /fetch|network|terminated|socket|ECONN|ENET|EAI_/i.test(raw)) {
+            streamError = "Network error mid-stream (" + diag + "): " + cap(raw, 200);
+          } else {
+            streamError = "Stream read error (" + diag + "): " + cap(raw, 200);
+          }
           break;
         }
         const { value, done } = readResult;
         if (done) break;
+        chunksReceived++;
         sseBuf += decoder.decode(value, { stream: true });
         const parsed = parseSSEFrames(sseBuf);
         sseBuf = parsed.rest;
@@ -1248,7 +1274,6 @@ async function streamRoundEvents(state, round, finalRound) {
     } catch (e) {
       streamError = streamError ?? (e && e.message ? e.message : String(e));
     } finally {
-      clearTimeout(hardTimer);
       try { ac.abort(); } catch {} // release the connection
     }
     // PREMATURE STREAM CUT: output arrived but the stream ended with no
@@ -1300,6 +1325,13 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;
   if (state.toolsEnabled !== false) nb.tools = ALL_TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: sanitizeToolParameters(t.parameters) } }));
   if (dp.includes("tools") || state.paramBans.includes("tools") || wireMode(state).noTools) delete nb.tools;
+  // HANG-GUARD, NOT A REASONING CAP: a non-streaming response has NO
+  // liveness signal (no bytes arrive until the entire completion is done),
+  // so some ceiling is required to ever detect a dead request. The old
+  // 180s ceiling killed legitimate long-thinking models — a max-reasoning
+  // non-streaming call can take many minutes — so the guard is now 30 min:
+  // far past any healthy completion, short enough to surface a dead one.
+  const NONSTREAM_HANG_GUARD_MS = 1_800_000;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -1309,7 +1341,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
         ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
       },
       body: JSON.stringify(nb),
-      signal: AbortSignal.timeout(180_000),
+      signal: AbortSignal.timeout(NONSTREAM_HANG_GUARD_MS),
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
@@ -1329,7 +1361,7 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
             ...(p.apiKey ? { Authorization: "Bearer " + p.apiKey } : {}),
           },
           body: JSON.stringify(nb),
-          signal: AbortSignal.timeout(180_000),
+          signal: AbortSignal.timeout(NONSTREAM_HANG_GUARD_MS),
         });
         if (retryRes.ok) {
           const json2 = await retryRes.json();

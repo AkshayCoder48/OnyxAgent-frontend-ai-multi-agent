@@ -32,18 +32,24 @@ export function useConversations() {
   const getUserId = useUserId();
   // Subscribe to auth store so the query re-enables when the user loads.
   const userId = useAuthStore((s) => s.user?.id);
-  const {
-    currentConversationId,
-    currentMessages,
-    hydratedConversationId,
-    isLoading: selectLoading,
-    error,
-    setCurrentConversationId,
-    setMessagesFor,
-    setLoading,
-    setError,
-  } = useConversationStore();
-  const { clearMessages } = useChatStore();
+  // ── RENDER-ISOLATED SUBSCRIPTIONS ────────────────────────────────────────
+  // Every store subscription below is SELECTOR-based: this hook is consumed
+  // by layout-level surfaces (ChatWorkspace, ConversationSidebar, chat
+  // containers) that must NOT re-render on store fields they never read.
+  // The previous no-selector destructure subscribed consumers to the ENTIRE
+  // conversation store AND the ENTIRE chat store — every field change
+  // (streaming state flips, message repaints, unrelated conversations)
+  // re-rendered the whole workspace tree including every docked panel and
+  // the full conversation list. Actions come from selectors too: store
+  // action references are stable, so these subscriptions never re-render.
+  const currentConversationId = useConversationStore((s) => s.currentConversationId);
+  const selectLoading = useConversationStore((s) => s.isLoading);
+  const error = useConversationStore((s) => s.error);
+  const setCurrentConversationId = useConversationStore((s) => s.setCurrentConversationId);
+  const setMessagesFor = useConversationStore((s) => s.setMessagesFor);
+  const setLoading = useConversationStore((s) => s.setLoading);
+  const setError = useConversationStore((s) => s.setError);
+  const clearMessages = useChatStore((s) => s.clearMessages);
   const hasMoreRef = useRef(true);
   // Tracks the in-flight message fetch so a rapid conversation switch can abort
   // the previous request — otherwise a slower earlier fetch could resolve last
@@ -397,7 +403,10 @@ export function useConversations() {
   return {
     conversations,
     currentConversationId,
-    currentMessages,
+    // NOTE: `currentMessages` is deliberately NOT returned — no consumer
+    // reads it from this hook, and subscribing to it here would re-render
+    // every layout-level consumer on every message repaint. Consumers that
+    // need messages subscribe via their own narrow selector.
     isLoading,
     error,
     fetchConversations,

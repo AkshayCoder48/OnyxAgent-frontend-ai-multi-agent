@@ -85,7 +85,10 @@ export function ConversationSidebar({
     fetchConversations: refetch,
     currentConversationId: activeConversationId,
   } = useConversations();
-  const { user, logout } = useAuthStore();
+  // Selector subscriptions — user object + stable logout action only (the
+  // old no-selector call re-rendered this sidebar on every auth-store tick).
+  const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
 
   const [query, setQuery] = React.useState("");
 

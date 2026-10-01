@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { memo, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
@@ -93,18 +93,23 @@ function accountInitials(user: { full_name?: string | null; email: string } | nu
 interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
-  /** Chat-only scheduled tasks: this conversation is a task's dedicated
+  /** CHAT-ONLY SCHEDULED TASKS: this conversation is a task's dedicated
    *  chat → subtle clock badge next to the title. */
   isScheduled?: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-  onArchive: () => void;
-  onUnarchive: () => void;
-  onRename: (title: string) => void;
-  onShare: () => void;
+  // STABLE id-based callbacks (React.memo-friendly): the parent passes the
+  // SAME function references for every row — the row's own conversation.id
+  // is threaded through at call time, so a memoized row only re-renders
+  // when ITS data/flags actually change (30+ rows × per-tick re-renders was
+  // a real cost before the render-isolation fixes).
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onArchive: (id: string) => void;
+  onUnarchive: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onShare: (id: string) => void;
 }
 
-function ConversationItem({
+const ConversationItem = memo(function ConversationItem({
   conversation,
   isActive,
   isScheduled = false,
@@ -189,7 +194,7 @@ function ConversationItem({
 
   const handleRename = () => {
     if (editTitle.trim()) {
-      onRename(editTitle.trim());
+      onRename(conversation.id, editTitle.trim());
     }
     setIsEditing(false);
   };
@@ -207,15 +212,15 @@ function ConversationItem({
   }> = conversation.is_archived
     ? [
         { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
-        { key: "share", icon: Share2, label: t("share"), run: onShare },
-        { key: "restore", icon: ArchiveRestore, label: "Restore", run: onUnarchive },
-        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: onDelete },
+        { key: "share", icon: Share2, label: t("share"), run: () => onShare(conversation.id) },
+        { key: "restore", icon: ArchiveRestore, label: "Restore", run: () => onUnarchive(conversation.id) },
+        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: () => onDelete(conversation.id) },
       ]
     : [
         { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
-        { key: "share", icon: Share2, label: t("share"), run: onShare },
-        { key: "archive", icon: Archive, label: t("archive"), run: onArchive },
-        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: onDelete },
+        { key: "share", icon: Share2, label: t("share"), run: () => onShare(conversation.id) },
+        { key: "archive", icon: Archive, label: t("archive"), run: () => onArchive(conversation.id) },
+        { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: () => onDelete(conversation.id) },
       ];
 
   return (
@@ -229,7 +234,7 @@ function ConversationItem({
           ? "bg-accent text-accent-foreground border border-[#a5f3fc] dark:border-[#155e75]"
           : "text-foreground/70 hover:bg-foreground/5 hover:text-foreground border border-transparent",
       )}
-      onClick={onSelect}
+      onClick={() => onSelect(conversation.id)}
     >
       <MessageSquare
         className={cn("h-4 w-4 shrink-0", isActive ? "text-primary" : "text-foreground/40")}
@@ -359,7 +364,7 @@ function ConversationItem({
       </div>
     </div>
   );
-}
+});
 
 type ConversationView = "active" | "archived";
 
@@ -479,10 +484,17 @@ function ConversationList({
   // Date-grouped history (Terra spec): TODAY / YESTERDAY / THIS WEEK / OLDER.
   const groups = groupByDate(visible);
 
-  const handleSelect = (id: string) => {
-    onSelect(id);
-    onNavigate?.();
-  };
+  const handleSelect = useCallback(
+    (id: string) => {
+      onSelect(id);
+      onNavigate?.();
+    },
+    [onSelect, onNavigate],
+  );
+
+  // Stable per-row-callbacks (React.memo): every ConversationItem receives
+  // the SAME references — the row threads its own conversation.id through.
+  const handleShare = useCallback((id: string) => setShareConversationId(id), []);
 
   const handleNewChat = () => {
     onNewChat();
@@ -665,12 +677,12 @@ function ConversationList({
                         conversation={conversation}
                         isActive={conversation.id === currentConversationId}
                         isScheduled={scheduledChatIds.has(conversation.id)}
-                        onSelect={() => handleSelect(conversation.id)}
-                        onDelete={() => onDelete(conversation.id)}
-                        onArchive={() => onArchive(conversation.id)}
-                        onUnarchive={() => onUnarchive(conversation.id)}
-                        onRename={(title) => onRename(conversation.id, title)}
-                        onShare={() => setShareConversationId(conversation.id)}
+                        onSelect={handleSelect}
+                        onDelete={onDelete}
+                        onArchive={onArchive}
+                        onUnarchive={onUnarchive}
+                        onRename={onRename}
+                        onShare={handleShare}
                       />
                     ))}
                   </div>
@@ -705,8 +717,14 @@ export function ConversationSidebar({ className, mode = "agent" }: ConversationS
   const router = useRouter();
   // Collapse state lives in the chat-sidebar store (not local state) so the
   // workspace layout (ChatPage) can auto-collapse the rail to its icon form
-  // when a right-hand panel needs the horizontal space.
-  const { isOpen, close, expand, collapse } = useChatSidebarStore();
+  // when a right-hand panel needs the horizontal space. SELECTOR-based
+  // subscriptions only — the old no-selector call re-rendered the whole
+  // sidebar (every conversation row) on any chat-sidebar-store field change;
+  // actions are stable references and never re-render.
+  const isOpen = useChatSidebarStore((s) => s.isOpen);
+  const close = useChatSidebarStore((s) => s.close);
+  const expand = useChatSidebarStore((s) => s.expand);
+  const collapse = useChatSidebarStore((s) => s.collapse);
   const isCollapsed = useChatSidebarStore((s) => s.collapsed);
   const [convSidebarWidth, setConvSidebarWidth] = useResizableSidebar(
     "conversation-sidebar-width",
@@ -991,7 +1009,11 @@ export function ConversationSidebar({ className, mode = "agent" }: ConversationS
         )}
       </aside>
 
-      <Sheet open={isOpen} onOpenChange={close}>
+      {/* Mobile drawer — keepMountedOnceOpen: once the chat list has been
+          opened on mobile it stays mounted (hidden) after every close, so
+          re-opens are instant instead of remounting the whole conversation
+          list + framer-motion rows on every tap. */}
+      <Sheet open={isOpen} onOpenChange={close} keepMountedOnceOpen>
         <SheetContent side="left" className="w-80 p-0 flex flex-col bg-secondary">
           <SheetHeader className="h-12 shrink-0 px-4">
             <SheetTitle className="font-display tracking-tight">{t("conversations")}</SheetTitle>

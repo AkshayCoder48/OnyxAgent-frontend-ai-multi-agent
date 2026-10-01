@@ -78,7 +78,9 @@ export function ChatControls({
   onProviderSelect,
 }: ChatControlsProps) {
   const [tab, setTab] = useState<Tab>("model");
-  const { currentConversationId } = useConversationStore();
+  // Selector subscription — only re-renders when the active id itself
+  // changes (not on any other conversation-store field).
+  const currentConversationId = useConversationStore((s) => s.currentConversationId);
 
   // ── SINGLE SOURCE OF TRUTH (model-desync PRD §10) ──
   // The selection state lives in the chat store — the SAME state the send /

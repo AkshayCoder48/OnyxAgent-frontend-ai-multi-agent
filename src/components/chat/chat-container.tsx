@@ -217,13 +217,21 @@ export function ChatContainer(
     codeMode,
   }: { onOpenSettings?: () => void; codeMode?: boolean } = {},
 ) {
-  const {
-    currentConversationId,
-    currentMessages,
-    hydratedConversationId,
-    isLoading: isConversationLoading,
-  } = useConversationStore();
-  const { addMessage: addChatMessage, restorePersisted } = useChatStore();
+  // SELECTOR-BASED SUBSCRIPTIONS (render isolation — the previous
+  // no-selector destructure re-rendered this whole 900-line container on
+  // ANY chat/conversation store field change). currentMessages is
+  // legitimately subscribed (the DB-paint effect) — it only changes
+  // identity when a conversation load lands, not per streaming tick.
+  const currentConversationId = useConversationStore(
+    (s) => s.currentConversationId,
+  );
+  const currentMessages = useConversationStore((s) => s.currentMessages);
+  const hydratedConversationId = useConversationStore(
+    (s) => s.hydratedConversationId,
+  );
+  const isConversationLoading = useConversationStore((s) => s.isLoading);
+  const addChatMessage = useChatStore((s) => s.addMessage);
+  const restorePersisted = useChatStore((s) => s.restorePersisted);
   const { fetchConversations, selectConversation } = useConversations();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 

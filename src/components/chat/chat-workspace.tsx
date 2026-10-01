@@ -111,7 +111,10 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // default. The DockedPanel container renders each as a docked column on
   // md+ and a full-height drawer below, so this single state drives both.
   const [sidePanel, setSidePanel] = useState<SidePanel>(null);
-  const { open: openChatSidebar } = useChatSidebarStore();
+  // Selector-only: `open` is a stable store ACTION — this subscription never
+  // re-renders the workspace (the old no-selector call subscribed it to the
+  // entire chat-sidebar store).
+  const openChatSidebar = useChatSidebarStore((s) => s.open);
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
   const { conversations, isLoading: conversationsLoading, selectConversation } =
     useConversations();
@@ -610,8 +613,12 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
 
       {/* OnyxCode panels — Database + live web Preview, docked beside the
           chat on md+ (full-height drawers below). Same open/close animation
-          and resizing as every other panel; content stays mounted across
-          toggles so the preview iframe and the DB list keep their state. */}
+          and resizing as every other panel. keepAlive: both panels carry
+          state worth preserving across toggles (the DB panel's tab/scroll/
+          editor state, the preview's IFRAME — remounting would reload the
+          app under test); the lighter live panels (files/timeline/logs/
+          subagents/platforms) intentionally unmount when closed so their
+          live subscriptions do zero work while hidden. */}
       {isCode && (
         <DockedPanel
           id="database-panel"
@@ -624,6 +631,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
           maxWidth={720}
           sheetCloseButton
           sheetClassName="w-[92vw] sm:max-w-md"
+          keepAlive
         >
           <DatabasePanel />
         </DockedPanel>
@@ -641,6 +649,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
           maxWidth={960}
           sheetCloseButton
           sheetClassName="w-[95vw] sm:max-w-2xl"
+          keepAlive
         >
           <PreviewPanel conversationId={currentConversationId} active={previewOpen} />
         </DockedPanel>

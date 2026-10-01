@@ -31,11 +31,17 @@ import {
  *   - Send images via paperclip
  */
 export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
-  const {
-    subagents, sessions, activeSessionId,
-    setActiveSession, deleteSession,
-    loadFromStorage,
-  } = useSubagentStore();
+  // SELECTOR-BASED SUBSCRIPTIONS (render isolation): this sidebar stays
+  // mounted while other panels are open and its store ticks during sub-agent
+  // runs — the old no-selector call re-rendered it on EVERY store field
+  // (sidebarOpen flips, unrelated registry updates). Only the exact fields
+  // read here are subscribed; actions are stable references.
+  const subagents = useSubagentStore((s) => s.subagents);
+  const sessions = useSubagentStore((s) => s.sessions);
+  const activeSessionId = useSubagentStore((s) => s.activeSessionId);
+  const setActiveSession = useSubagentStore((s) => s.setActiveSession);
+  const deleteSession = useSubagentStore((s) => s.deleteSession);
+  const loadFromStorage = useSubagentStore((s) => s.loadFromStorage);
 
   // Sort sessions: pinned first, then by updated_at descending.
   const sortedSessions = [...sessions].sort((a, b) => {

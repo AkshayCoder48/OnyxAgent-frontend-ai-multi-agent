@@ -28,6 +28,15 @@ interface SheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
+  /** ZERO-LAG SIDEBARS: once the sheet has been opened, keep the whole
+   *  subtree mounted when closed (hidden via display:none after the exit
+   *  animation) instead of unmounting it. Re-opens are then instant — no
+   *  remount-per-tap of heavy content (the conversation list, docked
+   *  panels). React state, scroll positions and iframes survive toggles;
+   *  display:none removes the subtree from layout, paint and the a11y tree,
+   *  so the hidden copy costs nothing visually. Use for state-heavy or
+   *  heavy-to-remount content whose live work is quiet while hidden. */
+  keepMountedOnceOpen?: boolean;
 }
 
 interface SheetContentProps {
@@ -39,11 +48,27 @@ interface SheetContentProps {
   [key: string]: unknown;
 }
 
-export function Sheet({ open, onOpenChange, children }: SheetProps) {
+export function Sheet({
+  open,
+  onOpenChange,
+  children,
+  keepMountedOnceOpen = false,
+}: SheetProps) {
   // `rendered` keeps the tree mounted through the exit animation; `closing`
-  // flips the entrance classes to their exit counterparts.
+  // flips the entrance classes to their exit counterparts. With
+  // keepMountedOnceOpen, `rendered` additionally NEVER flips back to false
+  // once the sheet has opened — the settled-closed state hides the wrapper
+  // with the `hidden` attribute instead (see `settledClosed`).
   const [rendered, setRendered] = React.useState(open);
   const [closing, setClosing] = React.useState(false);
+  // Latch: once the sheet has opened at least once, a keepMountedOnceOpen
+  // sheet never unmounts again (state, not a ref — ref writes during render
+  // are forbidden by react-hooks/refs and this must be readable in the
+  // close-timeout effect's closure without a stale-capture risk).
+  const [everOpened, setEverOpened] = React.useState(false);
+  React.useEffect(() => {
+    if (open) setEverOpened(true);
+  }, [open]);
 
   React.useEffect(() => {
     if (open) {
@@ -53,29 +78,40 @@ export function Sheet({ open, onOpenChange, children }: SheetProps) {
     }
     // Nothing was shown — nothing to animate out.
     if (!rendered) return;
-    // Play the reversed animation, then unmount.
+    // Play the reversed animation, then unmount — unless the caller asked
+    // for the mounted-keepalive, in which case the wrapper stays mounted
+    // (and gets hidden by `settledClosed` below) and only the closing flag
+    // resets.
     setClosing(true);
     const t = window.setTimeout(() => {
-      setRendered(false);
       setClosing(false);
+      if (!keepMountedOnceOpen || !everOpened) {
+        setRendered(false);
+      }
     }, SHEET_EXIT_MS);
     return () => window.clearTimeout(t);
-  }, [open, rendered]);
+  }, [open, rendered, keepMountedOnceOpen, everOpened]);
 
-  // Body scroll lock while the sheet occupies the screen (enter + exit).
+  // Body scroll lock while the sheet VISIBLE (enter + exit) — NOT while a
+  // keepMounted sheet is settled-closed (rendered && !open && !closing).
+  const visible = rendered && (open || closing);
   React.useEffect(() => {
-    if (!rendered) return;
+    if (!visible) return;
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = "";
     };
-  }, [rendered]);
+  }, [visible]);
 
   if (!rendered) return null;
 
+  // Settled-closed keepMounted state: exit animation finished, wrapper
+  // hidden from layout/paint/a11y but the React tree stays alive.
+  const settledClosed = keepMountedOnceOpen && !open && !closing;
+
   return (
     <SheetClosingContext.Provider value={closing}>
-      <div className="fixed inset-0 z-50">
+      <div className="fixed inset-0 z-50" hidden={settledClosed || undefined}>
         <div
           className={cn(
             "fixed inset-0 bg-black/50 backdrop-blur-sm",

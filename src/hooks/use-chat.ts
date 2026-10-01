@@ -102,10 +102,15 @@ File paths are relative to the sandbox workspace root (e.g. "projects/my-app/ind
  */
 export function useChat(options: UseChatOptions = {}) {
   const { conversationId, onConversationCreated } = options;
-  const { currentConversationId: currentConversationIdFromStore } =
-    useConversationStore();
-  const { clearMessages } = useChatStore();
-  const { setCurrentTurnId: setCurrentTodoTurnId, reset: resetTodoTurn } = useResearchStore();
+  // SELECTOR-BASED SUBSCRIPTIONS (render isolation): the previous
+  // no-selector destructure re-rendered every useChat consumer on ANY chat/
+  // conversation store field change. Only the exact fields read here are
+  // subscribed; actions are stable store references (never re-render).
+  const currentConversationIdFromStore =
+    useConversationStore((s) => s.currentConversationId);
+  const clearMessages = useChatStore((s) => s.clearMessages);
+  const setCurrentTodoTurnId = useResearchStore((s) => s.setCurrentTurnId);
+  const resetTodoTurn = useResearchStore((s) => s.reset);
 
   // The execution this hook STARTED (new-chat turns run before the
   // conversation exists — the registry can't key them yet).
