@@ -375,6 +375,42 @@ export async function consumeRun(ctx: {
    *  banner slot — agent state preserved, nothing duplicated). */
   let noticeStage = 0;
 
+  // ── VISIBILITY-AWARE OUTAGE ACCOUNTING (Runtime PRD §10/§86/§87) ─────────
+  // A hidden browser tab is NOT evidence of a sandbox disconnection. Browser
+  // timer throttling in a hidden tab can stall the SSE reader + backoff
+  // timers for 20-60s while the E2B job runs perfectly — the old wall-clock
+  // outage then showed the false "connection interrupted" banner the moment
+  // the user returned. Rules implemented here:
+  //   1. Notices are driven by VISIBLE outage time only — on
+  //      visibilitychange→visible the notice clock RESETS (fresh 30s budget)
+  //      and any stage-1 banner clears; the user sees the live state, not a
+  //      stale accusation.
+  //   2. Returning to the tab wakes the backoff sleep immediately (a silent
+  //      re-subscribe of the SAME single loop — never a second consumer, so
+  //      reconnects stay idempotent, PRD §14/§78). No sandbox is created or
+  //      restarted by visibility changes (PRD §86).
+  let wakeSleep: (() => void) | null = null;
+  const onVisible = () => {
+    if (document.visibilityState !== "visible") return;
+    if (failedSince !== null) {
+      // Restart the VISIBLE-outage budget; keep silently reconnecting.
+      failedSince = Date.now();
+      if (noticeStage === 1) clearNotice();
+    }
+    // Short-circuit the current backoff sleep — probe right now.
+    backoffMs = RECONNECT_BASE_MS;
+    try {
+      wakeSleep?.();
+    } catch {
+      // best-effort
+    }
+  };
+  try {
+    document.addEventListener("visibilitychange", onVisible);
+  } catch {
+    // non-browser context — no visibility API
+  }
+
   const clearNotice = () => {
     if (noticeStage === 0) return;
     noticeStage = 0;
@@ -493,7 +529,6 @@ export async function consumeRun(ctx: {
           failureReason,
         );
       }
-      const outageMs = Date.now() - failedSince;
 
       // Liveness probe through the sibling REST channel (bg_status): it
       // reconnects to the sandbox independently of the SSE path, is the
@@ -503,6 +538,14 @@ export async function consumeRun(ctx: {
       try {
         const snap = await pollBackgroundTurn(e2bApiKey, job.sandboxId, job.runId);
         if (snap.status !== "unreachable") {
+          // REST LIVENESS (Runtime PRD §13/§84): the sandbox + run are
+          // verifiably REACHABLE through the sibling channel — the SSE leg
+          // merely hiccuped. That is NOT a "connection to the background
+          // sandbox interrupted" event: restart the visible-outage budget
+          // so no banner fires while probes keep proving liveness, and keep
+          // re-subscribing the SSE leg silently.
+          failedSince = Date.now();
+          if (noticeStage === 1) clearNotice();
           // bg_status returns the WHOLE event log — keep only what this
           // browser has not consumed yet (seq dedupe; seq-less v1-legacy
           // events stay on the SSE channel to avoid replay loops).
@@ -535,18 +578,41 @@ export async function consumeRun(ctx: {
       }
 
       // NON-destructive notices (PRD §23): early banner, then the hard-limit
-      // reassurance. NEVER the old fatal "Lost the connection" error — the
-      // job stays persisted and reconnecting continues indefinitely.
-      if (outageMs >= TRANSPORT_NOTICE_MS) showNotice(2);
-      else if (outageMs >= RECONNECT_NOTICE_MS) showNotice(1);
+      // reassurance — now driven by VISIBLE outage time only (hidden periods
+      // reset the clock on return, and a successful REST liveness probe
+      // restarts it — see above). NEVER the old fatal "Lost the connection"
+      // error — the job stays persisted and reconnecting continues indefinitely.
+      if (failedSince !== null) {
+        const outageMs = Date.now() - failedSince;
+        if (outageMs >= TRANSPORT_NOTICE_MS) showNotice(2);
+        else if (outageMs >= RECONNECT_NOTICE_MS) showNotice(1);
+      }
 
-      await new Promise((r) => setTimeout(r, backoffMs));
+      // Wakeable backoff sleep — visibilitychange→visible short-circuits it
+      // (silent immediate re-probe; never a second consumer loop).
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          wakeSleep = null;
+          resolve();
+        };
+        wakeSleep = finish;
+        setTimeout(finish, backoffMs);
+      });
       backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
     }
   } finally {
     // Last-write-wins safety net for every exit path (stop / terminal /
     // unexpected) — a no-op once the job record was cleared.
     persistCursor(true);
+    try {
+      document.removeEventListener("visibilitychange", onVisible);
+    } catch {
+      // best-effort
+    }
+    wakeSleep = null;
   }
 }
 

@@ -487,7 +487,7 @@ export class AgentEventProcessor {
                   this.openStreamGate();
                 }
                 this.textDeltaTimer = null;
-              }, this.gateDelayFor(1)); // ~120ms start-gate, then 1ms
+              }, this.gateDelayFor(32)); // ~120ms start-gate, then 32ms (~30fps) — Runtime PRD §25: 20–60ms UI batch; 1ms caused ~1000 store writes/sec (the lag root cause)
             }
           }
         }

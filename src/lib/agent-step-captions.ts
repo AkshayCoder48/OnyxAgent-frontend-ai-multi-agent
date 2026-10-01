@@ -67,6 +67,15 @@ const EXACT_CAPTIONS: Record<string, string> = {
   // Cloud workspace sync (OnyxBase KV)
   push_workspace: "Syncing the workspace to the cloud",
   retrieve_workspace: "Restoring the workspace from the cloud",
+  // OnyxCode tools (Code Mode) — live captions for app-building tools.
+  create_app: "Creating your app",
+  start_preview: "Starting the preview",
+  manage_preview: "Managing the preview",
+  manage_database: "Working with the database",
+  start_web_session: "Opening a web session",
+  manage_web_session: "Using the web session",
+  preview_image: "Showing an image",
+  inspect_image: "Inspecting an image",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import React, { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type { ToolCall } from "@/types";
 import {
   ArrowRight,
@@ -65,6 +65,74 @@ interface ToolCallCardProps {
   turnId?: string | null;
 }
 
+// ── STREAMING ARG HINTS (Runtime PRD §19–§28) ──────────────────────────────
+/** Argument keys whose value is the tool's "primary target" — the path a
+ *  file tool writes, the URL a fetch reads, the KV key, the app name… Ordered
+ *  by priority; the first one present wins the chip. */
+const PRIMARY_ARG_KEYS = [
+  "path",
+  "file_path",
+  "url",
+  "query",
+  "key",
+  "app_name",
+  "name",
+  "pattern",
+  "command",
+  "action",
+] as const;
+
+/** Extract the primary-arg hint from SETTLED args (post tool_call event). */
+function settledArgHint(args: ToolCall["args"]): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  for (const k of PRIMARY_ARG_KEYS) {
+    const v = a[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return null;
+}
+
+/** Extract a COMPLETE string value for a primary key from a PARTIAL JSON
+ *  arguments string while the model is still generating (Runtime PRD §21–§24:
+ *  the filename must appear as soon as `"path": "src/App.tsx"` exists, and
+ *  WITHOUT a full JSON.parse per token). A lightweight regex scan bounded to
+ *  the first ~4 KB — cheap enough to run once per 16 ms args batch. */
+const STREAM_HINT_RE =
+  /"(?:path|file_path|url|query|key|app_name|name|pattern|command)"\s*:\s*"((?:[^"\\]|\\.){0,512})"/;
+function streamingArgHint(partial: string): string | null {
+  if (!partial) return null;
+  const m = STREAM_HINT_RE.exec(partial.slice(0, 4096));
+  if (!m || !m[1]) return null;
+  try {
+    // Unescape the minimal JSON string escapes (\n, \", \\, \uXXXX).
+    return JSON.parse('"' + m[1] + '"') as string;
+  } catch {
+    return m[1];
+  }
+}
+
+/** The live phase + primary-arg hint for a running/settled tool call.
+ *  While arguments are still streaming the tool part carries
+ *  `{ _streaming: "<partial json>" }` (the event-processor's 16 ms arg
+ *  batch) — the live chip reads the partial string; once the final
+ *  `tool_call` lands, `args` is the parsed object and the phase becomes
+ *  "executing". PRD §120: never invent filenames — the hint comes only from
+ *  actually-streamed argument bytes. */
+function liveArgsPhase(toolCall: ToolCall): {
+  hint: string | null;
+  phase: "generating" | "executing";
+} {
+  const streaming = (toolCall.args as { _streaming?: string } | undefined)?._streaming;
+  if (toolCall.status === "pending" || toolCall.status === "running") {
+    if (typeof streaming === "string") {
+      return { hint: streamingArgHint(streaming), phase: "generating" };
+    }
+    return { hint: settledArgHint(toolCall.args), phase: "executing" };
+  }
+  return { hint: settledArgHint(toolCall.args), phase: "executing" };
+}
+
 /**
  * ToolCallCard — ONE card per tool call, in exactly ONE style per display
  * mode (the "no duplicates" rule):
@@ -80,13 +148,16 @@ interface ToolCallCardProps {
  *               view) or a specialized renderer when one exists (CodeDiff,
  *               web-search results, charts…).
  */
-export function ToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
+export const ToolCallCard = React.memo(function ToolCallCard({
+  toolCall,
+  turnId,
+}: ToolCallCardProps) {
   const displayMode = useToolDisplayStore((s) => s.mode);
   if (displayMode === "simple") {
     return <SimpleToolCallCard toolCall={toolCall} turnId={turnId} />;
   }
   return <TechnicalToolCallCard toolCall={toolCall} turnId={turnId} />;
-}
+});
 
 // ---------------------------------------------------------------------------
 // SIMPLE MODE — one non-expandable friendly line per tool call.
@@ -102,6 +173,13 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const step = useMemo(() => friendlyStep(toolCall), [toolCall]);
   const ToolIcon = step.icon;
   const liveCaption = toolCaption(toolCall.name);
+  // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28):
+  // memoized on the toolCall identity — recomputes only on this tool's own
+  // 16 ms arg batches, never on sibling text tokens.
+  const { hint: liveHint, phase: livePhase } = useMemo(
+    () => liveArgsPhase(toolCall),
+    [toolCall],
+  );
 
   // ── Inline payloads ──────────────────────────────────────────────────
   // A few tools produce CONTENT (not chrome) that belongs in the main
@@ -234,6 +312,16 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
               {liveCaption}
             </ShimmerLabel>
+            {/* Live streamed-arg hint (Runtime PRD §21–§23): the real
+                path/URL/key from the PARTIAL arguments — visible the moment
+                it exists in the arg stream, never a fabricated filename. */}
+            {liveHint ? (
+              <span className="font-mono text-xs text-foreground/60 max-w-[45%] truncate">{liveHint}</span>
+            ) : (
+              <span className="text-xs text-muted-foreground/80">
+                {livePhase === "generating" ? "preparing arguments…" : ""}
+              </span>
+            )}
             <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
             <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
             <span className="streaming-dots" aria-hidden="true">
@@ -412,6 +500,13 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }, [isShowTodo, isManageTodo, toolCall.args, toolCall.status, toolCall.result]);
   const inputHint =
     typeof urlArg === "string" ? urlArg : typeof queryArg === "string" ? queryArg : todoHint;
+  // Settled primary-arg chip (Runtime PRD §23): file tools surface the
+  // created/read/edited PATH next to the label once done (not only while
+  // streaming) — "✓ src/App.tsx" instead of a bare "Created a file".
+  const settledHint = toolCall.status !== "pending" && toolCall.status !== "running"
+    ? settledArgHint(toolCall.args)
+    : null;
+  const displayHint = inputHint ?? settledHint;
 
   const resultText =
     toolCall.result !== undefined
@@ -718,6 +813,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // the auto-expand render-time adjustment can read it.)
   const isError = toolCall.status === "error";
   const liveCaption = toolCaption(toolCall.name);
+  // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28).
+  const { hint: liveHint, phase: livePhase } = useMemo(
+    () => liveArgsPhase(toolCall),
+    [toolCall],
+  );
 
   return (
     /* assistant-ui "Tool call" element anatomy — SIMPLE TOOL NAME line, no
@@ -774,9 +874,17 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             </span>
           </span>
         )}
-        {/* The mono argument chip — the primary arg rides next to the label. */}
-        {inputHint && !isRunning ? (
-          <span className={cn(chipClass, "mb-fade-in-soft shrink truncate")}>{inputHint}</span>
+        {/* The mono argument chip — the primary arg rides next to the label.
+            While RUNNING the chip shows the LIVE streamed hint (Runtime PRD
+            §22: the filename appears the moment it exists in the argument
+            stream); once settled it shows the final primary arg. */}
+        {isRunning && liveHint ? (
+          <span className={cn(chipClass, "shrink truncate font-mono")}>
+            <span className="text-muted-foreground/70">{livePhase === "generating" ? "· writing args ·" : "·"}</span>
+            <span className="ml-1 truncate">{liveHint}</span>
+          </span>
+        ) : displayHint && !isRunning ? (
+          <span className={cn(chipClass, "mb-fade-in-soft shrink truncate")}>{displayHint}</span>
         ) : null}
 
         {/* Right actions — duration badge + settle state + raw toggle. The

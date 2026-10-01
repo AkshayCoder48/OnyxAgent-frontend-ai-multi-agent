@@ -71,7 +71,8 @@ export function WebSessionResult({ data }: { data: WebSessionPayload }) {
           ) : null}
           {data.dataUrl ? (
             <figure className="overflow-hidden rounded-xl border border-border">
-              {/* eslint-disable-next-line @next/next/no-img-element — data URL from the sandbox */}
+              {/* data URL from the sandbox — next/image brings nothing here */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={data.dataUrl}
                 alt={`Screenshot of ${data.url ?? "the web session"}`}
