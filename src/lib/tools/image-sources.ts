@@ -2,8 +2,8 @@
 
 /**
  * Shared image-source resolver (Runtime PRD §49–§54, §57–§59, §114–§116) —
- * used by BOTH `inspect_image` (real vision analysis) and `preview_image`
- * (display-only). Everything here runs browser-side: this app is
+ * used by `preview_image` (display-only) and the workspace tooling.
+ * Everything here runs browser-side: this app is
  * backendless, the sandbox is reached through the /api/sandbox proxy via
  * the E2B client, uploads live in OPFS, and the host filesystem is never
  * touched (sandbox reads are inherently bounded to the sandbox FS, §115).
@@ -112,7 +112,7 @@ export function normalizeSandboxPath(raw: string): string | null {
   return parts.join("/");
 }
 
-/** Accepted base64 data URL prefix (aligned with the /api/vision contract). */
+/** Accepted base64 data URL prefix. */
 export const IMAGE_DATA_URL_RE = /^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i;
 
 /** Encode bytes → base64 without stack overflow on large payloads. */
@@ -461,7 +461,8 @@ export async function downscaleDataUrl(
   return out;
 }
 
-/** Hard cap from the /api/vision contract (~7 MB data URL). */
+/** Hard cap on a resolved data URL (~7 MB) — keeps preview cards + tool
+ * results inside the WSEvent/stream payload budget. */
 const MAX_VISION_DATA_URL_CHARS = 7 * 1024 * 1024;
 
 /**

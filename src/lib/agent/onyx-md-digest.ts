@@ -79,7 +79,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Media, charts & time
 - create_chart — Line/bar/pie/area/scatter charts from structured data — renders inline.
-- preview_image — Show an image inline in the chat (URL or base64).
+- preview_image — Show an image inline in the chat (http(s) URL, base64, or a workspace path such as uploads/photo.jpg).
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
 ### Cloud workspace persistence (OnyxBase KV)

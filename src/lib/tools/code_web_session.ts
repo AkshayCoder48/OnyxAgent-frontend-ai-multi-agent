@@ -46,6 +46,97 @@ let browser = null;
 let page = null;
 let shotN = 0;
 
+// ── Diagnostics capture (OnyxCode PRD §26–§28) ──────────────────────────
+// Bounded ring buffers attached to every page: console errors/warnings,
+// uncaught page errors, failed network responses. Deduplicated by message
+// text so a repeating error never floods the log.
+let consoleLog = [];
+let networkLog = [];
+const seenConsole = new Set();
+const CONSOLE_MAX = 80;
+const NETWORK_MAX = 60;
+
+function recordConsole(type, text) {
+  const t = String(text ?? "").slice(0, 500);
+  if (!t) return;
+  const key = type + "|" + t;
+  if (seenConsole.has(key)) return;
+  seenConsole.add(key);
+  consoleLog.push({ type: type, text: t, ts: Date.now() });
+  if (consoleLog.length > CONSOLE_MAX) consoleLog.shift();
+}
+
+function recordNetwork(entry) {
+  networkLog.push(entry);
+  if (networkLog.length > NETWORK_MAX) networkLog.shift();
+}
+
+function attachDiagnostics(p) {
+  p.on("console", (msg) => {
+    const type = msg.type();
+    if (type !== "error" && type !== "warning") return;
+    recordConsole(type === "warning" ? "warn" : "error", msg.text());
+  });
+  p.on("pageerror", (err) => {
+    recordConsole("pageerror", err && err.message ? err.message : String(err));
+  });
+  p.on("response", (resp) => {
+    const s = resp.status();
+    if (s >= 400) {
+      recordNetwork({ status: s, url: String(resp.url()).slice(0, 300), ts: Date.now() });
+    }
+  });
+  p.on("requestfailed", (req) => {
+    const failure = req.failure ? req.failure() : null;
+    recordNetwork({ status: 0, url: String(req.url()).slice(0, 300), error: failure ? String(failure.errorText || "") : "failed", ts: Date.now() });
+  });
+}
+
+// In-page serializer for browser_eval (OnyxCode PRD §8): DOM nodes,
+// NodeLists, Promises, circular references and non-serializable values all
+// produce USEFUL plain data instead of crashing the evaluation.
+// (Array-join, not a template literal — this file's own DRIVER_SOURCE is a
+// String.raw template, so a nested backtick would terminate it.)
+const SERIALIZER_SRC = [
+  "function __onyxSer(v, depth, seen) {",
+  "  seen = seen || new WeakSet();",
+  "  try {",
+  "    if (v === null) return null;",
+  "    var t = typeof v;",
+  "    if (t === 'string') return v.length > 4000 ? v.slice(0, 4000) + '...' : v;",
+  "    if (t === 'number' || t === 'boolean' || t === 'undefined') return v;",
+  "    if (t === 'bigint') return String(v) + 'n';",
+  "    if (t === 'symbol') return v.toString();",
+  "    if (t === 'function') return '[function ' + (v.name || 'anonymous') + ']';",
+  "    if (v instanceof Error) return v.name + ': ' + v.message;",
+  "    if (v instanceof Date) return v.toISOString();",
+  "    if (v instanceof RegExp) return String(v);",
+  "    if (typeof Node !== 'undefined' && v instanceof Node) {",
+  "      if (v.nodeType === 1) {",
+  "        var cls = typeof v.className === 'string' ? v.className.split(/\\s+/).filter(Boolean).slice(0, 8) : [];",
+  "        var r = typeof v.getBoundingClientRect === 'function' ? v.getBoundingClientRect() : null;",
+  "        return { element: true, tag: v.tagName.toLowerCase(), id: v.id || undefined, classes: cls, text: (v.innerText || '').trim().slice(0, 200), box: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : undefined };",
+  "      }",
+  "      if (v.nodeType === 9) return '[document ' + (v.title || '') + ']';",
+  "      return '[' + (v.nodeName || 'node') + ']';",
+  "    }",
+  "    if (typeof Window !== 'undefined' && v instanceof Window) return '[window - ' + location.href + ']';",
+  "    if (seen.has(v)) return '[circular]';",
+  "    if (depth >= 4) return Array.isArray(v) ? '[array(' + v.length + ')]' : '[object]';",
+  "    seen.add(v);",
+  "    if (Array.isArray(v)) return v.slice(0, 100).map(function (x) { return __onyxSer(x, depth + 1, seen); });",
+  "    if (typeof NodeList !== 'undefined' && (v instanceof NodeList || v instanceof HTMLCollection)) { return Array.prototype.slice.call(v, 0, 100).map(function (x) { return __onyxSer(x, depth + 1, seen); }); }",
+  "    if (v && typeof v === 'object' && typeof v.length === 'number' && typeof v.item === 'function') { return Array.prototype.slice.call(v, 0, 100).map(function (x) { return __onyxSer(x, depth + 1, seen); }); }",
+  "    var out = {};",
+  "    var keys = Object.keys(v).slice(0, 30);",
+  "    for (var i = 0; i < keys.length; i++) out[keys[i]] = __onyxSer(v[keys[i]], depth + 1, seen);",
+  "    return out;",
+  "  } catch (e) {",
+  "    return '[unserializable: ' + String(e && e.message ? e.message : e) + ']';",
+  "  }",
+  "}",
+].join("\n");
+
 async function getBrowser() {
   if (browser) return browser;
   const { chromium } = await import("playwright");
@@ -57,6 +148,7 @@ async function getPage() {
   if (page) return page;
   const b = await getBrowser();
   page = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  attachDiagnostics(page);
   return page;
 }
 
@@ -101,6 +193,74 @@ async function handle(cmd) {
     }
     case "status": {
       return { ok: true, action: "status", alive: !!browser && browser.isConnected(), url: page ? page.url() : null };
+    }
+    case "eval": {
+      // browser_eval (OnyxCode PRD §5–§9): REAL JavaScript execution in the
+      // live page. eval() supports expressions AND statements; the result
+      // (incl. awaited Promises) is serialized in-page by __onyxSer so DOM
+      // nodes, NodeLists and circular values return useful data.
+      const code = String(cmd.code ?? "");
+      if (!code.trim()) return { ok: false, error: "'code' is required for eval." };
+      const wrapper =
+        "(async () => {\n" +
+        SERIALIZER_SRC +
+        "\n  try {\n" +
+        "    let __r = eval(" + JSON.stringify(code) + ");\n" +
+        "    if (__r && typeof __r.then === 'function') __r = await __r;\n" +
+        "    return { ok: true, value: __onyxSer(__r, 0) };\n" +
+        "  } catch (e) {\n" +
+        "    return { ok: false, error: String(e && e.message ? e.message : e) };\n" +
+        "  }\n" +
+        "})()";
+      const result = await p.evaluate(wrapper);
+      return Object.assign({ action: "eval", url: p.url() }, result || { ok: false, error: "evaluation returned nothing" });
+    }
+    case "els": {
+      // Element inventory (OnyxCode PRD §11–§14): the interactive elements
+      // of the current page with stable selectors + a11y info — the data
+      // behind element tagging.
+      const limit = Math.max(1, Math.min(200, Number(cmd.limit) || 80));
+      const els = await p.evaluate("(() => {\n" +
+        "  function sel(el) {\n" +
+        "    if (el.id) return '#' + el.id;\n" +
+        "    var aria = el.getAttribute('aria-label');\n" +
+        "    var tag = el.tagName.toLowerCase();\n" +
+        "    if (aria) return tag + '[aria-label=\\\"' + aria.slice(0, 40) + '\\"]';\n" +
+        "    var cls = typeof el.className === 'string' ? el.className.split(/\\s+/).filter(Boolean) : [];\n" +
+        "    if (cls.length) return tag + '.' + cls.slice(0, 2).join('.');\n" +
+        "    var name = el.getAttribute('name');\n" +
+        "    if (name) return tag + '[name=\\\"' + name + '\\"]';\n" +
+        "    var txt = (el.innerText || '').trim().slice(0, 20);\n" +
+        "    if (txt) return tag + ':has-text("' + txt.replace(/\"/g, '') + '")';\n" +
+        "    return tag + ':nth-of-type(' + (Array.prototype.indexOf.call(el.parentNode.children, el) + 1) + ')';\n" +
+        "  }\n" +
+        "  var out = [];\n" +
+        "  var nodes = document.querySelectorAll('button, a[href], input, select, textarea, [role=button], [role=link], [role=tab], [onclick], [tabindex]');\n" +
+        "  for (var el of nodes) {\n" +
+        "    var r = el.getBoundingClientRect();\n" +
+        "    if (r.width === 0 && r.height === 0) continue;\n" +
+        "    var text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 80);\n" +
+        "    out.push({ tag: el.tagName.toLowerCase(), id: el.id || null, classes: (typeof el.className === 'string' ? el.className : '').split(/\\s+/).filter(Boolean).slice(0, 6), role: el.getAttribute('role') || null, type: el.getAttribute('type') || null, name: el.getAttribute('name') || null, text: text || null, selector: sel(el), box: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } });\n" +
+        "    if (out.length >= " + limit + ") break;\n" +
+        "  }\n" +
+        "  return out;\n" +
+        "})()");
+      return { ok: true, action: "els", url: p.url(), count: els.length, elements: els };
+    }
+    case "console": {
+      const entries = consoleLog.slice(-Math.max(1, Math.min(80, Number(cmd.limit) || 40)));
+      if (cmd.clear) {
+        consoleLog = [];
+        seenConsole.clear();
+      }
+      return { ok: true, action: "console", count: entries.length, entries: entries };
+    }
+    case "network": {
+      const entries = networkLog.slice(-Math.max(1, Math.min(60, Number(cmd.limit) || 30)));
+      if (cmd.clear) {
+        networkLog = [];
+      }
+      return { ok: true, action: "network", count: entries.length, entries: entries };
     }
     case "close": {
       if (browser) { await browser.close().catch(() => {}); }
@@ -168,6 +328,11 @@ async function sendCommand(
   }
   return { ok: false, error: "Web session command timed out." };
 }
+
+/** Exported for the browser_eval / diagnostics tools (code_diagnostics.ts)
+ *  — they drive the SAME single driver + file protocol so the AI's page
+ *  state (navigation, console capture) is shared across all Code tools. */
+export const webSession = { WS_DIR, ensureDriver, sendCommand };
 
 /** Install Playwright + boot the driver (idempotent — once per sandbox). */
 async function ensureDriver(
@@ -275,13 +440,28 @@ registerTool(
 
 registerTool(
   "manage_web_session",
-  "Drive an active OnyxCode web session (headless Chromium in the sandbox, started by start_web_session). Actions: `navigate` (url), `click` (selector), `type` (selector, text), `press` (key), `screenshot` (returns the image), `extract` (visible text, optional selector), `title`, `content` (HTML), `status`, `close`. Selectors are CSS. Use http://localhost:PORT to interact with your own previews.",
+  "Drive an active OnyxCode web session (headless Chromium in the sandbox, started by start_web_session). Actions: `navigate` (url), `click` (selector), `type` (selector, text), `press` (key), `screenshot` (returns the image), `extract` (visible text, optional selector), `title`, `content` (HTML), `eval` (run JavaScript in the page — see browser_eval), `els` (interactive-element inventory with selectors + a11y info), `console` (captured console errors/warnings + page errors, deduplicated), `network` (failed 4xx/5xx + failed requests), `status`, `close`. Selectors are CSS. Use http://localhost:PORT to interact with your own previews.",
   {
     type: "object",
     properties: {
       action: {
         type: "string",
-        enum: ["navigate", "click", "type", "press", "screenshot", "extract", "title", "content", "status", "close"],
+        enum: [
+          "navigate",
+          "click",
+          "type",
+          "press",
+          "screenshot",
+          "extract",
+          "title",
+          "content",
+          "eval",
+          "els",
+          "console",
+          "network",
+          "status",
+          "close",
+        ],
         description: "The interaction to perform.",
       },
       url: { type: "string", description: "For navigate." },
@@ -289,6 +469,9 @@ registerTool(
       text: { type: "string", description: "Text to type (type action)." },
       key: { type: "string", description: "Key to press (press action), e.g. Enter." },
       fullPage: { type: "boolean", description: "Screenshot the full page (optional)." },
+      code: { type: "string", description: "JavaScript to evaluate (eval action)." },
+      limit: { type: "number", description: "Max entries (console/network) or elements (els)." },
+      clear: { type: "boolean", description: "Clear the captured console/network log after reading." },
     },
     required: ["action"],
     additionalProperties: false,
@@ -308,6 +491,9 @@ registerTool(
     if (args.text !== undefined) cmd.text = String(args.text);
     if (args.key !== undefined) cmd.key = String(args.key);
     if (args.fullPage !== undefined) cmd.fullPage = !!args.fullPage;
+    if (args.code !== undefined) cmd.code = String(args.code);
+    if (args.limit !== undefined) cmd.limit = Number(args.limit) || 0;
+    if (args.clear !== undefined) cmd.clear = !!args.clear;
 
     const result = await sendCommand(client, cmd, { timeoutMs: 60_000 });
     return { kind: "web_session", ok: result.ok !== false, action, ...result };
