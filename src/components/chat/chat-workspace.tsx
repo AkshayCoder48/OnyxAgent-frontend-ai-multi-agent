@@ -11,6 +11,7 @@ import { useChatSidebarStore, useChatStore, useConversationStore } from "@/store
 import { useCodePanelStore } from "@/stores/code-panel-store";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
+import { useCodePreviewLifecycle } from "@/hooks/use-code-preview";
 import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
@@ -177,6 +178,14 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
       }
     }
   }, [isCode, conversations, conversationsLoading, selectConversation]);
+
+  // ── ONE CODE CHAT = ONE APP PREVIEW (Runtime PRD §2-8/§73-76) ───────────
+  // Leaving the Code workspace (this workspace unmounts — exactly the /code
+  // layout unmount signal) or switching to another code chat stops the
+  // outgoing chat's preview dev server; entering a chat whose app project
+  // has a persisted (stopped) session silently restarts it. Panel toggles
+  // and tab hides never unmount this hook, so they never stop anything.
+  useCodePreviewLifecycle(isCode, currentConversationId);
 
   // HYDRATION-SAFE TITLE (fixes the "Hydration failed" mismatch on ?id=
   // reloads): the conversation store rehydrates SYNCHRONOUSLY from
@@ -612,7 +621,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
           sheetCloseButton
           sheetClassName="w-[95vw] sm:max-w-2xl"
         >
-          <PreviewPanel />
+          <PreviewPanel conversationId={currentConversationId} active={previewOpen} />
         </DockedPanel>
       )}
     </div>

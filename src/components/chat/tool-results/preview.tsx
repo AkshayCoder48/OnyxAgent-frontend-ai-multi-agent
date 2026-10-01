@@ -1,13 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { ExternalLink, MonitorPlay, Square, Trash2 } from "lucide-react";
+import { ExternalLink, MonitorPlay } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ROUTES } from "@/lib/constants";
 import { useCodePanelStore } from "@/stores/code-panel-store";
-import { usePreviewSessionStore } from "@/stores/preview-session-store";
-import { stopPreviewSession } from "@/lib/code/preview-ops";
 import { cn } from "@/lib/utils";
 
 /** OnyxCode preview result payload (see src/lib/tools/code_preview.ts). */
@@ -19,16 +17,17 @@ export interface PreviewPayload {
   name?: string;
   framework?: string;
   frameworkLabel?: string;
-  url?: string;
+  url?: string | null;
   port?: number;
   status?: string;
   message?: string;
   error?: string;
+  /** This conversation's session only (one app per chat — 0 or 1 entries). */
   sessions?: Array<{
     sessionId: string;
     name: string;
     framework: string;
-    url: string;
+    url: string | null;
     status: string;
     createdAt: number;
   }>;
@@ -61,7 +60,8 @@ function statusChip(status: string | undefined): string {
 
 /**
  * Rich card for the OnyxCode preview tools (extension PRD §3.7): public URL,
- * status, "Open preview panel" action, and for `list` the session table.
+ * status, and "Open preview panel" action. `list` renders THIS chat's single
+ * session as the same card — never a multi-session table (one app per chat).
  */
 export function PreviewResult({ data }: { data: PreviewPayload }) {
   const router = useRouter();
@@ -74,30 +74,51 @@ export function PreviewResult({ data }: { data: PreviewPayload }) {
     if (!window.location.pathname.startsWith("/code")) router.push(ROUTES.CODE);
   };
 
-  if (data.action === "list" && data.sessions) {
+  // `list` — this conversation's ONE session (or none yet).
+  if (data.action === "list") {
+    const s = data.sessions?.[0];
+    if (!s) {
+      return (
+        <p className="text-muted-foreground py-1 text-xs">
+          No preview session for this chat yet — start one with start_preview.
+        </p>
+      );
+    }
     return (
-      <div className="space-y-2 py-1">
-        <div className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">
-          {data.count ?? data.sessions.length} preview session{(data.count ?? data.sessions.length) === 1 ? "" : "s"}
+      <div className="space-y-2.5 py-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <MonitorPlay className="text-primary h-4 w-4 shrink-0" aria-hidden />
+          <span className="text-foreground text-sm font-semibold">{s.name}</span>
+          <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", statusChip(s.status))}>
+            {s.status}
+          </span>
         </div>
-        <div className="border-foreground/10 divide-foreground/8 divide-y overflow-hidden rounded-xl border">
-          {data.sessions.map((s) => (
-            <button
-              key={s.sessionId}
-              type="button"
-              onClick={() => openPreviewPanel()}
-              className="hover:bg-foreground/[0.03] flex w-full items-center gap-2 px-3 py-2 text-left"
+        {s.url && (
+          <a
+            href={s.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary hover:bg-primary/5 block truncate rounded-lg px-2 py-1.5 font-mono text-xs underline-offset-2 hover:underline"
+          >
+            {s.url}
+          </a>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" className="animate-press h-8 gap-1.5" onClick={openPreviewPanel}>
+            <MonitorPlay className="h-3.5 w-3.5" aria-hidden />
+            Open preview panel
+          </Button>
+          {s.url && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5"
+              onClick={() => window.open(s.url!, "_blank", "noopener,noreferrer")}
             >
-              <MonitorPlay className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium">{s.name}</span>
-                <span className="text-muted-foreground block truncate font-mono text-[10px]">{s.url}</span>
-              </span>
-              <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", statusChip(s.status))}>
-                {s.status}
-              </span>
-            </button>
-          ))}
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+              New tab
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -141,7 +162,7 @@ export function PreviewResult({ data }: { data: PreviewPayload }) {
             size="sm"
             variant="outline"
             className="h-8 gap-1.5"
-            onClick={() => window.open(data.url, "_blank", "noopener,noreferrer")}
+            onClick={() => window.open(data.url!, "_blank", "noopener,noreferrer")}
           >
             <ExternalLink className="h-3.5 w-3.5" aria-hidden />
             New tab
@@ -152,38 +173,5 @@ export function PreviewResult({ data }: { data: PreviewPayload }) {
         <p className="text-muted-foreground text-[11px] leading-relaxed">{data.message}</p>
       )}
     </div>
-  );
-}
-
-/**
- * Small stop control used by the Preview tab cards (shared styling with the
- * chat card). Kept here so the chat card + panel card share one look.
- */
-export function PreviewStopButton({
-  session,
-  onStopped,
-}: {
-  session: { id: string; name: string; port: number; url: string; status: string };
-  onStopped?: () => void;
-}) {
-  const isStopped = session.status === "stopped";
-  return (
-    <Button
-      size="sm"
-      variant={isStopped ? "outline" : "secondary"}
-      className="h-7 gap-1.5 px-2.5 text-[11px]"
-      onClick={() => {
-        if (isStopped) {
-          usePreviewSessionStore.getState().remove(session.id);
-          onStopped?.();
-          return;
-        }
-        void stopPreviewSession(session).then(() => onStopped?.());
-      }}
-      title={isStopped ? "Remove from the list" : "Stop the dev server"}
-    >
-      {isStopped ? <Trash2 className="h-3 w-3" aria-hidden /> : <Square className="h-3 w-3" aria-hidden />}
-      {isStopped ? "Remove" : "Stop"}
-    </Button>
   );
 }

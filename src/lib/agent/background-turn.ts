@@ -713,7 +713,35 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       // Non-fatal — a bad MCP server doesn't block the turn.
     }
     try {
-      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES);
+      // REQUEST-SCOPED EXPOSURE for the bridged snapshot: the conversation
+      // RECORD decides the mode (Runtime PRD §63 — the route is not enough;
+      // a background job outlives the page). Code-only tools (create_app,
+      // previews, the kv_*/storage_* suite) never bridge into normal Agent
+      // background turns; in Code Mode the database write half is
+      // intent-gated exactly like the foreground runtime.
+      let bgScope: { codeMode: boolean; lastUserText?: string | null; usedToolNames?: Iterable<string> } | undefined;
+      try {
+        const conv = conversationId
+          ? await conversationService.get(conversationId, ctx.userId)
+          : null;
+        const storeMsgs = ctx.store?.getState().messages ?? [];
+        const lastUser = [...storeMsgs].reverse().find((m) => m.role === "user");
+        const used = new Set<string>();
+        for (const m of storeMsgs) {
+          for (const p of m.parts ?? []) {
+            if (p.type === "tool" && p.toolCall?.name) used.add(p.toolCall.name);
+          }
+        }
+        bgScope = {
+          codeMode: conv?.mode === "code",
+          lastUserText:
+            (typeof lastUser?.content === "string" ? lastUser.content : "") || null,
+          usedToolNames: used,
+        };
+      } catch {
+        bgScope = undefined; // unscoped — bridge everything (legacy behavior)
+      }
+      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES, bgScope);
     } catch {
       browserTools = [];
     }

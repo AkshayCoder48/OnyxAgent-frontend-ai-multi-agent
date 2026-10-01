@@ -46,6 +46,7 @@ import type {
   AskUserQuestion,
 } from "@/types";
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
+import { filterToolsForRequest, usedToolNamesFromHistory } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
 import { promptKb } from "@/lib/agent/tool-digest";
@@ -1764,29 +1765,54 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   const toolCtxForList = { ...toolCtx, conversationId };
   const registeredTools = listTools(toolCtxForList);
 
+  // REQUEST-SCOPED TOOL EXPOSURE (OnyxBase PRD §13/§22 + Runtime PRD §71/§72):
+  // Code-only tools (category "code") never ride into normal Agent turns,
+  // and the database WRITE half is intent-gated inside Code Mode. The scope
+  // is recomputed at the top of every round so tools used by earlier rounds
+  // of THIS turn latch the full database suite immediately.
+  // (allToolCalls is declared here — before its first reader below — and
+  // filled by the agent loop; see "IDEMPOTENT TOOL EXECUTION" further down.)
+  const allToolCalls: ToolCall[] = [];
+  const codeModeTurn = isCodeMode();
+  const historyToolNames = usedToolNamesFromHistory(history);
+  const lastUserRow = [...history].reverse().find((m) => m.role === "user");
+  const lastUserText =
+    (typeof lastUserRow?.content === "string" ? lastUserRow.content : "") || null;
+  const buildScopedTools = () => {
+    const used = new Set(historyToolNames);
+    for (const tc of allToolCalls) used.add(tc.name);
+    return filterToolsForRequest(registeredTools, {
+      codeMode: codeModeTurn,
+      lastUserText,
+      usedToolNames: used,
+    });
+  };
+
   // HARD CAP (MCP tool-flood fix): no matter how many tools the registry
   // holds, the request NEVER carries more than MAX_LLM_TOOLS definitions.
   // Built-ins + the MCP/Composio meta-tools are always tiny (~66); this cap
   // is the safety net for pathological cases (a rogue source registering
   // hundreds of tools). Truncation is logged loudly.
   const MAX_LLM_TOOLS = 96;
-  let tools: ChatCompletionTool[] = registeredTools.map((t) => ({
-    type: "function",
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters as Record<string, unknown>,
-    },
-  }));
+  const toWireTools = (defs: typeof registeredTools): ChatCompletionTool[] =>
+    defs.map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters as Record<string, unknown>,
+      },
+    }));
+  let tools: ChatCompletionTool[] = toWireTools(buildScopedTools());
   if (tools.length > MAX_LLM_TOOLS) {
     logWarn(
       "llm",
-      `Tool flood guard: ${tools.length} tools registered — sending only the first ${MAX_LLM_TOOLS}`,
+      `Tool flood guard: ${registeredTools.length} tools registered — sending only the first ${MAX_LLM_TOOLS}`,
       {
         context: {
-          registered: tools.length,
+          registered: registeredTools.length,
           sent: MAX_LLM_TOOLS,
-          dropped: tools.slice(MAX_LLM_TOOLS).map((t) => t.function?.name).slice(0, 20).join(", "),
+          dropped: registeredTools.slice(MAX_LLM_TOOLS).map((t) => t.name).slice(0, 20).join(", "),
         },
       },
     );
@@ -1794,7 +1820,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   }
 
   // Debug: log the tool count so we can verify all built-in tools are registered
-  console.log(`[agent] Tools registered: ${registeredTools.length}`, registeredTools.map(t => t.name));
+  console.log(`[agent] Tools registered: ${registeredTools.length} → sent: ${tools.length}${codeModeTurn ? " (code mode)" : " (agent mode)"}`);
 
   // Build the enhanced system prompt with the tool list + usage knowledge.
   // PRD §13/§14/§38 — RUNTIME-GROUNDED availability: this list is built from
@@ -2154,7 +2180,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   let lastAssistantThinking = "";
   let lastAssistantReasoning = "";
   let lastUsage: AgentTurnResult["usage"];
-  const allToolCalls: ToolCall[] = [];
+  // (allToolCalls is declared earlier — before the request-scoped tool
+  // build that reads it — see "REQUEST-SCOPED TOOL EXPOSURE" above.)
   // IDEMPOTENT TOOL EXECUTION (PRD §5): every toolCallId executes exactly
   // once per turn — SSE reconnects, provider retries, React rerenders and
   // event replays can never trigger a second execution.
@@ -2200,6 +2227,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   while (round < effectiveMaxRounds) {
     round += 1;
     roundStartTimes[round] = Date.now();
+    // Refresh the request-scoped tool set (the database latch may have
+    // flipped via this turn's earlier tool calls).
+    tools = toWireTools(buildScopedTools()).slice(0, MAX_LLM_TOOLS);
 
     if (signal?.aborted) {
       return {

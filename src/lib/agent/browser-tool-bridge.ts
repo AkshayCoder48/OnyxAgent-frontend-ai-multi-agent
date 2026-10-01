@@ -18,6 +18,7 @@
  */
 
 import { getTool, listTools, type ToolContext } from "@/lib/tools/registry";
+import { filterToolsForRequest } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools with the registry.
 import { waitForAskUser } from "@/lib/agent/ask-user-wait";
 import { settingsService } from "@/lib/services";
@@ -130,13 +131,24 @@ async function writeBridgeResult(
 /** Collect the browser-registry tools the background runner should expose as
  *  BRIDGED tools (everything without a native sandbox implementation).
  *  Called at launch (startBackgroundTurn) after hot-loading custom + MCP
- *  tools, mirroring the in-browser runtime's per-turn loading sequence. */
+ *  tools, mirroring the in-browser runtime's per-turn loading sequence.
+ *  `scope` (when provided) applies the same REQUEST-SCOPED EXPOSURE rules as
+ *  the foreground runtime: code-only tools never bridge into normal Agent
+ *  background turns, and the database write half is intent-gated in Code
+ *  Mode (OnyxBase PRD §13/§22/§34). */
 export function collectBridgeableTools(
   nativeNames: ReadonlySet<string>,
+  scope?: {
+    codeMode: boolean;
+    lastUserText?: string | null;
+    usedToolNames?: Iterable<string>;
+  },
 ): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
-  return listTools()
-    .filter((t) => !nativeNames.has(t.name))
-    .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+  let tools = listTools().filter((t) => !nativeNames.has(t.name));
+  if (scope) {
+    tools = filterToolsForRequest(tools, scope);
+  }
+  return tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
 }
 
 /**

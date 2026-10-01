@@ -51,18 +51,29 @@ registerTool(
     // ---- action: list (was list_chats) ----
     if (action === "list") {
       const limit = Math.min((args.limit as number) ?? 20, 100);
+      // CHAT MODE ISOLATION (Runtime PRD §60/§62): the agent in Agent mode
+      // lists ONLY agent chats; a Code-mode agent lists ONLY code chats.
+      // The tool's own conversation decides the mode (persisted with the
+      // chat, §63 — never the route).
+      const ownConv = ctx.conversationId
+        ? await db.conversations.get(ctx.conversationId)
+        : undefined;
+      const listMode = ownConv?.mode === "code" ? "code" : "agent";
       const conversations = await db.conversations
         .where("user_id")
         .equals(ctx.userId)
         .reverse()
         .sortBy("updated_at");
-      const items = conversations.slice(0, limit).map((c) => ({
+      const sameMode = conversations.filter((c) =>
+        listMode === "code" ? c.mode === "code" : c.mode !== "code",
+      );
+      const items = sameMode.slice(0, limit).map((c) => ({
         id: c.id,
         title: c.title ?? "(untitled)",
         updated_at: c.updated_at,
         is_archived: c.is_archived,
       }));
-      return { items, total: conversations.length };
+      return { items, total: sameMode.length };
     }
 
     // ---- action: read (was read_chat) ----
@@ -78,6 +89,17 @@ registerTool(
       }
       if (conv.user_id !== ctx.userId) {
         return { error: "Conversation not found" }; // don't leak existence
+      }
+      // CROSS-MODE READ GUARD (Runtime PRD §60/§62): an Agent-mode agent can
+      // never read a Code chat (and vice versa) — same "not found" answer as
+      // a foreign chat so mode boundaries don't leak either.
+      const ownConv = ctx.conversationId
+        ? await db.conversations.get(ctx.conversationId)
+        : undefined;
+      const readerMode = ownConv?.mode === "code" ? "code" : "agent";
+      const targetMode = conv.mode === "code" ? "code" : "agent";
+      if (readerMode !== targetMode) {
+        return { error: "Conversation not found" };
       }
       const messages = await db.messages
         .where("conversation_id")

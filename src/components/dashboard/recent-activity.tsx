@@ -36,7 +36,10 @@ export function RecentActivity({ limit = 6 }: { limit?: number }) {
       const events: ActivityItem[] = [];
       if (user?.id) {
         const conversations = await conversationService.list(user.id, { limit: 5 });
+        // CHAT MODE ISOLATION (Runtime PRD §60): the dashboard shows normal
+        // Agent activity only — OnyxCode chats never surface here.
         for (const c of conversations.slice(0, 4)) {
+          if (c.mode === "code") continue;
           events.push({
             id: `conv-${c.id}`,
             icon: MessageSquare,

@@ -1,31 +1,47 @@
 "use client";
 
 /**
- * OnyxCode preview operations (OnyxCode PRD §4.3/§6) — the client-side
- * engine behind `start_preview` / `manage_preview` AND the Preview tab's
- * Stop button. Shared so the agent's tools and the UI act on the exact
- * same sandbox processes and session records.
+ * OnyxCode preview operations (OnyxCode PRD §4.3/§6 + Runtime PRD §2-8) — the
+ * client-side engine behind `start_preview` / `manage_preview`, the Preview
+ * panel's Start/Stop buttons, AND the per-chat preview lifecycle
+ * (auto-start on entering a code chat, stop on leaving it — PRD §5-6/§73-76).
+ * Shared so the agent's tools and the UI act on the exact same sandbox
+ * processes and session records.
+ *
+ * ONE CODE CHAT = ONE APP: every preview is scoped by conversationId, its
+ * session record keyed deterministically as pv-<conversationId>, and starts
+ * are mutually exclusive per conversation (never double-start — concurrent
+ * callers await the SAME in-flight start).
  *
  * Flow (start):
- *   1. resolve the E2B client (shared sandbox),
- *   2. run the scaffold's install command (foreground, streamed progress),
- *   3. start the dev server as a DETACHED background command (start_server),
- *   4. resolve the public URL (get_host → https://{sandboxId}-{port}.e2b.dev),
- *   5. poll the URL until it responds (or timeout),
- *   6. upsert a PreviewSession record (localStorage-persisted → survives
- *      refresh) — the Preview tab renders from these records.
+ *   1. resolve the E2B client (shared sandbox — one per API key, unchanged),
+ *   2. kill the conversation's previous dev server (restart hygiene),
+ *   3. run the scaffold's install command (foreground, streamed progress),
+ *   4. start the dev server as a DETACHED background command (start_server),
+ *   5. resolve the public URL (get_host → https://{sandboxId}-{port}.e2b.dev),
+ *   6. poll the URL until it responds (or timeout) — "running" is only ever
+ *      recorded after the URL actually serves (PRD §7/§122),
+ *   7. upsert the conversation's single PreviewSession record
+ *      (localStorage-persisted → survives refresh).
  */
 
 import { getE2BClient } from "@/lib/e2b/client";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { useAuthStore } from "@/stores";
 import {
+  findPreviewSession,
+  previewSessionIdFor,
   usePreviewSessionStore,
   type PreviewSession,
+  type PreviewSessionStatus,
 } from "@/stores/preview-session-store";
 import { getScaffold, projectDir, type CodeScaffold } from "@/lib/code/scaffolds";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Shared "no sandbox key" message (the agent tools + the UI restart path). */
+export const NO_KEY_ERROR =
+  "Previews require an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
 /**
  * Detect what kind of project lives at projects/<appName> by probing the
@@ -127,10 +143,70 @@ export async function checkPreviewUrl(
   return false;
 }
 
+/* ------------------------------------------------------------------ */
+/* Start mutual-exclusion (Runtime PRD §6/§75 — never double-start)     */
+/* ------------------------------------------------------------------ */
+
+/** One in-flight start per conversation (awaited by every concurrent caller). */
+const inflightStarts = new Map<string, Promise<StartPreviewResult>>();
+/** Listeners notified whenever a start begins/ends (the Preview panel's
+ *  "starting…" state subscribes here — including tool-driven starts). */
+const startListeners = new Set<() => void>();
+
+function notifyStartsChanged(): void {
+  for (const listener of startListeners) listener();
+}
+
+/** Subscribe to start-in-flight changes. Returns an unsubscribe function. */
+export function subscribePreviewStarts(listener: () => void): () => void {
+  startListeners.add(listener);
+  return () => {
+    startListeners.delete(listener);
+  };
+}
+
+/** Is a start already in flight for this conversation? */
+export function isPreviewStartInFlight(conversationId: string): boolean {
+  return inflightStarts.has(conversationId);
+}
+
+/** The in-flight start promise for a conversation, if any (the leave-the-
+ *  workspace stop path awaits it so a mid-boot server is stopped once it
+ *  lands instead of leaking). */
+export function getInflightPreviewStart(
+  conversationId: string,
+): Promise<StartPreviewResult> | null {
+  return inflightStarts.get(conversationId) ?? null;
+}
+
+/**
+ * ONE start per conversation at a time: if a start is already in flight,
+ * callers await ITS result instead of kicking off a second dev server.
+ * Everything that starts a preview (the agent's start_preview tool, the
+ * panel's Start button, the auto-start on entering a code chat) funnels
+ * through here.
+ */
+export function startPreviewExclusive(
+  conversationId: string | null | undefined,
+  start: () => Promise<StartPreviewResult>,
+): Promise<StartPreviewResult> {
+  if (!conversationId) return start();
+  const existing = inflightStarts.get(conversationId);
+  if (existing) return existing;
+  const run = start().finally(() => {
+    inflightStarts.delete(conversationId);
+    notifyStartsChanged();
+  });
+  inflightStarts.set(conversationId, run);
+  notifyStartsChanged();
+  return run;
+}
+
 export async function startPreview(opts: StartPreviewOptions): Promise<StartPreviewResult> {
   const { apiKey, appName, scaffold } = opts;
   const port = opts.port ?? scaffold.port;
   const progress = opts.onProgress;
+  const conversationId = opts.conversationId ?? null;
 
   if (!scaffold.serverCommand) {
     return {
@@ -157,8 +233,25 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
         error:
           `Project directory ${cwd} was not found in the current sandbox ` +
           "(the sandbox may have been replaced — files written earlier may live in a previous one). " +
-          "Re-create the project files first (create_app or create_file), then start the preview again.",
+          "Re-create the project files first (create_app or create_file_chunk), then start the preview again.",
       };
+    }
+
+    // 0.5. RESTART HYGIENE (one app per chat): if this conversation already
+    // has a preview record, kill its old dev server (project marker + port)
+    // BEFORE booting the new one — a half-dead process squatting on the port
+    // would make the fresh server fail to bind (or serve stale output).
+    // Best-effort: a failed kill must never block the start.
+    if (conversationId) {
+      const prev = findPreviewSession(usePreviewSessionStore.getState().sessions, conversationId);
+      if (prev) {
+        progress?.(`Stopping the previous preview for ${prev.name}…`);
+        try {
+          await killPreviewProcesses(client, prev.name, port);
+        } catch {
+          /* best-effort */
+        }
+      }
     }
 
     // 1. Install dependencies (foreground, streamed).
@@ -203,15 +296,21 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
     const hostInfo = await client.getHostUrl(port);
     progress?.(`Public preview URL: ${hostInfo.url}`);
 
-    // 4. Wait until it actually serves.
+    // 4. Wait until it actually serves — "running" is only recorded after
+    // the URL responds (honest status, PRD §7/§122).
     const live = await checkPreviewUrl(hostInfo.url, {
       timeoutMs: 90_000,
       onProgress: (line) => progress?.(line),
     });
 
-    // 5. Record the session (survives refresh).
+    // 5. Record the session — the DETERMINISTIC pv-<conversationId> id, so
+    //    the chat keeps exactly one record and every start re-uses/upgrades
+    //    it in place (the store's upsert adopts any legacy record for the
+    //    conversation). Survives refresh.
     const session: PreviewSession = {
-      id: `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      id: conversationId
+        ? previewSessionIdFor(conversationId)
+        : `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       name: appName,
       framework: scaffold.key,
       frameworkLabel: scaffold.label,
@@ -220,9 +319,9 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
       sandboxId: hostInfo.sandboxId ?? started.sandboxId,
       status: live ? "running" : "error",
       command: wrappedCmd,
-      error: live ? undefined : "The server started but the public URL did not respond in time — it may still be booting; refresh the Preview tab.",
+      error: live ? undefined : "The server started but the public URL did not respond in time — it may still be booting; refresh the preview panel.",
       createdAt: Date.now(),
-      ...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
+      ...(conversationId ? { conversationId } : {}),
     };
     usePreviewSessionStore.getState().upsert(session);
     return { ok: true, session };
@@ -233,13 +332,99 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
 }
 
 /**
- * Stop a preview session's dev server. Kills by pid (if known), by the
- * project-path marker in the command line, and by port (fuser/ss when
- * available) — then marks the record stopped regardless (the sandbox
- * rotation reaps anything left over eventually).
+ * Restart THE CHAT's app from its persisted session record (Runtime PRD
+ * §6/§75 — the auto-start on entering a code chat, and the panel's Start
+ * button): resolve the E2B key + scaffold from the record (probing the
+ * project files when the framework is unknown), then run the normal start
+ * path — mutually exclusive per conversation, so a manual Start while an
+ * auto-start is mid-flight simply awaits it. On failure the record flips to
+ * an honest "error" state (PRD §122) and is KEPT so retry/auto-start still
+ * work.
+ */
+export async function restartPreviewForConversation(
+  conversationId: string,
+  opts?: { onProgress?: (line: string) => void },
+): Promise<StartPreviewResult> {
+  const session = findPreviewSession(usePreviewSessionStore.getState().sessions, conversationId);
+  if (!session) {
+    return {
+      ok: false,
+      error: "No app project is recorded for this chat yet — ask OnyxCode to create one first.",
+    };
+  }
+  const result = await startPreviewExclusive(conversationId, () =>
+    startPreviewFromSession(session, conversationId, opts),
+  );
+  if (!result.ok) {
+    usePreviewSessionStore
+      .getState()
+      .markStatus(session.id, "error", result.error ?? "Failed to start the preview.");
+  }
+  return result;
+}
+
+/** Resolve key + scaffold for a persisted session, then startPreview. */
+async function startPreviewFromSession(
+  session: PreviewSession,
+  conversationId: string,
+  opts?: { onProgress?: (line: string) => void },
+): Promise<StartPreviewResult> {
+  const userId = useAuthStore.getState().user?.id;
+  const apiKey = userId ? await getEffectiveE2BKey(userId) : null;
+  if (!apiKey) {
+    return { ok: false, error: NO_KEY_ERROR };
+  }
+  // Prefer the framework recorded on the session; fall back to probing the
+  // project files (covers legacy records with unknown frameworks).
+  let scaffold = getScaffold(session.framework);
+  if (!scaffold) {
+    const client = getE2BClient(apiKey, null, "shared");
+    scaffold = await detectScaffold(client, session.name);
+  }
+  return startPreview({
+    apiKey,
+    appName: session.name,
+    scaffold,
+    port: session.port || scaffold.port,
+    conversationId,
+    onProgress: opts?.onProgress,
+  });
+}
+
+/**
+ * Kill a preview's dev server in the sandbox: by the project-path marker in
+ * the process's command line and by port (fuser/ss when available).
+ */
+async function killPreviewProcesses(
+  client: ReturnType<typeof getE2BClient>,
+  appName: string,
+  port: number,
+): Promise<void> {
+  // BRACKET-TRICK: the literal marker would match this stop command's OWN
+  // command line (pkill kills its own shell) — `[-]` keeps the regex
+  // matching the real server process ("projects/my-app") but not the
+  // pattern string itself ("projects/my[-]app").
+  const safeMarker = `projects/${appName}`.replace(/-/g, "[-]");
+  const command = [
+    // 1. Kill anything whose command line references the project dir.
+    `pkill -f "${safeMarker}" || true`,
+    // 2. Kill whatever still listens on the port (fuser or ss).
+    `fuser -k ${port}/tcp 2>/dev/null || true`,
+    `ss -Kltn "sport = :${port}" 2>/dev/null || true`,
+  ].join("; ");
+  await client.exec(command, { timeout: 20 });
+}
+
+/**
+ * Stop a preview session's dev server. Kills by the project-path marker in
+ * the command line and by port (fuser/ss when available) — then marks the
+ * record stopped regardless (the sandbox rotation reaps anything left over
+ * eventually). The record itself is KEPT (status "stopped", url cleared) —
+ * it is the chat's app-project marker, so re-entering the chat can
+ * auto-start it again (Runtime PRD §5-6/§73-75).
  */
 export async function stopPreviewSession(
-  session: Pick<PreviewSession, "id" | "name" | "port" | "url">,
+  session: Pick<PreviewSession, "id" | "name" | "port">,
   apiKey?: string,
 ): Promise<boolean> {
   const store = usePreviewSessionStore.getState();
@@ -255,19 +440,7 @@ export async function stopPreviewSession(
   }
   try {
     const client = getE2BClient(key, null, "shared");
-    // BRACKET-TRICK: the literal marker would match this stop command's OWN
-    // command line (pkill kills its own shell) — `[-]` keeps the regex
-    // matching the real server process ("projects/my-app") but not the
-    // pattern string itself ("projects/my[-]app").
-    const safeMarker = `projects/${session.name}`.replace(/-/g, "[-]");
-    const command = [
-      // 1. Kill anything whose command line references the project dir.
-      `pkill -f "${safeMarker}" || true`,
-      // 2. Kill whatever still listens on the port (fuser or ss).
-      `fuser -k ${session.port}/tcp 2>/dev/null || true`,
-      `ss -Kltn "sport = :${session.port}" 2>/dev/null || true`,
-    ].join("; ");
-    await client.exec(command, { timeout: 20 });
+    await killPreviewProcesses(client, session.name, session.port);
     store.markStatus(session.id, "stopped");
     return true;
   } catch {
@@ -276,14 +449,36 @@ export async function stopPreviewSession(
   }
 }
 
-/** Light liveness check for an existing session URL (used by the panel). */
+/**
+ * Honest liveness check (Runtime PRD §7/§122): ping the session's public
+ * URL and sync the record to what the network actually says — a dead URL
+ * flips the record to "stopped" (dropping the stale URL) so the panel can
+ * never embed a dead page; a URL that responds again upgrades a timed-out
+ * "error" boot back to "running". A record the user STOPPED is never
+ * resurrected by a poll (the Stop button wins).
+ */
 export async function refreshPreviewSessionLiveness(
-  session: PreviewSession,
-): Promise<"running" | "stopped" | "error"> {
-  try {
-    await fetch(session.url, { mode: "no-cors", cache: "no-store" });
-    return session.status === "stopped" ? session.status : "running";
-  } catch {
+  session: Pick<PreviewSession, "id" | "url" | "status">,
+): Promise<PreviewSessionStatus> {
+  const store = usePreviewSessionStore.getState();
+  const current = store.sessions.find((s) => s.id === session.id);
+  if (!current) return session.status;
+  if (!current.url) {
+    if (current.status !== "stopped") store.markStatus(current.id, "stopped");
     return "stopped";
   }
+  const serving = await isUrlServing(current.url);
+  const fresh = usePreviewSessionStore.getState().sessions.find((s) => s.id === session.id);
+  if (!fresh) return session.status;
+  if (serving) {
+    if (fresh.status === "error") {
+      usePreviewSessionStore.getState().markStatus(fresh.id, "running");
+      return "running";
+    }
+    return fresh.status;
+  }
+  if (fresh.status !== "stopped") {
+    usePreviewSessionStore.getState().markStatus(fresh.id, "stopped");
+  }
+  return "stopped";
 }
