@@ -121,12 +121,17 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // ── MODE-SCOPED CONVERSATION SELECTION (OnyxCode PRD §7) ──────────────
   // Both modes share ONE current-conversation pointer; entering a mode
   // swaps the selection to that mode's latest conversation (or a fresh
-  // new-chat state) exactly once per mount, so the /chat and /code
-  // experiences each show their own, separate chats. The agent side also
-  // remembers the last agent conversation so leaving Code Mode restores it.
+  // new-chat state). The agent side also remembers the last agent
+  // conversation so leaving Code Mode restores it.
+  //
+  // STANDING ACTIVE-CHAT VALIDATION (Runtime PRD §66): the check is not a
+  // once-per-mount swap — ANY state in which the workspace's selected
+  // conversation belongs to the OTHER mode (stale store pointer after a
+  // route change, a cross-mode deep link that slipped past the hydration
+  // guard, a late list load) is corrected the moment it is observed. The
+  // corrections are idempotent, so re-running on list updates is safe.
   const modeSwapDoneRef = useRef(false);
   useEffect(() => {
-    if (modeSwapDoneRef.current) return;
     const store = useConversationStore.getState();
     const curId = store.currentConversationId;
     const curConv = curId ? conversations.find((c) => c.id === curId) : undefined;
@@ -139,15 +144,17 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
         modeSwapDoneRef.current = true;
         return;
       }
+      // STANDING GUARD: an agent conversation must never render inside the
+      // Code workspace — swap to the latest code chat (or a fresh state).
+      if (modeSwapDoneRef.current && !curConv) return; // fresh state — nothing to correct
       if (conversationsLoading && conversations.length === 0) return; // wait for the list
-      // Swap to the latest non-archived code conversation, or a fresh state.
       const latestCode = [...conversations]
         .filter((c) => c.mode === "code" && !c.is_archived)
         .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
       modeSwapDoneRef.current = true;
-      if (latestCode) {
+      if (latestCode && latestCode.id !== curId) {
         void selectConversation(latestCode.id);
-      } else {
+      } else if (!latestCode) {
         useChatStore.getState().clearMessages();
         store.selectConversation(null, { loading: false });
         setUrlParam("id", null);
@@ -156,9 +163,12 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
       // Remember the agent conversation we're in (for Code Mode return).
       if (curConv && (!curConv.mode || curConv.mode === "agent")) {
         rememberAgentConversation(curConv.id);
+        modeSwapDoneRef.current = true;
+        return;
       }
-      // Entering the agent workspace while a CODE conversation is selected
-      // → restore the last agent conversation (or a fresh state).
+      // STANDING GUARD: a CODE conversation must never render inside the
+      // normal Agent workspace — restore the last agent conversation (or a
+      // fresh state). Runs on every observation of a cross-mode selection.
       if (curConv?.mode === "code") {
         if (conversationsLoading && conversations.length === 0) return; // wait for the list
         const lastAgentId = recallAgentConversation();
@@ -169,11 +179,22 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
         if (restore) {
           void selectConversation(restore.id);
         } else {
-          useChatStore.getState().clearMessages();
-          store.selectConversation(null, { loading: false });
-          setUrlParam("id", null);
+          const latestAgent = [...conversations]
+            .filter((c) => (!c.mode || c.mode === "agent") && !c.is_archived)
+            .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
+          if (latestAgent) {
+            void selectConversation(latestAgent.id);
+          } else {
+            useChatStore.getState().clearMessages();
+            store.selectConversation(null, { loading: false });
+            setUrlParam("id", null);
+          }
         }
-      } else {
+        return;
+      }
+      if (!curId && !modeSwapDoneRef.current) {
+        // Agent workspace with no selection and nothing to correct — leave
+        // the fresh/new-chat state as-is.
         modeSwapDoneRef.current = true;
       }
     }

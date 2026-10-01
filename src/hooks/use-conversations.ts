@@ -219,6 +219,23 @@ export function useConversations() {
     if (urlId && needsHydration && !autoHydratedRef.current && !useChatStore.getState().isStreaming) {
       autoHydratedRef.current = true;
       await listPromise;
+      // ACTIVE-CHAT VALIDATION (Runtime PRD §66 — "Route Is Not Enough"):
+      // a deep link must never render a conversation of the OTHER mode —
+      // /chat?id=<code-chat> and /code?id=<agent-chat> are rejected here;
+      // the workspace's mode-swap effect then selects a valid conversation
+      // for this mode (or a fresh state). The workspace mode is derived from
+      // the PATH (sync, no effect-ordering races with the /code layout's
+      // code-mode flag).
+      const expectedMode = window.location.pathname.includes("/code") ? "code" : "agent";
+      const list = queryClient.getQueryData<Conversation[]>(listKey) ?? [];
+      const target = list.find((c) => c.id === urlId);
+      const targetMode = target?.mode === "code" ? "code" : "agent";
+      if (target && targetMode !== expectedMode) {
+        // Cross-mode deep link — strip the id so it can't re-hydrate on a
+        // later refetch, and leave the selection to the mode-swap logic.
+        window.history.replaceState({}, "", window.location.pathname);
+        return;
+      }
       // `loadConversationMessages` performs the full guarded select+fetch.
       // It is safe even when the id is already "selected" — the point is
       // that its MESSAGES were never loaded for this page load.
