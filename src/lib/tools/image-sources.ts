@@ -21,9 +21,8 @@
  * silent substitutions.
  */
 
-import { getE2BClient } from "@/lib/e2b/client";
 import type { E2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { chatSandboxForCtx, type ResolvedSandbox } from "@/lib/e2b/sandbox-rotation";
 import { getUploadByName, readUploadBytes } from "@/lib/uploads/registry";
 import type { UploadedFileRecord } from "@/lib/uploads/registry";
 import type { ToolContext } from "./registry";
@@ -290,14 +289,17 @@ async function resolveSandboxPath(
     };
   }
 
-  let apiKey: string | null = null;
+  let sbx: ResolvedSandbox | null = null;
   try {
-    apiKey = await ensureFreshSandboxForCtx(ctx);
+    // Chat-aware: in a Code chat the image lives in THIS app's own sandbox
+    // (where run_python / the authoring tools put it); an agent chat reads
+    // the shared workspace (unchanged).
+    sbx = await chatSandboxForCtx(ctx);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, reason: `the sandbox could not be reached (${msg})` };
   }
-  if (!apiKey) {
+  if (!sbx) {
     return {
       ok: false,
       reason:
@@ -310,8 +312,7 @@ async function resolveSandboxPath(
   const paths = norm.includes("/") ? [norm] : [norm, `uploads/${norm}`];
   let read: Awaited<ReturnType<E2BClient["readFilesBatch"]>>;
   try {
-    const client = getE2BClient(apiKey, null, "shared");
-    read = await client.readFilesBatch(paths);
+    read = await sbx.client.readFilesBatch(paths);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, reason: `the sandbox read failed (${msg})` };

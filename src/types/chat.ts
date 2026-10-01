@@ -58,6 +58,12 @@ export interface ChatMessage {
    *  non-standard ``reasoning_content`` field that some OpenAI-compatible
    *  providers stream. */
   reasoning?: string;
+  /** Model that served this assistant message (persisted on the DB row as
+   *  ``model_name``). Stamped live by the event processor from each round's
+   *  ``model_request_start`` event — with the Auto Router the serving model
+   *  can differ round to round, so this reflects the model that served the
+   *  MOST RECENT round. */
+  model_name?: string | null;
   /** Ordered timeline of the assistant turn: reasoning, text and tool
    *  calls in the exact order they occurred. Rendered in sequence so a
    *  multi-step turn (think → tools → text → think → tools → text) shows

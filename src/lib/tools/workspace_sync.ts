@@ -18,8 +18,7 @@
  */
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { OnyxBaseKV, ONYXBASE_DEFAULT_BASE_URL, looksLikeOnyxBaseKey } from "@/lib/onyxbase/kv-client";
 import {
@@ -150,9 +149,11 @@ registerTool(
       }
     }
 
-    // 1. E2B availability (PRD §13).
-    const e2bKey = await ensureFreshSandboxForCtx(ctx);
-    if (!e2bKey) {
+    // 1. E2B availability (PRD §13). Chat-aware: a Code Mode chat pushes
+    //    THIS app's own per-chat sandbox; an agent chat pushes the user's
+    //    shared workspace (unchanged).
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) {
       return {
         ok: false, status: "error", tool: "push_workspace", workspaceId: WORKSPACE_ID,
         syncedFiles: 0, unchangedFiles: 0, updatedFiles: 0, uploadedBytes: 0, removedFiles: 0,
@@ -170,7 +171,7 @@ registerTool(
       } satisfies PushResult;
     }
 
-    const e2b = getE2BClient(e2bKey, null, "shared");
+    const e2b = sbx.client;
     try {
       const result = await pushWorkspace({
         e2b,
@@ -253,8 +254,11 @@ registerTool(
       }
     }
 
-    const e2bKey = await ensureFreshSandboxForCtx(ctx);
-    if (!e2bKey) {
+    // Chat-aware: a Code Mode chat restores INTO this app's own per-chat
+    // sandbox; an agent chat restores into the user's shared workspace
+    // (unchanged).
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) {
       return {
         ok: false, status: "error", tool: "retrieve_workspace", workspaceId: WORKSPACE_ID,
         restoredFiles: 0, downloadedBytes: 0, integrityVerified: false, skippedFiles: [],
@@ -262,7 +266,7 @@ registerTool(
       } satisfies RetrieveResult;
     }
 
-    const e2b = getE2BClient(e2bKey, null, "shared");
+    const e2b = sbx.client;
     try {
       const result = await retrieveWorkspace({
         e2b,

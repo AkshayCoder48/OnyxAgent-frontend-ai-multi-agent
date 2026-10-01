@@ -13,11 +13,47 @@
  *   - Stateless — every request is self-contained.
  */
 import { NextResponse } from "next/server";
+import {
+  Agent,
+  fetch as undiciFetch,
+  type Response as UndiciResponse,
+} from "undici";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// 5 minutes — generous window for long streaming completions.
-export const maxDuration = 300;
+// Vercel-only hint — self-hosted `next start` has NO function timeout, so
+// this number only matters when deployed on Vercel. 800s keeps the Vercel
+// ceiling comfortably above every other guard in the streaming stack.
+export const maxDuration = 800;
+
+/**
+ * ZERO-TIMEOUT STREAM DISPATCHER — the fix for "Stream read failed on any
+ * number below 600s".
+ *
+ * Node's global fetch is undici, and undici ships DEFAULT dispatcher
+ * timeouts that killed long-reasoning streams long before any application
+ * logic ran:
+ *   - headersTimeout = 300s — kills the request if the provider hasn't sent
+ *     response HEADERS within 5 minutes. Max-thinking models legitimately
+ *     sit silent for minutes BEFORE the first byte, so healthy streams died
+ *     at the ~5-minute mark with a socket-level "Headers Timeout Error".
+ *   - bodyTimeout = 300s — kills a response body that stays silent between
+ *     chunks for 5 minutes (long silent thinking phases inside a stream).
+ * Neither is configurable through fetch() options — they live on the
+ * dispatcher — so the fix is an explicit undici Agent with both set to 0:
+ * a stream now lives exactly as long as the provider keeps the connection
+ * open. Connection ESTABLISHMENT stays bounded (30s) so dead/unreachable
+ * hosts still fail fast instead of hanging forever.
+ *
+ * Module-scoped on purpose: ONE agent (and its connection pool) for the
+ * whole process — creating an Agent per request would leak sockets under
+ * streaming load.
+ */
+const STREAM_AGENT = new Agent({
+  headersTimeout: 0,
+  bodyTimeout: 0,
+  connect: { timeout: 30_000 },
+});
 
 /**
  * Headers that we forward from the incoming client request to the upstream
@@ -118,11 +154,15 @@ export async function GET(
     forwardHeaders["authorization"] = authHeader;
   }
 
-  let upstream: Response;
+  let upstream: UndiciResponse;
   try {
-    upstream = await fetch(targetUrl.toString(), {
+    // STREAM_AGENT (see above): no headers/body timeouts — model-list
+    // endpoints can be slow, and they deserve the same liveness rules as
+    // the chat streams. Connection setup is still bounded at 30s.
+    upstream = await undiciFetch(targetUrl.toString(), {
       method: "GET",
       headers: forwardHeaders,
+      dispatcher: STREAM_AGENT,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown network error";
@@ -214,15 +254,19 @@ export async function POST(
   // Don't override it with the q=0.9 fallback — some providers
   // check for exact "text/event-stream" to enable streaming.
 
-  let upstream: Response;
+  let upstream: UndiciResponse;
   try {
-    upstream = await fetch(targetUrl.toString(), {
+    // STREAM_AGENT (see above): headersTimeout/bodyTimeout are BOTH 0 —
+    // undici's 300s defaults were killing silent max-thinking streams at
+    // the ~5-minute mark ("Stream read failed on any number below 600s").
+    upstream = await undiciFetch(targetUrl.toString(), {
       method: "POST",
       headers: forwardHeaders,
       body,
-      // `duplex: "half"` is required by Node's undici when streaming a body
-      // to a fetch() request and is a no-op otherwise.
-      // @ts-expect-error — `duplex` is valid in undici but not in the DOM lib.
+      // `duplex: "half"` is required by undici when a request body is
+      // present and a no-op otherwise. undici's own RequestInit types
+      // include `duplex`, so no @ts-expect-error is needed here (the old
+      // directive applied to the GLOBAL fetch's DOM-lib types).
       duplex: "half",
       // CRITICAL: Prevent Node's undici from buffering the upstream response.
       // Without this, undici reads the entire response into memory before
@@ -230,6 +274,7 @@ export async function POST(
       // equivalent of `curl -N` (no-buffer) — we want each chunk flushed
       // to the client the moment it arrives from the upstream provider.
       cache: "no-store",
+      dispatcher: STREAM_AGENT,
     });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
@@ -308,7 +353,12 @@ export async function POST(
     },
   });
 
-  const streamedBody = upstream.body?.pipeThrough(passthrough);
+  // undici's types declare `body` as node:stream/web's ReadableStream while
+  // lib.dom's TransformStream / NextResponse expect the DOM ReadableStream —
+  // in Node they are the SAME WHATWG class at runtime, so bridge the two
+  // declaration worlds with one cast.
+  const upstreamBody = upstream.body as ReadableStream<Uint8Array> | null;
+  const streamedBody = upstreamBody?.pipeThrough(passthrough);
 
   return new NextResponse(streamedBody, {
     status: upstream.status,

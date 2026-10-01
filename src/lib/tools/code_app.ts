@@ -1,8 +1,7 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import {
   getScaffold,
@@ -16,11 +15,13 @@ const NO_KEY_ERROR =
 
 /**
  * OnyxCode `create_app` (OnyxCode PRD §6) — scaffold a real, runnable
- * project for a given framework into /home/user/projects/<name> in the E2B
- * sandbox. Files are written through the same sandbox write path the file
- * tools use, so every other tool (read_file, run_terminal, edit_file…)
- * sees them immediately. After scaffolding, the model should call
- * `start_preview` to serve the app at a public URL.
+ * project for a given framework into /home/user/projects/<name> in THIS
+ * chat's own E2B sandbox (per-chat isolation — one chat = one app). Files
+ * are written through the same sandbox write path the other Code Mode tools
+ * use (create_file_chunk / edit_file / run_terminal / start_preview…), so
+ * they all see them immediately — within THIS chat's isolated filesystem.
+ * After scaffolding, the model should call `start_preview` to serve the app
+ * at a public URL.
  */
 registerTool(
   "create_app",
@@ -59,8 +60,8 @@ registerTool(
       (args.name as string | undefined) || (args.description as string | undefined) || rawFramework,
     );
 
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) {
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) {
       return { ok: false, error: NO_KEY_ERROR };
     }
 
@@ -68,7 +69,10 @@ registerTool(
     progress?.("", `Scaffolding ${scaffold.label} app "${appName}"…`, "stdout");
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      // THIS chat's own sandbox (one chat = one app = its own filesystem) —
+      // the scaffold lands in the app's isolated workspace, never in another
+      // chat's.
+      const client = sbx.client;
       const dir = projectDir(appName);
       await client.createFolder(dir);
 

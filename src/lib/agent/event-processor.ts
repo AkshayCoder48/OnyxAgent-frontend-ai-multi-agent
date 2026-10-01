@@ -455,6 +455,18 @@ export class AgentEventProcessor {
           }
         }
         this.ensureMessageForActiveGeneration();
+        // SERVED-MODEL BADGE (Auto Router): the runtime stamps the model that
+        // serves THIS round onto the event (absent on legacy/background
+        // emitters). Record it on the active assistant message so any badge
+        // reading message.model_name shows the model that ACTUALLY served —
+        // with the Auto Router this can differ round to round.
+        const servedModel = (wsEvent.data as { model?: unknown }).model;
+        if (typeof servedModel === "string" && servedModel && this.currentMessageId) {
+          const messageId = this.currentMessageId;
+          this.store.getState().updateMessage(messageId, (m) =>
+            m.model_name === servedModel ? m : { ...m, model_name: servedModel },
+          );
+        }
         break;
       }
 

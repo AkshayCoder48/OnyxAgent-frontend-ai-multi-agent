@@ -11,6 +11,11 @@ import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { useExperimentalStore } from "@/stores/experimental-store";
 import { useProviders } from "@/hooks/use-data";
+import {
+  AUTO_ROUTER_LABEL,
+  AUTO_ROUTER_MODEL_VALUE,
+  AUTO_ROUTER_PROVIDER_ID,
+} from "@/lib/auto-router";
 import { cn } from "@/lib/utils";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
@@ -37,6 +42,19 @@ interface ChatControlsProps {
 /** localStorage persistence for the model preference (PRD §14): saved on
  *  every pick, restored + validated against the live provider list on mount. */
 const MODEL_PREF_KEY = "onyx:selected-model";
+
+/** The synthetic "provider" handed to onProviderSelect when the Auto
+ *  Router row is picked — only its `id` matters (chat-container maps it to
+ *  the selectedProviderId store write; the runtime never sees this object).
+ *  AUTO_ROUTER_PROVIDER_ID is a sentinel that never matches a real provider
+ *  row (real ids are nanoids). */
+const AUTO_ROUTER_PICK: CustomProvider = {
+  id: AUTO_ROUTER_PROVIDER_ID,
+  name: AUTO_ROUTER_LABEL,
+  base_url: "",
+  has_api_key: true,
+  models: [],
+};
 
 function saveModelPref(providerId: string | null, model: string | null): void {
   if (typeof window === "undefined") return;
@@ -93,10 +111,6 @@ export function ChatControls({
   const selectedModel = useChatStore((s) => s.selectedModel);
   const selectedProviderId = useChatStore((s) => s.selectedProviderId);
 
-  const [availableModels] = useState<{ value: string; label: string }[]>([
-    { value: "", label: "Default" },
-  ]);
-
   // ── PROVIDERS — REACTIVE, AUTH-RESOLVED (stale "OnyxAI" ghost fix) ──────
   // The old one-shot effect read `useAuthStore.getState().user?.id` on mount
   // — BEFORE init() resolved the real user id — so it queried the transient
@@ -122,6 +136,25 @@ export function ChatControls({
     [providerRows],
   );
 
+  // ── AUTO ROUTER (replaces the old hardcoded "Default" row) ─────────────
+  // The built-in entry EXISTS only when there is something to route
+  // between: >1 configured provider → one "Auto Router" row (per-round
+  // routing across the user's providers); 0 or 1 provider → NO built-in
+  // row at all (no "Default", no "Auto Router").
+  const availableModels = useMemo<{ value: string; label: string; caption?: string }[]>(
+    () =>
+      providers.length > 1
+        ? [
+            {
+              value: AUTO_ROUTER_MODEL_VALUE,
+              label: AUTO_ROUTER_LABEL,
+              caption: "Picks the best model for each round",
+            },
+          ]
+        : [],
+    [providers.length],
+  );
+
   useEffect(() => {
     // Selection resolution (PRD §12–§14) — runs whenever the RESOLVED
     // provider list changes. Initialize ONLY when there is no valid
@@ -133,15 +166,22 @@ export function ChatControls({
     const customProviders = providers;
 
     const store = useChatStore.getState();
-    /** "default" = explicit no-selection; "valid" = usable; null = gone.
+    /** "default" = explicit no-selection; "auto-router" = the Auto Router
+     *  sentinel; "valid" = usable; null = gone.
      *  Validation is provider-existence only: a model id NOT in the
      *  provider's list is still valid — the "Custom model ID" input
      *  intentionally sends arbitrary ids to the provider, and the
-     *  runtime surfaces a provider error if the id is genuinely dead. */
+     *  runtime surfaces a provider error if the id is genuinely dead.
+     *  AUTO ROUTER: the sentinel selection stays valid ONLY while more
+     *  than one provider exists — with ≤1 there is nothing to route
+     *  between. */
     const validate = (
       providerId: string | null | undefined,
       model: string | null | undefined,
-    ): "default" | "valid" | null => {
+    ): "default" | "auto-router" | "valid" | null => {
+      if (providerId === AUTO_ROUTER_PROVIDER_ID) {
+        return customProviders.length > 1 ? "auto-router" : null;
+      }
       if (providerId == null && (model == null || model === "")) return "default";
       const p = customProviders.find((x) => x.id === providerId);
       if (!p) return null; // provider disappeared → selection unusable
@@ -152,11 +192,12 @@ export function ChatControls({
     let nextModel: string | null = store.selectedModel;
     const storeStatus = validate(nextProviderId, nextModel);
 
-    if (storeStatus !== "valid") {
+    if (storeStatus !== "valid" && storeStatus !== "auto-router") {
       const persisted = loadModelPref();
       if (persisted && validate(persisted.providerId, persisted.model) !== null) {
         // Restored preference — covers an explicit "Default" pick too
-        // ({null, null} validates as "default", not null).
+        // ({null, null} validates as "default", not null) and a persisted
+        // Auto Router pick (valid only while >1 provider exists).
         nextProviderId = persisted.providerId;
         nextModel = persisted.model;
       } else if (persisted === null) {
@@ -164,6 +205,22 @@ export function ChatControls({
         // active provider's first model. This is the ONLY path that
         // picks a model on the user's behalf (PRD §12: initialization
         // happens only when the active model is genuinely undefined).
+        const activeProvider =
+          customProviders.find((p) => p.is_active) || customProviders[0];
+        if (activeProvider && activeProvider.models.length > 0) {
+          nextProviderId = activeProvider.id;
+          nextModel = activeProvider.models[0]!;
+        } else {
+          nextProviderId = null;
+          nextModel = null;
+        }
+      } else if (nextProviderId === AUTO_ROUTER_PROVIDER_ID) {
+        // AUTO ROUTER DEGRADATION: the user picked Auto Router when >1
+        // providers existed; the list has since dropped to ≤1, so the
+        // router can no longer route. Fall back to the first-provider
+        // initialization (plain no-selection when no provider has a
+        // model). The persisted pref is re-saved by the apply block
+        // below, so the stale sentinel never comes back on reload.
         const activeProvider =
           customProviders.find((p) => p.is_active) || customProviders[0];
         if (activeProvider && activeProvider.models.length > 0) {
@@ -184,9 +241,12 @@ export function ChatControls({
     // valid existing selection is never touched, and the runtime refs
     // (modelRef/providerIdRef) are synced by the same setters.
     if (nextProviderId !== store.selectedProviderId || nextModel !== store.selectedModel) {
-      const provider = nextProviderId
-        ? customProviders.find((x) => x.id === nextProviderId) ?? null
-        : null;
+      const provider =
+        nextProviderId === AUTO_ROUTER_PROVIDER_ID
+          ? AUTO_ROUTER_PICK // synthetic pick — only its id flows into the store
+          : nextProviderId
+            ? customProviders.find((x) => x.id === nextProviderId) ?? null
+            : null;
       onProviderSelect?.(provider);
       onModelChange?.(nextModel);
       saveModelPref(nextProviderId, nextModel);
@@ -198,14 +258,21 @@ export function ChatControls({
   const [effort, setEffort] = useState<ThinkingEffort>("off");
   const settingsOverridden = temperature !== null || effort !== "off";
 
+  const isAutoRouter = selectedProviderId === AUTO_ROUTER_PROVIDER_ID;
+
   const triggerSummary = useMemo(() => {
     const parts: string[] = [];
-    if (selectedModel) parts.push(selectedModel);
+    // Auto Router active → the chip names the router, not a single model
+    // (the actual model differs per round; the served model shows in the
+    // message's model badge instead).
+    if (isAutoRouter) parts.push(AUTO_ROUTER_LABEL);
+    else if (selectedModel) parts.push(selectedModel);
     if (settingsOverridden) parts.push("Custom");
     return parts.length ? parts.join(" · ") : "Controls";
-  }, [selectedModel, settingsOverridden]);
+  }, [isAutoRouter, selectedModel, settingsOverridden]);
 
-  const hasOverrides = (selectedModel != null && selectedModel !== "") || settingsOverridden;
+  const hasOverrides =
+    isAutoRouter || (selectedModel != null && selectedModel !== "") || settingsOverridden;
 
   return (
     <Popover>
@@ -258,12 +325,16 @@ export function ChatControls({
               providers={providers}
               selectedModel={selectedModel}
               selectedProviderId={selectedProviderId}
-              onPickDefault={(m) => {
+              onPickBuiltin={(m) => {
                 // Write through the authoritative setters (they update the
-                // store AND the runtime refs) + persist the pick.
-                onProviderSelect?.(null);
-                onModelChange?.(m.value || null);
-                saveModelPref(null, m.value || null);
+                // store AND the runtime refs) + persist the pick. The only
+                // built-in row is Auto Router: its synthetic provider id
+                // lands in the store as the routing sentinel.
+                if (m.value === AUTO_ROUTER_MODEL_VALUE) {
+                  onProviderSelect?.(AUTO_ROUTER_PICK);
+                  onModelChange?.(null);
+                  saveModelPref(AUTO_ROUTER_PROVIDER_ID, null);
+                }
               }}
               onPickProviderModel={(p, modelId) => {
                 onProviderSelect?.(p);
@@ -338,14 +409,14 @@ function ModelPanel({
   providers,
   selectedModel,
   selectedProviderId,
-  onPickDefault,
+  onPickBuiltin,
   onPickProviderModel,
 }: {
-  models: { value: string; label: string }[];
+  models: { value: string; label: string; caption?: string }[];
   providers: CustomProvider[];
   selectedModel: string | null;
   selectedProviderId: string | null;
-  onPickDefault: (m: { value: string; label: string }) => void;
+  onPickBuiltin: (m: { value: string; label: string }) => void;
   onPickProviderModel: (p: CustomProvider, modelId: string) => void;
 }) {
   const [customModelId, setCustomModelId] = useState("");
@@ -399,21 +470,20 @@ function ModelPanel({
         </div>
       )}
 
-      {/* Default / built-in models */}
+      {/* Built-in entry — Auto Router (only present when >1 provider) */}
       {filteredModels.length > 0 && (
         <ul className="space-y-1 mb-4">
           {filteredModels.map((m) => {
-            // "Default" is active only when there is NO provider/model
-            // selection (the store's null/null state).
+            // Auto Router is active when the store holds the routing
+            // sentinel as the selected provider (no single model id).
             const isActive =
-              selectedProviderId == null &&
-              (selectedModel == null || selectedModel === "") &&
-              m.value === "";
+              m.value === AUTO_ROUTER_MODEL_VALUE &&
+              selectedProviderId === AUTO_ROUTER_PROVIDER_ID;
             return (
-              <li key={m.value || "default"}>
+              <li key={m.value}>
                 <button
                   type="button"
-                  onClick={() => onPickDefault(m)}
+                  onClick={() => onPickBuiltin(m)}
                   className={cn(
                     "flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
                     isActive
@@ -421,7 +491,14 @@ function ModelPanel({
                       : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
                   )}
                 >
-                  <span className="truncate font-medium">{m.label}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{m.label}</span>
+                    {m.caption && (
+                      <span className="text-foreground/55 block truncate text-[10px] leading-tight">
+                        {m.caption}
+                      </span>
+                    )}
+                  </span>
                   {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
                 </button>
               </li>

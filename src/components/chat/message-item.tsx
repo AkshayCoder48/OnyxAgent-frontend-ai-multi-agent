@@ -195,6 +195,7 @@ function TextBubble({
   sources,
   genuiNodes,
   isStreaming,
+  identityKey,
 }: {
   text: string;
   showCursor: boolean;
@@ -209,13 +210,48 @@ function TextBubble({
   /** True while the message is actively streaming. Drives the GenUI creation
    *  gate ("Creating …" line → cross-fade into the rendered block). */
   isStreaming?: boolean;
+  /** Stable identity of this text stream (message/part id) — lets the
+   *  typewriter resume instead of replaying after a mid-stream remount
+   *  (reconnect / route change, OnyxAgent stream spec §24). */
+  identityKey?: string;
 }) {
-  // SINGLE-LETTER STREAMING (user spec): while this bubble streams, the
-  // text is buffered and revealed letter by letter — a 0.5s initial hold,
-  // then one smooth adaptive letter flow with fade-in, regardless of how
-  // the SSE chunks arrived. Settled/hydrated messages are a pure
-  // pass-through (no timers, full text immediately).
-  const { text: revealedText } = useTypewriter(text, Boolean(isStreaming));
+  // SINGLE-LETTER STREAMING (OnyxAgent stream spec): while this bubble
+  // streams, the text is buffered and revealed CHARACTER BY CHARACTER —
+  // one continuous character stream regardless of how the SSE chunks
+  // arrived; each freshly revealed char then mounts into the markdown as
+  // a `.letter-in` span (opacity 0.5→1, blur 5px→0, 0.02s stagger).
+  // Settled/hydrated messages are a pure pass-through (no timers, full
+  // text immediately — spec §23).
+  //
+  // The markdown variant runs a BATCHED reveal (40ms tick vs the 20ms
+  // default): a markdown re-parse is far heavier than a plain-text render,
+  // and the per-char CSS stagger (0.02s/char) makes a 4-char batch visually
+  // IDENTICAL to four single-char ticks — same butter, half the parse rate
+  // (the lag fix for large chats).
+  const { text: revealedText, freshFrom, animating } = useTypewriter(
+    text,
+    Boolean(isStreaming),
+    { identityKey, tickMs: 40 },
+  );
+
+  // Size of the fresh char window (chars revealed in the last ~700ms) —
+  // paces the animated window in the markdown renderer so a char only
+  // leaves the span window after its fade finished (pop-free at any speed).
+  const freshCount = Math.max(0, revealedText.length - freshFrom);
+
+  // STREAM GRACE: keep the char window mounted ~620ms after the reveal
+  // finishes so the FINAL chars complete their fade before the plain
+  // (settled) render swaps the spans out — never a hard pop at stream end.
+  const [streamGrace, setStreamGrace] = React.useState(false);
+  React.useEffect(() => {
+    if (isStreaming || animating) {
+      setStreamGrace(true);
+      return;
+    }
+    const t = window.setTimeout(() => setStreamGrace(false), 620);
+    return () => window.clearTimeout(t);
+  }, [isStreaming, animating]);
+  const streamActive = Boolean(isStreaming) || streamGrace;
 
   // Parse the text for `<<<genui>>>` sentinels. Returns ordered segments
   // (text / genui / text / genui / ...) so interleaved text between multiple
@@ -294,8 +330,7 @@ function TextBubble({
         <div
           className={cn(
             "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
-            !isStreaming && "prose-sm-static",
-            isStreaming && "stream-reveal stream-batch-fade",
+            !streamActive && "prose-sm-static",
           )}
         >
           <MarkdownContent
@@ -303,7 +338,8 @@ function TextBubble({
             onCiteClick={onCiteClick}
             sources={sources}
             showCursor={showCursor}
-            streaming={isStreaming}
+            streaming={streamActive}
+            freshChars={streamActive ? freshCount : 0}
           />
         </div>
       </div>
@@ -332,8 +368,7 @@ function TextBubble({
               className={cn(
                 "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
                 i > 0 && "mt-3",
-                !isStreaming && "prose-sm-static",
-                isStreaming && "stream-reveal stream-batch-fade",
+                !streamActive && "prose-sm-static",
               )}
             >
               <MarkdownContent
@@ -341,7 +376,8 @@ function TextBubble({
                 onCiteClick={onCiteClick}
                 sources={sources}
                 showCursor={showCursor && isLast}
-                streaming={isStreaming && isLast}
+                streaming={streamActive && isLast}
+                freshChars={streamActive && isLast ? freshCount : 0}
               />
             </div>
           );
@@ -926,6 +962,7 @@ export const MessageItem = React.memo(function MessageItem({
                     sources={sources}
                     genuiNodes={!message.isStreaming ? message.genui : undefined}
                     isStreaming={Boolean(message.isStreaming)}
+                    identityKey={message.id}
                   />
                 )}
                 {message.toolCalls && message.toolCalls.length > 0 && (
@@ -1042,6 +1079,7 @@ export const MessageItem = React.memo(function MessageItem({
                 sources={sources}
                 genuiNodes={!streaming ? message.genui : undefined}
                 isStreaming={isTail}
+                identityKey={it.partId}
               />
             );
             if (!inPanel) return <React.Fragment key={it.partId}>{bubble}</React.Fragment>;

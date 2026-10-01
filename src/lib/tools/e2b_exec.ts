@@ -1,8 +1,7 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // E2B Python sandbox — modules available in the code-interpreter template.
@@ -12,14 +11,14 @@ const PYTHON_NOTE =
 /**
  * Code execution tools — `run_python` and `run_terminal`.
  *
- * The E2B sandbox is the SINGLE source of truth for files. Files created by
- * `create_file` / `write_file` are already in the sandbox, so there is NO
- * sync step before code execution. Files created/modified by code are
- * immediately visible to the file tools (no reverse sync needed either).
+ * ONE CHAT = ONE APP (Code Mode): every execution runs in THIS
+ * conversation's OWN sandbox (per-chat "separate" mode) — the same isolated
+ * filesystem the file-authoring + preview tools use, so files written by one
+ * app's chat are never visible in another's.
  *
- * Auto-rotation: `ensureFreshSandboxForCtx(ctx)` is called before every
- * execution. If the sandbox is >23h old, it's rotated (backup → kill →
- * create → restore) transparently.
+ * Auto-rotation: `codeSandboxForCtx(ctx)` is called before every execution.
+ * If the chat's sandbox is >50 min old it's rotated (backup → kill → create →
+ * restore) transparently, scoped to that chat only.
  */
 
 const NO_KEY_ERROR =
@@ -41,8 +40,8 @@ registerTool(
     if (!code || !code.trim()) {
       return { error: "No code provided" };
     }
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) {
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) {
       return {
         error: NO_KEY_ERROR,
         exit_code: -1,
@@ -52,7 +51,7 @@ registerTool(
     }
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const onOutput = ctx.onToolOutput;
 
       // ENV INJECTION (PRD §14): pass the user's env-var VALUES into the
@@ -120,8 +119,8 @@ registerTool(
     if (!command || !command.trim()) {
       return { error: "No command provided" };
     }
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) {
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) {
       return {
         error: NO_KEY_ERROR,
         exit_code: -1,
@@ -131,7 +130,7 @@ registerTool(
     }
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const onOutput = ctx.onToolOutput;
 
       // ENV INJECTION (PRD §14): pass the user's env-var VALUES so `$VAR`

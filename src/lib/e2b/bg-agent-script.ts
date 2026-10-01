@@ -48,6 +48,9 @@ export const BG_AGENT_SCRIPT = String.raw`
 import fs from "node:fs/promises";
 import { exec } from "node:child_process";
 import path from "node:path";
+import http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
 
 const HOME = "/home/user";
 const STATE_DIR = path.join(HOME, ".onyx");
@@ -849,6 +852,105 @@ function sanitizeToolParameters(schema) {
   return out;
 }
 
+// ── No-timeout fetch for the LLM stream ───────────────────────────────
+/** fetch() WITHOUT undici's default timeouts — used ONLY for the main LLM
+ *  stream call. Node's global fetch (undici) silently enforces TWO
+ *  dispatcher-level timeouts that fired far below the 600s floor and
+ *  surfaced as yet another "Stream read failed":
+ *    - headersTimeout 300s: the request is killed if response HEADERS
+ *      haven't arrived within 5 minutes. Max-thinking models legitimately
+ *      think for minutes BEFORE the first byte — healthy streams died.
+ *    - bodyTimeout 300s: a response body that stays silent between chunks
+ *      for 5 minutes is killed (long silent thinking phases mid-stream).
+ *  Neither is settable through fetch() options — they live on the
+ *  dispatcher — so this helper drives node:http/node:https directly:
+ *  NO header/body timeouts at all, so the stream lives exactly as long
+ *  as the provider keeps the connection open (IDLE_TIMEOUT_MS in the SSE
+ *  loop below stays the only liveness guard). Only TCP connection
+ *  ESTABLISHMENT is bounded (30s) so dead hosts fail fast; once the socket
+ *  is connected nothing is ever timed out.
+ *
+ *  Returns a Response-like object — { status, ok, headers.get(name), body,
+ *  text(), json() } — whose body is a WEB ReadableStream (Readable.toWeb),
+ *  so the existing res.body.getReader() SSE loop works unchanged.
+ *  Redirects are followed like fetch() would (301/302/303 → GET, 307/308
+ *  keep method + body, max 5 hops). Node core modules ONLY — this script
+ *  ships to the E2B sandbox as a single self-contained file. */
+async function fetchNoTimeout(urlStr, opts) {
+  const CONNECT_TIMEOUT_MS = 30_000;
+  const MAX_REDIRECTS = 5;
+  // fetch() parity: a URL without a protocol is an ERROR, not a request to
+  // localhost (node's legacy url.parse would happily do the latter).
+  if (!/^https?:\/\//i.test(String(urlStr))) throw new Error("Invalid URL: " + urlStr);
+  let url = String(urlStr);
+  let method = opts.method || "GET";
+  let reqBody = opts.body;
+  for (let hop = 0; ; hop++) {
+    const res = await new Promise((resolve, reject) => {
+      const mod = /^https:\/\//i.test(url) ? https : http;
+      const headers = Object.assign({}, opts.headers);
+      let reqBodyStr = null;
+      if (reqBody != null) {
+        reqBodyStr = typeof reqBody === "string" ? reqBody : String(reqBody);
+        // Explicit Content-Length (fetch parity): some strict gateways
+        // reject chunked request bodies.
+        const hasLen = Object.keys(headers).some((k) => k.toLowerCase() === "content-length");
+        if (!hasLen) headers["Content-Length"] = String(Buffer.byteLength(reqBodyStr));
+      }
+      let resEnded = false; // response fully read — skip a pointless destroy on abort
+      let connectTimer = null;
+      const clearConnectTimer = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
+      const req = mod.request(url, { method, headers }, (nodeRes) => {
+        clearConnectTimer();
+        nodeRes.on("end", () => { resEnded = true; });
+        const webBody = Readable.toWeb(nodeRes);
+        resolve({
+          status: nodeRes.statusCode || 0,
+          ok: nodeRes.statusCode >= 200 && nodeRes.statusCode < 300,
+          headers: {
+            get: (name) => {
+              const v = nodeRes.headers[String(name).toLowerCase()];
+              if (v === undefined) return null;
+              return Array.isArray(v) ? v.join(", ") : String(v);
+            },
+          },
+          body: webBody,
+          text: () => new Response(webBody).text(),
+          json: () => new Response(webBody).json(),
+        });
+      });
+      req.on("error", (e) => { clearConnectTimer(); reject(e); });
+      // Connect-phase bound ONLY: cleared the moment the TCP connection is
+      // established — server processing time (silent thinking before the
+      // headers arrive) is NEVER bounded by it.
+      connectTimer = setTimeout(() => {
+        req.destroy(new Error("connect timeout (30s) — the provider host never accepted the TCP connection"));
+      }, CONNECT_TIMEOUT_MS);
+      req.on("socket", (sock) => {
+        if (sock.connecting) sock.once("connect", clearConnectTimer);
+        else clearConnectTimer();
+      });
+      if (opts.signal) {
+        opts.signal.addEventListener("abort", () => {
+          if (!resEnded) req.destroy(new Error("aborted"));
+        });
+      }
+      if (reqBodyStr != null) req.write(reqBodyStr);
+      req.end();
+    });
+    const loc = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (!loc || hop >= MAX_REDIRECTS) return res;
+    // Release the redirect response's socket, then hop (fetch semantics:
+    // 301/302/303 after POST → GET with no body; 307/308 keep everything).
+    try { await res.body.cancel(); } catch {}
+    url = new URL(loc, url).toString();
+    if (res.status !== 307 && res.status !== 308 && method !== "GET" && method !== "HEAD") {
+      method = "GET";
+      reqBody = undefined;
+    }
+  }
+}
+
 // ── The streaming LLM call ──────────────────────────────────────────────
 const MAX_ATTEMPTS = 8; // 4 + headroom for the strict-gateway self-heal ladder
 // DEAD-WIRE GUARD (not a duration cap): reader.read() rejecting after this
@@ -861,8 +963,11 @@ const MAX_ATTEMPTS = 8; // 4 + headroom for the strict-gateway self-heal ladder
 // total execution timeout anywhere in this runner: a round may legitimately
 // run as long as the provider keeps sending bytes (the ~567s "Stream read
 // failed" failures were the old 600s hard abort killing healthy
-// max-thinking streams mid-reasoning — removed 2026-10).
-const IDLE_TIMEOUT_MS = 240_000;
+// max-thinking streams mid-reasoning — removed 2026-10). 600s, not lower:
+// NO liveness guard may fire below 600s (user requirement) — a truly dead
+// connection now takes up to 10 minutes to surface, which the idle
+// diagnostics message below already explains.
+const IDLE_TIMEOUT_MS = 600_000;
 
 /**
  * Streams ONE round. Emits live events (status:first_token, reasoning_delta,
@@ -1086,10 +1191,13 @@ async function streamRoundEvents(state, round, finalRound) {
     // truncated reasoning). The only liveness guard left is IDLE_TIMEOUT_MS
     // (zero BYTES on the wire); duration itself is never failure. ac
     // exists purely to release the connection in the finally below.
+    // fetchNoTimeout instead of global fetch: undici's built-in
+    // headersTimeout / bodyTimeout (300s each) were the OTHER sub-600s
+    // killer — see the helper above.
     const ac = new AbortController();
     const roundStart = Date.now();
     try {
-      res = await fetch(url, {
+      res = await fetchNoTimeout(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

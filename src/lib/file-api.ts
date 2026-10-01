@@ -239,11 +239,19 @@ export async function readFileBytes(fileId: string): Promise<Blob | null> {
 
 /**
  * Upload a file to the E2B sandbox at /home/user/<filename>.
- * Only called when file_system_mode is "cloud" (cloud) — the caller checks
- * the mode before invoking this. No-op if no sandbox API key is provided.
  *
- * The file is also still stored locally in OPFS (via `uploadFile`) so it
- * persists across sessions and works in local mode.
+ * Sandbox targeting (per-chat isolation): a CODE-MODE chat passes its
+ * `conversationId` + sandboxMode "separate" so the attachment lands in the
+ * app's OWN sandbox (one chat = one app = its own files); agent-mode callers
+ * keep the default ("shared" — the user-level workspace, unchanged).
+ * No-op if no sandbox API key is provided.
+ *
+ * NOTE: the LIVE chat-attachment upload path mirrors files through
+ * `mirrorUploadToSandbox` (uploads/registry.ts), which applies this exact
+ * code-chat / agent-chat rule automatically (no caller changes needed).
+ * This helper remains the direct API for explicit callers. The file is also
+ * still stored locally in OPFS (via `uploadFile`) so it persists across
+ * sessions and works in local mode.
  */
 export async function uploadFileToSandbox(
   file: File,

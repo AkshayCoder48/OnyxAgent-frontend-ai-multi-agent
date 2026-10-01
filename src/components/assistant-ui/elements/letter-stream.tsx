@@ -43,6 +43,16 @@ export interface TypewriterOptions {
   tickMs?: number;
   /** Catch-up pace once the stream settled mid-reveal (letters/sec). */
   finishCps?: number;
+  /** Stable identity of the streamed text (e.g. the message/part id).
+   *
+   * RECONNECT STABILITY (OnyxAgent stream spec §24): when a streaming
+   * component REMOUNTS mid-stream (route change, background-stream
+   * reconnect, tab visibility reload), the typewriter seeds its revealed
+   * count from this per-identity cache instead of restarting — already
+   * seen characters render instantly and only the genuinely new tail
+   * animates. Without a key, a remount re-reveals from zero (bounded by
+   * the huge-backlog jump-ahead). */
+  identityKey?: string;
 }
 
 export interface TypewriterState {
@@ -76,6 +86,11 @@ const FRESH_WINDOW_MS = 700;
 const LETTER_STAGGER_STEPS = 15;
 const LETTER_STAGGER_STEP_S = 0.02;
 
+/** Reveal-count cache for `identityKey` reconnects (spec §24) — bounded,
+ *  insertion-order eviction, only ever touched by the typewriter engine. */
+const REVEAL_CACHE_MAX = 128;
+const revealCache = new Map<string, number>();
+
 export function useTypewriter(
   target: string,
   active: boolean,
@@ -85,6 +100,7 @@ export function useTypewriter(
   const baseCps = options?.baseCps ?? 90;
   const tickMs = options?.tickMs ?? 20;
   const finishCps = options?.finishCps ?? 320;
+  const identityKey = options?.identityKey;
 
   // Reduced motion → never animate (checked once, SSR-safe).
   const reducedMotion = React.useMemo(
@@ -97,10 +113,18 @@ export function useTypewriter(
 
   const animate = active && !reducedMotion;
 
-  const [reveal, setReveal] = React.useState<RevealState>(() => ({
-    n: animate ? 0 : target.length,
-    history: [],
-  }));
+  const [reveal, setReveal] = React.useState<RevealState>(() => {
+    if (!animate) return { n: target.length, history: [] };
+    // Reconnect seed (spec §24): resume from this identity's last known
+    // reveal instead of replaying the whole message.
+    if (identityKey) {
+      const cached = revealCache.get(identityKey);
+      if (typeof cached === "number") {
+        return { n: Math.max(0, Math.min(cached, target.length)), history: [] };
+      }
+    }
+    return { n: 0, history: [] };
+  });
 
   // Latest target + revealed count for the tick closures (refs written only
   // in effects — React-Compiler safe).
@@ -209,6 +233,18 @@ export function useTypewriter(
         : { n: target.length, history: [] },
     );
   }, [animate, target]);
+
+  // ── Identity reveal persistence (spec §24) ─────────────────────────────
+  // Mirror the revealed count into the bounded cache so a remount mid-stream
+  // resumes where this identity left off.
+  React.useEffect(() => {
+    if (!identityKey || !everAnimated) return;
+    revealCache.set(identityKey, reveal.n);
+    if (revealCache.size > REVEAL_CACHE_MAX) {
+      const oldest = revealCache.keys().next().value;
+      if (oldest !== undefined) revealCache.delete(oldest);
+    }
+  }, [identityKey, reveal.n, everAnimated]);
 
   const n = Math.min(reveal.n, target.length);
   const text = animate || everAnimated ? target.slice(0, n) : target;

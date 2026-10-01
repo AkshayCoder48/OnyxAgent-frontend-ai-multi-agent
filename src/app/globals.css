@@ -2661,28 +2661,20 @@ html.theme-transitioning .animate-backdrop {
   50% { opacity: 0.5; transform: scale(0.85); }
 }
 
-/* --- Reduce repaint: disable transitions during streaming ---
-   IMPORTANT: `.onyx-word` (the streaming blue→white fade) is EXCLUDED — the
-   blanket transition kill is what made tinted words SNAP back to ink instead
-   of fading. Color transitions on a handful of trailing word spans are one
-   cheap paint; killing them is what looked janky. */
-.streaming-active *:not(.onyx-word) {
-  transition: none !important;
-}
-.streaming-active .prose-sm {
-  contain: layout style paint;
-}
-
 /* ═════════════════════════════════════════════════════════════════════════
    ONYX STREAM POLISH — butter-smooth streaming visuals
    ═════════════════════════════════════════════════════════════════════════
-   The visual layer of butter streaming: newly streamed content fades
-   blue → normal exactly ONCE (at mount / first paint); stable React keys
-   guarantee later updates never restart or re-animate anything. All
-   effects animate color / background-color / opacity ONLY — no transforms,
-   no layout, no reflow, no scroll jitter. Chunk grouping is structural
-   (word spans / line spans with stable index keys), never per-token DOM
-   churn. Honors prefers-reduced-motion at the bottom of this block. */
+   The visual layer of butter streaming: the assistant response is ONE
+   continuous CHARACTER stream — every freshly revealed character mounts as
+   a `.letter-in` span that fades in exactly ONCE (opacity 0.5 → 1,
+   blur 5px → 0, 0.02s/char stagger set inline by the markdown renderer).
+   Stable per-index keys guarantee later updates never restart or
+   re-animate anything. All effects animate opacity / filter ONLY — no
+   transforms, no layout, no reflow, no scroll jitter. The animation unit
+   is the CHARACTER — never a word, never an SSE chunk (OnyxAgent stream
+   spec). Honors prefers-reduced-motion at the bottom of this block.
+   (`.streaming-active` was never applied by any component — dead rule,
+   removed with the word-tint rewrite.) */
 :root {
   --onyx-stream-tint: #3b82f6;          /* blue-500 — light mode tint */
   --onyx-stream-tint-bg: rgb(59 130 246 / 0.12);
@@ -2692,34 +2684,12 @@ html.theme-transitioning .animate-backdrop {
   --onyx-stream-tint-bg: rgb(96 165 250 / 0.14);
 }
 
-/* Words of the trailing paragraph (markdown text): fresh words carry the
-   blue tint; when newer words push them out of the window the class flips
-   and this transition settles them back to the inherited ink — a calm,
-   continuous blue→white comet tail. New words also materialize the SAME
-   way the letter stream does (OnyxCode PRD §42): starting at 50% opacity
-   with a 5px blur and sharpening into focus, with a 0.02s per-word stagger
-   set inline by tintStreamingParagraph (markdown groups the character
-   cascade at word granularity — PRD §44 — so per-char spans never break
-   inline markdown structure). `backwards` fill keeps the from-state
-   visible during the stagger delay. */
-.onyx-word {
-  transition: color 900ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: onyx-word-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-.onyx-word-fresh {
-  color: var(--onyx-stream-tint);
-}
-@keyframes onyx-word-in {
-  from {
-    opacity: 0.5;
-    filter: blur(5px);
-  }
-  to {
-    opacity: 1;
-    filter: blur(0);
-  }
-}
-
+/* Streaming characters (markdown prose + active code lines): each fresh
+   char mounts at 50% opacity with a 5px blur and sharpens into focus
+   (OnyxAgent stream spec §3). INLINE display (never inline-block) keeps
+   normal text wrapping — no mid-word breaks, no atomic boxes. The stagger
+   delay (0.02s/char, stable per index) is set inline by charStreamTail;
+   `both` fill keeps the from-state visible during the stagger delay. */
 /* Streaming code lines: each NEW line flashes a soft blue highlight that
    drains away over ~800ms — never restarts while the line is still being
    written, and completed lines are never re-animated. Background-only, so
@@ -2762,10 +2732,7 @@ html.theme-transitioning .animate-backdrop {
    disabled (instant settle), the blue tint itself may remain as a static
    color cue — it is color, not motion. */
 @media (prefers-reduced-motion: reduce) {
-  .onyx-word {
-    transition: none;
-    animation: none;
-  }
+  .letter-in,
   .onyx-code-line,
   .onyx-stream-line {
     animation: none;
@@ -3269,7 +3236,7 @@ html.theme-transitioning .animate-backdrop {
    fresh window render as plain text, so long streams carry no per-letter
    DOM once settled. */
 .letter-in {
-  display: inline-block;
+  display: inline;
   animation: letter-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 @keyframes letter-in {

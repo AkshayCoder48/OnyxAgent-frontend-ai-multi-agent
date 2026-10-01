@@ -30,7 +30,9 @@
 
 import { fileService } from "@/lib/services";
 import { db } from "@/lib/db";
-import { useAuthStore } from "@/stores";
+import { useAuthStore, useConversationStore } from "@/stores";
+import { getE2BClient, type E2BClient } from "@/lib/e2b/client";
+import { isCodeChat } from "@/lib/e2b/sandbox-rotation";
 import {
   readFile as opfsReadFile,
   deleteFile as opfsDeleteFile,
@@ -270,13 +272,14 @@ export async function deleteUpload(fileId: string, userId: string): Promise<bool
     } catch {
       /* best-effort */
     }
-    // 3. Sandbox mirror (only when a sandbox key is configured).
+    // 3. Sandbox mirror (only when a sandbox key is configured) — the same
+    //    chat-aware target the mirror write used, so the copy is removed
+    //    from the sandbox it actually lives in (best-effort).
     try {
       const { settingsService } = await import("@/lib/services");
       const apiKey = await settingsService.getDecryptedSandboxKey(userId);
       if (apiKey) {
-        const { getE2BClient } = await import("@/lib/e2b/client");
-        const client = getE2BClient(apiKey, null, "shared");
+        const client = await mirrorSandboxClient(apiKey);
         await client.deleteFile(`uploads/${record.filename}`).catch(() => {});
       }
     } catch {
@@ -288,12 +291,42 @@ export async function deleteUpload(fileId: string, userId: string): Promise<bool
 }
 
 // ---------------------------------------------------------------------------
+// Sandbox mirror target (Code Mode: one chat = one app).
+// ---------------------------------------------------------------------------
+
+/**
+ * Which sandbox an upload mirrors into (and deletes from). A Code Mode chat
+ * mirrors into THAT chat's OWN app sandbox (per-chat "separate" mode — the
+ * attachment lands in the app's isolated filesystem, next to the project
+ * files the Code tools wrote); an agent chat (or an unknown conversation)
+ * keeps the legacy user-level shared workspace, exactly as before.
+ *
+ * `conversationId` wins when given (the chat-input path); otherwise the
+ * ACTIVE conversation decides (both callers fire inside the chat the user
+ * is typing in / uploading from).
+ */
+async function mirrorSandboxClient(
+  apiKey: string,
+  conversationId?: string | null,
+): Promise<E2BClient> {
+  const convId =
+    conversationId ?? useConversationStore.getState().currentConversationId ?? null;
+  if (convId && (await isCodeChat(convId))) {
+    return getE2BClient(apiKey, convId, "separate");
+  }
+  // Agent chat / unknown conversation — the legacy shared workspace.
+  return getE2BClient(apiKey, null, "shared");
+}
+
+// ---------------------------------------------------------------------------
 // Sandbox mirror (binary-safe).
 // ---------------------------------------------------------------------------
 
 /**
  * Mirror an upload into the E2B sandbox at `uploads/<filename>` so the AI's
- * native file tools (list_folder / read_file) can see it. Binary-safe: the
+ * native file tools can see it. In a Code Mode chat the mirror lands in
+ * THAT chat's own app sandbox (one chat = one app = its own files); in an
+ * agent chat it lands in the shared workspace (unchanged). Binary-safe: the
  * bytes go over as base64 and are decoded server-side. Collision-safe: the
  * local registry fileId is the identity — the mirror is just a convenience
  * copy for the sandbox-native tools.
@@ -304,13 +337,13 @@ export async function deleteUpload(fileId: string, userId: string): Promise<bool
 export async function mirrorUploadToSandbox(
   record: UploadedFileRecord,
   apiKey: string,
+  conversationId?: string | null,
 ): Promise<boolean> {
   if (!apiKey) return false;
   try {
     const blob = await readUploadBytes(record);
     if (!blob) return false;
-    const { getE2BClient } = await import("@/lib/e2b/client");
-    const client = getE2BClient(apiKey, null, "shared");
+    const client = await mirrorSandboxClient(apiKey, conversationId);
     // base64 encode without stack-overflow on big files (chunked).
     const buf = new Uint8Array(await blob.arrayBuffer());
     let binary = "";

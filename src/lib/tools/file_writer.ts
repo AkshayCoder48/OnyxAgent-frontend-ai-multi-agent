@@ -1,10 +1,10 @@
 "use client";
 
 import { registerTool, type ToolContext } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
+import type { E2BClient } from "@/lib/e2b/client";
 import {
-  ensureFreshSandbox,
-  resolveSandboxApiKey,
+  codeSandboxForCtx,
+  type ResolvedSandbox,
 } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
@@ -21,8 +21,9 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
  *     lets the agent inspect what's already on disk before deciding where to
  *     continue).
  *
- * All operations go through the same E2B client as `e2b_files.ts` — files
- * written here are immediately visible to `read_file`, `list_folder`, etc.
+ * All operations go through THIS chat's OWN E2B sandbox (one chat = one app —
+ * the same per-chat filesystem create_app / start_preview / run_terminal
+ * use), so the chunked-written app files stay isolated per conversation.
  * Paths are relative to `/home/user` (the sandbox workspace root).
  *
  * Tools (3):
@@ -87,15 +88,12 @@ function shellSingleQuote(s: string): string {
 const NO_KEY_ERROR =
   "File operations require an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
-/** Resolve the API key the same way e2b_files does — supports subagents that
- *  build a minimal context without the decrypted key. Also runs the sandbox
- *  auto-rotation check (rotates if the sandbox is >23h old) before returning
- *  the key, so callers can use the E2B client immediately. */
-async function getApiKey(ctx: ToolContext): Promise<string | null> {
-  const apiKey = await resolveSandboxApiKey(ctx);
-  if (!apiKey) return null;
-  await ensureFreshSandbox(apiKey);
-  return apiKey;
+/** Resolve THIS chat's own sandbox for the chunked-writer tools (Code Mode
+ *  write path — one chat = one app = its own filesystem): the key, per-chat
+ *  rotation, and the client in one call. Supports subagents that build a
+ *  minimal context without the decrypted key (falls back through settings). */
+async function getSandbox(ctx: ToolContext): Promise<ResolvedSandbox | null> {
+  return codeSandboxForCtx(ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,11 +122,11 @@ registerTool(
   async (args, ctx) => {
     const rawPath = safePath(args.path as string);
     const createDirs = (args.create_dirs as boolean) ?? true;
-    const apiKey = await getApiKey(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await getSandbox(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const createdDirs: string[] = [];
 
       // Detect existing type by probing. `listFiles` succeeds on directories,
@@ -266,7 +264,7 @@ registerTool(
  * Returns the list of directories that were created (for reporting).
  */
 async function ensureParentDir(
-  client: ReturnType<typeof getE2BClient>,
+  client: E2BClient,
   rawPath: string,
 ): Promise<string[]> {
   const { parent } = splitPath(rawPath);
@@ -332,11 +330,11 @@ registerTool(
     const chunkIndex = (args.chunk_index as number) ?? 0;
     const totalChunks = (args.total_chunks as number) ?? undefined;
 
-    const apiKey = await getApiKey(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await getSandbox(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
 
       // 1. Verify parent directory exists (auto-create if missing).
       const createdDirs = await ensureParentDir(client, rawPath);
@@ -463,11 +461,11 @@ registerTool(
     const endLineRaw = args.end_line as number | undefined;
     const endLine = typeof endLineRaw === "number" ? Math.floor(endLineRaw) : undefined;
 
-    const apiKey = await getApiKey(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await getSandbox(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
 
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const content = await client.readFile(rawPath);
 
       // Split into lines without dropping trailing-newline information.

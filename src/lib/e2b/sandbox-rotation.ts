@@ -22,6 +22,14 @@
  * call `ensureFreshSandbox(apiKey)` before every file operation and code
  * execution, and the rotation happens automatically if needed.
  *
+ * PER-TARGET ROTATION (Code Mode — one chat = one app): `ensureFreshSandbox`
+ * takes an optional target (conversationId + mode). Shared targets keep the
+ * LEGACY behavior exactly (timestamps + sandbox-id slot keyed by apiKey
+ * only); separate targets rotate THAT conversation's own sandbox — mutex,
+ * creation timestamp, localStorage sandbox-id key and client eviction are
+ * all scoped per (apiKey, conversationId), so a rotation in one chat can
+ * never touch another chat's sandbox or the shared workspace.
+ *
  * FILE-LOSS SAFETY (PRD §9–10): rotation never kills sandboxes it isn't
  * replacing, and it backs up BEFORE killing — the client sandboxId makes
  * the rotation work even on a serverless cold start (empty server cache).
@@ -29,7 +37,14 @@
  * (auto-restore below + push/retrieve_workspace tools).
  */
 
-import { getE2BClient, evictAllE2BClients } from "./client";
+import {
+  getE2BClient,
+  evictAllE2BClients,
+  evictE2BClient,
+  sandboxIdStorageKey,
+  type E2BClient,
+} from "./client";
+import { isCodeMode } from "@/lib/code-mode";
 import type { ToolContext } from "@/lib/tools/registry";
 
 // 50 minutes — rotate BEFORE the 1-hour E2B sandbox timeout kills the sandbox.
@@ -220,15 +235,20 @@ export function maybeAutoRestoreWorkspace(apiKey: string): void {
   });
 }
 
-// localStorage keys (per API key).
-function createdAtKey(apiKey: string): string {
-  return `e2b-sandbox-createdAt:${apiKey}`;
+// localStorage keys (per rotation target).
+function createdAtKey(t: SandboxTarget): string {
+  // Shared targets keep the LEGACY per-apiKey key (no migration); separate
+  // targets scope the timestamp per conversation so each chat's sandbox
+  // rotates on its own 50-minute schedule.
+  return t.mode === "separate" && t.conversationId
+    ? `e2b-sandbox-createdAt:${t.apiKey}:${t.conversationId}`
+    : `e2b-sandbox-createdAt:${t.apiKey}`;
 }
 
-function getStoredCreatedAt(apiKey: string): number | null {
+function getStoredCreatedAt(t: SandboxTarget): number | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(createdAtKey(apiKey));
+    const raw = window.localStorage.getItem(createdAtKey(t));
     if (!raw) return null;
     const n = Number(raw);
     return Number.isFinite(n) ? n : null;
@@ -237,27 +257,49 @@ function getStoredCreatedAt(apiKey: string): number | null {
   }
 }
 
-function setStoredCreatedAt(apiKey: string, ts: number): void {
+function setStoredCreatedAt(t: SandboxTarget, ts: number): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(createdAtKey(apiKey), String(ts));
+    window.localStorage.setItem(createdAtKey(t), String(ts));
   } catch {
     // ignore quota errors
   }
 }
 
-function clearStoredCreatedAt(apiKey: string): void {
+function clearStoredCreatedAt(t: SandboxTarget): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem(createdAtKey(apiKey));
+    window.localStorage.removeItem(createdAtKey(t));
   } catch {
     // ignore
   }
 }
 
-// Module-level mutex — ensures only ONE rotation runs at a time, even if
-// multiple tools call ensureFreshSandbox concurrently.
-let rotationPromise: Promise<void> | null = null;
+// Module-level mutexes — one in-progress rotation PER TARGET, so a shared
+// rotation never blocks (or gets blocked by) a per-chat rotation, and two
+// different chats can rotate concurrently while the same chat coalesces.
+const rotationPromises = new Map<string, Promise<void>>();
+
+/** Which sandbox a tool operates on. (apiKey, conversationId, mode) — the
+ *  same triple `getE2BClient` caches clients by, so rotation and tool calls
+ *  can never disagree about WHICH sandbox they are keeping fresh. */
+export interface SandboxTarget {
+  apiKey: string;
+  conversationId: string | null;
+  mode: "shared" | "separate";
+}
+
+/** Mutex key — per (apiKey, conversationId, mode). */
+function targetMutexKey(t: SandboxTarget): string {
+  return t.mode === "separate" && t.conversationId
+    ? `${t.apiKey}:${t.conversationId}:separate`
+    : `${t.apiKey}:shared`;
+}
+
+/** The (cached) E2B client for a target. */
+export function targetE2BClient(t: SandboxTarget): E2BClient {
+  return getE2BClient(t.apiKey, t.conversationId, t.mode);
+}
 
 /**
  * Resolve the E2B sandbox API key from a tool context.
@@ -288,44 +330,62 @@ export async function resolveSandboxApiKey(ctx: {
 }
 
 /**
- * Ensure the sandbox for the given API key is fresh (< 50 min old).
+ * Ensure the sandbox for the given target is fresh (< 50 min old).
  *
  * If the sandbox is older than the rotation age (or no creation timestamp is
  * recorded), performs an atomic rotation on the server:
  *   backup → kill old → create → restore.
  *
+ * The optional `target` selects WHICH sandbox: omitting it (or passing the
+ * default) rotates the legacy user-level SHARED sandbox exactly as before;
+ * passing `{ conversationId, mode: "separate" }` rotates THAT conversation's
+ * own sandbox (Code Mode — one chat = one app). Timestamps, the localStorage
+ * sandbox-id slot and the rotation mutex are all per-target.
+ *
  * Called before EVERY file operation and code execution. Transparent to
  * callers — never throws (rotation failures are logged and swallowed so
  * the operation can proceed; the next call will retry).
  *
- * Concurrency: a module-level mutex ensures only ONE rotation runs at a
- * time. Concurrent callers wait for the in-progress rotation to finish.
+ * Concurrency: one in-progress rotation PER TARGET. Concurrent callers for
+ * the same target wait for the in-progress rotation; other targets (other
+ * chats, the shared sandbox) rotate independently.
  */
-export async function ensureFreshSandbox(apiKey: string): Promise<void> {
+export async function ensureFreshSandbox(
+  apiKey: string,
+  target?: { conversationId?: string | null; mode?: "shared" | "separate" },
+): Promise<void> {
   if (!apiKey) return;
+  const t: SandboxTarget = {
+    apiKey,
+    conversationId: target?.conversationId ?? null,
+    mode: target?.mode ?? "shared",
+  };
 
-  // If rotation is already in progress, wait for it (don't start a second one).
-  if (rotationPromise) {
+  // If rotation is already in progress FOR THIS TARGET, wait for it (don't
+  // start a second one). Other targets rotate on their own schedules.
+  const inProgress = rotationPromises.get(targetMutexKey(t));
+  if (inProgress) {
     try {
-      await rotationPromise;
+      await inProgress;
     } catch {
       // swallow — the original caller already logged the error
     }
     return;
   }
 
-  const createdAt = getStoredCreatedAt(apiKey);
+  const createdAt = getStoredCreatedAt(t);
 
-  // First call — no timestamp stored yet. Touch the sandbox to ensure one
-  // exists, then record the timestamp. This is NOT a rotation — we just
-  // need to know when the sandbox was first seen so we can rotate it later.
+  // First call — no timestamp stored yet for this target. Touch the sandbox
+  // to ensure one exists, then record the timestamp. This is NOT a rotation
+  // — we just need to know when the sandbox was first seen so we can rotate
+  // it later.
   if (!createdAt) {
     try {
-      const client = getE2BClient(apiKey, null, "shared");
-      // createSandbox() is idempotent — reuses an existing sandbox if one
-      // is already cached on the server, otherwise creates a new one.
-      await client.createSandbox();
-      setStoredCreatedAt(apiKey, Date.now());
+      // createSandbox() is idempotent — reuses the existing sandbox for
+      // this target (shared: per apiKey; separate: per apiKey+conversation)
+      // or creates a new one.
+      await targetE2BClient(t).createSandbox();
+      setStoredCreatedAt(t, Date.now());
     } catch {
       // best-effort — don't block the operation. The next call will retry.
     }
@@ -336,12 +396,13 @@ export async function ensureFreshSandbox(apiKey: string): Promise<void> {
   if (Date.now() - createdAt < ROTATION_AGE_MS) return;
 
   // Rotation needed — perform it atomically on the server.
-  rotationPromise = performRotation(apiKey).finally(() => {
-    rotationPromise = null;
+  const rotation = performRotation(t).finally(() => {
+    rotationPromises.delete(targetMutexKey(t));
   });
+  rotationPromises.set(targetMutexKey(t), rotation);
 
   try {
-    await rotationPromise;
+    await rotation;
   } catch (err) {
     console.warn("[sandbox-rotation] rotation failed:", err);
     // Don't rethrow — the operation should proceed even if rotation failed.
@@ -350,35 +411,38 @@ export async function ensureFreshSandbox(apiKey: string): Promise<void> {
 }
 
 /**
- * Perform the actual rotation by calling the server's `rotate` action.
+ * Perform the actual rotation of ONE target's sandbox by calling the
+ * server's `rotate` action.
  *
  * The server does: backup (ALL files, binary-safe) → kill the OLD sandbox
- * only → create → restore — all atomically. We pass our CURRENT sandbox ID
+ * only → create → restore — all atomically, scoped to the target's
+ * (apiKey, conversationId, mode) cache key. We pass our CURRENT sandbox ID
  * so the server can find the old sandbox even on a serverless cold start
  * (its in-memory cache is empty there — without the id a cold rotation
  * couldn't back anything up and the workspace would be lost). Afterwards we
- * update the client-side cached sandboxId and creation timestamp.
+ * update the client-side cached sandboxId (in the target's PER-MODE
+ * localStorage slot — shared = the legacy key, separate = the per-chat key)
+ * and the creation timestamp.
  */
-async function performRotation(apiKey: string): Promise<void> {
+async function performRotation(t: SandboxTarget): Promise<void> {
   try {
     // The CURRENT sandbox id — the server uses it (as a fallback to its own
     // cache) to back up + replace exactly this sandbox. localStorage is the
     // primary source; the in-memory E2BClient's id is the fallback for when
-    // localStorage is unavailable.
+    // localStorage is unavailable. The key is PER-MODE (see client.ts's
+    // sandboxIdStorageKey) so a per-chat rotation reads THIS chat's id.
+    const idKey = sandboxIdStorageKey(t.apiKey, t.conversationId, t.mode);
     const storedSandboxId =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem(`e2b-sandbox-id:${apiKey}`)
-        : null;
-    const currentSandboxId =
-      storedSandboxId ??
-      getE2BClient(apiKey, null, "shared").peekSandboxId();
+      typeof window !== "undefined" ? window.localStorage.getItem(idKey) : null;
+    const currentSandboxId = storedSandboxId ?? targetE2BClient(t).peekSandboxId();
     const res = await fetch("/api/sandbox", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        apiKey,
+        apiKey: t.apiKey,
         action: "rotate",
-        sandboxMode: "shared",
+        conversationId: t.conversationId,
+        sandboxMode: t.mode,
         sandboxId: currentSandboxId,
       }),
     });
@@ -397,48 +461,55 @@ async function performRotation(apiKey: string): Promise<void> {
     };
 
     if (data.sandboxId) {
-      // Update localStorage with the NEW sandboxId so the next E2BClient
-      // instance picks it up.
+      // Update localStorage with the NEW sandboxId (the target's own slot)
+      // so the next E2BClient instance picks it up.
       if (typeof window !== "undefined") {
         try {
-          window.localStorage.setItem(
-            `e2b-sandbox-id:${apiKey}`,
-            data.sandboxId,
-          );
+          window.localStorage.setItem(idKey, data.sandboxId);
         } catch {
           // ignore
         }
       }
-      // Evict ALL cached E2BClient instances for this apiKey so the next
-      // getE2BClient() call creates a fresh client that loads the new
-      // sandboxId from localStorage. (The old client still holds a reference
-      // to the killed sandbox.)
-      evictAllE2BClients();
+      if (t.mode === "separate" && t.conversationId) {
+        // Precise eviction — only THIS chat's client is dropped (it reloads
+        // its id from its per-chat slot, which we just updated). Every other
+        // chat's client keeps its in-memory id.
+        evictE2BClient(t.apiKey, t.conversationId, "separate");
+      } else {
+        // Shared: ALL shared clients for this apiKey persist to the ONE
+        // legacy localStorage slot, so every one of them must be evicted to
+        // pick up the new id (the legacy behavior — unchanged).
+        evictAllE2BClients();
+      }
       // Record the rotation time so we rotate again after the rotation age.
-      setStoredCreatedAt(apiKey, Date.now());
+      setStoredCreatedAt(t, Date.now());
       console.log(
-        `[sandbox-rotation] rotated to ${data.sandboxId} (backed up ${data.backedUp ?? 0}, restored ${data.restored ?? 0})`,
+        `[sandbox-rotation] rotated ${t.mode === "separate" && t.conversationId ? `chat ${t.conversationId.slice(0, 8)}…` : "shared sandbox"} to ${data.sandboxId} (backed up ${data.backedUp ?? 0}, restored ${data.restored ?? 0})`,
       );
     } else {
       // No sandboxId returned — rotation failed silently. Clear the
       // timestamp so we try again next time.
-      clearStoredCreatedAt(apiKey);
+      clearStoredCreatedAt(t);
       throw new Error("rotate returned no sandboxId");
     }
   } catch (err) {
     // Clear the timestamp so the next call retries the rotation.
-    clearStoredCreatedAt(apiKey);
+    clearStoredCreatedAt(t);
     throw err;
   }
 }
 
 /**
  * Convenience wrapper: resolve the API key from a tool context, then ensure
- * the sandbox is fresh. Returns the resolved API key (or null if none).
+ * the SHARED sandbox (the legacy user-level workspace) is fresh. Returns the
+ * resolved API key (or null if none).
  *
- * Used by file tools to do both steps in one call:
+ * Used by the shared-surface file tools to do both steps in one call:
  *   const apiKey = await ensureFreshSandboxForCtx(ctx);
  *   if (!apiKey) return { error: "..." };
+ *
+ * Code Mode tools should use `codeSandboxForCtx` (THIS chat's own sandbox)
+ * and dual-mode surfaces `chatSandboxForCtx` instead — see below.
  */
 export async function ensureFreshSandboxForCtx(
   ctx: ToolContext,
@@ -451,4 +522,105 @@ export async function ensureFreshSandboxForCtx(
   // already restored — see runAutoRestore).
   maybeAutoRestoreWorkspace(apiKey);
   return apiKey;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Per-chat sandbox resolution (Code Mode: one chat = one app = its own
+// filesystem, its own files — the sandbox counterpart of the per-chat
+// OnyxBase KV database namespace in src/lib/code/db-namespace.ts).
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Look up a conversation's persisted mode. Returns null when the record
+ *  can't be read (a brand-new chat mid-creation, or a minimal subagent
+ *  context) — callers decide the fallback. */
+export async function conversationCodeMode(
+  conversationId: string,
+): Promise<"code" | "agent" | null> {
+  try {
+    const { db } = await import("@/lib/db");
+    const conv = await db.conversations.get(conversationId);
+    if (!conv) return null;
+    return conv.mode === "code" ? "code" : "agent";
+  } catch {
+    return null;
+  }
+}
+
+/** Does this conversation belong to Code Mode (per-chat app sandboxes)?
+ *  An unknown record (not persisted yet) falls back to the ACTIVE UI mode —
+ *  the /code workspace hosts only code chats, so the first turn of a new
+ *  code chat still resolves correctly while it is being created. */
+export async function isCodeChat(
+  conversationId?: string | null,
+): Promise<boolean> {
+  if (!conversationId) return false;
+  const mode = await conversationCodeMode(conversationId);
+  if (mode === "code") return true;
+  if (mode === "agent") return false;
+  return isCodeMode();
+}
+
+/** A fully resolved sandbox: the target triple + the live client. */
+export interface ResolvedSandbox extends SandboxTarget {
+  client: E2BClient;
+}
+
+/** Build the per-chat target for a CODE-MODE tool: THIS conversation's own
+ *  sandbox ("separate" mode — one chat = one app = its own files). When the
+ *  context carries no conversationId we fall back to the shared workspace
+ *  with a loud warn (the fallback degenerates to the shared sandbox
+ *  server-side too — better than crashing the tool). */
+export function codeSandboxTarget(
+  apiKey: string,
+  ctx: { conversationId?: string },
+): SandboxTarget {
+  const conversationId = ctx.conversationId ?? null;
+  if (!conversationId) {
+    console.warn(
+      "[e2b] code tool ran without a conversationId — falling back to the " +
+        "shared sandbox (per-chat file isolation unavailable for this call)",
+    );
+  }
+  return { apiKey, conversationId, mode: "separate" };
+}
+
+/** Code Mode tools: resolve the key, ensure THIS chat's sandbox is fresh
+ *  (per-chat rotation — the shared workspace and other chats are never
+ *  touched), and return the per-chat client. Returns null when no sandbox
+ *  key is configured (callers surface their NO_KEY_ERROR). */
+export async function codeSandboxForCtx(
+  ctx: ToolContext,
+): Promise<ResolvedSandbox | null> {
+  const apiKey = await resolveSandboxApiKey(ctx);
+  if (!apiKey) return null;
+  const target = codeSandboxTarget(apiKey, ctx);
+  await ensureFreshSandbox(apiKey, target);
+  // NOTE: deliberately NO shared-workspace auto-restore here — a code
+  // chat's sandbox is the app's own isolated world; the user-level cloud
+  // workspace restore belongs to the shared/agent path only.
+  return { ...target, client: targetE2BClient(target) };
+}
+
+/** Dual-mode surfaces (tools available in BOTH agent and code chats —
+ *  push/retrieve_workspace, image path resolution, …): a Code chat resolves
+ *  to THAT chat's own app sandbox; an agent chat keeps the legacy
+ *  user-level shared workspace (the user's sandbox_mode setting, exactly as
+ *  before). Freshness is ensured for whichever sandbox was resolved. */
+export async function chatSandboxForCtx(
+  ctx: ToolContext,
+): Promise<ResolvedSandbox | null> {
+  const apiKey = await resolveSandboxApiKey(ctx);
+  if (!apiKey) return null;
+  const conversationId = ctx.conversationId ?? null;
+  const target: SandboxTarget =
+    conversationId && (await isCodeChat(conversationId))
+      ? { apiKey, conversationId, mode: "separate" }
+      : { apiKey, conversationId: null, mode: ctx.sandboxMode ?? "shared" };
+  await ensureFreshSandbox(apiKey, target);
+  if (target.mode === "shared") {
+    // The shared path keeps the cloud-workspace auto-restore (unchanged);
+    // per-chat app sandboxes never trigger it.
+    maybeAutoRestoreWorkspace(apiKey);
+  }
+  return { ...target, client: targetE2BClient(target) };
 }

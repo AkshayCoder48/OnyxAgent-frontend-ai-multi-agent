@@ -83,7 +83,12 @@ function buildHandler(
         // Write the tool source + args to a temp file and exec
         const code = `${pythonSource}\n\nimport json\n_result = run(**json.loads('${JSON.stringify(args).replace(/'/g, "\\'")}'))\nprint(json.dumps(_result if not isinstance(_result, str) else _result))`;
         const { getE2BClient } = await import("@/lib/e2b/client");
-        const client = getE2BClient(apiKey, ctx.userId);
+        // Custom python tools are user-level surfaces (available in agent
+        // chats too), NOT per-chat Code tools — they run in the SHARED
+        // sandbox. (The 2nd argument is the CONVERSATION id; the old
+        // `ctx.userId` pass was a misuse — harmless in shared mode, but
+        // wrong.)
+        const client = getE2BClient(apiKey, null, "shared");
         // Use STREAMING Python execution so custom tool output appears
         // live in the tool call card (via onToolOutput callback). Previously
         // used the non-streaming client.runPython() which waited for the

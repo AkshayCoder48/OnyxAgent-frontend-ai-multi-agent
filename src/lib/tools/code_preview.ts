@@ -1,8 +1,10 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import {
+  codeSandboxForCtx,
+  resolveSandboxApiKey,
+} from "@/lib/e2b/sandbox-rotation";
 import { getScaffold, normalizeAppName } from "@/lib/code/scaffolds";
 import {
   NO_KEY_ERROR,
@@ -37,10 +39,15 @@ async function doStart(
 ): Promise<Record<string, unknown>> {
   const appName = normalizeAppName(args.name as string | undefined);
   const conversationId = ctx.conversationId ?? null;
-  const apiKey = await ensureFreshSandboxForCtx(ctx);
-  if (!apiKey) {
+  // THIS chat's OWN sandbox (one chat = one app — the same isolated
+  // filesystem create_app / create_file_chunk wrote the project into, with
+  // per-chat rotation included). The preview server must boot there, never
+  // in the shared workspace.
+  const sbx = await codeSandboxForCtx(ctx);
+  if (!sbx) {
     return { ok: false, error: NO_KEY_ERROR };
   }
+  const apiKey = sbx.apiKey;
 
   // Resolve the scaffold: explicit framework → the project files on disk
   // (detected) → this conversation's session history → static. Detecting
@@ -50,8 +57,7 @@ async function doStart(
   const explicit = getScaffold(args.framework as string | undefined);
   let scaffold = explicit;
   if (!scaffold) {
-    const client = getE2BClient(apiKey, null, "shared");
-    scaffold = await detectScaffold(client, appName);
+    scaffold = await detectScaffold(sbx.client, appName);
     ctx.onToolOutput?.(
       "",
       `Detected ${scaffold.label} project for "${appName}".`,
@@ -189,7 +195,10 @@ registerTool(
         ctx.conversationId,
       );
       const target = fresh ?? session;
-      const apiKey = await ensureFreshSandboxForCtx(ctx);
+      // Resolve just the KEY (no rotation work — stopping only kills the
+      // dev-server processes; stopPreviewSession itself targets the
+      // session-record's own per-chat sandbox).
+      const apiKey = await resolveSandboxApiKey(ctx);
       await stopPreviewSession(target, apiKey ?? undefined);
       return {
         kind: "preview",

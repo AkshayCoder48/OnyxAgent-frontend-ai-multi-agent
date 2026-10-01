@@ -13,10 +13,15 @@ export interface MarkdownContentProps {
   /** When true, renders the writing cursor inline at the end of the last
    *  paragraph — right next to the last letter, NOT on a new line below. */
   showCursor?: boolean;
-  /** True while the message is actively streaming. Enables the blue→ink
-   *  word tint on the newest words of the trailing paragraph (the
-   *  "StreamingText" streamer effect). */
+  /** True while the message is actively streaming. Enables the
+   *  character-level streaming fade on the trailing text (each fresh char
+   *  mounts as a `.letter-in` span: opacity 0.5→1, blur 5px→0, 0.02s/char
+   *  stagger — one continuous per-character stream, never word-based). */
   streaming?: boolean;
+  /** How many characters were revealed in the last ~700ms (the live
+   *  typewriter's fresh window). Drives the size of the trailing
+   *  animated-char window so it stays pop-free at any reveal pace. */
+  freshChars?: number;
 }
 
 /**
@@ -39,7 +44,7 @@ const MarkdownContentImpl = dynamic(
   },
 );
 
-export function MarkdownContent({ content, onCiteClick, sources, showCursor, streaming }: MarkdownContentProps) {
+export function MarkdownContent({ content, onCiteClick, sources, showCursor, streaming, freshChars }: MarkdownContentProps) {
   return (
     <MarkdownContentImpl
       content={content}
@@ -47,6 +52,7 @@ export function MarkdownContent({ content, onCiteClick, sources, showCursor, str
       sources={sources}
       showCursor={showCursor}
       streaming={streaming}
+      freshChars={freshChars}
     />
   );
 }

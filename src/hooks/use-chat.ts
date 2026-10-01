@@ -18,6 +18,10 @@ import { useConversationStore, useResearchStore } from "@/stores";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { startBackgroundTurn } from "@/lib/agent/background-turn";
 import { isCodeMode } from "@/lib/code-mode";
+import {
+  AUTO_ROUTER_PROVIDER_ID,
+  type RouterCandidate,
+} from "@/lib/auto-router";
 import { notifyConversationsChanged } from "@/lib/scheduler/chat-sync";
 import {
   executionHub,
@@ -228,6 +232,53 @@ export function useChat(options: UseChatOptions = {}) {
       const storeSelection = useChatStore.getState();
       const modelOverride = storeSelection.selectedModel ?? modelRef.current;
       const providerOverrideId = storeSelection.selectedProviderId ?? providerIdRef.current;
+
+      // ── AUTO ROUTER ────────────────────────────────────────────────────
+      // The routing sentinel (picked in the model popover when >1 provider
+      // exists) means "route EVERY round across all eligible providers"
+      // instead of resolving one. Candidates = every ACTIVE provider with at
+      // least one model + an API key, ONE candidate per provider (its first
+      // model — bounded by design so routing stays cheap + comparable).
+      // With ≤1 usable candidate the router degrades to the normal
+      // single-provider path below (providers[0] IS that candidate).
+      // NOTE (background turns): they are router-unaware — they resolve
+      // opts.provider ONCE at turn start, so an auto-router background turn
+      // runs entirely on the first candidate. Accepted limitation (the
+      // per-round routing lives in the foreground runtime, runtime.ts).
+      let routerCandidates: RouterCandidate[] | null = null;
+      if (providerOverrideId === AUTO_ROUTER_PROVIDER_ID) {
+        const candidates: RouterCandidate[] = [];
+        for (const row of providers) {
+          const firstModel = row.models?.[0];
+          if (!firstModel || !row.api_key_encrypted) continue;
+          try {
+            const apiKey = await aiProviderService.getDecryptedApiKey(row.id);
+            if (!apiKey) continue;
+            candidates.push({
+              key: row.id,
+              model: firstModel,
+              label: row.name,
+              provider: {
+                baseUrl: row.base_url,
+                apiKey,
+                model: firstModel,
+                modelType: row.model_type,
+                toolsEnabled: row.tools_enabled,
+                noPrefix: (row as { no_prefix?: boolean }).no_prefix ?? false,
+                thinkingEnabled:
+                  (row as { thinking_enabled?: boolean }).thinking_enabled ?? false,
+                disabledParams:
+                  (row as { disabled_params?: string[] }).disabled_params ?? [],
+              },
+            });
+          } catch {
+            // Key decryption failed for THIS provider — skip it; its
+            // siblings still route.
+          }
+        }
+        if (candidates.length > 1) routerCandidates = candidates;
+      }
+
       const selectedProvider =
         providerOverrideId != null
           ? (providers.find((p) => p.id === providerOverrideId) ?? providers[0])
@@ -244,6 +295,13 @@ export function useChat(options: UseChatOptions = {}) {
         console.debug(
           `[useChat] turn provider=${selectedProvider.name} model=${model || "(provider default)"}`,
         );
+        if (routerCandidates) {
+          console.debug(
+            `[useChat] auto-router active: ${routerCandidates.length} candidates — ${routerCandidates
+              .map((c) => `${c.label}:${c.model}`)
+              .join(" | ")}`,
+          );
+        }
       }
 
       // Load user settings (system prompt, auto-approve, etc.)
@@ -266,16 +324,26 @@ export function useChat(options: UseChatOptions = {}) {
         conversationId: currentConversationIdFromStore ?? conversationId ?? null,
         userMessage: message,
         fileIds,
-        provider: {
-          baseUrl: selectedProvider.base_url,
-          apiKey,
-          model,
-          modelType: selectedProvider.model_type,
-          toolsEnabled: selectedProvider.tools_enabled,
-          noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
-          thinkingEnabled: (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
-          disabledParams: (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
-        },
+        // AUTO ROUTER: when candidates exist, the fallback `provider` IS the
+        // first candidate (same config object) so router-unaware code paths
+        // (background turns) and the non-routing degenerate case behave
+        // identically; the runtime re-picks per round from
+        // `providerCandidates`.
+        provider: routerCandidates
+          ? routerCandidates[0]!.provider
+          : {
+              baseUrl: selectedProvider.base_url,
+              apiKey,
+              model,
+              modelType: selectedProvider.model_type,
+              toolsEnabled: selectedProvider.tools_enabled,
+              noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
+              thinkingEnabled:
+                (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
+              disabledParams:
+                (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
+            },
+        ...(routerCandidates ? { providerCandidates: routerCandidates } : {}),
         systemPrompt,
         temperature: temperatureRef.current,
         thinkingEffort: thinkingEffortRef.current,

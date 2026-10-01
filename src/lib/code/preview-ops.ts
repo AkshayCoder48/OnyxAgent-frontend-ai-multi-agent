@@ -14,7 +14,9 @@
  * callers await the SAME in-flight start).
  *
  * Flow (start):
- *   1. resolve the E2B client (shared sandbox — one per API key, unchanged),
+ *   1. resolve the E2B client — THIS chat's OWN sandbox ("separate" mode,
+ *      one chat = one app = its own filesystem; the same sandbox the
+ *      authoring tools wrote the project into),
  *   2. kill the conversation's previous dev server (restart hygiene),
  *   3. run the scaffold's install command (foreground, streamed progress),
  *   4. start the dev server as a DETACHED background command (start_server),
@@ -216,7 +218,16 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
   }
 
   try {
-    const client = getE2BClient(apiKey, null, "shared");
+    // THIS chat's OWN sandbox — the dev server must boot in the same
+    // isolated filesystem create_app / create_file_chunk wrote the project
+    // into (one chat = one app). Without a conversationId this degenerates
+    // to the legacy shared slot (defensive — warn loudly).
+    if (!conversationId) {
+      console.warn(
+        "[preview] startPreview called without a conversationId — falling back to the shared sandbox",
+      );
+    }
+    const client = getE2BClient(apiKey, conversationId, "separate");
     const cwd = scaffold.cwd(appName);
 
     // 0. SANDBOX SANITY — the project directory must exist in THIS sandbox.
@@ -375,10 +386,11 @@ async function startPreviewFromSession(
     return { ok: false, error: NO_KEY_ERROR };
   }
   // Prefer the framework recorded on the session; fall back to probing the
-  // project files (covers legacy records with unknown frameworks).
+  // project files (covers legacy records with unknown frameworks) — in
+  // THIS chat's own sandbox, where the project lives.
   let scaffold = getScaffold(session.framework);
   if (!scaffold) {
-    const client = getE2BClient(apiKey, null, "shared");
+    const client = getE2BClient(apiKey, conversationId, "separate");
     scaffold = await detectScaffold(client, session.name);
   }
   return startPreview({
@@ -424,7 +436,7 @@ async function killPreviewProcesses(
  * auto-start it again (Runtime PRD §5-6/§73-75).
  */
 export async function stopPreviewSession(
-  session: Pick<PreviewSession, "id" | "name" | "port">,
+  session: Pick<PreviewSession, "id" | "name" | "port" | "conversationId">,
   apiKey?: string,
 ): Promise<boolean> {
   const store = usePreviewSessionStore.getState();
@@ -439,7 +451,14 @@ export async function stopPreviewSession(
     return false;
   }
   try {
-    const client = getE2BClient(key, null, "shared");
+    // Kill the dev server in the sandbox it actually runs in: the chat's
+    // OWN sandbox when the record carries a conversationId (one chat = one
+    // app), else the legacy shared workspace (pre-isolation records).
+    const client = getE2BClient(
+      key,
+      session.conversationId ?? null,
+      session.conversationId ? "separate" : "shared",
+    );
     await killPreviewProcesses(client, session.name, session.port);
     store.markStatus(session.id, "stopped");
     return true;

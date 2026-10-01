@@ -12,7 +12,15 @@
  *   - "shared" (default): a single Sandbox instance per apiKey, reused
  *     across all conversations. Lower latency, fewer sandboxes.
  *   - "separate": a new Sandbox per (apiKey, conversationId). Isolation
- *     between conversations, but more sandboxes created.
+ *     between conversations, but more sandboxes created. Code Mode uses
+ *     this for EVERY code chat (one chat = one app = its own filesystem).
+ *
+ * SANDBOX-ID STORAGE (per-mode keys): the persisted sandbox id lives at
+ *   - shared:  `e2b-sandbox-id:<apiKey>`                (legacy — unchanged)
+ *   - separate: `e2b-sandbox-id:<apiKey>:<conversationId>`
+ * so per-conversation clients never fight over one localStorage slot. A
+ * separate-mode client WITHOUT a conversationId defensively falls back to
+ * the legacy key (it degenerates to the shared sandbox server-side too).
  *
  * Backward-compat: the class is still named `E2BClient` and the factory
  * `getE2BClient()` still exists so existing call sites don't break.
@@ -54,6 +62,21 @@ export class E2BError extends Error {
   }
 }
 
+/** localStorage key for a client's persisted sandbox id. Shared mode keeps
+ *  the LEGACY key (no migration); separate mode scopes it per conversation
+ *  so each chat's client persists/reconnects to ITS OWN sandbox. Must be
+ *  used by EVERY read/write/remove of a sandbox id (the rotation loop in
+ *  sandbox-rotation.ts imports this too — one source of truth). */
+export function sandboxIdStorageKey(
+  apiKey: string,
+  conversationId: string | null,
+  mode: "shared" | "separate",
+): string {
+  return mode === "separate" && conversationId
+    ? `e2b-sandbox-id:${apiKey}:${conversationId}`
+    : `e2b-sandbox-id:${apiKey}`;
+}
+
 // Cache of E2BClient instances by (apiKey, conversationId, mode).
 const clientCache = new Map<string, E2BClient>();
 
@@ -75,6 +98,18 @@ export function evictAllE2BClients(): void {
   clientCache.clear();
 }
 
+/** Evict ONE cached client (exact apiKey + conversationId + mode match).
+ *  Used by per-conversation sandbox rotation: only the rotated chat's client
+ *  is dropped (it reloads its sandbox id from its per-chat localStorage
+ *  key), while every OTHER chat's client keeps its in-memory id. */
+export function evictE2BClient(
+  apiKey: string,
+  conversationId: string | null,
+  mode: "shared" | "separate",
+): void {
+  clientCache.delete(`${apiKey}:${conversationId ?? ""}:${mode}`);
+}
+
 export class E2BClient {
   private apiKey: string;
   private conversationId: string | null;
@@ -93,11 +128,19 @@ export class E2BClient {
     this.apiKey = apiKey;
     this.conversationId = conversationId;
     this.mode = mode;
-    // Load the sandbox ID from localStorage
+    // Load the sandbox ID from localStorage — the PER-MODE key (shared =
+    // legacy slot, separate = per-conversation slot) so separate-mode
+    // clients for different conversations can never adopt each other's
+    // sandbox ids.
     if (typeof window !== "undefined") {
-      const stored = window.localStorage.getItem(`e2b-sandbox-id:${apiKey}`);
+      const stored = window.localStorage.getItem(this.sandboxIdKey());
       if (stored) this.sandboxId = stored;
     }
+  }
+
+  /** The per-mode localStorage slot this client persists its sandbox id in. */
+  private sandboxIdKey(): string {
+    return sandboxIdStorageKey(this.apiKey, this.conversationId, this.mode);
   }
 
   /** Make a call to the server-side sandbox API. Auto-recovers from dead
@@ -112,8 +155,11 @@ export class E2BClient {
     // ── Request coalescing ──────────────────────────────────────────
     // Identical in-flight requests (same action + args + sandbox) share a
     // single promise so concurrent tools don't stampede the rate-limited
-    // sandbox API with duplicates.
-    const coalesceKey = `${this.apiKey}:${this.mode}:${action}:${JSON.stringify(args)}`;
+    // sandbox API with duplicates. The conversationId is part of the key:
+    // two separate-mode clients for DIFFERENT conversations must never share
+    // an in-flight call (they target different sandboxes even when the args
+    // are identical).
+    const coalesceKey = `${this.apiKey}:${this.mode}:${this.conversationId ?? ""}:${action}:${JSON.stringify(args)}`;
     const inFlight = E2BClient.inFlightCalls.get(coalesceKey);
     if (inFlight) {
       try {
@@ -210,7 +256,7 @@ export class E2BClient {
       if (sid && sid !== this.sandboxId) {
         this.sandboxId = sid;
         if (typeof window !== "undefined") {
-          window.localStorage.setItem(`e2b-sandbox-id:${this.apiKey}`, sid);
+          window.localStorage.setItem(this.sandboxIdKey(), sid);
         }
       }
     }
@@ -230,7 +276,7 @@ export class E2BClient {
       // Clear the stored sandbox ID so the retry creates a new one.
       this.sandboxId = null;
       if (typeof window !== "undefined") {
-        window.localStorage.removeItem(`e2b-sandbox-id:${this.apiKey}`);
+        window.localStorage.removeItem(this.sandboxIdKey());
       }
       // Retry the original action with sandboxId=null. The server will see
       // no clientSandboxId, skip the cache lookup (which we just evicted by
@@ -243,7 +289,7 @@ export class E2BClient {
         if (sid) {
           this.sandboxId = sid;
           if (typeof window !== "undefined") {
-            window.localStorage.setItem(`e2b-sandbox-id:${this.apiKey}`, sid);
+            window.localStorage.setItem(this.sandboxIdKey(), sid);
           }
         }
       }
@@ -596,7 +642,7 @@ export class E2BClient {
             if (msg.sandboxId && msg.sandboxId !== this.sandboxId) {
               this.sandboxId = msg.sandboxId;
               if (typeof window !== "undefined") {
-                window.localStorage.setItem(`e2b-sandbox-id:${this.apiKey}`, msg.sandboxId);
+                window.localStorage.setItem(this.sandboxIdKey(), msg.sandboxId);
               }
             }
             if (msg.type === "stdout" && msg.data) {
@@ -737,7 +783,10 @@ export class E2BClient {
     // getE2BClient() call creates a fresh client (which will create a new
     // sandbox on its first operation in the new mode).
     for (const [key] of clientCache.entries()) {
-      if (key.startsWith(apiKey)) {
+      // NOTE the ":" — a bare startsWith(apiKey) would also evict clients of
+      // a DIFFERENT api key that merely shares a prefix (e.g. e2b_ab vs
+      // e2b_abc), needlessly dropping their in-memory sandbox ids.
+      if (key.startsWith(`${apiKey}:`)) {
         clientCache.delete(key);
       }
     }

@@ -26,8 +26,8 @@
  */
 
 import { registerTool, type ToolContext } from "./registry";
-import { getE2BClient, type E2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { type E2BClient } from "@/lib/e2b/client";
+import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { webSession } from "./code_web_session";
 import { findPreviewSession, usePreviewSessionStore } from "@/stores/preview-session-store";
@@ -284,9 +284,9 @@ Returns a serialized result: primitives, objects, arrays and DOM-derived info co
     if (!code.trim()) return { error: "'code' is required." };
     const target = String(args.target ?? "current_preview");
 
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const progress = (line: string) => ctx.onToolOutput?.("", line, "stdout");
     const page = await ensurePageOnTarget(client, ctx, {
@@ -383,9 +383,9 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const progress = (line: string) => ctx.onToolOutput?.("", line, "stdout");
     const page = await ensurePageOnTarget(client, ctx, {
@@ -449,9 +449,9 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const probed = await probeProject(ctx, client, args.project as string | undefined);
     if ("error" in probed) return { error: probed.error };
@@ -503,9 +503,9 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const probed = await probeProject(ctx, client, args.project as string | undefined);
     if ("error" in probed) return { error: probed.error };
@@ -567,9 +567,9 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const probed = await probeProject(ctx, client, args.project as string | undefined);
     if ("error" in probed) return { error: probed.error };
@@ -647,9 +647,9 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const probed = await probeProject(ctx, client, args.project as string | undefined);
     if ("error" in probed) return { error: probed.error };
@@ -731,9 +731,9 @@ Each check reports passed / failed / skipped with a summary. Use this after sign
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
+    const client = sbx.client;
     const progress = (line: string) => ctx.onToolOutput?.("", line, "stdout");
 
     const probed = await probeProject(ctx, client, args.project as string | undefined);

@@ -1,7 +1,8 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
+import type { E2BClient } from "@/lib/e2b/client";
+import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 
 /**
  * Security audit tool — scans the user's workspace for common security issues.
@@ -45,7 +46,7 @@ const TEXT_EXTENSIONS = new Set([
 
 /** Recursively list all files under `rootPath` in the E2B sandbox. */
 async function listSandboxFiles(
-  client: ReturnType<typeof getE2BClient>,
+  client: E2BClient,
   rootPath: string,
 ): Promise<string[]> {
   const out: string[] = [];
@@ -84,15 +85,18 @@ registerTool(
     const scanPath = (args.path as string) || ".";
     const findings: Finding[] = [];
 
-    const sandboxKey = ctx.sandboxApiKey ?? ctx.e2bApiKey;
-    if (!sandboxKey) {
+    // Chat-aware: a Code Mode chat audits THIS app's own per-chat sandbox
+    // (one chat = one app); an agent chat audits the user's shared workspace
+    // (unchanged).
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) {
       return {
         error: "Security audit requires an E2B sandbox. Configure one in Settings → Config → E2B Sandbox.",
       };
     }
 
     try {
-      const client = getE2BClient(sandboxKey, ctx.conversationId, ctx.sandboxMode ?? "shared");
+      const client = sbx.client;
       const rootPath = scanPath === "."
         ? "/home/user"
         : (scanPath.startsWith("/") ? scanPath : `/home/user/${scanPath}`);

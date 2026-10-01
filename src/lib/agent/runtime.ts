@@ -71,6 +71,12 @@ import {
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import { manageContext } from "@/lib/agent/context/context-manager";
+import {
+  classifyRouterError,
+  pickCandidate,
+  reportResult,
+  type RouterCandidate,
+} from "@/lib/auto-router";
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -122,6 +128,14 @@ export interface AgentTurnOptions {
    *  the SAME generation — the processor then reuses the placeholder
    *  assistant message instead of creating a duplicate. */
   generationId?: string;
+  /** AUTO ROUTER — per-round model routing. When this carries MORE THAN
+   *  ONE candidate, `runAgentTurn` re-picks which provider+model serves
+   *  EVERY LLM round of the turn (health-first + round-robin — see
+   *  lib/auto-router.ts) instead of using one fixed provider. `provider`
+   *  above is set to the FIRST candidate by the caller, so router-unaware
+   *  code paths keep working unchanged. Undefined / ≤1 candidate = today's
+   *  single-provider behavior, byte for byte. */
+  providerCandidates?: RouterCandidate[];
 }
 
 export interface AgentTurnResult {
@@ -1024,7 +1038,10 @@ async function streamRound(
 
   emit({
     type: "model_request_start",
-    data: { round: roundNumber ?? 1 },
+    // `model` = the model actually serving THIS round (with the Auto
+    // Router it can differ round to round; the event-processor stamps it
+    // onto the assistant message so the UI badge shows the served model).
+    data: { round: roundNumber ?? 1, model: provider.model },
     timestamp: nowISO(),
   });
 
@@ -2224,6 +2241,22 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // while it is (after the turn ends, the final save owns the row).
   let turnActive = true;
 
+  // ── AUTO ROUTER (per-round model routing) ──────────────────────────────
+  // With >1 candidate the runtime re-picks the provider+model for EVERY
+  // LLM round (health-first + round-robin — lib/auto-router.ts). Without
+  // candidates (the normal single-provider selection) every `roundProvider`
+  // below IS `opts.provider` and the code path is byte-for-byte today's.
+  const routerCandidates =
+    opts.providerCandidates && opts.providerCandidates.length > 1
+      ? opts.providerCandidates
+      : null;
+  let previousRouterKey: string | undefined;
+  /** Model that served the most recent round — stamped onto every persisted
+   *  checkpoint (modelName) so the UI/shared views show what ACTUALLY
+   *  served the turn (with the router this can differ from
+   *  opts.provider.model). */
+  let lastServedModel = opts.provider.model;
+
   while (round < effectiveMaxRounds) {
     round += 1;
     roundStartTimes[round] = Date.now();
@@ -2244,12 +2277,31 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       };
     }
 
+    // AUTO ROUTER: pick THIS round's provider+model. The pick itself is
+    // counted as "served" inside pickCandidate; the outcome is reported
+    // after the round via reportResult. A failed candidate is benched for
+    // 60s, so the transient-retry path below (`round -= 1; continue`)
+    // naturally REROUTES the retried round to the next-best candidate.
+    let roundProvider = opts.provider;
+    if (routerCandidates) {
+      const candidate = pickCandidate(routerCandidates, round, previousRouterKey);
+      previousRouterKey = candidate.key;
+      roundProvider = candidate.provider;
+      lastServedModel = candidate.model;
+      if (process.env.NODE_ENV !== "production") {
+        console.debug(
+          `[agent] auto-router round ${round}: ${candidate.label} → ${candidate.model}`,
+        );
+      }
+    }
+
     let roundResult: RoundResult;
+    const roundAttemptStart = Date.now();
     try {
       roundResult = await streamRound({
         messages,
         tools,
-        provider: opts.provider,
+        provider: roundProvider,
         temperature: opts.temperature,
         thinkingEffort: opts.thinkingEffort,
         emit,
@@ -2257,8 +2309,25 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         roundNumber: round,
         reasoningReplay,
       });
+      // Router health: a completed round is a success — reset the error
+      // streak + record the round latency (the routing tie-break).
+      if (routerCandidates && previousRouterKey) {
+        reportResult(previousRouterKey, {
+          ok: true,
+          latencyMs: Date.now() - roundAttemptStart,
+        });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Router health: the failure benches this candidate for 60s (≥3
+      // consecutive failures keep it benched) and the round is retried on
+      // the next-best candidate via the pick above.
+      if (routerCandidates && previousRouterKey) {
+        reportResult(previousRouterKey, {
+          ok: false,
+          errorKind: classifyRouterError(message),
+        });
+      }
 
       // AUTO CONTEXT ERROR DETECTION: If the error is related to context
       // window overflow or DEGRADED functions, automatically generate a
@@ -2274,7 +2343,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));
         logWarn("agent", `Transient network/timeout error — auto-retrying (attempt ${retryCountThisTurn}/3)`, {
           detail: message,
-          context: { round, model: opts.provider.model },
+          context: { round, model: lastServedModel },
         });
         // IDEMPOTENT RETRY (timeline PRD §17): this round is about to be
         // RE-STREAMED. Everything the failed attempt already emitted
@@ -2297,7 +2366,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         console.warn("[agent] Context error detected, generating handoff + retrying...", message.slice(0, 100));
         logWarn("agent", "Context window error — generating handoff letter and retrying with reduced history", {
           detail: message,
-          context: { round, model: opts.provider.model },
+          context: { round, model: lastServedModel },
         });
         // Generate handoff letter (saves full chat to file + builds summary)
         handoffContext = await generateHandoff();
@@ -2308,12 +2377,13 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         // Reset messages array for the retry
         messages.length = 0;
         messages.push(...priorMessages);
-        // Retry the round
+        // Retry the round (same routed provider as the failed attempt — a
+        // context overflow is a history problem, not a provider problem).
         try {
           roundResult = await streamRound({
             messages,
             tools,
-            provider: opts.provider,
+            provider: roundProvider,
             temperature: opts.temperature,
             thinkingEffort: opts.thinkingEffort,
             emit,
@@ -2321,10 +2391,24 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             roundNumber: round,
             reasoningReplay,
           });
+          if (routerCandidates && previousRouterKey) {
+            reportResult(previousRouterKey, {
+              ok: true,
+              latencyMs: Date.now() - roundAttemptStart,
+            });
+          }
         } catch (retryErr) {
           // Retry also failed — give up and report the original error
           // (the emitted error event is mirrored into the Logs store by
           // the event processor — no double-logging here).
+          if (routerCandidates && previousRouterKey) {
+            reportResult(previousRouterKey, {
+              ok: false,
+              errorKind: classifyRouterError(
+                retryErr instanceof Error ? retryErr.message : String(retryErr),
+              ),
+            });
+          }
           const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
           emit({
             type: "error",
@@ -2339,7 +2423,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               role: "assistant",
               content: `(error: context limit reached. Full chat saved to /chats folder. ${retryMsg})`,
               toolCalls: allToolCalls,
-              modelName: opts.provider.model,
+              modelName: lastServedModel,
               isStreaming: false,
               generation: generationSummary(true),
             },
@@ -2384,7 +2468,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               lastAssistantTextBeforeTools,
             ),
             toolCalls: allToolCalls,
-            modelName: opts.provider.model,
+            modelName: lastServedModel,
             isStreaming: false,
             generation: generationSummary(true),
           },
@@ -2523,7 +2607,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           reasoning: roundResult.reasoning || undefined,
           parts: finalParts,
           toolCalls: allToolCalls,
-          modelName: opts.provider.model,
+          modelName: lastServedModel,
           isStreaming: false,
           generation: generationSummary(false),
         },
@@ -2845,7 +2929,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
                     reasoning: lastAssistantReasoning || undefined,
                     parts: assistantParts,
                     toolCalls: allToolCalls,
-                    modelName: opts.provider.model,
+                    modelName: lastServedModel,
                     isStreaming: true,
                   })
                   .catch(() => {
@@ -2925,7 +3009,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           reasoning: lastAssistantReasoning || undefined,
           parts: assistantParts,
           toolCalls: allToolCalls,
-          modelName: opts.provider.model,
+          modelName: lastServedModel,
           isStreaming: true,
         },
       );
@@ -2940,7 +3024,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // The agent may have produced useful intermediate text or tool results;
   // surfacing those is better than dropping them on the floor with an error.
   logWarn("agent", `Stopped: reached max rounds (${effectiveMaxRounds}) — showing the last response`, {
-    context: { model: opts.provider.model, rounds: effectiveMaxRounds, tool_calls: allToolCalls.length },
+    context: { model: lastServedModel, rounds: effectiveMaxRounds, tool_calls: allToolCalls.length },
   });
   const savedMessage = await conversationService.saveAgentCheckpoint(
     conversationId,
@@ -2962,7 +3046,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         lastAssistantTextBeforeTools,
       ),
       toolCalls: allToolCalls,
-      modelName: opts.provider.model,
+      modelName: lastServedModel,
       isStreaming: false,
       generation: generationSummary(false),
     },

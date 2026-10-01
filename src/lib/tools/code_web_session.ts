@@ -1,8 +1,7 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { getE2BClient } from "@/lib/e2b/client";
-import { ensureFreshSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import type { E2BClient } from "@/lib/e2b/client";
 
@@ -407,9 +406,11 @@ registerTool(
   async (args, ctx) => {
     const url = String(args.url ?? "");
     if (!url) return { ok: false, error: "url is required." };
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { ok: false, error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    // THIS chat's own sandbox — the web session tests the app preview that
+    // runs in the same per-chat filesystem (one chat = one app).
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { ok: false, error: NO_KEY_ERROR };
+    const client = sbx.client;
     const progress = (line: string) => ctx.onToolOutput?.("", line, "stdout");
 
     const booted = await ensureDriver(client, progress);
@@ -478,9 +479,9 @@ registerTool(
   },
   async (args, ctx) => {
     const action = String(args.action ?? "");
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { ok: false, error: NO_KEY_ERROR };
-    const client = getE2BClient(apiKey, null, "shared");
+    const sbx = await codeSandboxForCtx(ctx);
+    if (!sbx) return { ok: false, error: NO_KEY_ERROR };
+    const client = sbx.client;
 
     const booted = await ensureDriver(client);
     if (!booted.ok) return { ok: false, error: booted.error };
