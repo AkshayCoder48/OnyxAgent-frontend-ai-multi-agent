@@ -700,6 +700,10 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     // registry tool that has no native sandbox implementation. The runner
     // exposes these to the LLM as bridged tools executed back here.
     let browserTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [];
+    // MODE ISOLATION (OnyxCode PRD §3) — record-driven (the conversation
+    // decides, not the current route: a background job outlives the page).
+    // Defaults to the live route flag; upgraded to the record's mode below.
+    let bgCodeMode = isCodeMode();
     try {
       const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
       await loadDynamicTools(ctx.userId);
@@ -738,6 +742,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
             (typeof lastUser?.content === "string" ? lastUser.content : "") || null,
           usedToolNames: used,
         };
+        bgCodeMode = conv?.mode === "code";
       } catch {
         bgScope = undefined; // unscoped — bridge everything (legacy behavior)
       }
@@ -748,6 +753,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
 
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
+      codeMode: bgCodeMode,
       provider: {
         baseUrl: ctx.turn.provider.baseUrl,
         apiKey: ctx.turn.provider.apiKey,

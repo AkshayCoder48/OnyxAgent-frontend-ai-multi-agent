@@ -150,6 +150,19 @@ const safePath = (p) => {
   return abs;
 };
 
+// Magic-byte image sniffing for preview_image's workspace-path support —
+// mirrors src/lib/tools/image-sources.ts sniffImageMime (the file's
+// extension is never trusted, the CONTENT decides).
+const sniffImageMime = (buf) => {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image/gif";
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return "image/webp";
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return "image/bmp";
+  return null;
+};
+
 // ── TOOL-ARG REPAIR (PRD "Create File causes provider SSE failure") ──────
 // Self-contained mirror of src/lib/agent/tool-args.ts (this script is
 // standalone by design, like the param policy above).
@@ -577,7 +590,10 @@ function parseBareToolCall(text) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const name = typeof parsed.name === "string" ? parsed.name
     : (parsed.function && typeof parsed.function.name === "string" ? parsed.function.name : null);
-  if (!name || !TOOLS.some((x) => x.name === name)) return null;
+  // ALL_TOOLS (not the raw TOOLS table): in agent mode the coding tools are
+  // filtered out, so a bare-text tool call naming them must NOT be promoted
+  // out of plain text either (mode isolation defense in depth).
+  if (!name || !ALL_TOOLS.some((x) => x.name === name)) return null;
   let args = parsed.arguments ?? (parsed.function && parsed.function.arguments) ?? {};
   if (typeof args === "string") {
     try { args = JSON.parse(args); } catch { /* keep the string */ }
@@ -2241,23 +2257,54 @@ const TOOLS = [
   },
   {
     name: "preview_image",
-    description: "Display an image inline in the chat. Use this to show the user a visual — a generated image, a screenshot, a diagram URL, a chart from an external service, etc. Accepts: - url: An HTTP/HTTPS URL to an image (e.g. \"https://example.com/chart.png\") - base64: A base64-encoded image with data URI prefix (e.g. \"data:image/png;base64,iVBOR...\") - alt: Optional alt text / caption shown below the image The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.",
+    description: "Display an image inline in the chat. Use this to show the user a visual — a generated image, a screenshot, a diagram URL, a chart from an external service, etc. Accepts: - url: An HTTP/HTTPS URL to an image (e.g. \"https://example.com/chart.png\") — or a workspace path (same as path) - base64: A base64-encoded image with data URI prefix (e.g. \"data:image/png;base64,iVBOR...\") - path: A workspace/sandbox image path (e.g. \"projects/my-app/public/logo.png\", \".onyx/websession/shots/shot-2.png\", \"uploads/photo.jpg\") - alt: Optional alt text / caption shown below the image The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.",
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string", description: "HTTP/HTTPS URL of the image to display." },
+        url: { type: "string", description: "HTTP/HTTPS URL of the image to display — or a workspace/sandbox path." },
         base64: { type: "string", description: "Base64 data URI of the image (e.g. 'data:image/png;base64,iVBOR...'). Use this when you have the raw image data." },
+        path: { type: "string", description: "Workspace image to display: a sandbox path (e.g. 'uploads/photo.jpg', '.onyx/websession/shots/shot-2.png')." },
         alt: { type: "string", description: "Optional caption / alt text shown below the image." },
       },
       additionalProperties: false,
     },
     run: async (args) => {
-      const url = String(args.url || args.base64 || "");
-      if (!url) return { error: "Either 'url' or 'base64' must be provided." };
-      if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("data:image/")) {
-        return { error: "URL must start with http://, https://, or data:image/" };
+      const alt = String(args.alt || "");
+      const base64 = String(args.base64 || "").trim();
+      const urlArg = String(args.url || "").trim();
+      const pathArg = String(args.path || "").trim();
+      if (base64) {
+        const url = base64.startsWith("data:")
+          ? base64
+          : "data:image/png;base64," + base64.replace(/\s+/g, "");
+        return { kind: "image_preview", url, alt };
       }
-      return { kind: "image_preview", url, alt: String(args.alt || "") };
+      const httpish = (s) => /^https?:\/\//i.test(s) || s.startsWith("data:image/");
+      if (urlArg && httpish(urlArg)) {
+        return { kind: "image_preview", url: urlArg, alt };
+      }
+      // Workspace path — explicit "path", OR a "url" that isn't http(s)/data:
+      // (models frequently put workspace paths in "url"; that used to
+      // hard-fail with "URL must start with http://, https://, or data:image/").
+      const candidate = pathArg || urlArg;
+      if (!candidate) return { error: "Either 'url', 'base64', or 'path' must be provided." };
+      const abs = safePath(candidate);
+      if (!abs) return { error: "Invalid path: " + candidate };
+      try {
+        const buf = await fs.readFile(abs);
+        if (buf.length > 12 * 1024 * 1024) {
+          return { error: "Image too large to preview (>12 MB): " + candidate };
+        }
+        const mime = sniffImageMime(buf);
+        if (!mime) return { error: "Not a recognized image (PNG/JPEG/GIF/WebP/BMP): " + candidate };
+        return {
+          kind: "image_preview",
+          url: "data:" + mime + ";base64," + buf.toString("base64"),
+          alt: alt || candidate,
+        };
+      } catch (e) {
+        return { error: "Failed to read image '" + candidate + "': " + friendlyErr(e) };
+      }
     },
   },
   {
@@ -2359,6 +2406,22 @@ const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
 const BRIDGE_TIMEOUT_MS = { ask_user: 900_000 };
 
 let ALL_TOOLS = TOOLS;
+
+// MODE ISOLATION (OnyxCode PRD §3): sandbox-native tools that are
+// OnyxCode-ONLY — the coding write path + E2B execution. Dropped from the
+// LLM surface for normal Agent background turns (state.codeMode !== true).
+// Files stay shared: read_file, list_folder, delete_file, create_folder,
+// move_file, send_file, send_folder, search_documents all remain.
+const NATIVE_CODE_ONLY_TOOLS = new Set([
+  "write_file",
+  "create_file",
+  "edit_file",
+  "verify_path",
+  "create_file_chunk",
+  "read_file_section",
+  "run_terminal",
+  "run_python",
+]);
 
 async function runBridgeTool(callId, name, args) {
   const token = String(callId || name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
@@ -2482,6 +2545,18 @@ async function main() {
       });
     }
     if (bridged.length) ALL_TOOLS = TOOLS.concat(bridged);
+  }
+  // MODE ISOLATION (OnyxCode PRD §3): a normal Agent background turn never
+  // sees the sandbox-native CODING tools — file authoring (write_file,
+  // create_file, edit_file, the chunked writer trio) and E2B execution
+  // (run_terminal, run_python) are OnyxCode-only, exactly like
+  // filterToolsForRequest in the foreground runtime. Files stay shared:
+  // reading, listing, deleting, sending and searching remain available.
+  // (state.browserTools is already mode-filtered client-side by
+  // collectBridgeableTools; legacy state files without the flag are treated
+  // as agent-mode.)
+  if (state.codeMode !== true) {
+    ALL_TOOLS = ALL_TOOLS.filter((t) => !NATIVE_CODE_ONLY_TOOLS.has(t.name));
   }
   // Tool-list text (the SAME discipline the in-browser runtime uses) so the
   // model knows its exact surface — prevents hallucinated tool names.
