@@ -97,7 +97,7 @@ export function Hero({
         <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
           <Link
             href={primaryCta.href}
-            className="bg-foreground text-background hover:bg-foreground/90 group inline-flex items-center gap-3 rounded-full py-2.5 pr-2 pl-7 text-base font-medium transition-colors"
+            className="bg-foreground text-background hover:bg-foreground/90 group inline-flex items-center gap-3 rounded-full py-2.5 pr-2 pl-7 text-base font-medium bg-[linear-gradient(105deg,rgba(255,255,255,0.14)_0%,rgba(255,255,255,0.07)_20%,transparent_38%,rgba(255,255,255,0.4)_48%,rgba(255,255,255,0.4)_52%,transparent_58%)] [background-size:250%_100%] hover:[background-position:100%_0] [transition:color_.25s,background-color_.25s,background-position_.7s_cubic-bezier(0.25,1,0.5,1)]"
           >
             <span>{primaryCta.label}</span>
             <span className="bg-brand text-brand-foreground flex h-9 w-9 items-center justify-center rounded-full transition-transform group-hover:rotate-45">

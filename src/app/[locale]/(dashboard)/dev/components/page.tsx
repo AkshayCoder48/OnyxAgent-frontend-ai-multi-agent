@@ -53,6 +53,8 @@ import {
   IconButton,
   Input,
   SectionHeading,
+  ShinyButton,
+  ShinyButtonEmerald,
 } from "@/components/ui";
 
 /**
@@ -103,6 +105,23 @@ function Gallery() {
         <IconButton aria-label="Delete" size="icon">
           <Trash2 />
         </IconButton>
+      </Section>
+
+      <Section title="Shiny Buttons">
+        {/* Gleam-edge, themed on-brand (cyan fill, light-cyan conic sweep,
+            white shine, pill radius). */}
+        <ShinyButton
+          label="Get Started"
+          fillColor="var(--color-primary)"
+          labelColor="var(--color-primary-foreground)"
+          accentColor="var(--color-brand-muted)"
+          accentSoftColor="#ffffff"
+          cornerRadius={999}
+        />
+        {/* Gleam-edge, the component's stock look (black fill, orange sweep). */}
+        <ShinyButton label="Get Started" cornerRadius={999} />
+        {/* The emerald shine sweep. */}
+        <ShinyButtonEmerald>Emerald Shine</ShinyButtonEmerald>
       </Section>
 
       <Section title="Badges">

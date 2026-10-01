@@ -1,5 +1,7 @@
 export { Button, buttonVariants } from "./button";
 export { IconButton } from "./icon-button";
+export { ShinyButton } from "./shiny-button";
+export { default as ShinyButtonEmerald } from "./shiny-button-emerald";
 export { FormField } from "./form-field";
 export { ConfirmDialog } from "./confirm-dialog";
 export { SectionHeading } from "./section-heading";

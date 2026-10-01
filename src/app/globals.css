@@ -13,6 +13,10 @@
    instantly with no animation (the "sidebars suddenly appear" bug). */
 @import "tw-animate-css";
 @import "./glass-buttons.css";
+/* Fluid shine — always-on glossy sweep for every raw <button>; the
+   <Button> cva carries its own sweep in button.tsx. Stands down while the
+   experimental glass skin is active. */
+@import "./shiny-buttons.css";
 
 /* =========================================================================
    Design tokens — single brand var drives the whole app.

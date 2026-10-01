@@ -1,0 +1,100 @@
+/* =========================================================================
+   FLUID SHINE — the always-on glossy sweep for every raw <button>.
+   =========================================================================
+   Companion to the shiny <Button> variants (src/components/ui/button.tsx):
+   buttons that don't go through the cva (Radix triggers, sheet/dialog
+   close buttons, prompt cards, segmented controls, icon strips…) still
+   get the fluid shine. A soft white glint slides across the button on
+   hover / focus-visible, and flashes across on touch presses.
+
+   Stand-down list (a button is left completely untouched when it …):
+   - `.exp-glass` is on <html> — the experimental glass skin owns every
+     button pseudo-layer while it is active.
+   - carries a `gleam-edge` class — the self-contained ShinyButton
+     component brings its own sweeping conic edge + shimmer.
+   - uses Tailwind `before:*` utilities — the button owns its ::before
+     (e.g. `.cite-chip`'s -inset-2 hit-area pad), so it keeps it.
+   - is a `.dot-nav` indicator — its ::before is the extended tap pad
+     on mobile; a glint would shrink the target area.
+
+   Otherwise colour-aware by construction (the glint is a white
+   screen-blend, so it reads on the light canvas AND the dark theme, over
+   any fill), layout-safe (no padding/size/typography changes;
+   `border-radius: inherit` clips to any shape; `pointer-events: none`
+   keeps every hit target intact — un-layered on purpose, same as
+   glass-buttons.css, which is what makes "every button" actually work)
+   and motion-safe (`prefers-reduced-motion` fades the glint out).
+   ========================================================================= */
+
+/* Only position buttons that aren't already absolutely placed — Tailwind's
+   .absolute/.fixed/.sticky layered utilities must keep winning. */
+:root:not(.exp-glass)
+  button:not(.absolute):not(.fixed):not(.sticky):not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip) {
+  position: relative;
+}
+
+/* The glint — a 250%-wide gradient whose highlight band sits just outside
+   the visible 40% window at rest (0% 0) and just outside it again once
+   hovered (100% 0), so the band makes exactly one full pass per hover. */
+:root:not(.exp-glass)
+  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+
+  background: linear-gradient(
+    105deg,
+    transparent 42%,
+    rgba(255, 255, 255, 0.4) 50%,
+    transparent 58%
+  );
+  background-size: 250% 100%;
+  background-position: 0% 0;
+  background-repeat: no-repeat;
+
+  mix-blend-mode: screen;
+  opacity: 0;
+
+  transition:
+    background-position 650ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 180ms ease;
+}
+
+:root:not(.exp-glass)
+  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):hover::before,
+:root:not(.exp-glass)
+  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):focus-visible::before {
+  opacity: 1;
+  background-position: 100% 0;
+}
+
+/* Touch devices — no hover to ride, so the press itself flashes the glint
+   across in one long, lazy sweep. */
+@media (hover: none) and (pointer: coarse) {
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):active::before {
+    opacity: 1;
+    background-position: 100% 0;
+    transition:
+      background-position 900ms cubic-bezier(0.25, 1, 0.5, 1),
+      opacity 120ms ease;
+  }
+}
+
+/* Reduced motion — no sweep at all. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip)::before,
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):hover::before,
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):focus-visible::before,
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):active::before {
+    opacity: 0;
+    transition: none;
+  }
+}
