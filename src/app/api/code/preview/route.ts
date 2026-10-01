@@ -1,18 +1,32 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   checkPreviewSession,
+  ensurePreviewSession,
   listPreviewSessions,
+  previewSessionIdFor,
   startPreviewSession,
   stopPreviewSession,
+  stopWorkspacePreviews,
 } from "@/lib/agent/code-tools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Preview tab backing — lists/starts/stops/checks live preview sessions.
- * The live serving happens in the preview mini-service (port 3212); this
- * route keeps the DB records in sync and bridges to the service.
+ * Preview tab backing — ONE app project per Code chat.
+ *
+ * GET   ?workspace=W → the workspace's single preview session (plus the raw
+ *                      list for backwards compatibility).
+ * POST  { action: "ensure" }         → rehydrate: adopt running, else start
+ *                                      from persisted files when a real page
+ *                                      exists (silent when there is nothing
+ *                                      previewable — no fake preview).
+ * POST  { action: "start" }          → explicit Go live (refreshes the same
+ *                                      deterministic session id).
+ * POST  { action: "stop" }           → stop one session.
+ * POST  { action: "stop_workspace" } → leaving the Code workspace: stop every
+ *                                      running session (runtime destroyed,
+ *                                      files preserved).
  */
 
 function workspaceParam(request: NextRequest): string | null {
@@ -27,7 +41,12 @@ export async function GET(request: NextRequest) {
   }
   try {
     const sessions = await listPreviewSessions(workspaceId);
-    return NextResponse.json({ sessions });
+    // The one logical project = the deterministic session id for this chat.
+    const session =
+      sessions.find((s) => s.sessionId === previewSessionIdFor(workspaceId)) ??
+      sessions.find((s) => s.status === "running") ??
+      null;
+    return NextResponse.json({ session, sessions });
   } catch {
     return NextResponse.json({ error: "Preview sessions could not be listed." }, { status: 500 });
   }
@@ -49,6 +68,19 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    if (action === "ensure") {
+      const outcome = await ensurePreviewSession(workspaceId);
+      if (!outcome.ok) {
+        // Silent outcome — nothing previewable yet. Not an error.
+        return NextResponse.json({ ok: false, silent: true, reason: outcome.reason });
+      }
+      return NextResponse.json({
+        ok: true,
+        sessionId: outcome.sessionId,
+        url: outcome.url,
+        started: outcome.started,
+      });
+    }
     if (action === "start") {
       const outcome = await startPreviewSession(workspaceId, name);
       if (!outcome.ok) {
@@ -66,6 +98,10 @@ export async function POST(request: NextRequest) {
       }
       return NextResponse.json({ ok: true });
     }
+    if (action === "stop_workspace") {
+      await stopWorkspacePreviews(workspaceId);
+      return NextResponse.json({ ok: true });
+    }
     if (action === "check") {
       if (!sessionId) {
         return NextResponse.json({ error: "A sessionId is required." }, { status: 400 });
@@ -73,7 +109,7 @@ export async function POST(request: NextRequest) {
       const outcome = await checkPreviewSession(workspaceId, sessionId);
       return NextResponse.json({ ok: outcome.ok, status: outcome.status ?? null, title: outcome.title ?? "" });
     }
-    return NextResponse.json({ error: "Unknown action. Use start | stop | check." }, { status: 400 });
+    return NextResponse.json({ error: "Unknown action. Use ensure | start | stop | stop_workspace | check." }, { status: 400 });
   } catch {
     return NextResponse.json({ error: "The preview action could not be completed." }, { status: 500 });
   }

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { Composer } from "@/components/terra/composer";
 import { Thread } from "@/components/terra/thread";
@@ -18,6 +19,15 @@ import { PreviewPanel } from "./preview-panel";
  * merely `invisible` (NOT display:none) — switching is instant, scroll
  * positions and panel state survive, and the newly-shown section plays a
  * light enter animation (`.onyx-panel`).
+ *
+ * RUNTIME LIFECYCLE (one chat = one app project = one temporary runtime):
+ *   entering a code chat  → the workspace's preview runtime is rehydrated
+ *                           (idempotent ensure; files are the source of truth)
+ *   switching code chats  → the previous chat's runtime is stopped, the new
+ *                           chat's runtime starts — source files untouched
+ *   leaving Code Mode     → the runtime stops (CodeShell unmounts here);
+ *                           the workspace itself is preserved
+ * A hidden browser tab NEVER stops anything — visibility is not exit.
  */
 export function CodeShell() {
   const codeTab = useTerra((s) => s.codeTab);
@@ -28,6 +38,51 @@ export function CodeShell() {
 
   const hasMessages = (active?.messages.length ?? 0) > 0;
   const workspaceId = active?.id ?? "";
+  /** Latest workspace id — maintained by the lifecycle effect, read by the
+   *  unmount-only cleanup. */
+  const workspaceIdRef = useRef(workspaceId);
+  /** The workspace id the lifecycle effect last ran for (chat switches). */
+  const prevWorkspaceRef = useRef("");
+
+  /* Runtime stop for a workspace (fire-and-forget, idempotent). */
+  const stopRuntime = (id: string) => {
+    if (!id) return;
+    void fetch("/api/code/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: id, action: "stop_workspace" }),
+    }).catch(() => undefined);
+  };
+  /* Runtime rehydration for a workspace (idempotent ensure). */
+  const ensureRuntime = (id: string) => {
+    if (!id) return;
+    void fetch("/api/code/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: id, action: "ensure" }),
+    }).catch(() => undefined);
+  };
+
+  // Chat switch: stop the previous chat's runtime, start the new one's.
+  useEffect(() => {
+    workspaceIdRef.current = workspaceId;
+    const previous = prevWorkspaceRef.current;
+    prevWorkspaceRef.current = workspaceId;
+    if (workspaceId && previous && workspaceId !== previous) {
+      stopRuntime(previous);
+    }
+    if (workspaceId) ensureRuntime(workspaceId);
+  }, [workspaceId]);
+
+  // Leaving Code Mode entirely (this shell unmounts): destroy the runtime,
+  // keep the workspace. StrictMode double-mount in dev makes this
+  // stop→ensure once — harmless (same session id, one revision bump).
+  useEffect(
+    () => () => {
+      stopRuntime(workspaceIdRef.current);
+    },
+    [],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">

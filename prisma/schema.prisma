@@ -31,11 +31,14 @@ model CloudConversation {
 
 // OnyxCode — a code-mode workspace (one per code-mode conversation). Files are
 // stored as a single JSON {path: content} map; one row read/write keeps
-// scaffold + edit operations at millisecond level.
+// scaffold + edit operations at millisecond level. Binary assets (images the
+// agent writes, captured screenshots) live in their own JSON map as
+// {path: {mime, data(base64)}} so text tooling stays text-only.
 model CodeWorkspace {
   id        String   @id // = code conversation id
   appMeta   String   @default("{}") // JSON: { framework, name, description }
   files     String   @default("{}") // JSON: { path: content }
+  assets    String   @default("{}") // JSON: { path: { mime, data } }
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

@@ -7,6 +7,7 @@ import {
   type RouteDecision,
   type RouterMessage,
 } from "./router";
+import { getZai } from "./zai";
 import {
   codeToolDocs,
   executeCodeTool,
@@ -59,6 +60,15 @@ export type TurnEvent =
       toolId: string;
       backgrounded: boolean;
       subtitle: string;
+    }
+  | {
+      /** The model is still GENERATING a tool block — live partial arguments.
+       *  `args` is the full partial JSON text so far (a snapshot, not a delta),
+       *  so replay/reattach is idempotent and clients can render it directly. */
+      type: "tool_prepare";
+      toolId: string;
+      name: string;
+      args: string;
     }
   | {
       /** A tool finished — updates the card and feeds the next model round. */
@@ -245,12 +255,6 @@ export function skipToolWait(turnId: string, toolId: string): boolean {
 /* ------------------------------------------------------------------ */
 /* Upstream reader (idle-only watchdog, never kills an active stream)  */
 /* ------------------------------------------------------------------ */
-
-let cachedZai: Awaited<ReturnType<typeof ZAI.create>> | null = null;
-async function getZai() {
-  if (!cachedZai) cachedZai = await ZAI.create();
-  return cachedZai;
-}
 
 interface UpstreamChunk {
   content: string;
@@ -482,7 +486,7 @@ export function startTurnJob(
 /* agent keeps planning while they run.                                */
 /* ------------------------------------------------------------------ */
 
-const MAX_TOOL_ROUNDS = 5;
+const MAX_TOOL_ROUNDS = 8;
 /** How long a finished reply stays open waiting for backgrounded tools. */
 const BG_TOOL_CAP_MS = 90_000;
 
@@ -541,14 +545,38 @@ interface ToolCall {
   args: Record<string, unknown>;
 }
 
+/** Known tool-argument keys — lets flat calls (the model putting action/path
+ *  at the top level instead of inside "args") execute correctly instead of
+ *  silently running with empty arguments. */
+const TOOL_ARG_KEYS = [
+  "action",
+  "path",
+  "content",
+  "framework",
+  "name",
+  "description",
+  "url",
+  "screenshot",
+  "key",
+  "data",
+  "sessionId",
+  "question",
+] as const;
+
 function toToolCall(value: unknown): ToolCall | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const obj = value as { tool?: unknown; args?: unknown };
   if (typeof obj.tool !== "string" || obj.tool.trim().length === 0) return null;
-  const args =
-    obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)
-      ? (obj.args as Record<string, unknown>)
-      : {};
+  let args: Record<string, unknown>;
+  if (obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)) {
+    args = obj.args as Record<string, unknown>;
+  } else {
+    // Flat call shape ({tool, action, path, ...}) — hoist the known keys.
+    args = {};
+    for (const key of TOOL_ARG_KEYS) {
+      if (key in obj) args[key] = (obj as Record<string, unknown>)[key];
+    }
+  }
   return { tool: obj.tool.trim(), args };
 }
 
@@ -596,6 +624,8 @@ function describeToolCall(call: { tool: string; args: Record<string, unknown> })
       return `${s("action") || "list"} preview${s("sessionId") ? ` · ${s("sessionId")}` : ""}`;
     case "start_web_session":
       return `Open web session${a.screenshot === true ? " + screenshot" : ""}`;
+    case "inspect_image":
+      return `Inspect ${s("path") || "available images"}`;
     case "manage_database":
       return `${s("action") || "list"} ${s("key") || "records"}`.trim();
     default:
@@ -613,8 +643,11 @@ function detectAnnouncedTool(text: string): { action: string; example: string } 
   const intent = /\b(i'?ll|i will|i am going to|i'?m going to|let me|now i|we'?ll)\b/i.test(text);
   if (!intent) return null;
   // Explanations — questions answered, code shown — are not announcements.
-  if (text.includes("?") || text.includes("```")) return null;
-  const lower = text.toLowerCase();
+  // URLs (with query strings like ?XTransformPort=…) are stripped first so
+  // their "?" never silences the detector.
+  const stripped = text.replace(/(?:https?:\/\/|\/)[\w\-./%?=&#:~]+/g, " ");
+  if (stripped.includes("?") || stripped.includes("```")) return null;
+  const lower = stripped.toLowerCase();
   if (/(preview|go live)/.test(lower) && /(start|launch|run|open|spin|bring|serve)/.test(lower)) {
     return {
       action: "start the live preview",
@@ -627,6 +660,16 @@ function detectAnnouncedTool(text: string): { action: string; example: string } 
       example: '{"tool": "start_web_session", "args": {"screenshot": true}}',
     };
   }
+  // Image inspection — "verify/inspect the logo" needs inspect_image.
+  if (
+    /(logo|image|screenshot|picture|photo|icon)/.test(lower) &&
+    /(verify|check|inspect|look at|describe|view|see|confirm|analyze)/.test(lower)
+  ) {
+    return {
+      action: "inspect the image",
+      example: '{"tool": "inspect_image", "args": {"path": "<the image path>"}}',
+    };
+  }
   if (/(database|record)/.test(lower) && /(save|store|write|persist)/.test(lower)) {
     return {
       action: "save to the workspace database",
@@ -636,8 +679,8 @@ function detectAnnouncedTool(text: string): { action: string; example: string } 
   // File edits — the most common code-mode action. Broad on purpose: in
   // code mode an announced edit ALWAYS needs the manage_files block.
   if (
-    /(file|page|site|section|footer|header|hero|menu|\.html|index|app|css|style|code)/.test(lower) &&
-    /(add|write|update|change|edit|modify|put|insert|remove|delete|fix|append|move|replace)/.test(lower)
+    /(file|files|page|site|section|footer|header|hero|menu|\.html|index|app|css|style|code|logo)/.test(lower) &&
+    /(add|write|update|change|edit|modify|put|insert|remove|delete|fix|append|move|replace|rebuild|recreate|restore|build|create|generate|scaffold|include|use)/.test(lower)
   ) {
     return {
       action: "write the file changes",
@@ -648,15 +691,48 @@ function detectAnnouncedTool(text: string): { action: string; example: string } 
   return null;
 }
 
+/** Corrective block examples per tool — used when the model fabricates a
+ *  tool result in prose; the corrective round demands the REAL block. */
+const FABRICATION_EXAMPLES: Record<string, string> = {
+  manage_files:
+    '{"tool": "manage_files", "args": {"action": "write", "path": "index.html", "content": "<the full updated file content>"}}',
+  start_preview: '{"tool": "start_preview", "args": {"name": "<the app name>"}}',
+  start_web_session: '{"tool": "start_web_session", "args": {"screenshot": true}}',
+  manage_preview: '{"tool": "manage_preview", "args": {"action": "list"}}',
+  manage_database: '{"tool": "manage_database", "args": {"action": "set", "key": "<key>", "data": {}}}',
+  inspect_image: '{"tool": "inspect_image", "args": {"path": "<the image path>"}}',
+  create_app:
+    '{"tool": "create_app", "args": {"framework": "static", "name": "<the app name>"}}',
+};
+
+/**
+ * Prose quoting a serialized tool-result marker ("[used tool <name>: …]")
+ * for a tool that did NOT run this turn (not in `allow`) — pure fabrication.
+ */
+function detectQuotedFabrication(
+  text: string,
+  allow: Set<string>,
+): { tool: string; example: string } | null {
+  for (const match of text.matchAll(/\[\s*used tool\s+([a-z_]+)/gi)) {
+    const name = match[1].toLowerCase();
+    if (!allow.has(name)) {
+      return {
+        tool: name,
+        example: FABRICATION_EXAMPLES[name] ?? '{"tool": "<tool-name>", "args": {}}',
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * The nastier cousin of the announcement: the model FABRICATES a completed
  * manage_files action in prose — quoting tool-result wording like
- * "[used tool manage_files…" or "Wrote 2370 bytes to index.html" — while the
- * real block it emitted was for a different tool. Nothing was written.
+ * "Wrote 2370 bytes to index.html" or claiming files were written — while
+ * the real block it emitted was for a different tool. Nothing was written.
  * Detected deterministically from the tool-result phrasing itself.
  */
 function detectFabricatedFileWrite(text: string): boolean {
-  if (/\[\s*used tool\s+manage_files/i.test(text)) return true;
   if (/\bwrote\s+\d+\s+bytes?\s+to\b/i.test(text)) return true;
   if (
     /\b(?:i'?ve|i have|has been|is now|now)\s+(?:been\s+)?(?:written|saved|updated|added|changed)\b/i.test(text) &&
@@ -667,19 +743,47 @@ function detectFabricatedFileWrite(text: string): boolean {
   return false;
 }
 
+/**
+ * A tool fence whose closing ``` has not arrived yet — the model is still
+ * generating the call. Returns the JSON text streamed so far ("" right when
+ * the fence marker completes), or null when no fence is open.
+ */
+function openFenceText(raw: string): string | null {
+  const re = /```[ \t]*onyxtool[^\n]*\n?/gi;
+  let lastStart = -1;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(raw)) !== null) lastStart = match.index + match[0].length;
+  if (lastStart === -1) return null;
+  if (raw.indexOf("```", lastStart) !== -1) return null; // closed — nothing streaming
+  return raw.slice(lastStart);
+}
+
+/** How often live partial tool arguments are surfaced (ms). */
+const PREPARE_THROTTLE_MS = 140;
+
 /** Stream one model round, emitting reasoning/delta/replace for the visible
- *  portion only (tool fences held back). Returns the round's full raw text. */
+ *  portion only (tool fences held back). While a tool fence is OPEN, its
+ *  partial arguments stream out as `tool_prepare` snapshots so the UI shows
+ *  the real tool name + path while the model is still writing them. Returns
+ *  the round's full raw text plus the toolIds assigned to its fences. */
 async function readCodeRound(
   job: TurnJob,
   upstream: { role: "system" | "user" | "assistant"; content: string }[],
   thinking: boolean,
   temperature: number,
   resumeFrom: string | null,
-): Promise<string> {
+): Promise<{ raw: string; prepareIds: string[] }> {
   const state = { raw: resumeFrom ?? "", lastReasoning: "", lastAnswer: resumeFrom ?? "" };
   let produced = state.raw.length > 0;
   let success = false;
   let lastError: unknown = null;
+
+  /* Tool-argument streaming: one stable id per open fence; snapshots are
+   * throttled so token-frequency never reaches the event log unbounded. */
+  const prepareIds: string[] = [];
+  let prepareOpen = false;
+  let currentPrepareId = "";
+  let prepareEmittedAt = 0;
 
   const openMarkerPending = (raw: string): boolean => {
     if (resumeFrom) return false;
@@ -694,6 +798,33 @@ async function readCodeRound(
     if (openMarkerPending(nextRaw)) return;
     const visible = visiblePortion(nextRaw);
     const { reasoning, answer } = splitThinking(visible);
+    // Live partial tool arguments — the fence is open, the model is still
+    // writing the call. Surface the real name + args as they grow (no JSON
+    // parsing per token — plain string slicing + one regex per throttle tick).
+    const open = openFenceText(nextRaw);
+    if (open !== null) {
+      const now = Date.now();
+      if (!prepareOpen) {
+        // A NEW fence started streaming — a fresh stable id for it.
+        prepareOpen = true;
+        prepareEmittedAt = 0; // force an immediate first snapshot
+        currentPrepareId = `prep${prepareIds.length + 1}-${Math.random().toString(36).slice(2, 8)}`;
+        prepareIds.push(currentPrepareId);
+      }
+      const known = /"tool"\s*:\s*"([^"]+)"/.exec(open)?.[1] ?? "";
+      if ((known || open.length > 4) && now - prepareEmittedAt >= PREPARE_THROTTLE_MS) {
+        prepareEmittedAt = now;
+        job.append({
+          type: "tool_prepare",
+          toolId: currentPrepareId,
+          name: known || "tool",
+          args: open.slice(0, 4000),
+        });
+      }
+    } else if (prepareOpen) {
+      prepareOpen = false;
+      currentPrepareId = "";
+    }
     if (reasoning.startsWith(state.lastReasoning) && reasoning.length > state.lastReasoning.length) {
       job.append({ type: "reasoning", text: reasoning.slice(state.lastReasoning.length) });
       state.lastReasoning = reasoning;
@@ -767,7 +898,7 @@ async function readCodeRound(
   }
 
   if (!success) throw lastError ?? new Error("The model round produced no content.");
-  return state.raw;
+  return { raw: state.raw, prepareIds };
 }
 
 interface BackgroundTool {
@@ -809,7 +940,7 @@ ${workspaceText}`;
 
   const backgroundTools: BackgroundTool[] = [];
 
-  const runRound = (roundResume: string | null): Promise<string> =>
+  const runRound = (roundResume: string | null): Promise<{ raw: string; prepareIds: string[] }> =>
     readCodeRound(
       job,
       [{ role: "system" as const, content: systemPrompt }, ...roundHistory],
@@ -881,8 +1012,11 @@ ${workspaceText}`;
   /* ---------------- main loop: model round → tool → model round ------ */
   while (!job.aborted) {
     let raw: string;
+    let roundPrepareIds: string[] = [];
     try {
-      raw = await runRound(toolCalls === 0 && !producedContent ? resumeFrom : null);
+      const round = await runRound(toolCalls === 0 && !producedContent ? resumeFrom : null);
+      raw = round.raw;
+      roundPrepareIds = round.prepareIds;
     } catch (error) {
       if (job.aborted) break;
       if (producedContent) {
@@ -905,23 +1039,43 @@ ${workspaceText}`;
     const block = extractToolBlocks(raw);
     if (!block) {
       // No tool block — is the model merely ANNOUNCING an action it never
-      // ran? One bounded corrective round demands the real block.
+      // ran, or outright FABRICATING a completed one in prose? A bounded
+      // corrective round demands the real block.
       const visibleAnswer = splitThinking(visiblePortion(raw)).answer.trim();
       const announced = detectAnnouncedTool(visibleAnswer);
-      if (announced && corrections < 2 && !job.aborted) {
+      const quoted = detectQuotedFabrication(visibleAnswer, new Set());
+      const correction: { action: string; example: string } | null = announced
+        ?? (quoted
+          ? { action: `run ${quoted.tool} for real`, example: quoted.example }
+          : detectFabricatedFileWrite(visibleAnswer)
+            ? {
+                action: "write the file changes",
+                example: FABRICATION_EXAMPLES.manage_files,
+              }
+            : null);
+      if (correction && corrections < 2 && !job.aborted) {
         corrections += 1;
         roundHistory.push({ role: "assistant", content: visibleAnswer });
         roundHistory.push({
           role: "user",
-          content: `You wrote that you would ${announced.action}, but you did NOT emit the onyxtool block — the action has not happened. Emit the tool block NOW as the ONLY content of your reply, in exactly this shape:
+          content: `You wrote that you would ${correction.action}, but you did NOT emit the onyxtool block — the action has not happened. Emit the tool block NOW as the ONLY content of your reply, in exactly this shape:
 
 \`\`\`onyxtool
-${announced.example}
+${correction.example}
 \`\`\`
 
 Replace the placeholders with real values from the conversation. No prose, just the block.`,
         });
         continue;
+      }
+      if (correction && corrections >= 2) {
+        // Corrections exhausted and the model STILL claims unexecuted work —
+        // surface it honestly instead of letting the fabricated claim read
+        // as a completed action.
+        send({
+          type: "warning",
+          text: `The model described tool work ("${correction.action}") but never emitted the tool block — nothing was actually changed. Ask again to make it happen.`,
+        });
       }
       modelFinished = true;
       break;
@@ -950,33 +1104,40 @@ Replace the placeholders with real values from the conversation. No prose, just 
 
     const visibleText = splitThinking(visiblePortion(raw)).answer.trim();
 
-    // Fabrication guard: the reply CLAIMS a completed file write (quoting
-    // tool-result phrasing) but no manage_files call was emitted this round
-    // or any earlier one — the claimed change does not exist. Demand the
+    // Fabrication guard: the reply CLAIMS completed tool work — quoting
+    // tool-result phrasing ("[used tool …]", "Wrote N bytes to…", invented
+    // preview URLs) — for tools that were never called this turn. Demand the
     // real block before anything else runs.
     const roundTools = new Set(calls.map((c) => c.tool));
-    if (
-      !calledTools.has("manage_files") &&
+    const fabrication =
+      detectQuotedFabrication(visibleText, new Set([...calledTools, ...roundTools])) ??
+      (!calledTools.has("manage_files") &&
       !roundTools.has("manage_files") &&
-      detectFabricatedFileWrite(visibleText) &&
-      corrections < 2 &&
-      !job.aborted
-    ) {
+      detectFabricatedFileWrite(visibleText)
+        ? { tool: "manage_files", example: FABRICATION_EXAMPLES.manage_files }
+        : null);
+    if (fabrication && corrections < 2 && !job.aborted) {
       corrections += 1;
       roundHistory.push({ role: "assistant", content: visibleText });
       roundHistory.push({
         role: "user",
-        content: `Your reply described file changes as already written ("used tool manage_files", "wrote bytes to…"), but you did NOT emit a manage_files block — NOTHING was written to the workspace. That text was a fabrication; results only ever arrive as [TOOL RESULT] messages after you emit a block.
+        content: `Your reply described ${fabrication.tool} results that never happened (quoted tool-result wording), but you did NOT emit that tool's block — NOTHING happened for it. Results only ever arrive as [TOOL RESULT] messages after you emit a block.
 
-Emit the tool call(s) NOW as the ONLY content of your reply. A single call:
+Emit the ${fabrication.tool} call NOW as the ONLY content of your reply:
 
 \`\`\`onyxtool
-{"tool": "manage_files", "args": {"action": "write", "path": "index.html", "content": "<the full updated file content>"}}
+${fabrication.example}
 \`\`\`
 
-…or batch several calls as a JSON array in ONE block (e.g. the write, then start_preview). No prose.`,
+Replace the placeholders with real values from the conversation. No prose.`,
       });
       continue;
+    }
+    if (fabrication && corrections >= 2) {
+      send({
+        type: "warning",
+        text: `The model described tool work ("${fabrication.tool}") that never actually ran — nothing was changed by it. Ask again to make it happen.`,
+      });
     }
 
     if (toolCalls + calls.length > MAX_TOOL_ROUNDS) {
@@ -990,13 +1151,19 @@ Emit the tool call(s) NOW as the ONLY content of your reply. A single call:
       content: visibleText || `(calling ${calls.map((c) => c.tool).join(", ")})`,
     });
     const resultLines: string[] = [];
+    const callsBeforeRound = toolCalls;
 
     for (const call of calls) {
       toolCalls += 1;
       producedContent = true;
       calledTools.add(call.tool);
 
-      const toolId = `t${toolCalls}-${Math.random().toString(36).slice(2, 8)}`;
+      // Reuse the prepare-stream id when one was assigned to this position —
+      // the live "generating arguments" card then upgrades IN PLACE into the
+      // executing card (stable toolCallId across the whole lifecycle).
+      const toolId =
+        roundPrepareIds[toolCalls - 1 - callsBeforeRound] ??
+        `t${toolCalls}-${Math.random().toString(36).slice(2, 8)}`;
       send({
         type: "tool_call",
         toolId,
@@ -1111,7 +1278,8 @@ Use the real tool names and args for whatever you actually intend. If everything
         content: `${resultLines}\n\nThe background tools finished. Briefly acknowledge the results and wrap up — no new tool calls.`,
       });
       try {
-        const bonusRaw = await runRound(null);
+        const bonusRound = await runRound(null);
+        const bonusRaw = bonusRound.raw;
         // A stray tool block in the bonus round is executed synchronously,
         // then one final round closes the turn — never an endless chain.
         const bonusBlock = extractToolBlocks(bonusRaw);
@@ -1122,7 +1290,7 @@ Use the real tool names and args for whatever you actually intend. If everything
             .flat();
           const bonusCall = bonusCalls[0];
           if (bonusCall) {
-            const bonusId = `t${toolCalls + 1}-bonus`;
+            const bonusId = bonusRound.prepareIds[0] ?? `t${toolCalls + 1}-bonus`;
             send({
               type: "tool_call",
               toolId: bonusId,

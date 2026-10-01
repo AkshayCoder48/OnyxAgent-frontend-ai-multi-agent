@@ -206,11 +206,17 @@ export function CreationPrompt({ workspaceId }: { workspaceId?: string }) {
             </DropdownMenuContent>
           </DropdownMenu>
 
+          {/* Visually and accessibly hidden — the "Upload" button is the
+           * user-facing control (it clicks this input). Without aria-hidden
+           * the native input leaks its "Choose Files / No file chosen" label
+           * into the page. */}
           <input
             ref={fileInputRef}
             id="onyxcode-upload"
             type="file"
             multiple
+            aria-hidden="true"
+            tabIndex={-1}
             className="sr-only"
             onChange={(event) => void onUpload(event.target.files)}
           />

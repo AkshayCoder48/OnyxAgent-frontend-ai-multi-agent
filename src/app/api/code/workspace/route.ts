@@ -18,9 +18,13 @@ export async function GET(request: NextRequest) {
   const files = Object.keys(ws.files)
     .sort()
     .map((path) => ({ path, bytes: ws.files[path].length }));
+  // Binary image assets ride along (taggable, and inspectable by the agent).
+  const assets = Object.keys(ws.assets)
+    .sort()
+    .map((path) => ({ path, bytes: Math.round((ws.assets[path].data.length * 3) / 4) }));
   return NextResponse.json({
-    files,
-    fileCount: files.length,
+    files: [...files, ...assets],
+    fileCount: files.length + assets.length,
     appMeta: ws.appMeta,
     updatedAt: ws.updatedAt,
   });

@@ -8,6 +8,7 @@ import { useTerra } from "./store";
 
 export function Composer() {
   const [value, setValue] = useState("");
+  const appMode = useTerra((s) => s.appMode);
   const send = useTerra((s) => s.send);
   const sending = useTerra((s) => s.sending);
   const stop = useTerra((s) => s.stop);
@@ -51,8 +52,8 @@ export function Composer() {
             value={value}
             onChange={(event) => setValue(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Reply to Terra…"
-            aria-label="Message to Terra"
+            placeholder={appMode === "code" ? "Reply to OnyxCode…" : "Reply to Terra…"}
+            aria-label={appMode === "code" ? "Message to OnyxCode" : "Message to Terra"}
             className="terra-scroll block max-h-[200px] min-h-[44px] w-full resize-none bg-transparent px-3 py-2.5 caret-terra text-[15px] leading-relaxed text-ink placeholder:text-ink-muted/80 focus:outline-none"
           />
           <div className="flex items-center gap-1.5 pt-1">

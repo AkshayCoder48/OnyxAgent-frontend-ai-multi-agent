@@ -7,9 +7,11 @@ export type ToolIconKind =
   | "database"
   | "monitor"
   | "folder"
-  | "sparkles";
+  | "sparkles"
+  | "image";
 
-export type ToolStatus = "completed" | "running";
+/** running = executing; preparing = the model is still writing its arguments. */
+export type ToolStatus = "completed" | "running" | "preparing";
 
 export type RouteName = "fast" | "balanced" | "deep";
 
@@ -23,7 +25,15 @@ export type CodeTab = "chat" | "database" | "preview";
 
 /** Rich card payload for a code-mode tool result. */
 export interface ToolResultData {
-  kind: "create_app" | "preview" | "preview_list" | "web_session" | "database" | "files";
+  kind:
+    | "create_app"
+    | "preview"
+    | "preview_list"
+    | "web_session"
+    | "database"
+    | "files"
+    | "image"
+    | "image_list";
   payload: Record<string, unknown>;
 }
 

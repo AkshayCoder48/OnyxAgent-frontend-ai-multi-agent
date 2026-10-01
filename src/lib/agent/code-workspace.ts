@@ -14,9 +14,18 @@ export interface WorkspaceAppMeta {
   description?: string;
 }
 
+/** A binary asset (image) — base64 data + detected MIME type. */
+export interface WorkspaceAsset {
+  mime: string;
+  /** base64-encoded bytes. */
+  data: string;
+}
+
 export interface Workspace {
   id: string;
   files: Record<string, string>;
+  /** Binary images — inspectable by the vision tool, servable in previews. */
+  assets: Record<string, WorkspaceAsset>;
   appMeta: WorkspaceAppMeta;
   createdAt: number;
   updatedAt: number;
@@ -30,7 +39,7 @@ function now(): number {
 }
 
 function emptyWorkspace(id: string): Workspace {
-  return { id, files: {}, appMeta: {}, createdAt: now(), updatedAt: now() };
+  return { id, files: {}, assets: {}, appMeta: {}, createdAt: now(), updatedAt: now() };
 }
 
 async function loadFromDb(id: string): Promise<Workspace | null> {
@@ -39,6 +48,7 @@ async function loadFromDb(id: string): Promise<Workspace | null> {
     if (!row) return null;
     let files: Record<string, string> = {};
     let appMeta: WorkspaceAppMeta = {};
+    let assets: Record<string, WorkspaceAsset> = {};
     try {
       const parsed = JSON.parse(row.files) as Record<string, unknown>;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -50,6 +60,19 @@ async function loadFromDb(id: string): Promise<Workspace | null> {
       files = {};
     }
     try {
+      const parsed = JSON.parse(row.assets ?? "{}") as Record<string, unknown>;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [path, asset] of Object.entries(parsed)) {
+          const a = asset as { mime?: unknown; data?: unknown };
+          if (typeof a?.mime === "string" && typeof a?.data === "string") {
+            assets[path] = { mime: a.mime, data: a.data };
+          }
+        }
+      }
+    } catch {
+      assets = {};
+    }
+    try {
       const meta = JSON.parse(row.appMeta) as WorkspaceAppMeta;
       if (meta && typeof meta === "object") appMeta = meta;
     } catch {
@@ -58,6 +81,7 @@ async function loadFromDb(id: string): Promise<Workspace | null> {
     return {
       id,
       files,
+      assets,
       appMeta,
       createdAt: row.createdAt.getTime(),
       updatedAt: row.updatedAt.getTime(),
@@ -103,10 +127,12 @@ async function persist(workspace: Workspace): Promise<void> {
         id: workspace.id,
         files: JSON.stringify(workspace.files),
         appMeta: JSON.stringify(workspace.appMeta),
+        assets: JSON.stringify(workspace.assets),
       },
       update: {
         files: JSON.stringify(workspace.files),
         appMeta: JSON.stringify(workspace.appMeta),
+        assets: JSON.stringify(workspace.assets),
       },
     });
   } catch {
@@ -132,13 +158,15 @@ export async function writeFiles(
 
 export async function deleteFile(id: string, path: string): Promise<boolean> {
   const workspace = await getWorkspace(id);
-  if (!(path in workspace.files)) return false;
+  if (!(path in workspace.files) && !(path in workspace.assets)) return false;
   delete workspace.files[path];
+  delete workspace.assets[path];
   await persist(workspace);
   return true;
 }
 
-/** Replace the whole file set (scaffold overwrite). */
+/** Replace the whole file set (scaffold overwrite). Binary assets survive a
+ *  re-scaffold — screenshots/uploads are user artifacts, not scaffold files. */
 export async function replaceWorkspace(
   id: string,
   files: Record<string, string>,
@@ -151,9 +179,25 @@ export async function replaceWorkspace(
   return workspace;
 }
 
+/** Merge binary assets (images) into the workspace. */
+export async function writeAssets(
+  id: string,
+  assets: Record<string, WorkspaceAsset>,
+): Promise<Workspace> {
+  const workspace = await getWorkspace(id);
+  for (const [path, asset] of Object.entries(assets)) {
+    const clean = path.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!clean || clean.startsWith("..") || clean.includes("/../")) continue;
+    workspace.assets[clean] = asset;
+  }
+  await persist(workspace);
+  return workspace;
+}
+
 export function workspaceSummary(workspace: Workspace, maxFiles = 40): string {
   const meta = workspace.appMeta;
   const paths = Object.keys(workspace.files).sort();
+  const assetPaths = Object.keys(workspace.assets).sort();
   const lines: string[] = [];
   if (meta.name || meta.framework) {
     lines.push(`App: ${meta.name ?? "(unnamed)"}${meta.framework ? ` (${meta.framework})` : ""}`);
@@ -166,6 +210,15 @@ export function workspaceSummary(workspace: Workspace, maxFiles = 40): string {
     lines.push(`Files (${paths.length}):`);
     for (const p of shown) lines.push(`  - ${p} (${workspace.files[p].length} bytes)`);
     if (paths.length > maxFiles) lines.push(`  … and ${paths.length - maxFiles} more`);
+  }
+  if (assetPaths.length > 0) {
+    // The image index — the model needs to know exactly which images exist
+    // and that it can actually VIEW them with inspect_image.
+    lines.push(`Images (${assetPaths.length}) — viewable with inspect_image:`);
+    for (const p of assetPaths.slice(0, 20)) {
+      const asset = workspace.assets[p];
+      lines.push(`  - ${p} (${asset.mime}, ${Math.round((asset.data.length * 3) / 4 / 1024)} KB)`);
+    }
   }
   return lines.join("\n");
 }

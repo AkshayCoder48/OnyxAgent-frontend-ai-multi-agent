@@ -18,10 +18,18 @@ const PORT = 3212;
 const DATA_DIR = import.meta.dir;
 const SESSIONS_FILE = join(DATA_DIR, "sessions.json");
 
+interface Asset {
+  mime: string;
+  /** base64-encoded bytes. */
+  data: string;
+}
+
 interface Session {
   id: string;
   name: string;
   files: Record<string, string>;
+  /** Binary images (workspace assets) served at their paths. */
+  assets: Record<string, Asset>;
   entry: string;
   status: "running" | "stopped";
   createdAt: number;
@@ -43,6 +51,10 @@ function loadSessions(): void {
         id: s.id,
         name: typeof s.name === "string" ? s.name : s.id,
         files: s.files,
+        assets:
+          typeof s.assets === "object" && s.assets !== null && !Array.isArray(s.assets)
+            ? (s.assets as Record<string, Asset>)
+            : {},
         entry: typeof s.entry === "string" && s.entry.length > 0 ? s.entry : "preview/index.html",
         status: s.status === "stopped" ? "stopped" : "running",
         createdAt: typeof s.createdAt === "number" ? s.createdAt : Date.now(),
@@ -266,6 +278,20 @@ const server = Bun.serve({
         if (!clean || clean.startsWith("..") || clean.includes("/../")) continue;
         cleanFiles[clean] = content;
       }
+      const rawAssets =
+        typeof body.assets === "object" && body.assets !== null && !Array.isArray(body.assets)
+          ? (body.assets as Record<string, unknown>)
+          : null;
+      const cleanAssets: Record<string, Asset> = {};
+      if (rawAssets) {
+        for (const [p, asset] of Object.entries(rawAssets)) {
+          const a = asset as { mime?: unknown; data?: unknown };
+          if (typeof a?.mime !== "string" || typeof a?.data !== "string") continue;
+          const clean = p.replace(/\\/g, "/").replace(/^\/+/, "");
+          if (!clean || clean.startsWith("..") || clean.includes("/../")) continue;
+          cleanAssets[clean] = { mime: a.mime, data: a.data };
+        }
+      }
       const entry =
         typeof body.entry === "string" && body.entry.length > 0
           ? body.entry.replace(/\\/g, "/").replace(/^\/+/, "")
@@ -277,6 +303,7 @@ const server = Bun.serve({
         id,
         name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : existing?.name ?? id,
         files: cleanFiles,
+        assets: cleanAssets,
         entry,
         status: "running",
         createdAt: existing?.createdAt ?? Date.now(),
@@ -308,6 +335,16 @@ const server = Bun.serve({
       rel = normalize(rel).replace(/\\/g, "/");
       if (rel.startsWith("..") || rel.includes("/../")) {
         return notFound("Path escapes the preview root.");
+      }
+      // Binary image assets — decoded bytes with their stored MIME type so
+      // workspace images (screenshots, written images) work inside previews.
+      const asset = session.assets[rel];
+      if (asset) {
+        const bytes = Buffer.from(asset.data, "base64");
+        return new Response(new Uint8Array(bytes), {
+          status: 200,
+          headers: { "Content-Type": asset.mime, "Cache-Control": "no-store" },
+        });
       }
       const file = session.files[rel] ?? (rel === session.entry ? session.files["preview/index.html"] : undefined);
       if (file === undefined) {

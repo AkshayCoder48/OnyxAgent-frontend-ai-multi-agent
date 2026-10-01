@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 import { CodeBlock } from "./code-block";
 import { Markdown } from "./markdown";
 import { ToolCard } from "./tool-card";
-import { useTerra } from "./store";
+import { useStream } from "./stream-store";
+import { toolIconFor, useTerra } from "./store";
 import type { Message, RouteInfo } from "./types";
 
 function AssistantHeader({ route }: { route?: RouteInfo }) {
@@ -83,18 +84,26 @@ function useTick(active: boolean): void {
   }, [active]);
 }
 
-function ThinkingBlock({ message }: { message: Message }) {
-  const live = Boolean(message.streaming) && message.text.length === 0;
-  useTick(live);
+function ThinkingBlock({
+  message,
+  reasoning,
+  thinkingLive,
+}: {
+  message: Message;
+  reasoning: string;
+  /** The model is still inside its THINKING section right now. */
+  thinkingLive: boolean;
+}) {
+  useTick(thinkingLive);
   // Snapshot the running timer once, then let the tick animate the clock.
   const [mounted] = useState(() => ({ at: Date.now(), base: message.thinkMs ?? 0 }));
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
-  const open = userToggle ?? live;
+  const open = userToggle ?? thinkingLive;
 
-  const seconds = live
+  const seconds = thinkingLive
     ? (mounted.base + (Date.now() - mounted.at)) / 1000
     : (message.thinkMs ?? 0) / 1000;
-  const label = live ? "Thinking…" : `Thought for ${seconds < 1 ? "under a second" : `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`}`;
+  const label = thinkingLive ? "Thinking…" : `Thought for ${seconds < 1 ? "under a second" : `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`}`;
 
   return (
     <div className="overflow-hidden rounded-xl border border-hairline bg-paper">
@@ -105,18 +114,18 @@ function ThinkingBlock({ message }: { message: Message }) {
         className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-terra-soft/50"
       >
         <Brain
-          className={cn("h-4 w-4 shrink-0", live ? "animate-pulse text-terra" : "text-ink-muted")}
+          className={cn("h-4 w-4 shrink-0", thinkingLive ? "animate-pulse text-terra" : "text-ink-muted")}
           aria-hidden
         />
         <span
           className={cn(
             "text-[12px] font-medium tracking-[0.02em]",
-            live ? "text-terra-deep" : "text-ink-muted",
+            thinkingLive ? "text-terra-deep" : "text-ink-muted",
           )}
         >
           {label}
         </span>
-        {live && (
+        {thinkingLive && (
           <span className="flex items-center gap-1 text-[11px] text-ink-muted" aria-hidden>
             <span className="terra-dot h-1 w-1 rounded-full bg-terra" />
             <span className="terra-dot h-1 w-1 rounded-full bg-terra" style={{ animationDelay: "0.15s" }} />
@@ -131,10 +140,10 @@ function ThinkingBlock({ message }: { message: Message }) {
           aria-hidden
         />
       </button>
-      {open && message.reasoning && (
+      {open && reasoning && (
         <div className="terra-scroll max-h-64 overflow-y-auto border-t border-hairline px-4 py-3">
           <p className="whitespace-pre-wrap text-[13px] leading-[1.65] italic text-ink-muted">
-            {message.reasoning}
+            {reasoning}
           </p>
         </div>
       )}
@@ -228,6 +237,11 @@ export const AssistantTurn = memo(function AssistantTurn({
   const sending = useTerra((s) => s.sending);
   const [copied, setCopied] = useState(false);
 
+  // LIVE OVERLAY SUBSCRIPTION — returns the store state only while THIS
+  // message is the one streaming, null otherwise. So token flushes re-render
+  // exactly this component and nothing else in the app.
+  const live = useStream((s) => (s.msgId === message.id ? s : null));
+
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(plainText(message));
@@ -239,6 +253,11 @@ export const AssistantTurn = memo(function AssistantTurn({
   };
 
   const streaming = Boolean(message.streaming);
+  const liveAnswer = streaming && live ? live.answer : "";
+  const liveReasoning = streaming && live ? live.reasoning : (message.reasoning ?? "");
+  const liveNotice = streaming && live ? live.notice : message.notice;
+  const prepare = streaming && live ? live.prepare : null;
+  const thinkingLive = streaming && (live ? liveAnswer.trim().length === 0 : message.text.length === 0);
   const hasAnswer = (message.parts ?? []).some(
     (p) => p.type === "text" && p.text.trim().length > 0,
   );
@@ -252,10 +271,10 @@ export const AssistantTurn = memo(function AssistantTurn({
     >
       <AssistantHeader route={message.route} />
 
-      {message.notice && (
+      {liveNotice && (
         <p className="mb-2.5 flex items-center gap-1.5 text-[12px] italic text-ink-muted" role="status">
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-terra" aria-hidden />
-          {message.notice}
+          {liveNotice}
         </p>
       )}
 
@@ -280,17 +299,17 @@ export const AssistantTurn = memo(function AssistantTurn({
         </div>
       ) : (
         <div className="space-y-4">
-          {message.reasoning && <ThinkingBlock message={message} />}
+          {liveReasoning && (
+            <ThinkingBlock message={message} reasoning={liveReasoning} thinkingLive={thinkingLive} />
+          )}
 
-          {message.parts?.length ? (
+          {(message.parts?.length ?? 0) > 0 || liveAnswer || prepare ? (
             <div className={cn("space-y-4", streaming && "terra-streaming")}>
-              {message.parts.map((part, index) => {
+              {message.parts?.map((part, index) => {
                 if (part.type === "text") {
-                  const isLastPart = index === message.parts!.length - 1;
                   return (
-                    <div key={index} className={isLastPart ? "terra-stream-last" : undefined}>
+                    <div key={index}>
                       <Markdown>{part.text}</Markdown>
-                      {streaming && isLastPart && part.text.trim().length > 0 && <StreamCursor />}
                     </div>
                   );
                 }
@@ -312,8 +331,35 @@ export const AssistantTurn = memo(function AssistantTurn({
                   />
                 );
               })}
+
+              {/* The live tail — text still streaming in from the model. */}
+              {liveAnswer && (
+                <div className="terra-stream-last">
+                  <Markdown>{liveAnswer}</Markdown>
+                  <StreamCursor />
+                </div>
+              )}
+
+              {/* The tool call the model is writing RIGHT NOW — its real
+               *  arguments stream in live with the path/name extracted as
+               *  soon as they exist (never a mute "Creating…"). */}
+              {prepare && (
+                <ToolCard
+                  tool={{
+                    name: prepare.name,
+                    icon: toolIconFor(prepare.name),
+                    subtitle: "",
+                    status: "preparing",
+                    args: prepare.args,
+                    result: "",
+                    toolId: prepare.toolId,
+                  }}
+                  streaming={streaming}
+                  workspaceId={workspaceId}
+                />
+              )}
             </div>
-          ) : streaming && !message.reasoning ? (
+          ) : streaming && !liveReasoning ? (
             <TypingDots />
           ) : null}
 

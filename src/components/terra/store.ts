@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { MODELS, seedConversations } from "./seed";
+import { clearLiveStream, setLiveStream, useStream } from "./stream-store";
 import type {
   AppMode,
   ChatHistoryMessage,
@@ -51,7 +52,7 @@ function partContent(part: MessagePart): string {
 }
 
 /** Icon chip for a tool name (code-mode tools included). */
-function toolIconFor(name: string): ToolIconKind {
+export function toolIconFor(name: string): ToolIconKind {
   switch (name) {
     case "create_app":
     case "manage_files":
@@ -62,6 +63,8 @@ function toolIconFor(name: string): ToolIconKind {
       return "monitor";
     case "manage_database":
       return "database";
+    case "inspect_image":
+      return "image";
     case "web_search":
       return "globe";
     default:
@@ -221,6 +224,22 @@ let draft: StreamDraft | null = null;
 let streamAbort: AbortController | null = null;
 let userStopped = false;
 
+/** Mirror the whole draft into the live-stream overlay (draft creation). */
+const syncOverlay = () => {
+  const current = draft;
+  if (!current) return;
+  setLiveStream({
+    msgId: current.msgId,
+    convId: current.convId,
+    reasoning: current.reasoning,
+    answer: current.answer,
+    thinkStart: current.thinkStart,
+    route: current.route,
+    notice: current.notice,
+    prepare: null,
+  });
+};
+
 /** Find a live tool card inside the draft by its server tool id. */
 function draftTool(current: StreamDraft, toolId: string): ToolCallData | null {
   for (let i = current.builtParts.length - 1; i >= 0; i--) {
@@ -244,6 +263,7 @@ type StreamEvent =
   | { type: "replace"; reasoning: string; answer: string }
   | { type: "status"; text: string }
   | { type: "warning"; text: string }
+  | { type: "tool_prepare"; toolId: string; name: string; args: string }
   | { type: "tool_call"; toolId: string; name: string; subtitle: string; args: string }
   | { type: "tool_status"; toolId: string; backgrounded: boolean; subtitle: string }
   | {
@@ -616,18 +636,45 @@ export const useTerra = create<TerraState>()((set, get) => {
 
   /* ---------------- streaming core --------------------------------- */
 
-  /** Write the current draft into the live assistant message (batched). */
-  const flushDraft = () => {
+  /**
+   * LIVE flush (fast path, ~12×/s): pushes reasoning/answer into the overlay
+   * store ONLY. No conversation state is touched — so nothing except the one
+   * streaming assistant turn re-renders while tokens arrive. This split is
+   * what keeps long generations from janking the whole app.
+   */
+  const flushLive = () => {
     const current = draft;
     if (!current) return;
     if (current.timer) {
       clearTimeout(current.timer);
       current.timer = null;
     }
-    const parts: MessagePart[] = [
-      ...current.builtParts,
-      ...(current.answer.length > 0 ? [{ type: "text" as const, text: current.answer }] : []),
-    ];
+    setLiveStream({
+      msgId: current.msgId,
+      convId: current.convId,
+      reasoning: current.reasoning,
+      answer: current.answer,
+      thinkStart: current.thinkStart,
+      route: current.route,
+    });
+  };
+
+  const queueLive = () => {
+    if (!draft || draft.timer) return;
+    // setTimeout keeps working (throttled) in background tabs, unlike rAF —
+    // so the reply keeps rendering even while the tab is hidden.
+    draft.timer = setTimeout(flushLive, 80);
+  };
+
+  /**
+   * MILESTONE flush (slow path, rare): persists the structural snapshot —
+   * completed text segments + tool cards, route, notices — into the actual
+   * conversation message. Called on tool lifecycle events, route decisions
+   * and status notes; never per token.
+   */
+  const pushMilestone = () => {
+    const current = draft;
+    if (!current) return;
     set((s) => ({
       conversations: s.conversations.map((c) =>
         c.id === current.convId
@@ -640,12 +687,12 @@ export const useTerra = create<TerraState>()((set, get) => {
                       reasoning: current.reasoning || undefined,
                       route: current.route ?? undefined,
                       notice: current.notice ?? undefined,
+                      warn: current.warn ?? undefined,
                       streaming: true,
                       // Live running timer for the thinking block.
                       thinkMs:
                         current.thinkStart !== null ? Date.now() - current.thinkStart : undefined,
-                      text: current.answer,
-                      parts,
+                      parts: current.builtParts,
                     }
                   : m,
               ),
@@ -653,13 +700,6 @@ export const useTerra = create<TerraState>()((set, get) => {
           : c,
       ),
     }));
-  };
-
-  const queueFlush = () => {
-    if (!draft || draft.timer) return;
-    // setTimeout keeps working (throttled) in background tabs, unlike rAF —
-    // so the reply keeps rendering even while the tab is hidden.
-    draft.timer = setTimeout(flushDraft, 80);
   };
 
   const finalizeDraft = (patch: Partial<Message>) => {
@@ -706,6 +746,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       ),
       sending: false,
     }));
+    clearLiveStream(current.msgId);
     markDirty(current.convId);
   };
 
@@ -722,6 +763,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       ),
       sending: false,
     }));
+    clearLiveStream(current.msgId);
   };
 
   const runStream = async (
@@ -745,23 +787,31 @@ export const useTerra = create<TerraState>()((set, get) => {
 
     /** Draft has content — OR the live message already does (a recovered
      *  turn resumes with an empty draft but a partially-filled message,
-     *  and that partial must never be thrown away). */
+     *  and that partial must never be thrown away). Tool cards already
+     *  pinned onto the timeline count too — a tool-only turn is real work. */
     const draftHasContent = (): boolean => {
       const current = draft;
       if (!current) return false;
       if (current.answer.trim().length > 0) return true;
+      if (current.builtParts.some((p) => p.type === "tool")) return true;
       const live = get()
         .conversations.find((c) => c.id === current.convId)
         ?.messages.find((m) => m.id === current.msgId);
       if (!live) return false;
       return (
         live.text.trim().length > 0 ||
-        (live.parts ?? []).some((p) => p.type === "text" && p.text.trim().length > 0)
+        (live.parts ?? []).some((p) => p.type === "text" && p.text.trim().length > 0) ||
+        (live.parts ?? []).some((p) => p.type === "tool")
       );
     };
 
     const applyEvent = (event: StreamEvent) => {
       if (!draft) return;
+      // A live event arrived — the re-attach succeeded; clear any transient
+      // "reattaching…" overlay notice so it never outstays the blip.
+      if (event.type !== "status" && useStream.getState().notice !== null) {
+        setLiveStream({ notice: null });
+      }
       switch (event.type) {
         case "route": {
           draft.route = {
@@ -780,34 +830,45 @@ export const useTerra = create<TerraState>()((set, get) => {
             }));
             scheduleSnapshot();
           }
-          queueFlush();
+          pushMilestone();
           break;
         }
         case "reasoning": {
           if (draft.thinkStart === null) draft.thinkStart = Date.now();
           draft.reasoning += event.text;
-          queueFlush();
+          queueLive();
           break;
         }
         case "delta": {
           draft.answer += event.text;
-          queueFlush();
+          queueLive();
           break;
         }
         case "replace": {
           draft.reasoning = event.reasoning;
           draft.answer = event.answer;
-          queueFlush();
+          queueLive();
           break;
         }
         case "status": {
           draft.notice = event.text;
-          queueFlush();
+          pushMilestone();
           break;
         }
         case "warning": {
           draft.warn = event.text;
-          queueFlush();
+          pushMilestone();
+          break;
+        }
+        case "tool_prepare": {
+          // The model is still WRITING the tool call — surface the real name
+          // + partial arguments live (fast overlay only; zero conversation
+          // writes so token-frequency never re-renders the app shell).
+          setLiveStream({
+            msgId: draft.msgId,
+            convId: draft.convId,
+            prepare: { toolId: event.toolId, name: event.name, args: event.args },
+          });
           break;
         }
         case "tool_call": {
@@ -829,7 +890,8 @@ export const useTerra = create<TerraState>()((set, get) => {
               toolId: event.toolId,
             },
           });
-          queueFlush();
+          pushMilestone();
+          setLiveStream({ answer: "", prepare: null });
           break;
         }
         case "tool_status": {
@@ -837,7 +899,7 @@ export const useTerra = create<TerraState>()((set, get) => {
           if (tool) {
             tool.backgrounded = event.backgrounded;
             if (event.subtitle) tool.subtitle = event.subtitle;
-            queueFlush();
+            pushMilestone();
           }
           break;
         }
@@ -855,7 +917,7 @@ export const useTerra = create<TerraState>()((set, get) => {
               };
               tool.resultData = data;
             }
-            queueFlush();
+            pushMilestone();
           }
           break;
         }
@@ -898,6 +960,7 @@ export const useTerra = create<TerraState>()((set, get) => {
               draft.builtParts = [];
               draft.route = null;
               draft.notice = null;
+              setLiveStream({ reasoning: "", answer: "", prepare: null });
             }
           },
         );
@@ -958,12 +1021,20 @@ export const useTerra = create<TerraState>()((set, get) => {
         // Transport failure on the viewer leg (background-tab eviction,
         // network blip, socket reset, premature close). The job keeps
         // running server-side — re-attach and replay what we missed.
+        //
+        // A hidden tab is NOT a lost job: the first re-attach is usually a
+        // sub-second blip the user never sees, so it stays SILENT. Only a
+        // reconnect that actually takes multiple attempts is worth surfacing
+        // (honest lifecycle, no false "reconnecting" noise on tab switches).
         if (attempts <= MAX_ATTACH_ATTEMPTS) {
           create = false; // attach-only; a missing job surfaces as GoneError
-          if (draft) {
-            draft.notice =
-              attempts === 1 ? "Reconnecting…" : `Reconnecting (attempt ${attempts})…`;
-            queueFlush();
+          if (draft && attempts >= 2) {
+            setLiveStream({
+              notice:
+                attempts === 2
+                  ? "Stream connection dropped — reattaching…"
+                  : `Reattaching (attempt ${attempts - 1})…`,
+            });
           }
           await sleepOrWake(Math.min(400 * 2 ** Math.min(attempts, 4), 5000));
           continue;
@@ -1007,6 +1078,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       timer: null,
       statsCounted: false,
     };
+    syncOverlay();
     const history: ChatHistoryMessage[] = historyMessages.map((m) => ({
       role: m.role,
       content: messageContent(m),
@@ -1097,6 +1169,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       timer: null,
       statsCounted: true, // replays never double-count
     };
+    syncOverlay();
     set({ sending: true });
     const history: ChatHistoryMessage[] = historyMessages.map((m) => ({
       role: m.role,
@@ -1390,9 +1463,15 @@ export const useTerra = create<TerraState>()((set, get) => {
       if (!last || Date.now() - last.at > 15_000) return;
       tombstones.delete(last.conversation.id);
       pendingTombstones.delete(last.conversation.id);
+      const wasCode = last.conversation.mode === "code";
       set((s) => ({
         conversations: sortConversations([last.conversation, ...s.conversations]),
-        activeId: last.conversation.id,
+        // MODE-AWARE RESTORE: a code chat must never become the active
+        // agent chat (and vice versa) — that is how code conversations
+        // leaked into the normal agent view.
+        ...(wasCode
+          ? { activeCodeId: s.appMode === "code" ? last.conversation.id : s.activeCodeId }
+          : { activeId: s.appMode === "agent" ? last.conversation.id : s.activeId }),
         lastDeleted: null,
       }));
       markDirty(last.conversation.id);
@@ -1454,6 +1533,17 @@ export const useTerra = create<TerraState>()((set, get) => {
     },
 
     exitCodeMode: () => {
+      const state = get();
+      // Leaving Code Mode destroys the workspace RUNTIME (the preview
+      // session) — source files stay. CodeShell's unmount also covers this;
+      // both are idempotent.
+      if (state.activeCodeId) {
+        void fetch("/api/code/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId: state.activeCodeId, action: "stop_workspace" }),
+        }).catch(() => undefined);
+      }
       set({ appMode: "agent", mobileNavOpen: false });
       scheduleSnapshot();
     },
@@ -1497,7 +1587,7 @@ export const useTerra = create<TerraState>()((set, get) => {
       if (tool) {
         tool.backgrounded = true;
         tool.subtitle = "Running in background";
-        flushDraft();
+        pushMilestone();
       }
       void fetch("/api/chat", {
         method: "POST",

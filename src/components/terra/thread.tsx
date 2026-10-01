@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Feather } from "lucide-react";
 import { EMPTY_STATE_SUGGESTIONS } from "./seed";
+import { useStream } from "./stream-store";
 import { useTerra } from "./store";
 import { AssistantTurn, UserCard } from "./turns";
 
@@ -83,6 +84,7 @@ export function Thread() {
     count: number;
     sending: boolean;
     lastLength: string;
+    streamVersion: number;
   } | null>(null);
   /** True while the view rides along with the latest message. The user
    *  scrolling up unpins it — streaming then grows the thread silently
@@ -96,7 +98,10 @@ export function Thread() {
   const messageCount = active?.messages.length ?? 0;
   const lastMessage = active?.messages[messageCount - 1];
   // Track streaming growth so the thread follows the reply as it arrives.
+  // The live answer no longer touches conversation state per token, so the
+  // follow signal comes from the overlay's version counter instead.
   const lastLength = lastMessage ? `${lastMessage.role}:${lastMessage.text.length}:${lastMessage.reasoning?.length ?? 0}` : "";
+  const streamVersion = useStream((s) => (s.msgId ? s.version : 0));
 
   /* Locate the scrolling ancestor once per mount (agent page and OnyxCode
    * both wrap the thread in a .terra-scroll container). */
@@ -130,7 +135,7 @@ export function Thread() {
 
   useEffect(() => {
     const prev = prevRef.current;
-    prevRef.current = { id: activeId ?? "", count: messageCount, sending, lastLength };
+    prevRef.current = { id: activeId ?? "", count: messageCount, sending, lastLength, streamVersion };
     if (!prev) return;
     if (prev.id !== (activeId ?? "")) {
       // Switched conversation — snap to the top, then re-sync the pin state
@@ -148,13 +153,13 @@ export function Thread() {
     }
     const grew = messageCount > prev.count;
     const startedTyping = !prev.sending && sending;
-    const streamed = prev.lastLength !== lastLength;
+    const streamed = prev.lastLength !== lastLength || prev.streamVersion !== streamVersion;
     if (!(grew || startedTyping || streamed) || messageCount === 0) return;
     // The user's own new message always re-pins the view; assistant growth
     // only follows when the user is already at (or near) the bottom.
     if (grew && lastMessage?.role === "user") pinnedRef.current = true;
     if (pinnedRef.current) scrollToBottom();
-  }, [activeId, messageCount, sending, lastLength]);
+  }, [activeId, messageCount, sending, lastLength, streamVersion]);
 
   if (!booted) return <BootSkeleton />;
   if (!active) return null;
