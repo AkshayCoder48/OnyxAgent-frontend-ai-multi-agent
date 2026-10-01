@@ -30,9 +30,9 @@ import { cn } from "@/lib/utils";
  *    history, plain rerenders) render the full text with no timers at all.
  *
  * Returns the revealed substring plus `freshFrom` — the index where the
- * "fresh window" starts (chars revealed within the last ~360ms). Those are
- * the chars still playing their letter-in animation; everything before it
- * is safe to render as plain text.
+ * "fresh window" starts (chars revealed within the last ~700ms). Those are
+ * the chars still playing their letter-in animation (240ms + up to 280ms
+ * stagger); everything before it is safe to render as plain text.
  */
 export interface TypewriterOptions {
   /** Hold before the first reveal while streaming (ms). Default 180. */
@@ -61,7 +61,20 @@ interface RevealState {
   history: { t: number; n: number }[];
 }
 
-const FRESH_WINDOW_MS = 360;
+/** How long a freshly revealed char stays in per-char spans. Must cover
+ *  the letter-in animation (240ms) PLUS the worst-case stagger delay
+ *  (LETTER_STAGGER_STEPS × 0.02s = 280ms) with margin, so a char never
+ *  unmounts mid-animation (that would pop). */
+const FRESH_WINDOW_MS = 700;
+
+/** Character stagger (OnyxCode PRD §42): every letter starts 0.02s after
+ *  the one before it. Implemented as a STABLE per-index delay —
+ *  `(absoluteIndex % LETTER_STAGGER_STEPS) × 0.02s` — so a char's delay
+ *  never changes after it mounts (a shifting delay would re-seek the
+ *  running animation and cause visual jumps). The modulo keeps the delay
+ *  bounded (≤ 0.28s) for arbitrarily large bursts. */
+const LETTER_STAGGER_STEPS = 15;
+const LETTER_STAGGER_STEP_S = 0.02;
 
 export function useTypewriter(
   target: string,
@@ -266,7 +279,13 @@ export function LetterStream({
         ch === " " || ch === "\n" || ch === "\t" ? (
           ch
         ) : (
-          <span key={windowStart + i} className="letter-in">
+          <span
+            key={windowStart + i}
+            className="letter-in"
+            style={{
+              animationDelay: `${((windowStart + i) % LETTER_STAGGER_STEPS) * LETTER_STAGGER_STEP_S}s`,
+            }}
+          >
             {ch}
           </span>
         ),

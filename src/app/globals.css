@@ -2691,21 +2691,28 @@ html.theme-transitioning .animate-backdrop {
 /* Words of the trailing paragraph (markdown text): fresh words carry the
    blue tint; when newer words push them out of the window the class flips
    and this transition settles them back to the inherited ink — a calm,
-   continuous blue→white comet tail. New words also materialize softly
-   (opacity ramp, runs once per word on mount). */
+   continuous blue→white comet tail. New words also materialize the SAME
+   way the letter stream does (OnyxCode PRD §42): starting at 50% opacity
+   with a 5px blur and sharpening into focus, with a 0.02s per-word stagger
+   set inline by tintStreamingParagraph (markdown groups the character
+   cascade at word granularity — PRD §44 — so per-char spans never break
+   inline markdown structure). `backwards` fill keeps the from-state
+   visible during the stagger delay. */
 .onyx-word {
   transition: color 900ms cubic-bezier(0.22, 1, 0.36, 1);
-  animation: onyx-word-in 260ms ease-out;
+  animation: onyx-word-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 .onyx-word-fresh {
   color: var(--onyx-stream-tint);
 }
 @keyframes onyx-word-in {
   from {
-    opacity: 0.45;
+    opacity: 0.5;
+    filter: blur(5px);
   }
   to {
     opacity: 1;
+    filter: blur(0);
   }
 }
 
@@ -3251,25 +3258,23 @@ html.theme-transitioning .animate-backdrop {
 /* ===== Letter stream — single-letter typewriter (motion blur + fade) =====
    Every freshly revealed letter of a streaming surface (thinking text, tool
    output, captions) mounts as a .letter-in span exactly once (stable index
-   keys): it fades from transparent + 3px blur into ink over ~280ms. Pair
-   with useTypewriter/LetterStream — chars outside the fresh window render
-   as plain text, so long streams carry no per-letter DOM once settled. */
+   keys): it starts at 50% OPACITY with a 5px BLUR and sharpens into ink
+   over ~240ms. A per-letter stagger (0.02s per character, set inline by
+   LetterStream) cascades bursts so each letter starts 0.02s after the one
+   before it. Pair with useTypewriter/LetterStream — chars outside the
+   fresh window render as plain text, so long streams carry no per-letter
+   DOM once settled. */
 .letter-in {
   display: inline-block;
-  animation: letter-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: letter-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 @keyframes letter-in {
   from {
-    opacity: 0;
-    filter: blur(3px);
-    transform: translateY(0.08em);
-  }
-  55% {
-    filter: blur(0.5px);
+    opacity: 0.5;
+    filter: blur(5px);
   }
   to {
     opacity: 1;
     filter: blur(0);
-    transform: none;
   }
 }

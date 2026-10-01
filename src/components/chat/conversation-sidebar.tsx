@@ -494,6 +494,11 @@ function ConversationList({
     onNavigate?.();
   };
 
+  const handleOpenAgentMode = () => {
+    router.push(ROUTES.CHAT);
+    onNavigate?.();
+  };
+
   const isArchivedView = view === "archived";
 
   return (
@@ -536,6 +541,29 @@ function ConversationList({
               </span>
             </span>
             <TerminalSquare className="text-muted-foreground h-4 w-4 shrink-0" aria-hidden />
+          </button>
+        </div>
+      )}
+
+      {/* Agent Mode entry (OnyxCode sidebar only — OnyxCode PRD §40): the
+          SAME mode-switch concept the agent sidebar shows, mirrored. While
+          inside Code Mode the button is labeled "Agent Mode" and returns the
+          user to the normal OnyxAgent chats. */}
+      {isCode && (
+        <div className="px-3 pb-2">
+          <button
+            type="button"
+            onClick={handleOpenAgentMode}
+            className="border-border bg-card hover:border-primary/40 hover:bg-accent/50 flex h-10 w-full items-center justify-between gap-2 rounded-xl border px-3.5 text-sm font-medium shadow-sm transition-colors"
+            title="Back to OnyxAgent — the normal chat agent"
+          >
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <span className="bg-primary/10 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md">
+                <MessageSquare className="text-primary h-3.5 w-3.5" aria-hidden />
+              </span>
+              <span className="truncate">Agent Mode</span>
+            </span>
+            <ChevronRight className="text-muted-foreground h-4 w-4 shrink-0" aria-hidden />
           </button>
         </div>
       )}
@@ -931,6 +959,18 @@ export function ConversationSidebar({ className, mode = "agent" }: ConversationS
               aria-label="Open Code Mode"
             >
               <TerminalSquare className="h-4 w-4" aria-hidden />
+            </Button>
+          )}
+          {mode === "code" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground mt-2 h-10 w-10 p-0"
+              onClick={() => router.push(ROUTES.CHAT)}
+              title="Agent Mode — back to OnyxAgent"
+              aria-label="Back to Agent Mode"
+            >
+              <MessageSquare className="h-4 w-4" aria-hidden />
             </Button>
           )}
         </div>

@@ -220,7 +220,17 @@ function tintStreamingParagraph(
   out[lastStrIdx] = tokens.map((t, i) => {
     if (t.trim().length === 0) return t;
     return (
-      <span key={i} className={"onyx-word" + (fresh.has(i) ? " onyx-word-fresh" : "")}>
+      <span
+        key={i}
+        className={"onyx-word" + (fresh.has(i) ? " onyx-word-fresh" : "")}
+        // Word-level stagger of the character cascade (OnyxCode PRD §42 —
+        // markdown groups the per-char blur/fade at word granularity, §44).
+        // STABLE per-index delay: derived from the token's own key, so it
+        // never changes after mount (a shifting delay would re-seek the
+        // running onyx-word-in animation). Consecutive words cascade at
+        // 0.02s steps, cycling over the fresh-window size.
+        style={{ animationDelay: `${(i % FRESH_WORD_WINDOW) * 0.02}s` }}
+      >
         {t}
       </span>
     );
