@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { Feather } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ArrowDown, Feather } from "lucide-react";
 import { EMPTY_STATE_SUGGESTIONS } from "./seed";
 import { useTerra } from "./store";
 import { AssistantTurn, UserCard } from "./turns";
@@ -63,6 +64,9 @@ function BootSkeleton() {
   );
 }
 
+/** Distance from the bottom (px) that still counts as "pinned to latest". */
+const PIN_THRESHOLD = 140;
+
 export function Thread() {
   const appMode = useTerra((s) => s.appMode);
   const active = useTerra((s) =>
@@ -73,12 +77,18 @@ export function Thread() {
   const send = useTerra((s) => s.send);
   const topRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
   const prevRef = useRef<{
     id: string;
     count: number;
     sending: boolean;
     lastLength: string;
   } | null>(null);
+  /** True while the view rides along with the latest message. The user
+   *  scrolling up unpins it — streaming then grows the thread silently
+   *  instead of yanking the viewport back down on every flush. */
+  const pinnedRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
 
   const activeId = active?.id;
   // OnyxCode tool cards get the workspace id so their actions work.
@@ -88,20 +98,62 @@ export function Thread() {
   // Track streaming growth so the thread follows the reply as it arrives.
   const lastLength = lastMessage ? `${lastMessage.role}:${lastMessage.text.length}:${lastMessage.reasoning?.length ?? 0}` : "";
 
+  /* Locate the scrolling ancestor once per mount (agent page and OnyxCode
+   * both wrap the thread in a .terra-scroll container). */
+  useEffect(() => {
+    const scroller =
+      (topRef.current?.closest?.(".terra-scroll") as HTMLElement | null) ??
+      (bottomRef.current?.closest?.(".terra-scroll") as HTMLElement | null);
+    if (!scroller) return;
+    scrollerRef.current = scroller;
+    const onScroll = () => {
+      const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < PIN_THRESHOLD;
+      pinnedRef.current = pinned;
+      setShowJump(!pinned);
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", onScroll);
+      scrollerRef.current = null;
+    };
+  }, []);
+
+  const scrollToBottom = () => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    // Instant (not smooth): during streaming this runs on every flush, and
+    // restarting a smooth animation 12×/s is what made scrolling feel dead.
+    // The scroll listener re-syncs the pinned state + jump pill on its own.
+    pinnedRef.current = true;
+    scroller.scrollTop = scroller.scrollHeight;
+  };
+
   useEffect(() => {
     const prev = prevRef.current;
     prevRef.current = { id: activeId ?? "", count: messageCount, sending, lastLength };
     if (!prev) return;
     if (prev.id !== (activeId ?? "")) {
+      // Switched conversation — snap to the top, then re-sync the pin state
+      // from the settled scroll position (async, layout-dependent).
+      pinnedRef.current = true;
       topRef.current?.scrollIntoView({ block: "start" });
+      requestAnimationFrame(() => {
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        const pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < PIN_THRESHOLD;
+        pinnedRef.current = pinned;
+        setShowJump(!pinned);
+      });
       return;
     }
     const grew = messageCount > prev.count;
     const startedTyping = !prev.sending && sending;
     const streamed = prev.lastLength !== lastLength;
-    if ((grew || startedTyping || streamed) && messageCount > 0) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
+    if (!(grew || startedTyping || streamed) || messageCount === 0) return;
+    // The user's own new message always re-pins the view; assistant growth
+    // only follows when the user is already at (or near) the bottom.
+    if (grew && lastMessage?.role === "user") pinnedRef.current = true;
+    if (pinnedRef.current) scrollToBottom();
   }, [activeId, messageCount, sending, lastLength]);
 
   if (!booted) return <BootSkeleton />;
@@ -130,6 +182,32 @@ export function Thread() {
           <div ref={bottomRef} aria-hidden className="scroll-mb-36" />
         </div>
       )}
+
+      {/* Floating "back to latest" pill — appears once the user scrolls away
+       *  from the live end of the thread. Sticks to the scroll viewport. */}
+      <AnimatePresence>
+        {showJump && active.messages.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 8, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.95 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            className={`
+              pointer-events-none sticky z-10 mt-2 flex justify-center
+              ${appMode === "code" ? "bottom-4" : "bottom-32"}
+            `.trim()}
+          >
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              className="pointer-events-auto inline-flex h-9 items-center gap-1.5 rounded-full border border-terra-soft-border bg-background/95 px-4 text-[12px] font-medium text-terra-deep shadow-[0_4px_16px_rgba(26,26,26,0.14)] backdrop-blur transition-colors hover:bg-terra-soft"
+            >
+              <ArrowDown className="h-3.5 w-3.5" aria-hidden />
+              {sending ? "Jump to latest" : "Back to latest"}
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

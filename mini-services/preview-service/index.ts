@@ -25,6 +25,8 @@ interface Session {
   entry: string;
   status: "running" | "stopped";
   createdAt: number;
+  /** Bumped on every (re-)register — clients live-reload on change. */
+  revision: number;
 }
 
 /** id -> session */
@@ -44,6 +46,7 @@ function loadSessions(): void {
         entry: typeof s.entry === "string" && s.entry.length > 0 ? s.entry : "preview/index.html",
         status: s.status === "stopped" ? "stopped" : "running",
         createdAt: typeof s.createdAt === "number" ? s.createdAt : Date.now(),
+        revision: typeof s.revision === "number" ? s.revision : 1,
       });
     }
   } catch {
@@ -225,6 +228,7 @@ const server = Bun.serve({
           entry: s.entry,
           status: s.status,
           createdAt: s.createdAt,
+          revision: s.revision,
         })),
       });
     }
@@ -276,6 +280,7 @@ const server = Bun.serve({
         entry,
         status: "running",
         createdAt: existing?.createdAt ?? Date.now(),
+        revision: (existing?.revision ?? 0) + 1,
       });
       persistSessions();
       return Response.json({ ok: true, id, entry, url: `/preview/${id}/${entry}?${GATEWAY_QUERY}` });

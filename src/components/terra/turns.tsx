@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -142,7 +142,7 @@ function ThinkingBlock({ message }: { message: Message }) {
   );
 }
 
-export function UserCard({ message }: { message: Message }) {
+export const UserCard = memo(function UserCard({ message }: { message: Message }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -155,7 +155,7 @@ export function UserCard({ message }: { message: Message }) {
       </div>
     </motion.div>
   );
-}
+});
 
 function plainText(message: Message): string {
   const parts = message.parts ?? [];
@@ -214,7 +214,7 @@ function TypingDots() {
   );
 }
 
-export function AssistantTurn({
+export const AssistantTurn = memo(function AssistantTurn({
   message,
   isLast,
   workspaceId,
@@ -360,4 +360,4 @@ export function AssistantTurn({
       <span className="sr-only">{hasAnswer ? "" : "Terra is composing a reply"}</span>
     </motion.article>
   );
-}
+});

@@ -217,3 +217,36 @@
 .terra-streaming .terra-stream-last > :last-child {
   margin-bottom: 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* OnyxCode motion                                                     */
+/* ------------------------------------------------------------------ */
+
+/* Section enter — plays whenever a panel becomes the active one */
+@keyframes onyx-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.onyx-panel[data-active="true"] {
+  animation: onyx-panel-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Tactile press feedback — every button subtly yields while pressed */
+:where(button:not(:disabled)):active {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onyx-panel[data-active="true"] {
+    animation: none;
+  }
+  :where(button:not(:disabled)):active {
+    transform: none;
+  }
+}

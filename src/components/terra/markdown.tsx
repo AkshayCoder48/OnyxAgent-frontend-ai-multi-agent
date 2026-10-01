@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { Check } from "lucide-react";
 import { CodeBlock } from "./code-block";
@@ -117,9 +118,11 @@ const editorialComponents: Components = {
 };
 
 export function Markdown({ children }: { children: string }) {
-  return (
-    <div className="space-y-4 text-ink">
-      <ReactMarkdown components={editorialComponents}>{children}</ReactMarkdown>
-    </div>
+  // Parsing is the expensive part — during streaming the parent re-renders
+  // every ~80ms, so the parsed tree is cached per exact text input.
+  const parsed = useMemo(
+    () => <ReactMarkdown components={editorialComponents}>{children}</ReactMarkdown>,
+    [children],
   );
+  return <div className="space-y-4 text-ink">{parsed}</div>;
 }

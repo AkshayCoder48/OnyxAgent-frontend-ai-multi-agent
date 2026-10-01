@@ -38,7 +38,7 @@ interface EditorState {
  * OnyxCode Database tab — a workspace-scoped document/KV browser over the
  * same records the agent writes through the manage_database tool.
  */
-export function DatabasePanel({ workspaceId }: { workspaceId: string }) {
+export function DatabasePanel({ workspaceId, active = true }: { workspaceId: string; active?: boolean }) {
   const [records, setRecords] = useState<CodeRecordView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -67,13 +67,18 @@ export function DatabasePanel({ workspaceId }: { workspaceId: string }) {
     refresh();
   }, [refresh]);
 
-  // Live refresh while the tab is visible (the agent may be writing).
+  // Live refresh while the panel is the visible section (the agent may be
+  // writing); a silent catch-up fetch whenever it becomes active again.
   useEffect(() => {
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible" && !editor) refresh(true);
+      if (active && document.visibilityState === "visible" && !editor) refresh(true);
     }, 8000);
     return () => clearInterval(timer);
-  }, [refresh, editor]);
+  }, [refresh, editor, active]);
+
+  useEffect(() => {
+    if (active) refresh(true);
+  }, [active]);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();

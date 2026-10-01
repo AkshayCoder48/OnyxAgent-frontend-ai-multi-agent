@@ -26,6 +26,7 @@ import {
   writeFiles,
   deleteFile,
   workspaceSummary,
+  type Workspace,
 } from "./code-workspace";
 
 export const PREVIEW_PORT = 3212;
@@ -72,18 +73,18 @@ export function codeToolDocs(): string {
 \`\`\`
 
 Tool reference:
-- create_app — scaffold a fresh project. args: framework (nextjs | vite-react | fastapi | node | static | cli), name (required, from the user's request), description.
-- manage_files — edit the workspace. args: action (list | read | write | delete), path, content (for write). ALWAYS write preview/index.html (self-contained HTML, inline CSS) so the preview stays alive.
+- create_app — scaffold a fresh project. args: framework (nextjs | vite-react | fastapi | node | static | cli), name (required, from the user's request), description. The scaffold ships GENERIC PLACEHOLDER pages — after scaffolding you MUST replace the placeholder with the actual site the user asked for (manage_files write) before starting the preview. Never show the placeholder as the finished result.
+- manage_files — edit the workspace. args: action (list | read | write | delete), path, content (for write). For STATIC sites write the real requested page to index.html at the WORKSPACE ROOT (the live preview serves exactly that file). For app frameworks (nextjs, vite-react) keep preview/index.html a self-contained mirror of the page (inline CSS, no external assets) and update it whenever the page design changes. Running previews pick up file changes automatically.
 - start_preview — serve the workspace as a live preview URL. args: name (optional). Returns the public URL; tell the user to open the Preview tab.
 - manage_preview — args: action (list | stop | check), sessionId (for stop/check).
 - start_web_session — open a real headless browser against a URL (defaults to the latest preview). args: url (optional — an absolute URL or the preview path from a start_preview result), screenshot (boolean, optional — takes a PNG).
 - manage_database — read/write the workspace database (also shown in the Database tab). args: action (list | get | set | delete), key, data (any JSON, for set).
 
 Tool protocol rules — FOLLOW THESE EXACTLY:
-1. AT MOST ONE tool block per reply, and it must be the LAST thing you write. Stop right after the block — the result comes back to you as a TOOL RESULT message and you continue then.
+1. End tool work with ONE fenced onyxtool block as the LAST thing you write. The block holds either a single call {"tool": …, "args": …} or a JSON ARRAY of calls executed in order — e.g. the page write AND start_preview together: [{"tool": "manage_files", …}, {"tool": "start_preview", …}]. Stop right after the block — results come back as TOOL RESULT messages and you continue then.
 2. The block content must be valid JSON. No prose inside the fence. ALWAYS fill in the args (never leave them empty when the tool takes a name/framework/path).
-3. NEVER announce a tool action in prose without emitting its block in the SAME reply. Writing "I'll start the preview now" without the \`\`\`onyxtool block is a protocol violation — the action will not happen. Either emit the block, or don't mention the action.
-4. Never invent tool results. Wait for the real ones.
+3. NEVER announce or describe a tool action in prose without emitting its block in the SAME reply. Writing "I'll start the preview now" or "I've updated the file" without the matching block is a protocol violation — the action will not happen.
+4. NEVER invent, predict or quote a tool result. Results only ever arrive as [TOOL RESULT] messages after you emit a block. If you have not emitted the block, nothing has happened — do not claim it has.
 5. When no more tool work is needed, write your final answer with NO tool block — and never promise future tool actions in it.`;
 }
 
@@ -129,6 +130,81 @@ async function previewSessionsFor(workspaceId: string) {
   });
 }
 
+/** Scaffold placeholder markers — pages OnyxCode itself generated, not the
+ *  user's real content. Used to prefer real pages for the preview entry. */
+const PLACEHOLDER_RE = /scaffolded by onyxcode|warm editorial starting point|live static preview of the project/i;
+
+/**
+ * Pick the file a preview session should serve — always the REAL page the
+ * agent wrote, never the generic scaffold placeholder.
+ *
+ * 1. The framework's canonical entry when it holds real content
+ *    (static: index.html — the site itself; apps: preview/index.html — the
+ *    self-contained mirror).
+ * 2. Otherwise any non-placeholder HTML page (models sometimes write the
+ *    real site into a subfolder like my-app/index.html) — shallowest path
+ *    wins.
+ * 3. Otherwise the canonical entry / any HTML, placeholder or not.
+ */
+export function pickPreviewEntry(workspace: Workspace): string | null {
+  const files = workspace.files;
+  const htmlFiles = Object.keys(files)
+    .filter((p) => /\.html?$/i.test(p))
+    .sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+  const isPlaceholder = (p: string) => PLACEHOLDER_RE.test(files[p] ?? "");
+  const preferred =
+    workspace.appMeta.framework === "static"
+      ? ["index.html", "preview/index.html"]
+      : ["preview/index.html", "index.html"];
+
+  for (const p of preferred) {
+    if (files[p] && !isPlaceholder(p)) return p;
+  }
+  const real = htmlFiles.filter((p) => !isPlaceholder(p));
+  if (real.length > 0) return real[0];
+  for (const p of preferred) {
+    if (files[p]) return p;
+  }
+  return htmlFiles[0] ?? null;
+}
+
+/**
+ * Push the CURRENT workspace files into every running preview session of
+ * this workspace. Called after any file change (scaffold / write / delete)
+ * so a live preview actually serves what the agent built — the browser
+ * just needs a refresh, never a new session.
+ */
+async function syncRunningPreviews(workspaceId: string): Promise<void> {
+  let rows;
+  try {
+    rows = await db.previewSession.findMany({ where: { workspaceId, status: "running" } });
+  } catch {
+    return;
+  }
+  if (rows.length === 0) return;
+  const workspace = await getWorkspace(workspaceId);
+  const entry = pickPreviewEntry(workspace);
+  for (const row of rows) {
+    if (!entry) {
+      await bridgeStop(row.id);
+      try {
+        await db.previewSession.update({ where: { id: row.id }, data: { status: "stopped" } });
+      } catch {
+        // Row vanished mid-sync — nothing to do.
+      }
+      continue;
+    }
+    const url = await bridgeRegister(row.id, row.name, workspace.files, entry);
+    if (url) {
+      try {
+        await db.previewSession.update({ where: { id: row.id }, data: { url, entry } });
+      } catch {
+        // Row vanished mid-sync — the service copy is already correct.
+      }
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Preview session orchestration (shared with /api/code/preview)       */
 /* ------------------------------------------------------------------ */
@@ -144,14 +220,37 @@ export interface PreviewSessionView {
 
 export async function listPreviewSessions(workspaceId: string): Promise<PreviewSessionView[]> {
   const rows = await previewSessionsFor(workspaceId);
-  return rows.map((r) => ({
-    sessionId: r.id,
-    name: r.name,
-    url: r.url,
-    status: r.status,
-    entry: r.entry,
-    createdAt: r.createdAt.getTime(),
-  }));
+  // Live info from the preview service (status + revision) when reachable —
+  // revision bumps whenever the agent re-publishes a session's files.
+  const live = new Map<string, { status: string; revision: number }>();
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const response = await fetch(`${PREVIEW_BRIDGE}/list`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (response.ok) {
+      const data = (await response.json()) as {
+        sessions?: { id: string; status: string; revision: number }[];
+      };
+      for (const s of data.sessions ?? []) {
+        live.set(s.id, { status: s.status, revision: s.revision });
+      }
+    }
+  } catch {
+    // Service unreachable — the DB rows still list (status may be stale).
+  }
+  return rows.map((r) => {
+    const info = live.get(r.id);
+    return {
+      sessionId: r.id,
+      name: r.name,
+      url: r.url,
+      status: info?.status ?? r.status,
+      entry: r.entry,
+      createdAt: r.createdAt.getTime(),
+      revision: info?.revision ?? 0,
+    };
+  });
 }
 
 export async function startPreviewSession(
@@ -160,11 +259,7 @@ export async function startPreviewSession(
 ): Promise<{ ok: true; sessionId: string; url: string } | { ok: false; error: string }> {
   const workspace = await getWorkspace(workspaceId);
   const sessionName = name || workspace.appMeta.name || "Preview";
-  const entry = workspace.files["preview/index.html"]
-    ? "preview/index.html"
-    : workspace.files["index.html"]
-      ? "index.html"
-      : null;
+  const entry = pickPreviewEntry(workspace);
   if (!entry) {
     return {
       ok: false,
@@ -337,11 +432,12 @@ async function toolCreateApp(args: Args, ctx: ToolContext): Promise<ToolExecutio
     name: slugify(name),
     description: scaffold.appMeta.description,
   });
+  await syncRunningPreviews(ctx.workspaceId);
   const paths = Object.keys(workspace.files).sort();
   return {
     ok: true,
     subtitle: `Scaffolded ${FRAMEWORKS.find((f) => f.id === framework)?.label} · ${paths.length} files`,
-    text: `Project "${slugify(name)}" (${framework}) scaffolded into the workspace. Files:\n${paths.map((p) => `- ${p}`).join("\n")}\n\nA self-contained preview page ships at preview/index.html. Next step: call start_preview to get a live URL for the user.`,
+    text: `Project "${slugify(name)}" (${framework}) scaffolded into the workspace. Files:\n${paths.map((p) => `- ${p}`).join("\n")}\n\nIMPORTANT: these scaffold pages are a generic placeholder. Next step: use manage_files to write the ACTUAL site the user asked for (${framework === "static" ? "the real page content goes to index.html — the preview serves it directly" : "put a self-contained mirror of the real page at preview/index.html with inline CSS"}), then call start_preview. Never present the placeholder as the finished site.`,
     resultData: {
       kind: "create_app",
       payload: {
@@ -386,19 +482,26 @@ async function toolManageFiles(args: Args, ctx: ToolContext): Promise<ToolExecut
     if (!path) return { ok: false, subtitle: "Missing path", text: "write needs a path argument." };
     const content = str(args, "content");
     if (!content) return { ok: false, subtitle: "Missing content", text: "write needs the content argument." };
-    await writeFiles(ctx.workspaceId, { [path]: content });
+    const workspace = await writeFiles(ctx.workspaceId, { [path]: content });
+    await syncRunningPreviews(ctx.workspaceId);
+    const entry = pickPreviewEntry(workspace);
+    const entryNote =
+      /\.html?$/i.test(path) && entry && entry !== path
+        ? ` Note: the live preview serves "${entry}" — write the real page there (workspace root, not a subfolder) so the user sees it.`
+        : "";
     return {
       ok: true,
       subtitle: `Wrote ${path}`,
-      text: `Wrote ${content.length} bytes to ${path}. The live preview serves the latest workspace state — refresh it to see the change.`,
+      text: `Wrote ${content.length} bytes to ${path}. Running previews now serve the latest workspace files — the user just refreshes the Preview tab to see them.${entryNote}`,
       resultData: { kind: "files", payload: { action, path, bytes: content.length } },
     };
   }
   if (action === "delete") {
     if (!path) return { ok: false, subtitle: "Missing path", text: "delete needs a path argument." };
     const removed = await deleteFile(ctx.workspaceId, path);
+    if (removed) await syncRunningPreviews(ctx.workspaceId);
     return removed
-      ? { ok: true, subtitle: `Deleted ${path}`, text: `Deleted ${path}.` }
+      ? { ok: true, subtitle: `Deleted ${path}`, text: `Deleted ${path}. Running previews were updated to the new workspace state.` }
       : { ok: false, subtitle: `${path} not found`, text: `No file at "${path}".` };
   }
   return { ok: false, subtitle: `Unknown action "${action}"`, text: `Unknown action "${action}". Use list | read | write | delete.` };

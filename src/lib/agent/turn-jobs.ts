@@ -506,34 +506,80 @@ function visiblePortion(raw: string): string {
 
 interface ToolBlock {
   complete: boolean;
-  /** Raw text before the fence (the model's visible message). */
+  /** Raw text before the first fence (the model's visible message). */
   before: string;
-  /** JSON text inside the fence (when complete). */
-  jsonText: string;
+  /** JSON texts of every complete fenced block, in order. */
+  jsonTexts: string[];
 }
 
-function extractToolBlock(raw: string): ToolBlock | null {
-  const match = TOOL_FENCE_RE.exec(raw);
-  if (!match) return null;
-  const before = raw.slice(0, match.index);
-  const rest = raw.slice(match.index + match[0].length);
-  const close = rest.indexOf("```");
-  if (close === -1) return { complete: false, before, jsonText: rest };
-  return { complete: true, before, jsonText: rest.slice(0, close) };
+/**
+ * Extract EVERY onyxtool fence in the reply. A single reply may batch calls
+ * either as one JSON array inside one fence or as several fences — both are
+ * collected here so nothing is silently dropped. `complete` is false when a
+ * fence is left unterminated.
+ */
+function extractToolBlocks(raw: string): ToolBlock | null {
+  const fences: { start: number; jsonStart: number }[] = []
+  const re = /```[ \t]*onyxtool[^\n]*\n?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(raw)) !== null) {
+    fences.push({ start: match.index, jsonStart: match.index + match[0].length });
+  }
+  if (fences.length === 0) return null;
+  const before = raw.slice(0, fences[0].start);
+  const jsonTexts: string[] = [];
+  for (let i = 0; i < fences.length; i++) {
+    const close = raw.indexOf("```", fences[i].jsonStart);
+    if (close === -1) return { complete: false, before, jsonTexts };
+    jsonTexts.push(raw.slice(fences[i].jsonStart, close));
+  }
+  return { complete: true, before, jsonTexts };
 }
 
-function parseToolCall(jsonText: string): { tool: string; args: Record<string, unknown> } | null {
+interface ToolCall {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+function toToolCall(value: unknown): ToolCall | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const obj = value as { tool?: unknown; args?: unknown };
+  if (typeof obj.tool !== "string" || obj.tool.trim().length === 0) return null;
+  const args =
+    obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)
+      ? (obj.args as Record<string, unknown>)
+      : {};
+  return { tool: obj.tool.trim(), args };
+}
+
+/**
+ * Parse one fence's JSON into a list of calls. Accepts a single call object,
+ * a bare array of call objects, or {"calls": [...]} — so the model can batch
+ * "write the page AND start the preview" in one block instead of fabricating
+ * the first action in prose.
+ */
+function parseToolCalls(jsonText: string): ToolCall[] | null {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(jsonText.trim()) as { tool?: unknown; args?: unknown };
-    if (typeof parsed?.tool !== "string" || parsed.tool.trim().length === 0) return null;
-    const args =
-      parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args)
-        ? (parsed.args as Record<string, unknown>)
-        : {};
-    return { tool: parsed.tool.trim(), args };
+    parsed = JSON.parse(jsonText.trim());
   } catch {
     return null;
   }
+  const fromList = (list: unknown): ToolCall[] | null => {
+    if (!Array.isArray(list)) return null;
+    const calls = list
+      .map(toToolCall)
+      .filter((c): c is ToolCall => c !== null);
+    return calls.length > 0 ? calls : null;
+  };
+  if (Array.isArray(parsed)) return fromList(parsed);
+  if (parsed && typeof parsed === "object") {
+    const callsField = (parsed as { calls?: unknown }).calls;
+    if (Array.isArray(callsField)) return fromList(callsField);
+    const single = toToolCall(parsed);
+    return single ? [single] : null;
+  }
+  return null;
 }
 
 function describeToolCall(call: { tool: string; args: Record<string, unknown> }): string {
@@ -558,19 +604,6 @@ function describeToolCall(call: { tool: string; args: Record<string, unknown> })
 }
 
 /**
- * Concrete block-shape example for the continuation message — the model
- * follows the protocol far more reliably when the exact syntax is repeated
- * right where it continues (verified against the gateway: announcements
- * without blocks otherwise appear on follow-up rounds).
- */
-function nextBlockExample(tool: string): string {
-  if (tool === "create_app") {
-    return '```onyxtool\n{"tool": "start_preview", "args": {"name": "<the app name>"}}\n```';
-  }
-  return '```onyxtool\n{"tool": "<tool-name>", "args": {}}\n```';
-}
-
-/**
  * Deterministic self-healing for the classic failure mode: the model ANNOUNCES
  * a tool action in prose but never emits the block. When a reply without a
  * block clearly promises one of the known actions, a corrective round asks
@@ -579,6 +612,8 @@ function nextBlockExample(tool: string): string {
 function detectAnnouncedTool(text: string): { action: string; example: string } | null {
   const intent = /\b(i'?ll|i will|i am going to|i'?m going to|let me|now i|we'?ll)\b/i.test(text);
   if (!intent) return null;
+  // Explanations — questions answered, code shown — are not announcements.
+  if (text.includes("?") || text.includes("```")) return null;
   const lower = text.toLowerCase();
   if (/(preview|go live)/.test(lower) && /(start|launch|run|open|spin|bring|serve)/.test(lower)) {
     return {
@@ -598,7 +633,38 @@ function detectAnnouncedTool(text: string): { action: string; example: string } 
       example: '{"tool": "manage_database", "args": {"action": "set", "key": "<key>", "data": {}}}',
     };
   }
+  // File edits — the most common code-mode action. Broad on purpose: in
+  // code mode an announced edit ALWAYS needs the manage_files block.
+  if (
+    /(file|page|site|section|footer|header|hero|menu|\.html|index|app|css|style|code)/.test(lower) &&
+    /(add|write|update|change|edit|modify|put|insert|remove|delete|fix|append|move|replace)/.test(lower)
+  ) {
+    return {
+      action: "write the file changes",
+      example:
+        '{"tool": "manage_files", "args": {"action": "write", "path": "index.html", "content": "<the full updated file content>"}}',
+    };
+  }
   return null;
+}
+
+/**
+ * The nastier cousin of the announcement: the model FABRICATES a completed
+ * manage_files action in prose — quoting tool-result wording like
+ * "[used tool manage_files…" or "Wrote 2370 bytes to index.html" — while the
+ * real block it emitted was for a different tool. Nothing was written.
+ * Detected deterministically from the tool-result phrasing itself.
+ */
+function detectFabricatedFileWrite(text: string): boolean {
+  if (/\[\s*used tool\s+manage_files/i.test(text)) return true;
+  if (/\bwrote\s+\d+\s+bytes?\s+to\b/i.test(text)) return true;
+  if (
+    /\b(?:i'?ve|i have|has been|is now|now)\s+(?:been\s+)?(?:written|saved|updated|added|changed)\b/i.test(text) &&
+    /\b(?:file|files|page|index\.html|preview\/index\.html|site|html)\b/i.test(text)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Stream one model round, emitting reasoning/delta/replace for the visible
@@ -809,6 +875,8 @@ ${workspaceText}`;
   let toolCalls = 0;
   let corrections = 0;
   let modelFinished = false;
+  /** Tools actually executed this turn — powers the fabrication guard. */
+  const calledTools = new Set<string>();
 
   /* ---------------- main loop: model round → tool → model round ------ */
   while (!job.aborted) {
@@ -834,7 +902,7 @@ ${workspaceText}`;
     if (job.aborted) break;
     producedContent = producedContent || raw.trim().length > 0;
 
-    const block = extractToolBlock(raw);
+    const block = extractToolBlocks(raw);
     if (!block) {
       // No tool block — is the model merely ANNOUNCING an action it never
       // ran? One bounded corrective round demands the real block.
@@ -868,81 +936,125 @@ Replace the placeholders with real values from the conversation. No prose, just 
       break;
     }
 
-    const call = parseToolCall(block.jsonText);
-    if (!call) {
+    // One reply may batch several calls (single object, array, or several
+    // fences) — they all run in order in this round.
+    const calls = block.jsonTexts
+      .map((json) => parseToolCalls(json))
+      .filter((list): list is ToolCall[] => list !== null)
+      .flat();
+    if (calls.length === 0) {
       send({ type: "warning", text: "A malformed tool block was ignored." });
       modelFinished = true;
       break;
     }
-    if (toolCalls >= MAX_TOOL_ROUNDS) {
+
+    const visibleText = splitThinking(visiblePortion(raw)).answer.trim();
+
+    // Fabrication guard: the reply CLAIMS a completed file write (quoting
+    // tool-result phrasing) but no manage_files call was emitted this round
+    // or any earlier one — the claimed change does not exist. Demand the
+    // real block before anything else runs.
+    const roundTools = new Set(calls.map((c) => c.tool));
+    if (
+      !calledTools.has("manage_files") &&
+      !roundTools.has("manage_files") &&
+      detectFabricatedFileWrite(visibleText) &&
+      corrections < 2 &&
+      !job.aborted
+    ) {
+      corrections += 1;
+      roundHistory.push({ role: "assistant", content: visibleText });
+      roundHistory.push({
+        role: "user",
+        content: `Your reply described file changes as already written ("used tool manage_files", "wrote bytes to…"), but you did NOT emit a manage_files block — NOTHING was written to the workspace. That text was a fabrication; results only ever arrive as [TOOL RESULT] messages after you emit a block.
+
+Emit the tool call(s) NOW as the ONLY content of your reply. A single call:
+
+\`\`\`onyxtool
+{"tool": "manage_files", "args": {"action": "write", "path": "index.html", "content": "<the full updated file content>"}}
+\`\`\`
+
+…or batch several calls as a JSON array in ONE block (e.g. the write, then start_preview). No prose.`,
+      });
+      continue;
+    }
+
+    if (toolCalls + calls.length > MAX_TOOL_ROUNDS) {
       send({ type: "warning", text: "Tool budget for this reply reached — finishing up." });
       modelFinished = true;
       break;
     }
-    toolCalls += 1;
-    producedContent = true;
 
-    const toolId = `t${toolCalls}-${Math.random().toString(36).slice(2, 8)}`;
-    const visibleText = splitThinking(visiblePortion(raw)).answer.trim();
-    send({
-      type: "tool_call",
-      toolId,
-      name: call.tool,
-      subtitle: describeToolCall(call),
-      args: JSON.stringify(call.args, null, 2),
+    roundHistory.push({
+      role: "assistant",
+      content: visibleText || `(calling ${calls.map((c) => c.tool).join(", ")})`,
     });
+    const resultLines: string[] = [];
 
-    const outcome = await executeWithSkip(call, toolId, true);
+    for (const call of calls) {
+      toolCalls += 1;
+      producedContent = true;
+      calledTools.add(call.tool);
 
-    if (outcome.kind === "result") {
-      emitToolResult(toolId, outcome.result);
-      roundHistory.push({ role: "assistant", content: visibleText || `(calling tool ${call.tool})` });
-      roundHistory.push({
-        role: "user",
-        content: `[TOOL RESULT] ${call.tool} — ${outcome.result.ok ? "success" : "failure"}
-${outcome.result.text.slice(0, 4000)}
-
-Continue now. The user's request may need several steps (scaffold THEN preview, save THEN verify…). If any tool work is still needed, end THIS reply with a tool block in exactly this shape:
-
-${nextBlockExample(call.tool)}
-
-Use the real tool name and args for whatever you actually intend. If everything is done, write your final answer with NO tool block — never promise future tool actions.`,
-      });
-    } else {
-      // Skip-wait: the tool keeps running detached; the agent continues now.
-      send({ type: "tool_status", toolId, backgrounded: true, subtitle: "Running in background" });
-      const background: BackgroundTool = {
+      const toolId = `t${toolCalls}-${Math.random().toString(36).slice(2, 8)}`;
+      send({
+        type: "tool_call",
         toolId,
         name: call.tool,
-        settled: false,
-        result: null,
-        promise: Promise.resolve(),
-      };
-      background.promise = outcome.promise.then(
-        (result) => {
-          background.result = result;
-          background.settled = true;
-        },
-        (error: unknown) => {
-          background.result = {
-            ok: false,
-            subtitle: `${call.tool} failed`,
-            text: `Tool ${call.tool} failed: ${error instanceof Error ? error.message : String(error)}`,
-          };
-          background.settled = true;
-        },
-      );
-      backgroundTools.push(background);
-      roundHistory.push({ role: "assistant", content: visibleText || `(calling tool ${call.tool})` });
-      roundHistory.push({
-        role: "user",
-        content: `[TOOL STATUS] ${call.tool} is still running in the background — the user chose to continue without waiting. Keep working on your plan with your NEXT tool or your final answer. To call another tool, end THIS reply with a block in exactly this shape:
-
-${nextBlockExample(call.tool)}
-
-Do not wait for or ask about the background tool — its result will be delivered when it finishes.`,
+        subtitle: describeToolCall(call),
+        args: JSON.stringify(call.args, null, 2),
       });
+
+      const outcome = await executeWithSkip(call, toolId, true);
+
+      if (outcome.kind === "result") {
+        emitToolResult(toolId, outcome.result);
+        resultLines.push(
+          `[TOOL RESULT] ${call.tool} — ${outcome.result.ok ? "success" : "failure"}\n${outcome.result.text.slice(0, 4000)}`,
+        );
+      } else {
+        // Skip-wait: the tool keeps running detached; the agent continues now.
+        send({ type: "tool_status", toolId, backgrounded: true, subtitle: "Running in background" });
+        const background: BackgroundTool = {
+          toolId,
+          name: call.tool,
+          settled: false,
+          result: null,
+          promise: Promise.resolve(),
+        };
+        background.promise = outcome.promise.then(
+          (result) => {
+            background.result = result;
+            background.settled = true;
+          },
+          (error: unknown) => {
+            background.result = {
+              ok: false,
+              subtitle: `${call.tool} failed`,
+              text: `Tool ${call.tool} failed: ${error instanceof Error ? error.message : String(error)}`,
+            };
+            background.settled = true;
+          },
+        );
+        backgroundTools.push(background);
+        resultLines.push(
+          `[TOOL STATUS] ${call.tool} is still running in the background — the user chose to continue without waiting.`,
+        );
+      }
     }
+
+    roundHistory.push({
+      role: "user",
+      content: `${resultLines.join("\n\n")}
+
+Continue now. The user's request may need several steps (scaffold THEN preview, save THEN verify…). If any tool work is still needed, end THIS reply with a tool block — a single call, or a JSON array of calls executed in order:
+
+\`\`\`onyxtool
+[{"tool": "<tool-name>", "args": {}}, {"tool": "<tool-name>", "args": {}}]
+\`\`\`
+
+Use the real tool names and args for whatever you actually intend. If everything is done, write your final answer with NO tool block — never promise future tool actions.`,
+    });
   }
 
   if (job.aborted) {
@@ -1002,9 +1114,13 @@ Do not wait for or ask about the background tool — its result will be delivere
         const bonusRaw = await runRound(null);
         // A stray tool block in the bonus round is executed synchronously,
         // then one final round closes the turn — never an endless chain.
-        const bonusBlock = extractToolBlock(bonusRaw);
+        const bonusBlock = extractToolBlocks(bonusRaw);
         if (bonusBlock?.complete) {
-          const bonusCall = parseToolCall(bonusBlock.jsonText);
+          const bonusCalls = bonusBlock.jsonTexts
+            .map((json) => parseToolCalls(json))
+            .filter((list): list is ToolCall[] => list !== null)
+            .flat();
+          const bonusCall = bonusCalls[0];
           if (bonusCall) {
             const bonusId = `t${toolCalls + 1}-bonus`;
             send({

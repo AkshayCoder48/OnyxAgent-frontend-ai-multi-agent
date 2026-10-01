@@ -146,6 +146,9 @@ export interface PreviewSessionView {
   status: string;
   entry: string;
   createdAt: number;
+  /** Bumped by the preview service every time the session's files are
+   *  re-published — the Preview tab uses it to live-reload the iframe. */
+  revision: number;
 }
 
 export interface WorkspaceFileView {

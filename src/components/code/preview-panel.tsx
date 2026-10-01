@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Copy,
@@ -28,7 +28,7 @@ function relativeTime(at: number): string {
  * OnyxCode Preview tab — live preview sessions served by the preview service.
  * Session list on the left, embedded iframe + controls on the right.
  */
-export function PreviewPanel({ workspaceId }: { workspaceId: string }) {
+export function PreviewPanel({ workspaceId, active = true }: { workspaceId: string; active?: boolean }) {
   const [sessions, setSessions] = useState<PreviewSessionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -36,6 +36,13 @@ export function PreviewPanel({ workspaceId }: { workspaceId: string }) {
   const [copied, setCopied] = useState(false);
   const [starting, setStarting] = useState(false);
   const [stoppingId, setStoppingId] = useState<string | null>(null);
+  // Tracks the served snapshot of the selected session — when the agent
+  // re-registers a preview with new files (or starts a new one) the URL or
+  // entry changes and the embedded iframe reloads itself.
+  const servedRef = useRef<string>("");
+  // Newest session creation time seen so far — a brand-new running session
+  // (the agent just hit start_preview) is auto-followed.
+  const latestSeenRef = useRef(0);
 
   const refresh = useCallback(
     (silent = false) => {
@@ -47,6 +54,21 @@ export function PreviewPanel({ workspaceId }: { workspaceId: string }) {
           setSessions(data.sessions ?? []);
           setSelectedId((current) => {
             const next = data.sessions ?? [];
+            const newest = next.reduce<PreviewSessionView | null>(
+              (acc, s) => (s.createdAt > (acc?.createdAt ?? 0) ? s : acc),
+              null,
+            );
+            // The agent just published a new running session — follow it.
+            if (
+              newest &&
+              newest.status === "running" &&
+              newest.sessionId !== current &&
+              newest.createdAt > latestSeenRef.current
+            ) {
+              latestSeenRef.current = newest.createdAt;
+              return newest.sessionId;
+            }
+            if (newest) latestSeenRef.current = Math.max(latestSeenRef.current, newest.createdAt);
             if (current && next.some((s) => s.sessionId === current)) return current;
             const running = next.find((s) => s.status === "running");
             return running?.sessionId ?? next[0]?.sessionId ?? null;
@@ -61,21 +83,43 @@ export function PreviewPanel({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     setSessions([]);
     setSelectedId(null);
+    latestSeenRef.current = 0;
+    servedRef.current = "";
     refresh();
   }, [refresh]);
 
-  // Keep the list warm while the tab is visible.
+  // Catch up the moment the section becomes the active one.
+  useEffect(() => {
+    if (active) refresh(true);
+    // refresh identity is stable per workspace.
+  }, [active]);
+
+  // Keep the list warm while the section is active.
   useEffect(() => {
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") refresh(true);
-    }, 10000);
+      if (active && document.visibilityState === "visible") refresh(true);
+    }, 5000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, active]);
 
   const selected = useMemo(
     () => sessions.find((s) => s.sessionId === selectedId) ?? null,
     [sessions, selectedId],
   );
+
+  // Live-reload the embedded page when the agent re-publishes the selected
+  // session (revision bump) or its URL/entry changes — no manual Refresh.
+  useEffect(() => {
+    if (!selected) {
+      servedRef.current = "";
+      return;
+    }
+    const served = `${selected.sessionId}:${selected.status}:${selected.revision}:${selected.url}`;
+    if (servedRef.current === served) return;
+    const reload = servedRef.current.startsWith(`${selected.sessionId}:`);
+    servedRef.current = served;
+    if (reload) setFrameKey((k) => k + 1);
+  }, [selected]);
 
   const startPreview = async () => {
     if (!workspaceId || starting) return;
@@ -86,12 +130,16 @@ export function PreviewPanel({ workspaceId }: { workspaceId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, action: "start" }),
       });
-      const result = (await response.json()) as { ok?: boolean; url?: string; error?: string };
+      const result = (await response.json()) as { ok?: boolean; url?: string; sessionId?: string; error?: string };
       if (!response.ok || !result.ok) {
         toast.error(result.error ?? "Could not start the preview.");
         return;
       }
       toast.success("Preview is live.");
+      if (result.sessionId) {
+        // Show the fresh session immediately (the poll would also find it).
+        setSelectedId(result.sessionId);
+      }
       refresh(true);
     } catch {
       toast.error("Could not reach the preview service.");
