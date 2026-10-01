@@ -9,7 +9,7 @@
  * arbitrary origins), so no proxy is needed — the key NEVER crosses our
  * server, the LLM, the system prompt, or the E2B sandbox.
  *
- * Endpoints (per https://onyxbase-phi.vercel.app/docs):
+ * Endpoints (per https://onyxbase-chi.vercel.app/docs):
  *   POST   /v1/set            { collection?, key, value }
  *   GET    /v1/get/{key}      404 when missing
  *   DELETE /v1/delete/{key}
@@ -20,7 +20,14 @@
  * All records live in the deterministic collection "onyxagent".
  */
 
-export const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-phi.vercel.app";
+export const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-chi.vercel.app";
+
+/** RETIRED default base URLs. A user who never customized anything may still
+ *  have one of these persisted in `extra.onyxbase_base_url` (it was the old
+ *  default) — settings reads treat them as "unset" so the CURRENT default
+ *  applies transparently (see settingsService.get). Only used for that
+ *  migration comparison; never for requests. */
+export const ONYXBASE_LEGACY_BASE_URLS: readonly string[] = ["https://onyxbase-phi.vercel.app"];
 
 /** Fixed, non-secret workspace identifier (PRD §4). Generated once, then
  *  permanent. The model MAY know this — it identifies which workspace the

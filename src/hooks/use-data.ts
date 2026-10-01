@@ -1,5 +1,5 @@
 // ============================================================================
-// useProviders, useSettings, useSlashCommands, useMCP, useCustomTools, useSkills
+// useProviders, useSettings, useSlashCommands, useCustomTools, useSkills
 // ============================================================================
 "use client";
 
@@ -8,7 +8,6 @@ import {
   aiProviderService,
   settingsService,
   slashCommandService,
-  mcpService,
   customToolService,
   skillService,
 } from "@/lib/services";
@@ -138,37 +137,6 @@ export function useSlashCommands() {
     create: createM.mutateAsync,
     update: updateM.mutateAsync,
     toggleBuiltin: toggleBuiltinM.mutateAsync,
-    remove: deleteM.mutateAsync,
-  };
-}
-
-export function useMCPServers() {
-  const { userId } = useAuthScope();
-  const qc = useQueryClient();
-  const query = useQuery({
-    queryKey: ["mcp-servers", userId],
-    queryFn: () => (userId ? mcpService.list(userId) : []),
-    enabled: !!userId,
-  });
-  const createM = useMutation({
-    mutationFn: async (input: Parameters<typeof mcpService.create>[1]) =>
-      mcpService.create(userId!, input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["mcp-servers", userId] }),
-  });
-  const updateM = useMutation({
-    mutationFn: async ({ id, patch }: { id: ID; patch: Record<string, unknown> }) =>
-      mcpService.update(id, patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["mcp-servers", userId] }),
-  });
-  const deleteM = useMutation({
-    mutationFn: async (id: ID) => mcpService.delete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["mcp-servers", userId] }),
-  });
-  return {
-    servers: query.data ?? [],
-    loading: query.isLoading,
-    create: createM.mutateAsync,
-    update: updateM.mutateAsync,
     remove: deleteM.mutateAsync,
   };
 }

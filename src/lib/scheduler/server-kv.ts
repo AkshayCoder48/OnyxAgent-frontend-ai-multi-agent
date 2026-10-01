@@ -16,7 +16,7 @@
  *    dropped by OnyxBase's durable mirror — see worklog cloud-sync-9hr-fix)
  */
 
-const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-phi.vercel.app";
+const ONYXBASE_DEFAULT_BASE_URL = "https://onyxbase-chi.vercel.app";
 const ONYXBASE_COLLECTION = "onyxagent";
 /** Hung connections (rare but real) burn the full timeout; healthy calls
  *  land in 0.2-2s. Reads: 8s × 3 attempts; writes: 15s × 4 (durability). */

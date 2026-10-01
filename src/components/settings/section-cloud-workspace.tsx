@@ -205,12 +205,12 @@ export function SectionCloudWorkspace() {
           every meaningful task (<code>push_workspace</code>) and restores it into fresh
           sandboxes (<code>retrieve_workspace</code>). Get a free key at{" "}
           <a
-            href="https://onyxbase-phi.vercel.app"
+            href="https://onyxbase-chi.vercel.app"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-0.5 font-medium underline underline-offset-2"
           >
-            onyxbase-phi.vercel.app
+            onyxbase-chi.vercel.app
             <ExternalLink className="size-3" />
           </a>
           .

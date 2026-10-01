@@ -23,10 +23,13 @@
  *   Storage      code:storage:<conversationId>:<path>             (metadata)
  *                code:storage:<conversationId>:<path>:chunk-000001 …       (payload chunks,
  *                  same 120 000-char chunk sizing as workspace-sync)
+ *   Env          code:env:<conversationId>:<NAME>   (persistent per-app
+ *                  environment variables — plain string values; they survive
+ *                  sandbox destruction, e.g. API keys / app config)
  *   Schema       code:schema:<conversationId>      (ONE record, app-level
  *                  metadata — NOT native OnyxBase tables; PRD §15)
  *   Activity     code:activity:<conversationId>    (bounded append log,
- *                  last 50 events)
+ *                  last 500 events)
  *
  * All state is real OnyxBase KV data — it persists beyond sandbox
  * destruction (PRD §38) because nothing is ever tied to the E2B sandbox.
@@ -43,8 +46,11 @@ import { useAuthStore } from "@/stores";
 /** All OnyxCode database records are stored under this key prefix. */
 export const CODE_DB_PREFIX = "code:db:";
 
-/** Upper bound on records pulled into the Database tab per refresh. */
-export const CODE_DB_MAX_RECORDS = 100;
+/** Upper bound on records pulled into the Database tab per refresh. Not a
+ *  product limit (PRD §35) — every record is a paced OnyxBase read, so the
+ *  genuine limit left is practical fetch time; 2 000 keeps a full refresh
+ *  reasonable without artificially hiding data. */
+export const CODE_DB_MAX_RECORDS = 2_000;
 
 export function codeDbKey(name: string): string {
   return `${CODE_DB_PREFIX}${name.replace(/^\/+/, "").replace(/^code:db:/, "")}`;
@@ -151,11 +157,18 @@ export const CODE_STORAGE_PREFIX = "code:storage:";
 /** Application schema metadata for a chat (PRD §15). */
 export const CODE_SCHEMA_PREFIX = "code:schema:";
 
+/** Persistent environment variables for a chat (per-app env namespace —
+ *  plain string values under UPPER_SNAKE_CASE names). */
+export const CODE_ENV_PREFIX = "code:env:";
+
 /** Bounded activity log for a chat. */
 export const CODE_ACTIVITY_PREFIX = "code:activity:";
 
-/** Activity log bound — only the last N events are kept (append + trim). */
-export const CODE_ACTIVITY_MAX_EVENTS = 50;
+/** Activity log bound — only the last N events are kept (append + trim).
+ *  The log is ONE KV record (a JSON blob), so the genuine limit is that
+ *  record's size: 500 events × ~100 chars stays far inside
+ *  CODE_KV_MAX_VALUE_CHARS. */
+export const CODE_ACTIVITY_MAX_EVENTS = 500;
 
 /** Base64/text chars per storage chunk record — identical sizing to the
  *  live-verified workspace-sync chunking (see CHUNK_SIZE in
@@ -167,22 +180,29 @@ export const CODE_STORAGE_CHUNK_SIZE = 120_000;
  *  ≈ 100 paced KV writes). Larger payloads are rejected with a clear error. */
 export const CODE_STORAGE_MAX_PAYLOAD_CHARS = 12_000_000;
 
-/** Hard cap on one KV record value (chars). Larger documents must go through
- *  storage_write (chunked) — a single KV record must stay round-trip
- *  compatible with the panel + makeRecord, so it is never chunked. */
-export const CODE_KV_MAX_VALUE_CHARS = 120_000;
+/** Cap on one KV record value (chars). Not an arbitrary product limit
+ *  (PRD §35) — it only guards a single record against pathological sizes;
+ *  a genuine backend ceiling, if one is ever hit, surfaces as a REAL
+ *  OnyxBase error (live-verified floor: ≥ 256 000 chars round-trip,
+ *  2026-09-12). Larger documents belong in storage_write (chunked). */
+export const CODE_KV_MAX_VALUE_CHARS = 1_000_000;
 
-/** Upper bound on items pulled per listing call (records / files). */
-export const CODE_MAX_LIST_ITEMS = 100;
+/** Upper bound on items pulled per listing call (records / files / env
+ *  vars). Not a product limit (PRD §35) — each item costs a paced KV read,
+ *  so this keeps listings practical instead of hiding data. */
+export const CODE_MAX_LIST_ITEMS = 1_000;
 
 /** Self-describing label embedded in every schema record (PRD §15 — the
  *  schema is application-level metadata in the KV namespace, NOT native
  *  OnyxBase tables, and must never pretend otherwise). */
 export const CODE_SCHEMA_LABEL = "OnyxCode application schema metadata";
 
-/** Sanity caps for the agent-facing schema API. */
-export const CODE_SCHEMA_MAX_ENTITIES = 100;
-export const CODE_SCHEMA_MAX_FIELDS = 60;
+/** Sanity caps for the agent-facing schema API. The schema is ONE KV record
+ *  (entities × fields serialized as JSON), so the genuine limit is that
+ *  record's size — these bounds keep it far inside
+ *  CODE_KV_MAX_VALUE_CHARS without restricting real data models. */
+export const CODE_SCHEMA_MAX_ENTITIES = 500;
+export const CODE_SCHEMA_MAX_FIELDS = 200;
 
 // ---------------------------------------------------------------------------
 // Input normalization (the §21 isolation boundary — every helper funnels
@@ -241,6 +261,26 @@ export function normalizeStoragePath(path: string): string {
   return p;
 }
 
+/** Normalize an environment variable name: trimmed + UPPERCASE, then
+ *  UPPER_SNAKE_CASE (letters, digits, underscores; must start with a letter
+ *  or underscore), max 100 chars. Throws with a clear reason otherwise. */
+export function normalizeEnvName(name: string): string {
+  const raw = (name ?? "").trim();
+  const n = raw.toUpperCase();
+  if (!n) {
+    throw new Error('An environment variable name is required (e.g. "OPENAI_API_KEY").');
+  }
+  if (n.length > 100) {
+    throw new Error(`Environment variable name is too long (${n.length} chars, max 100).`);
+  }
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(n)) {
+    throw new Error(
+      `Invalid environment variable name "${raw}" — use UPPER_SNAKE_CASE (A-Z, 0-9, _; must start with a letter or underscore).`,
+    );
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------------------
 // Key builders (all derived from the conversationId — never caller-supplied).
 // ---------------------------------------------------------------------------
@@ -259,6 +299,17 @@ export function chatKvKey(conversationId: string, key: string): string {
 export function chatKvName(conversationId: string, fullKey: string): string {
   const prefix = chatKvPrefix(conversationId);
   return fullKey.startsWith(prefix) ? fullKey.slice(prefix.length) : fullKey;
+}
+
+/** Full key prefix of a chat's environment-variable namespace:
+ *  `code:env:<conversationId>:`. */
+export function chatEnvPrefix(conversationId: string): string {
+  return `${CODE_ENV_PREFIX}${normalizeConversationId(conversationId)}:`;
+}
+
+/** Full env record key: `code:env:<conversationId>:<NAME>`. */
+export function chatEnvKey(conversationId: string, name: string): string {
+  return `${chatEnvPrefix(conversationId)}${normalizeEnvName(name)}`;
 }
 
 /** Full key prefix of a chat's storage namespace: `code:storage:<id>:`. */
@@ -330,7 +381,8 @@ function parseMaybeJson(value: string): { parsed: unknown; isJson: boolean } {
 }
 
 // ===========================================================================
-// ACTIVITY LOG — bounded append log (last 50 events), best-effort by design.
+// ACTIVITY LOG — bounded append log (last CODE_ACTIVITY_MAX_EVENTS events),
+// best-effort by design.
 // ===========================================================================
 
 export type CodeActivityActor = "agent" | "user";
@@ -413,6 +465,11 @@ export async function activityList(
 // KV — per-chat documents (raw JSON/text values, ONE canonical shape).
 // ===========================================================================
 
+/** Hard ceiling for an explicit kvList `limit` — a genuine practicality
+ *  bound (every record is a paced KV read), aligned with
+ *  CODE_DB_MAX_RECORDS; the default comes from CODE_MAX_LIST_ITEMS. */
+const CODE_KV_LIST_HARD_CAP = 2_000;
+
 /** One record in a chat's KV namespace. */
 export interface CodeKvEntry {
   /** Full OnyxBase key (`code:db:<conversationId>:<name>`). */
@@ -429,7 +486,8 @@ export interface CodeKvEntry {
 export interface KvListOptions extends CodeLayerOptions {
   /** Only names starting with this prefix (within the chat namespace). */
   prefix?: string;
-  /** Max records returned (default 100, hard cap 200). */
+  /** Max records returned (default CODE_MAX_LIST_ITEMS, hard cap
+   *  CODE_KV_LIST_HARD_CAP). */
   limit?: number;
   /** Called with the running count as values load. */
   onProgress?: (loaded: number) => void;
@@ -548,7 +606,7 @@ export async function kvList(conversationId: string, opts?: KvListOptions): Prom
   const nameFilter = opts?.prefix?.trim();
   if (nameFilter) names = names.filter((n) => n.startsWith(nameFilter));
 
-  const limit = Math.min(Math.max(opts?.limit ?? CODE_MAX_LIST_ITEMS, 1), 200);
+  const limit = Math.min(Math.max(opts?.limit ?? CODE_MAX_LIST_ITEMS, 1), CODE_KV_LIST_HARD_CAP);
   names = [...names].sort((a, b) => a.localeCompare(b)).slice(0, limit);
 
   const entries: CodeKvEntry[] = [];
@@ -659,6 +717,151 @@ export async function kvSearch(
   const entries = await kvList(conversationId, { ...opts, prefix: undefined });
   if (!q) return entries;
   return entries.filter((e) => e.name.toLowerCase().includes(q) || e.value.toLowerCase().includes(q));
+}
+
+// ===========================================================================
+// ENV — persistent per-app environment variables (plain string values under
+// UPPER_SNAKE_CASE names). Like every other section this is real OnyxBase KV
+// data: the variables survive sandbox destruction, which makes them the
+// right home for API keys / config the generated app needs across resets.
+// Callers pass the resolved CodeDbClient FIRST (tools + panel resolve it once
+// per interaction); the namespace still derives from the conversationId.
+// ===========================================================================
+
+/** One environment variable in a chat's env namespace. */
+export interface CodeEnvRecord {
+  /** Normalized UPPER_SNAKE_CASE name (without the key prefix). */
+  name: string;
+  /** The raw stored value — a plain string, exactly what was set. */
+  value: string;
+  size: number;
+  /** Last env_set timestamp derived from the bounded activity log —
+   *  undefined when the write predates the log window (honest recency, same
+   *  rule as KV records, which carry no timestamps by design). */
+  updatedAt?: string;
+}
+
+/** Env mutation options (activity-log bookkeeping, mirroring CodeLayerOptions
+ *  for the client-first env helpers). */
+export interface EnvMutationOptions {
+  /** Who performed the mutation (recorded in the activity log). */
+  actor?: CodeActivityActor;
+  /** Skip the (best-effort) activity-log append. */
+  skipActivity?: boolean;
+}
+
+/** List a chat's environment variables (sorted by name). `updatedAt` is the
+ *  latest `env_set` event per name from the activity log (one extra read),
+ *  undefined for writes older than the log window. */
+export async function envList(
+  client: CodeDbClient,
+  conversationId: string,
+): Promise<CodeEnvRecord[]> {
+  const cid = normalizeConversationId(conversationId);
+  const prefix = chatEnvPrefix(cid);
+  const names = (await client.kv.listKeys(prefix))
+    .filter((k) => k.startsWith(prefix))
+    .map((k) => k.slice(prefix.length));
+
+  const records: CodeEnvRecord[] = [];
+  for (const name of names) {
+    try {
+      const value = await client.kv.get(`${prefix}${name}`);
+      if (value === null) continue; // deleted between list + get
+      records.push({ name, value, size: value.length });
+    } catch {
+      /* skip unreadable rows — the list stays useful */
+    }
+  }
+
+  // Honest recency (same rule as KV records): the latest env_set event per
+  // name from the bounded activity log. readActivityRecord never throws —
+  // a missing/corrupt log just yields no timestamps.
+  const activity = await readActivityRecord(client, cid);
+  const latest = new Map<string, string>();
+  for (const e of activity.events) {
+    if (e.op === "env_set" && e.target) latest.set(e.target, e.ts);
+  }
+
+  return records
+    .map((r) => {
+      const ts = latest.get(r.name);
+      return ts ? { ...r, updatedAt: ts } : r;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Read one environment variable. Returns null when it doesn't exist. */
+export async function envGet(
+  client: CodeDbClient,
+  conversationId: string,
+  name: string,
+): Promise<{ name: string; value: string } | null> {
+  const cid = normalizeConversationId(conversationId);
+  const n = normalizeEnvName(name);
+  const value = await client.kv.get(chatEnvKey(cid, n));
+  if (value === null) return null;
+  return { name: n, value };
+}
+
+/** Create/overwrite (upsert) one environment variable. Values are PLAIN
+ *  strings — no JSON normalization — capped at CODE_KV_MAX_VALUE_CHARS (same
+ *  bound as KV records; larger payloads belong in storage_write). Throws with
+ *  operation + target + reason on any real OnyxBase failure. */
+export async function envSet(
+  client: CodeDbClient,
+  conversationId: string,
+  name: string,
+  value: string,
+  opts?: EnvMutationOptions,
+): Promise<CodeEnvRecord> {
+  const cid = normalizeConversationId(conversationId);
+  const n = normalizeEnvName(name);
+  if (typeof value !== "string") {
+    throw new Error('env_set failed — value must be a plain string.');
+  }
+  if (value.length > CODE_KV_MAX_VALUE_CHARS) {
+    throw new OnyxBaseError(
+      "FILE_TOO_LARGE",
+      `env_set "${n}" failed — value is ${value.length} chars (max ${CODE_KV_MAX_VALUE_CHARS}). Use storage_write for large payloads (it chunks automatically).`,
+    );
+  }
+  await client.kv.set(chatEnvKey(cid, n), value);
+  const updatedAt = nowISO();
+  if (!opts?.skipActivity) {
+    await activityAppend(
+      cid,
+      {
+        actor: opts?.actor ?? "agent",
+        op: "env_set",
+        target: n,
+        ok: true,
+        detail: `${value.length} chars`,
+      },
+      { client },
+    );
+  }
+  return { name: n, value, size: value.length, updatedAt };
+}
+
+/** Delete one environment variable (404 → already gone, reported as deleted). */
+export async function envDelete(
+  client: CodeDbClient,
+  conversationId: string,
+  name: string,
+  opts?: EnvMutationOptions,
+): Promise<{ name: string }> {
+  const cid = normalizeConversationId(conversationId);
+  const n = normalizeEnvName(name);
+  await client.kv.delete(chatEnvKey(cid, n));
+  if (!opts?.skipActivity) {
+    await activityAppend(
+      cid,
+      { actor: opts?.actor ?? "agent", op: "env_delete", target: n, ok: true },
+      { client },
+    );
+  }
+  return { name: n };
 }
 
 // ===========================================================================
@@ -1270,6 +1473,8 @@ export interface CodeDatabaseOverview {
     keyPatterns: CodeKvKeyPattern[];
     truncated: boolean;
   };
+  /** Persistent environment variables (code:env:<chat>:<NAME>). */
+  envCount: number;
   storage: {
     files: number;
     /** Sum of decoded bytes over the (bounded) metadata scan. */
@@ -1320,6 +1525,12 @@ export async function databaseOverview(
   const names = (await client.kv.listKeys(kvPrefix))
     .filter((k) => k.startsWith(kvPrefix))
     .map((k) => k.slice(kvPrefix.length));
+
+  note("Reading environment variables…");
+  const envPrefix = chatEnvPrefix(cid);
+  const envCount = (await client.kv.listKeys(envPrefix)).filter((k) =>
+    k.startsWith(envPrefix),
+  ).length;
 
   note("Reading stored files…");
   const storagePrefix = chatStoragePrefix(cid);
@@ -1398,6 +1609,7 @@ export async function databaseOverview(
       keyPatterns,
       truncated: names.length > 8,
     },
+    envCount,
     storage: {
       files: storageKeys.length,
       totalBytes: storageMeta.reduce((sum, m) => sum + m.size, 0),

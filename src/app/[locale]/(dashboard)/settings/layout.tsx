@@ -3,7 +3,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import {
-  Blocks,
   Bot,
   Braces,
   CloudCog,
@@ -42,7 +41,6 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
     label: "Extensions",
     tabs: [
       { label: "Skills", href: ROUTES.SETTINGS_SKILLS, icon: Wrench },
-      { label: "MCPs", href: ROUTES.SETTINGS_MCPS, icon: Blocks },
       { label: "Tools", href: ROUTES.SETTINGS_TOOLS, icon: Wrench },
     ],
   },

@@ -109,8 +109,10 @@ export const MAX_FILE_BYTES = 50 * 1024 * 1024;
  *  the aggregate. */
 const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 
-/** Encoded chars per KV value. LIVE-VERIFIED 2026-09-12 against
- *  https://onyxbase-phi.vercel.app with a real key: values up to 256,000
+/** Encoded chars per KV value. LIVE-VERIFIED 2026-09-12 against the
+ *  then-default OnyxBase deployment (the retired "phi" instance — the
+ *  service has since moved; the current default lives in
+ *  ONYXBASE_DEFAULT_BASE_URL) with a real key: values up to 256,000
  *  chars are accepted AND read back byte-identical (the "~4 KB record
  *  ceiling" in earlier PRD notes was an assumption, never measured — it
  *  caused the 2026-09-11 overnight incident: a ~1 MB workspace was split

@@ -38,7 +38,7 @@ import { SectionCard } from "@/components/settings/settings-section";
 import { MoreOptions } from "@/components/settings/more-options";
 import { ProviderDiagnosticsDialog } from "@/components/settings/provider-diagnostics";
 import { useAuth } from "@/hooks";
-import { aiProviderService, settingsService } from "@/lib/services";
+import { aiProviderService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 import type { AIProviderRow } from "@/lib/db";
 
@@ -379,130 +379,10 @@ export default function ConfigSettingsPage() {
       >
         <DataManagementSection />
       </SectionCard>
-
-      {/* System prompt override */}
-      <SystemPromptSection />
     </div>
   );
 }
 
-function SystemPromptSection() {
-  const { user } = useAuth();
-  const [prompt, setPrompt] = useState<string>("");
-  const [enabled, setEnabled] = useState<boolean>(false);
-  const [defaultPrompt, setDefaultPrompt] = useState<string>("");
-  const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const s = await settingsService.get(user.id);
-        setPrompt(s.system_prompt ?? "");
-        setEnabled(s.system_prompt_enabled ?? false);
-        // Backendless mode has no server-side default prompt — keep a
-        // friendly placeholder so the textarea hint is still useful.
-        setDefaultPrompt(
-          "You are a helpful, knowledgeable AI assistant. Use the available tools when appropriate.",
-        );
-      } catch {
-        // ignore — section just stays at defaults
-      } finally {
-        setLoaded(true);
-      }
-    })();
-  }, [user]);
-
-  const save = async () => {
-    if (!user) return;
-    setSaving(true);
-    try {
-      await settingsService.setSystemPrompt(user.id, prompt.trim() || null, enabled);
-      toast.success("System prompt saved");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const reset = async () => {
-    if (!user) return;
-    setSaving(true);
-    try {
-      await settingsService.setSystemPrompt(user.id, null, false);
-      setPrompt("");
-      setEnabled(false);
-      toast.success("Reset to default prompt");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to reset");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!loaded) {
-    return (
-      <SectionCard
-        title="System prompt"
-        description="Override the agent's default system prompt for your chats."
-      >
-        <div className="flex items-center justify-center py-8 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading…
-        </div>
-      </SectionCard>
-    );
-  }
-
-  return (
-    <SectionCard
-      title="System prompt"
-      description="Override the agent's default system prompt for your chats. Leave empty to use the built-in default. The agent also automatically learns about your installed skills, MCPs, and custom tools — no need to mention them here."
-    >
-      <div className="space-y-4">
-        <FormField label="Enable custom prompt" htmlFor="agent-prompt-enabled">
-          <div className="flex items-center gap-2">
-            <input
-              id="agent-prompt-enabled"
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="h-4 w-4 rounded border-input"
-            />
-            <span className="text-sm text-muted-foreground">
-              When checked, your custom prompt replaces the default. When
-              unchecked, the prompt is saved but the default is used.
-            </span>
-          </div>
-        </FormField>
-        <FormField label="System prompt" htmlFor="agent-system-prompt">
-          <textarea
-            id="agent-system-prompt"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder={`Leave empty to use the default prompt. Write instructions for how the agent should behave in your chats…\n\nDefault prompt:\n${defaultPrompt.slice(0, 500)}…`}
-            rows={10}
-            maxLength={20000}
-            className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
-          />
-          <p className="text-xs text-muted-foreground mt-1">
-            {prompt.length.toLocaleString()} / 20,000 chars
-          </p>
-        </FormField>
-        <div className="flex gap-2">
-          <Button onClick={save} disabled={saving} size="sm">
-            {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <CheckCircle2 className="h-4 w-4 mr-1.5" />}
-            Save prompt
-          </Button>
-          <Button onClick={reset} disabled={saving} size="sm" variant="outline">
-            Reset to default
-          </Button>
-        </div>
-      </div>
-    </SectionCard>
-  );
-}
 
 // ---------- Sub-components ----------
 
@@ -527,7 +407,7 @@ function ProviderRow({
 }) {
   return (
     <div className="rounded-xl border border-foreground/10 p-4 space-y-3">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold truncate">{provider.name}</span>
@@ -556,7 +436,7 @@ function ProviderRow({
           </div>
           <p className="text-xs text-muted-foreground mt-0.5 truncate">{provider.base_url}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <Switch checked={provider.is_active} onCheckedChange={onToggle} />
           <Button size="sm" variant="ghost" onClick={onEdit}>
             <Pencil className="h-3.5 w-3.5" />
@@ -967,7 +847,7 @@ function ProviderEditor({
             surfaces as stuck-at-thinking because the SSE stream never starts.
             With this off the user can still chat in text-only mode. */}
         <div className="rounded-lg border border-foreground/15 p-3">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-sm font-medium">Tool calling</p>
               <p className="text-xs text-muted-foreground mt-0.5">
@@ -977,6 +857,7 @@ function ProviderEditor({
               </p>
             </div>
             <Switch
+              className="shrink-0"
               id="provider-tools-enabled"
               checked={draft.tools_enabled}
               onCheckedChange={(v) => onChange({ ...draft, tools_enabled: v })}

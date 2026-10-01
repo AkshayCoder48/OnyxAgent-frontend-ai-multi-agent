@@ -206,14 +206,15 @@ export default function AppearanceSettingsPage() {
   return (
     <div className="space-y-6">
       <SectionCard title="Theme" description="Light, dark, or follow your system preference.">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
           <div className="min-w-0 flex-1">
-            <p className="text-foreground text-sm font-medium">Color scheme</p>
-            <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">
+            <p className="text-foreground text-sm leading-snug font-medium">Color scheme</p>
+            <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
               Affects the entire app. Choose light, dark, or follow your system preference.
             </p>
           </div>
-          <div className="shrink-0">
+          {/* Control stacks below the label on mobile; right-aligned on sm+. */}
+          <div className="flex min-w-0 max-w-full justify-start sm:justify-end">
             <ThemeToggle variant="dropdown" />
           </div>
         </div>
@@ -224,19 +225,19 @@ export default function AppearanceSettingsPage() {
           {/* Light schemes */}
           <div>
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Light Themes ({lightSchemes.length})</p>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-2 items-stretch gap-2 sm:grid-cols-3 lg:grid-cols-4">
               {lightSchemes.map((scheme) => (
                 <button
                   key={scheme.name}
                   type="button"
                   onClick={() => selectScheme(scheme)}
                   className={cn(
-                    "rounded-xl border-2 p-2.5 text-left transition-all hover:scale-[1.02]",
+                    "flex min-h-[88px] flex-col gap-1.5 rounded-xl border-2 p-2.5 text-left transition-all hover:scale-[1.02]",
                     activeScheme === scheme.name ? "border-primary ring-2 ring-primary/20" : "border-border",
                   )}
                   style={{ backgroundColor: scheme.card, borderColor: scheme.border }}
                 >
-                  <div className="flex items-center gap-2 mb-1.5">
+                  <div className="flex items-center gap-2">
                     <div
                       className="h-5 w-5 rounded-full shrink-0 border"
                       style={{ backgroundColor: scheme.primary, borderColor: scheme.border }}
@@ -247,7 +248,7 @@ export default function AppearanceSettingsPage() {
                     </div>
                   </div>
                   <p className="text-[11px] font-medium truncate" style={{ color: scheme.foreground }}>{scheme.name}</p>
-                  <div className="flex gap-1 mt-1">
+                  <div className="mt-auto flex gap-1">
                     <div className="h-3 flex-1 rounded" style={{ backgroundColor: scheme.primary }} />
                     <div className="h-3 w-3 rounded" style={{ backgroundColor: scheme.card, border: `1px solid ${scheme.border}` }} />
                   </div>
@@ -259,19 +260,19 @@ export default function AppearanceSettingsPage() {
           {/* Dark schemes */}
           <div>
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Dark Themes ({darkSchemes.length})</p>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="grid grid-cols-2 items-stretch gap-2 sm:grid-cols-3 lg:grid-cols-4">
               {darkSchemes.map((scheme) => (
                 <button
                   key={scheme.name}
                   type="button"
                   onClick={() => selectScheme(scheme)}
                   className={cn(
-                    "rounded-xl border-2 p-2.5 text-left transition-all hover:scale-[1.02]",
+                    "flex min-h-[88px] flex-col gap-1.5 rounded-xl border-2 p-2.5 text-left transition-all hover:scale-[1.02]",
                     activeScheme === scheme.name ? "border-primary ring-2 ring-primary/20" : "border-border",
                   )}
                   style={{ backgroundColor: scheme.card, borderColor: scheme.border }}
                 >
-                  <div className="flex items-center gap-2 mb-1.5">
+                  <div className="flex items-center gap-2">
                     <div
                       className="h-5 w-5 rounded-full shrink-0 border"
                       style={{ backgroundColor: scheme.primary, borderColor: scheme.border }}
@@ -282,7 +283,7 @@ export default function AppearanceSettingsPage() {
                     </div>
                   </div>
                   <p className="text-[11px] font-medium truncate" style={{ color: scheme.foreground }}>{scheme.name}</p>
-                  <div className="flex gap-1 mt-1">
+                  <div className="mt-auto flex gap-1">
                     <div className="h-3 flex-1 rounded" style={{ backgroundColor: scheme.primary }} />
                     <div className="h-3 w-3 rounded" style={{ backgroundColor: scheme.card, border: `1px solid ${scheme.border}` }} />
                   </div>

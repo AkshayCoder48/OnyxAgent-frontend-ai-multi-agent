@@ -195,7 +195,7 @@ export function SlashCommandsManager() {
         ) : (
           <ul className="border-foreground/10 divide-foreground/8 divide-y rounded-xl border">
             {customs.map((record) => (
-              <li key={record.id} className="flex items-start gap-4 px-4 py-3">
+              <li key={record.id} className="flex items-center gap-4 px-4 py-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-2">
                     <code className="text-foreground bg-foreground/8 rounded px-1.5 py-0.5 font-mono text-xs">

@@ -2,9 +2,14 @@
 
 import { registerTool, type ToolContext } from "./registry";
 import {
+  chatEnvPrefix,
   chatKvPrefix,
   codeDbFailureMessage,
   databaseOverview,
+  envDelete,
+  envGet,
+  envList,
+  envSet,
   kvDelete,
   kvGet,
   kvList,
@@ -34,7 +39,8 @@ import {
  * records (PRD §21).
  *
  * Tool set: inspect_database, kv_get, kv_set, kv_delete, kv_list,
- * storage_list, storage_read, storage_write, storage_delete,
+ * env_list, env_get, env_set, env_delete (persistent per-app environment
+ * variables), storage_list, storage_read, storage_write, storage_delete,
  * storage_metadata, schema_upsert (+ the legacy manage_database, implemented
  * on top of the same layer for backward compatibility). All registered with
  * category "code" — they are only USEFUL in Code Mode; mode gating itself is
@@ -52,17 +58,21 @@ import {
 const NO_CONVERSATION =
   "No active conversation — the Code Mode database is scoped per chat (one chat = one isolated namespace).";
 
-/** kv_get returns the full value up to this size; beyond it, a preview. */
-const KV_GET_FULL_LIMIT = 50_000;
+/** kv_get returns the full value up to this size; beyond it, a preview. The
+ *  genuine limit left is the model-context budget — a full dump larger than
+ *  this would flood the next round instead of informing it. */
+const KV_GET_FULL_LIMIT = 500_000;
 
-/** storage_read returns full text up to this size; beyond it, a preview. */
-const STORAGE_TEXT_FULL_LIMIT = 50_000;
+/** storage_read returns full text up to this size; beyond it, a preview
+ *  (same model-context budget reasoning as KV_GET_FULL_LIMIT). */
+const STORAGE_TEXT_FULL_LIMIT = 500_000;
 
-/** Base64 payloads ≤ this many chars are returned in full (tiny icons); larger
- *  ones only carry a short preview (full binaries stay in OnyxBase — the
- *  Database panel renders thumbnails from the library layer, not from the
- *  tool result, so the LLM context never gets flooded with base64). */
-const STORAGE_B64_FULL_LIMIT = 2_000;
+/** Base64 payloads ≤ this many chars are returned in full (icons and small
+ *  images); larger ones only carry a short preview (full binaries stay in
+ *  OnyxBase — the Database panel renders thumbnails from the library layer,
+ *  not from the tool result, so the LLM context never gets flooded with
+ *  base64). */
+const STORAGE_B64_FULL_LIMIT = 20_000;
 
 // ---------------------------------------------------------------------------
 // Shared helpers.
@@ -231,7 +241,7 @@ registerTool(
 
 registerTool(
   "kv_set",
-  "Create or overwrite one record in this chat's OnyxBase KV namespace. value = a JSON string (object/array/scalar — stored normalized) or plain text. Values above ~120k chars are rejected — use storage_write for large payloads (it chunks automatically).",
+  "Create or overwrite one record in this chat's OnyxBase KV namespace. value = a JSON string (object/array/scalar — stored normalized) or plain text. Values above ~1M chars are rejected — use storage_write for large payloads (it chunks automatically).",
   {
     type: "object",
     properties: {
@@ -310,12 +320,12 @@ registerTool(
 
 registerTool(
   "kv_list",
-  "List records in this chat's OnyxBase KV namespace: names, sizes, JSON-ness and 200-char value previews (bounded — 100 by default). Optional `prefix` filters names; optional `search` filters by case-insensitive substring over names + values. On the FIRST list of a chat with zero records, legacy global workspace records are adopted (copied) into the chat.",
+  "List records in this chat's OnyxBase KV namespace: names, sizes, JSON-ness and 200-char value previews (bounded — 1,000 by default). Optional `prefix` filters names; optional `search` filters by case-insensitive substring over names + values. On the FIRST list of a chat with zero records, legacy global workspace records are adopted (copied) into the chat.",
   {
     type: "object",
     properties: {
       prefix: { type: "string", description: "Only names starting with this prefix (e.g. \"users/\")." },
-      limit: { type: "number", description: "Max records to return (default 100, max 200)." },
+      limit: { type: "number", description: "Max records to return (default 1,000, max 2,000)." },
       search: { type: "string", description: "Case-insensitive substring filter over names + values." },
     },
     additionalProperties: false,
@@ -360,6 +370,179 @@ registerTool(
       };
     } catch (err) {
       return { ok: false, op: "kv_list", error: `kv_list failed — ${errText(err)}` };
+    }
+  },
+  false,
+  "code",
+);
+
+// ---------------------------------------------------------------------------
+// Env tools — persistent per-app ENVIRONMENT VARIABLES in a dedicated
+// code:env:<chat>:<NAME> namespace. Plain string values, UPPER_SNAKE_CASE
+// names, real OnyxBase KV records: they survive sandbox destruction, so they
+// are the right home for API keys / tokens / config the generated app needs
+// across resets (the E2B sandbox env is temporary — this namespace is not).
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "env_list",
+  "List this chat's persistent environment variables (OnyxBase namespace code:env:<chat>:<NAME>) — names, sizes and short value previews (values truncated to ~80 chars; use env_get for the full value). These variables are stored in the user's OnyxBase cloud and survive sandbox destruction — use them for API keys and config the generated app needs across resets. Names are UPPER_SNAKE_CASE.",
+  {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+  async (_args, ctx) => {
+    const conversationId = requireConversationId(ctx);
+    if (!conversationId) return { ok: false, error: NO_CONVERSATION };
+    const progress = progressOf(ctx);
+    try {
+      const client = await resolveClient(ctx);
+      if ("error" in client) return { ok: false, error: client.error };
+
+      progress("Listing environment variables…");
+      const records = await envList(client, conversationId);
+      progress(`✓ ${records.length} variable(s)`);
+      return {
+        kind: "database",
+        ok: true,
+        op: "env_list",
+        namespace: chatEnvPrefix(conversationId),
+        count: records.length,
+        variables: records.map((r) => ({
+          name: r.name,
+          size: r.size,
+          preview: r.value.slice(0, 80),
+        })),
+      };
+    } catch (err) {
+      return { ok: false, op: "env_list", error: `env_list failed — ${errText(err)}` };
+    }
+  },
+  false,
+  "code",
+);
+
+registerTool(
+  "env_get",
+  "Read one persistent environment variable of this chat (full value). The variable lives in OnyxBase (code:env:<chat>:<NAME>) and survives sandbox destruction — the right place for API keys/config the generated app needs across resets. Names are UPPER_SNAKE_CASE (e.g. OPENAI_API_KEY).",
+  {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Variable name, e.g. OPENAI_API_KEY (UPPER_SNAKE_CASE)." },
+    },
+    required: ["name"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const conversationId = requireConversationId(ctx);
+    if (!conversationId) return { ok: false, error: NO_CONVERSATION };
+    const name = String(args.name ?? "").trim();
+    if (!name) return { ok: false, error: "name is required." };
+    const progress = progressOf(ctx);
+    try {
+      const client = await resolveClient(ctx);
+      if ("error" in client) return { ok: false, error: client.error };
+
+      progress(`Variable ${name.toUpperCase()} — reading…`);
+      const record = await envGet(client, conversationId, name);
+      if (!record) {
+        return {
+          ok: false,
+          op: "env_get",
+          error: `Variable "${name.toUpperCase()}" not found in this chat's environment.`,
+        };
+      }
+      progress(`✓ Value loaded (${record.value.length} chars)`);
+      return {
+        kind: "database",
+        ok: true,
+        op: "env_get",
+        name: record.name,
+        value: record.value,
+        size: record.value.length,
+      };
+    } catch (err) {
+      return { ok: false, op: "env_get", error: `env_get "${name}" failed — ${errText(err)}` };
+    }
+  },
+  false,
+  "code",
+);
+
+registerTool(
+  "env_set",
+  "Create or overwrite (upsert) one persistent environment variable for this chat. The value is a plain string stored in the user's OnyxBase cloud (code:env:<chat>:<NAME>) — it survives sandbox destruction, so it is the right place for API keys, tokens and config the generated app needs across resets. Names are normalized to UPPER_SNAKE_CASE (e.g. STRIPE_SECRET_KEY).",
+  {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Variable name, e.g. OPENAI_API_KEY (UPPER_SNAKE_CASE)." },
+      value: {
+        type: "string",
+        description: "The variable value — a plain string (e.g. an API key, token or URL).",
+      },
+    },
+    required: ["name", "value"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const conversationId = requireConversationId(ctx);
+    if (!conversationId) return { ok: false, error: NO_CONVERSATION };
+    const name = String(args.name ?? "").trim();
+    const value = coerceText(args.value);
+    if (!name) return { ok: false, error: "name is required." };
+    if (value === undefined) return { ok: false, error: "value is required (a plain string)." };
+    const progress = progressOf(ctx);
+    try {
+      const client = await resolveClient(ctx);
+      if ("error" in client) return { ok: false, error: client.error };
+
+      progress(`Saving ${name.toUpperCase()}…`);
+      const record = await envSet(client, conversationId, name, value, { actor: "agent" });
+      progress(`✓ Saved (${record.size} chars)`);
+      return {
+        kind: "database",
+        ok: true,
+        op: "env_set",
+        name: record.name,
+        size: record.size,
+        saved: true,
+      };
+    } catch (err) {
+      return { ok: false, op: "env_set", error: `env_set "${name}" failed — ${errText(err)}` };
+    }
+  },
+  false,
+  "code",
+);
+
+registerTool(
+  "env_delete",
+  "Delete one persistent environment variable from this chat (OnyxBase namespace code:env:<chat>:<NAME>).",
+  {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Variable name to delete (UPPER_SNAKE_CASE)." },
+    },
+    required: ["name"],
+    additionalProperties: false,
+  },
+  async (args, ctx) => {
+    const conversationId = requireConversationId(ctx);
+    if (!conversationId) return { ok: false, error: NO_CONVERSATION };
+    const name = String(args.name ?? "").trim();
+    if (!name) return { ok: false, error: "name is required." };
+    const progress = progressOf(ctx);
+    try {
+      const client = await resolveClient(ctx);
+      if ("error" in client) return { ok: false, error: client.error };
+
+      progress(`Deleting ${name.toUpperCase()}…`);
+      const result = await envDelete(client, conversationId, name, { actor: "agent" });
+      progress("✓ Deleted");
+      return { kind: "database", ok: true, op: "env_delete", name: result.name, deleted: true };
+    } catch (err) {
+      return { ok: false, op: "env_delete", error: `env_delete "${name}" failed — ${errText(err)}` };
     }
   },
   false,
@@ -416,7 +599,7 @@ registerTool(
 
 registerTool(
   "storage_read",
-  "Read a stored file from this chat's OnyxBase cloud storage. Text files return their text (full up to 50k chars); binary/image files return metadata + a short base64 preview — the full payload stays in OnyxBase and renders as a thumbnail in the Code Mode Database panel.",
+  "Read a stored file from this chat's OnyxBase cloud storage. Text files return their text (full up to 500k chars); binary/image files return metadata + a short base64 preview — the full payload stays in OnyxBase and renders as a thumbnail in the Code Mode Database panel.",
   {
     type: "object",
     properties: {

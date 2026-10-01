@@ -29,7 +29,6 @@ export const ROUTES = {
   SETTINGS_APPEARANCE: "/settings/appearance",
   SETTINGS_CONFIG: "/settings/config",
   SETTINGS_SKILLS: "/settings/skills",
-  SETTINGS_MCPS: "/settings/mcps",
   SETTINGS_TOOLS: "/settings/tools",
   SETTINGS_ENV: "/settings/env",
   SETTINGS_API_KEYS: "/settings/api-keys",

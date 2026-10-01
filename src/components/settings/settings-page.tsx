@@ -9,7 +9,6 @@ import {
   Moon,
   Palette,
   Plug,
-  Server,
   Settings as SettingsIcon,
   Sliders,
   Sparkles,
@@ -28,7 +27,6 @@ import { SectionAgentSettings } from "./section-agent-settings";
 import { SectionSlashCommands } from "./section-slash-commands";
 import { SectionE2B } from "./section-e2b";
 import { SectionCloudWorkspace } from "./section-cloud-workspace";
-import { SectionMcp } from "./section-mcp";
 import { SectionCustomTools } from "./section-custom-tools";
 import { SectionSkills } from "./section-skills";
 import { SectionAppearance } from "./section-appearance";
@@ -39,7 +37,6 @@ export type SettingsSectionId =
   | "slash"
   | "e2b"
   | "cloud"
-  | "mcp"
   | "tools"
   | "skills"
   | "appearance";
@@ -81,7 +78,7 @@ const NAV_GROUPS: NavGroup[] = [
       {
         id: "agent",
         label: "Agent Settings",
-        description: "Default model, temperature, system prompt",
+        description: "Default model, temperature, env vars",
         icon: Sliders,
       },
     ],
@@ -95,12 +92,6 @@ const NAV_GROUPS: NavGroup[] = [
         label: "Slash Commands",
         description: "Built-in & custom prompts",
         icon: Terminal,
-      },
-      {
-        id: "mcp",
-        label: "MCP Servers",
-        description: "Model Context Protocol over HTTP/SSE",
-        icon: Server,
       },
       {
         id: "tools",
@@ -282,7 +273,6 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
             {active === "slash" && <SectionSlashCommands />}
             {active === "e2b" && <SectionE2B />}
             {active === "cloud" && <SectionCloudWorkspace />}
-            {active === "mcp" && <SectionMcp />}
             {active === "tools" && <SectionCustomTools />}
             {active === "skills" && <SectionSkills />}
             {active === "appearance" && <SectionAppearance />}

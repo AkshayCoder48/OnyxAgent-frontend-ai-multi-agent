@@ -13,9 +13,12 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   Braces,
+  ChevronDown,
   Copy,
   Database,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Image as ImageIcon,
   Info,
@@ -27,6 +30,7 @@ import {
   Search,
   Trash2,
   Upload,
+  Variable,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -73,8 +77,11 @@ import { conversationService } from "@/lib/services";
 import type { Conversation } from "@/types";
 import { ROUTES } from "@/lib/constants";
 import {
+  CODE_ACTIVITY_MAX_EVENTS,
   CODE_STORAGE_MAX_PAYLOAD_CHARS,
   codeDbFailureMessage,
+  envDelete,
+  envSet,
   kvDelete,
   kvSet,
   resolveCodeDbClient,
@@ -87,6 +94,7 @@ import {
   type CodeActivityActor,
   type CodeActivityEvent,
   type CodeDatabaseOverview,
+  type CodeEnvRecord,
   type CodeKvEntry,
   type CodeSchemaEntity,
   type CodeStorageMetadata,
@@ -106,7 +114,7 @@ import { cn } from "@/lib/utils";
  *
  * Sections (only real data — §28 honesty: "—" while loading, real OnyxBase
  * errors with retry, never fabricated values):
- *   Overview · KV · Files · Schema · Search · Activity
+ *   Overview · KV · Env · Files · Schema · Search · Activity
  *
  * Lifecycle (calm per §31 — NO polling interval): refresh on panel open (when
  * stale), on conversation switch, when the browser tab becomes visible again
@@ -122,16 +130,28 @@ const STALE_MS = 30_000;
  *  (§111 lazy + light: never pull multi-megabyte payloads into the panel). */
 const THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
 
-type TabValue = "overview" | "kv" | "files" | "schema" | "search" | "activity";
+/** §35 render guard — long lists render in PAGES of this many rows with a
+ *  "Load more" button (and a "showing X of Y" note). Data is never truncated
+ *  away, only chunked for the DOM; the page matches the point where a real
+ *  list starts to hurt scroll/paint performance. */
+const LIST_PAGE_SIZE = 500;
+
+/** Search groups page smaller (dense rows, up to three groups at once). */
+const SEARCH_PAGE_SIZE = 50;
+
+type TabValue = "overview" | "kv" | "env" | "files" | "schema" | "search" | "activity";
 
 type KvEditorState = { mode: "new" } | { mode: "edit"; entry: CodeKvEntry } | null;
 type SchemaEditorState = { mode: "new" } | { mode: "edit"; entity: CodeSchemaEntity } | null;
 type UploadState = { file: File; dataUrl: string } | null;
 type ConfirmState =
   | { kind: "kv"; name: string }
+  | { kind: "env"; name: string }
   | { kind: "file"; path: string }
   | { kind: "entity"; name: string }
   | null;
+
+type EnvFormState = { mode: "new" } | { mode: "edit"; record: CodeEnvRecord } | null;
 
 /* ------------------------------------------------------------------ */
 /* Shared helpers                                                       */
@@ -191,7 +211,8 @@ function activityEvent(
 
 /** The most recent time the activity log shows a KV op for this record —
  *  KV entries carry no updatedAt by design (Task C), so recency is HONEST:
- *  real events when they exist, "—" when the record predates the 50-event log. */
+ *  real events when they exist, "—" when the record predates the
+ *  CODE_ACTIVITY_MAX_EVENTS-event log. */
 function lastKvTouchAt(name: string, activity: CodeActivityEvent[]): string | null {
   for (let i = activity.length - 1; i >= 0; i--) {
     const e = activity[i];
@@ -368,6 +389,7 @@ export function DatabasePanel() {
     (s) =>
       s.sectionBusy.overview ||
       s.sectionBusy.kv ||
+      s.sectionBusy.env ||
       s.sectionBusy.storage ||
       s.sectionBusy.schema ||
       s.sectionBusy.activity,
@@ -377,6 +399,7 @@ export function DatabasePanel() {
   const setEditorOpenFor = useCodeDatabaseStore((s) => s.setEditorOpenFor);
   const setKvQuery = useCodeDatabaseStore((s) => s.setKvQuery);
   const removeKvLocal = useCodeDatabaseStore((s) => s.removeKvLocal);
+  const deleteEnvLocal = useCodeDatabaseStore((s) => s.deleteEnvLocal);
   const removeFileLocal = useCodeDatabaseStore((s) => s.removeFileLocal);
   const removeSchemaEntityLocal = useCodeDatabaseStore((s) => s.removeSchemaEntityLocal);
   const appendActivityLocal = useCodeDatabaseStore((s) => s.appendActivityLocal);
@@ -476,6 +499,13 @@ export function DatabasePanel() {
         removeKvLocal(conversationId, result.name);
         appendActivityLocal(conversationId, activityEvent("user", "kv_delete", result.name, true));
         toast.success(`Deleted "${result.name}"`);
+      } else if (confirmState.kind === "env") {
+        const result = await envDelete(resolved, conversationId, confirmState.name, {
+          actor: "user",
+        });
+        deleteEnvLocal(conversationId, result.name);
+        appendActivityLocal(conversationId, activityEvent("user", "env_delete", result.name, true));
+        toast.success(`Deleted "${result.name}"`);
       } else if (confirmState.kind === "file") {
         await storageDelete(conversationId, confirmState.path, { client: resolved, actor: "user" });
         removeFileLocal(conversationId, confirmState.path);
@@ -493,7 +523,7 @@ export function DatabasePanel() {
     } finally {
       setConfirmBusy(false);
     }
-  }, [confirmState, conversationId, removeKvLocal, removeFileLocal, removeSchemaEntityLocal, appendActivityLocal]);
+  }, [confirmState, conversationId, removeKvLocal, deleteEnvLocal, removeFileLocal, removeSchemaEntityLocal, appendActivityLocal]);
 
   const confirmMeta = useMemo(() => {
     if (!confirmState) return null;
@@ -502,6 +532,14 @@ export function DatabasePanel() {
         title: `Delete "${confirmState.name}"?`,
         description: "The record is removed from this app's OnyxBase database. This cannot be undone.",
         label: "Delete record",
+      };
+    }
+    if (confirmState.kind === "env") {
+      return {
+        title: `Delete "${confirmState.name}"?`,
+        description:
+          "The environment variable is removed from this app's OnyxBase storage. This cannot be undone.",
+        label: "Delete variable",
       };
     }
     if (confirmState.kind === "file") {
@@ -598,6 +636,9 @@ export function DatabasePanel() {
               <TabsTrigger value="kv" className="h-7 rounded-md px-2.5 text-[11px]">
                 KV
               </TabsTrigger>
+              <TabsTrigger value="env" className="h-7 rounded-md px-2.5 text-[11px]">
+                Env
+              </TabsTrigger>
               <TabsTrigger value="files" className="h-7 rounded-md px-2.5 text-[11px]">
                 Files
               </TabsTrigger>
@@ -645,6 +686,13 @@ export function DatabasePanel() {
               onEdit={(entry) => openKvEditor({ mode: "edit", entry })}
               onNew={() => openKvEditor({ mode: "new" })}
               onConfirmDelete={(name) => setConfirmState({ kind: "kv", name })}
+            />
+          </TabsContent>
+
+          <TabsContent value="env" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+            <EnvTab
+              conversationId={conversationId}
+              onConfirmDelete={(name) => setConfirmState({ kind: "env", name })}
             />
           </TabsContent>
 
@@ -783,7 +831,7 @@ function OverviewTab({
     );
   }
 
-  const { kv, storage, schema, activity, onyxbase, lastUpdate, legacyRecords } = overview;
+  const { kv, envCount, storage, schema, activity, onyxbase, lastUpdate, legacyRecords } = overview;
 
   return (
     <div className="space-y-2.5 p-2.5">
@@ -807,6 +855,9 @@ function OverviewTab({
         </OverviewRow>
         <OverviewRow label="Records">
           <span className="tabular-nums">{kv.count.toLocaleString()}</span>
+        </OverviewRow>
+        <OverviewRow label="Env variables">
+          <span className="tabular-nums">{envCount.toLocaleString()}</span>
         </OverviewRow>
         <OverviewRow label="Files">
           <span className="tabular-nums">
@@ -856,6 +907,14 @@ function OverviewTab({
                 {e.name}
               </span>
             ))}
+            {schema.entities.length > 8 && (
+              <span
+                className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono text-[10px]"
+                title={`${schema.entities.length} entities in total — see the Schema tab`}
+              >
+                +{schema.entities.length - 8} more
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -918,6 +977,16 @@ function KvTab({
     );
   }, [entries, query]);
 
+  // §35 render guard — page long lists; "Load more" reveals the rest.
+  // Reset during render when the query changes (React's adjust-state-when-
+  // props-change pattern — no effect, no cascading render).
+  const [shown, setShown] = useState(LIST_PAGE_SIZE);
+  const [shownForQuery, setShownForQuery] = useState(query);
+  if (shownForQuery !== query) {
+    setShownForQuery(query);
+    setShown(LIST_PAGE_SIZE);
+  }
+
   return (
     <div className="space-y-2.5 p-2.5">
       <div className="flex items-center gap-1.5">
@@ -962,16 +1031,21 @@ function KvTab({
           }
         />
       ) : (
-        <div className="border-border/60 divide-y divide-border/50 overflow-hidden rounded-xl border">
-          {filtered.map((entry) => (
-            <KvRow
-              key={entry.key}
-              entry={entry}
-              touchedAt={lastKvTouchAt(entry.name, activity)}
-              onEdit={() => onEdit(entry)}
-              onConfirmDelete={() => onConfirmDelete(entry.name)}
-            />
-          ))}
+        <div className="space-y-0">
+          <div className="border-border/60 divide-y divide-border/50 overflow-hidden rounded-xl border">
+            {filtered.slice(0, shown).map((entry) => (
+              <KvRow
+                key={entry.key}
+                entry={entry}
+                touchedAt={lastKvTouchAt(entry.name, activity)}
+                onEdit={() => onEdit(entry)}
+                onConfirmDelete={() => onConfirmDelete(entry.name)}
+              />
+            ))}
+          </div>
+          {filtered.length > shown && (
+            <LoadMore shown={Math.min(shown, filtered.length)} total={filtered.length} onMore={() => setShown((n) => n + LIST_PAGE_SIZE)} />
+          )}
         </div>
       )}
 
@@ -1007,7 +1081,7 @@ function KvRow({
           </span>
           <span
             className="text-muted-foreground text-[10px]"
-            title={touchedAt ? absoluteTime(touchedAt) : "Unknown — outside the last 50 activity events"}
+            title={touchedAt ? absoluteTime(touchedAt) : `Unknown — outside the last ${CODE_ACTIVITY_MAX_EVENTS} activity events`}
           >
             {formatWhen(touchedAt)}
           </span>
@@ -1257,6 +1331,321 @@ function KvEditorDialog({
 }
 
 /* ------------------------------------------------------------------ */
+/* Env tab — persistent per-app environment variables (code:env:<chat>) */
+/* ------------------------------------------------------------------ */
+
+function EnvTab({
+  conversationId,
+  onConfirmDelete,
+}: {
+  conversationId: string;
+  onConfirmDelete: (name: string) => void;
+}) {
+  const env = useCodeDatabaseStore((s) => s.env);
+  const busy = useCodeDatabaseStore((s) => s.sectionBusy.env);
+  const [form, setForm] = useState<EnvFormState>(null);
+
+  // §35 render guard — page long lists; "Load more" reveals the rest.
+  const [shown, setShown] = useState(LIST_PAGE_SIZE);
+
+  // The form's data belongs to its conversation — close it (and reset paging)
+  // when the scope changes (same rule as the panel-level editor dialogs).
+  // Adjusted during render (no effect — avoids cascading renders).
+  const [formScope, setFormScope] = useState(conversationId);
+  if (formScope !== conversationId) {
+    setFormScope(conversationId);
+    setForm(null);
+    setShown(LIST_PAGE_SIZE);
+  }
+
+  const formKey = form?.mode === "edit" ? `edit:${form.record.name}` : "new";
+
+  return (
+    <div className="space-y-2.5 p-2.5">
+      <p className="border-border/60 text-muted-foreground rounded-lg border border-dashed px-2.5 py-2 text-[10px] leading-relaxed">
+        <span className="text-foreground font-medium">Environment variables</span> — persistent in
+        your OnyxBase cloud for this app (survives sandbox resets). The right place for API keys and
+        config the generated app needs; shared with the agent&apos;s env_* tools.
+      </p>
+
+      {form ? (
+        <EnvForm
+          key={formKey}
+          conversationId={conversationId}
+          mode={form.mode}
+          record={form.mode === "edit" ? form.record : undefined}
+          onClose={() => setForm(null)}
+        />
+      ) : (
+        <div className="flex items-center justify-end">
+          <Button
+            size="sm"
+            onClick={() => setForm({ mode: "new" })}
+            className="h-8 gap-1.5 px-2.5 text-[11px]"
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden />
+            Add variable
+          </Button>
+        </div>
+      )}
+
+      {busy && env.length === 0 ? (
+        <div className="space-y-2">
+          {[1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-12 w-full rounded-lg" />
+          ))}
+        </div>
+      ) : env.length === 0 ? (
+        <EmptyState
+          icon={<Variable className="h-5 w-5" aria-hidden />}
+          title="No environment variables yet"
+          body="Ask OnyxCode to store the app's API keys and config as environment variables (it uses the env_set tool) — they persist in OnyxBase and survive sandbox resets — or add the first one yourself."
+          action={
+            <Button size="sm" variant="outline" onClick={() => setForm({ mode: "new" })}>
+              Add variable
+            </Button>
+          }
+        />
+      ) : (
+        <div className="space-y-0">
+          <div className="border-border/60 divide-y divide-border/50 overflow-hidden rounded-xl border">
+            {env.slice(0, shown).map((record) => (
+              <EnvRow
+                key={record.name}
+                record={record}
+                onEdit={() => setForm({ mode: "edit", record })}
+                onConfirmDelete={() => onConfirmDelete(record.name)}
+              />
+            ))}
+          </div>
+          {env.length > shown && (
+            <LoadMore
+              shown={Math.min(shown, env.length)}
+              total={env.length}
+              onMore={() => setShown((n) => n + LIST_PAGE_SIZE)}
+            />
+          )}
+        </div>
+      )}
+
+      <p className="text-muted-foreground text-center text-[10px]">
+        {env.length} variable{env.length === 1 ? "" : "s"} · UPPER_SNAKE_CASE names · stored under{" "}
+        <code className="font-mono">code:env:{conversationId.slice(0, 8)}…</code> in OnyxBase
+      </p>
+    </div>
+  );
+}
+
+/** One env row — name (mono, uppercase), MASKED value with a per-row reveal
+ *  toggle, size, honest activity-derived recency, and row actions. */
+function EnvRow({
+  record,
+  onEdit,
+  onConfirmDelete,
+}: {
+  record: CodeEnvRecord;
+  onEdit: () => void;
+  onConfirmDelete: () => void;
+}) {
+  const [revealed, setRevealed] = useState(false);
+
+  return (
+    <div className="hover:bg-foreground/[0.03] flex items-center gap-1 px-2.5 py-2 transition-colors">
+      <button type="button" onClick={onEdit} className="min-w-0 flex-1 text-left" title={`Edit ${record.name}`}>
+        <span className="block truncate font-mono text-xs font-semibold tracking-wide">
+          {record.name}
+        </span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            className={cn(
+              "block max-w-full truncate font-mono text-[10px]",
+              revealed ? "text-foreground/80" : "text-muted-foreground/70 tracking-widest",
+            )}
+            title={revealed ? record.value : "Hidden — use the eye toggle to reveal"}
+          >
+            {revealed ? record.value : "••••••••••••"}
+          </span>
+          <span className="text-muted-foreground font-mono text-[10px] tabular-nums">
+            {record.size.toLocaleString()} ch
+          </span>
+          <span
+            className="text-muted-foreground text-[10px]"
+            title={
+              record.updatedAt
+                ? absoluteTime(record.updatedAt)
+                : `Unknown — outside the last ${CODE_ACTIVITY_MAX_EVENTS} activity events`
+            }
+          >
+            {formatWhen(record.updatedAt ?? null)}
+          </span>
+        </span>
+      </button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground h-7 w-7"
+          onClick={() => setRevealed((r) => !r)}
+          title={revealed ? `Hide ${record.name} value` : `Reveal ${record.name} value`}
+          aria-label={revealed ? `Hide ${record.name} value` : `Reveal ${record.name} value`}
+          aria-pressed={revealed}
+        >
+          {revealed ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground h-7 w-7"
+          onClick={() => void copyText(record.value, "Value")}
+          title={`Copy ${record.name} value`}
+          aria-label={`Copy ${record.name} value`}
+        >
+          <Copy className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground h-7 w-7"
+          onClick={onEdit}
+          title={`Edit ${record.name}`}
+          aria-label={`Edit ${record.name}`}
+        >
+          <Pencil className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-destructive h-7 w-7"
+          onClick={onConfirmDelete}
+          title={`Delete ${record.name}`}
+          aria-label={`Delete ${record.name}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" aria-hidden />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Inline add/edit form — the KV editor's visual language, in place. The name
+ *  normalizes to UPPER_SNAKE_CASE server-side (envSet); invalid names surface
+ *  the library's clear error inline instead of a fake success. */
+function EnvForm({
+  conversationId,
+  mode,
+  record,
+  onClose,
+}: {
+  conversationId: string;
+  mode: "new" | "edit";
+  record?: CodeEnvRecord;
+  onClose: () => void;
+}) {
+  const setEnvLocal = useCodeDatabaseStore((s) => s.setEnvLocal);
+  const appendActivityLocal = useCodeDatabaseStore((s) => s.appendActivityLocal);
+
+  const [name, setName] = useState(record?.name ?? "");
+  const [value, setValue] = useState(record?.value ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("Name is required (UPPER_SNAKE_CASE, e.g. OPENAI_API_KEY).");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const resolved = await resolveCodeDbClient();
+      if ("kind" in resolved) throw new Error(codeDbFailureMessage(resolved));
+      const saved = await envSet(resolved, conversationId, trimmedName, value, {
+        actor: "user",
+      });
+      // §32 — confirmed write: ONE targeted local update, no refetch. Mirror
+      // the activity event the library just appended server-side.
+      setEnvLocal(conversationId, saved);
+      appendActivityLocal(
+        conversationId,
+        activityEvent("user", "env_set", saved.name, true, `${saved.size} chars`),
+      );
+      toast.success(`Saved "${saved.name}"`);
+      onClose();
+    } catch (err) {
+      // §28 — a REAL OnyxBase/validation failure is never reported as success.
+      setError(err instanceof Error ? err.message : "Failed to save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-border/60 space-y-2.5 rounded-xl border p-2.5">
+      <p className="text-muted-foreground text-[10px] leading-relaxed">
+        Stored in OnyxBase under{" "}
+        <code className="font-mono">code:env:{conversationId.slice(0, 8)}…:{name.trim().toUpperCase() || "NAME"}</code>{" "}
+        — the same variables the agent&apos;s env_* tools read and write. They survive sandbox
+        resets.
+      </p>
+      <div>
+        <Label htmlFor="code-db-env-name" className="mb-1 block text-xs">
+          Name
+        </Label>
+        <Input
+          id="code-db-env-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. OPENAI_API_KEY"
+          disabled={mode === "edit"}
+          className="h-8 font-mono text-xs uppercase"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {mode === "edit" && (
+          <p className="text-muted-foreground mt-1 text-[10px]">
+            Renaming is not supported — delete and recreate the variable instead.
+          </p>
+        )}
+      </div>
+      <div>
+        <Label htmlFor="code-db-env-value" className="mb-1 block text-xs">
+          Value
+        </Label>
+        <Input
+          id="code-db-env-value"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="e.g. sk-… or https://api.example.com"
+          className="h-8 font-mono text-xs"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </div>
+      {error && (
+        <p className="text-destructive text-xs leading-relaxed" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-1.5">
+        <Button variant="outline" size="sm" onClick={onClose} disabled={saving} className="h-8 px-2.5 text-[11px]">
+          Cancel
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => void save()}
+          disabled={saving || !name.trim()}
+          className="h-8 gap-1.5 px-2.5 text-[11px]"
+        >
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+          {mode === "edit" ? "Save variable" : "Add variable"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Files tab (§10 — persistent OnyxBase app storage, NOT workspace)     */
 /* ------------------------------------------------------------------ */
 
@@ -1283,6 +1672,10 @@ function FilesTab({
     if (!q) return files;
     return files.filter((f) => f.path.toLowerCase().includes(q) || f.mime.toLowerCase().includes(q));
   }, [files, query]);
+
+  // §35 render guard — page long lists; "Load more" reveals the rest.
+  const [shown, setShown] = useState(LIST_PAGE_SIZE);
+  useEffect(() => setShown(LIST_PAGE_SIZE), [query]);
 
   const download = async (file: CodeStorageMetadata) => {
     setDownloading(file.path);
@@ -1388,50 +1781,59 @@ function FilesTab({
           }
         />
       ) : (
-        <div className="border-border/60 divide-y divide-border/50 overflow-hidden rounded-xl border">
-          {filtered.map((file) => (
-            <div key={file.path} className="hover:bg-foreground/[0.03] flex items-center gap-2.5 px-2.5 py-2 transition-colors">
-              <LazyThumbnail conversationId={conversationId} file={file} />
-              <div className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-xs font-medium" title={file.path}>
-                  {file.path}
-                </span>
-                <span className="text-muted-foreground mt-0.5 block truncate text-[10px]">
-                  {file.mime} · {formatBytes(file.size)}
-                  {file.chunks > 1 ? ` · ${file.chunks} chunks` : ""} ·{" "}
-                  <span title={absoluteTime(file.updatedAt)}>{formatWhen(file.updatedAt)}</span>
-                </span>
+        <div className="space-y-0">
+          <div className="border-border/60 divide-y divide-border/50 overflow-hidden rounded-xl border">
+            {filtered.slice(0, shown).map((file) => (
+              <div key={file.path} className="hover:bg-foreground/[0.03] flex items-center gap-2.5 px-2.5 py-2 transition-colors">
+                <LazyThumbnail conversationId={conversationId} file={file} />
+                <div className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-xs font-medium" title={file.path}>
+                    {file.path}
+                  </span>
+                  <span className="text-muted-foreground mt-0.5 block truncate text-[10px]">
+                    {file.mime} · {formatBytes(file.size)}
+                    {file.chunks > 1 ? ` · ${file.chunks} chunks` : ""} ·{" "}
+                    <span title={absoluteTime(file.updatedAt)}>{formatWhen(file.updatedAt)}</span>
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-foreground h-7 w-7"
+                    onClick={() => void download(file)}
+                    disabled={downloading === file.path}
+                    title={`Download ${file.path}`}
+                    aria-label={`Download ${file.path}`}
+                  >
+                    {downloading === file.path ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" aria-hidden />
+                    )}
+                  </Button>
+                  <FileMetadataPopover conversationId={conversationId} file={file} />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-muted-foreground hover:text-destructive h-7 w-7"
+                    onClick={() => onConfirmDelete(file.path)}
+                    title={`Delete ${file.path}`}
+                    aria-label={`Delete ${file.path}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                  </Button>
+                </div>
               </div>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="text-muted-foreground hover:text-foreground h-7 w-7"
-                  onClick={() => void download(file)}
-                  disabled={downloading === file.path}
-                  title={`Download ${file.path}`}
-                  aria-label={`Download ${file.path}`}
-                >
-                  {downloading === file.path ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                  ) : (
-                    <Download className="h-3.5 w-3.5" aria-hidden />
-                  )}
-                </Button>
-                <FileMetadataPopover conversationId={conversationId} file={file} />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="text-muted-foreground hover:text-destructive h-7 w-7"
-                  onClick={() => onConfirmDelete(file.path)}
-                  title={`Delete ${file.path}`}
-                  aria-label={`Delete ${file.path}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" aria-hidden />
-                </Button>
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          {filtered.length > shown && (
+            <LoadMore
+              shown={Math.min(shown, filtered.length)}
+              total={filtered.length}
+              onMore={() => setShown((n) => n + LIST_PAGE_SIZE)}
+            />
+          )}
         </div>
       )}
 
@@ -2039,6 +2441,21 @@ function SearchTab({
 
   const q = query.trim().toLowerCase();
 
+  // §35 render guard — page each result group; "Load more" reveals the rest
+  // (nothing is hidden behind a "+N more" note anymore).
+  const [kvShown, setKvShown] = useState(SEARCH_PAGE_SIZE);
+  const [fileShown, setFileShown] = useState(SEARCH_PAGE_SIZE);
+  const [schemaShown, setSchemaShown] = useState(SEARCH_PAGE_SIZE);
+  // Reset paging during render when the query changes (adjust-state
+  // pattern — no effect, no cascading renders).
+  const [pageForQuery, setPageForQuery] = useState(query);
+  if (pageForQuery !== query) {
+    setPageForQuery(query);
+    setKvShown(SEARCH_PAGE_SIZE);
+    setFileShown(SEARCH_PAGE_SIZE);
+    setSchemaShown(SEARCH_PAGE_SIZE);
+  }
+
   const kvMatches = useMemo(
     () =>
       q
@@ -2101,7 +2518,7 @@ function SearchTab({
         <div className="space-y-3">
           {kvMatches.length > 0 && (
             <SearchGroup title="Records" count={kvMatches.length}>
-              {kvMatches.slice(0, 20).map((e) => (
+              {kvMatches.slice(0, kvShown).map((e) => (
                 <button
                   key={e.key}
                   type="button"
@@ -2114,16 +2531,18 @@ function SearchTab({
                   </span>
                 </button>
               ))}
-              {kvMatches.length > 20 && (
-                <p className="text-muted-foreground px-2.5 py-1 text-[10px]">
-                  + {kvMatches.length - 20} more — open the KV tab to see them all.
-                </p>
+              {kvMatches.length > kvShown && (
+                <LoadMore
+                  shown={Math.min(kvShown, kvMatches.length)}
+                  total={kvMatches.length}
+                  onMore={() => setKvShown((n) => n + SEARCH_PAGE_SIZE)}
+                />
               )}
             </SearchGroup>
           )}
           {fileMatches.length > 0 && (
             <SearchGroup title="Files" count={fileMatches.length}>
-              {fileMatches.slice(0, 20).map((f) => (
+              {fileMatches.slice(0, fileShown).map((f) => (
                 <button
                   key={f.path}
                   type="button"
@@ -2136,11 +2555,18 @@ function SearchTab({
                   </span>
                 </button>
               ))}
+              {fileMatches.length > fileShown && (
+                <LoadMore
+                  shown={Math.min(fileShown, fileMatches.length)}
+                  total={fileMatches.length}
+                  onMore={() => setFileShown((n) => n + SEARCH_PAGE_SIZE)}
+                />
+              )}
             </SearchGroup>
           )}
           {schemaMatches.length > 0 && (
             <SearchGroup title="Schema" count={schemaMatches.length}>
-              {schemaMatches.map((e) => (
+              {schemaMatches.slice(0, schemaShown).map((e) => (
                 <button
                   key={e.name}
                   type="button"
@@ -2153,6 +2579,13 @@ function SearchTab({
                   </span>
                 </button>
               ))}
+              {schemaMatches.length > schemaShown && (
+                <LoadMore
+                  shown={Math.min(schemaShown, schemaMatches.length)}
+                  total={schemaMatches.length}
+                  onMore={() => setSchemaShown((n) => n + SEARCH_PAGE_SIZE)}
+                />
+              )}
             </SearchGroup>
           )}
         </div>
@@ -2195,7 +2628,8 @@ function ActivityTab() {
     <div className="space-y-2.5 p-2.5">
       <p className="text-muted-foreground px-0.5 text-[10px] leading-relaxed">
         The last {activity.length} operation{activity.length === 1 ? "" : "s"} on this app&apos;s
-        database — real events appended by you and the agent (bounded to 50).
+        database — real events appended by you and the agent (bounded to{" "}
+        {CODE_ACTIVITY_MAX_EVENTS}).
       </p>
       {busy && activity.length === 0 ? (
         <div className="space-y-2">
@@ -2235,6 +2669,24 @@ function ActivityTab() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Load more (§35 — paged render guard; data is chunked, never hidden)  */
+/* ------------------------------------------------------------------ */
+
+function LoadMore({ shown, total, onMore }: { shown: number; total: number; onMore: () => void }) {
+  return (
+    <div className="flex items-center justify-center gap-2 py-2">
+      <span className="text-muted-foreground text-[10px] tabular-nums">
+        Showing {shown.toLocaleString()} of {total.toLocaleString()}
+      </span>
+      <Button variant="outline" size="sm" className="h-7 gap-1 px-2.5 text-[11px]" onClick={onMore}>
+        <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+        Load more
+      </Button>
     </div>
   );
 }

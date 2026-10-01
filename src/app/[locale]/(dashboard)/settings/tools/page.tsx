@@ -196,7 +196,7 @@ export default function ToolsSettingsPage() {
                     className="animate-fade-in opacity-95"
                   >
                     <CardContent className="py-3 px-4">
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono text-sm font-medium">
@@ -252,7 +252,7 @@ export default function ToolsSettingsPage() {
                 {filtered.map((tool) => (
                   <Card key={tool.id} className="animate-fade-in hover:shadow-md transition-shadow">
                     <CardContent className="py-3 px-4">
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono text-sm font-medium">

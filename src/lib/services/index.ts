@@ -29,7 +29,7 @@ import {
   vaultDecrypt,
   requireVault,
 } from "@/lib/crypto/vault";
-import { ONYXBASE_WORKSPACE_ID } from "@/lib/onyxbase/kv-client";
+import { ONYXBASE_LEGACY_BASE_URLS, ONYXBASE_WORKSPACE_ID } from "@/lib/onyxbase/kv-client";
 // Lazy-load the E2B sandbox client . The class lives at
 // `@/lib/e2b/client` for back-compat with the existing import paths; it
 // now talks to E2B's REST API instead of the old proxy.
@@ -1270,8 +1270,10 @@ export interface UserSettings {
    *  `extra.onyxbase_api_key_encrypted`). Powers the persistent cloud
    *  workspace (push_workspace / retrieve_workspace). */
   onyxbase_api_key_present?: boolean;
-  /** OnyxBase instance base URL (default https://onyxbase-phi.vercel.app),
-   *  stored under `extra.onyxbase_base_url`. */
+  /** OnyxBase instance base URL (default https://onyxbase-chi.vercel.app),
+   *  stored under `extra.onyxbase_base_url`. Values equal to a RETIRED
+   *  default (ONYXBASE_LEGACY_BASE_URLS) read back as undefined so the
+   *  current default applies transparently. */
   onyxbase_base_url?: string;
   /** Fixed workspace identifier — `workspace_default`. NOT a secret; the
    *  model may know it (PRD §4). */
@@ -1288,6 +1290,17 @@ export interface UserSettings {
    *  without the vault-encrypted API key). Reused across prompts so we never
    *  create a session per turn. */
   composio_session_id?: string | null;
+}
+
+/** Normalize a stored/provided OnyxBase base URL for comparison only —
+ *  same rules as the KV client's normalizeBaseUrl (scheme added when
+ *  missing, trailing slashes stripped), so a stored legacy default is
+ *  recognized regardless of how the user's browser saved it. */
+function normalizeOnyxBaseUrlForCompare(raw: string): string {
+  let url = raw.trim();
+  if (!url) return "";
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  return url.replace(/\/+$/, "");
 }
 
 export const settingsService = {
@@ -1332,7 +1345,16 @@ export const settingsService = {
       // stored values ("pydantic_ai", "langchain", …) normalize to "onyx_ai".
       ai_framework: "onyx_ai",
       onyxbase_api_key_present: !!row.extra?.onyxbase_api_key_encrypted,
-      onyxbase_base_url: (row.extra?.onyxbase_base_url as string | undefined) ?? undefined,
+      // Migration: a stored base URL that (normalized) equals a RETIRED
+      // default was never a real customization — return undefined so the
+      // CURRENT default (ONYXBASE_DEFAULT_BASE_URL) applies transparently.
+      onyxbase_base_url: (() => {
+        const stored = row.extra?.onyxbase_base_url;
+        if (typeof stored !== "string" || !stored.trim()) return undefined;
+        return ONYXBASE_LEGACY_BASE_URLS.includes(normalizeOnyxBaseUrlForCompare(stored))
+          ? undefined
+          : stored;
+      })(),
       onyxbase_workspace_id: ONYXBASE_WORKSPACE_ID,
       onyxbase_last_synced: (row.extra?.onyxbase_last_synced as string | null | undefined) ?? null,
       composio_api_key_present: !!row.extra?.composio_api_key_encrypted,

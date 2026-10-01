@@ -34,6 +34,7 @@ import {
   activityList,
   codeDbFailureMessage,
   databaseOverview,
+  envList,
   kvList,
   resolveCodeDbClient,
   schemaGet,
@@ -43,6 +44,7 @@ import {
   type CodeDatabaseOverview,
   type CodeDbClient,
   type CodeDbFailure,
+  type CodeEnvRecord,
   type CodeKvEntry,
   type CodeSchema,
   type CodeStorageMetadata,
@@ -55,7 +57,7 @@ export type CodeDatabasePhase =
   | "not-configured" // user has no OnyxBase key → Settings → Cloud
   | "error";
 
-export type CodeDatabaseSection = "overview" | "kv" | "storage" | "schema" | "activity";
+export type CodeDatabaseSection = "overview" | "kv" | "env" | "storage" | "schema" | "activity";
 
 /** A lazily-loaded thumbnail for one storage path (§111 — never blocking). */
 export interface CodeThumbnail {
@@ -68,17 +70,18 @@ export interface CodeThumbnail {
 const ALL_SECTIONS: readonly CodeDatabaseSection[] = [
   "overview",
   "kv",
+  "env",
   "storage",
   "schema",
   "activity",
 ];
 
 function busySections(): Record<CodeDatabaseSection, boolean> {
-  return { overview: true, kv: true, storage: true, schema: true, activity: true };
+  return { overview: true, kv: true, env: true, storage: true, schema: true, activity: true };
 }
 
 function idleSections(): Record<CodeDatabaseSection, boolean> {
-  return { overview: false, kv: false, storage: false, schema: false, activity: false };
+  return { overview: false, kv: false, env: false, storage: false, schema: false, activity: false };
 }
 
 function errText(err: unknown): string {
@@ -110,6 +113,8 @@ export interface CodeDatabaseState {
   sectionBusy: Record<CodeDatabaseSection, boolean>;
   overview: CodeDatabaseOverview | null;
   kv: { entries: CodeKvEntry[]; query: string };
+  /** Persistent environment variables for this conversation (env tab). */
+  env: CodeEnvRecord[];
   storage: { files: CodeStorageMetadata[] };
   /** Lazy image thumbnails, keyed by storage path (current conversation). */
   thumbnails: Record<string, CodeThumbnail>;
@@ -121,11 +126,12 @@ export interface CodeDatabaseState {
   editorOpenFor: string | null;
   lastFetchedAt: number | null;
 
-  /** Full refresh (all five sections, fetched in parallel, one client). */
+  /** Full refresh (all six sections, fetched in parallel, one client). */
   refreshAll: (conversationId: string) => Promise<void>;
   /** Individual section refreshes (each resolves its own client). */
   refreshOverview: (conversationId: string) => Promise<void>;
   refreshKv: (conversationId: string) => Promise<void>;
+  refreshEnv: (conversationId: string) => Promise<void>;
   refreshStorage: (conversationId: string) => Promise<void>;
   refreshSchema: (conversationId: string) => Promise<void>;
   refreshActivity: (conversationId: string) => Promise<void>;
@@ -133,6 +139,8 @@ export interface CodeDatabaseState {
   // ── §32 targeted local updates (call AFTER the real write confirmed) ──
   upsertKvLocal: (conversationId: string, entry: CodeKvEntry) => void;
   removeKvLocal: (conversationId: string, name: string) => void;
+  setEnvLocal: (conversationId: string, record: CodeEnvRecord) => void;
+  deleteEnvLocal: (conversationId: string, name: string) => void;
   upsertFileLocal: (conversationId: string, metadata: CodeStorageMetadata) => void;
   removeFileLocal: (conversationId: string, path: string) => void;
   setSchemaLocal: (conversationId: string, schema: CodeSchema) => void;
@@ -161,9 +169,10 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
       return;
     }
     const client = resolved;
-    const [overviewR, kvR, storageR, schemaR, activityR] = await Promise.allSettled([
+    const [overviewR, kvR, envR, storageR, schemaR, activityR] = await Promise.allSettled([
       databaseOverview(conversationId, { client }),
       kvList(conversationId, { client }),
+      envList(client, conversationId),
       storageList(conversationId, { client }),
       schemaGet(conversationId, { client }),
       activityList(conversationId, undefined, { client }),
@@ -176,6 +185,8 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
     else failures.push(`overview — ${errText(overviewR.reason)}`);
     if (kvR.status === "fulfilled") patch.kv = { entries: kvR.value, query: get().kv.query };
     else failures.push(`KV records — ${errText(kvR.reason)}`);
+    if (envR.status === "fulfilled") patch.env = envR.value;
+    else failures.push(`environment variables — ${errText(envR.reason)}`);
     if (storageR.status === "fulfilled") patch.storage = { files: storageR.value };
     else failures.push(`files — ${errText(storageR.reason)}`);
     if (schemaR.status === "fulfilled") patch.schema = schemaR.value;
@@ -248,6 +259,7 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
     sectionBusy: idleSections(),
     overview: null,
     kv: { entries: [], query: "" },
+    env: [],
     storage: { files: [] },
     thumbnails: {},
     thumbnailFailed: {},
@@ -273,6 +285,7 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
           ? {
               overview: null,
               kv: { entries: [], query: "" },
+              env: [],
               storage: { files: [] },
               thumbnails: {},
               thumbnailFailed: {},
@@ -298,6 +311,11 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
       runSection("kv", conversationId, async (client) => {
         const entries = await kvList(conversationId, { client });
         return { kv: { entries, query: get().kv.query } };
+      }),
+    refreshEnv: (conversationId) =>
+      runSection("env", conversationId, async (client) => {
+        const env = await envList(client, conversationId);
+        return { env };
       }),
     refreshStorage: (conversationId) =>
       runSection("storage", conversationId, async (client) => {
@@ -334,6 +352,23 @@ export const useCodeDatabaseStore = create<CodeDatabaseState>((set, get) => {
       set((s) => ({
         kv: { entries: s.kv.entries.filter((e) => e.name !== name), query: s.kv.query },
       }));
+    },
+
+    setEnvLocal: (conversationId, record) => {
+      if (get().conversationId !== conversationId) return;
+      set((s) => {
+        const exists = s.env.some((e) => e.name === record.name);
+        const env = exists
+          ? s.env.map((e) => (e.name === record.name ? record : e))
+          : [...s.env, record];
+        env.sort((a, b) => a.name.localeCompare(b.name));
+        return { env };
+      });
+    },
+
+    deleteEnvLocal: (conversationId, name) => {
+      if (get().conversationId !== conversationId) return;
+      set((s) => ({ env: s.env.filter((e) => e.name !== name) }));
     },
 
     upsertFileLocal: (conversationId, metadata) => {
