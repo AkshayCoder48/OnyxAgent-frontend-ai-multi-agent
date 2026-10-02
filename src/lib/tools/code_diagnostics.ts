@@ -28,7 +28,7 @@
 import { registerTool, type ToolContext } from "./registry";
 import { type E2BClient } from "@/lib/e2b/client";
 import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
-import { bumpWorkspaceVersion } from "./workspace-snapshot";
+import { bumpWorkspaceVersion, getWorkspaceFsVersion } from "./workspace-snapshot";
 import { webSession } from "./code_web_session";
 import { findPreviewSession, usePreviewSessionStore } from "@/stores/preview-session-store";
 
@@ -223,14 +223,51 @@ async function ensurePageOnTarget(
   if (targetUrl) {
     const status = await sendCommand(client, { action: "status" }, { timeoutMs: 20_000 });
     const current = typeof status.url === "string" ? status.url : null;
-    if (!current || !current.startsWith(targetUrl)) {
+    const onTarget = !!current && current.startsWith(targetUrl);
+    // PAGE-FRESHNESS GATE (the "AI can't see errors" fix): a page whose URL
+    // already matches the target is NOT proof it shows the current app — if
+    // project files were written after it loaded (fsVersion bumped), the
+    // headless page may still render the OLD build (HMR dies with every
+    // dev-server restart; wholesale page rewrites defeat fast-refresh), so
+    // its console/network captures would miss the real app's errors (e.g.
+    // "__webpack_modules__[moduleId] is not a function" chunk crashes).
+    // Reload it (goto the SAME url) before evaluating/inspecting.
+    const stale =
+      onTarget && getWorkspaceFsVersion() > webSession.pageFsVersion();
+    if (!onTarget) {
       opts.onProgress?.(`TARGET ${targetUrl}`);
-      const nav = await sendCommand(client, { action: "navigate", url: targetUrl }, { timeoutMs: 60_000 });
+      const nav = await sendCommand(
+        client,
+        { action: "navigate", url: targetUrl },
+        { timeoutMs: 60_000 },
+      );
       if (nav.ok === false) {
-        return { ok: false, error: `Navigation to ${targetUrl} failed — ${String(nav.error ?? "")}` };
+        return {
+          ok: false,
+          error: `Navigation to ${targetUrl} failed — ${String(nav.error ?? "")}`,
+        };
       }
+      webSession.markPageLoaded();
+    } else if (stale) {
+      opts.onProgress?.(
+        `Reloading ${current} — the project files changed since this page was loaded (stale-page guard so you see the REAL app, not the old build).`,
+      );
+      // Re-goto the CURRENT url (preserves the AI's sub-page position) —
+      // page.goto on the same URL forces a full reload.
+      const nav = await sendCommand(
+        client,
+        { action: "navigate", url: current! },
+        { timeoutMs: 60_000 },
+      );
+      if (nav.ok === false) {
+        return {
+          ok: false,
+          error: `Reloading ${current} failed — ${String(nav.error ?? "")}`,
+        };
+      }
+      webSession.markPageLoaded();
     } else {
-      opts.onProgress?.(`TARGET ${targetUrl} (already loaded)`);
+      opts.onProgress?.(`TARGET ${targetUrl} (already loaded, fresh)`);
     }
   }
 

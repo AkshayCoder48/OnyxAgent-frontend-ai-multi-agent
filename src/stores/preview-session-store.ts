@@ -40,6 +40,13 @@ export interface PreviewSession {
   /** Error note when status === "error". */
   error?: string;
   createdAt: number;
+  /** Monotonic-ish boot stamp — bumped by EVERY completed start (a fresh
+   *  dev-server boot AND a healthy-server reuse). The preview panel's
+   *  iframe key includes it, so each new boot remounts the iframe and the
+   *  panel can never keep rendering a page from a PREVIOUS build (the
+   *  stale-scaffold-page / "__webpack_modules__[moduleId] is not a
+   *  function" fix). */
+  bootEpoch?: number;
   conversationId?: string;
 }
 

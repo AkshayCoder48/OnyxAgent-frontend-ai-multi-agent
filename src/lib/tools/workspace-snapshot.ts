@@ -48,6 +48,7 @@ import {
   resolveSandboxApiKey,
 } from "@/lib/e2b/sandbox-rotation";
 import type { ToolContext } from "./registry";
+import { notifySandboxWrite } from "@/lib/code/workspace-activity";
 import * as opfs from "@/lib/storage/opfs";
 
 // ---------------------------------------------------------------------------
@@ -200,7 +201,21 @@ let inFlight: { key: string; promise: Promise<WorkspaceSnapshot> } | null = null
  */
 export function bumpWorkspaceVersion(scope: "files" | "local" = "files"): void {
   if (scope === "local") localVersion++;
-  else fsVersion++;
+  else {
+    fsVersion++;
+    // Publish to the workspace-activity bus: the preview panel reloads its
+    // iframe once writes settle (HMR over the E2B proxy is unreliable, so
+    // without this the sidebar keeps showing the stale scaffold page), and
+    // the diagnostics/browser_eval path re-navigates its headless page.
+    notifySandboxWrite();
+  }
+}
+
+/** Current sandbox-files version counter — consumers (e.g. the web-session
+ *  page-freshness gate in code_diagnostics) compare it against the version
+ *  they observed at load time to detect staleness. */
+export function getWorkspaceFsVersion(): number {
+  return fsVersion;
 }
 
 /** Test/escape hatch — clears the snapshot cache and resets the version gates. */

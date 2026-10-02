@@ -20,6 +20,8 @@ export interface PreviewPayload {
   url?: string | null;
   port?: number;
   status?: string;
+  /** True when the start reused an already-running healthy dev server. */
+  reused?: boolean;
   message?: string;
   error?: string;
   /** This conversation's session only (one app per chat — 0 or 1 entries). */

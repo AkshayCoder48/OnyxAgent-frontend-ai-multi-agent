@@ -96,6 +96,37 @@ export interface StartPreviewResult {
   ok: boolean;
   session?: PreviewSession;
   error?: string;
+  /** True when an ALREADY-RUNNING healthy dev server was reused instead of
+   *  killing + rebooting it (the anti-restart-churn path). */
+  reused?: boolean;
+}
+
+/**
+ * Is a dev server for THIS app already running and answering on the port?
+ * Two probes in one exec (both must pass):
+ *   1. a process whose command line references the project dir exists
+ *      (the bracket trick keeps pgrep from matching its own shell), and
+ *   2. `curl http://localhost:PORT` answers 2xx/3xx inside the sandbox.
+ *
+ * This is the gate for the REUSE path in startPreview: killing and rebooting
+ * a healthy dev server breaks EVERY already-open preview tab (pages hold
+ * chunk references from the previous webpack build — the classic
+ * "__webpack_modules__[moduleId] is not a function" stale-chunk crash) and
+ * costs a full reinstall + reboot cycle for nothing. A healthy server keeps
+ * serving; only its bootEpoch is bumped so the panel iframe remounts.
+ */
+async function isDevServerHealthy(
+  client: ReturnType<typeof getE2BClient>,
+  appName: string,
+  port: number,
+): Promise<boolean> {
+  const safeMarker = `projects/${appName}`.replace(/-/g, "[-]");
+  const probe = await client.exec(
+    `pgrep -f "${safeMarker}" >/dev/null 2>&1 && curl -s -o /dev/null -w "%{http_code}" --max-time 12 http://localhost:${port} 2>/dev/null || echo ERR`,
+    { timeout: 25 },
+  );
+  const code = probe.stdout.trim();
+  return code.startsWith("2") || code.startsWith("3");
 }
 
 /**
@@ -247,6 +278,48 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
       };
     }
 
+    // 0.7. REUSE A HEALTHY SERVER (the anti-restart-churn fix): if a dev
+    // server for THIS app is already running and answering on the port,
+    // KEEP it. Restarting unconditionally broke every already-open preview
+    // tab — the old page kept chunk references from the previous webpack
+    // build and crashed with "__webpack_modules__[moduleId] is not a
+    // function" as soon as the new build served different module ids — and
+    // re-ran the whole install+boot cycle needlessly. On reuse we only bump
+    // bootEpoch (the panel remounts its iframe → shows the CURRENT app) and
+    // re-verify the public URL.
+    if (await isDevServerHealthy(client, appName, port)) {
+      progress?.("A dev server for this app is already running and healthy — reusing it (no restart, open tabs keep working).");
+      const hostInfo = await client.getHostUrl(port);
+      const live = await checkPreviewUrl(hostInfo.url, {
+        timeoutMs: 30_000,
+        onProgress: (line) => progress?.(line),
+      });
+      if (live) {
+        const serverCmd = scaffold.serverCommand!(appName, port);
+        const session: PreviewSession = {
+          id: conversationId
+            ? previewSessionIdFor(conversationId)
+            : `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          name: appName,
+          framework: scaffold.key,
+          frameworkLabel: scaffold.label,
+          url: hostInfo.url,
+          port,
+          sandboxId: hostInfo.sandboxId,
+          status: "running",
+          command: `cd ${cwd} && ${serverCmd}`,
+          createdAt: Date.now(),
+          bootEpoch: Date.now(),
+          ...(conversationId ? { conversationId } : {}),
+        };
+        usePreviewSessionStore.getState().upsert(session);
+        return { ok: true, session, reused: true };
+      }
+      // Public URL not answering although localhost does (proxy hiccup) —
+      // fall through to the full restart path, which re-exposes the port.
+      progress?.("The public URL did not answer — restarting the dev server.");
+    }
+
     // 0.5. RESTART HYGIENE (one app per chat): if this conversation already
     // has a preview record, kill its old dev server (project marker + port)
     // BEFORE booting the new one — a half-dead process squatting on the port
@@ -331,6 +404,7 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
       command: wrappedCmd,
       error: live ? undefined : "The server started but the public URL did not respond in time — it may still be booting; refresh the preview panel.",
       createdAt: Date.now(),
+      bootEpoch: Date.now(),
       ...(conversationId ? { conversationId } : {}),
     };
     usePreviewSessionStore.getState().upsert(session);

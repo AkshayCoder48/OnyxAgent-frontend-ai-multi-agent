@@ -19,6 +19,7 @@ import {
   type BgJob,
 } from "@/lib/e2b/background-agent";
 import { BG_NATIVE_TOOL_NAMES } from "@/lib/e2b/bg-native-tools";
+import { bumpWorkspaceVersion } from "@/lib/tools/workspace-snapshot";
 import {
   collectBridgeableTools,
   handleBrowserToolCall,
@@ -309,6 +310,29 @@ export async function consumeRun(ctx: {
     }
   };
 
+  /** Sandbox-native tools that MUTATE the workspace (bg-agent-script's
+   *  TOOLS array). Their results must bump the browser-side workspace
+   *  version — they bypass the browser registry, so without this neither
+   *  the snapshot cache nor the preview panel's freshness bus (the
+   *  stale-iframe fix) would ever learn that files changed during a
+   *  background turn. */
+  const BG_NATIVE_WRITE_TOOLS = new Set([
+    "write_file",
+    "create_file",
+    "edit_file",
+    "create_file_chunk",
+    "delete_file",
+    "move_file",
+    "create_folder",
+    "delete_folder",
+    "run_terminal",
+    "run_python",
+  ]);
+
+  /** tool_call id → name (native bg tools), so the nameless tool_result
+   *  events can be attributed. */
+  const nativeToolNames = new Map<string, string>();
+
   /** Replay one batch of events through the pipeline (seq order == file
    *  order). Shared by the SSE frames and the bg_status fallback drain.
    *  Returns true when the batch contained a terminal (done/error) event. */
@@ -341,6 +365,20 @@ export async function consumeRun(ctx: {
           // best-effort — the runner's timeout produces a graceful error
         });
         continue;
+      }
+      // NATIVE WRITE TRANSPARENCY: attribute tool_call → name, and when a
+      // mutating NATIVE tool finishes, bump the browser workspace version
+      // (also publishes to the workspace-activity bus → the preview panel
+      // reloads its iframe once writes settle — the stale-scaffold-page
+      // fix applies to background turns too). Bridged tools bump inside
+      // their own browser handlers, so they are filtered by the name set.
+      if (ev.t === "tool_call" && typeof ev.name === "string" && BG_NATIVE_TOOL_NAMES.has(ev.name)) {
+        nativeToolNames.set(String(ev.id ?? ""), ev.name);
+      } else if (ev.t === "tool_result" && typeof ev.id === "string") {
+        const name = nativeToolNames.get(ev.id);
+        if (name && BG_NATIVE_WRITE_TOOLS.has(name)) {
+          bumpWorkspaceVersion();
+        }
       }
       replayEvent(ctx.emit, ev);
       if (ev.t === "done" || ev.t === "error") finished = true;

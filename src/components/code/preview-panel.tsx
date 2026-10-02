@@ -25,6 +25,7 @@ import {
   stopPreviewSession,
   subscribePreviewStarts,
 } from "@/lib/code/preview-ops";
+import { subscribeSandboxWrites } from "@/lib/code/workspace-activity";
 import { cn } from "@/lib/utils";
 
 /** The panel's view of the chat's ONE app. */
@@ -91,6 +92,37 @@ export function PreviewPanel({
 
   const url = session?.url ?? null;
   const isRunning = phase === "running" && !!url;
+
+  // ── STALE-IFRAME FIXES (the "preview sidebar shows the scaffold page"
+  //  bug) ──────────────────────────────────────────────────────────────
+  // The iframe loads ONCE per server boot; HMR websockets do not survive
+  // the E2B public proxy, so without these it kept rendering the page from
+  // the FIRST boot (the scaffold placeholder) forever while the real app
+  // was already on the server.
+  //
+  //  (a) bootEpoch in the key: every completed start (fresh boot OR healthy
+  //      reuse) bumps the epoch → React remounts the iframe → the panel can
+  //      never keep a page from a PREVIOUS build (also the root cause of
+  //      "__webpack_modules__[moduleId] is not a function" in stale tabs).
+  //  (b) write-settle reload: when the agent writes project files (the
+  //      workspace-activity bus), reload the iframe once writes have been
+  //      quiet for a few seconds — the panel tracks the build LIVE. NOT
+  //      gated on `active`: the keepAlive panel stays mounted while hidden,
+  //      and a hidden-but-stale iframe must still refresh so re-opening the
+  //      panel shows the current app.
+  const bootEpoch = session?.bootEpoch ?? session?.createdAt ?? 0;
+  useEffect(() => {
+    if (!isRunning) return;
+    let timer = 0;
+    const unsub = subscribeSandboxWrites(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setIframeKey((k) => k + 1), 3_500);
+    });
+    return () => {
+      unsub();
+      window.clearTimeout(timer);
+    };
+  }, [isRunning]);
 
   // ── ACTIONS ─────────────────────────────────────────────────────────────
   const start = async () => {
@@ -241,7 +273,7 @@ export function PreviewPanel({
       {isRunning && url ? (
         <div className="bg-muted/30 min-h-0 flex-1 p-2">
           <iframe
-            key={`${session?.id ?? "app"}-${iframeKey}`}
+            key={`${session?.id ?? "app"}-${bootEpoch}-${iframeKey}`}
             src={url}
             title={`Live preview of ${session?.name ?? "the app"}`}
             className="bg-background h-full w-full rounded-xl border border-border shadow-sm"

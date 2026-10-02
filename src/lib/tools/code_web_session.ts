@@ -2,7 +2,7 @@
 
 import { registerTool } from "./registry";
 import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
-import { bumpWorkspaceVersion } from "./workspace-snapshot";
+import { bumpWorkspaceVersion, getWorkspaceFsVersion } from "./workspace-snapshot";
 import { WEB_SESSION_DRIVER_SOURCE } from "./web-session-driver";
 import type { E2BClient } from "@/lib/e2b/client";
 
@@ -75,7 +75,34 @@ async function sendCommand(
 /** Exported for the browser_eval / diagnostics tools (code_diagnostics.ts)
  *  — they drive the SAME single driver + file protocol so the AI's page
  *  state (navigation, console capture) is shared across all Code tools. */
-export const webSession = { WS_DIR, ensureDriver, sendCommand };
+export const webSession = { WS_DIR, ensureDriver, sendCommand, markPageLoaded, pageFsVersion };
+
+/* ------------------------------------------------------------------ */
+/* Page-freshness gate (the "AI can't see errors" fix)                  */
+/* ------------------------------------------------------------------ */
+
+/** Workspace fsVersion observed the LAST time the web-session page was
+ *  (re)loaded by any path. The headless page does NOT reliably self-update
+ *  when the agent writes more project files (HMR dies with every dev-server
+ *  restart; big multi-file rewrites defeat fast-refresh), so a page that
+ *  predates the latest writes keeps showing the OLD app — typically the
+ *  scaffold's placeholder — and its console/network captures show NOTHING.
+ *  Comparing this marker against getWorkspaceFsVersion() lets the
+ *  diagnostics path force a reload before reading the page (see
+ *  ensurePageOnTarget in code_diagnostics.ts), so the AI always inspects
+ *  the REAL app and sees its actual runtime errors. */
+let pageLoadedAtFsVersion = 0;
+
+/** Record that the web-session page was just (re)loaded — call after every
+ *  successful navigation (fresh page ⇒ current with the latest writes). */
+function markPageLoaded(): void {
+  pageLoadedAtFsVersion = getWorkspaceFsVersion();
+}
+
+/** The fsVersion the page was last loaded at (0 = never navigated). */
+function pageFsVersion(): number {
+  return pageLoadedAtFsVersion;
+}
 
 /** Install Playwright + boot the driver (idempotent — once per sandbox).
  *
@@ -190,6 +217,7 @@ registerTool(
     const nav = await sendCommand(client, { action: "navigate", url }, { timeoutMs: 60_000 });
     bumpWorkspaceVersion();
     if (!nav.ok) return { ok: false, error: String(nav.error ?? "Navigation failed.") };
+    markPageLoaded();
     return {
       kind: "web_session",
       ok: true,
@@ -268,6 +296,9 @@ registerTool(
     if (args.clear !== undefined) cmd.clear = !!args.clear;
 
     const result = await sendCommand(client, cmd, { timeoutMs: 60_000 });
+    // A successful navigate loaded a FRESH page — record its fsVersion so
+    // the diagnostics freshness gate knows the page is current.
+    if (action === "navigate" && result.ok !== false) markPageLoaded();
     return { kind: "web_session", ok: result.ok !== false, action, ...result };
   },
   false,
