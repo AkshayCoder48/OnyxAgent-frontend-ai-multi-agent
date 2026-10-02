@@ -628,7 +628,7 @@ export function DatabasePanel() {
           <div className="shrink-0 px-2.5 pt-2 pb-2">
             <TabsList
               aria-label="Database sections"
-              className="scrollbar-thin h-8 w-full justify-start gap-0.5 overflow-x-auto rounded-lg p-0.5"
+              className="scrollbar-none h-8 w-full justify-start gap-0.5 overflow-x-auto rounded-lg p-0.5"
             >
               <TabsTrigger value="overview" className="h-7 rounded-md px-2.5 text-[11px]">
                 Overview
@@ -671,7 +671,7 @@ export function DatabasePanel() {
             </div>
           )}
 
-          <TabsContent value="overview" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="overview" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <OverviewTab
               overview={overview}
               title={title}
@@ -681,7 +681,7 @@ export function DatabasePanel() {
             />
           </TabsContent>
 
-          <TabsContent value="kv" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="kv" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <KvTab
               onEdit={(entry) => openKvEditor({ mode: "edit", entry })}
               onNew={() => openKvEditor({ mode: "new" })}
@@ -689,14 +689,14 @@ export function DatabasePanel() {
             />
           </TabsContent>
 
-          <TabsContent value="env" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="env" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <EnvTab
               conversationId={conversationId}
               onConfirmDelete={(name) => setConfirmState({ kind: "env", name })}
             />
           </TabsContent>
 
-          <TabsContent value="files" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="files" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <FilesTab
               conversationId={conversationId}
               query={filesQuery}
@@ -706,7 +706,7 @@ export function DatabasePanel() {
             />
           </TabsContent>
 
-          <TabsContent value="schema" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="schema" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <SchemaTab
               onEdit={(entity) => openSchemaEditor({ mode: "edit", entity })}
               onNew={() => openSchemaEditor({ mode: "new" })}
@@ -714,7 +714,7 @@ export function DatabasePanel() {
             />
           </TabsContent>
 
-          <TabsContent value="search" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="search" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <SearchTab
               query={searchQuery}
               onQueryChange={setSearchQuery}
@@ -730,7 +730,7 @@ export function DatabasePanel() {
             />
           </TabsContent>
 
-          <TabsContent value="activity" className="scrollbar-thin mt-0 min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="activity" className="scrollbar-none mt-0 min-h-0 flex-1 overflow-y-auto">
             <ActivityTab />
           </TabsContent>
         </Tabs>
@@ -1292,7 +1292,7 @@ function KvEditorDialog({
                 id="code-db-kv-value"
                 value={draft.text}
                 onChange={(e) => setDraft((d) => ({ ...d, text: e.target.value }))}
-                className="scrollbar-thin min-h-[180px] font-mono text-xs"
+                className="scrollbar-none min-h-[180px] font-mono text-xs"
                 spellCheck={false}
                 aria-invalid={!!validation}
               />

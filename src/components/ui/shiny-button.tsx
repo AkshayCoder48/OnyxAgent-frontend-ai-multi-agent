@@ -33,6 +33,9 @@ interface ShinyButtonProps {
   label?: string;
   onClick?: () => void;
   className?: string;
+  /** Inline style passthrough — wins over the scope CSS, so hosts can
+   *  resize the button (padding / font-size) without fighting the gleam. */
+  style?: React.CSSProperties;
   fillColor?: string;
   labelColor?: string;
   accentColor?: string;
@@ -50,6 +53,7 @@ export function ShinyButton({
   label = "Get Started",
   onClick,
   className = "",
+  style,
   fillColor = "#000000",
   labelColor = "#ffffff",
   accentColor = "#ff5f00",
@@ -275,6 +279,7 @@ export function ShinyButton({
         type="button"
         className={`${scope} ${className}`}
         onClick={onClick}
+        style={style}
         aria-label={label}
         data-reduced-motion={reducedMotion ? "true" : undefined}
       >

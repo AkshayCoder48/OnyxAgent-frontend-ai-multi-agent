@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -10,19 +11,33 @@ import {
 import { Loader2, Paperclip, Rocket, X } from "lucide-react";
 import { toast } from "sonner";
 
-import { ChatControls } from "@/components/chat/chat-controls";
+import { saveModelPref } from "@/components/chat/chat-controls";
+import {
+  ModelPicker,
+  ShinyButton,
+  ShinyButtonEmerald,
+  type ModelPickerProvider,
+} from "@/components/ui";
 import { uploadFile, type FileUploadResponse } from "@/lib/file-api";
+import {
+  AUTO_ROUTER_LABEL,
+  AUTO_ROUTER_MODEL_VALUE,
+  AUTO_ROUTER_PROVIDER_ID,
+} from "@/lib/auto-router";
+import { useChatStore } from "@/stores";
+import { useProviders } from "@/hooks/use-data";
 import type { ChatMessageFile } from "@/types";
-import { cn } from "@/lib/utils";
 
 /**
  * OnyxCode CreationPrompt (extension PRD §3.2) — the big multi-line prompt
  * that replaces the bottom composer while a Code Mode conversation is empty.
  *
  * - Large textarea (min-h-[180px], auto-grows to ~400px).
- * - Toolbar: file upload (same OPFS upload path as the normal composer),
- *   the EXACT model selector used in normal chat (ChatControls — same store,
- *   same provider list), and the primary "Create" CTA.
+ * - Toolbar: file upload (same OPFS upload path as the normal composer,
+ *   on the emerald gleam button), the pasted ModelPicker wired to the same
+ *   stores/persistence as normal chat, and the primary "Create" CTA on the
+ *   gleam-edge ShinyButton — the two shiny gleam buttons live in the code
+ *   mode main UI.
  * - Quick-start chips pre-fill the textarea (they do NOT auto-send).
  * - Enter sends, Shift+Enter inserts a newline — the same behaviour as the
  *   normal chat composer, so the box feels like every other prompt in the
@@ -204,11 +219,13 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
               aria-hidden
               tabIndex={-1}
             />
-            <button
-              type="button"
+            {/* Attach files — the emerald gleam button (one of the two
+                shiny buttons in the code-mode main UI). Same OPFS upload path
+                as the normal composer. */}
+            <ShinyButtonEmerald
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 py-0 text-xs font-medium"
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled || uploading}
-              className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:opacity-50"
               title="Attach files"
               aria-label="Attach files"
             >
@@ -218,30 +235,43 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
                 <Paperclip className="h-3.5 w-3.5" aria-hidden />
               )}
               <span className="hidden sm:inline">{uploading ? "Uploading…" : "Attach files"}</span>
-            </button>
+            </ShinyButtonEmerald>
             <span className="text-muted-foreground/40 hidden font-mono text-[10px] sm:inline">·</span>
-            {/* Model selector — the exact same component + store as normal chat. */}
-            <ChatControls />
+            {/* Model selector — the pasted ModelPicker (provider rail +
+                search + thinking-capable rows), wired to the same stores
+                and persistence the normal-chat selector uses. */}
+            <CodeModelPicker />
           </div>
 
           <div className="flex items-center gap-2">
             <kbd className="text-muted-foreground/60 hidden select-none font-mono text-[10px] sm:inline-flex">
               ⏎ to create
             </kbd>
-            <button
-              type="button"
-              onClick={send}
-              disabled={!canSend}
-              className={cn(
-                "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm font-semibold shadow-sm transition-all",
-                canSend
-                  ? "bg-primary text-primary-foreground hover:bg-primary/90 ripple-tap"
-                  : "bg-foreground/10 text-muted-foreground cursor-not-allowed",
-              )}
-            >
-              <Rocket className="h-4 w-4" aria-hidden />
-              Create
-            </button>
+            {canSend ? (
+              /* Create CTA — the gleam-edge ShinyButton (the second of the
+                 two shiny buttons in the code-mode main UI), themed on-brand:
+                 cyan fill, deep-cyan sweeping conic edge, white shine. */
+              <ShinyButton
+                label="Create"
+                onClick={send}
+                fillColor="var(--color-primary)"
+                labelColor="var(--color-primary-foreground)"
+                accentColor="var(--color-brand-muted)"
+                accentSoftColor="#ffffff"
+                cornerRadius={12}
+                sweepDuration={2.6}
+                style={{ padding: "0.6rem 1.35rem", fontSize: "0.875rem" }}
+              />
+            ) : (
+              <button
+                type="button"
+                disabled
+                className="bg-foreground/10 text-muted-foreground inline-flex h-9 cursor-not-allowed items-center gap-2 rounded-xl px-4 text-sm font-semibold"
+              >
+                <Rocket className="h-4 w-4" aria-hidden />
+                Create
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -263,5 +293,79 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * CodeModelPicker — the pasted ModelPicker (beui-style provider rail +
+ * capability rows + search) wired to the SAME stores/persistence the
+ * normal-chat ChatControls uses. Replaces the bare <ChatControls /> that
+ * rendered an empty popover in code mode (its tabs only mount when the
+ * chat layer passes callbacks — the creation prompt never did). The Auto
+ * Router leads the list whenever there is more than one provider to route
+ * between, mirroring the normal-chat selector.
+ */
+function CodeModelPicker() {
+  const { providers: providerRows } = useProviders();
+  const selectedModel = useChatStore((s) => s.selectedModel);
+  const selectedProviderId = useChatStore((s) => s.selectedProviderId);
+  const setSelectedModel = useChatStore((s) => s.setSelectedModel);
+  const setSelectedProviderId = useChatStore((s) => s.setSelectedProviderId);
+
+  const providers = useMemo<readonly ModelPickerProvider[]>(() => {
+    const configured = providerRows
+      .filter((p) => (p.models ?? []).length > 0)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        models: (p.models ?? []).map((modelId) => ({
+          id: modelId,
+          name: modelId,
+          description: p.api_key_encrypted ? undefined : "API key missing",
+        })),
+      }));
+    if (providerRows.length > 1) {
+      return [
+        {
+          id: AUTO_ROUTER_PROVIDER_ID,
+          name: "Auto Router",
+          models: [
+            {
+              id: AUTO_ROUTER_MODEL_VALUE,
+              name: AUTO_ROUTER_LABEL,
+              description: "Picks the best model for each round",
+            },
+          ],
+        },
+        ...configured,
+      ];
+    }
+    return configured;
+  }, [providerRows]);
+
+  if (providers.length === 0) return null;
+
+  const isAutoRouter = selectedProviderId === AUTO_ROUTER_PROVIDER_ID;
+
+  return (
+    <ModelPicker
+      providers={providers}
+      value={isAutoRouter ? AUTO_ROUTER_MODEL_VALUE : (selectedModel ?? undefined)}
+      onValueChange={(modelId, providerId) => {
+        if (providerId === AUTO_ROUTER_PROVIDER_ID) {
+          setSelectedProviderId(AUTO_ROUTER_PROVIDER_ID);
+          setSelectedModel(null);
+          saveModelPref(AUTO_ROUTER_PROVIDER_ID, null);
+        } else {
+          setSelectedProviderId(providerId);
+          setSelectedModel(modelId);
+          saveModelPref(providerId, modelId);
+        }
+      }}
+      side="top"
+      align="start"
+      closeOnSelect
+      placeholder="Model"
+    />
   );
 }

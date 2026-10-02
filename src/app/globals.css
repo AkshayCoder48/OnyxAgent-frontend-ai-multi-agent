@@ -5,6 +5,17 @@
 @import "@fontsource-variable/fraunces/wght-italic.css";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
+/* Libre Caslon Condensed — the full-app text face (400–700 + italics).
+   Self-hosted via Fontsource so it renders identically offline and in
+   every deployment environment. */
+@import "@fontsource/libre-caslon-condensed/400.css";
+@import "@fontsource/libre-caslon-condensed/400-italic.css";
+@import "@fontsource/libre-caslon-condensed/500.css";
+@import "@fontsource/libre-caslon-condensed/500-italic.css";
+@import "@fontsource/libre-caslon-condensed/600.css";
+@import "@fontsource/libre-caslon-condensed/600-italic.css";
+@import "@fontsource/libre-caslon-condensed/700.css";
+@import "@fontsource/libre-caslon-condensed/700-italic.css";
 @import "tailwindcss";
 /* tw-animate — REQUIRED for the animate-in / slide-in-from-* / fade-in / zoom-in
    utilities used by Sheet, Dialog, Popover, DropdownMenu, Tooltip and the
@@ -26,47 +37,47 @@
 
 @theme {
   /* ============================================================
-     Brand — clean "cyan on white" palette.
-     A pure white canvas (#FFFFFF), near-black ink (#0A0A0A) and
-     ONE crisp accent: cyan (#0891B2, deep #0E7490 on hover /
-     inline code). No purple / indigo / violet anywhere.
+     Brand — "cyan on black" palette (the app DEFAULT).
+     A pure black canvas (#000000), white ink (#FFFFFF) and
+     ONE crisp accent: bright cyan (#22D3EE, deep #06B6D4 on hover).
+     No purple / indigo / violet anywhere.
      Single brand var drives the whole app; the in-app picker
      (/settings/appearance) can still override on `<html>`.
      ============================================================ */
-  /* Preset: CYAN (#0891B2). Brand vars drive the in-app picker.
-     h/c/l are the oklch coordinates of #0891B2 so picker-derived
-     colors match the hex tokens below exactly
-     (oklch(60.9% 0.111 221.7)). */
-  --brand-h: 221.7;
-  --brand-c: 0.111;
-  --brand-l: 60.9%;
-  --color-brand-foreground: #ffffff;
+  /* Preset: BRIGHT CYAN (#22D3EE) on the black canvas. Brand vars drive
+     the in-app picker. h/c/l are the oklch coordinates of #22D3EE so
+     picker-derived colors match the hex tokens below
+     (oklch(79.2% 0.135 211.5)). */
+  --brand-h: 211.5;
+  --brand-c: 0.135;
+  --brand-l: 79.2%;
+  --color-brand-foreground: #05161c;
 
-  --color-brand: #0891b2;
-  --color-brand-hover: #0e7490;
-  --color-brand-muted: #67c3d9;
-  /* Chart strokes/fills — deeper cyan for readability on white bg. */
-  --color-chart: #0e7490;
+  --color-brand: #22d3ee;
+  --color-brand-hover: #06b6d4;
+  --color-brand-muted: #0e7490;
+  /* Chart strokes/fills — bright cyan, readable on the black canvas. */
+  --color-chart: #22d3ee;
 
-  /* Light theme (DEFAULT) — white canvas, near-black ink, cyan accents */
-  --color-background: #ffffff;                  /* pure white canvas */
-  --color-foreground: #0a0a0a;                  /* near-black ink */
-  --color-card: #ffffff;                        /* white card (hairline-bordered) */
-  --color-card-foreground: #0a0a0a;
-  --color-popover: #ffffff;
-  --color-popover-foreground: #0a0a0a;
-  --color-primary: #0891b2;                     /* cyan */
-  --color-primary-foreground: #ffffff;
-  --color-secondary: #f1f5f9;                   /* cool paper surface */
-  --color-secondary-foreground: #0a0a0a;
-  --color-muted: #f1f5f9;                       /* cool paper surface */
-  --color-muted-foreground: #64748b;            /* slate ink on white */
-  --color-accent: #ecfeff;                      /* soft cyan wash */
-  --color-accent-foreground: #0a0a0a;
-  --color-destructive: #dc2626;                 /* red */
-  --color-destructive-foreground: #ffffff;
-  --color-border: #e2e8f0;                      /* hairline */
-  --color-input: #e2e8f0;                       /* hairline input */
+  /* Dark theme (DEFAULT) — black canvas, white ink, bright-cyan buttons */
+  --color-background: #000000;                  /* pure black canvas */
+  --color-foreground: #ffffff;                  /* white ink */
+  --color-card: #0b0d10;                        /* near-black card (hairline-bordered) */
+  --color-card-foreground: #f7f8f9;
+  --color-popover: #0b0d10;
+  --color-popover-foreground: #f7f8f9;
+  --color-primary: #22d3ee;                     /* bright cyan buttons */
+  --color-primary-foreground: #05161c;          /* near-black ink on cyan */
+  --color-secondary: #16181d;                   /* raised dark surface */
+  --color-secondary-foreground: #f5f6f7;
+  --color-muted: #16181d;                       /* raised dark surface */
+  --color-muted-foreground: #9aa3ad;            /* muted slate on black */
+  --color-accent: #0d2a31;                      /* dim cyan wash */
+  --color-accent-foreground: #ffffff;
+  --color-destructive: #f87171;                 /* red */
+  --color-destructive-foreground: #0a0a0a;
+  --color-border: #23262c;                      /* dark hairline */
+  --color-input: #23262c;                       /* dark hairline input */
   --color-ring: var(--color-brand);
 
   /* Radius */
@@ -74,12 +85,12 @@
   --radius-card: 1rem;
   --radius-pill: 999px;
 
-  /* Typography — Fraunces (serif display) for brand voice, Inter for
-     body/UI, JetBrains Mono for code. Variable fonts are self-hosted via
+  /* Typography — Libre Caslon Condensed carries ALL app text (display,
+     body, accent); JetBrains Mono stays for code. Self-hosted via
      Fontsource (imported at the top of this file). */
-  --font-display: "Fraunces Variable", "Fraunces", Georgia, "Times New Roman", serif;
-  --font-body: "Inter Variable", "Inter", system-ui, sans-serif;
-  --font-accent: "Fraunces Variable", "Fraunces", Georgia, serif;
+  --font-display: "Libre Caslon Condensed", "Fraunces Variable", Georgia, "Times New Roman", serif;
+  --font-body: "Libre Caslon Condensed", Georgia, "Times New Roman", serif;
+  --font-accent: "Libre Caslon Condensed", Georgia, serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Motion */
@@ -90,59 +101,68 @@
   --duration-slow: 400ms;
 }
 
-/* Dark theme — cool neutral counterpart of the white canvas.
-   Keeps the same cyan accent so both themes share one voice.
+/* Light theme — the OPT-IN counterpart (theme toggle / Settings →
+   Appearance). The app DEFAULT is the black canvas above, so light mode
+   is only applied when the `light` class lands on <html>.
    When a custom color scheme is applied (via JS inline styles), the
-   .custom-scheme class is added to <html> to PREVENT this media query
-   from overriding the inline styles. */
-@media (prefers-color-scheme: dark) {
-  :root:not(.light):not(.custom-scheme) {
-    --color-background: #0c1116;                 /* near-black slate */
-    --color-foreground: #e2e8f0;                 /* light slate text */
-    --color-card: #131a21;                       /* dark slate surface */
-    --color-card-foreground: #e2e8f0;
-    --color-popover: #131a21;
-    --color-popover-foreground: #e2e8f0;
-    --color-primary: #22d3ee;                    /* bright cyan */
-    --color-primary-foreground: #06222b;
-    --color-secondary: #1a232c;                  /* dark slate surface */
-    --color-secondary-foreground: #e2e8f0;
-    --color-muted: #1a232c;
-    --color-muted-foreground: #8b98a5;           /* muted slate */
-    --color-accent: #18242e;                     /* dim cyan accent */
-    --color-accent-foreground: #e2e8f0;
-    --color-destructive: #f87171;
-    --color-destructive-foreground: #0c1116;
-    --color-border: #263241;                     /* cool hairline */
-    --color-input: #263241;
-    --color-brand: #22d3ee;
-    --color-brand-hover: #06b6d4;
-    --color-chart: var(--color-brand);
-  }
+   .custom-scheme class is added to <html> to PREVENT this block from
+   overriding the inline styles. */
+:root.light:not(.custom-scheme) {
+  --color-background: #ffffff;                  /* pure white canvas */
+  --color-foreground: #0a0a0a;                  /* near-black ink */
+  --color-card: #ffffff;
+  --color-card-foreground: #0a0a0a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0a0a0a;
+  --color-primary: #0891b2;                     /* cyan */
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f1f5f9;
+  --color-secondary-foreground: #0a0a0a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-accent: #ecfeff;                      /* soft cyan wash */
+  --color-accent-foreground: #0a0a0a;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e2e8f0;                      /* hairline */
+  --color-input: #e2e8f0;
+  --color-brand: #0891b2;
+  --color-brand-hover: #0e7490;
+  --color-brand-foreground: #ffffff;
+  --color-brand-muted: #67c3d9;
+  --color-chart: #0e7490;
+  --brand-h: 221.7;
+  --brand-c: 0.111;
+  --brand-l: 60.9%;
 }
 
+/* Dark theme (DEFAULT) — explicit `.dark` class block; mirrors the
+   @theme defaults so a classed <html> and a class-less SSR shell paint
+   the exact same black/cyan canvas. */
 :root.dark:not(.custom-scheme) {
-  --color-background: #0c1116;
-  --color-foreground: #e2e8f0;
-  --color-card: #131a21;
-  --color-card-foreground: #e2e8f0;
-  --color-popover: #131a21;
-  --color-popover-foreground: #e2e8f0;
+  --color-background: #000000;
+  --color-foreground: #ffffff;
+  --color-card: #0b0d10;
+  --color-card-foreground: #f7f8f9;
+  --color-popover: #0b0d10;
+  --color-popover-foreground: #f7f8f9;
   --color-primary: #22d3ee;
-  --color-primary-foreground: #06222b;
-  --color-secondary: #1a232c;
-  --color-secondary-foreground: #e2e8f0;
-  --color-muted: #1a232c;
-  --color-muted-foreground: #8b98a5;
-  --color-accent: #18242e;
-  --color-accent-foreground: #e2e8f0;
+  --color-primary-foreground: #05161c;
+  --color-secondary: #16181d;
+  --color-secondary-foreground: #f5f6f7;
+  --color-muted: #16181d;
+  --color-muted-foreground: #9aa3ad;
+  --color-accent: #0d2a31;
+  --color-accent-foreground: #ffffff;
   --color-destructive: #f87171;
-  --color-destructive-foreground: #0c1116;
-  --color-border: #263241;
-  --color-input: #263241;
+  --color-destructive-foreground: #0a0a0a;
+  --color-border: #23262c;
+  --color-input: #23262c;
   --color-brand: #22d3ee;
   --color-brand-hover: #06b6d4;
-  --color-chart: var(--color-brand);
+  --color-brand-foreground: #05161c;
+  --color-brand-muted: #0e7490;
+  --color-chart: #22d3ee;
 }
 
 /* =========================================================================
@@ -153,10 +173,11 @@
    these var() fallbacks take over.
    ========================================================================= */
 :root {
-  /* User turn = soft-cyan card with ink text. */
-  --chat-user-bg: #ecfeff;
-  --chat-user-fg: #0a0a0a;
-  --chat-user-border: #cffafe;
+  /* User turn = deep-cyan card with light text (matches the black
+     default canvas). */
+  --chat-user-bg: #12333d;
+  --chat-user-fg: #e8eef2;
+  --chat-user-border: #1d4653;
   /* Assistant turn = frameless (no bubble) — flat editorial text. */
   --chat-assistant-bg: transparent;
   --chat-assistant-fg: var(--color-foreground);
@@ -165,11 +186,10 @@
   --chat-code-header-bg: #0c1116;
   --chat-code-fg: #d5e3ec;
 }
-:root.dark:not(.custom-scheme) {
-  --chat-user-bg: #12333d;
-  --chat-user-fg: #e2e8f0;
-  --chat-user-border: #1d4653;
-  --chat-assistant-bg: transparent;
+:root.light:not(.custom-scheme) {
+  --chat-user-bg: #ecfeff;
+  --chat-user-fg: #0a0a0a;
+  --chat-user-border: #cffafe;
 }
 
 /* =========================================================================

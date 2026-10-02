@@ -1,8 +1,12 @@
 "use client";
 
 import * as React from "react";
+import { Moon, Sun } from "lucide-react";
+import { toast } from "sonner";
 import { SectionCard } from "@/components/settings/settings-section";
+import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme";
+import { useThemeStore } from "@/stores/theme-store";
 import { cn } from "@/lib/utils";
 
 interface ColorScheme {
@@ -160,6 +164,7 @@ function applyScheme(scheme: ColorScheme) {
 
 export default function AppearanceSettingsPage() {
   const [activeScheme, setActiveScheme] = React.useState<string>("Emerald (Default)");
+  const setTheme = useThemeStore((s) => s.setTheme);
 
   React.useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -217,6 +222,38 @@ export default function AppearanceSettingsPage() {
           <div className="flex min-w-0 max-w-full justify-start sm:justify-end">
             <ThemeToggle variant="dropdown" />
           </div>
+        </div>
+        {/* The two shiny gleam buttons — one-tap theme setters. The
+            gleam-edge button paints the default black canvas (white ink,
+            cyan accents); the emerald button flips to the light canvas. */}
+        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-border pt-4">
+          <ShinyButton
+            label="Black canvas"
+            onClick={() => {
+              setTheme("dark");
+              toast.success("Theme set to dark");
+            }}
+            fillColor="#000000"
+            labelColor="#ffffff"
+            accentColor="#22d3ee"
+            accentSoftColor="#67e8f9"
+            cornerRadius={10}
+            sweepDuration={2.6}
+            style={{ padding: "0.55rem 1.15rem", fontSize: "0.8rem" }}
+          />
+          <ShinyButtonEmerald
+            className="inline-flex h-9 items-center gap-2 px-4 text-xs"
+            onClick={() => {
+              setTheme("light");
+              toast.success("Theme set to light");
+            }}
+          >
+            <Sun className="h-3.5 w-3.5" aria-hidden />
+            Light canvas
+          </ShinyButtonEmerald>
+          <span className="text-muted-foreground/70 hidden items-center gap-1 text-[11px] sm:inline-flex">
+            <Moon className="h-3 w-3" aria-hidden /> one-tap canvas
+          </span>
         </div>
       </SectionCard>
 

@@ -56,7 +56,7 @@ const AUTO_ROUTER_PICK: CustomProvider = {
   models: [],
 };
 
-function saveModelPref(providerId: string | null, model: string | null): void {
+export function saveModelPref(providerId: string | null, model: string | null): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(MODEL_PREF_KEY, JSON.stringify({ providerId, model }));

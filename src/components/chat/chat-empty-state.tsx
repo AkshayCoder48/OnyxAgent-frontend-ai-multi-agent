@@ -2,6 +2,7 @@
 
 import { ArrowUpRight, Code2, FileSearch, Globe, Sparkles, Wrench, Brain } from "lucide-react";
 
+import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { useAuth } from "@/hooks";
 
 const PROMPTS = [
@@ -96,6 +97,41 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
               {f.label}
             </div>
           ))}
+        </div>
+
+        {/* The two shiny gleam buttons — one-tap ways into a conversation,
+            placed ABOVE the prompt cards so they're visible without
+            scrolling. Emerald "Surprise me" loads a random prompt into the
+            composer; the gleam-edge "Start chatting" focuses the composer. */}
+        <div className="stagger-in mt-4 flex flex-wrap items-center justify-center gap-3 sm:mt-6">
+          <ShinyButtonEmerald
+            className="inline-flex h-11 items-center gap-2 px-5 text-sm"
+            onClick={() => {
+              const pick = PROMPTS[Math.floor(Math.random() * PROMPTS.length)]!;
+              onPick(pick.prompt);
+            }}
+          >
+            <Sparkles className="h-4 w-4" aria-hidden />
+            Surprise me
+          </ShinyButtonEmerald>
+          <ShinyButton
+            label="Start chatting"
+            onClick={() => {
+              const el =
+                document.querySelector<HTMLTextAreaElement>(
+                  'textarea[placeholder^="Reply to OnyxAgent"]',
+                ) ?? document.querySelector<HTMLTextAreaElement>("textarea");
+              el?.focus();
+              el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+            }}
+            fillColor="var(--color-primary)"
+            labelColor="var(--color-primary-foreground)"
+            accentColor="var(--color-brand-muted)"
+            accentSoftColor="#ffffff"
+            cornerRadius={12}
+            sweepDuration={2.6}
+            style={{ padding: "0.75rem 1.75rem", fontSize: "0.9375rem" }}
+          />
         </div>
 
         {/* Prompt cards — single-line descriptions on phones so the four

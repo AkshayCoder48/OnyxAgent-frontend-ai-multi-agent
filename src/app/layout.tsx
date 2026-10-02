@@ -74,8 +74,8 @@ export const viewport: Viewport = {
  * class difference (same technique next-themes uses).
  */
 const themeInitScript = `(function(){try{
-var t="light";
-var raw=localStorage.getItem("theme-storage");
+var t="dark";
+var raw=localStorage.getItem("theme-storage-v2");
 if(raw){var p=JSON.parse(raw);if(p&&p.state&&p.state.theme){t=p.state.theme;}}
 if(t==="system"){t=window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
 var r=document.documentElement;

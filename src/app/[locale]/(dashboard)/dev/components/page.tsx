@@ -52,10 +52,13 @@ import {
   FormField,
   IconButton,
   Input,
+  ModelPicker,
+  ReasoningText,
   SectionHeading,
   ShinyButton,
   ShinyButtonEmerald,
 } from "@/components/ui";
+import { defaultModelProviders } from "@/components/ui/model-picker";
 
 /**
  * Dev-only component gallery — a lightweight stand-in for Storybook that keeps
@@ -122,6 +125,45 @@ function Gallery() {
         <ShinyButton label="Get Started" cornerRadius={999} />
         {/* The emerald shine sweep. */}
         <ShinyButtonEmerald>Emerald Shine</ShinyButtonEmerald>
+      </Section>
+
+      <Section title="ReasoningText (thinking variants)">
+        {/* The pasted beui.dev loading-states component — phrase cycling
+            with three transition variants. "auto" rotates cascade → swap →
+            scramble as the phrases advance (same engine the live
+            ThinkingIndicator now uses). */}
+        <div className="flex w-full flex-col gap-4">
+          <div className="flex flex-col gap-1">
+            <span className="text-muted-foreground text-[10px] font-mono uppercase tracking-wider">
+              auto (rotates all variants)
+            </span>
+            <ReasoningText variant="auto" />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-muted-foreground text-[10px] font-mono uppercase tracking-wider">
+              cascade
+            </span>
+            <ReasoningText variant="cascade" interval={1400} />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-muted-foreground text-[10px] font-mono uppercase tracking-wider">
+              swap
+            </span>
+            <ReasoningText variant="swap" interval={1400} />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-muted-foreground text-[10px] font-mono uppercase tracking-wider">
+              scramble
+            </span>
+            <ReasoningText variant="scramble" interval={1400} />
+          </div>
+        </div>
+      </Section>
+
+      <Section title="ModelPicker">
+        {/* The pasted model picker — provider rail, capability chips,
+            thinking-effort track and search, on the built-in demo data. */}
+        <ModelPicker providers={defaultModelProviders} side="top" align="start" />
       </Section>
 
       <Section title="Badges">

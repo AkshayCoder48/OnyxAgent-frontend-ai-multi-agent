@@ -2,6 +2,14 @@ export { Button, buttonVariants } from "./button";
 export { IconButton } from "./icon-button";
 export { ShinyButton } from "./shiny-button";
 export { default as ShinyButtonEmerald } from "./shiny-button-emerald";
+export { ReasoningText, default as ReasoningTextDefault } from "./reasoning-text";
+export {
+  ModelPicker,
+  default as ModelPickerDefault,
+  type ModelPickerProvider,
+  type ModelPickerModel,
+  type ThinkingEffort as ModelPickerThinkingEffort,
+} from "./model-picker";
 export { FormField } from "./form-field";
 export { ConfirmDialog } from "./confirm-dialog";
 export { SectionHeading } from "./section-heading";

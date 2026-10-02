@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { MoreOptions } from "@/components/settings/more-options";
 import {
   Select,
@@ -192,6 +193,30 @@ export function SectionAppearance() {
             active={mounted && (theme === "system" || !theme)}
             onClick={() => handleTheme("system")}
           />
+        </div>
+
+        {/* The two shiny gleam buttons — one-tap theme setters. The
+            gleam-edge button paints the default black canvas (white ink,
+            cyan accents); the emerald button flips to the light canvas. */}
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <ShinyButton
+            label="Black canvas"
+            onClick={() => handleTheme("dark")}
+            fillColor="#000000"
+            labelColor="#ffffff"
+            accentColor="#22d3ee"
+            accentSoftColor="#67e8f9"
+            cornerRadius={10}
+            sweepDuration={2.6}
+            style={{ padding: "0.55rem 1.15rem", fontSize: "0.8rem" }}
+          />
+          <ShinyButtonEmerald
+            className="inline-flex h-9 items-center gap-2 px-4 text-xs"
+            onClick={() => handleTheme("light")}
+          >
+            <Sun className="h-3.5 w-3.5" aria-hidden />
+            Light canvas
+          </ShinyButtonEmerald>
         </div>
       </section>
 

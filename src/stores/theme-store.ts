@@ -13,13 +13,15 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      // LIGHT is the app default: white canvas, black ink, cyan accents.
-      // ("system" remains a user choice — persisted choices always win.)
-      theme: "light",
+      // DARK is the app default: black canvas, white ink, cyan buttons.
+      // (Key is versioned — "theme-storage-v2" — so the black default
+      // reaches existing installs once; a persisted choice still wins
+      // afterwards, and "system" remains a user choice.)
+      theme: "dark",
       setTheme: (theme) => set({ theme }),
     }),
     {
-      name: "theme-storage",
+      name: "theme-storage-v2",
     },
   ),
 );
@@ -33,7 +35,7 @@ export function getResolvedTheme(theme: Theme): "light" | "dark" {
     if (typeof window !== "undefined") {
       return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     }
-    return "light";
+    return "dark";
   }
   return theme;
 }
