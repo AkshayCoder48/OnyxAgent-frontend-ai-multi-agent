@@ -126,19 +126,6 @@
   animation: trSentenceIn 240ms ease-out both;
 }
 
-/* ── Streaming tint (onyx butter-streaming, synced with globals.css) ────
-   The newest words of the live sentence land in blue and settle into the
-   normal ink over ~900ms — never the whole block, just the trailing
-   window. Words keep their DOM identity (word-index keys) so a word moving
-   OUT of the tint window transitions color instead of snapping. */
-.trWord {
-  transition: color 900ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.trWordTint {
-  color: var(--onyx-stream-tint, #3b82f6); /* shared streaming tint */
-}
-
 .trCaret {
   display: inline-block;
   width: 0.4em;
@@ -178,9 +165,6 @@
   }
   .trCollapsible,
   .trCollapsible.isCollapsed {
-    transition: none;
-  }
-  .trWord {
     transition: none;
   }
   .trCaret {

@@ -1237,15 +1237,15 @@ function tailText(s: string | undefined, max: number = STREAM_TAIL_BYTES): strin
 }
 
 /** Live streaming text (SINGLE-LETTER streaming, user spec): useTypewriter
- *  buffers the growing text and reveals it one character at a time — 0.5s
- *  initial hold, adaptive pace — while LetterStream gives every fresh
- *  letter a motion-blur + fade-in (`.letter-in`). `tint: false` keeps error
- *  red (the color rides `className`). */
+ *  buffers the growing text and reveals it one character at a time — a
+ *  short initial hold, adaptive pace, full ink (NO per-letter fade/blur —
+ *  the reveal pacing is the motion). `tint: false` keeps error red (the
+ *  color rides `className`). */
 function StreamLines({ text, tint = true, className }: { text: string; tint?: boolean; className?: string }) {
-  const { text: revealed, freshFrom, animating } = useTypewriter(text, true);
+  const { text: revealed } = useTypewriter(text, true);
   return (
     <span className={cn(tint ? "text-foreground/85" : undefined, className)}>
-      <LetterStream text={revealed} freshFrom={freshFrom} animating={animating} />
+      <LetterStream text={revealed} />
     </span>
   );
 }

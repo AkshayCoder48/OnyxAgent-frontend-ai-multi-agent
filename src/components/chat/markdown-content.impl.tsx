@@ -127,35 +127,26 @@ function preprocessCitations(content: string): string {
   return content.replace(/\[(\d{1,3})\](?![\(:])/g, (_, n) => `[[${n}]](#cite-${n})`);
 }
 
-// ── CHARACTER-LEVEL STREAMING FADE ─────────────────────────────────────────
+// ── STREAMING TEXT — PLAIN PACED REVEAL ─────────────────────────────────────
 // (Animation state ≠ text state.) The typewriter (useTypewriter in
-// message-item) paces the reveal char-by-char; the markdown renderer mounts
-// the TRAILING fresh window of characters as `.letter-in` spans (one-shot
-// opacity 0.5/blur 5px → full ink, 0.02s stagger) while everything else —
-// and every settled/historical message — renders PLAIN:
-//   • STABLE KEYS — a char's key is its index within the run, so appended
-//     text never remounts or re-animates anything already on screen.
-//   • NO FILL-FORWARD LEAK — `.letter-in` uses `backwards` fill (CSS): the
-//     from-state shows only during the stagger delay; on completion the
-//     span reverts to natural styles (opacity 1, no filter). Chars age out
-//     of the fresh window back to plain text long after their animation
-//     finished (the window is ≥ the worst-case animation time).
-//   • MARKDOWN-SAFE — only rendered text runs are split; markdown syntax
-//     is consumed by the parser, whitespace stays plain (wrapping,
-//     pre-formatted spacing and line breaks are pixel-identical).
+// message-item) paces the reveal char-by-char and the markdown renders
+// whatever is revealed as PLAIN TEXT at full ink — NO per-word and NO
+// per-character blur/fade animations (user spec: the reveal pacing itself
+// is the motion; the message-level entrance fade handles the "whole
+// response fades in" feel). The context here only carries the trailing
+// state the CODE BLOCK needs:
 //   • CODE BLOCKS — the trailing code block renders plain monospace while
-//     it grows (line-flash only) and the settled syntax-highlighted tree
-//     once complete — highlighting, colors, copy and scrolling intact.
+//     it grows (soft line-flash only, no text fade) and the settled
+//     syntax-highlighted tree once complete — highlighting, colors, copy
+//     and scrolling intact.
 //   • HISTORICAL MESSAGES — `stream.streaming` is false for hydrated
 //     history: zero animation DOM, fully settled render.
 const StreamFreshContext = React.createContext<{
   streaming: boolean;
   lastWord: string;
-  freshChars: number;
 }>({
   streaming: false,
   lastWord: "",
-  freshChars: 0,
 });
 
 // Citation sources for THIS message (Beta V1.2). Provided by MarkdownContent
@@ -169,138 +160,11 @@ function findSource(sources: readonly SourceItem[], n: number): SourceItem | und
 }
 
 /** Extract the last non-whitespace word of a string, lowercased + stripped
- *  of markdown punctuation — used to detect the trailing container. */
+ *  of markdown punctuation — used to detect the trailing code block. */
 function lastPlainWord(s: string): string {
   const words = s.replace(/[*_`~[\]]/g, " ").split(/\s+/).filter(Boolean);
   const last = words.length ? words[words.length - 1] : undefined;
   return last ? last.toLowerCase() : "";
-}
-
-/** Per-char stagger: each character starts 0.02s after the previous one,
- *  computed from the char's STABLE index within its run (a delay that
- *  changed after mount would re-seek the running animation — visual
- *  jumps). The modulo bounds the delay (≤ 0.28s) for arbitrarily large
- *  bursts while keeping consecutive chars exactly 0.02s apart. */
-const CHAR_STAGGER_STEPS = 15;
-const CHAR_STAGGER_STEP_S = 0.02;
-
-/** Fresh-char window bounds (chars kept as animating spans in the trailing
- *  run). The live size comes from the typewriter's fresh window (chars
- *  revealed in the last ~700ms — pace-adaptive), clamped to a sane per-run
- *  span budget: at any reveal pace the window must outlast the worst-case
- *  animation (240ms + 280ms max stagger) so a char only unmounts (→ plain
- *  text) long after it finished animating. */
-const MIN_FRESH_CHARS = 24;
-const MAX_FRESH_CHARS = 120;
-
-function clampFreshWindow(freshChars: number): number {
-  if (!Number.isFinite(freshChars) || freshChars <= 0) return MIN_FRESH_CHARS;
-  return Math.max(MIN_FRESH_CHARS, Math.min(Math.floor(freshChars), MAX_FRESH_CHARS));
-}
-
-/** Recursively flatten a rendered node tree to its plain text — used for
- *  the trailing-container check (works through strong/em/a/code/…). */
-function flattenPlainText(nodes: React.ReactNode): string {
-  let out = "";
-  const walk = (n: React.ReactNode) => {
-    if (n == null || typeof n === "boolean") return;
-    if (typeof n === "string" || typeof n === "number") {
-      out += String(n);
-      return;
-    }
-    if (Array.isArray(n)) {
-      n.forEach(walk);
-      return;
-    }
-    if (React.isValidElement(n)) {
-      walk((n.props as { children?: React.ReactNode }).children);
-    }
-  };
-  walk(nodes);
-  return out;
-}
-
-/**
- * Split the trailing `freshWindow` characters of a plain-text run into
- * `.letter-in` spans. Everything before the window is ONE joined string
- * (zero per-char DOM); whitespace chars render plain (wrapping and
- * pre-formatted spacing are untouched); each animated char is keyed by its
- * STABLE index within the run so appended text never remounts (or
- * re-animates) anything already on screen.
- */
-function charStreamTail(raw: string, freshWindow: number): React.ReactNode {
-  const chars = Array.from(raw);
-  if (chars.length <= 1) return raw;
-  const start = Math.max(0, chars.length - freshWindow);
-  const out: React.ReactNode[] = [];
-  if (start > 0) out.push(chars.slice(0, start).join(""));
-  for (let i = start; i < chars.length; i++) {
-    const ch = chars[i]!;
-    // Whitespace never animates (invisible) and must stay a plain
-    // character so wrapping / pre-formatted spacing is untouched.
-    if (ch === " " || ch === "\n" || ch === "\t" || ch === "\r") {
-      out.push(ch);
-      continue;
-    }
-    out.push(
-      <span
-        key={`c${i}`}
-        className="letter-in"
-        style={{ animationDelay: `${(i % CHAR_STAGGER_STEPS) * CHAR_STAGGER_STEP_S}s` }}
-      >
-        {ch}
-      </span>,
-    );
-  }
-  return out;
-}
-
-/** TRUE when this container is the one that currently ENDS the streamed
- *  content (its last plain word matches the stream's last plain word) —
- *  only the trailing container carries the fresh char window. The stream
- *  stays ONE logical sequence across containers: the reveal index is the
- *  typewriter's (global per message), and the trailing hand-off between
- *  containers is seamless — a newly-started container's chars mount fresh
- *  while the previous container settles to plain text. */
-function isTrailingContainer(text: string, stream: { lastWord: string }): boolean {
-  const norm = text.replace(/\s+/g, " ").trim().toLowerCase();
-  const lastWord = stream.lastWord.toLowerCase();
-  return !!norm && !!lastWord && norm.endsWith(lastWord);
-}
-
-/**
- * Walk a container's children and char-split the LAST meaningful text tail:
- * the last non-empty plain string gets `charStreamTail`; when the tail
- * lives inside a trailing inline element (strong/em/a/…), the walk recurses
- * INTO the element so bold/italic/linked streaming text fades per char too
- * — markdown structure stays fully intact, only visible text animates.
- * Returns the original children when there is nothing to split.
- */
-function streamFreshTail(children: React.ReactNode, freshWindow: number): React.ReactNode {
-  const parts: React.ReactNode[] = Array.isArray(children) ? children : [children];
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const child = parts[i];
-    if (typeof child === "string") {
-      if (child.trim().length === 0) continue; // pure whitespace — no fresh chars here
-      const out = parts.slice();
-      out[i] = charStreamTail(child, freshWindow);
-      return out;
-    }
-    if (React.isValidElement(child)) {
-      const inner = (child.props as { children?: React.ReactNode }).children;
-      if (inner == null) continue;
-      const hasText =
-        typeof inner === "string"
-          ? inner.trim().length > 0
-          : Array.isArray(inner) &&
-            inner.some((c) => (typeof c === "string" ? c.trim().length > 0 : false));
-      if (!hasText) continue;
-      const out = parts.slice();
-      out[i] = React.cloneElement(child, undefined, streamFreshTail(inner, freshWindow));
-      return out;
-    }
-  }
-  return children;
 }
 
 /** Strip any CURSOR markers that leaked into paragraph children.
@@ -320,29 +184,15 @@ function stripCursorMarkers(child: React.ReactNode): React.ReactNode {
 }
 
 /**
- * Text-container hook (used by the p / heading / li / blockquote / td
- * overrides): while the message streams AND this container is the trailing
- * one, its text tail is split into per-character `.letter-in` spans.
- * Settled messages (historical chats) and non-trailing containers render
- * the children untouched — zero animation DOM.
- */
-function useFreshTail(children: React.ReactNode): React.ReactNode {
-  const stream = React.useContext(StreamFreshContext);
-  if (!stream.streaming) return children;
-  if (!isTrailingContainer(flattenPlainText(children), stream)) return children;
-  return streamFreshTail(children, clampFreshWindow(stream.freshChars));
-}
-
-/**
- * Paragraph renderer (uppercase so it can read context per rules-of-hooks).
- * Prose carries the character-level fresh window when trailing (see the
- * char-stream block above); settled messages render plain.
+ * Paragraph renderer. Streamed text renders PLAIN at full ink — the
+ * typewriter in message-item paces the reveal; there are NO per-word or
+ * per-character fade/blur spans (the char-stream machinery was removed per
+ * user spec). Only the defensive cursor-marker strip remains.
  */
 function StreamParagraph({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
-  const inner = useFreshTail(children);
   return (
     <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-      {stripCursorMarkers(inner)}
+      {stripCursorMarkers(children)}
     </p>
   );
 }
@@ -417,10 +267,9 @@ function highlightedCode(code: string, lang: string | null): React.ReactNode {
  *   • While this block is the one currently ENDING the streamed content
  *     (code actively streaming in), the body renders as plain monospace
  *     text grouped per line — each new line mounts with the soft
- *     `onyx-code-line` background flash. The chars themselves stay plain
- *     in code (syntax tokens arrive chunked, per-char spans inside them
- *     would break the plain-line render); the CHARACTER fade lives in the
- *     prose containers and the trailing-edge detection below.
+ *     `onyx-code-line` background flash (background-only: text is always
+ *     full ink, NO per-char/per-word fade). Syntax tokens arrive chunked,
+ *     so per-char spans inside them would break the plain-line render.
  *   • Otherwise (settled, or a code block the stream has moved past) the
  *     body renders the memoized syntax-highlighted tree (`highlightedCode`)
  *     — colors appear the moment the block completes, and never re-render
@@ -454,8 +303,9 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
   if (trailing && codeContent) {
     // ACTIVE CODE — plain text, one span per line (stable keys) so a
     // completed line never re-renders as code grows. The `onyx-code-line`
-    // flash is background-only; the characters themselves render plain and
-    // settle at full opacity the moment the block completes (colors on).
+    // flash is background-only (no text opacity change); the characters
+    // render plain at full ink and the block settles into syntax colors
+    // the moment it completes.
     const lines = codeContent.split("\n");
     body = (
       <code className={lang ? `language-${lang}` : undefined}>
@@ -507,13 +357,12 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
   );
 }
 
-// ── Text container components (uppercase — they call the useFreshTail
-// hook, so rules-of-hooks requires component-named functions). Referenced by
-// the SHARED_COMPONENTS map below; each applies the character-level fresh
-// window when it is the trailing container of the live stream. ─────────────
+// ── Text container components. Referenced by the SHARED_COMPONENTS map
+// below; each applies its Terra styling. Streamed text renders PLAIN at
+// full ink (the typewriter paces the reveal — no per-word/per-char
+// animation DOM). ─────────────────────────────────────────────────────
 
 function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) {
-  const fresh = useFreshTail(children);
   const checkbox = Array.isArray(children)
     ? children.find(
         (c) =>
@@ -523,7 +372,7 @@ function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) 
     : null;
   if (checkbox && React.isValidElement(checkbox)) {
     const isChecked = Boolean((checkbox as React.ReactElement<{ checked?: boolean }>).props?.checked);
-    const remaining = Array.isArray(fresh) ? fresh.filter((c) => c !== checkbox) : fresh;
+    const remaining = Array.isArray(children) ? children.filter((c) => c !== checkbox) : children;
     return (
       <li
         className="flex items-start gap-2 leading-relaxed list-none"
@@ -546,7 +395,7 @@ function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) 
   }
   return (
     <li className="leading-relaxed" {...props}>
-      {fresh}
+      {children}
     </li>
   );
 }
@@ -557,7 +406,7 @@ function Heading1({ children, ...props }: React.ComponentPropsWithoutRef<"h1">) 
       className="font-display mt-4 mb-2 text-xl font-bold tracking-tight first:mt-0"
       {...props}
     >
-      {useFreshTail(children)}
+      {children}
     </h1>
   );
 }
@@ -568,7 +417,7 @@ function Heading2({ children, ...props }: React.ComponentPropsWithoutRef<"h2">) 
       className="font-display mt-4 mb-2 text-lg font-semibold tracking-tight first:mt-0"
       {...props}
     >
-      {useFreshTail(children)}
+      {children}
     </h2>
   );
 }
@@ -576,7 +425,7 @@ function Heading2({ children, ...props }: React.ComponentPropsWithoutRef<"h2">) 
 function Heading3({ children, ...props }: React.ComponentPropsWithoutRef<"h3">) {
   return (
     <h3 className="font-display mt-3 mb-2 text-base font-semibold first:mt-0" {...props}>
-      {useFreshTail(children)}
+      {children}
     </h3>
   );
 }
@@ -587,7 +436,7 @@ function QuoteBlock({ children, ...props }: React.ComponentPropsWithoutRef<"bloc
       className="border-brand/40 text-foreground/75 my-3 border-l-2 pl-4 italic"
       {...props}
     >
-      {useFreshTail(children)}
+      {children}
     </blockquote>
   );
 }
@@ -598,7 +447,7 @@ function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
       className="border-foreground/10 border-b px-3 py-2 text-left font-mono text-[11px] font-semibold tracking-wider uppercase"
       {...props}
     >
-      {useFreshTail(children)}
+      {children}
     </th>
   );
 }
@@ -606,17 +455,17 @@ function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
 function TdCell({ children, ...props }: React.ComponentPropsWithoutRef<"td">) {
   return (
     <td className="border-foreground/8 border-b px-3 py-2 last:border-0" {...props}>
-      {useFreshTail(children)}
+      {children}
     </td>
   );
 }
 
 function DtTerm({ children, ...props }: React.ComponentPropsWithoutRef<"dt">) {
-  return <dt className="font-semibold text-foreground" {...props}>{useFreshTail(children)}</dt>;
+  return <dt className="font-semibold text-foreground" {...props}>{children}</dt>;
 }
 
 function DdDef({ children, ...props }: React.ComponentPropsWithoutRef<"dd">) {
-  return <dd className="text-foreground/75 ml-4" {...props}>{useFreshTail(children)}</dd>;
+  return <dd className="text-foreground/75 ml-4" {...props}>{children}</dd>;
 }
 
 /**
@@ -847,7 +696,6 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   sources,
   showCursor,
   streaming,
-  freshChars,
 }: MarkdownContentProps) {
   // Keep the ref in sync so the shared `a` override can call the latest
   // onCiteClick without forcing a re-creation of the components map.
@@ -866,14 +714,14 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // is streaming at rapid intervals.
   const deferredContent = React.useDeferredValue(content);
 
-  // Character-stream state for the fresh window — computed fresh each
-  // render and provided via context (no ref mutation, no render lag). The
-  // lastWord of the DEFERRED content decides which container is trailing
-  // (what's rendered), and freshChars sizes the animated window.
+  // Trailing-stream state, computed fresh each render and provided via
+  // context (no ref mutation, no render lag). The lastWord of the DEFERRED
+  // content decides whether the trailing CODE BLOCK is still growing (its
+  // plain-line render) or settled (syntax highlight). Prose carries no
+  // per-char state — text renders plain at full ink.
   const streamState = {
     streaming: !!streaming,
     lastWord: streaming ? lastPlainWord(deferredContent) : "",
-    freshChars: freshChars ?? 0,
   };
 
   // Strip ALL cursor markers from content. The marker may appear as:
@@ -954,7 +802,6 @@ export const MarkdownContent = React.memo(function MarkdownContent({
     prev.onCiteClick === next.onCiteClick &&
     prev.sources === next.sources &&
     prev.showCursor === next.showCursor &&
-    prev.streaming === next.streaming &&
-    prev.freshChars === next.freshChars
+    prev.streaming === next.streaming
   );
 });

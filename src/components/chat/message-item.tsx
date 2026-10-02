@@ -268,31 +268,32 @@ function TextBubble({
 }) {
   // SINGLE-LETTER STREAMING (OnyxAgent stream spec): while this bubble
   // streams, the text is buffered and revealed CHARACTER BY CHARACTER —
-  // one continuous character stream regardless of how the SSE chunks
-  // arrived; each freshly revealed char then mounts into the markdown as
-  // a `.letter-in` span (opacity 0.5→1, blur 5px→0, 0.02s stagger).
-  // Settled/hydrated messages are a pure pass-through (no timers, full
-  // text immediately — spec §23).
+  // one continuous character flow regardless of how the SSE chunks
+  // arrived. Freshly revealed characters render at FULL INK immediately
+  // (NO per-word / per-character blur or fade — the reveal pacing is the
+  // motion). Settled/hydrated messages are a pure pass-through (no timers,
+  // full text immediately — spec §23).
+  //
+  // FINISH, DON'T FLUSH (round-end rule): when the stream settles mid-
+  // reveal — the AI stops, the round ends, or the turn's trailing text is
+  // relocated out of the WorkingPanel (which REMOUNTS this bubble as
+  // "settled") — the typewriter seeds from the identity reveal cache and
+  // keeps pacing the remaining backlog out at catch-up speed. The text
+  // that was already streamed but not yet revealed is NEVER dumped at
+  // once.
   //
   // The markdown variant runs a BATCHED reveal (40ms tick vs the 20ms
-  // default): a markdown re-parse is far heavier than a plain-text render,
-  // and the per-char CSS stagger (0.02s/char) makes a 4-char batch visually
-  // IDENTICAL to four single-char ticks — same butter, half the parse rate
-  // (the lag fix for large chats).
-  const { text: revealedText, freshFrom, animating } = useTypewriter(
+  // default): a markdown re-parse is far heavier than a plain-text render.
+  const { text: revealedText, animating } = useTypewriter(
     text,
     Boolean(isStreaming),
     { identityKey, tickMs: 40 },
   );
 
-  // Size of the fresh char window (chars revealed in the last ~700ms) —
-  // paces the animated window in the markdown renderer so a char only
-  // leaves the span window after its fade finished (pop-free at any speed).
-  const freshCount = Math.max(0, revealedText.length - freshFrom);
-
-  // STREAM GRACE: keep the char window mounted ~620ms after the reveal
-  // finishes so the FINAL chars complete their fade before the plain
-  // (settled) render swaps the spans out — never a hard pop at stream end.
+  // STREAM GRACE: keep the streaming render ~620ms past the reveal so the
+  // settled swap (prose-sm → prose-sm-static, code-block colors) happens
+  // only after the last characters are on screen — never a hard pop at
+  // stream end.
   const [streamGrace, setStreamGrace] = React.useState(false);
   React.useEffect(() => {
     if (isStreaming || animating) {
@@ -376,14 +377,14 @@ function TextBubble({
   // Assistant turns are FRAMELESS (Terra spec) — no bubble, editorial text on
   // the cream canvas with serif-numeral ordered lists.
   //
-  // CHARACTER-LEVEL FADE (animation state ≠ text state): NO whole-block dim
-  // exists anymore — the old `.response-live` opacity/blur on this wrapper
-  // leaked into the final state whenever a streaming flag stuck (the "grey
-  // text" bug: a child can never be full-white under a faded parent). The
-  // fade is carried ONLY by the per-character `.letter-in` spans inside
-  // MarkdownContent's trailing container, and those animate with `backwards`
-  // fill — after completion every character is plain text at natural
-  // styles (opacity 1, no filter, theme foreground).
+  // PLAIN PACED REVEAL (animation state ≠ text state): NO whole-block dim
+  // and NO per-character fade spans exist — the old `.response-live`
+  // opacity/blur wrapper leaked into the final state whenever a streaming
+  // flag stuck (the "grey text" bug), and the `.letter-in` per-char
+  // blur/fade was removed per user spec. Revealed text renders at natural
+  // styles (opacity 1, no filter, theme foreground); the typewriter paces
+  // the reveal and the message-level entrance fade handles the
+  // whole-response fade-in.
   if (segments.length === 0 && !persistedSpec) {
     return (
       <div className="relative w-full max-w-full break-words">
@@ -399,7 +400,6 @@ function TextBubble({
             sources={sources}
             showCursor={showCursor}
             streaming={streamActive}
-            freshChars={streamActive ? freshCount : 0}
           />
         </div>
       </div>
@@ -437,7 +437,6 @@ function TextBubble({
                 sources={sources}
                 showCursor={showCursor && isLast}
                 streaming={streamActive && isLast}
-                freshChars={streamActive && isLast ? freshCount : 0}
               />
             </div>
           );

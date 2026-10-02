@@ -769,23 +769,6 @@
     }
   }
 
-  /* Fade-in for streaming AI text — applied per-token-chunk as it arrives.
-     Uses a short opacity ramp so new content gently appears instead of
-     popping in, giving the streaming output a smoother feel. */
-  .stream-fade {
-    animation: stream-fade-in 280ms ease-out both;
-  }
-  @keyframes stream-fade-in {
-    from {
-      opacity: 0;
-      filter: blur(2px);
-    }
-    to {
-      opacity: 1;
-      filter: blur(0);
-    }
-  }
-
   /* Generic fade-in used by cards, sections, list items. */
   .animate-fade-in {
     animation: animate-fade-in 320ms ease-out both;
@@ -798,22 +781,6 @@
     to {
       opacity: 1;
       transform: translateY(0);
-    }
-  }
-
-  /* Per-word streaming fade — wraps each new word as it streams in. */
-  .word-fade {
-    animation: word-fade-in 220ms ease-out both;
-    display: inline;
-  }
-  @keyframes word-fade-in {
-    from {
-      opacity: 0;
-      filter: blur(3px);
-    }
-    to {
-      opacity: 1;
-      filter: blur(0);
     }
   }
 
@@ -1081,8 +1048,7 @@
   .pulse-dot,
   .flow-dash,
   .comet,
-  .quote-toolbar-in,
-  .letter-in {
+  .quote-toolbar-in {
     animation: none !important;
   }
   .reveal {
@@ -1427,28 +1393,6 @@
   }
 }
 
-/* Character-level streaming fade-in — each new character gently appears.
-   Applied to the streaming text container. Since text deltas arrive
-   character-by-character from the AI (via text_delta events), each DOM
-   update adds new text. The `stream-reveal` class uses a CSS animation
-   that re-triggers on content changes (via a key prop in React), giving
-   a smooth fade-in effect on each batch of newly-arrived characters. */
-@keyframes char-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(1px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.stream-char {
-  display: inline;
-  animation: char-fade-in 0.3s ease-out both;
-}
-
 /* Streaming cursor — blinking while AI is generating. This is the legacy
    block cursor; the new WritingCursor component (geometric shapes) is used
    for assistant text, but this class is kept for back-compat. */
@@ -1464,24 +1408,6 @@
 @keyframes blink-cursor {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
-}
-
-/* Smooth text reveal — the streaming container has a gentle fade-in
-   animation. Since the text container re-renders on every text_delta
-   event (as new characters arrive from the AI), this animation plays
-   on each update, creating a subtle per-character fade-in effect that
-   matches the AI's output speed. */
-.stream-reveal {
-  animation: stream-fade-in 0.25s ease-out;
-}
-
-@keyframes stream-fade-in {
-  from {
-    opacity: 0.6;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 /* ==================== Writing Cursor (geometric shapes) ====================
@@ -2385,15 +2311,6 @@ html.theme-transitioning .animate-backdrop {
   50% { background-position: 100% 50%; }
 }
 
-/* --- Text stream reveal (per-character fade) --- */
-.text-stream-reveal {
-  animation: text-stream 0.15s ease-out both;
-}
-@keyframes text-stream {
-  from { opacity: 0; transform: translateY(2px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 /* --- Settings card hover --- */
 .settings-card-hover {
   transition: all 0.2s ease;
@@ -2485,8 +2402,7 @@ html.theme-transitioning .animate-backdrop {
   .rotate-in,
   .panel-glass-in,
   .bubble-glass-in,
-  .subagent-slide-in,
-  .text-stream-reveal {
+  .subagent-slide-in {
     animation: none !important;
     filter: none !important;
     opacity: 1 !important;
@@ -2542,21 +2458,6 @@ html.theme-transitioning .animate-backdrop {
   font-family: var(--font-display), "Fraunces", Georgia, serif;
   font-style: italic;
   color: var(--color-brand);
-}
-
-/* --- Streaming text throttle animation (batched fade) --- */
-.stream-batch-fade {
-  animation: stream-batch-fade 0.15s ease-out both;
-}
-@keyframes stream-batch-fade {
-  from {
-    opacity: 0.5;
-    filter: blur(1px);
-  }
-  to {
-    opacity: 1;
-    filter: blur(0);
-  }
 }
 
 /* --- Reasoning / Thinking panel — empty → filled cross-fade ---
@@ -2683,13 +2584,6 @@ html.theme-transitioning .animate-backdrop {
 }
 .prose-sm {
   /* streaming messages — no content-visibility, let it flow naturally */
-}
-
-/* --- GPU-accelerated streaming text container --- */
-.stream-reveal {
-  will-change: opacity;
-  backface-visibility: hidden;
-  transform: translateZ(0);
 }
 
 /* --- Prompt box corner animation — animated gradient border on the
@@ -2828,76 +2722,44 @@ html.theme-transitioning .animate-backdrop {
    ONYX STREAM POLISH — butter-smooth streaming visuals
    ═════════════════════════════════════════════════════════════════════════
    The visual layer of butter streaming: the assistant response is ONE
-   continuous CHARACTER stream — every freshly revealed character mounts as
-   a `.letter-in` span that fades in exactly ONCE (opacity 0.5 → 1,
-   blur 5px → 0, 0.02s/char stagger set inline by the markdown renderer).
-   Stable per-index keys guarantee later updates never restart or
-   re-animate anything. All effects animate opacity / filter ONLY — no
-   transforms, no layout, no reflow, no scroll jitter. The animation unit
-   is the CHARACTER — never a word, never an SSE chunk (OnyxAgent stream
-   spec). Honors prefers-reduced-motion at the bottom of this block.
-   (`.streaming-active` was never applied by any component — dead rule,
-   removed with the word-tint rewrite.) */
+   continuous CHARACTER stream paced by the typewriter (useTypewriter) —
+   freshly revealed characters render PLAIN at full ink. There are NO
+   per-word and NO per-character blur/fade animations on streamed text
+   (user spec: the reveal pacing is the motion; the message-level entrance
+   fade handles the whole-response fade-in). The only per-unit visual left
+   is the streaming CODE-LINE background flash below — background-color
+   ONLY, never a text opacity/filter change. Honors prefers-reduced-motion
+   at the bottom of this block. */
 :root {
-  --onyx-stream-tint: #3b82f6;          /* blue-500 — light mode tint */
   --onyx-stream-tint-bg: rgb(59 130 246 / 0.12);
 }
 .dark {
-  --onyx-stream-tint: #60a5fa;          /* blue-400 — dark mode tint */
   --onyx-stream-tint-bg: rgb(96 165 250 / 0.14);
 }
 
-/* Streaming characters (markdown prose + active code lines): each fresh
-   char mounts at 50% opacity with a 5px blur and sharpens into focus
-   (OnyxAgent stream spec §3). INLINE display (never inline-block) keeps
-   normal text wrapping — no mid-word breaks, no atomic boxes. The stagger
-   delay (0.02s/char, stable per index) is set inline by charStreamTail;
-   `both` fill keeps the from-state visible during the stagger delay. */
 /* Streaming code lines: each NEW line flashes a soft blue highlight that
    drains away over ~800ms — never restarts while the line is still being
-   written, and completed lines are never re-animated. Background-only, so
-   hljs syntax colors stay intact. */
+   written, and completed lines are never re-animated. BACKGROUND-ONLY
+   (no text opacity/filter change — text is always full ink) so hljs
+   syntax colors stay intact. */
 .onyx-code-line {
   display: inline;
   animation: onyx-line-in 800ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
-
-/* Tool output / streaming-args lines: same recipe plus a soft materialize.
-   The `-plain` variant (stderr) skips the blue background so the destructive
-   red stays readable. */
-.onyx-stream-line {
-  display: inline;
-  animation: onyx-line-in 800ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.onyx-stream-line-plain {
-  animation-name: onyx-line-in-plain;
-}
 @keyframes onyx-line-in {
   from {
     background-color: var(--onyx-stream-tint-bg);
-    opacity: 0.65;
   }
   to {
     background-color: transparent;
-    opacity: 1;
-  }
-}
-@keyframes onyx-line-in-plain {
-  from {
-    opacity: 0.65;
-  }
-  to {
-    opacity: 1;
   }
 }
 
-/* Reduced motion: content stays fully functional; the animated fades are
-   disabled (instant settle), the blue tint itself may remain as a static
+/* Reduced motion: content stays fully functional; the animated flash is
+   disabled (instant settle) — the tint itself may remain as a static
    color cue — it is color, not motion. */
 @media (prefers-reduced-motion: reduce) {
-  .letter-in,
-  .onyx-code-line,
-  .onyx-stream-line {
+  .onyx-code-line {
     animation: none;
   }
 }
@@ -3389,46 +3251,16 @@ html.theme-transitioning .animate-backdrop {
   }
 }
 
-/* ===== Character-level streaming fade (animation state ≠ text state) =====
-   The fade unit is the CHARACTER (never a word, chunk or block): each
-   freshly revealed char mounts as a `.letter-in` span that animates ONCE
-   from opacity 0.5 / blur(5px) to full ink, with a 0.02s/char stagger set
-   inline by the markdown renderer (stable per-index keys — nothing ever
-   re-animates).
-
-   FILL-MODE SAFETY (the "final text must be normal text" rule): the
-   animation uses `backwards`, NOT `both`/`forwards`. `backwards` shows the
-   from-state only during the stagger delay; the moment the animation ends
-   the span reverts to its NATURAL styles — opacity 1, filter none, the
-   inherited theme foreground. There is NO fill-forward state that could
-   leave a character grey, dimmed or blurred after completion. And because
-   older chars age out of the fresh window back to PLAIN TEXT (spans
-   unmount), the settled message is plain strings at natural styles.
+/* ===== Streaming text — plain paced reveal (animation state ≠ text state)
+   The fade unit was retired: streamed text has NO per-word, per-character
+   or per-chunk fade/blur animations. The typewriter (useTypewriter) paces
+   the character-by-character reveal and every revealed character renders
+   at its NATURAL styles — opacity 1, filter none, the inherited theme
+   foreground — so there is structurally nothing that could leak a
+   transition state into the final text. The message-level entrance
+   (`.bubble-ai-in`) provides the whole-response fade-in; the only
+   per-unit visual left is the background-only `.onyx-code-line` flash.
 
    PARENT OPACITY RULE: nothing up the tree (message, markdown wrapper,
-   stream wrapper, thinking container) carries a persistent opacity/filter —
-   a child can never be full-white under a faded parent. The old
-   whole-response `.response-live` dim (opacity 0.7 + blur on the ENTIRE
-   response while streaming) is REMOVED: it dimmed already-completed text
-   and leaked into the final state whenever a streaming flag stuck. */
-.letter-in {
-  display: inline;
-  animation: letter-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) backwards;
-}
-@keyframes letter-in {
-  from {
-    opacity: 0.5;
-    filter: blur(5px);
-  }
-  to {
-    /* Matches the span's natural state exactly — even if a fill mode is
-       ever reintroduced, the final frame IS normal text. */
-    opacity: 1;
-    filter: blur(0);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .letter-in {
-    animation: none;
-  }
-}
+   stream wrapper, thinking container) carries a persistent opacity/filter
+   — a child can never be full-white under a faded parent. */

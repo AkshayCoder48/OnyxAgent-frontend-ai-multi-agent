@@ -49,22 +49,36 @@ const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
 const FADE = 16; // top/bottom fade once the viewport is capped
 
 /**
- * The live sentence streams in LETTER BY LETTER (user spec: "single letter
- * streaming … with motion blur and fade-in … like thinking and all"):
- * useTypewriter buffers the growing sentence and reveals one character at a
- * time; LetterStream fades + blurs each fresh letter in exactly once. The
- * FIRST sentence of a thinking block holds the stream-start delay (180ms —
- * the retuned "a bit faster" pace); later sentences flow with a tiny 40ms
- * pacing gap. A caret rides at the end while streaming.
+ * The sentences stream in LETTER BY LETTER — useTypewriter buffers each
+ * growing sentence and reveals one character at a time at full ink (NO
+ * per-letter fade/blur). The FIRST sentence of a thinking block holds the
+ * stream-start delay (180ms); later sentences flow with a tiny 40ms
+ * pacing gap. A caret rides at the end of the LIVE last sentence.
+ *
+ * NO INTER-SENTENCE DUMPS: every sentence of a live block keeps its own
+ * typewriter (stable index keys), so when a NEW sentence starts, the
+ * previous one flips `active` → false and FINISHES its remaining reveal
+ * at catch-up pace instead of snapping to full text (the round-end
+ * "auto-throwing" rule, applied at sentence boundaries too).
  */
-function StreamingSentence({ text, holdMs }: { text: string; holdMs: number }) {
-  const { text: revealed, freshFrom, animating } = useTypewriter(text, true, {
+function StreamingSentence({
+  text,
+  holdMs,
+  active,
+}: {
+  text: string;
+  holdMs: number;
+  /** True only for the LIVE trailing sentence — previous sentences finish
+   *  their reveal paced, then rest fully revealed. */
+  active: boolean;
+}) {
+  const { text: revealed, animating } = useTypewriter(text, active, {
     initialDelayMs: holdMs,
   });
   return (
     <>
-      <LetterStream text={revealed} freshFrom={freshFrom} animating={animating} />
-      <span className={styles.trCaret} aria-hidden="true" />
+      <LetterStream text={revealed} />
+      {active && animating && <span className={styles.trCaret} aria-hidden="true" />}
     </>
   );
 }
@@ -82,6 +96,19 @@ export function ThinkingReasoning({
   const [capped, setCapped] = useState(false);
   const [fade, setFade] = useState({ top: false, bottom: true });
   const viewportRef = useRef<HTMLDivElement>(null);
+
+  // EVER-LIVE (finish-don't-flush): a block that STREAMED in this session
+  // keeps its per-sentence typewriters mounted after settle so the last
+  // sentence can finish revealing at catch-up pace — only the block's
+  // collapse hides it. A block that mounts ALREADY settled (hydrated
+  // history) renders plain text instantly (no timers, spec §23).
+  // Render-time adjustment (no effect, no cascading renders).
+  const [everLive, setEverLive] = useState(phase === "thinking");
+  const [prevLive, setPrevLive] = useState(phase === "thinking");
+  if (phase === "thinking" && !prevLive) {
+    setPrevLive(true);
+    setEverLive(true);
+  }
 
   const done = phase === "done";
   const count = sentences.length;
@@ -204,8 +231,12 @@ export function ThinkingReasoning({
             <div className={styles.trStream}>
               {sentences.slice(0, count).map((line, i) => (
                 <p key={i} className={styles.trSentence}>
-                  {!done && i === count - 1 ? (
-                    <StreamingSentence text={line} holdMs={count === 1 ? 180 : 40} />
+                  {everLive ? (
+                    <StreamingSentence
+                      text={line}
+                      holdMs={count === 1 ? 180 : 40}
+                      active={phase === "thinking" && i === count - 1}
+                    />
                   ) : (
                     line
                   )}
