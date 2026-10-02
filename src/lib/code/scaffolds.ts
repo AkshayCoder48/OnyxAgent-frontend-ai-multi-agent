@@ -258,7 +258,7 @@ const viteReact: CodeScaffold = {
         2,
       ),
     },
-    { path: "vite.config.js", content: `import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\nexport default defineConfig({ plugins: [react()], server: { host: true } });\n` },
+    { path: "vite.config.js", content: `import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\n// allowedHosts: the public preview is served at https://{sandboxId}-{port}.e2b.app —\n// Vite 6 blocks non-localhost Host headers by default, which made every\n// OnyxCode vite preview answer 403 "Blocked request. This host is not allowed".\nexport default defineConfig({ plugins: [react()], server: { host: true, allowedHosts: true } });\n` },
     {
       path: "index.html",
       content: `<!doctype html>
