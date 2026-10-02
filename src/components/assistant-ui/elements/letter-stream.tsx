@@ -72,8 +72,10 @@ interface RevealState {
 }
 
 /** How long a freshly revealed char stays "fresh" (drives the fresh-window
- *  bookkeeping in useTypewriter's history pruning). No per-char animation
- *  uses it anymore — the whole-response fade era renders plain text. */
+ *  bookkeeping in useTypewriter's history pruning). The markdown renderer
+ *  sizes its per-char `.letter-in` span window from this — it must outlast
+ *  the worst-case letter animation (240ms + 280ms max stagger) so a char
+ *  only unmounts back to plain text long after it settled. */
 const FRESH_WINDOW_MS = 700;
 
 /** Reveal-count cache for `identityKey` reconnects (spec §24) — bounded,
@@ -266,15 +268,16 @@ function prune(history: { t: number; n: number }[], now: number) {
 }
 
 /**
- * LetterStream — plain text, always (whole-response fade era). The
- * typewriter (useTypewriter) still paces the CHARACTER-BY-CHARACTER reveal,
- * but the revealed text renders as ONE plain string — no per-letter
- * `.letter-in` spans, no per-word fading (user spec, 2026-09-29: "make
- * whole response fade, not just the word"). The fade is applied ONCE to
- * the whole response block by message-item's `.response-fade` wrapper.
+ * LetterStream — plain text, always. The typewriter (useTypewriter) still
+ * paces the CHARACTER-BY-CHARACTER reveal, and the markdown renderer
+ * (markdown-content.impl) mounts the trailing fresh window as per-char
+ * `.letter-in` spans (one-shot fade, `backwards` fill — never a forward
+ * leak). This component renders the revealed text as ONE plain string for
+ * the non-markdown call sites (tool cards, thinking text, captions) where
+ * the container-level styling is already handled by the host.
  *
- * The component + props are kept so every existing call site (tool cards,
- * thinking text, captions) keeps working unchanged.
+ * The component + props are kept so every existing call site keeps working
+ * unchanged.
  */
 export function LetterStream({
   text,

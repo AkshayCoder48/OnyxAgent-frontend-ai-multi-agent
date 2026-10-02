@@ -102,16 +102,44 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   };
 }
 
+/** Delivery receipt returned the moment a subagent message is accepted —
+ * the generation itself keeps running independently (fire-and-forget,
+ * async subagent messaging spec: "delivery is not generation completion").
+ * Consumed by query_subagent (tools/subagents.ts); the session state is
+ * readable live by read_chat (tools/chat_inspect.ts). */
+export interface SubagentTurnDelivery {
+  /** The subagent chat session the message landed in (read_chat chatId). */
+  sessionId: string;
+  /** The persisted user message id. */
+  userMessageId: string;
+  /** The streaming assistant placeholder that will carry the reply. */
+  assistantMessageId: string;
+  /** Settles with the final response text when the detached turn ends
+   * (never rejects — generation errors resolve as the error text, exactly
+   * like the old awaited behavior). */
+  completion: Promise<string>;
+}
+
 /**
- * Execute a subagent turn with REAL STREAMING.
- * Streams text chunks to the store as they arrive from the API.
+ * startSubagentTurn — DELIVERY-CONFIRMED subagent messaging. Synchronously
+ * validates the target, persists the user message into the subagent's chat
+ * session and mounts the streaming assistant placeholder, then kicks off
+ * the LLM generation DETACHED. The returned receipt exists the instant
+ * delivery is confirmed — the caller never waits for the target AI's
+ * response, thinking, tools or completion.
+ *
+ * Delivery fails fast (throws) only when the message CANNOT be accepted:
+ * unknown subagent or unusable session. Everything after that (provider
+ * errors, tool failures, timeouts) belongs to the TARGET run and surfaces
+ * through `completion` and the session's message state — a failed
+ * generation never retroactively fails a confirmed delivery.
  */
-export async function executeSubagentTurn(
+export function startSubagentTurn(
   subagentId: string,
   userMessage: string,
   _fileIds?: string[],
   sessionId?: string,
-): Promise<string> {
+): SubagentTurnDelivery {
   const store = useSubagentStore.getState();
   const subagent = store.getSubagent(subagentId);
   if (!subagent) throw new Error(`Subagent ${subagentId} not found`);
@@ -119,11 +147,13 @@ export async function executeSubagentTurn(
   // Get or create a session.
   let session = sessionId ? store.sessions.find((s) => s.id === sessionId) : store.getActiveSession();
   if (!session || session.subagentId !== subagentId) {
-    session = store.createSession(subagentId, userMessage.slice(0, 40));
+    session = store.createSession(subagent.id, userMessage.slice(0, 40));
   }
   const sid = session.id;
 
-  // Add the user message.
+  // DELIVERY CONFIRMATION POINT: persisting the user message into the
+  // target session. After this write the message belongs to the target
+  // chat; the runtime below owns its own execution lifecycle.
   const userMsg: SubagentMessage = {
     id: nanoid(),
     role: "user",
@@ -132,7 +162,8 @@ export async function executeSubagentTurn(
   };
   store.addMessage(sid, userMsg);
 
-  // Add a placeholder assistant message to stream into.
+  // Streaming placeholder the generation streams into — read_chat sees it
+  // immediately with status "streaming" and partial content as it grows.
   const assistantMsgId = nanoid();
   store.addMessage(sid, {
     id: assistantMsgId,
@@ -142,6 +173,30 @@ export async function executeSubagentTurn(
     isStreaming: true,
   });
 
+  // DETACHED GENERATION — never awaited by the caller. The loop writes
+  // everything (deltas, tool cards, errors, completion) into the session
+  // store; this catch is the last-resort net so an unexpected rejection
+  // can never surface as an unhandled promise in the caller's context.
+  const completion = runSubagentLoop(subagent, sid, assistantMsgId).catch(
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+
+  return { sessionId: sid, userMessageId: userMsg.id, assistantMessageId: assistantMsgId, completion };
+}
+
+/**
+ * The generation loop of one subagent turn — streamed LLM rounds + tool
+ * calls, all written into the subagent session store. Runs INDEPENDENTLY
+ * of the caller (started detached by startSubagentTurn); resolves with the
+ * final response text (or the error text — it never rejects past the
+ * delivery boundary).
+ */
+async function runSubagentLoop(
+  subagent: SubagentConfig,
+  sid: string,
+  assistantMsgId: string,
+): Promise<string> {
+  const subagentId = subagent.id;
   let accumulatedReasoning = "";
 
   // PRD §34/§35: Load the user's decrypted E2B sandbox key + env vars so
@@ -721,6 +776,22 @@ export async function executeSubagentTurn(
     });
     return errMsg;
   }
+}
+
+/**
+ * Back-compat awaited wrapper — delivers the message, then waits for the
+ * detached generation to settle and resolves with its final text. Used by
+ * the subagent SIDEBAR UI (a human watching one chat). The agent-side
+ * query_subagent tool uses startSubagentTurn directly so it returns on
+ * delivery, never on completion.
+ */
+export async function executeSubagentTurn(
+  subagentId: string,
+  userMessage: string,
+  _fileIds?: string[],
+  sessionId?: string,
+): Promise<string> {
+  return startSubagentTurn(subagentId, userMessage, _fileIds, sessionId).completion;
 }
 
 /** Execute tool calls in parallel for non-streaming mode. */

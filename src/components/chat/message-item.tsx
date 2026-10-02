@@ -376,19 +376,17 @@ function TextBubble({
   // Assistant turns are FRAMELESS (Terra spec) — no bubble, editorial text on
   // the cream canvas with serif-numeral ordered lists.
   //
-  // WHOLE-RESPONSE FADE (user spec 2026-09-29: "make whole response fade,
-  // not just the word"): the entire response block carries ONE fade — while
-  // the turn streams it sits slightly dimmed (`.response-live`), and when the
-  // turn settles the WHOLE block fades to full ink in one motion. No
-  // per-word / per-character animation exists anymore.
+  // CHARACTER-LEVEL FADE (animation state ≠ text state): NO whole-block dim
+  // exists anymore — the old `.response-live` opacity/blur on this wrapper
+  // leaked into the final state whenever a streaming flag stuck (the "grey
+  // text" bug: a child can never be full-white under a faded parent). The
+  // fade is carried ONLY by the per-character `.letter-in` spans inside
+  // MarkdownContent's trailing container, and those animate with `backwards`
+  // fill — after completion every character is plain text at natural
+  // styles (opacity 1, no filter, theme foreground).
   if (segments.length === 0 && !persistedSpec) {
     return (
-      <div
-        className={cn(
-          "response-fade relative w-full max-w-full break-words",
-          streamActive && "response-live",
-        )}
-      >
+      <div className="relative w-full max-w-full break-words">
         <div
           className={cn(
             "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
@@ -420,12 +418,7 @@ function TextBubble({
   const lastTextIdx = renderSegments.map((s) => s.type).lastIndexOf("text");
 
   return (
-    <div
-      className={cn(
-        "response-fade relative w-full max-w-full break-words",
-        streamActive && "response-live",
-      )}
-    >
+    <div className="relative w-full max-w-full break-words">
       {renderSegments.map((seg, i) => {
         if (seg.type === "text") {
           const isLast = i === lastTextIdx;
@@ -1180,8 +1173,12 @@ export const MessageItem = React.memo(function MessageItem({
               />
             );
             if (!inPanel) return <React.Fragment key={it.partId}>{bubble}</React.Fragment>;
+            // FULL INK (no opacity-85 wrapper): intermediate text inside the
+            // WorkingPanel is real assistant text — a persistent parent-level
+            // opacity leak here kept it permanently grey/dim after completion
+            // (a child can never be full-white under a faded parent).
             return (
-              <div key={it.partId} className="w-full opacity-85">
+              <div key={it.partId} className="w-full">
                 {bubble}
               </div>
             );

@@ -196,7 +196,7 @@ Role:
       status: "pending",
       disposable,
       role,
-      message: `Subagent spawned${role ? ` (role: ${role})` : ""}${disposable ? " [DISPOSABLE — will auto-dispose on completion]" : ""}. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to send messages and get replies.`,
+      message: `Subagent spawned${role ? ` (role: ${role})` : ""}${disposable ? " [DISPOSABLE — will auto-dispose on completion]" : ""}. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to deliver its task (fire-and-forget — it returns on delivery) and read_chat to inspect its output.`,
     };
   },
   false,
@@ -371,18 +371,23 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
 );
 
 // === Tool: query_subagent ===
-// This tool ACTUALLY calls the subagent's LLM and streams the response.
-// The orchestrator uses this to ask the subagent to do work and get a reply.
-// If the task isn't done, the orchestrator can query again.
+// ASYNC SUBAGENT MESSAGING ("delivery is not generation completion"): the
+// tool completes the moment the message is DELIVERED to the target
+// subagent's chat session — it never waits for the target AI's thinking,
+// tool calls, streaming or completion. The target keeps generating
+// independently (its own runtime lifecycle); the orchestrator inspects its
+// output at any time with read_chat — including partially streamed content.
 registerTool(
   "query_subagent",
-  `Send a message to a subagent and get its reply. The subagent will process your message using its configured API + model, and may call tools (same tools as the main agent — shared sandbox + file system). Use this to:
+  `Send a message to a subagent — FIRE-AND-FORGET. The tool returns the INSTANT the message is delivered to the subagent's chat session; the subagent then processes it independently (it may think, call tools and stream a response on its own, in parallel with your own work). Use this to:
 
-1. Ask a subagent to do work (e.g. "research X", "write code for Y")
-2. Check on progress if the subagent is still working
-3. Send follow-up instructions
+1. Kick off work in a subagent (e.g. "research X", "write code for Y") and keep going with your own turn
+2. Send follow-up instructions without blocking
+3. Message several subagents back-to-back — they run CONCURRENTLY
 
-The subagent's reply is returned. If the task isn't complete, query again with more specific instructions. The conversation history is preserved within the subagent's session.
+The result does NOT contain the subagent's reply — only the delivery receipt (target_chat_id, message_id, target_agent_id). To see what a subagent has generated so far — including output it is STILL STREAMING — call read_chat with the returned target_chat_id; repeat read_chat later for progressively more content.
+
+Delivery fails fast only when the message cannot be accepted (unknown target, runtime unavailable). A later generation failure belongs to the target run and never retroactively fails a delivered message.
 
 If no task_id is provided, creates a new subagent task. If a name is provided but no existing subagent matches, a new subagent is spawned with that name.`,
   {
@@ -390,7 +395,7 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
     properties: {
       task_id: {
         type: "string",
-        description: "The subagent task ID to query. If omitted, a new task is created.",
+        description: "The subagent task ID to message. If omitted, a new task is created.",
       },
       subagent_name: {
         type: "string",
@@ -398,7 +403,7 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       },
       message: {
         type: "string",
-        description: "The message to send to the subagent.",
+        description: "The message to deliver to the subagent.",
       },
       description: {
         type: "string",
@@ -423,30 +428,32 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
 
     // Dynamically import to avoid circular deps.
     const { useSubagentStore } = await import("@/stores/subagent-store");
-    const { executeSubagentTurn } = await import("@/lib/agent/subagent-runtime");
     const store = useSubagentStore.getState();
 
     let subagentId: string;
+    let task: SubagentTask | undefined;
 
     if (taskId) {
       // Existing task — find the subagent.
-      const task = taskStore.get(taskId);
-      if (!task) {
+      const existingTask = taskStore.get(taskId);
+      if (!existingTask) {
         return { error: `Task ${taskId} not found.` };
       }
+      task = existingTask;
       // Use subagent_id if available (most reliable), else find by name.
       let existing: SubagentConfig | undefined;
-      if (task.subagent_id) {
-        existing = store.getSubagent(task.subagent_id);
+      if (existingTask.subagent_id) {
+        existing = store.getSubagent(existingTask.subagent_id);
       }
       if (!existing) {
-        existing = store.subagents.find((s) => s.name === task.subagent_name);
+        existing = store.subagents.find((s) => s.name === existingTask.subagent_name);
       }
       if (!existing) {
-        return { error: `Subagent "${task.subagent_name}" no longer exists. It may have been deleted. Spawn a new one with spawn_subagent.` };
+        return { error: `Subagent "${existingTask.subagent_name}" no longer exists. It may have been deleted. Spawn a new one with spawn_subagent.` };
       }
-      // Allow querying disposed agents — re-enable them so they can be used again.
-      // The user should be able to message a subagent even after it was disposed.
+      // Allow messaging disposed agents — re-enable them so they can be
+      // used again. The user should be able to message a subagent even
+      // after it was disposed.
       if (existing.lifecycle_status === "disposed" || !existing.enabled) {
         store.updateSubagent(existing.id, {
           enabled: true,
@@ -485,35 +492,31 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
         role: existing.role,
       };
       taskStore.set(newTask.task_id, newTask);
+      task = newTask;
       emitStatus(newTask);
     }
 
-    // Update task status.
-    const task = Array.from(taskStore.values()).find((t) => t.subagent_name === store.getSubagent(subagentId)?.name);
+    // Task + lifecycle bookkeeping — this agent is now actively working.
     if (task) {
       task.status = "running";
       emitStatus(task);
     }
-    // Lifecycle: this agent is now actively working.
     try {
       store.updateLifecycleStatus(subagentId, "working");
     } catch {
       // best-effort
     }
 
+    // ── DELIVERY (fire-and-forget boundary) ─────────────────────────────
+    // startSubagentTurn returns SYNCHRONOUSLY once the message is persisted
+    // into the target subagent's chat session (delivery confirmed); the
+    // generation loop runs DETACHED and writes its stream/tools/result into
+    // that session on its own. The ONLY failure that fails this tool is a
+    // delivery failure — the message could not be accepted at all.
+    let delivery;
     try {
-      const reply = await executeSubagentTurn(subagentId, message);
-      if (task) {
-        task.status = "completed";
-        emitStatus(task);
-        emitMessage(task.task_id, "result", reply);
-      }
-      try {
-        useSubagentStore.getState().updateLifecycleStatus(subagentId, "completed");
-      } catch {
-        // best-effort
-      }
-      return { subagent_name: store.getSubagent(subagentId)?.name, reply };
+      const { startSubagentTurn } = await import("@/lib/agent/subagent-runtime");
+      delivery = startSubagentTurn(subagentId, message);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (task) {
@@ -526,8 +529,37 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       } catch {
         // best-effort
       }
-      return { error: errMsg };
+      return { error: `DELIVERY_FAILED: ${errMsg}` };
     }
+
+    // Detached settle bookkeeping — status events for the subagent panel.
+    // This NEVER blocks the tool result; the target's own outcome (reply or
+    // error text) lands in its session, visible via read_chat.
+    void delivery.completion.then((reply) => {
+      if (task) {
+        task.status = "completed";
+        emitStatus(task);
+        emitMessage(task.task_id, "result", reply);
+      }
+      try {
+        useSubagentStore.getState().updateLifecycleStatus(subagentId, "completed");
+      } catch {
+        // best-effort
+      }
+    });
+
+    const agentName = useSubagentStore.getState().getSubagent(subagentId)?.name ?? "subagent";
+    return {
+      status: "sent",
+      task_id: task?.task_id,
+      subagent_name: agentName,
+      target_agent_id: subagentId,
+      target_chat_id: delivery.sessionId,
+      message_id: delivery.userMessageId,
+      message:
+        `Message sent successfully. ${agentName} is continuing independently — its reply is NOT included here. ` +
+        `Call read_chat with chat_id "${delivery.sessionId}" to inspect its output so far (works while it is still streaming); call it again later for more.`,
+    };
   },
   false,
   "orchestration",
@@ -829,7 +861,7 @@ registerTool(
   "manage_subagent_chat",
   `Manage chat SESSIONS with subagents — one tool for all session operations. Sessions persist across page refreshes. Pass \`action\` plus the fields that action needs:
 
-- action "create": create a new chat session with a subagent (auto-creates the subagent if it doesn't exist). Requires \`subagent_name\`; optional \`title\`, \`description\` + \`specialty\` + \`system_prompt\` (for auto-created subagents). Returns the session_id — send messages via query_subagent.
+- action "create": create a new chat session with a subagent (auto-creates the subagent if it doesn't exist). Requires \`subagent_name\`; optional \`title\`, \`description\` + \`specialty\` + \`system_prompt\` (for auto-created subagents). Returns the session_id — deliver messages via query_subagent and inspect replies via read_chat.
 - action "delete": delete a session permanently (history is removed). Requires \`session_id\`.
 - action "edit_title": rename a session. Requires \`session_id\` + \`title\`.
 - action "pin": pin (or unpin) a session — pinned chats appear at the top of the list. Requires \`session_id\`; optional \`pinned\` (default true).`,
@@ -908,7 +940,7 @@ registerTool(
         subagent_id: subagent.id,
         subagent_name: subagent.name,
         title: session.title,
-        message: `New chat session created with ${subagent.name}. Use query_subagent with this subagent to send messages.`,
+        message: `New chat session created with ${subagent.name}. Deliver messages via query_subagent (fire-and-forget) and inspect its output via read_chat with chat_id "${session.id}".`,
       };
     }
 

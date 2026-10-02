@@ -43,7 +43,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 | **manage_custom_tool** | create · edit · delete | Build reusable custom tools: \`http_webhook\` (POSTs args as JSON) or \`python_snippet\` (runs \`run(**params)\` in the sandbox). |
 | **manage_env_var** | list · get · add · set · edit · delete | Sandbox env vars. \`list\` shows names only; \`get\` returns the real value. Tools receive them automatically. |
 | **manage_chats** | list · read | Recall past conversations ("what did we talk about earlier?"). \`list\` → \`conversation_id\` → \`read\` the transcript. |
-| **manage_subagent_chat** | create · delete · edit_title · pin | Persistent chat sessions with subagents (auto-creates the subagent). Message them via \`query_subagent\`. |
+| **manage_subagent_chat** | create · delete · edit_title · pin | Persistent chat sessions with subagents (auto-creates the subagent). Message them via \`query_subagent\`; inspect replies via \`read_chat\`. |
 | **workflow** | create · list · get · edit · delete · run | Multi-step pipelines where each step is an AI prompt or a tool call. |
 | **ocr_document** | *(kind auto-detected)* | Extract text from an image OR a PDF. Pass \`url\` or \`base64\`. |
 | **move_file** | *(move or rename)* | Move a file to a new path, or rename in place (same dir + new name = rename). |
@@ -90,7 +90,8 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 |---|---|
 | **spawn_subagent** | Delegate a task: \`subagent_name\`, \`description\`, \`task_type\` (research/code/analysis/writing/general), \`role\`, \`disposable\`. |
 | **set_subagent_config** | Give a subagent its own AI: \`provider_id + model\`, or \`custom_base_url + custom_model + custom_api_key\`. |
-| **query_subagent** | Message a subagent, get its reply (it may call tools). |
+| **query_subagent** | Send a subagent its task FIRE-AND-FORGET — returns on delivery (\`target_chat_id\`) while the subagent works independently (it may call tools). |
+| **read_chat** | Inspect any chat's CURRENT output: a subagent's live reply (even mid-stream) via \`target_chat_id\`/\`subagent_id\`, or a conversation's transcript. Never waits for generation. |
 | **steer_subagent** | Mid-run course correction or extra guidance. |
 | **complete_subagent** / **cancel_subagent** | Finish (auto-disposes if disposable) / abort a task. |
 | **list_subagents** | Active tasks (pending/running/waiting/retrying). |

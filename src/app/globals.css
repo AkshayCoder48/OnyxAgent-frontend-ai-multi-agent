@@ -3389,40 +3389,46 @@ html.theme-transitioning .animate-backdrop {
   }
 }
 
-/* ===== Letter stream — typewriter reveal (whole-response fade era) =====
-   The typewriter (useTypewriter) still paces the character-by-character
-   reveal, but the revealed characters render as PLAIN TEXT — the class is
-   kept as a NO-OP so any stray usage renders plain instead of
-   re-introducing per-word / per-character fades (user spec, 2026-09-29:
-   "make whole response fade, not just the word"). The one fade that exists
-   is the WHOLE-RESPONSE fade below. */
+/* ===== Character-level streaming fade (animation state ≠ text state) =====
+   The fade unit is the CHARACTER (never a word, chunk or block): each
+   freshly revealed char mounts as a `.letter-in` span that animates ONCE
+   from opacity 0.5 / blur(5px) to full ink, with a 0.02s/char stagger set
+   inline by the markdown renderer (stable per-index keys — nothing ever
+   re-animates).
+
+   FILL-MODE SAFETY (the "final text must be normal text" rule): the
+   animation uses `backwards`, NOT `both`/`forwards`. `backwards` shows the
+   from-state only during the stagger delay; the moment the animation ends
+   the span reverts to its NATURAL styles — opacity 1, filter none, the
+   inherited theme foreground. There is NO fill-forward state that could
+   leave a character grey, dimmed or blurred after completion. And because
+   older chars age out of the fresh window back to PLAIN TEXT (spans
+   unmount), the settled message is plain strings at natural styles.
+
+   PARENT OPACITY RULE: nothing up the tree (message, markdown wrapper,
+   stream wrapper, thinking container) carries a persistent opacity/filter —
+   a child can never be full-white under a faded parent. The old
+   whole-response `.response-live` dim (opacity 0.7 + blur on the ENTIRE
+   response while streaming) is REMOVED: it dimmed already-completed text
+   and leaked into the final state whenever a streaming flag stuck. */
 .letter-in {
   display: inline;
-  animation: none;
+  animation: letter-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
-
-/* ===== Whole-response streaming fade =====
-   The fade unit is the ENTIRE response block (message-item wraps every
-   assistant text in `.response-fade`): while the turn streams the whole
-   block sits slightly dimmed (`.response-live` — still "materializing"),
-   and the moment the turn settles the WHOLE response fades to full ink in
-   one smooth motion. One CSS transition on one element — zero per-word,
-   per-line or per-character animation DOM anywhere in the response. */
-.response-fade {
-  transition:
-    opacity 500ms var(--ease-out),
-    filter 500ms var(--ease-out);
-}
-.response-fade.response-live {
-  opacity: 0.7;
-  filter: blur(0.35px);
+@keyframes letter-in {
+  from {
+    opacity: 0.5;
+    filter: blur(5px);
+  }
+  to {
+    /* Matches the span's natural state exactly — even if a fill mode is
+       ever reintroduced, the final frame IS normal text. */
+    opacity: 1;
+    filter: blur(0);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .response-fade {
-    transition: none;
-  }
-  .response-fade.response-live {
-    opacity: 1;
-    filter: none;
+  .letter-in {
+    animation: none;
   }
 }

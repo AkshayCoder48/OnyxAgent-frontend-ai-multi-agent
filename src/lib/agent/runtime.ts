@@ -1918,7 +1918,7 @@ Available tools for incremental writing:
 - read_file_section: Read specific sections for verification and resume
 
 ### Subagent Orchestration (you are an orchestrator)
-Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\`; steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
+Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\` (FIRE-AND-FORGET — it returns the instant the message is delivered, with a \`target_chat_id\`, while the subagent works independently); inspect what a subagent has generated so far — including output it is still streaming — with \`read_chat\` (pass the \`target_chat_id\`; repeat later for more); steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
 
 ### Skills, MCP & dynamic tools
 - MCP servers expose their tools ON DEMAND via \`mcp_search_tools\` → \`mcp_call_tool\` (a single server can host hundreds of tools, so they are NOT pre-loaded into your tool list — search first when a task might need one; configure servers with \`manage_mcp\`). Composio integrations work the same way (\`composio_search_tools\` → \`composio_execute_tool\`).
@@ -1958,8 +1958,8 @@ Automatically delegate when ANY of these are true:
 2. **Analyse** complexity and dependencies (call \`analyze_workspace\` first)
 3. **Plan** the execution graph (which tasks can run in parallel, which are sequential)
 4. **Decompose** into independent work packages
-5. **Delegate** to specialist subagents via spawn_subagent + query_subagent
-6. **Monitor** progress via list_subagents + query_subagent
+5. **Delegate** to specialist subagents via spawn_subagent + query_subagent (delivery-confirmed, non-blocking — subagents run CONCURRENTLY)
+6. **Monitor** progress via read_chat (each subagent's live output, even mid-stream) + list_subagents
 7. **Validate** outputs (check for errors, conflicts, missing pieces)
 8. **Merge** all results into a coherent final response
 9. **Respond** with a single unified answer
