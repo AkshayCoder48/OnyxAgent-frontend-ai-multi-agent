@@ -24,7 +24,6 @@ import { formatDuration } from "./tool-duration";
 import {
   CollapsePanel,
   Orb,
-  ShimmerLabel,
   ThinkingIndicator,
   ThinkingReasoning,
 } from "@/components/assistant-ui/elements";
@@ -35,6 +34,7 @@ import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { extractGenUINodes, buildTextSegments } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
+import { useAiStatusPhrases } from "@/hooks/use-ai-status-phrases";
 import { stripUploadTags } from "@/lib/uploads/registry";
 
 /**
@@ -80,6 +80,15 @@ function ReasoningPanel({
 }) {
   const isThinking = variant === "thinking";
 
+  // AI-written follow-up phrases for the bare thinking line (per-turn,
+  // from the backend LLM — see AgentStatusLine).
+  const taskText = useLastUserTaskText();
+  const aiPhrases = useAiStatusPhrases({
+    activity: isThinking ? "thinking" : "reasoning",
+    task: taskText,
+    enabled: isStreaming,
+  });
+
   // Split the (possibly still-streaming) reasoning text into sentences —
   // the element reveals them row by row. PRD §5 (reasoning formatting):
   // normalize ONLY unintended repeated whitespace — never a blanket trim
@@ -113,6 +122,7 @@ function ReasoningPanel({
     return (
       <ThinkingIndicator
         label={isThinking ? "Thinking" : "Reasoning"}
+        phrases={aiPhrases ?? undefined}
         className="mb-2"
       />
     );
@@ -152,6 +162,20 @@ function ResponseOrbGlyph({ size = 28 }: { size?: number }) {
   return <Orb variant={variant} size={size} className="shrink-0" />;
 }
 
+/** The conversation's LAST user message (the current task), bounded —
+ *  context for the AI-written status phrases. The selector returns a
+ *  primitive, so this only re-renders the host when the task text actually
+ *  changes (a new user message), never per streaming token. */
+function useLastUserTaskText(): string {
+  return useChatStore((s) => {
+    for (let i = s.messages.length - 1; i >= 0; i--) {
+      const m = s.messages[i]!;
+      if (m.role === "user" && m.content) return m.content.slice(0, 400);
+    }
+    return "";
+  });
+}
+
 /**
  * AgentStatusLine — THE one in-place execution status for a STREAMING
  * assistant message WITHOUT tool calls (the classic flow and the legacy
@@ -170,6 +194,16 @@ function ResponseOrbGlyph({ size = 28 }: { size?: number }) {
  */
 function AgentStatusLine({ message }: { message: ChatMessage }) {
   const phase = deriveAgentPhase(message);
+  // AI-WRITTEN STATUS TEXT (user directive): the follow-up phrases cycling
+  // under "Working/Thinking" are generated per-turn by the backend LLM
+  // (/api/status-caption) from the user's request — never the old canned
+  // "Reading the context" rotation.
+  const taskText = useLastUserTaskText();
+  const aiPhrases = useAiStatusPhrases({
+    activity: phase === "working" ? "working" : "thinking",
+    task: taskText,
+    enabled: phase !== null,
+  });
   if (!phase) return null;
   const nothingStreamed =
     (message.parts ?? []).length === 0 && !message.content;
@@ -180,9 +214,12 @@ function AgentStatusLine({ message }: { message: ChatMessage }) {
       aria-live="polite"
     >
       <ResponseOrbGlyph size={nothingStreamed ? 28 : 22} />
-      <ShimmerLabel className="text-sm font-medium">
-        {phase === "working" ? "Working" : "Thinking"}
-      </ShimmerLabel>
+      <ThinkingIndicator
+        showDot={false}
+        label={phase === "working" ? "Working" : "Thinking"}
+        phrases={aiPhrases ?? undefined}
+        className="min-w-0"
+      />
     </div>
   );
 }
@@ -651,6 +688,16 @@ function WorkingPanel({
   // there) — inside the panel the trigger owns it, so null ⇒ "Thinking".
   const phase = streaming ? (deriveAgentPhase(message) ?? "thinking") : null;
 
+  // AI-written follow-up phrases for the live Thinking ⇄ Working trigger
+  // (per-turn, backend LLM — see AgentStatusLine). The panel's own label
+  // always leads the rotation; the AI phrases follow it.
+  const taskText = useLastUserTaskText();
+  const aiPhrases = useAiStatusPhrases({
+    activity: phase === "working" ? "working" : "thinking",
+    task: taskText,
+    enabled: streaming,
+  });
+
   const [expanded, setExpanded] = React.useState(streaming || hasDeliverables);
   const [userToggled, setUserToggled] = React.useState(false);
   // AUTO EXPAND/COLLAPSE (render-time adjustment — no effect, no cascading
@@ -702,10 +749,11 @@ function WorkingPanel({
         {streaming ? (
           // ThinkingIndicator without its dot: a keyed shimmer label —
           // the fade replays every time Thinking switches to Working and
-          // back, per the spec.
+          // back, per the spec. The follow-up phrases are AI-written.
           <ThinkingIndicator
             showDot={false}
             label={phase === "working" ? "Working" : "Thinking"}
+            phrases={aiPhrases ?? undefined}
             className="min-w-0"
           />
         ) : (

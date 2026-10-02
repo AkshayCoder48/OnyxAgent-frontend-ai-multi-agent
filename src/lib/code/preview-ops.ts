@@ -70,13 +70,12 @@ export async function detectScaffold(
       const deps = { ...pkg.dependencies, ...pkg.devDependencies };
       if (deps.next) return getScaffold("nextjs")!;
       if (deps.vite || deps["@vitejs/plugin-react"]) return getScaffold("vite-react")!;
-      if (deps.express) return getScaffold("node")!;
+      // OnyxCode supports only React+Vite / Next.js / static — an express
+      // or python project falls through to the static scaffold rules.
     } catch {
       /* unparseable package.json — fall through */
     }
   }
-  const mainPy = await read("main.py");
-  if (mainPy) return getScaffold("fastapi")!;
   const indexHtml = await read("index.html");
   if (indexHtml) return getScaffold("static")!;
   return getScaffold("static")!;

@@ -31,8 +31,14 @@ export interface CodeScaffold {
   files: (appName: string, description?: string) => ScaffoldFile[];
 }
 
-export const SCAFFOLD_KEYS = ["nextjs", "vite-react", "fastapi", "node", "static", "cli"] as const;
+export const SCAFFOLD_KEYS = ["nextjs", "vite-react", "static"] as const;
 export type ScaffoldKey = (typeof SCAFFOLD_KEYS)[number];
+
+/* OnyxCode framework policy (user directive): ONLY React + Vite,
+ * React + Next.js, and static HTML/CSS/JS sites are supported. The old
+ * fastapi / node / cli scaffolds were removed — any other framework
+ * request (python, express, cli…) resolves to the static scaffold, which
+ * the agent then overwrites with the real app anyway. */
 
 /** Normalize a user/model-provided app name into a safe folder/package name. */
 export function normalizeAppName(raw: string | undefined | null): string {
@@ -309,127 +315,6 @@ h1 span { color: #f7ff42; }
   ],
 };
 
-const fastapi: CodeScaffold = {
-  key: "fastapi",
-  label: "Python FastAPI",
-  description: "FastAPI service with a JSON API + HTML landing page.",
-  port: 3000,
-  installCommand: "pip install -q fastapi uvicorn",
-  serverCommand: (_n, port) => `python3 -m uvicorn main:app --host 0.0.0.0 --port ${port}`,
-  cwd: (appName) => projectDir(appName),
-  files: (appName, description) => [
-    {
-      path: "requirements.txt",
-      content: `fastapi>=0.115.0\nuvicorn>=0.34.0\n`,
-    },
-    {
-      path: "main.py",
-      content: `"""${heroTitle(appName)} — FastAPI service scaffolded by OnyxCode."""
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-
-app = FastAPI(title="${heroTitle(appName).replace(/"/g, "")}")
-
-ITEMS: dict[str, dict] = {
-    "1": {"id": "1", "title": "First item", "done": False},
-    "2": {"id": "2", "title": "Second item", "done": True},
-}
-
-
-@app.get("/", response_class=HTMLResponse)
-def home() -> str:
-    return PAGE
-
-
-@app.get("/health")
-def health() -> dict:
-    return {"ok": True, "app": "${appName}"}
-
-
-@app.get("/items")
-def list_items() -> list[dict]:
-    return list(ITEMS.values())
-
-
-@app.post("/items/{item_id}/toggle")
-def toggle(item_id: str) -> dict:
-    item = ITEMS.get(item_id)
-    if item is None:
-        return {"error": "not found"}
-    item["done"] = not item["done"]
-    return item
-
-
-PAGE = """${htmlPage({ appName, framework: "FastAPI", accent: "#5ee6c4", accentSoft: "#5ee6c41f", bg: "#0a1210", fg: "#eefcf7", description })}"""
-`,
-    },
-    { path: "README.md", content: `# ${heroTitle(appName)}\n\nFastAPI service scaffolded by OnyxCode.\n\n- \`uvicorn main:app --reload\` — dev server\n- \`GET /health\`, \`GET /items\`, \`POST /items/{id}/toggle\` — API\n` },
-  ],
-};
-
-const node: CodeScaffold = {
-  key: "node",
-  label: "Node.js",
-  description: "Node.js + Express web server.",
-  port: 3000,
-  installCommand: "npm install --no-audit --no-fund --loglevel=error",
-  serverCommand: (_n, port) => `PORT=${port} node server.js`,
-  cwd: (appName) => projectDir(appName),
-  files: (appName, description) => [
-    {
-      path: "package.json",
-      content: JSON.stringify(
-        {
-          name: appName,
-          private: true,
-          version: "0.1.0",
-          type: "commonjs",
-          scripts: { start: "node server.js" },
-          dependencies: { express: "^4.21.2" },
-        },
-        null,
-        2,
-      ),
-    },
-    {
-      path: "server.js",
-      content: `// ${heroTitle(appName)} — Express server scaffolded by OnyxCode.
-const express = require("express");
-const path = require("path");
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-const items = [
-  { id: "1", title: "First item", done: false },
-  { id: "2", title: "Second item", done: true },
-];
-
-app.use(express.json());
-app.get("/api/health", (_req, res) => res.json({ ok: true, app: ${JSON.stringify(appName)} }));
-app.get("/api/items", (_req, res) => res.json(items));
-app.post("/api/items/:id/toggle", (req, res) => {
-  const item = items.find((i) => i.id === req.params.id);
-  if (!item) return res.status(404).json({ error: "not found" });
-  item.done = !item.done;
-  res.json(item);
-});
-app.use(express.static(__dirname));
-app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "index.html")));
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(\`${appName} listening on port \${PORT}\`);
-});
-`,
-    },
-    {
-      path: "index.html",
-      content: htmlPage({ appName, framework: "Node.js + Express", accent: "#8ee98b", accentSoft: "#8ee98b1f", bg: "#0b100d", fg: "#f0fbef", description }),
-    },
-    { path: "README.md", content: `# ${heroTitle(appName)}\n\nNode.js + Express server scaffolded by OnyxCode.\n\n- \`npm start\` — run the server\n- \`GET /api/health\`, \`GET /api/items\` — API\n` },
-  ],
-};
-
 const staticSite: CodeScaffold = {
   key: "static",
   label: "Static site",
@@ -450,91 +335,25 @@ const staticSite: CodeScaffold = {
   ],
 };
 
-const cliTool: CodeScaffold = {
-  key: "cli",
-  label: "CLI tool",
-  description: "Node.js CLI tool (no preview server — run it with run_terminal).",
-  port: 3000,
-  installCommand: null,
-  serverCommand: null, // CLI tools have no dev server.
-  cwd: (appName) => projectDir(appName),
-  files: (appName, description) => [
-    {
-      path: "package.json",
-      content: JSON.stringify(
-        {
-          name: appName,
-          private: true,
-          version: "0.1.0",
-          type: "module",
-          bin: { [appName]: "./cli.js" },
-        },
-        null,
-        2,
-      ),
-    },
-    {
-      path: "cli.js",
-      content: `#!/usr/bin/env node
-// ${heroTitle(appName)} — CLI tool scaffolded by OnyxCode.
-import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
-
-const root = process.argv[2] || ".";
-
-async function walk(dir, depth = 0) {
-  const entries = await readdir(dir, { withFileTypes: true });
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  for (const e of entries) {
-    if (e.name.startsWith(".") || e.name === "node_modules") continue;
-    const full = join(dir, e.name);
-    const pad = "  ".repeat(depth);
-    if (e.isDirectory()) {
-      console.log(\`\${pad}\${e.name}/\`);
-      await walk(full, depth + 1);
-    } else {
-      const s = await stat(full);
-      const kb = (s.size / 1024).toFixed(1);
-      console.log(\`\${pad}\${e.name}  (\${kb} KB)\`);
-    }
-  }
-}
-
-console.log(\`# ${appName} — file tree (\${root})\`);
-walk(root).catch((err) => {
-  console.error("Error:", err.message);
-  process.exit(1);
-});
-`,
-    },
-    {
-      path: "README.md",
-      content: `# ${heroTitle(appName)}\n\nCLI tool scaffolded by OnyxCode.\n\n\`\`\`bash\nnode cli.js .\n\`\`\`\n\n${description ? description + "\n" : ""}`,
-    },
-  ],
-};
-
 export const SCAFFOLDS: Record<ScaffoldKey, CodeScaffold> = {
   nextjs,
   "vite-react": viteReact,
-  fastapi,
-  node,
   static: staticSite,
-  cli: cliTool,
 };
 
 export function getScaffold(key: string | undefined | null): CodeScaffold | null {
   if (!key) return null;
   const normalized = key.toLowerCase().trim();
   if (normalized in SCAFFOLDS) return SCAFFOLDS[normalized as ScaffoldKey];
-  // Fuzzy fallbacks for model-provided keys.
+  // Fuzzy fallbacks for model-provided keys. OnyxCode only supports
+  // React+Vite, Next.js and static sites — every other framework request
+  // (python/fastapi/express/node/cli/…) resolves to the static scaffold
+  // (zero build step, the agent replaces the placeholder with the real
+  // app files immediately after create_app anyway).
   if (/react/.test(normalized) && /vite/.test(normalized)) return viteReact;
   if (/next/.test(normalized)) return nextjs;
-  if (/python|fastapi|flask|uvicorn/.test(normalized)) return fastapi;
-  if (/express|node/.test(normalized)) return node;
-  if (/html|static|site/.test(normalized)) return staticSite;
-  if (/cli|script|command/.test(normalized)) return cliTool;
-  return null;
+  if (/html|static|site|vanilla/.test(normalized)) return staticSite;
+  return staticSite;
 }
 
 export function scaffoldKeysDescription(): string {

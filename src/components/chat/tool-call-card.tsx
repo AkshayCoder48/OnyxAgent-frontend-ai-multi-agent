@@ -136,6 +136,130 @@ function liveArgsPhase(toolCall: ToolCall): {
   return { hint: settledArgHint(toolCall.args), phase: "executing" };
 }
 
+/* ------------------------------------------------------------------ */
+/* LIVE WRITING PREVIEW (user directive 2026-10-02: "the tool calls   */
+/* writing isn't visible — the card appears when the AI completes     */
+/* writing"). While the model streams a tool call's arguments, the    */
+/* payload being written (file content / code / spec) is now shown    */
+/* LIVE inside the card — the user literally watches the AI write,    */
+/* instead of a static caption followed by a sudden finished card.    */
+/* ------------------------------------------------------------------ */
+
+/** Argument fields whose string value is the thing being "written". */
+const WRITE_FIELD_RE =
+  /"(?:content|new_content|new_string|code|html|text|body|diff|spec|command|script)"\s*:\s*"/g;
+
+/** Single-pass JSON string unescape for an OPEN (unterminated) value —
+ *  a trailing partial escape ("…\\u00e" / bare "…\\") is dropped first
+ *  so the tail never shows escape garbage mid-write. */
+function unescapeOpenJsonString(s: string): string {
+  let str = s;
+  const dangling = /\\(?:u[0-9a-fA-F]{0,3})?$/.exec(str);
+  if (dangling) str = str.slice(0, str.length - dangling[0]!.length);
+  return str.replace(
+    /\\(u[0-9a-fA-F]{4}|n|r|t|b|f|"|\\)/g,
+    (_m, g: string) => {
+      if (g[0] === "u") {
+        return String.fromCharCode(Number.parseInt(g.slice(1), 16));
+      }
+      if (g === "n") return "\n";
+      if (g === "r") return "\r";
+      if (g === "t") return "\t";
+      if (g === "b") return "\b";
+      if (g === "f") return "\f";
+      return g; // " and \\
+    },
+  );
+}
+
+export interface LiveWriteStream {
+  /** The unescaped payload text written so far (may be huge). */
+  text: string;
+  /** Raw JSON length of the value (cheap live counter). */
+  rawLen: number;
+}
+
+/** Extract the growing write-payload (file content, code, spec…) from a
+ *  PARTIAL JSON arguments string. Bounded work per 16 ms batch: the field
+ *  locator scans only the first 4 KB; the value walk is a single pass.
+ *  Returns the LONGEST write field found (the payload, not a label), or
+ *  null when nothing big enough is streaming yet. */
+function extractWriteStream(partial: string): LiveWriteStream | null {
+  if (!partial || partial.length < 80) return null;
+  const scan = partial.slice(0, 4096);
+  WRITE_FIELD_RE.lastIndex = 0;
+  let best: LiveWriteStream | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = WRITE_FIELD_RE.exec(scan)) !== null) {
+    const rest = partial.slice(m.index + m[0]!.length);
+    // Walk to the closing unescaped quote (or the end while still open).
+    let end = rest.length;
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i]!;
+      if (c === "\\") {
+        i++; // skip the escaped char
+        continue;
+      }
+      if (c === '"') {
+        end = i;
+        break;
+      }
+    }
+    const raw = rest.slice(0, end);
+    if (raw.length > (best?.rawLen ?? 0)) {
+      best = { text: unescapeOpenJsonString(raw), rawLen: raw.length };
+    }
+  }
+  if (!best || best.text.trim().length < 80) return null;
+  return best;
+}
+
+/** How much of the written payload to show live (the TAIL — the write
+ *  head is always at the bottom, like a terminal). */
+const LIVE_WRITE_TAIL = 900;
+
+/** LIVE WRITING PREVIEW — the growing payload, auto-scrolled to the write
+ *  head, with a char/line counter. Shown while the model is still
+ *  generating the tool call's arguments (phase "generating"). */
+function LiveWritePreview({
+  stream,
+  label,
+}: {
+  stream: LiveWriteStream;
+  label: string | null;
+}) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const text = stream.text;
+  useEffect(() => {
+    if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [text]);
+  const tail = text.length > LIVE_WRITE_TAIL ? `…${text.slice(-LIVE_WRITE_TAIL)}` : text;
+  const lines = (text.match(/\n/g) ?? []).length + 1;
+  return (
+    <div className="mt-1.5 ml-5 min-w-0 overflow-hidden rounded-lg border border-foreground/10 bg-foreground/[0.03]">
+      <div className="flex items-center justify-between gap-2 border-b border-foreground/8 px-2.5 py-1.5">
+        <span className="flex min-w-0 items-center gap-1.5 text-[10px] font-medium tracking-wide uppercase text-muted-foreground">
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary/80" aria-hidden />
+          <span className="shrink-0">Writing</span>
+          {label && (
+            <span className="min-w-0 truncate font-mono normal-case tracking-normal text-foreground/60">{label}</span>
+          )}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/80">
+          {stream.rawLen.toLocaleString()} chars · {lines.toLocaleString()} lines
+        </span>
+      </div>
+      <pre
+        ref={preRef}
+        className="scrollbar-thin max-h-40 overflow-y-auto p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words text-foreground/85"
+      >
+        {tail}
+        <OrbCursor variant="C2" size={11} />
+      </pre>
+    </div>
+  );
+}
+
 /**
  * ToolCallCard — ONE card per tool call, in exactly ONE style per display
  * mode (the "no duplicates" rule):
@@ -182,6 +306,21 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const { hint: liveHint, phase: livePhase } = useMemo(
     () => liveArgsPhase(toolCall),
     [toolCall],
+  );
+
+  // LIVE WRITING PREVIEW (user directive 2026-10-02): while the model is
+  // still WRITING this call's arguments, the payload itself (file content /
+  // code / spec) streams visibly inside the card — the user watches the AI
+  // write in real time instead of a caption-only wait followed by a sudden
+  // finished card.
+  const liveWrite = useMemo(
+    () =>
+      livePhase === "generating"
+        ? extractWriteStream(
+            (toolCall.args as { _streaming?: string })?._streaming ?? "",
+          )
+        : null,
+    [livePhase, toolCall],
   );
 
   // ── Inline payloads ──────────────────────────────────────────────────
@@ -358,6 +497,10 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           </>
         )}
       </div>
+
+      {/* LIVE WRITING PREVIEW — the payload being written, streaming in
+          real time while the arguments are still generating. */}
+      {liveWrite && <LiveWritePreview stream={liveWrite} label={liveHint} />}
 
       {/* Inline content payloads (content, never chrome). */}
       {isShowTodo && isCompleted && (
@@ -1118,6 +1261,10 @@ function RunningToolPanel({
   // Show streaming args when the tool is pending (LLM composing) OR running
   // (tool executing but _streaming args haven't been replaced yet).
   const streamingArgs = (toolCall.args as { _streaming?: string })?._streaming;
+  // Readable write-payload (file content / code / spec) extracted from the
+  // partial JSON — shown INSTEAD of the raw JSON when present (the user
+  // watches the AI write the file, not escaped JSON).
+  const writeStream = streamingArgs ? extractWriteStream(streamingArgs) : null;
 
   // Pick the most informative arg to display
   const previewArg =
@@ -1153,16 +1300,22 @@ function RunningToolPanel({
 
       {/* Streaming args — keep visible while pending OR running.
           DON'T delete when the tool starts running — the user wants to see
-          what command/code is being executed. Only hide if the final parsed
-          args replace them (previewArg is shown instead). */}
-      {streamingArgs && (
-        <div className="bg-foreground/[0.03] rounded-lg border border-foreground/8 p-3">
-          <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide uppercase">
-            {toolCall.status === "pending" ? "Composing" : "Arguments"}
+          what command/code is being executed. When a write-payload (file
+          content / code / spec) is detectable in the partial JSON, the
+          READABLE extracted value is shown instead of the raw JSON (user
+          directive 2026-10-02: the writing must be visible while it
+          happens). */}
+      {streamingArgs &&
+        (writeStream ? (
+          <LiveWritePreview stream={writeStream} label={streamingArgHint(streamingArgs)} />
+        ) : (
+          <div className="bg-foreground/[0.03] rounded-lg border border-foreground/8 p-3">
+            <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide uppercase">
+              {toolCall.status === "pending" ? "Composing" : "Arguments"}
+            </div>
+            <StreamingArgsDisplay args={streamingArgs} />
           </div>
-          <StreamingArgsDisplay args={streamingArgs} />
-        </div>
-      )}
+        ))}
       {/* Show the final args when the tool is running AND streaming args
           are gone (replaced by parsed args). If streaming args still exist,
           they're shown above — don't duplicate. */}

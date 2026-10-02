@@ -15,7 +15,7 @@ import type { ChatMessageFile } from "@/types";
  */
 
 const CAPABILITIES = [
-  { icon: Boxes, label: "6 scaffolds" },
+  { icon: Boxes, label: "React + Vite · Next.js · Static" },
   { icon: Globe, label: "Live preview" },
   { icon: Database, label: "OnyxBase database" },
   { icon: TerminalSquare, label: "Full agent tools" },

@@ -25,7 +25,7 @@ const NO_KEY_ERROR =
  */
 registerTool(
   "create_app",
-  `Scaffold a new application project in the E2B sandbox workspace (OnyxCode). Supported frameworks: ${scaffoldKeysDescription()}. Creates the project under /home/user/projects/<name> with real, runnable files. The scaffold ships a PLACEHOLDER landing page — after creating the app you MUST write the REAL app the user asked for (replace the placeholder index/app page with the actual content, pages, styles and behavior) using create_file_chunk with paths like projects/<name>/app/page.tsx, then call start_preview. Never present the placeholder scaffold page as the finished app. For CLI tools there is no preview — run them with run_terminal.`,
+  `Scaffold a new application project in the E2B sandbox workspace (OnyxCode). Supported frameworks: ${scaffoldKeysDescription()} — ONLY these are supported (no Python/Node.js backends, no CLI tools). Creates the project under /home/user/projects/<name> with real, runnable files. The scaffold ships a PLACEHOLDER landing page — after creating the app you MUST write the REAL app the user asked for (replace the placeholder index/app page with the actual content, pages, styles and behavior) using create_file_chunk with paths like projects/<name>/app/page.tsx, then call start_preview. Never present the placeholder scaffold page as the finished app.`,
   {
     type: "object",
     properties: {
