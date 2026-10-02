@@ -197,3 +197,108 @@ export function resolveSchedulerKey(headerKey: string | null | undefined): strin
   const fromEnv = (process.env.ONYXBASE_SCHEDULER_KEY ?? "").trim();
   return fromEnv || null;
 }
+
+// ---------------------------------------------------------------------------
+// CachedSchedulerKV — the scheduler request-storm fix
+// ---------------------------------------------------------------------------
+
+/**
+ * SHORT-TTL READ CACHE (per OnyxBase key).
+ *
+ * Live-diagnosed (2026-10-03): the browser pollers (sidebar convergence,
+ * server-chat pull, scheduler heartbeat — one of each per open client)
+ * plus the tick engine's OWN re-reads made every /api/scheduler request do
+ * 5-30 SEQUENTIAL OnyxBase roundtrips (listKeys unions, per-task version
+ * gets, run envelopes) — 2-5s per "list" and 14-18s per full tick. With
+ * several clients polling, those slow requests held the browser's
+ * per-origin connection pool open continuously, so the router's RSC fetch
+ * for a route change (e.g. Agent ⇄ OnyxCode, Settings) QUEUED BEHIND THEM
+ * — the reported "takes 20-40 seconds to navigate" lag.
+ *
+ * This wrapper caches reads for a few seconds (module-level, so every
+ * request on a warm instance shares it) and invalidates precisely on
+ * writes. Safety analysis:
+ *  - listKeys: invalidated on EVERY set/delete (version records mint NEW
+ *    keys, so the key universe changes) — staleness window ≈ the write
+ *    itself, same as before.
+ *  - get: read-your-write on set; deleted on delete. The tick-lock get is
+ *    cached too — the lock is an OPTIMIZATION (run ids are deterministic
+ *    per occurrence, double ticks can never double-run a task), and the
+ *    in-process tick collapse in the route is now the primary guard.
+ */
+const KV_CACHE_TTL_MS = 12_000;
+
+interface CacheBox<T> {
+  at: number;
+  value: T;
+}
+
+const kvListCache = new Map<string, CacheBox<string[]>>();
+const kvGetCache = new Map<string, CacheBox<string | null>>();
+
+/** Per-key cache scope — users never cross-read each other's state. */
+function kvCacheScope(apiKey: string): string {
+  let h = 0;
+  for (let i = 0; i < apiKey.length; i++) h = (h * 31 + apiKey.charCodeAt(i)) | 0;
+  return `${h.toString(36)}:${apiKey.length}`;
+}
+
+function pruneKvCaches(): void {
+  const cutoff = Date.now() - KV_CACHE_TTL_MS;
+  for (const [k, v] of kvListCache) if (v.at < cutoff) kvListCache.delete(k);
+  for (const [k, v] of kvGetCache) if (v.at < cutoff) kvGetCache.delete(k);
+}
+
+export class CachedSchedulerKV extends SchedulerKV {
+  private readonly scope: string;
+
+  constructor(apiKey: string, baseUrl?: string | null) {
+    super(apiKey, baseUrl);
+    this.scope = kvCacheScope(apiKey.trim());
+  }
+
+  async listKeys(prefix: string): Promise<string[]> {
+    const key = `${this.scope}:${prefix}`;
+    const hit = kvListCache.get(key);
+    if (hit && Date.now() - hit.at < KV_CACHE_TTL_MS) return [...hit.value];
+    const value = await super.listKeys(prefix);
+    kvListCache.set(key, { at: Date.now(), value });
+    if (kvListCache.size > 64 || kvGetCache.size > 512) pruneKvCaches();
+    return [...value];
+  }
+
+  async get(key: string): Promise<string | null> {
+    const ck = `${this.scope}:${key}`;
+    const hit = kvGetCache.get(ck);
+    if (hit && Date.now() - hit.at < KV_CACHE_TTL_MS) return hit.value;
+    const value = await super.get(key);
+    kvGetCache.set(ck, { at: Date.now(), value });
+    if (kvListCache.size > 64 || kvGetCache.size > 512) pruneKvCaches();
+    return value;
+  }
+
+  /** A write changes the value AND (version records) the key universe. */
+  private invalidate(key: string): void {
+    kvGetCache.delete(`${this.scope}:${key}`);
+    for (const k of kvListCache.keys()) {
+      if (k.startsWith(`${this.scope}:`)) kvListCache.delete(k);
+    }
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    await super.set(key, value);
+    this.invalidate(key);
+    // read-your-write — the next read must observe this write.
+    kvGetCache.set(`${this.scope}:${key}`, { at: Date.now(), value });
+  }
+
+  async delete(key: string): Promise<void> {
+    await super.delete(key);
+    this.invalidate(key);
+  }
+}
+
+/** Construct a read-cached scheduler KV (drop-in for `new SchedulerKV`). */
+export function cachedSchedulerKv(apiKey: string, baseUrl?: string | null): CachedSchedulerKV {
+  return new CachedSchedulerKV(apiKey, baseUrl);
+}

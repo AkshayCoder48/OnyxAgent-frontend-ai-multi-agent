@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import type { Conversation } from "@/types";
 import type { SafeScheduledTask } from "@/lib/scheduler/types";
-import { schedulerApi } from "@/lib/scheduler/client";
+import { noteSchedulerTasks, schedulerApi } from "@/lib/scheduler/client";
 import {
   addLinkedChat,
   CHAT_LINKS_CHANGED_EVENT,
@@ -392,8 +392,10 @@ function useLinkedChatIds(): Set<string> {
   return linked;
 }
 
-/** Converge the link registry with the server's task list every 30s while
- *  the sidebar is mounted (silent; failures never touch the registry). */
+/** Converge the link registry with the server's task list every 60s while
+ *  the sidebar is mounted (silent; failures never touch the registry).
+ *  Also feeds the zero-task tick skip (noteSchedulerTasks) — with no
+ *  scheduled tasks the heartbeat skips its expensive tick entirely. */
 function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
   const linked = useLinkedChatIds();
   useEffect(() => {
@@ -402,6 +404,7 @@ function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
     const converge = async () => {
       const res = await schedulerApi(userId, "list");
       if (cancelled || !res.ok || !Array.isArray(res.tasks)) return;
+      noteSchedulerTasks(res.tasks.length);
       const serverIds = new Set<string>();
       for (const task of res.tasks) {
         const chatId = (task as SafeScheduledTask).chatId;
@@ -419,7 +422,7 @@ function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
       // registry, which re-renders the badge set.
     };
     void converge().catch(() => {});
-    const id = window.setInterval(() => void converge().catch(() => {}), 30_000);
+    const id = window.setInterval(() => void converge().catch(() => {}), 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(id);

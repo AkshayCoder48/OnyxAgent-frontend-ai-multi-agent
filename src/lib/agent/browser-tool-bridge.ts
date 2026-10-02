@@ -96,6 +96,43 @@ function markBridgeDone(key: string): void {
   }
 }
 
+/** Derive the SAME bridge file token the sandbox runner uses — the ack
+ * file the runner polls for MUST land at the exact path it expects. */
+function bridgeToken(call: { callId: string; name: string }): string {
+  // NOTE: mirrors the runner exactly — `callId || name` fallback, then the
+  // charset scrub + 80-char cap. A mismatch would make the runner's ack
+  // poll miss the file and fast-fail a healthy call.
+  return (
+    String(call.callId || call.name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call"
+  );
+}
+
+/** Write a file into the run's sandbox through /api/sandbox write_file
+ * (the same transport the result write-back uses). */
+async function writeSandboxFile(
+  e2bApiKey: string,
+  sandboxId: string,
+  conversationId: string,
+  sandboxPath: string,
+  content: string,
+): Promise<void> {
+  const res = await fetch("/api/sandbox", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiKey: e2bApiKey,
+      conversationId,
+      sandboxId,
+      action: "write_file",
+      args: { path: sandboxPath, content },
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error("Bridge write-back failed (HTTP " + res.status + "): " + text.slice(0, 200));
+  }
+}
+
 /** Write the bridge result file into the run's sandbox (same path the
  *  runner polls). Passes sandboxId so cold serverless instances reconnect
  *  to the RIGHT sandbox, and conversationId so warm instances hit the
@@ -105,27 +142,16 @@ async function writeBridgeResult(
   sandboxId: string,
   conversationId: string,
   callId: string,
+  name: string,
   payload: { ok: true; result: unknown } | { ok: false; error: string },
 ): Promise<void> {
-  const token = String(callId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
-  const res = await fetch("/api/sandbox", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      apiKey: e2bApiKey,
-      conversationId,
-      sandboxId,
-      action: "write_file",
-      args: {
-        path: ".onyx/bridge/" + token + ".res.json",
-        content: JSON.stringify(payload),
-      },
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error("Bridge write-back failed (HTTP " + res.status + "): " + text.slice(0, 200));
-  }
+  await writeSandboxFile(
+    e2bApiKey,
+    sandboxId,
+    conversationId,
+    ".onyx/bridge/" + bridgeToken({ callId, name }) + ".res.json",
+    JSON.stringify(payload),
+  );
 }
 
 /** Collect the browser-registry tools the background runner should expose as
@@ -156,11 +182,25 @@ export function collectBridgeableTools(
  * event replay loop — the sandbox runner serializes ordering itself).
  */
 export async function handleBrowserToolCall(call: BrowserToolCall): Promise<void> {
+  // ACK FIRST (the 240s timeout fix): the moment this browser receives the
+  // call it writes .ack.json — the runner's liveness signal. When no tab
+  // is open, no ack ever lands and the runner fails fast (~25s) instead of
+  // burning its full 240s timeout on every bridged tool call. Best-effort:
+  // an ack write failure never kills the call (the runner would time out
+  // exactly as before).
+  await writeSandboxFile(
+    call.e2bApiKey,
+    call.sandboxId,
+    call.conversationId,
+    ".onyx/bridge/" + bridgeToken(call) + ".ack.json",
+    JSON.stringify({ ok: true, ack: true, at: Date.now() }),
+  ).catch(() => {});
+
   const dedupKey = bridgeDoneKey(call);
   if (isBridgeDone(dedupKey)) return; // replay after reload — already handled
 
   const writeBack = (payload: { ok: true; result: unknown } | { ok: false; error: string }) =>
-    writeBridgeResult(call.e2bApiKey, call.sandboxId, call.conversationId, call.callId, payload);
+    writeBridgeResult(call.e2bApiKey, call.sandboxId, call.conversationId, call.callId, call.name, payload);
 
   const tool = getTool(call.name);
   if (!tool) {

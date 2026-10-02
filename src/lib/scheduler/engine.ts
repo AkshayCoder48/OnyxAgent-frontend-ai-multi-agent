@@ -72,8 +72,13 @@ const MAX_CONCURRENT_RUNS = 2;
 const RUN_STALE_MS = 55 * 60_000;
 /** Consecutive unreachable finalization checks before declaring failure. */
 const MAX_UNREACHABLE_CHECKS = 5;
-/** Tick lock window — overlapping triggers (cron + heartbeat) collapse. */
-const TICK_LOCK_MS = 20_000;
+/** Tick lock window. 55s (was 20s): with heartbeats at 60s per client and
+ * multiple clients staggered, a 20s lock still admitted a FULL evaluation
+ * (14-18s of sequential KV roundtrips) every few seconds — the
+ * request-storm that starved route navigation. At 55s at most one full
+ * evaluation runs per minute per process (see the route-level collapse);
+ * the KV lock remains the CROSS-process guard. */
+const TICK_LOCK_MS = 55_000;
 /** One-time catch-up grace: a "once" occurrence fires late within 24h. */
 const ONCE_CATCHUP_GRACE_MS = 24 * 60 * 60_000;
 /** Retry backoff base for transient launch failures. */
@@ -136,7 +141,10 @@ function taskReplicaKey(id: string): string {
 /** Robust prefix list — OnyxBase's list endpoint IGNORES the prefix query
  *  param (returns the whole collection; filter client-side) and can hit a
  *  stale instance showing only part of the namespace. Two passes with a
- *  settle delay, results unioned. */
+ *  settle delay, results unioned. The 1s settle only runs when the
+ *  previous pass FAILED or came back empty — a healthy first pass needs
+ *  no settle before its paranoia union (this sleep used to add 1s to EVERY
+ *  listKeys call, seconds per tick). */
 async function listKeysRobust(kv: SchedulerKV, _prefix: string): Promise<string[]> {
   const union = new Set<string>();
   let sawAny = false;
@@ -149,7 +157,7 @@ async function listKeysRobust(kv: SchedulerKV, _prefix: string): Promise<string[
       /* retry */
     }
     if (attempt === 1 && sawAny) break;
-    if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+    if (attempt < 2 && !sawAny) await new Promise((r) => setTimeout(r, 1000));
   }
   return [...union];
 }
@@ -1748,9 +1756,13 @@ export async function tick(kv: SchedulerKV, opts: TickOptions): Promise<TickResu
   //     run record (or with an already-terminal record) gets recovered:
   //     e2bRunId resolved from the sandbox's bg-state pointer, then
   //     finalized through the normal path.
+  //     GATED (request-storm fix): with nothing running and no enabled
+  //     task, there is nothing to recover — every run/exec record maps to
+  //     a task, so the E2B list (+ per-sandbox connect!) would be pure
+  //     latency. This gate removes 2-4s from the idle tick.
   try {
     const apiKey = e2bKey();
-    if (apiKey) {
+    if (apiKey && (runningTaskIds.size > 0 || tasks.some((t) => t.enabled))) {
       const paginator = Sandbox.list({ apiKey, limit: 50 });
       const page = await paginator.nextItems();
       // Only RUNNING sandboxes (paused ones wake on connect — costly; the

@@ -187,3 +187,10 @@
     animation: none;
   }
 }
+
+/* LIVE header node (thinking-text continuity): hosts the caller's cycling
+   status indicator. display:contents so the inner flex/typography owns the
+   line — the header's 0.75rem must not shrink the live status text. */
+.trLiveNode {
+  display: contents;
+}

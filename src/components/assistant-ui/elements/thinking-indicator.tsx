@@ -68,14 +68,17 @@ export function ThinkingIndicator({
         />
       )}
       {/* Label — keyed on its own content so a new live status restarts the
-          phrase rotation + variant cycle from the fresh label. */}
-      <span key={label} className="text-muted-foreground min-w-0 text-sm leading-none">
+          phrase rotation + variant cycle from the fresh label. leading-snug
+          (NOT leading-none): the phrase sizer row is overflow-hidden, and at
+          line-height 1 the descenders of g/y/p were clipped — the "caption
+          text cut off a bit" fix. */}
+      <span key={label} className="text-muted-foreground min-w-0 text-sm leading-snug">
         <ReasoningText
           phrases={[label, ...(phrases ?? FOLLOW_UP_PHRASES)]}
           variant={variant}
           interval={interval}
           indicator={null}
-          className="leading-none"
+          className="leading-snug"
         />
       </span>
       {elapsed !== undefined && (

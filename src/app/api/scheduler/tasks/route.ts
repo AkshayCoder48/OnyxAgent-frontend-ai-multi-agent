@@ -16,7 +16,7 @@
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { SchedulerKV, resolveSchedulerKey } from "@/lib/scheduler/server-kv";
+import { SchedulerKV, cachedSchedulerKv, resolveSchedulerKey } from "@/lib/scheduler/server-kv";
 import {
   createTask,
   deleteTask,
@@ -27,13 +27,47 @@ import {
   updateTask,
 } from "@/lib/scheduler/engine";
 import { pullChatUpdates, writeChatMirror } from "@/lib/scheduler/chat-store";
-import type { ChatTurnMessage } from "@/lib/scheduler/types";
+import type { ChatTurnMessage, SafeScheduledTask } from "@/lib/scheduler/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-function auth(req: NextRequest): { kv: SchedulerKV } | { error: NextResponse } {
+// ── LIST MEMO (the scheduler request-storm / navigation-lag fix) ──────────
+// "list" is the hottest action (every mounted sidebar converges the link
+// registry on mount + every 60s; with several open clients that is a call
+// every few seconds — each one used to re-walk the whole schedule: KV
+// namespace + per-task version records, 2-5s apiece). A short per-key memo
+// + in-flight sharing makes the storm cheap; ANY mutating action on this
+// route invalidates it immediately. Mutations and reads share the
+// CachedSchedulerKV read cache, so even a cold "list" is a few roundtrips.
+const LIST_MEMO_MS = 8_000;
+const listMemos = new Map<string, { at: number; tasks: SafeScheduledTask[] }>();
+const listInFlight = new Map<string, Promise<SafeScheduledTask[]>>();
+
+function invalidateListMemo(key: string): void {
+  listMemos.delete(key);
+}
+
+async function listTasksMemoized(key: string, kv: SchedulerKV): Promise<SafeScheduledTask[]> {
+  const memo = listMemos.get(key);
+  if (memo && Date.now() - memo.at < LIST_MEMO_MS) return memo.tasks;
+  const inFlight = listInFlight.get(key);
+  if (inFlight) return inFlight;
+  const p = (async () => {
+    const tasks = await listTasksSafe(kv);
+    listMemos.set(key, { at: Date.now(), tasks });
+    return tasks;
+  })();
+  listInFlight.set(key, p);
+  try {
+    return await p;
+  } finally {
+    listInFlight.delete(key);
+  }
+}
+
+function auth(req: NextRequest): { key: string; kv: SchedulerKV } | { error: NextResponse } {
   const key = resolveSchedulerKey(req.headers.get("x-onyxbase-key"));
   if (!key) {
     return {
@@ -47,13 +81,14 @@ function auth(req: NextRequest): { kv: SchedulerKV } | { error: NextResponse } {
       ),
     };
   }
-  return { kv: new SchedulerKV(key) };
+  return { key, kv: cachedSchedulerKv(key) };
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const a = auth(req);
   if ("error" in a) return a.error;
   const kv = a.kv;
+  const apiKey = a.key;
 
   let body: Record<string, unknown>;
   try {
@@ -105,36 +140,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           chatContext: parseChatContext(body.chatContext),
           runtime: body.runtime as never,
         });
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true, task: r.task, ...(r.warning ? { warning: r.warning } : {}) });
       }
 
       case "update": {
         const r = await updateTask(kv, body as never);
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true, task: r.task, ...(r.warning ? { warning: r.warning } : {}) });
       }
 
       case "delete": {
         await deleteTask(kv, String(body.id ?? ""));
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true });
       }
 
       case "pause": {
         const task = await setTaskEnabled(kv, String(body.id ?? ""), false);
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true, task });
       }
 
       case "resume": {
         const task = await setTaskEnabled(kv, String(body.id ?? ""), true);
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true, task });
       }
 
       case "run_now": {
         const r = await runTaskNow(kv, String(body.id ?? ""));
+        invalidateListMemo(apiKey);
         return NextResponse.json({ ok: true, run: r.run, task: r.task });
       }
 
       case "list": {
-        const tasks = await listTasksSafe(kv);
+        const tasks = await listTasksMemoized(apiKey, kv);
         return NextResponse.json({ ok: true, tasks });
       }
 
@@ -188,6 +229,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const a = auth(req);
   if ("error" in a) return a.error;
-  const tasks = await listTasksSafe(a.kv);
+  const tasks = await listTasksMemoized(a.key, a.kv);
   return NextResponse.json({ ok: true, tasks });
 }

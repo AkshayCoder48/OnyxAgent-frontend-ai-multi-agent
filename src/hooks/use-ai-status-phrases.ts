@@ -74,9 +74,12 @@ function fetchPhrases(
         phrases?: unknown;
       } | null;
       if (!data || !Array.isArray(data.phrases)) return null;
-      const list = data.phrases.filter(
-        (p): p is string => typeof p === "string" && p.trim().length > 1,
-      );
+      const list = data.phrases
+        .filter((p): p is string => typeof p === "string" && p.trim().length > 1)
+        // Width safety net: the status line reserves the LONGEST phrase's
+        // width — one long sentence would clip every caption after it.
+        .map((p) => p.trim().slice(0, 34))
+        .filter((p) => p.length > 1);
       if (list.length === 0) return null;
       CACHE.set(key, list);
       return list;

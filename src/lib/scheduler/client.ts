@@ -47,6 +47,46 @@ export interface SchedulerTickResult {
 const NOT_CONFIGURED_MESSAGE =
   "Cloud scheduling isn't configured yet. Add your OnyxBase API key in Settings → Cloud Workspace.";
 
+// ── CONNECTION-POOL PROTECTION (the navigation-lag fix) ────────────────────
+// A browser holds at most ~6 concurrent HTTP/1.1 connections per origin.
+// The background pollers (sidebar convergence, server-chat pull, scheduler
+// heartbeat) used to fire independently — a slow tick (up to 18s) + a slow
+// list + a pull could occupy several slots for tens of seconds, and the
+// router's RSC fetch for a route change (Agent ⇄ OnyxCode, Settings) then
+// QUEUED BEHIND THEM — the reported "takes 20-40s to navigate". Two guards:
+//   1. SINGLE-FLIGHT: this tab runs AT MOST ONE scheduler request at a time
+//      (a tiny promise chain — pollers wait their turn instead of piling
+//      up connections). User-facing TOOL calls (scheduled_tasks.ts) use
+//      their own fetch and bypass this queue.
+//   2. HARD TIMEOUT: 25s — a hung request must not squat on a connection
+//      slot forever; the callers' catch paths already treat failure as
+//      "skip this cycle".
+const SCHEDULER_FETCH_TIMEOUT_MS = 25_000;
+
+let schedulerChain: Promise<unknown> = Promise.resolve();
+
+/** Serialize one scheduler fetch per tab (background pollers only). */
+function enqueueSchedulerFetch<T>(op: () => Promise<T>): Promise<T> {
+  const run = schedulerChain.then(op, op);
+  schedulerChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+// ── ZERO-TASK TICK SKIP ────────────────────────────────────────────────
+// When the sidebar's last convergence saw ZERO scheduled tasks, there is
+// nothing for a heartbeat to fire or finalize — skip the tick entirely
+// (the memoized "list" is cheap, the tick is the expensive one). The
+// sidebar updates this on every convergence; first load (null) still ticks.
+let lastKnownTaskCount: number | null = null;
+
+/** Record how many scheduled tasks the client currently knows about. */
+export function noteSchedulerTasks(count: number): void {
+  lastKnownTaskCount = count;
+}
+
 /** Resolve the vault key for a user (transient — caller must not persist it). */
 async function resolveKey(userId: string): Promise<string | null> {
   const { settingsService } = await import("@/lib/services");
@@ -58,16 +98,20 @@ async function postScheduler(
   key: string,
   body: Record<string, unknown>,
 ): Promise<SchedulerApiResponse> {
-  const res = await fetch(route, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-OnyxBase-Key": key },
-    body: JSON.stringify(body),
+  // Single-flight + timeout — see the connection-pool protection block.
+  return enqueueSchedulerFetch(async () => {
+    const res = await fetch(route, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OnyxBase-Key": key },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(SCHEDULER_FETCH_TIMEOUT_MS),
+    });
+    const data = (await res.json().catch(() => ({}))) as SchedulerApiResponse;
+    if (!res.ok && data.ok !== false) {
+      return { ok: false, error: "HTTP_ERROR", message: `Request failed (${res.status})` };
+    }
+    return data;
   });
-  const data = (await res.json().catch(() => ({}))) as SchedulerApiResponse;
-  if (!res.ok && data.ok !== false) {
-    return { ok: false, error: "HTTP_ERROR", message: `Request failed (${res.status})` };
-  }
-  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +223,9 @@ export async function pullChat(
 /** Fire-and-forget scheduler heartbeat (POST /api/scheduler/tick). */
 export async function tickHeartbeat(userId: string): Promise<SchedulerTickResult | null> {
   if (!userId) return null;
+  // ZERO-TASK SKIP: nothing to fire or finalize — the tick is the most
+  // expensive scheduler call; with no tasks it is pure latency.
+  if (lastKnownTaskCount === 0) return null;
   let key: string | null = null;
   try {
     key = await resolveKey(userId);
@@ -187,11 +234,15 @@ export async function tickHeartbeat(userId: string): Promise<SchedulerTickResult
   }
   if (!key || !key.trim()) return null; // silent — never throws
   try {
-    const res = await fetch("/api/scheduler/tick", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-OnyxBase-Key": key },
-      body: JSON.stringify({ trigger: "heartbeat" }),
-    });
+    // Single-flight + timeout — see the connection-pool protection block.
+    const res = await enqueueSchedulerFetch(() =>
+      fetch("/api/scheduler/tick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OnyxBase-Key": key as string },
+        body: JSON.stringify({ trigger: "heartbeat" }),
+        signal: AbortSignal.timeout(SCHEDULER_FETCH_TIMEOUT_MS),
+      }),
+    );
     if (!res.ok) return null;
     return (await res.json().catch(() => null)) as SchedulerTickResult | null;
   } catch {

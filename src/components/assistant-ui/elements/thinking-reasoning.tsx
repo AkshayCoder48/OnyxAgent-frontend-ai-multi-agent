@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import styles from "./ThinkingReasoning.module.css";
 import { useTypewriter, LetterStream } from "./letter-stream";
 
@@ -30,6 +30,13 @@ export interface ThinkingReasoningProps {
   verb?: string;
   /** Label while streaming — "Thinking…" or "Reasoning…". */
   activeLabel?: string;
+  /** LIVE HEADER OVERRIDE (thinking-text continuity fix): while streaming,
+  // render this node as the header INSTEAD of the static shimmer label —
+  // the SAME cycling status indicator the message showed BEFORE the first
+  // reasoning sentence arrived, so the "thinking" text never visibly
+  // changes character the moment real thinking starts. Ignored once the
+  // block settles (the "Thought for Ns" summary replaces it). */
+  headerNode?: ReactNode;
   /** HEADERLESS LIVE MODE (WorkingPanel): while streaming, skip the
    *  header button entirely — the sentences stream bare and the host
    *  panel's own trigger line owns the "Thinking" status (no duplicate
@@ -68,6 +75,7 @@ export function ThinkingReasoning({
   elapsedSeconds,
   verb = "Thought",
   activeLabel = "Thinking…",
+  headerNode,
   headerlessLive = false,
 }: ThinkingReasoningProps) {
   const [open, setOpen] = useState(false);
@@ -150,6 +158,10 @@ export function ThinkingReasoning({
             <span className={styles.trLabel}>
               <span className={styles.trVerb}>{verb}</span> for {elapsedS}s
             </span>
+          ) : headerNode !== undefined && headerNode !== null ? (
+            // The caller's LIVE status node (cycling AI phrases) — identical
+            // to the pre-thinking indicator so the status text never swaps.
+            <span className={styles.trLiveNode}>{headerNode}</span>
           ) : (
             <span className={styles.trLabel + " " + styles.trShimmer}>
               {activeLabel}

@@ -136,6 +136,20 @@ function ReasoningPanel({
         elapsedSeconds={elapsedSeconds}
         verb={isThinking ? "Thought" : "Reasoned"}
         activeLabel={isThinking ? "Thinking…" : "Reasoning…"}
+        // THINKING-TEXT CONTINUITY: the live header is the SAME cycling
+        // indicator shown before the first sentence arrived — the status
+        // text no longer swaps to a different static label the moment real
+        // reasoning starts streaming.
+        headerNode={
+          isStreaming ? (
+            <ThinkingIndicator
+              showDot={false}
+              label={isThinking ? "Thinking" : "Reasoning"}
+              phrases={aiPhrases ?? undefined}
+              className="min-w-0"
+            />
+          ) : undefined
+        }
       />
     </div>
   );

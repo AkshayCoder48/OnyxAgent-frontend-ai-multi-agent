@@ -215,7 +215,10 @@ export function ReasoningText({
           </span>
         )}
 
-        <span aria-hidden="true" className="grid overflow-hidden text-left">
+        {/* leading-snug: the row is overflow-hidden for the cascade's
+            rise/fall chars — at line-height 1 the descenders (g, y, p) were
+            clipped. 1.375 leaves room for the full glyph box. */}
+        <span className="grid overflow-hidden text-left leading-snug">
           <span className="invisible col-start-1 row-start-1 whitespace-nowrap">
             {longestPhrase}…
           </span>

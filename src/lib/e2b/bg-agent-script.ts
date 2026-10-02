@@ -2712,6 +2712,14 @@ const DIGEST_TOOLS = new Set(${JSON.stringify(ONYX_MD_DIGEST_TOOLS)});
 const BRIDGE_DIR = path.join(STATE_DIR, "bridge");
 const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
 const BRIDGE_TIMEOUT_MS = { ask_user: 900_000 };
+// ACK FAST-FAIL (240s timeout fix): the browser writes an .ack.json file the
+// moment it PICKS UP the request (before executing the tool). If no ack
+// arrives within this window, no app tab is consuming the run's events
+// (closed / asleep / backgrounded) — fail NOW with the actionable message
+// instead of burning the full per-tool timeout. 25s: generous enough for one
+// reconnect backoff wake in a hidden tab (timers throttle to ≥1min there),
+// instant compared to 240s.
+const BRIDGE_ACK_WINDOW_MS = 25_000;
 
 let ALL_TOOLS = TOOLS;
 
@@ -2739,19 +2747,41 @@ async function runBridgeTool(callId, name, args) {
   const token = String(callId || name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
   const reqPath = path.join(BRIDGE_DIR, token + ".req.json");
   const resPath = path.join(BRIDGE_DIR, token + ".res.json");
+  const ackPath = path.join(BRIDGE_DIR, token + ".ack.json");
   await fs.mkdir(BRIDGE_DIR, { recursive: true });
   await fs.rm(resPath, { force: true }).catch(() => {});
+  await fs.rm(ackPath, { force: true }).catch(() => {});
   await fs.writeFile(reqPath, JSON.stringify({ id: callId, name, args }));
   await emitEvent({ t: "browser_tool_call", id: callId, name, args });
   const timeoutMs = BRIDGE_TIMEOUT_MS[name] ?? BRIDGE_DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
+  const ackDeadline = Date.now() + BRIDGE_ACK_WINDOW_MS;
+  let acked = false;
   for (;;) {
+    // ACK PHASE — the browser picked the call up (it writes .ack.json the
+    // moment it receives the event, before running the tool). Until acked,
+    // we are in the fast-fail window: if it expires, no app tab is open.
+    if (!acked) {
+      try {
+        await fs.readFile(ackPath, "utf8");
+        acked = true;
+      } catch {
+        if (Date.now() >= ackDeadline) {
+          await fs.rm(reqPath, { force: true }).catch(() => {});
+          return {
+            error:
+              "The '" + name + "' tool runs in your BROWSER — no open app tab picked the request up within " +
+              Math.round(BRIDGE_ACK_WINDOW_MS / 1000) + "s (the tab was closed, asleep or backgrounded). Browser-side tools (chats, memories, skills, MCP configs, subagents, ask_user) need this app tab open. Continue with the sandbox tools or finish without it, and tell the user to re-run with the app tab open if that tool is essential.",
+          };
+        }
+      }
+    }
     if (Date.now() >= deadline) {
       await fs.rm(reqPath, { force: true }).catch(() => {});
       return {
         error:
-          "The '" + name + "' tool runs in your BROWSER and timed out after " + Math.round(timeoutMs / 1000) +
-          "s — the app tab was not open (closed, asleep or backgrounded). Browser-side tools (chats, memories, skills, MCP configs, subagents, ask_user) need this app tab open. Continue with the sandbox tools or finish without it, and tell the user to re-run with the app tab open if that tool is essential.",
+          "The '" + name + "' tool ran in your BROWSER but did not finish within " + Math.round(timeoutMs / 1000) +
+          "s (the app tab may have closed mid-run). Continue with the sandbox tools or finish without it, and tell the user to re-run with the app tab open if that tool is essential.",
       };
     }
     try {
@@ -2759,6 +2789,7 @@ async function runBridgeTool(callId, name, args) {
       const parsed = JSON.parse(raw);
       await fs.rm(reqPath, { force: true }).catch(() => {});
       await fs.rm(resPath, { force: true }).catch(() => {});
+      await fs.rm(ackPath, { force: true }).catch(() => {});
       if (parsed && parsed.ok === false) return { error: String(parsed.error ?? "browser tool failed") };
       if (parsed && parsed.result !== undefined) return parsed.result;
       return { error: "browser tool returned no result" };
@@ -2919,6 +2950,13 @@ async function main() {
   // turn with a real answer instead of the old terminal
   // "Background run hit the max-rounds cap" error.
   const maxRounds = state.maxRounds ?? 30;
+  // EMPTY-RESPONSE RE-ASKS: some gateways occasionally answer a round with
+  // NOTHING (no text, no reasoning, no tool calls) — a transient completion
+  // glitch, not a fatal condition. Instead of failing the whole turn with
+  // "The model returned an empty response.", re-ask the SAME round (a
+  // system nudge + fresh request) up to twice. Only a third empty answer
+  // ends the turn as an error.
+  let emptyRetries = 0;
   for (let round = 1; round <= maxRounds; round++) {
     const isFinalRound = round === maxRounds;
     if (isFinalRound && state.toolsEnabled !== false) {
@@ -2944,13 +2982,21 @@ async function main() {
     }
     const toolCalls = (result.toolCalls ?? []).filter((tc) => tc && tc.function && tc.function.name);
     if (!toolCalls.length || isFinalRound) {
-      // FINAL ROUND (or a plain answer): end the turn as done. On the wrap-up
-      // round the model had no tools — any parsed "tool call" text is treated
-      // as the answer it is; the turn NEVER ends in the max-rounds error.
       const content = result.content.trim() || (isFinalRound
         ? "I reached the tool-call limit after completing the work steps — here is where things stand. Ask me to continue and I'll pick up from the plan."
         : "");
       if (!content && !result.reasoning.trim()) {
+        // EMPTY RESPONSE — re-ask this round before declaring failure.
+        if (emptyRetries < 2) {
+          emptyRetries++;
+          await emitEvent({ t: "status", kind: "retry", round, attempt: emptyRetries, delayMs: 800, reason: "empty response — re-asking the model" });
+          state.messages.push({
+            role: "system",
+            content: "Your previous response came back completely empty (no text, no tool calls). Respond now — either call one of your tools or write your answer to the user. Never return an empty message.",
+          });
+          round--; // replay this round number
+          continue;
+        }
         await emitEvent({ t: "error", message: "The model returned an empty response." });
         await setTerminal("error", "The model returned an empty response.");
         return;
@@ -2959,6 +3005,7 @@ async function main() {
       await setTerminal("done", content);
       return;
     }
+    emptyRetries = 0; // a productive round resets the empty streak
     // ONE assistant message carrying content + tool_calls (protocol shape).
     // STRICT-COMPAT (LLM HTTP 400 fix): the wire format keeps ONLY fields
     // every OpenAI-compatible endpoint accepts. The local 'reasoning' field
