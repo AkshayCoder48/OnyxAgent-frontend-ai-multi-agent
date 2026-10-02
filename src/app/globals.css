@@ -5,17 +5,19 @@
 @import "@fontsource-variable/fraunces/wght-italic.css";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
-/* Libre Caslon Condensed — the full-app text face (400–700 + italics).
+/* Lato — the full-app text face (Łukasz Dziedzic, 2010; 100–900 + italics).
    Self-hosted via Fontsource so it renders identically offline and in
    every deployment environment. */
-@import "@fontsource/libre-caslon-condensed/400.css";
-@import "@fontsource/libre-caslon-condensed/400-italic.css";
-@import "@fontsource/libre-caslon-condensed/500.css";
-@import "@fontsource/libre-caslon-condensed/500-italic.css";
-@import "@fontsource/libre-caslon-condensed/600.css";
-@import "@fontsource/libre-caslon-condensed/600-italic.css";
-@import "@fontsource/libre-caslon-condensed/700.css";
-@import "@fontsource/libre-caslon-condensed/700-italic.css";
+@import "@fontsource/lato/100.css";
+@import "@fontsource/lato/100-italic.css";
+@import "@fontsource/lato/300.css";
+@import "@fontsource/lato/300-italic.css";
+@import "@fontsource/lato/400.css";
+@import "@fontsource/lato/400-italic.css";
+@import "@fontsource/lato/700.css";
+@import "@fontsource/lato/700-italic.css";
+@import "@fontsource/lato/900.css";
+@import "@fontsource/lato/900-italic.css";
 @import "tailwindcss";
 /* tw-animate — REQUIRED for the animate-in / slide-in-from-* / fade-in / zoom-in
    utilities used by Sheet, Dialog, Popover, DropdownMenu, Tooltip and the
@@ -85,12 +87,12 @@
   --radius-card: 1rem;
   --radius-pill: 999px;
 
-  /* Typography — Libre Caslon Condensed carries ALL app text (display,
-     body, accent); JetBrains Mono stays for code. Self-hosted via
+  /* Typography — Lato (designed by Łukasz Dziedzic) carries ALL app text
+     (display, body, accent); JetBrains Mono stays for code. Self-hosted via
      Fontsource (imported at the top of this file). */
-  --font-display: "Libre Caslon Condensed", "Fraunces Variable", Georgia, "Times New Roman", serif;
-  --font-body: "Libre Caslon Condensed", Georgia, "Times New Roman", serif;
-  --font-accent: "Libre Caslon Condensed", Georgia, serif;
+  --font-display: "Lato", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Lato", ui-sans-serif, system-ui, sans-serif;
+  --font-accent: "Lato", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Motion */
@@ -1796,29 +1798,25 @@ html.theme-transitioning .animate-backdrop {
    floating gradients, glow pulses, and more. All respect
    prefers-reduced-motion. */
 
-/* --- Glass surfaces (frosted glass / glassmorphism) --- */
+/* --- Fixed surfaces (user spec, 2026-09-29: "make all backgrounds fixed") ---
+   Every app surface is a SOLID, static background — no translucency, no
+   backdrop blur, nothing that shifts as content scrolls behind it. The
+   old frosted-glass recipes are retired; the class names stay so existing
+   markup keeps working, now painting fixed color. */
 .glass {
-  background: color-mix(in srgb, var(--color-background) 65%, transparent);
-  backdrop-filter: blur(14px) saturate(180%);
-  -webkit-backdrop-filter: blur(14px) saturate(180%);
-  border: 1px solid color-mix(in srgb, var(--color-foreground) 8%, transparent);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
 }
 .glass-strong {
-  background: color-mix(in srgb, var(--color-background) 80%, transparent);
-  backdrop-filter: blur(20px) saturate(200%);
-  -webkit-backdrop-filter: blur(20px) saturate(200%);
-  border: 1px solid color-mix(in srgb, var(--color-foreground) 10%, transparent);
+  background: var(--color-background);
+  border: 1px solid var(--color-border);
 }
 .glass-card {
-  background: color-mix(in srgb, var(--color-card) 70%, transparent);
-  backdrop-filter: blur(12px) saturate(160%);
-  -webkit-backdrop-filter: blur(12px) saturate(160%);
-  border: 1px solid color-mix(in srgb, var(--color-foreground) 6%, transparent);
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
 }
 .glass-header {
-  background: color-mix(in srgb, var(--color-background) 75%, transparent);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  background: var(--color-background);
 }
 
 /* --- Motion blur on streaming text --- */
@@ -1896,6 +1894,151 @@ html.theme-transitioning .animate-backdrop {
   0%, 100% { transform: translate(0, 0) scale(1); }
   33% { transform: translate(8px, -6px) scale(1.05); }
   66% { transform: translate(-4px, 8px) scale(0.97); }
+}
+
+/* ========================================================================
+   FLUID SURFACES (user spec, 2026-09-29: hero options, panel headers and
+   the database tab buttons get "nice backgrounds like fluids").
+
+   Layered liquid gradients in the brand family over a solid base — two
+   radial "blobs" + one diagonal sheen, slowly drifting. Everything sits
+   on an OPAQUE base color (the app's backgrounds stay fixed; the fluid is
+   pure foreground tint, never translucency).
+
+     .fluid-chip  — small controls: the hero option toggles (hamburger,
+                    database, preview, platforms, timeline, subagent,
+                    logs, files) and the database tab buttons (Overview /
+                    KV / Env / Files / Schema / Search / Activity).
+                    IDLE: a calm static wash. OPEN/ACTIVE (aria-expanded,
+                    data-state=active, or .is-on): the drift animation
+                    runs and the tint brightens.
+     .fluid-bar   — panel header strips (database, preview, timeline,
+                    subagent, files, logs): a wide, subtle fluid wash.
+     .fluid-edge  — the hairline gradient border + top sheen shared by
+                    both (applied automatically, no extra class needed).
+
+   prefers-reduced-motion: the drift freezes to a static gradient.
+   ======================================================================== */
+.fluid-chip,
+.fluid-bar {
+  position: relative;
+  isolation: isolate;
+  border-color: color-mix(in srgb, var(--color-brand) 24%, var(--color-border));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-foreground) 7%, transparent),
+    0 0 0 0 color-mix(in srgb, var(--color-brand) 0%, transparent);
+}
+
+/* The liquid itself — idle state: calm, mostly static. */
+.fluid-chip {
+  background-color: var(--color-secondary);
+  background-image:
+    radial-gradient(
+      130% 150% at 12% 18%,
+      color-mix(in srgb, var(--color-brand) 16%, transparent) 0%,
+      transparent 55%
+    ),
+    radial-gradient(
+      120% 140% at 88% 86%,
+      color-mix(in srgb, var(--color-brand) 10%, transparent) 0%,
+      transparent 60%
+    ),
+    linear-gradient(
+      115deg,
+      color-mix(in srgb, var(--color-brand) 7%, transparent),
+      transparent 45%,
+      color-mix(in srgb, var(--color-brand) 5%, transparent)
+    );
+  background-size: 170% 170%, 150% 150%, 100% 100%;
+  transition:
+    box-shadow 220ms var(--ease-out),
+    border-color 220ms var(--ease-out),
+    color 220ms var(--ease-out);
+}
+
+.fluid-chip:hover {
+  border-color: color-mix(in srgb, var(--color-brand) 45%, var(--color-border));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-foreground) 9%, transparent),
+    0 0 14px -4px color-mix(in srgb, var(--color-brand) 45%, transparent);
+}
+
+/* ACTIVE fluid — the toggle is open / the tab is selected: the blobs
+   brighten and the whole surface drifts like a slow liquid. */
+.fluid-chip.is-on,
+.fluid-chip[aria-expanded="true"],
+.fluid-chip[data-state="active"] {
+  color: var(--color-foreground);
+  border-color: color-mix(in srgb, var(--color-brand) 55%, var(--color-border));
+  background-color: var(--color-secondary);
+  background-image:
+    radial-gradient(
+      130% 150% at 12% 18%,
+      color-mix(in srgb, var(--color-brand) 34%, transparent) 0%,
+      transparent 55%
+    ),
+    radial-gradient(
+      120% 140% at 88% 86%,
+      color-mix(in srgb, var(--color-brand) 22%, transparent) 0%,
+      transparent 60%
+    ),
+    linear-gradient(
+      115deg,
+      color-mix(in srgb, var(--color-brand) 16%, transparent),
+      transparent 45%,
+      color-mix(in srgb, var(--color-brand) 12%, transparent)
+    );
+  background-size: 190% 190%, 170% 170%, 100% 100%;
+  animation: fluid-drift 13s ease-in-out infinite alternate;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-foreground) 10%, transparent),
+    0 0 18px -4px color-mix(in srgb, var(--color-brand) 55%, transparent);
+}
+
+@keyframes fluid-drift {
+  0% {
+    background-position: 0% 0%, 100% 100%, 0 0;
+  }
+  50% {
+    background-position: 28% 22%, 72% 76%, 0 0;
+  }
+  100% {
+    background-position: 14% 34%, 86% 62%, 0 0;
+  }
+}
+
+/* Panel header strips — wider, calmer wash (no drift while idle; a lazy
+   drift only while its panel is open, via .is-on on the same element). */
+.fluid-bar {
+  background-color: var(--color-card);
+  background-image:
+    radial-gradient(
+      160% 220% at 0% 0%,
+      color-mix(in srgb, var(--color-brand) 12%, transparent) 0%,
+      transparent 55%
+    ),
+    radial-gradient(
+      140% 200% at 100% 100%,
+      color-mix(in srgb, var(--color-brand) 8%, transparent) 0%,
+      transparent 60%
+    ),
+    linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--color-brand) 5%, transparent),
+      transparent 40%,
+      color-mix(in srgb, var(--color-brand) 4%, transparent)
+    );
+  background-size: 200% 200%, 180% 180%, 100% 100%;
+}
+
+/* Reduced motion: the liquid freezes (color stays, motion stops). */
+@media (prefers-reduced-motion: reduce) {
+  .fluid-chip,
+  .fluid-chip.is-on,
+  .fluid-chip[aria-expanded="true"],
+  .fluid-chip[data-state="active"] {
+    animation: none;
+  }
 }
 
 /* --- Staggered list entrance --- */
@@ -3246,26 +3389,40 @@ html.theme-transitioning .animate-backdrop {
   }
 }
 
-/* ===== Letter stream — single-letter typewriter (motion blur + fade) =====
-   Every freshly revealed letter of a streaming surface (thinking text, tool
-   output, captions) mounts as a .letter-in span exactly once (stable index
-   keys): it starts at 50% OPACITY with a 5px BLUR and sharpens into ink
-   over ~240ms. A per-letter stagger (0.02s per character, set inline by
-   LetterStream) cascades bursts so each letter starts 0.02s after the one
-   before it. Pair with useTypewriter/LetterStream — chars outside the
-   fresh window render as plain text, so long streams carry no per-letter
-   DOM once settled. */
+/* ===== Letter stream — typewriter reveal (whole-response fade era) =====
+   The typewriter (useTypewriter) still paces the character-by-character
+   reveal, but the revealed characters render as PLAIN TEXT — the class is
+   kept as a NO-OP so any stray usage renders plain instead of
+   re-introducing per-word / per-character fades (user spec, 2026-09-29:
+   "make whole response fade, not just the word"). The one fade that exists
+   is the WHOLE-RESPONSE fade below. */
 .letter-in {
   display: inline;
-  animation: letter-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: none;
 }
-@keyframes letter-in {
-  from {
-    opacity: 0.5;
-    filter: blur(5px);
+
+/* ===== Whole-response streaming fade =====
+   The fade unit is the ENTIRE response block (message-item wraps every
+   assistant text in `.response-fade`): while the turn streams the whole
+   block sits slightly dimmed (`.response-live` — still "materializing"),
+   and the moment the turn settles the WHOLE response fades to full ink in
+   one smooth motion. One CSS transition on one element — zero per-word,
+   per-line or per-character animation DOM anywhere in the response. */
+.response-fade {
+  transition:
+    opacity 500ms var(--ease-out),
+    filter 500ms var(--ease-out);
+}
+.response-fade.response-live {
+  opacity: 0.7;
+  filter: blur(0.35px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .response-fade {
+    transition: none;
   }
-  to {
+  .response-fade.response-live {
     opacity: 1;
-    filter: blur(0);
+    filter: none;
   }
 }

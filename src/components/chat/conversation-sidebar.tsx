@@ -599,13 +599,13 @@ function ConversationList({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search chats"
             aria-label="Search chats"
-            className="border-border bg-background/70 placeholder:text-muted-foreground/60 focus:border-primary/40 h-8.5 w-full rounded-lg border pr-3 pl-8 text-[13px] outline-none transition-colors sm:h-9"
+            className="border-border bg-background placeholder:text-muted-foreground/60 focus:border-primary/40 h-8.5 w-full rounded-lg border pr-3 pl-8 text-[13px] outline-none transition-colors sm:h-9"
           />
         </div>
       </div>
 
       <div className="px-3 pb-2">
-        <div className="bg-background/60 border-border/60 flex rounded-lg border p-0.5">
+        <div className="bg-background border-border/60 flex rounded-lg border p-0.5">
           <ViewTab
             label="Active"
             count={activeCount}

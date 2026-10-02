@@ -380,7 +380,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={openChatSidebar}
-              className="h-8 w-8 p-0 md:hidden"
+              className="animate-press fluid-chip h-8 w-8 p-0 md:hidden"
               title="Open conversations"
               aria-label="Open conversations"
             >
@@ -420,11 +420,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
                 variant="ghost"
                 size="sm"
                 onClick={() => toggleCodePanel("database")}
-                className={
-                  databaseOpen
-                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
-                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                }
+                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
                 title="Database (OnyxBase)"
                 aria-label="Toggle database panel"
                 aria-expanded={databaseOpen}
@@ -438,11 +434,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
                 variant="ghost"
                 size="sm"
                 onClick={() => toggleCodePanel("preview")}
-                className={
-                  previewOpen
-                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
-                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                }
+                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
                 title="Web preview"
                 aria-label="Toggle preview panel"
                 aria-expanded={previewOpen}
@@ -459,11 +451,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
                 variant="ghost"
                 size="sm"
                 onClick={() => toggleSidePanel("platforms")}
-                className={
-                  platformsOpen
-                    ? "animate-press h-8 w-8 bg-foreground/5 p-0"
-                    : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                }
+                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
                 title="Platforms (Composio)"
                 aria-label="Toggle platforms panel"
                 aria-expanded={platformsOpen}
@@ -479,7 +467,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("timeline")}
-              className={timelineOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
               title="Tool timeline"
               aria-label="Show tool timeline"
               aria-expanded={timelineOpen}
@@ -491,7 +479,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={toggleSubagents}
-              className={subagentOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
               title="Subagent chat"
               aria-label="Toggle subagent panel"
               aria-expanded={subagentOpen}
@@ -503,7 +491,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("logs")}
-              className={logsOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground relative h-8 w-8 p-0"}
+              className="animate-press fluid-chip hover:text-foreground relative h-8 w-8 p-0 text-muted-foreground"
               title="Error logs"
               aria-label="Toggle error logs panel"
               aria-expanded={logsOpen}
@@ -518,7 +506,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
               variant="ghost"
               size="sm"
               onClick={() => toggleSidePanel("files")}
-              className={filesOpen ? "animate-press h-8 w-8 bg-foreground/5 p-0" : "animate-press text-muted-foreground hover:text-foreground h-8 w-8 p-0"}
+              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
               title="Show files"
               aria-label="Toggle files panel"
               aria-expanded={filesOpen}

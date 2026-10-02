@@ -563,7 +563,7 @@ export function DatabasePanel() {
   return (
     <div className="animate-in fade-in duration-150 flex h-full min-h-0 flex-col">
       {/* Header — DATABASE + OnyxBase reachability + scope + refresh */}
-      <div className="glass-header border-border flex shrink-0 items-center gap-2 border-b px-2.5 py-2">
+      <div className="fluid-bar border-border flex shrink-0 items-center gap-2 border-b px-2.5 py-2">
         <Database className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden />
         <span className="shrink-0 text-[12px] font-bold tracking-widest">DATABASE</span>
         <ReachDot overview={overview} />
@@ -630,25 +630,25 @@ export function DatabasePanel() {
               aria-label="Database sections"
               className="scrollbar-none h-8 w-full justify-start gap-0.5 overflow-x-auto rounded-lg p-0.5"
             >
-              <TabsTrigger value="overview" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="overview" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Overview
               </TabsTrigger>
-              <TabsTrigger value="kv" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="kv" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 KV
               </TabsTrigger>
-              <TabsTrigger value="env" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="env" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Env
               </TabsTrigger>
-              <TabsTrigger value="files" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="files" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Files
               </TabsTrigger>
-              <TabsTrigger value="schema" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="schema" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Schema
               </TabsTrigger>
-              <TabsTrigger value="search" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="search" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Search
               </TabsTrigger>
-              <TabsTrigger value="activity" className="h-7 rounded-md px-2.5 text-[11px]">
+              <TabsTrigger value="activity" className="fluid-chip h-7 rounded-md px-2.5 text-[11px]">
                 Activity
               </TabsTrigger>
             </TabsList>

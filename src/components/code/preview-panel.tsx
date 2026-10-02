@@ -154,7 +154,7 @@ export function PreviewPanel({
   return (
     <div className="animate-in fade-in duration-150 flex h-full min-h-0 flex-col">
       {/* Toolbar: the chat's app + honest status + actions (NO picker) */}
-      <div className="glass-header border-border flex shrink-0 flex-col gap-2 border-b px-2.5 py-2.5">
+      <div className="fluid-bar border-border flex shrink-0 flex-col gap-2 border-b px-2.5 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
           <MonitorPlay className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">

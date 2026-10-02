@@ -22,9 +22,12 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // Vercel-only hint — self-hosted `next start` has NO function timeout, so
-// this number only matters when deployed on Vercel. 800s keeps the Vercel
-// ceiling comfortably above every other guard in the streaming stack.
-export const maxDuration = 800;
+// this number only matters when deployed on Vercel. The Hobby plan caps
+// Serverless Functions at maxDuration 300 ("must have a maxDuration between
+// 1 and 300" — the old 800 broke `vercel deploy`), so 300 is the ceiling
+// while still keeping the streaming guard stack (zero-timeout dispatcher
+// below) comfortable for max-thinking models.
+export const maxDuration = 300;
 
 /**
  * ZERO-TIMEOUT STREAM DISPATCHER — the fix for "Stream read failed on any

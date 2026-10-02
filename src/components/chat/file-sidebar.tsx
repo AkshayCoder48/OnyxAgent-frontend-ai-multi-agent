@@ -479,7 +479,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         id="sidebar-upload-input"
       />
       {/* Header */}
-      <div className="border-b border-border px-3 py-3 space-y-2">
+      <div className="fluid-bar border-b border-border px-3 py-3 space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold flex items-center gap-1.5">
             <Folder className="h-4 w-4" />

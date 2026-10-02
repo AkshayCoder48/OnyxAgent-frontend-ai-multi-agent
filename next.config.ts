@@ -20,7 +20,7 @@ const ContentSecurityPolicy = `
   style-src 'self' 'unsafe-inline';
   img-src 'self' blob: data: https:;
   font-src 'self' data:;
-  connect-src 'self' https: ws: wss:;
+  connect-src 'self' https: ws: wss: data:;
   frame-src 'self' https://*.e2b.dev https://*.e2b.app;
   ${_frameAncestors}
   base-uri 'self';

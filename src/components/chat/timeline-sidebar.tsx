@@ -92,7 +92,7 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
   return (
     <div className="bg-card flex h-full min-h-0 flex-col">
       {/* Header — fixed (never scrolls away). */}
-      <div className="border-border flex h-12 shrink-0 items-center justify-between border-b px-3">
+      <div className="fluid-bar border-border flex h-12 shrink-0 items-center justify-between border-b px-3">
         <div className="flex min-w-0 items-center gap-2">
           <ListTree className="text-muted-foreground h-4 w-4 shrink-0" aria-hidden />
           <div className="min-w-0">

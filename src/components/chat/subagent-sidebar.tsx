@@ -180,16 +180,18 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
 
       {/* Header — session selector + close. Made taller + more prominent
           on mobile so it's easy to tap. */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b px-2 sm:px-3">
+      <div className="fluid-bar flex h-12 shrink-0 items-center justify-between border-b px-2 sm:px-3">
         <div className="relative flex items-center gap-1 min-w-0 flex-1">
-          {/* Hamburger / session selector button — larger touch target */}
+          {/* Hamburger / session selector button — larger touch target,
+              fluid-chip background (active while the history list is open). */}
           <Button
             variant="ghost"
             size="sm"
-            className="h-9 gap-2 px-2 text-sm font-medium min-w-0"
+            className="fluid-chip h-9 gap-2 px-2 text-sm font-medium min-w-0"
             onClick={() => setShowSessionList((v) => !v)}
             title="Chat history"
             aria-label="Toggle chat history"
+            aria-expanded={showSessionList}
           >
             <MessageSquare className="h-4 w-4 shrink-0" />
             <span className="truncate max-w-32 sm:max-w-40">
@@ -483,7 +485,7 @@ function CollapsibleToolCard({ tc }: {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="rounded-lg border border-border bg-background/60 text-xs overflow-hidden animate-fade-scale">
+    <div className="rounded-lg border border-border bg-card text-xs overflow-hidden animate-fade-scale">
       <button
         type="button"
         onClick={() => setExpanded((e) => !e)}
@@ -499,14 +501,14 @@ function CollapsibleToolCard({ tc }: {
         <div className="border-t border-border px-2.5 py-2 space-y-1.5">
           <div>
             <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-0.5">Arguments</p>
-            <pre className="text-[10px] text-muted-foreground overflow-x-auto scrollbar-thin bg-background/40 rounded p-1.5">
+            <pre className="text-[10px] text-muted-foreground overflow-x-auto scrollbar-thin bg-background rounded p-1.5">
               {JSON.stringify(tc.args, null, 2).slice(0, 500)}
             </pre>
           </div>
           {tc.result !== undefined && (
             <div>
               <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-0.5">Result</p>
-              <pre className="text-[10px] text-muted-foreground/70 overflow-x-auto scrollbar-thin bg-background/40 rounded p-1.5 max-h-32">
+              <pre className="text-[10px] text-muted-foreground/70 overflow-x-auto scrollbar-thin bg-background rounded p-1.5 max-h-32">
                 {JSON.stringify(tc.result, null, 2).slice(0, 600)}
               </pre>
             </div>

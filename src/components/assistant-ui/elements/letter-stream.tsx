@@ -71,20 +71,10 @@ interface RevealState {
   history: { t: number; n: number }[];
 }
 
-/** How long a freshly revealed char stays in per-char spans. Must cover
- *  the letter-in animation (240ms) PLUS the worst-case stagger delay
- *  (LETTER_STAGGER_STEPS × 0.02s = 280ms) with margin, so a char never
- *  unmounts mid-animation (that would pop). */
+/** How long a freshly revealed char stays "fresh" (drives the fresh-window
+ *  bookkeeping in useTypewriter's history pruning). No per-char animation
+ *  uses it anymore — the whole-response fade era renders plain text. */
 const FRESH_WINDOW_MS = 700;
-
-/** Character stagger (OnyxCode PRD §42): every letter starts 0.02s after
- *  the one before it. Implemented as a STABLE per-index delay —
- *  `(absoluteIndex % LETTER_STAGGER_STEPS) × 0.02s` — so a char's delay
- *  never changes after it mounts (a shifting delay would re-seek the
- *  running animation and cause visual jumps). The modulo keeps the delay
- *  bounded (≤ 0.28s) for arbitrarily large bursts. */
-const LETTER_STAGGER_STEPS = 15;
-const LETTER_STAGGER_STEP_S = 0.02;
 
 /** Reveal-count cache for `identityKey` reconnects (spec §24) — bounded,
  *  insertion-order eviction, only ever touched by the typewriter engine. */
@@ -276,56 +266,29 @@ function prune(history: { t: number; n: number }[], now: number) {
 }
 
 /**
- * LetterStream — plain text rendered letter by letter with a motion-blur +
- * fade-in on every fresh letter (`.letter-in` CSS animation). Pairs with
- * `useTypewriter`: pass the revealed `text` and `freshFrom`; chars before
- * the window render as one plain string (zero per-char DOM), chars inside
- * the window each animate in exactly once (stable index keys — a char never
- * remounts while visible).
+ * LetterStream — plain text, always (whole-response fade era). The
+ * typewriter (useTypewriter) still paces the CHARACTER-BY-CHARACTER reveal,
+ * but the revealed text renders as ONE plain string — no per-letter
+ * `.letter-in` spans, no per-word fading (user spec, 2026-09-29: "make
+ * whole response fade, not just the word"). The fade is applied ONCE to
+ * the whole response block by message-item's `.response-fade` wrapper.
  *
- * While not animating this is a plain text span — settled content carries
- * no per-letter DOM at all.
+ * The component + props are kept so every existing call site (tool cards,
+ * thinking text, captions) keeps working unchanged.
  */
 export function LetterStream({
   text,
-  freshFrom,
-  animating,
   className,
 }: {
   text: string;
-  /** Index where the still-animating window starts (from useTypewriter). */
-  freshFrom: number;
-  /** True while letters are flowing — false renders plain text. */
-  animating: boolean;
+  /** Index where the still-animating window starts (from useTypewriter).
+ * @deprecated ignored in the whole-response fade era — kept for call-site
+ *   compatibility. */
+  freshFrom?: number;
+  /** True while letters are flowing — false renders plain text.
+ * @deprecated ignored — text is always plain now. */
+  animating?: boolean;
   className?: string;
 }) {
-  if (!animating || !text) {
-    return <span className={className}>{text}</span>;
-  }
-
-  const chars = Array.from(text);
-  const windowStart = Math.max(0, Math.min(freshFrom, chars.length));
-
-  return (
-    <span className={cn("whitespace-pre-wrap", className)}>
-      {windowStart > 0 ? chars.slice(0, windowStart).join("") : null}
-      {chars.slice(windowStart).map((ch, i) =>
-        // Whitespace never needs the animation (invisible) and rendering it
-        // inside inline-block spans would disturb wrapping — plain chars.
-        ch === " " || ch === "\n" || ch === "\t" ? (
-          ch
-        ) : (
-          <span
-            key={windowStart + i}
-            className="letter-in"
-            style={{
-              animationDelay: `${((windowStart + i) % LETTER_STAGGER_STEPS) * LETTER_STAGGER_STEP_S}s`,
-            }}
-          >
-            {ch}
-          </span>
-        ),
-      )}
-    </span>
-  );
+  return <span className={cn("whitespace-pre-wrap", className)}>{text}</span>;
 }

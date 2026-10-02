@@ -66,7 +66,7 @@ function LogEntryCard({ entry }: { entry: LogEntry }) {
   );
 
   return (
-    <div className="border-border/70 bg-card/50 hover:bg-card rounded-lg border transition-colors">
+    <div className="border-border/70 bg-card hover:bg-accent/40 rounded-lg border transition-colors">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -116,7 +116,7 @@ function LogEntryCard({ entry }: { entry: LogEntry }) {
             </div>
           )}
           {entry.detail && (
-            <div className="bg-background/70 rounded-md border p-2">
+            <div className="bg-background rounded-md border p-2">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-muted-foreground text-[10px] font-medium tracking-wide uppercase">
                   Details
@@ -200,7 +200,7 @@ export function LogsViewer({ className }: { className?: string }) {
   return (
     <div className={cn("bg-background flex h-full min-h-0 flex-col", className)}>
       {/* Panel header */}
-      <div className="border-border/70 flex shrink-0 flex-col gap-2 border-b p-3">
+      <div className="fluid-bar border-border/70 flex shrink-0 flex-col gap-2 border-b p-3">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
             <Bug className="text-foreground/70 h-4 w-4" aria-hidden />

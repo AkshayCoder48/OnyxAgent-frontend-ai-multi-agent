@@ -40,6 +40,10 @@
  */
 
 import { ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
+// The Playwright web-session driver, shared verbatim with the browser-side
+// tools (code_web_session.ts) — interpolated into the runner below so
+// start_/manage_web_session run NATIVELY inside the sandbox.
+import { WEB_SESSION_DRIVER_SOURCE } from "@/lib/tools/web-session-driver";
 
 export const BG_AGENT_SCRIPT = String.raw`
 // OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
@@ -1697,6 +1701,87 @@ async function ocrFetch(url, base64DataUri, filename) {
   return parse(res);
 }
 
+// ── Web-session driver (shared verbatim with the browser tools) ────────
+// The Playwright driver source from web-session-driver.ts — written to
+// /home/user/.onyx/websession/driver.mjs and started detached. JSON-encoded
+// so the shebang + imports inside it stay a plain STRING here (they would
+// be syntax errors if embedded raw mid-file).
+const WEB_SESSION_DRIVER_SOURCE = ${JSON.stringify(WEB_SESSION_DRIVER_SOURCE)};
+const WS_DIR = path.join(HOME, ".onyx", "websession");
+const WS_INSTALL_TIMEOUT_S = 280;
+
+/** exec() as a promise (never throws — returns {err, stdout, stderr}). */
+function wsExec(command, timeoutSec) {
+  return new Promise((resolve) => {
+    exec(command, { cwd: HOME, timeout: (timeoutSec ?? 30) * 1000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ err: err ? String((err && err.message) || err) : null, stdout: String(stdout || ""), stderr: String(stderr || "") });
+    });
+  });
+}
+
+/** Serialize driver boots — concurrent manage_web_session calls must not
+ *  double-install/double-boot. */
+let wsDriverBoot = null;
+
+/** Install (once) + boot the web-session driver, and confirm it is ALIVE.
+ *  Liveness = .ready marker AND a running driver process (a stale marker
+ *  from a crashed driver used to hang every command). Restarts reuse the
+ *  existing node_modules — only a FRESH sandbox pays the Chromium install. */
+async function ensureWsDriver() {
+  if (!wsDriverBoot) {
+    wsDriverBoot = (async () => {
+      const readyCmd = 'test -f ' + WS_DIR + '/.ready && pgrep -f "[d]river.mjs" >/dev/null && echo READY || echo NO';
+      const alive = await wsExec(readyCmd);
+      if (!alive.err && alive.stdout.trim() === "READY") return { ok: true };
+      await fs.mkdir(WS_DIR, { recursive: true });
+      await fs.writeFile(path.join(WS_DIR, "driver.mjs"), WEB_SESSION_DRIVER_SOURCE);
+      await fs.rm(path.join(WS_DIR, ".ready"), { force: true }).catch(() => {});
+      const installed = await wsExec('test -d ' + WS_DIR + '/node_modules/playwright && echo YES || echo NO');
+      if (installed.stdout.trim() !== "YES") {
+        const inst = await wsExec(
+          'cd ' + WS_DIR + ' && npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund --loglevel=error playwright && npx playwright install chromium --with-deps',
+          WS_INSTALL_TIMEOUT_S,
+        );
+        if (inst.err) {
+          return { ok: false, error: "Failed to install Playwright/Chromium in the sandbox: " + ((inst.stderr || inst.err).slice(-300) || "npm install failed") };
+        }
+      }
+      await wsExec('cd ' + WS_DIR + ' && nohup node driver.mjs > driver.log 2>&1 &');
+      for (let i = 0; i < 40; i++) {
+        const r = await wsExec(readyCmd);
+        if (!r.err && r.stdout.trim() === "READY") return { ok: true };
+        await sleep(400);
+      }
+      const log = await wsExec('tail -c 400 ' + WS_DIR + '/driver.log 2>/dev/null');
+      return { ok: false, error: "The web-session driver did not start in time." + (log.stdout ? " Driver log: " + log.stdout.slice(0, 200) : "") };
+    })();
+  }
+  const result = await wsDriverBoot;
+  // A FAILED boot may be transient (slow install) — drop the cache so the
+  // next call retries; a successful boot stays cached while the driver
+  // lives (the cheap alive-check above already ran inside it).
+  if (!result.ok) wsDriverBoot = null;
+  return result;
+}
+
+/** File-protocol command round-trip (local fs — the runner IS the sandbox). */
+async function wsSendCommand(cmd, timeoutMs) {
+  const id = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const resPath = path.join(WS_DIR, "res-" + id + ".json");
+  await fs.rm(resPath, { force: true }).catch(() => {});
+  await fs.writeFile(path.join(WS_DIR, "cmd.json"), JSON.stringify(Object.assign({ id }, cmd)));
+  const deadline = Date.now() + (timeoutMs ?? 60_000);
+  for (;;) {
+    if (Date.now() >= deadline) return { ok: false, error: "Web session command timed out." };
+    try {
+      const parsed = JSON.parse(await fs.readFile(resPath, "utf8"));
+      await fs.rm(resPath, { force: true }).catch(() => {});
+      return parsed;
+    } catch {}
+    await sleep(350);
+  }
+}
+
 // ── Sandbox-side tool implementations ──────────────────────────────────
 const TOOLS = [
   {
@@ -2520,6 +2605,89 @@ const TOOLS = [
       };
     },
   },
+  // ── Web sessions (OnyxCode PRD §6) — NATIVE in the sandbox ────────────
+  // start_web_session / manage_web_session drive the SAME Playwright
+  // driver + file protocol as the browser-side tools (code_web_session.ts
+  // / web-session-driver.ts — the source below is injected verbatim), but
+  // run ENTIRELY inside the sandbox: cmd.json is written to the local
+  // filesystem and res-<id>.json is polled locally. They used to live in
+  // the browser registry and BRIDGED back to the user's browser — dying
+  // with the tab closed ("this page was probably closed or asleep", the
+  // "tools not able to run in background / tab not opened" bug). Native
+  // here means background code-mode turns keep full web-session power.
+  {
+    name: "start_web_session",
+    description: "Start a headless Chromium (Playwright) web session INSIDE the sandbox for testing and interacting with web pages — including the agent's own live previews (use http://localhost:PORT, e.g. http://localhost:3000, to test apps you just started with start_preview). Installs Chromium on first use (can take a couple of minutes; consider skip-wait). Returns a session id; drive it with manage_web_session (navigate, click, type, screenshot, extract…).",
+    parameters: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "URL to open first (public https:// URL, or http://localhost:PORT to test a preview running in the sandbox).",
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const url = String(args.url ?? "");
+      if (!url) return { ok: false, error: "url is required." };
+      const booted = await ensureWsDriver();
+      if (!booted.ok) return { ok: false, error: booted.error };
+      const nav = await wsSendCommand({ action: "navigate", url }, 60_000);
+      if (nav.ok === false) return { ok: false, error: String(nav.error ?? "Navigation failed.") };
+      return {
+        kind: "web_session",
+        ok: true,
+        action: "start",
+        sessionId: "ws_default",
+        url: nav.url ?? url,
+        title: nav.title ?? null,
+        status: typeof nav.status === "number" ? nav.status : null,
+        message: "Web session ready. Drive it with manage_web_session actions: navigate, click, type, press, screenshot, extract, title, content, status, close.",
+      };
+    },
+  },
+  {
+    name: "manage_web_session",
+    description: "Drive an active OnyxCode web session (headless Chromium in the sandbox, started by start_web_session). Actions: navigate (url), click (selector), type (selector, text), press (key), screenshot (returns the image), extract (visible text, optional selector), title, content (HTML), eval (run JavaScript in the page — see browser_eval), els (interactive-element inventory with selectors + a11y info), console (captured console errors/warnings + page errors, deduplicated), network (failed 4xx/5xx + failed requests), status, close. Selectors are CSS. Use http://localhost:PORT to interact with your own previews.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["navigate", "click", "type", "press", "screenshot", "extract", "title", "content", "eval", "els", "console", "network", "status", "close"],
+          description: "The interaction to perform.",
+        },
+        url: { type: "string", description: "For navigate." },
+        selector: { type: "string", description: "CSS selector (click/type/press/extract)." },
+        text: { type: "string", description: "Text to type (type action)." },
+        key: { type: "string", description: "Key to press (press action), e.g. Enter." },
+        fullPage: { type: "boolean", description: "Screenshot the full page (optional)." },
+        code: { type: "string", description: "JavaScript to evaluate (eval action)." },
+        limit: { type: "number", description: "Max entries (console/network) or elements (els)." },
+        clear: { type: "boolean", description: "Clear the captured console/network log after reading." },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    run: async (args) => {
+      const action = String(args.action ?? "");
+      const booted = await ensureWsDriver();
+      if (!booted.ok) return { ok: false, error: booted.error };
+      const cmd = { action };
+      if (args.url !== undefined) cmd.url = String(args.url);
+      if (args.selector !== undefined) cmd.selector = String(args.selector);
+      if (args.text !== undefined) cmd.text = String(args.text);
+      if (args.key !== undefined) cmd.key = String(args.key);
+      if (args.fullPage !== undefined) cmd.fullPage = !!args.fullPage;
+      if (args.code !== undefined) cmd.code = String(args.code);
+      if (args.limit !== undefined) cmd.limit = Number(args.limit) || 0;
+      if (args.clear !== undefined) cmd.clear = !!args.clear;
+      const result = await wsSendCommand(cmd, 60_000);
+      return { kind: "web_session", ok: result.ok !== false, action, ...result };
+    },
+  },
 ];
 
 // Tools documented in the TOOL DIGEST (generated from Onyx.md — parity
@@ -2561,6 +2729,10 @@ const NATIVE_CODE_ONLY_TOOLS = new Set([
   "read_file_section",
   "run_terminal",
   "run_python",
+  // Web sessions are OnyxCode-scoped in the foreground registry ("code"
+  // category) — keep the same isolation here.
+  "start_web_session",
+  "manage_web_session",
 ]);
 
 async function runBridgeTool(callId, name, args) {
@@ -2578,8 +2750,8 @@ async function runBridgeTool(callId, name, args) {
       await fs.rm(reqPath, { force: true }).catch(() => {});
       return {
         error:
-          "The '" + name + "' tool runs in your browser and timed out after " + Math.round(timeoutMs / 1000) +
-          "s (this page was probably closed or asleep). Browser-side tools (chats, memories, skills, MCP configs, subagents, ask_user) need this page open. Continue with the sandbox tools or finish without it, and tell the user to re-run with the page open if that tool is essential.",
+          "The '" + name + "' tool runs in your BROWSER and timed out after " + Math.round(timeoutMs / 1000) +
+          "s — the app tab was not open (closed, asleep or backgrounded). Browser-side tools (chats, memories, skills, MCP configs, subagents, ask_user) need this app tab open. Continue with the sandbox tools or finish without it, and tell the user to re-run with the app tab open if that tool is essential.",
       };
     }
     try {

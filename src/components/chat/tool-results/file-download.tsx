@@ -93,18 +93,32 @@ export function FileDownloadResult({ payload }: { payload: FileDownloadPayload }
     setDownloading(true);
     try {
       // Convert data: URLs → Blob → object URL before triggering the
-      // download. Direct data: URLs can fail silently for large payloads
-      // (browser size limits vary, and anchor.click() doesn't throw when
-      // it refuses to navigate) — the user just sees nothing happen.
-      // Going through a Blob sidesteps those limits AND lets us surface
-      // real errors via the catch block.
+      // download. The base64 payload is decoded SYNCHRONOUSLY (chunked
+      // atob → Uint8Array → Blob) instead of `fetch(dataUrl)`:
+      //   - fetch() on data: URLs is governed by CSP connect-src, which
+      //     used to reject it ("Failed to fetch") whenever `data:` was
+      //     missing from the policy;
+      //   - browsers also refuse data: URLs over a few MB in fetch().
+      // Direct decoding has neither limit, and still surfaces real errors
+      // via the catch block.
       const url = payload.download_url;
       let downloadUrl: string;
       let shouldRevoke = false;
       if (url.startsWith("data:")) {
-        const resp = await fetch(url);
-        const blob = await resp.blob();
-        downloadUrl = URL.createObjectURL(blob);
+        const commaIdx = url.indexOf(",");
+        const meta = commaIdx >= 0 ? url.slice(5, commaIdx) : "";
+        const b64 = commaIdx >= 0 ? url.slice(commaIdx + 1) : "";
+        const mime = meta.split(";")[0] || "application/octet-stream";
+        const bin = atob(b64);
+        // Chunked copy — huge archives would blow the call stack with a
+        // single String.fromCharCode.apply over megabytes.
+        const bytes = new Uint8Array(bin.length);
+        const CHUNK = 32 * 1024;
+        for (let i = 0; i < bin.length; i += CHUNK) {
+          const end = Math.min(bin.length, i + CHUNK);
+          for (let j = i; j < end; j++) bytes[j] = bin.charCodeAt(j);
+        }
+        downloadUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
         shouldRevoke = true;
       } else {
         downloadUrl = url;

@@ -324,9 +324,20 @@ function TextBubble({
   // If no segments and no persisted spec, just render the full text as markdown.
   // Assistant turns are FRAMELESS (Terra spec) — no bubble, editorial text on
   // the cream canvas with serif-numeral ordered lists.
+  //
+  // WHOLE-RESPONSE FADE (user spec 2026-09-29: "make whole response fade,
+  // not just the word"): the entire response block carries ONE fade — while
+  // the turn streams it sits slightly dimmed (`.response-live`), and when the
+  // turn settles the WHOLE block fades to full ink in one motion. No
+  // per-word / per-character animation exists anymore.
   if (segments.length === 0 && !persistedSpec) {
     return (
-      <div className="relative w-full max-w-full break-words">
+      <div
+        className={cn(
+          "response-fade relative w-full max-w-full break-words",
+          streamActive && "response-live",
+        )}
+      >
         <div
           className={cn(
             "prose-sm assistant-prose max-w-none break-words text-[15px] leading-[1.68]",
@@ -358,7 +369,12 @@ function TextBubble({
   const lastTextIdx = renderSegments.map((s) => s.type).lastIndexOf("text");
 
   return (
-    <div className="relative w-full max-w-full break-words">
+    <div
+      className={cn(
+        "response-fade relative w-full max-w-full break-words",
+        streamActive && "response-live",
+      )}
+    >
       {renderSegments.map((seg, i) => {
         if (seg.type === "text") {
           const isLast = i === lastTextIdx;
@@ -814,6 +830,25 @@ export const MessageItem = React.memo(function MessageItem({
     !isUser &&
     (parts.length > 0 || (showTodoPanel && lastResearchPartId !== null));
 
+  // GenUI HOST (user fix, 2026-09-29 — "gen ui is duplicating in every round
+  // inside worked panel"): the persisted `message.genui` nodes must render
+  // on EXACTLY ONE text part — the part that actually carries the
+  // `<<<genui>>>` sentinel. (When no part carries the sentinel — legacy
+  // messages whose text was sanitized — the LAST text part hosts the
+  // fallback render.) Previously the nodes were handed to EVERY round's
+  // TextBubble, so after the turn settled each round inside the
+  // WorkingPanel rendered its own duplicate of the GenUI card.
+  const genuiHostPartId = React.useMemo(() => {
+    if (isUser || !message.genui || message.genui.length === 0) return null;
+    const textParts = (parts as readonly { id: string; type: string; content?: string }[]).filter(
+      (p) => p.type === "text" && typeof p.content === "string" && p.content.length > 0,
+    );
+    if (textParts.length === 0) return null;
+    const withSentinel = textParts.find((p) => p.content!.includes("<<<genui>>>"));
+    const host = withSentinel ?? textParts[textParts.length - 1]!;
+    return host.id;
+  }, [isUser, message.genui, parts]);
+
   // Persist GenUI nodes when streaming completes. Once `isStreaming` flips
   // to false, if the message text contains `<<<genui>>>` sentinels but
   // `message.genui` isn't set yet, parse + validate the spec and store it
@@ -1077,7 +1112,7 @@ export const MessageItem = React.memo(function MessageItem({
                 isUser={false}
                 onCiteClick={onCiteClick}
                 sources={sources}
-                genuiNodes={!streaming ? message.genui : undefined}
+                genuiNodes={!streaming && it.partId === genuiHostPartId ? message.genui : undefined}
                 isStreaming={isTail}
                 identityKey={it.partId}
               />
