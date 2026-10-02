@@ -56,19 +56,9 @@ const QUICK_STARTS: { label: string; prompt: string }[] = [
       "Scaffold a React + Vite app called my-vite-app with a sleek dashboard layout: sidebar navigation, stat cards, and a simple chart. Then start a live preview.",
   },
   {
-    label: "Python FastAPI",
-    prompt:
-      "Create a Python FastAPI service called my-api with a /health endpoint and an in-memory todo CRUD API (list, create, toggle, delete). Then start a live preview.",
-  },
-  {
     label: "Static site",
     prompt:
       "Build a static site called my-site — a single polished portfolio page (hero, projects grid, contact section) with no build step. Then start a live preview.",
-  },
-  {
-    label: "CLI tool",
-    prompt:
-      "Create a Node.js CLI tool called my-cli that takes a folder path and prints a tree of its files with sizes. Include a README and run it on the workspace to demo.",
   },
 ];
 

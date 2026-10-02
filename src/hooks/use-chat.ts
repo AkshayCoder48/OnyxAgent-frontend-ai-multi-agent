@@ -104,6 +104,44 @@ File paths are relative to the sandbox workspace root (e.g. "projects/my-app/ind
  *   - `messages` is the merged view: the live execution's store when one
  *     exists, otherwise the global chat store (DB-painted history).
  */
+/** Is this provider base URL reachable only from the user's own machine
+ *  (or their private network)? Background turns execute inside E2B sandboxes
+ *  — REMOTE VMs that cannot reach localhost / loopback / LAN addresses.
+ *  A local gateway provider (e.g. an OpenAI-compatible server running on
+ *  the user's machine) must therefore run its turns in the BROWSER, which
+ *  CAN reach it. */
+function isLocalProviderUrl(baseUrl: string | undefined | null): boolean {
+  if (!baseUrl) return false;
+  try {
+    const { hostname } = new URL(baseUrl);
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname === "[::1]" ||
+      hostname === "::1"
+    ) {
+      return true;
+    }
+    // RFC-1918 private ranges (10.x, 172.16–31.x, 192.168.x) + mDNS-style
+    // hostnames — all unreachable from a cloud VM.
+    if (/^10\./.test(hostname)) return true;
+    if (/^192\.168\./.test(hostname)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return true;
+    if (
+      hostname.endsWith(".local") ||
+      hostname.endsWith(".lan") ||
+      hostname.endsWith(".home") ||
+      hostname.endsWith(".internal")
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function useChat(options: UseChatOptions = {}) {
   const { conversationId, onConversationCreated } = options;
   // SELECTOR-BASED SUBSCRIPTIONS (render isolation): the previous
@@ -519,7 +557,20 @@ export function useChat(options: UseChatOptions = {}) {
         } catch {
           e2bKey = null;
         }
-        if (e2bKey) {
+        // LOCAL-PROVIDER GUARD: the background agent loop runs INSIDE the E2B
+        // sandbox (a remote VM) — a provider only reachable from THIS machine
+        // (localhost / loopback / LAN base URL) can never be contacted from
+        // there, and the turn would burn its whole self-heal retry budget on
+        // network AggregateErrors. Such turns run in the BROWSER instead (it
+        // reaches the local provider directly).
+        let providerIsLocal = false;
+        try {
+          const rows = await aiProviderService.list(userId, true);
+          providerIsLocal = rows.some((p) => isLocalProviderUrl(p.base_url));
+        } catch {
+          // provider resolution failure → let the normal path surface it
+        }
+        if (e2bKey && !providerIsLocal) {
           const handle = await startBackgroundTurn({
             turn: opts,
             e2bApiKey: e2bKey,
