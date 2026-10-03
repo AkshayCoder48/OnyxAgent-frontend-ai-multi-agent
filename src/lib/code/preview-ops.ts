@@ -38,6 +38,7 @@ import {
   type PreviewSessionStatus,
 } from "@/stores/preview-session-store";
 import { getScaffold, projectDir, type CodeScaffold } from "@/lib/code/scaffolds";
+import { notifySandboxWrite } from "@/lib/code/workspace-activity";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -99,34 +100,131 @@ export interface StartPreviewResult {
   /** True when an ALREADY-RUNNING healthy dev server was reused instead of
    *  killing + rebooting it (the anti-restart-churn path). */
   reused?: boolean;
+  /** True when a dev server WAS running but was rebooted (it was stale —
+   *  older than the newest project files — or the served page was a stale
+   *  snapshot). Open tabs should be refreshed after a restart. */
+  restarted?: boolean;
+  /** True when the serving page is still the create_app PLACEHOLDER — the
+   *  honest "the agent hasn't built the real app yet" flag surfaced by the
+   *  start_preview tool so the model never mistakes it for the real app. */
+  servingScaffoldPlaceholder?: boolean;
 }
 
-/**
- * Is a dev server for THIS app already running and answering on the port?
- * Two probes in one exec (both must pass):
- *   1. a process whose command line references the project dir exists
- *      (the bracket trick keeps pgrep from matching its own shell), and
- *   2. `curl http://localhost:PORT` answers 2xx/3xx inside the sandbox.
+/** The full dev-server probe: is it up, answering, and — critically — was it
+ * booted AFTER the newest project file was written?
  *
- * This is the gate for the REUSE path in startPreview: killing and rebooting
- * a healthy dev server breaks EVERY already-open preview tab (pages hold
- * chunk references from the previous webpack build — the classic
- * "__webpack_modules__[moduleId] is not a function" stale-chunk crash) and
- * costs a full reinstall + reboot cycle for nothing. A healthy server keeps
- * serving; only its bootEpoch is bumped so the panel iframe remounts.
+ * THE STALE-SERVER BUG this guards against: a dev server that booted while
+ * the project still contained the create_app scaffold placeholder can keep
+ * serving that STALE compiled output forever — HMR/websocket file-watching
+ * is unreliable through the sandbox (Next.js dev even regenerates a wiped
+ * `.next` from its in-memory module graph), so "process up + HTTP 200" is
+ * NOT proof the served page matches the files on disk. The fix compares the
+ * OLDEST matching server process's elapsed time (`ps -o etimes=`) against
+ * the newest project source mtime (excluding node_modules/.next): if any
+ * file changed AFTER the server booted, the server is stale and MUST be
+ * restarted, or the preview keeps showing the scaffold page.
  */
-async function isDevServerHealthy(
+async function probeDevServer(
   client: ReturnType<typeof getE2BClient>,
   appName: string,
   port: number,
-): Promise<boolean> {
+): Promise<{ up: boolean; httpOk: boolean; stale: boolean; detail?: string }> {
   const safeMarker = `projects/${appName}`.replace(/-/g, "[-]");
   const probe = await client.exec(
-    `pgrep -f "${safeMarker}" >/dev/null 2>&1 && curl -s -o /dev/null -w "%{http_code}" --max-time 12 http://localhost:${port} 2>/dev/null || echo ERR`,
+    // All-in-one: PID list (oldest elapsed), newest source mtime, local HTTP.
+    // Every field degrades independently — a missing ps/procps field never
+    // breaks the rest of the probe.
+    `PIDS=$(pgrep -f "${safeMarker}" 2>/dev/null | tr '\n' ' '); ` +
+      `if [ -z "$PIDS" ]; then echo "NO_SERVER"; else ` +
+      `OLDEST=$(ps -o etimes= -p $PIDS 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' | sort -rn | head -n 1); ` +
+      `NEWEST=$(find "/home/user/projects/${appName}" -path '*/node_modules' -prune -o -path '*/.next' -prune -o -path '*/.git' -prune -o -type f -printf '%T@\\n' 2>/dev/null | sort -rn | head -n 1 | cut -d. -f1); ` +
+      `NOW=$(date +%s); ` +
+      `CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://localhost:${port}" 2>/dev/null); ` +
+      `echo "UP oldest=\${OLDEST:-?} newest=\${NEWEST:-0} now=\$NOW code=\${CODE:-ERR}"; fi`,
     { timeout: 25 },
   );
-  const code = probe.stdout.trim();
-  return code.startsWith("2") || code.startsWith("3");
+  const out = probe.stdout.trim();
+  if (!out || out.startsWith("NO_SERVER") || !out.startsWith("UP")) {
+    return { up: false, httpOk: false, stale: false, detail: out || "no server process" };
+  }
+  const fields = Object.fromEntries(
+    out
+      .split(/\s+/)
+      .slice(1)
+      .map((tok) => {
+        const eq = tok.indexOf("=");
+        return eq > 0 ? [tok.slice(0, eq), tok.slice(eq + 1)] : [tok, ""];
+      }),
+  );
+  const code = String(fields.code ?? "ERR");
+  const httpOk = code.startsWith("2") || code.startsWith("3");
+  const elapsed = Number(fields.oldest);
+  const newest = Number(fields.newest ?? 0);
+  const now = Number(fields.now ?? 0);
+  // Stale when a project file is NEWER than the server's boot (file changed
+  // `elapsed` seconds ago at most, i.e. now-newest < elapsed). Unknown
+  // elapsed/newest degrades to "not stale" (conservative reuse).
+  const stale =
+    Number.isFinite(elapsed) &&
+    elapsed > 0 &&
+    Number.isFinite(newest) &&
+    newest > 0 &&
+    Number.isFinite(now) &&
+    now > 0 &&
+    now - newest < elapsed;
+  return { up: true, httpOk, stale, detail: out };
+}
+
+/* ------------------------------------------------------------------ */
+/* Scaffold-placeholder detection (the "preview shows the scaffold      */
+/* instead of the built app" honesty check)                              */
+/* ------------------------------------------------------------------ */
+
+/** Markers that identify the create_app PLACEHOLDER page (scaffolds.ts):
+ * the "<AppName> is live." hero and the "Scaffolded by OnyxCode"
+ * metadata/footer. When the SERVED page contains one but the project's
+ * entry files on disk NO LONGER do, the server/proxy is serving a stale
+ * snapshot of the scaffold — never the real app. */
+const SCAFFOLD_MARKER_RE = /is live\.|Scaffolded by OnyxCode/i;
+
+/** Does the page served at the (cache-busted) URL still render the create_app
+ * placeholder? Returns null when it can't be determined (CORS-opaque hosts,
+ * client-rendered SPAs whose raw HTML has no markers, network failure) —
+ * callers treat null as "unknown, don't fail on it". */
+async function servingScaffoldPlaceholder(url: string): Promise<boolean | null> {
+  try {
+    const r = await fetch(cacheBustedUrl(url), { cache: "no-store" });
+    if (!r.ok) return null;
+    const html = await r.text();
+    if (!html || html.length < 200) return null;
+    return SCAFFOLD_MARKER_RE.test(html);
+  } catch {
+    return null;
+  }
+}
+
+/** Do the project's ENTRY files on disk still contain the scaffold markers?
+ * (True = the agent hasn't replaced the placeholder yet — a scaffold-served
+ * preview is then CORRECT. False = the real app is on disk.) */
+async function diskStillHasScaffold(
+  client: ReturnType<typeof getE2BClient>,
+  appName: string,
+): Promise<boolean> {
+  const dir = projectDir(appName);
+  const probe = await client.exec(
+    `grep -l -e 'is live\\.' -e 'Scaffolded by OnyxCode' "${dir}/app/page.tsx" "${dir}/app/layout.tsx" "${dir}/index.html" "${dir}/src/App.jsx" 2>/dev/null | head -n 1`,
+    { timeout: 15 },
+  );
+  return probe.stdout.trim().length > 0;
+}
+
+/** Append a unique cache-buster query so NO caching layer (browser cache,
+ * iframe cache, E2B edge proxy) can answer with a stale snapshot. Unknown
+ * query params are ignored by every supported scaffold (Next/Vite/static). */
+export function cacheBustedUrl(url: string, token?: string): string {
+  if (!url) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}_onyx=${encodeURIComponent(token ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`)}`;
 }
 
 /**
@@ -136,14 +234,17 @@ async function isDevServerHealthy(
  * status: 2xx = serving, anything else = not (yet). The opaque no-cors
  * fallback only runs when the host sends no CORS headers at all (custom
  * preview hosts) — there, any network-level response counts as serving.
+ * Every probe is CACHE-BUSTED: a proxy that serves a cached snapshot would
+ * otherwise answer 200 for a page that no longer exists.
  */
 export async function isUrlServing(url: string): Promise<boolean> {
+  const probeUrl = cacheBustedUrl(url);
   try {
-    const r = await fetch(url, { cache: "no-store" });
+    const r = await fetch(probeUrl, { cache: "no-store" });
     return r.ok;
   } catch {
     try {
-      await fetch(url, { mode: "no-cors", cache: "no-store" });
+      await fetch(probeUrl, { mode: "no-cors", cache: "no-store" });
       return true;
     } catch {
       return false;
@@ -278,141 +379,350 @@ export async function startPreview(opts: StartPreviewOptions): Promise<StartPrev
       };
     }
 
-    // 0.7. REUSE A HEALTHY SERVER (the anti-restart-churn fix): if a dev
-    // server for THIS app is already running and answering on the port,
-    // KEEP it. Restarting unconditionally broke every already-open preview
-    // tab — the old page kept chunk references from the previous webpack
-    // build and crashed with "__webpack_modules__[moduleId] is not a
-    // function" as soon as the new build served different module ids — and
-    // re-ran the whole install+boot cycle needlessly. On reuse we only bump
-    // bootEpoch (the panel remounts its iframe → shows the CURRENT app) and
-    // re-verify the public URL.
-    if (await isDevServerHealthy(client, appName, port)) {
-      progress?.("A dev server for this app is already running and healthy — reusing it (no restart, open tabs keep working).");
-      const hostInfo = await client.getHostUrl(port);
-      const live = await checkPreviewUrl(hostInfo.url, {
-        timeoutMs: 30_000,
-        onProgress: (line) => progress?.(line),
-      });
-      if (live) {
-        const serverCmd = scaffold.serverCommand!(appName, port);
-        const session: PreviewSession = {
-          id: conversationId
-            ? previewSessionIdFor(conversationId)
-            : `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-          name: appName,
-          framework: scaffold.key,
-          frameworkLabel: scaffold.label,
-          url: hostInfo.url,
-          port,
-          sandboxId: hostInfo.sandboxId,
-          status: "running",
-          command: `cd ${cwd} && ${serverCmd}`,
-          createdAt: Date.now(),
-          bootEpoch: Date.now(),
-          ...(conversationId ? { conversationId } : {}),
-        };
-        usePreviewSessionStore.getState().upsert(session);
-        return { ok: true, session, reused: true };
-      }
-      // Public URL not answering although localhost does (proxy hiccup) —
-      // fall through to the full restart path, which re-exposes the port.
-      progress?.("The public URL did not answer — restarting the dev server.");
-    }
-
-    // 0.5. RESTART HYGIENE (one app per chat): if this conversation already
-    // has a preview record, kill its old dev server (project marker + port)
-    // BEFORE booting the new one — a half-dead process squatting on the port
-    // would make the fresh server fail to bind (or serve stale output).
-    // Best-effort: a failed kill must never block the start.
-    if (conversationId) {
-      const prev = findPreviewSession(usePreviewSessionStore.getState().sessions, conversationId);
-      if (prev) {
-        progress?.(`Stopping the previous preview for ${prev.name}…`);
-        try {
-          await killPreviewProcesses(client, prev.name, port);
-        } catch {
-          /* best-effort */
+    // 0.7. REUSE A HEALTHY, FRESH SERVER (the anti-restart-churn fix): if a
+    // dev server for THIS app is already running, answering on the port, AND
+    // was booted AFTER the newest project file was written, KEEP it.
+    // Restarting unconditionally broke every already-open preview tab (the
+    // old page kept chunk references from the previous webpack build and
+    // crashed with "__webpack_modules__[moduleId] is not a function"), but
+    // reusing a STALE server kept serving the scaffold placeholder forever —
+    // so reuse now ALSO requires the server to be newer than every source
+    // file (probeDevServer's mtime check). On reuse we only bump bootEpoch
+    // (the panel remounts its iframe → shows the CURRENT app) and re-verify
+    // the public URL — after confirming the served page is not the scaffold
+    // placeholder while the real app is on disk (the stale-snapshot guard).
+    const probe = await probeDevServer(client, appName, port);
+    if (probe.up && probe.httpOk) {
+      if (probe.stale) {
+        progress?.(
+          "The running dev server predates the newest project files (it would keep serving the OLD build) — restarting it…",
+        );
+      } else {
+        progress?.("A dev server for this app is already running and healthy — reusing it (no restart, open tabs keep working).");
+        const hostInfo = await client.getHostUrl(port);
+        const live = await checkPreviewUrl(hostInfo.url, {
+          timeoutMs: 30_000,
+          onProgress: (line) => progress?.(line),
+        });
+        if (live) {
+          // STALE-SNAPSHOT GUARD: if the URL serves the scaffold placeholder
+          // while the project on disk no longer contains it, the preview is
+          // pinned to a stale snapshot — restart once instead of recording a
+          // lying "running".
+          const servingScaffold = await servingScaffoldPlaceholder(hostInfo.url);
+          if (servingScaffold === true) {
+            const diskScaffold = await diskStillHasScaffold(client, appName);
+            if (!diskScaffold) {
+              progress?.(
+                "The preview URL is serving the scaffold placeholder but the real app is on disk — restarting the dev server to shake the stale snapshot…",
+              );
+            } else {
+              const session = await recordSession(conversationId, {
+                appName,
+                scaffold,
+                port,
+                url: hostInfo.url,
+                sandboxId: hostInfo.sandboxId,
+                command: `cd ${cwd} && ${scaffold.serverCommand!(appName, port)}`,
+              });
+              return { ok: true, session, reused: true, servingScaffoldPlaceholder: true };
+            }
+          } else {
+            const session = await recordSession(conversationId, {
+              appName,
+              scaffold,
+              port,
+              url: hostInfo.url,
+              sandboxId: hostInfo.sandboxId,
+              command: `cd ${cwd} && ${scaffold.serverCommand!(appName, port)}`,
+            });
+            return { ok: true, session, reused: true };
+          }
         }
+        // Public URL not answering although localhost does (proxy hiccup)
+        // — fall through to the full restart path, which re-exposes the port.
+        progress?.("The public URL did not answer — restarting the dev server.");
       }
     }
 
-    // 1. Install dependencies (foreground, streamed).
-    if (scaffold.installCommand) {
-      progress?.(`Installing dependencies (${scaffold.installCommand})…`);
-      let installOk = true;
-      let installErr = "";
-      let tail = "";
-      for await (const chunk of client.runCommandStream(scaffold.installCommand, {
+    // ── FULL (RE)START PATH ────────────────────────────────────────────
+    // At most one forced retry: a first boot that still serves the scaffold
+    // placeholder (stale proxy snapshot / zombie server) gets ONE more
+    // chance with a clean kill; a second failure is reported HONESTLY so the
+    // agent stops flailing and can tell the user what is actually wrong.
+    let lastError: string | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const boot = await bootPreviewServer({
+        client,
+        appName,
+        scaffold,
+        port,
         cwd,
-        timeout: 280,
-      })) {
-        if ((chunk.type === "stdout" || chunk.type === "stderr") && chunk.data) {
-          tail = (tail + chunk.data).slice(-800);
-          if (chunk.type === "stderr") installErr += chunk.data;
-          progress?.(chunk.data.trim().split("\n").pop() ?? "");
-        } else if (chunk.type === "result") {
-          installOk = (chunk.exit_code ?? 0) === 0;
-        }
-      }
-      if (!installOk) {
+        conversationId,
+        onProgress: progress,
+      });
+      if (boot.ok) {
         return {
-          ok: false,
-          error: `Dependency install failed (exit ${installOk ? 0 : 1}): ${installErr.slice(-400) || tail.slice(-400)}`,
+          ok: true,
+          session: boot.session,
+          restarted: attempt > 1 || probe.up,
+          ...(boot.servingScaffoldPlaceholder ? { servingScaffoldPlaceholder: true } : {}),
         };
       }
-      progress?.("Dependencies installed.");
+      lastError = boot.error;
+      // Retry only when the failure looks like a stale snapshot/served-build
+      // problem (a missing directory or failed install will not heal itself).
+      if (!boot.retryable) break;
+      progress?.(`Attempt ${attempt} failed (${lastError}) — retrying once with a clean kill…`);
     }
-
-    // 2. Start the dev server (detached background command).
-    const serverCmd = scaffold.serverCommand(appName, port);
-    // The `cd <dir> &&` prefix puts the project path in the process's
-    // command line so Stop can pkill by it.
-    const wrappedCmd = `cd ${cwd} && ${serverCmd}`;
-    progress?.(`Starting dev server: ${serverCmd}`);
-    const started = await client.startServer(wrappedCmd, { cwd: "/home/user" });
-    if (!started.started) {
-      return { ok: false, error: "The sandbox refused to start the dev server." };
+    const session = findPreviewSession(usePreviewSessionStore.getState().sessions, conversationId);
+    if (session) {
+      usePreviewSessionStore.getState().markStatus(session.id, "error", lastError ?? undefined);
     }
-
-    // 3. Resolve the public URL.
-    const hostInfo = await client.getHostUrl(port);
-    progress?.(`Public preview URL: ${hostInfo.url}`);
-
-    // 4. Wait until it actually serves — "running" is only recorded after
-    // the URL responds (honest status, PRD §7/§122).
-    const live = await checkPreviewUrl(hostInfo.url, {
-      timeoutMs: 90_000,
-      onProgress: (line) => progress?.(line),
-    });
-
-    // 5. Record the session — the DETERMINISTIC pv-<conversationId> id, so
-    //    the chat keeps exactly one record and every start re-uses/upgrades
-    //    it in place (the store's upsert adopts any legacy record for the
-    //    conversation). Survives refresh.
-    const session: PreviewSession = {
-      id: conversationId
-        ? previewSessionIdFor(conversationId)
-        : `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-      name: appName,
-      framework: scaffold.key,
-      frameworkLabel: scaffold.label,
-      url: hostInfo.url,
-      port,
-      sandboxId: hostInfo.sandboxId ?? started.sandboxId,
-      status: live ? "running" : "error",
-      command: wrappedCmd,
-      error: live ? undefined : "The server started but the public URL did not respond in time — it may still be booting; refresh the preview panel.",
-      createdAt: Date.now(),
-      bootEpoch: Date.now(),
-      ...(conversationId ? { conversationId } : {}),
-    };
-    usePreviewSessionStore.getState().upsert(session);
-    return { ok: true, session };
+    return { ok: false, error: lastError ?? "Failed to start the preview." };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: message };
   }
+}
+
+/** Persist the conversation's single preview record (running). */
+async function recordSession(
+  conversationId: string | null,
+  info: {
+    appName: string;
+    scaffold: CodeScaffold;
+    port: number;
+    url: string;
+    sandboxId?: string;
+    command: string;
+  },
+): Promise<PreviewSession> {
+  const session: PreviewSession = {
+    id: conversationId
+      ? previewSessionIdFor(conversationId)
+      : `pv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    name: info.appName,
+    framework: info.scaffold.key,
+    frameworkLabel: info.scaffold.label,
+    url: info.url,
+    port: info.port,
+    sandboxId: info.sandboxId ?? "",
+    status: "running",
+    command: info.command,
+    createdAt: Date.now(),
+    bootEpoch: Date.now(),
+    ...(conversationId ? { conversationId } : {}),
+  };
+  usePreviewSessionStore.getState().upsert(session);
+  // A completed start (fresh boot OR healthy reuse) invalidates every page
+  // loaded from a PREVIOUS build generation — chunk ids change on reboot,
+  // so stale pages crash with "__webpack_modules__[moduleId] is not a
+  // function" on their next lazy chunk load. Publishing on the workspace
+  // write bus (a) persists the wall-clock write stamp so browser_eval's
+  // cross-turn stale-page gate fires, and (b) reloads the preview panel's
+  // iframe once writes settle.
+  notifySandboxWrite();
+  return session;
+}
+
+/** Boot the dev server from scratch: clean kill → install → start → verify
+ * (BOTH sandbox-localhost AND the public URL) → scaffold honesty check. */
+async function bootPreviewServer(opts: {
+  client: ReturnType<typeof getE2BClient>;
+  appName: string;
+  scaffold: CodeScaffold;
+  port: number;
+  cwd: string;
+  conversationId: string | null;
+  onProgress?: (line: string) => void;
+}): Promise<
+  | { ok: true; session: PreviewSession; servingScaffoldPlaceholder?: boolean }
+  | { ok: false; error: string; retryable: boolean }
+> {
+  const { client, appName, scaffold, port, cwd, conversationId, onProgress: progress } = opts;
+
+  if (!scaffold.serverCommand) {
+    return {
+      ok: false,
+      retryable: false,
+      error: `The ${scaffold.label} scaffold has no preview server.`,
+    };
+  }
+
+  // 1. RESTART HYGIENE: kill every trace of the previous server — by PORT
+  // first (the actual listener; next-server workers rewrite their process
+  // titles so path-marker kills MISS them and they keep squatting on the
+  // port serving the OLD build), then by project-path marker, then by this
+  // scaffold's framework process names (safe: one sandbox = one chat = one
+  // app), and wait for the port to actually be FREE before rebooting so the
+  // fresh server can never hit EADDRINUSE against a zombie.
+  try {
+    await killPreviewProcesses(client, appName, port, scaffold.key);
+  } catch {
+    /* best-effort */
+  }
+
+  // 2. Install dependencies (foreground, streamed).
+  if (scaffold.installCommand) {
+    progress?.(`Installing dependencies (${scaffold.installCommand})…`);
+    let installOk = true;
+    let installErr = "";
+    let tail = "";
+    for await (const chunk of client.runCommandStream(scaffold.installCommand, {
+      cwd,
+      timeout: 280,
+    })) {
+      if ((chunk.type === "stdout" || chunk.type === "stderr") && chunk.data) {
+        tail = (tail + chunk.data).slice(-800);
+        if (chunk.type === "stderr") installErr += chunk.data;
+        progress?.(chunk.data.trim().split("\n").pop() ?? "");
+      } else if (chunk.type === "result") {
+        installOk = (chunk.exit_code ?? 0) === 0;
+      }
+    }
+    if (!installOk) {
+      return {
+        ok: false,
+        retryable: false,
+        error: `Dependency install failed (exit ${installOk ? 0 : 1}): ${installErr.slice(-400) || tail.slice(-400)}`,
+      };
+    }
+    progress?.("Dependencies installed.");
+  }
+
+  // 3. Start the dev server (detached background command).
+  const serverCmd = scaffold.serverCommand(appName, port);
+  // The `cd <dir> &&` prefix puts the project path in the process's
+  // command line so Stop can pkill by it.
+  const wrappedCmd = `cd ${cwd} && ${serverCmd}`;
+  progress?.(`Starting dev server: ${serverCmd}`);
+  const started = await client.startServer(wrappedCmd, { cwd: "/home/user" });
+  if (!started.started) {
+    return { ok: false, retryable: true, error: "The sandbox refused to start the dev server." };
+  }
+
+  // 4. Resolve the public URL — and SANDBOX-CHECK it: startServer and
+  // getHostUrl are separate server calls; if they resolve DIFFERENT
+  // sandboxes (server-cache divergence), the URL would embed some OTHER
+  // (stale) sandbox's app while our dev server boots alone here. That is
+  // exactly the "preview shows the scaffold in the sidebar but the real app
+  // in a new tab" / "proxy pinned to a stale snapshot" class of bugs —
+  // fail honestly instead of recording a lying "running".
+  const hostInfo = await client.getHostUrl(port);
+  if (
+    started.sandboxId &&
+    hostInfo.sandboxId &&
+    started.sandboxId !== hostInfo.sandboxId
+  ) {
+    return {
+      ok: false,
+      retryable: false,
+      error:
+        `Preview sandbox mismatch: the dev server started in sandbox ${started.sandboxId} ` +
+        `but the public URL points at sandbox ${hostInfo.sandboxId} (a stale sandbox record). ` +
+        "Retry the start in a moment — if it persists, stop the preview and start it again.",
+    };
+  }
+  progress?.(`Public preview URL: ${hostInfo.url}`);
+
+  // 5. Wait until BOTH endpoints actually serve — the sandbox-local port
+  // (proof OUR dev server owns the port) and the public URL. "running" is
+  // only recorded after both answer; a public URL that answers while
+  // localhost is dead means the URL is pinned to a stale snapshot.
+  const localLive = waitLocalServing(client, port, 90_000, (line) => progress?.(line));
+  const publicLive = checkPreviewUrl(hostInfo.url, {
+    timeoutMs: 90_000,
+    onProgress: (line) => progress?.(line),
+  });
+  const [localOk, publicOk] = await Promise.all([localLive, publicLive]);
+
+  if (!localOk && publicOk) {
+    return {
+      ok: false,
+      retryable: false,
+      error:
+        `The public preview URL (${hostInfo.url}) answered, but the dev server is NOT listening ` +
+        `on localhost:${port} in this chat's sandbox — the URL is serving a stale snapshot from a ` +
+        "different/older sandbox, not this app. Stop the preview and start it again; if it persists the " +
+        "E2B sandbox may need to be rotated (ask the user to restart it from Settings).",
+    };
+  }
+  if (!localOk || !publicOk) {
+    return {
+      ok: false,
+      retryable: true,
+      error:
+        "The server started but did not respond in time — it may still be booting; try start_preview again or refresh the preview panel.",
+    };
+  }
+
+  // 6. SCAFFOLD HONESTY CHECK: never record "running" while the URL serves
+  // the create_app placeholder and the real app is on disk. (Null = unknown
+  // — e.g. client-rendered Vite shells — treated as fine.)
+  let servingScaffold = false;
+  const placeholder = await servingScaffoldPlaceholder(hostInfo.url);
+  if (placeholder === true) {
+    const diskScaffold = await diskStillHasScaffold(client, appName);
+    if (!diskScaffold) {
+      servingScaffold = true;
+      return {
+        ok: false,
+        retryable: true,
+        error:
+          `The preview at ${hostInfo.url} is still serving the scaffold placeholder, not the built app ` +
+          "(stale build/snapshot). A clean restart will be attempted.",
+      };
+    }
+    // The placeholder IS the current on-disk app (the agent hasn't replaced
+    // it yet) — honest "running" with a flag the tool surfaces to the agent.
+    const session = await recordSession(conversationId, {
+      appName,
+      scaffold,
+      port,
+      url: hostInfo.url,
+      sandboxId: hostInfo.sandboxId,
+      command: wrappedCmd,
+    });
+    return { ok: true, session, servingScaffoldPlaceholder: true };
+  }
+
+  const session = await recordSession(conversationId, {
+    appName,
+    scaffold,
+    port,
+    url: hostInfo.url,
+    sandboxId: hostInfo.sandboxId,
+    command: wrappedCmd,
+  });
+  return { ok: true, session };
+}
+
+/** Poll localhost:PORT inside the sandbox until it answers 2xx/3xx. */
+async function waitLocalServing(
+  client: ReturnType<typeof getE2BClient>,
+  port: number,
+  timeoutMs: number,
+  onProgress?: (line: string) => void,
+): Promise<boolean> {
+  const start = Date.now();
+  let attempt = 0;
+  while (Date.now() - start < timeoutMs) {
+    attempt++;
+    try {
+      const r = await client.exec(
+        `curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://localhost:${port} 2>/dev/null || echo ERR`,
+        { timeout: 15 },
+      );
+      const code = r.stdout.trim();
+      if (code.startsWith("2") || code.startsWith("3")) return true;
+    } catch {
+      /* sandbox hiccup — keep polling */
+    }
+    if (attempt === 1) onProgress?.("Waiting for the dev server to boot (sandbox-local check)…");
+    await sleep(3_000);
+  }
+  return false;
 }
 
 /**
@@ -476,28 +786,60 @@ async function startPreviewFromSession(
   });
 }
 
+/** Per-scaffold process-name patterns for the LAST-RESORT kill layer —
+ * safe because one sandbox = one chat = one app (a framework's processes in
+ * THIS sandbox can only belong to this chat's preview). The patterns use the
+ * BRACKET-TRICK (`[ ]`, `[-]`, `[.]`) so pkill's own command line — which
+ * contains the pattern literally — can never match itself. */
+const FRAMEWORK_KILL_PATTERNS: Record<string, string> = {
+  nextjs: `next[ ]dev|next[-]server`,
+  "vite-react": `v[i]te`,
+  static: `http[.]server`,
+};
+
 /**
- * Kill a preview's dev server in the sandbox: by the project-path marker in
- * the process's command line and by port (fuser/ss when available).
+ * Kill a preview's dev server in the sandbox — LAYERED, PORT FIRST:
+ *
+ *   1. PORT kill (fuser/lsof/ss): the actual LISTENER. This is the layer
+ *      that catches `next-server` workers — Next.js rewrites their process
+ *      titles (no project path in the cmdline), so the path-marker pkill
+ *      MISS them and they keep squatting on the port serving the OLD build
+ *      (the zombie that regenerates a stale `.next` forever).
+ *   2. Project-path marker pkill (the shell/npm wrappers).
+ *   3. Framework process patterns (last resort, per-sandbox-safe).
+ *   4. Wait until the port is actually FREE (up to 12s) so the fresh
+ *      server can never hit EADDRINUSE against a dying zombie.
  */
 async function killPreviewProcesses(
   client: ReturnType<typeof getE2BClient>,
   appName: string,
   port: number,
+  frameworkKey?: string,
 ): Promise<void> {
   // BRACKET-TRICK: the literal marker would match this stop command's OWN
   // command line (pkill kills its own shell) — `[-]` keeps the regex
   // matching the real server process ("projects/my-app") but not the
-  // pattern string itself ("projects/my[-]app").
+  // pattern string itself ("projects/my[-]-app").
   const safeMarker = `projects/${appName}`.replace(/-/g, "[-]");
+  const frameworkPattern = frameworkKey ? FRAMEWORK_KILL_PATTERNS[frameworkKey] : null;
   const command = [
-    // 1. Kill anything whose command line references the project dir.
-    `pkill -f "${safeMarker}" || true`,
-    // 2. Kill whatever still listens on the port (fuser or ss).
+    // 1. Kill whatever LISTENS on the port (the precise kill).
     `fuser -k ${port}/tcp 2>/dev/null || true`,
+    `lsof -t -i:${port} 2>/dev/null | xargs -r kill -9 2>/dev/null || true`,
+    // 2. Kill anything whose command line references the project dir.
+    `pkill -9 -f "${safeMarker}" 2>/dev/null || true`,
+    // 3. Framework process names (one sandbox = one app — cannot hit
+    //    another chat's server).
+    frameworkPattern ? `pkill -9 -f "${frameworkPattern}" 2>/dev/null || true` : `true`,
+    // 4. Force-close any listener still hanging on (best-effort).
     `ss -Kltn "sport = :${port}" 2>/dev/null || true`,
+    // 5. Wait for the port to be genuinely free (a zombie that ignores
+    //    SIGKILL for a moment must not poison the next boot).
+    `for i in 1 2 3 4 5 6; do ` +
+      `curl -s -o /dev/null --max-time 2 "http://localhost:${port}" 2>/dev/null && sleep 2 || exit 0; ` +
+      `done`,
   ].join("; ");
-  await client.exec(command, { timeout: 20 });
+  await client.exec(command, { timeout: 30 });
 }
 
 /**
@@ -509,7 +851,7 @@ async function killPreviewProcesses(
  * auto-start it again (Runtime PRD §5-6/§73-75).
  */
 export async function stopPreviewSession(
-  session: Pick<PreviewSession, "id" | "name" | "port" | "conversationId">,
+  session: Pick<PreviewSession, "id" | "name" | "port" | "framework" | "conversationId">,
   apiKey?: string,
 ): Promise<boolean> {
   const store = usePreviewSessionStore.getState();
@@ -532,7 +874,7 @@ export async function stopPreviewSession(
       session.conversationId ?? null,
       session.conversationId ? "separate" : "shared",
     );
-    await killPreviewProcesses(client, session.name, session.port);
+    await killPreviewProcesses(client, session.name, session.port, session.framework);
     store.markStatus(session.id, "stopped");
     return true;
   } catch {

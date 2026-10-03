@@ -691,6 +691,44 @@ async function getSandbox(
   // 1. Check the in-memory cache first.
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
+    // PER-CHAT DIVERGENCE GUARD (the "preview sidebar shows the scaffold
+    // but a new tab shows the real app" bug): every tool call for a code
+    // chat carries the CLIENT's sandboxId — the authoritative per-chat
+    // slot (localStorage e2b-sandbox-id:<key>:<conversationId>) that
+    // create_app / create_file_chunk / run_terminal / start_preview ALL
+    // resolve through. If this server's cache entry for the same key holds
+    // a DIFFERENT live sandbox (a rotation whose kill failed, a replaced
+    // entry from another flow), preferring the cache would silently point
+    // get_host/exec/start_server at the WRONG (stale) sandbox — the dev
+    // server boots in one sandbox while the public URL embeds another's.
+    // For "separate" (per-chat) sandboxes the CLIENT's id wins; the cache
+    // is derived state. If the client's id can't be connected (dead), the
+    // cached sandbox remains the fallback.
+    if (
+      clientSandboxId &&
+      mode === "separate" &&
+      conversationId &&
+      cached.sandbox.sandboxId !== clientSandboxId
+    ) {
+      try {
+        const clientSandbox = await Sandbox.connect(clientSandboxId, { apiKey });
+        console.log(
+          `[sandbox] divergence guard: cache had ${cached.sandbox.sandboxId} but the chat's client says ${clientSandboxId} — following the client (per-chat slot is authoritative)`,
+        );
+        const clientEntry: CacheEntry = {
+          sandbox: clientSandbox,
+          apiKey,
+          createdAt: Date.now(),
+          key,
+          verifiedAliveAt: Date.now(),
+        };
+        getCache(mode).set(key, clientEntry);
+        return clientSandbox;
+      } catch {
+        // The client's id is dead — keep the cached sandbox (it may be a
+        // server-side rotation the client hasn't caught up with).
+      }
+    }
     // ONYX.MD REFRESH: cached sandboxes created before an Onyx.md update
     // still carry the old documentation. Re-write it (best-effort) when the
     // version differs so the AI always reads the current tool compendium +
@@ -1066,7 +1104,7 @@ export async function POST(req: NextRequest) {
 
       case "get_host": {
         // OnyxCode previews — resolve the PUBLIC host for a sandbox port
-        // (https://{sandboxId}-{port}.e2b.dev). Used by start_preview to
+        // (https://{port}-{sandboxId}.e2b.app). Used by start_preview to
         // give the agent (and the Preview tab iframe) a live URL.
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         const port = (args.port as number) ?? 3000;
@@ -1075,10 +1113,11 @@ export async function POST(req: NextRequest) {
           host =
             typeof sandbox.getHost === "function"
               ? sandbox.getHost(port)
-              : `${sandbox.sandboxId}-${port}.e2b.dev`;
+              : `${port}-${sandbox.sandboxId}.e2b.app`;
         } catch {
-          // Fallback: the well-known E2B public port-host pattern.
-          host = `${sandbox.sandboxId}-${port}.e2b.dev`;
+          // Fallback: the well-known E2B public port-host pattern
+          // ({port}-{sandboxId}.e2b.app — port FIRST).
+          host = `${port}-${sandbox.sandboxId}.e2b.app`;
         }
         return NextResponse.json({
           sandboxId: sandbox.sandboxId,

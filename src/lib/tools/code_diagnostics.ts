@@ -31,6 +31,8 @@ import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion, getWorkspaceFsVersion } from "./workspace-snapshot";
 import { webSession } from "./code_web_session";
 import { findPreviewSession, usePreviewSessionStore } from "@/stores/preview-session-store";
+import { cacheBustedUrl } from "@/lib/code/preview-ops";
+import { getLastSandboxWriteAt } from "@/lib/code/workspace-activity";
 
 const NO_KEY_ERROR =
   "This tool requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
@@ -226,19 +228,33 @@ async function ensurePageOnTarget(
     const onTarget = !!current && current.startsWith(targetUrl);
     // PAGE-FRESHNESS GATE (the "AI can't see errors" fix): a page whose URL
     // already matches the target is NOT proof it shows the current app — if
-    // project files were written after it loaded (fsVersion bumped), the
-    // headless page may still render the OLD build (HMR dies with every
-    // dev-server restart; wholesale page rewrites defeat fast-refresh), so
-    // its console/network captures would miss the real app's errors (e.g.
+    // project files were written after it loaded, the headless page may
+    // still render the OLD build (HMR dies with every dev-server restart;
+    // wholesale page rewrites defeat fast-refresh), so its console/network
+    // captures would miss the real app's errors (e.g.
     // "__webpack_modules__[moduleId] is not a function" chunk crashes).
-    // Reload it (goto the SAME url) before evaluating/inspecting.
+    //
+    // TWO staleness signals, because the in-memory fsVersion pair resets on
+    // every web-app reload while the driver's page survives across turns:
+    //   (a) fsVersion  — writes since the page loaded, THIS session;
+    //   (b) wall-clock — the PERSISTED last-write stamp vs the page's
+    //       persisted load stamp: catches a page loaded during a PREVIOUS
+    //       turn before this turn's writes (the "stale tab" that kept
+    //       evaluating the scaffold page while the real app was built).
+    const lastWrite = getLastSandboxWriteAt();
+    const pageLoaded = webSession.pageLoadedAt();
     const stale =
-      onTarget && getWorkspaceFsVersion() > webSession.pageFsVersion();
+      onTarget &&
+      (getWorkspaceFsVersion() > webSession.pageFsVersion() ||
+        (lastWrite > 0 && pageLoaded > 0 && lastWrite > pageLoaded) ||
+        pageLoaded === 0);
     if (!onTarget) {
       opts.onProgress?.(`TARGET ${targetUrl}`);
+      // Cache-busted so no layer (driver browser cache included) can answer
+      // with a stale snapshot of an earlier build.
       const nav = await sendCommand(
         client,
-        { action: "navigate", url: targetUrl },
+        { action: "navigate", url: cacheBustedUrl(targetUrl) },
         { timeoutMs: 60_000 },
       );
       if (nav.ok === false) {
@@ -250,13 +266,14 @@ async function ensurePageOnTarget(
       webSession.markPageLoaded();
     } else if (stale) {
       opts.onProgress?.(
-        `Reloading ${current} — the project files changed since this page was loaded (stale-page guard so you see the REAL app, not the old build).`,
+        `Reloading ${current} — the project files or the dev server changed since this page was loaded (stale-page guard so you see the REAL app, not the old build).`,
       );
       // Re-goto the CURRENT url (preserves the AI's sub-page position) —
-      // page.goto on the same URL forces a full reload.
+      // page.goto on the same URL forces a full reload, cache-busted so the
+      // reload can never be answered from any cache.
       const nav = await sendCommand(
         client,
-        { action: "navigate", url: current! },
+        { action: "navigate", url: cacheBustedUrl(current!) },
         { timeoutMs: 60_000 },
       );
       if (nav.ok === false) {

@@ -75,11 +75,20 @@ async function sendCommand(
 /** Exported for the browser_eval / diagnostics tools (code_diagnostics.ts)
  *  — they drive the SAME single driver + file protocol so the AI's page
  *  state (navigation, console capture) is shared across all Code tools. */
-export const webSession = { WS_DIR, ensureDriver, sendCommand, markPageLoaded, pageFsVersion };
+export const webSession = {
+  WS_DIR,
+  ensureDriver,
+  sendCommand,
+  markPageLoaded,
+  pageFsVersion,
+  pageLoadedAt,
+};
 
 /* ------------------------------------------------------------------ */
 /* Page-freshness gate (the "AI can't see errors" fix)                  */
 /* ------------------------------------------------------------------ */
+
+const PAGE_LOAD_KEY = "onyx:webSession:lastPageLoad";
 
 /** Workspace fsVersion observed the LAST time the web-session page was
  *  (re)loaded by any path. The headless page does NOT reliably self-update
@@ -90,18 +99,45 @@ export const webSession = { WS_DIR, ensureDriver, sendCommand, markPageLoaded, p
  *  Comparing this marker against getWorkspaceFsVersion() lets the
  *  diagnostics path force a reload before reading the page (see
  *  ensurePageOnTarget in code_diagnostics.ts), so the AI always inspects
- *  the REAL app and sees its actual runtime errors. */
+ *  the REAL app and sees its actual runtime errors.
+ *
+ *  BOTH counters are in-memory and reset on every web-app reload — while
+ *  the driver's headless page (inside the sandbox) survives across turns
+ *  and reloads. The PERSISTED wall-clock pair (pageLoadedAt vs
+ *  getLastSandboxWriteAt, both in localStorage) closes that hole: a page
+ *  loaded during a PREVIOUS turn, before this turn's writes, is still
+ *  detected as stale after the app reloads (fsVersion == pageFsVersion == 0
+ *  would otherwise claim "fresh"). */
 let pageLoadedAtFsVersion = 0;
+let pageLoadedAtWallClock = 0;
 
 /** Record that the web-session page was just (re)loaded — call after every
  *  successful navigation (fresh page ⇒ current with the latest writes). */
 function markPageLoaded(): void {
   pageLoadedAtFsVersion = getWorkspaceFsVersion();
+  pageLoadedAtWallClock = Date.now();
+  try {
+    window.localStorage.setItem(PAGE_LOAD_KEY, String(pageLoadedAtWallClock));
+  } catch {
+    /* storage unavailable — the in-memory stamp still works this session */
+  }
 }
 
 /** The fsVersion the page was last loaded at (0 = never navigated). */
 function pageFsVersion(): number {
   return pageLoadedAtFsVersion;
+}
+
+/** The wall-clock time the page was last (re)loaded — reads the PERSISTED
+ *  stamp so a fresh web-app instance still knows the driver's page age
+ *  (0 = never navigated / unknown). */
+function pageLoadedAt(): number {
+  if (pageLoadedAtWallClock) return pageLoadedAtWallClock;
+  try {
+    return Number(window.localStorage.getItem(PAGE_LOAD_KEY)) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 /** Install Playwright + boot the driver (idempotent — once per sandbox).

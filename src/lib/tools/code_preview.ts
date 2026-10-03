@@ -91,6 +91,15 @@ async function doStart(
     return { ok: false, error: result.error ?? "Failed to start the preview." };
   }
   const s = result.session;
+  const flags: string[] = [];
+  if (result.restarted === true)
+    flags.push("the dev server was RESTARTED (it was older than your latest file writes) — already-open tabs must be refreshed once");
+  if (result.reused === true && result.restarted !== true)
+    flags.push("reused the already-running healthy dev server — no restart, so open tabs keep working");
+  if (result.servingScaffoldPlaceholder === true)
+    flags.push(
+      "WARNING: the page currently served is still the create_app PLACEHOLDER — the real app has not been written/built yet; never present it as the finished app",
+    );
   return {
     kind: "preview",
     ok: true,
@@ -103,16 +112,18 @@ async function doStart(
     port: s.port,
     status: s.status,
     reused: result.reused === true,
+    restarted: result.restarted === true,
+    servingScaffoldPlaceholder: result.servingScaffoldPlaceholder === true,
     message:
       s.status === "running"
-        ? `Preview is live at ${s.url}${result.reused === true ? " (reused the already-running healthy dev server — no restart, so open tabs keep working)" : ""}. It is embedded in the Web preview panel (MonitorPlay button in the chat sub-header) and the user can open it in a new tab. To verify the REAL app is served (never the scaffold placeholder), run start_web_session on http://localhost:${s.port} and use manage_web_session screenshot / console / network — check for runtime errors such as chunk-load failures ("__webpack_modules__[moduleId] is not a function") and fix them before claiming the app works.`
+        ? `Preview is live at ${s.url}${flags.length ? ` (${flags.join("; ")})` : ""}. It is embedded in the Web preview panel (MonitorPlay button in the chat sub-header) and the user can open it in a new tab. The start ALREADY verified the URL is serving from THIS chat's sandbox and is NOT a stale scaffold snapshot. To double-check the real app renders, run start_web_session on http://localhost:${s.port} and use manage_web_session screenshot / console / network — check for runtime errors such as chunk-load failures ("__webpack_modules__[moduleId] is not a function") and fix them before claiming the app works.`
         : `Preview server started at ${s.url} but it is still booting — tell the user to check the Web preview panel in a moment.`,
   };
 }
 
 registerTool(
   "start_preview",
-  "Start (or restart) the live preview for an app in the E2B sandbox: detects the project's framework from its files (or uses the explicit framework argument), installs dependencies when needed, starts the dev server in the background, waits for the public URL to respond, and returns it. If a dev server for the app is ALREADY running and healthy, it is REUSED (no restart — already-open tabs keep working; the preview panel refreshes automatically). The URL is embedded in the Web preview panel (the MonitorPlay button beside the chat title) — one app per chat, so this reuses/updates the chat's single preview session. Use after create_app — IMPORTANT: only after you have written the REAL app content into projects/<name>/ (the scaffold ships a placeholder landing page; replace it with the actual site the user asked for BEFORE previewing). After every start, VERIFY the real app with start_web_session + manage_web_session (screenshot/console/network) — never claim it works while it still shows the scaffold placeholder or throws runtime errors.",
+  "Start (or restart) the live preview for an app in the E2B sandbox: detects the project's framework from its files (or uses the explicit framework argument), installs dependencies when needed, starts the dev server in the background, waits for the public URL to respond, and returns it. If a dev server for the app is ALREADY running, healthy AND newer than the newest project file, it is REUSED (open tabs keep working); if it is older than your latest file writes (it would keep serving the OLD build), it is automatically RESTARTED. The start VERIFIES the URL actually serves THIS chat's app (never the scaffold placeholder nor a stale snapshot) and fails honestly if it cannot. The URL is embedded in the Web preview panel (the MonitorPlay button beside the chat title) — one app per chat, so this reuses/updates the chat's single preview session. Use after create_app — IMPORTANT: only after you have written the REAL app content into projects/<name>/ (the scaffold ships a placeholder landing page; replace it with the actual site the user asked for BEFORE previewing). After every start, VERIFY the real app with start_web_session + manage_web_session (screenshot/console/network) — never claim it works while it still shows the scaffold placeholder or throws runtime errors.",
   {
     type: "object",
     properties: {

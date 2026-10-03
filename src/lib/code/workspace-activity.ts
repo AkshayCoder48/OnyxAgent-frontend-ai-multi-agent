@@ -32,12 +32,55 @@ type Listener = () => void;
 
 const listeners = new Set<Listener>();
 
+/** localStorage key for the persisted last-write wall-clock stamp. The
+ * in-memory fsVersion counter (workspace-snapshot) resets on every web-app
+ * reload, so a second, RELATIVE-time signal is needed: consumers compare
+ * this stamp against the headless page's persisted LOAD stamp to detect a
+ * page that predates the latest writes ACROSS reloads/turns (the driver
+ * process inside the sandbox keeps its page alive indefinitely — without
+ * this, browser_eval happily evaluated a scaffold page from a previous
+ * turn: the "AI can't see errors / stale tab" bug). */
+const LAST_WRITE_KEY = "onyx:workspace:lastWriteAt";
+
+function readLastWriteAt(): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    return Number(window.localStorage.getItem(LAST_WRITE_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** The wall-clock time of the last sandbox file write (0 when never/unknown).
+ * Survives web-app reloads — unlike the in-memory fsVersion counter. */
+export function getLastSandboxWriteAt(): number {
+  return readLastWriteAt();
+}
+
+/** Record a sandbox write NOW (persisted). Exposed for non-file events that
+ * still invalidate loaded pages — e.g. a dev-server RESTART changes every
+ * chunk id, so pages loaded before the restart are dead even though no file
+ * changed (the "__webpack_modules__[moduleId]" crash class). */
+export function markSandboxWriteAt(now = Date.now()): void {
+  if (typeof window === "undefined") return;
+  try {
+    // Monotonic: never move the stamp backwards (clock jitter safety).
+    const prev = readLastWriteAt();
+    if (now < prev) return;
+    window.localStorage.setItem(LAST_WRITE_KEY, String(now));
+  } catch {
+    /* storage unavailable — the in-memory bus below still fires */
+  }
+}
+
 /**
  * Notify subscribers that sandbox workspace FILES changed (a
  * file-mutating tool completed). Called from bumpWorkspaceVersion
  * (scope "files") — never for local-only state (memories, subagents…).
+ * Also persists the write stamp (see getLastSandboxWriteAt).
  */
 export function notifySandboxWrite(): void {
+  markSandboxWriteAt(Date.now());
   for (const listener of listeners) {
     try {
       listener();

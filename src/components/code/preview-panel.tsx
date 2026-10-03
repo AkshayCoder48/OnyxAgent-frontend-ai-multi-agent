@@ -19,6 +19,7 @@ import {
   type PreviewSessionStatus,
 } from "@/stores/preview-session-store";
 import {
+  cacheBustedUrl,
   isPreviewStartInFlight,
   refreshPreviewSessionLiveness,
   restartPreviewForConversation,
@@ -92,6 +93,23 @@ export function PreviewPanel({
 
   const url = session?.url ?? null;
   const isRunning = phase === "running" && !!url;
+  // Monotonic-ish boot stamp — bumped by EVERY completed start (a fresh
+  // dev-server boot AND a healthy-server reuse). The preview panel's
+  // iframe key includes it, so each new boot remounts the iframe and the
+  // panel can never keep rendering a page from a PREVIOUS build (the
+  // stale-scaffold-page / "__webpack_modules__[moduleId] is not a
+  // function" fix).
+  const bootEpoch = session?.bootEpoch ?? session?.createdAt ?? 0;
+  // CACHE-BUSTED embed/open URLs: every (re)mount of the iframe and every
+  // "Open in new tab" click get a UNIQUE query token, so no caching layer
+  // (browser cache, iframe cache, the E2B edge proxy) can ever answer with a
+  // stale scaffold snapshot from an earlier build — the classic "sidebar
+  // shows the scaffold while a fresh tab shows the real app" bug, and the
+  // "__webpack_modules__[moduleId] is not a function" crash a stale HTML +
+  // new chunks mismatch produces. Unknown query params are ignored by all
+  // supported scaffolds.
+  const embedSrc = url ? cacheBustedUrl(url, `${bootEpoch}-${iframeKey}`) : null;
+  const openSrc = url ? cacheBustedUrl(url, String(bootEpoch)) : null;
 
   // ── STALE-IFRAME FIXES (the "preview sidebar shows the scaffold page"
   //  bug) ──────────────────────────────────────────────────────────────
@@ -110,7 +128,6 @@ export function PreviewPanel({
   //      gated on `active`: the keepAlive panel stays mounted while hidden,
   //      and a hidden-but-stale iframe must still refresh so re-opening the
   //      panel shows the current app.
-  const bootEpoch = session?.bootEpoch ?? session?.createdAt ?? 0;
   useEffect(() => {
     if (!isRunning) return;
     let timer = 0;
@@ -205,8 +222,8 @@ export function PreviewPanel({
                 size="sm"
                 variant="ghost"
                 className="h-7 gap-1.5 px-2 text-[11px]"
-                onClick={() => url && window.open(url, "_blank", "noopener,noreferrer")}
-                title="Open the app in a new tab"
+                onClick={() => openSrc && window.open(openSrc, "_blank", "noopener,noreferrer")}
+                title="Open the app in a new tab (cache-busted, always the current build)"
               >
                 <ExternalLink className="h-3.5 w-3.5" aria-hidden />
                 Open
@@ -258,7 +275,7 @@ export function PreviewPanel({
 
         {url && (
           <a
-            href={url}
+            href={openSrc ?? url}
             target="_blank"
             rel="noopener noreferrer"
             className="text-muted-foreground hover:text-foreground block truncate font-mono text-[10px] transition-colors"
@@ -270,11 +287,11 @@ export function PreviewPanel({
       </div>
 
       {/* The app itself — fills the panel while it runs */}
-      {isRunning && url ? (
+      {isRunning && embedSrc ? (
         <div className="bg-muted/30 min-h-0 flex-1 p-2">
           <iframe
             key={`${session?.id ?? "app"}-${bootEpoch}-${iframeKey}`}
-            src={url}
+            src={embedSrc}
             title={`Live preview of ${session?.name ?? "the app"}`}
             className="bg-background h-full w-full rounded-xl border border-border shadow-sm"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
