@@ -77,3 +77,7 @@ cli/.npmrc
 mini-services/
 mock-llm/
 .debug/
+
+# environment
+.env
+.env*.local
