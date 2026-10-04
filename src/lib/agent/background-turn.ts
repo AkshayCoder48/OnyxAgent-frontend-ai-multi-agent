@@ -6,7 +6,6 @@ import type { WSEvent } from "@/types";
 import { useChatStore, type ExecutionChatStore } from "@/stores/chat-store";
 import { useResearchStore } from "@/stores";
 import { conversationService } from "@/lib/services";
-import { isCodeMode } from "@/lib/code-mode";
 import {
   launchBackgroundTurn,
   streamBackgroundTurn,
@@ -682,13 +681,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
   try {
     // 1. Ensure a conversation exists (new chat → create + notify).
     if (!conversationId) {
-      // OnyxCode Code Mode: turns started on /code stamp their lazily-created
-      // conversation with mode:"code" so the sidebars can filter them.
-      const conv = await conversationService.create(
-        ctx.userId,
-        undefined,
-        isCodeMode() ? "code" : undefined,
-      );
+      const conv = await conversationService.create(ctx.userId);
       conversationId = conv.id;
       // The pipeline's conversation_created handler attaches the id, fixes
       // the URL, and notifies the host — no separate callback needed.
@@ -738,10 +731,6 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     // registry tool that has no native sandbox implementation. The runner
     // exposes these to the LLM as bridged tools executed back here.
     let browserTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [];
-    // MODE ISOLATION (OnyxCode PRD §3) — record-driven (the conversation
-    // decides, not the current route: a background job outlives the page).
-    // Defaults to the live route flag; upgraded to the record's mode below.
-    let bgCodeMode = isCodeMode();
     try {
       const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
       await loadDynamicTools(ctx.userId);
@@ -755,43 +744,16 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       // Non-fatal — a bad MCP server doesn't block the turn.
     }
     try {
-      // REQUEST-SCOPED EXPOSURE for the bridged snapshot: the conversation
-      // RECORD decides the mode (Runtime PRD §63 — the route is not enough;
-      // a background job outlives the page). Code-only tools (create_app,
-      // previews, the kv_*/storage_* suite) never bridge into normal Agent
-      // background turns; in Code Mode the database write half is
-      // intent-gated exactly like the foreground runtime.
-      let bgScope: { codeMode: boolean; lastUserText?: string | null; usedToolNames?: Iterable<string> } | undefined;
-      try {
-        const conv = conversationId
-          ? await conversationService.get(conversationId, ctx.userId)
-          : null;
-        const storeMsgs = ctx.store?.getState().messages ?? [];
-        const lastUser = [...storeMsgs].reverse().find((m) => m.role === "user");
-        const used = new Set<string>();
-        for (const m of storeMsgs) {
-          for (const p of m.parts ?? []) {
-            if (p.type === "tool" && p.toolCall?.name) used.add(p.toolCall.name);
-          }
-        }
-        bgScope = {
-          codeMode: conv?.mode === "code",
-          lastUserText:
-            (typeof lastUser?.content === "string" ? lastUser.content : "") || null,
-          usedToolNames: used,
-        };
-        bgCodeMode = conv?.mode === "code";
-      } catch {
-        bgScope = undefined; // unscoped — bridge everything (legacy behavior)
-      }
-      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES, bgScope);
+      // REQUEST-SCOPED EXPOSURE for the bridged snapshot: the coding surface
+      // (file authoring + execution) never bridges — the background agent
+      // implements those natively in the sandbox (bg-native-tools.ts).
+      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES);
     } catch {
       browserTools = [];
     }
 
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
-      codeMode: bgCodeMode,
       provider: {
         baseUrl: ctx.turn.provider.baseUrl,
         apiKey: ctx.turn.provider.apiKey,

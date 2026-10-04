@@ -4,8 +4,8 @@
 // Tool result cards for the 8 scheduling tools (create / update / delete /
 // pause / resume / run_now / list / get_history).
 //
-// Style: the same warm glassmorphic surface as the workspace-sync card
-// (onyx-ws-* classes in globals.css) with terracotta/amber status tints —
+// Style: the warm glassmorphic surface (onyx-ws-* classes in globals.css)
+// with terracotta/amber status tints —
 // never raw JSON for these payloads.
 // ============================================================================
 

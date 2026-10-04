@@ -2,7 +2,7 @@
  * SERVER-side workspace sync (OnyxBase KV ⇄ E2B sandbox) for scheduled runs.
  *
  * Writes/reads the EXACT same KV layout as the browser engine
- * (src/lib/onyxbase/workspace-sync.ts) so both sides interoperate:
+ * the browser-side tooling used for the same purpose so both sides interoperate:
  *
  *   workspace:default:manifest                ← pointer + inline manifest
  *   workspace:default:m:{sha8}:{000001}…      ← manifest chunks (+mr: replicas)

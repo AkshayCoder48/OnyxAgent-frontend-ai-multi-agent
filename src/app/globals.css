@@ -1692,7 +1692,7 @@ body.sidebar-open {
 /* Smooth theme transition — SCOPED (was `*`, a global transition on every
    element that made the whole app repaint-transition on every state change:
    streaming updates, hover, panel toggles all felt mushy and CPU-heavy —
-   the "extremely laggy" OnyxCode experience). ThemeProvider toggles
+   the "extremely laggy" app experience). ThemeProvider toggles
    .theme-transitioning on <html> ONLY while a light/dark switch is in
    flight, so the theme still cross-fades without taxing every interaction.
    Components that want hover transitions already carry their own
@@ -2765,9 +2765,9 @@ html.theme-transitioning .animate-backdrop {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   ONYX WORKSPACE SYNC CARD — glassmorphic surface for push_workspace /
-   retrieve_workspace results (translucent glass, soft blur, thin border,
-   smooth entrance, compact stats). Theme-aware via CSS vars.
+   ONYX WS CARD — glassmorphic surface for the scheduled-task tool cards
+   (translucent glass, soft blur, thin border, smooth entrance, compact
+   stats). Theme-aware via CSS vars.
    ═══════════════════════════════════════════════════════════════════════════ */
 .onyx-ws-card {
   position: relative;

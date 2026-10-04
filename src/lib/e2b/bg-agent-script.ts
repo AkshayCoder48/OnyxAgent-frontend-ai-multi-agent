@@ -2605,19 +2605,18 @@ const TOOLS = [
       };
     },
   },
-  // ── Web sessions (OnyxCode PRD §6) — NATIVE in the sandbox ────────────
-  // start_web_session / manage_web_session drive the SAME Playwright
-  // driver + file protocol as the browser-side tools (code_web_session.ts
-  // / web-session-driver.ts — the source below is injected verbatim), but
-  // run ENTIRELY inside the sandbox: cmd.json is written to the local
-  // filesystem and res-<id>.json is polled locally. They used to live in
-  // the browser registry and BRIDGED back to the user's browser — dying
-  // with the tab closed ("this page was probably closed or asleep", the
-  // "tools not able to run in background / tab not opened" bug). Native
-  // here means background code-mode turns keep full web-session power.
+  // ── Web sessions — NATIVE in the sandbox ────────────────────────
+  // start_web_session / manage_web_session run ENTIRELY inside the
+  // sandbox (web-session-driver.ts — the source is injected verbatim):
+  // cmd.json is written to the local filesystem and res-<id>.json is
+  // polled locally. They used to live in the browser registry and BRIDGED
+  // back to the user's browser — dying with the tab closed ("this page was
+  // probably closed or asleep", the "tools not able to run in background /
+  // tab not opened" bug). Native here means the sandbox owns the whole
+  // Playwright lifecycle.
   {
     name: "start_web_session",
-    description: "Start a headless Chromium (Playwright) web session INSIDE the sandbox for testing and interacting with web pages — including the agent's own live previews (use http://localhost:PORT, e.g. http://localhost:3000, to test apps you just started with start_preview). Installs Chromium on first use (can take a couple of minutes; consider skip-wait). Returns a session id; drive it with manage_web_session (navigate, click, type, screenshot, extract…).",
+    description: "Start a headless Chromium (Playwright) web session INSIDE the sandbox for testing and interacting with web pages — including local servers running in the sandbox (use http://localhost:PORT, e.g. http://localhost:3000). Installs Chromium on first use (can take a couple of minutes; consider skip-wait). Returns a session id; drive it with manage_web_session (navigate, click, type, screenshot, extract…).",
     parameters: {
       type: "object",
       properties: {
@@ -2650,7 +2649,7 @@ const TOOLS = [
   },
   {
     name: "manage_web_session",
-    description: "Drive an active OnyxCode web session (headless Chromium in the sandbox, started by start_web_session). Actions: navigate (url), click (selector), type (selector, text), press (key), screenshot (returns the image), extract (visible text, optional selector), title, content (HTML), eval (run JavaScript in the page — see browser_eval), els (interactive-element inventory with selectors + a11y info), console (captured console errors/warnings + page errors, deduplicated), network (failed 4xx/5xx + failed requests), status, close. Selectors are CSS. Use http://localhost:PORT to interact with your own previews.",
+    description: "Drive an active web session (headless Chromium in the sandbox, started by start_web_session). Actions: navigate (url), click (selector), type (selector, text), press (key), screenshot (returns the image), extract (visible text, optional selector), title, content (HTML), eval (run JavaScript in the page), els (interactive-element inventory with selectors + a11y info), console (captured console errors/warnings + page errors, deduplicated), network (failed 4xx/5xx + failed requests), status, close. Selectors are CSS. Use http://localhost:PORT to interact with local servers.",
     parameters: {
       type: "object",
       properties: {
@@ -2723,11 +2722,10 @@ const BRIDGE_ACK_WINDOW_MS = 25_000;
 
 let ALL_TOOLS = TOOLS;
 
-// MODE ISOLATION (OnyxCode PRD §3): sandbox-native tools that are
-// OnyxCode-ONLY — the coding write path + E2B execution. Dropped from the
-// LLM surface for normal Agent background turns (state.codeMode !== true).
-// Files stay shared: read_file, list_folder, delete_file, create_folder,
-// move_file, send_file, send_folder, search_documents all remain.
+// MODE ISOLATION: sandbox-native tools that never reach the background
+// agent's LLM surface — the coding write path + E2B execution. Files stay
+// shared: read_file, list_folder, delete_file, create_folder, move_file,
+// send_file, send_folder, search_documents all remain.
 const NATIVE_CODE_ONLY_TOOLS = new Set([
   "write_file",
   "create_file",
@@ -2737,8 +2735,8 @@ const NATIVE_CODE_ONLY_TOOLS = new Set([
   "read_file_section",
   "run_terminal",
   "run_python",
-  // Web sessions are OnyxCode-scoped in the foreground registry ("code"
-  // category) — keep the same isolation here.
+  // Web sessions are native sandbox-only tools (not part of the browser
+  // registry) — same isolation here.
   "start_web_session",
   "manage_web_session",
 ]);
@@ -2889,18 +2887,14 @@ async function main() {
     }
     if (bridged.length) ALL_TOOLS = TOOLS.concat(bridged);
   }
-  // MODE ISOLATION (OnyxCode PRD §3): a normal Agent background turn never
-  // sees the sandbox-native CODING tools — file authoring (write_file,
-  // create_file, edit_file, the chunked writer trio) and E2B execution
-  // (run_terminal, run_python) are OnyxCode-only, exactly like
-  // filterToolsForRequest in the foreground runtime. Files stay shared:
-  // reading, listing, deleting, sending and searching remain available.
-  // (state.browserTools is already mode-filtered client-side by
-  // collectBridgeableTools; legacy state files without the flag are treated
-  // as agent-mode.)
-  if (state.codeMode !== true) {
-    ALL_TOOLS = ALL_TOOLS.filter((t) => !NATIVE_CODE_ONLY_TOOLS.has(t.name));
-  }
+  // MODE ISOLATION: a background agent turn never sees the sandbox-native
+  // CODING tools — file authoring (write_file, create_file, edit_file, the
+  // chunked writer trio) and E2B execution (run_terminal, run_python) —
+  // exactly like filterToolsForRequest in the foreground runtime. Files
+  // stay shared: reading, listing, deleting, sending and searching remain
+  // available. (state.browserTools is already filtered client-side by
+  // collectBridgeableTools.)
+  ALL_TOOLS = ALL_TOOLS.filter((t) => !NATIVE_CODE_ONLY_TOOLS.has(t.name));
   // Tool-list text (the SAME discipline the in-browser runtime uses) so the
   // model knows its exact surface — prevents hallucinated tool names.
   // When the system prompt already carries the TOOL DIGEST (injected

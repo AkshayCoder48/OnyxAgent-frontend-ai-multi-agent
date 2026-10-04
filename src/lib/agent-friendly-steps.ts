@@ -3,8 +3,6 @@ import {
   BarChart3,
   Brain,
   Clock,
-  CloudDownload,
-  CloudUpload,
   Download,
   FileMinus,
   FilePlus,
@@ -177,18 +175,6 @@ const RULES: Record<string, TenseRule> = {
   },
   manage_chats: { past: "Looked up past chats", present: "Looking up past chats", icon: FileSearch },
   ocr_document: { past: "Read a document", present: "Reading a document", icon: ImageIcon },
-
-  // ── Cloud workspace sync (OnyxBase KV) ────────────────────────────────
-  push_workspace: {
-    past: "Synced the workspace to the cloud",
-    present: "Syncing the workspace to the cloud",
-    icon: CloudUpload,
-  },
-  retrieve_workspace: {
-    past: "Restored the workspace from the cloud",
-    present: "Restoring the workspace from the cloud",
-    icon: CloudDownload,
-  },
 
   // ── External apps (Composio) ──────────────────────────────────────────
   composio_search_tools: {

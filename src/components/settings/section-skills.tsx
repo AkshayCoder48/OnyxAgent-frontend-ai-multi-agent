@@ -452,7 +452,7 @@ export function SectionSkills() {
             onClick={handlePushSkills}
             size="sm"
             disabled={pushing || !cloudConfigured}
-            title={cloudConfigured ? "Push every installed skill to OnyxBase (also rides along with push_workspace)" : "Add an OnyxBase API key in Cloud Workspace first"}
+            title={cloudConfigured ? "Push every installed skill to OnyxBase cloud backup" : "Add an OnyxBase API key in Cloud Workspace first"}
           >
             {pushing ? <Loader2 className="size-4 animate-spin" /> : <Cloud className="size-4" />}
             Push skills to cloud

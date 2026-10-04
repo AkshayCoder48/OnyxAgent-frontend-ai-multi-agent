@@ -8,26 +8,16 @@ import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
 import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
 import { useChatSidebarStore, useChatStore, useConversationStore } from "@/stores";
-import { useCodePanelStore } from "@/stores/code-panel-store";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
-import { useCodePreviewLifecycle } from "@/hooks/use-code-preview";
 import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
-import {
-  recallAgentConversation,
-  rememberAgentConversation,
-} from "@/lib/code-mode";
 import { setUrlParam } from "@/lib/utils";
-import { Database, FolderOpen, Menu, Bot, ListTree, MonitorPlay, ScrollText, Blocks } from "lucide-react";
-import { DatabasePanel } from "@/components/code/database-panel";
-import { PreviewPanel } from "@/components/code/preview-panel";
+import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks } from "lucide-react";
 
 type SidePanel = "platforms" | "files" | "timeline" | "logs" | null;
-
-export type ChatWorkspaceMode = "agent" | "code";
 
 /* ------------------------------------------------------------------
  * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
@@ -65,8 +55,6 @@ const PANEL_WIDTH_PREFS = {
   files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
-  database: { storageKey: "database-panel-width", defaultWidth: 440 },
-  preview: { storageKey: "preview-panel-width", defaultWidth: 560 },
 } as const;
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
@@ -97,15 +85,9 @@ const emptySubscribe = () => () => {};
 
 /**
  * The full chat workspace — conversation sidebar + glass top bar + chat
- * column + right-hand docked panels. Shared 1:1 by the normal OnyxAgent
- * route (/chat) and OnyxCode Code Mode (/code): Code Mode is a thin UI
- * layer over the SAME runtime (OnyxCode PRD §2), so the workspace simply
- * takes a `mode` prop that (a) filters the sidebar to that mode's
- * conversations, (b) swaps the empty state / hides the composer until the
- * first message, and (c) makes the sidebar's entry button navigate.
+ * column + right-hand docked panels (the OnyxAgent /chat experience).
  */
-export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) {
-  const isCode = mode === "code";
+export function ChatWorkspace() {
 
   // Files / timeline panels — the user's last right-panel choice, closed by
   // default. The DockedPanel container renders each as a docked column on
@@ -121,95 +103,27 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
-  // ── MODE-SCOPED CONVERSATION SELECTION (OnyxCode PRD §7) ──────────────
-  // Both modes share ONE current-conversation pointer; entering a mode
-  // swaps the selection to that mode's latest conversation (or a fresh
-  // new-chat state). The agent side also remembers the last agent
-  // conversation so leaving Code Mode restores it.
-  //
-  // STANDING ACTIVE-CHAT VALIDATION (Runtime PRD §66): the check is not a
-  // once-per-mount swap — ANY state in which the workspace's selected
-  // conversation belongs to the OTHER mode (stale store pointer after a
-  // route change, a cross-mode deep link that slipped past the hydration
-  // guard, a late list load) is corrected the moment it is observed. The
-  // corrections are idempotent, so re-running on list updates is safe.
-  const modeSwapDoneRef = useRef(false);
+  // ── LEGACY GUARD ────────────────────────────────────────────────────────
+  // OnyxCode (Code Mode) is gone. If the store still points at a legacy
+  // "code" conversation (a stale pointer from before the removal), fall
+  // back to the latest agent conversation (or a fresh new-chat state).
   useEffect(() => {
     const store = useConversationStore.getState();
     const curId = store.currentConversationId;
     const curConv = curId ? conversations.find((c) => c.id === curId) : undefined;
-
-    if (isCode) {
-      const urlId = new URLSearchParams(window.location.search).get("id");
-      // Already looking at a code conversation (or an explicit /code?id=…)
-      // → respect it and stop.
-      if (curConv?.mode === "code" || (!curId && urlId && conversations.find((c) => c.id === urlId)?.mode === "code")) {
-        modeSwapDoneRef.current = true;
-        return;
-      }
-      // STANDING GUARD: an agent conversation must never render inside the
-      // Code workspace — swap to the latest code chat (or a fresh state).
-      if (modeSwapDoneRef.current && !curConv) return; // fresh state — nothing to correct
-      if (conversationsLoading && conversations.length === 0) return; // wait for the list
-      const latestCode = [...conversations]
-        .filter((c) => c.mode === "code" && !c.is_archived)
-        .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
-      modeSwapDoneRef.current = true;
-      if (latestCode && latestCode.id !== curId) {
-        void selectConversation(latestCode.id);
-      } else if (!latestCode) {
-        useChatStore.getState().clearMessages();
-        store.selectConversation(null, { loading: false });
-        setUrlParam("id", null);
-      }
+    if (curConv?.mode !== "code") return;
+    if (conversationsLoading && conversations.length === 0) return; // wait for the list
+    const latestAgent = [...conversations]
+      .filter((c) => (!c.mode || c.mode === "agent") && !c.is_archived)
+      .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
+    if (latestAgent) {
+      void selectConversation(latestAgent.id);
     } else {
-      // Remember the agent conversation we're in (for Code Mode return).
-      if (curConv && (!curConv.mode || curConv.mode === "agent")) {
-        rememberAgentConversation(curConv.id);
-        modeSwapDoneRef.current = true;
-        return;
-      }
-      // STANDING GUARD: a CODE conversation must never render inside the
-      // normal Agent workspace — restore the last agent conversation (or a
-      // fresh state). Runs on every observation of a cross-mode selection.
-      if (curConv?.mode === "code") {
-        if (conversationsLoading && conversations.length === 0) return; // wait for the list
-        const lastAgentId = recallAgentConversation();
-        const restore = lastAgentId
-          ? conversations.find((c) => c.id === lastAgentId && !c.mode || c.id === lastAgentId && c.mode === "agent")
-          : undefined;
-        modeSwapDoneRef.current = true;
-        if (restore) {
-          void selectConversation(restore.id);
-        } else {
-          const latestAgent = [...conversations]
-            .filter((c) => (!c.mode || c.mode === "agent") && !c.is_archived)
-            .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
-          if (latestAgent) {
-            void selectConversation(latestAgent.id);
-          } else {
-            useChatStore.getState().clearMessages();
-            store.selectConversation(null, { loading: false });
-            setUrlParam("id", null);
-          }
-        }
-        return;
-      }
-      if (!curId && !modeSwapDoneRef.current) {
-        // Agent workspace with no selection and nothing to correct — leave
-        // the fresh/new-chat state as-is.
-        modeSwapDoneRef.current = true;
-      }
+      useChatStore.getState().clearMessages();
+      store.selectConversation(null, { loading: false });
+      setUrlParam("id", null);
     }
-  }, [isCode, conversations, conversationsLoading, selectConversation]);
-
-  // ── ONE CODE CHAT = ONE APP PREVIEW (Runtime PRD §2-8/§73-76) ───────────
-  // Leaving the Code workspace (this workspace unmounts — exactly the /code
-  // layout unmount signal) or switching to another code chat stops the
-  // outgoing chat's preview dev server; entering a chat whose app project
-  // has a persisted (stopped) session silently restarts it. Panel toggles
-  // and tab hides never unmount this hook, so they never stop anything.
-  useCodePreviewLifecycle(isCode, currentConversationId);
+  }, [conversations, conversationsLoading, selectConversation]);
 
   // HYDRATION-SAFE TITLE (fixes the "Hydration failed" mismatch on ?id=
   // reloads): the conversation store rehydrates SYNCHRONOUSLY from
@@ -238,10 +152,6 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // local panel state).
   const subagentOpen = useSubagentStore((s) => s.sidebarOpen);
   const setSubagentOpen = useSubagentStore((s) => s.setSidebarOpen);
-  // OnyxCode panels (Database / Preview) — store-backed so tool-result cards
-  // and the legacy /code/<tab> routes can open them directly.
-  const codePanel = useCodePanelStore((s) => s.open);
-  const setCodePanel = useCodePanelStore((s) => s.setOpen);
   // Error-log badge: unseen error count on the Logs toggle (resets when any
   // logs surface is opened).
   const unseenErrors = useLogStore((s) => s.unseenErrors);
@@ -255,26 +165,19 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
   // present — removing the key in Settings closes it here (derived), and
   // re-adding the key restores it if it was the user's last choice.
   const platformsOpen = sidePanel === "platforms" && !subagentOpen && composioConnected;
-  const filesOpen = sidePanel === "files" && !subagentOpen && !codePanel;
-  const timelineOpen = sidePanel === "timeline" && !subagentOpen && !codePanel;
-  const logsOpen = sidePanel === "logs" && !subagentOpen && !codePanel;
-  // Code Mode panels — dock beside the chat exactly like the others.
-  const databaseOpen = isCode && codePanel === "database" && !subagentOpen;
-  const previewOpen = isCode && codePanel === "preview" && !subagentOpen;
+  const filesOpen = sidePanel === "files" && !subagentOpen;
+  const timelineOpen = sidePanel === "timeline" && !subagentOpen;
+  const logsOpen = sidePanel === "logs" && !subagentOpen;
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
     subagentOpen
       ? "subagents"
-      : databaseOpen
-        ? "database"
-        : previewOpen
-          ? "preview"
-          : platformsOpen
-            ? "platforms"
-            : sidePanel === "platforms"
-              ? null
-              : sidePanel;
+      : platformsOpen
+        ? "platforms"
+        : sidePanel === "platforms"
+          ? null
+          : sidePanel;
 
   // Opening the docked logs panel counts as "seeing" the errors.
   useEffect(() => {
@@ -341,14 +244,10 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
 
   const toggleSubagents = () => {
     setSubagentOpen(!subagentOpen);
-    setCodePanel(null);
   };
   const toggleSidePanel = (panel: Exclude<SidePanel, null>) => {
-    // Opening a side panel takes over the dock from the subagent panel and
-    // the Code Mode panels (setSubagentOpen/setCodePanel are no-ops when the
-    // value is unchanged).
+    // Opening a side panel takes over the dock from the subagent panel.
     setSubagentOpen(false);
-    setCodePanel(null);
     const wasVisible =
       panel === "platforms"
         ? platformsOpen
@@ -359,16 +258,10 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
             : logsOpen;
     setSidePanel(wasVisible ? null : panel);
   };
-  // Code Mode panel toggle — same single-occupancy rules as above.
-  const toggleCodePanel = (panel: "database" | "preview") => {
-    setSubagentOpen(false);
-    setSidePanel(null);
-    setCodePanel(codePanel === panel ? null : panel);
-  };
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
-      <ConversationSidebar mode={mode} />
+      <ConversationSidebar />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Glass top bar (Terra spec): serif conversation title on the left,
             panel toggles on the right, over a hairline. Chat history lives
@@ -389,7 +282,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
             {!titleHydrated ? (
               /* Pre-hydration frame: the deterministic server shape. */
               <h1 className="title-reveal font-display truncate text-[17px] font-medium tracking-tight sm:text-lg">
-                {isCode ? "New app" : "New conversation"}
+                {"New conversation"}
               </h1>
             ) : currentConversationId && !conversationTitle ? (
               /* PRD §12 — the naming call is in flight: a shimmer skeleton
@@ -407,42 +300,11 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
                 key={conversationTitle ?? "new"}
                 className="title-reveal font-display truncate text-[17px] font-medium tracking-tight sm:text-lg"
               >
-                {conversationTitle || (isCode ? "New app" : "New conversation")}
+                {conversationTitle || "New conversation"}
               </h1>
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {/* OnyxCode panels (Code Mode only) — Database + the live web
-                Preview dock beside the chat exactly like the panels below:
-                same button, same animated open, same resizable column. */}
-            {isCode && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleCodePanel("database")}
-                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                title="Database (OnyxBase)"
-                aria-label="Toggle database panel"
-                aria-expanded={databaseOpen}
-                aria-controls="database-panel"
-              >
-                <Database className="h-4 w-4" />
-              </Button>
-            )}
-            {isCode && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleCodePanel("preview")}
-                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                title="Web preview"
-                aria-label="Toggle preview panel"
-                aria-expanded={previewOpen}
-                aria-controls="preview-panel"
-              >
-                <MonitorPlay className="h-4 w-4" />
-              </Button>
-            )}
             {/* Composio Platforms — a docked catalog sidebar that exists ONLY
                 while a Composio key is stored (direct platform connections
                 from chat: search, sort, filter, OAuth connect). */}
@@ -517,7 +379,7 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          <ChatContainer codeMode={isCode} />
+          <ChatContainer />
         </div>
       </div>
 
@@ -599,49 +461,6 @@ export function ChatWorkspace({ mode = "agent" }: { mode?: ChatWorkspaceMode }) 
         <TimelineSidebar onClose={() => setSidePanel(null)} />
       </DockedPanel>
 
-      {/* OnyxCode panels — Database + live web Preview, docked beside the
-          chat on md+ (full-height drawers below). Same open/close animation
-          and resizing as every other panel. keepAlive: both panels carry
-          state worth preserving across toggles (the DB panel's tab/scroll/
-          editor state, the preview's IFRAME — remounting would reload the
-          app under test); the lighter live panels (files/timeline/logs/
-          subagents/platforms) intentionally unmount when closed so their
-          live subscriptions do zero work while hidden. */}
-      {isCode && (
-        <DockedPanel
-          id="database-panel"
-          label="Database"
-          open={databaseOpen}
-          onClose={() => setCodePanel(null)}
-          storageKey="database-panel-width"
-          defaultWidth={440}
-          minWidth={340}
-          maxWidth={720}
-          sheetCloseButton
-          sheetClassName="w-[92vw] sm:max-w-md"
-          keepAlive
-        >
-          <DatabasePanel />
-        </DockedPanel>
-      )}
-
-      {isCode && (
-        <DockedPanel
-          id="preview-panel"
-          label="Web preview"
-          open={previewOpen}
-          onClose={() => setCodePanel(null)}
-          storageKey="preview-panel-width"
-          defaultWidth={560}
-          minWidth={380}
-          maxWidth={960}
-          sheetCloseButton
-          sheetClassName="w-[95vw] sm:max-w-2xl"
-          keepAlive
-        >
-          <PreviewPanel conversationId={currentConversationId} active={previewOpen} />
-        </DockedPanel>
-      )}
     </div>
   );
 }

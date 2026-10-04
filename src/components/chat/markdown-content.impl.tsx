@@ -212,7 +212,7 @@ function extractText(nodes: React.ReactNode): string {
 // ── SYNTAX HIGHLIGHTING — memoized, stream-stable (spec §12/§19–§21) ────────
 // rehype-highlight re-tokenized EVERY code block on EVERY markdown re-parse
 // (each typewriter tick) — the dominant CPU cost of streaming code-heavy
-// responses (the "code mode lags on large chats" report). Highlighting now
+// responses (the "laggy on large chats" report). Highlighting now
 // lives HERE, behind a content-keyed module cache:
 //
 //   • UNCHANGED code blocks return the CACHED React element tree — the same
@@ -669,7 +669,7 @@ function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
 // CodeBlock override behind a content-keyed memo cache (see
 // `highlightedCode`), so a growing message never re-tokenizes its settled
 // code blocks. This alone removes the dominant parse cost of streaming
-// code-heavy (Code Mode) responses.
+// code-heavy responses.
 const REMARK_PLUGINS = [remarkGfm];
 
 // Stable empty array for the sources context default (avoids a new [] per

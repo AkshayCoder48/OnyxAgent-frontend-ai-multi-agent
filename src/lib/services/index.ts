@@ -1267,8 +1267,9 @@ export interface UserSettings {
   /** Default thinking effort ("low" | "medium" | "high") — stored under `extra`. */
   default_thinking_effort?: "low" | "medium" | "high" | string | null;
   /** Whether an OnyxBase API key is stored (encrypted under
-   *  `extra.onyxbase_api_key_encrypted`). Powers the persistent cloud
-   *  workspace (push_workspace / retrieve_workspace). */
+   *  `extra.onyxbase_api_key_encrypted`). Powers the OnyxBase cloud
+   *  features: skills cloud backup and the server-side workspace sync
+   *  for scheduled tasks. */
   onyxbase_api_key_present?: boolean;
   /** OnyxBase instance base URL (default https://onyxbase-chi.vercel.app),
    *  stored under `extra.onyxbase_base_url`. Values equal to a RETIRED
@@ -1278,8 +1279,10 @@ export interface UserSettings {
   /** Fixed workspace identifier — `workspace_default`. NOT a secret; the
    *  model may know it (PRD §4). */
   onyxbase_workspace_id?: string;
-  /** ISO timestamp of the last successful push_workspace — stored under
-   *  `extra.onyxbase_last_synced`. */
+  /** ISO timestamp of the last successful workspace sync — stored under
+   *  `extra.onyxbase_last_synced`. Legacy: stamped by the removed
+   *  agent-side sync tools; scheduled-task syncs run server-side and do
+   *  not update this field. */
   onyxbase_last_synced?: string | null;
   /** Whether a Composio API key is stored (encrypted under
    *  `extra.composio_api_key_encrypted`). Powers the external-app
@@ -1598,9 +1601,10 @@ export const settingsService = {
    *  the user's vault key. Stored under `extra.onyxbase_api_key_encrypted`
    *  (no schema migration needed — same pattern as SkillsMP).
    *
-   *  SECURITY (PRD §5): the key is ONLY ever decrypted transiently inside the
-   *  workspace-sync tool layer to construct the KV client. It never enters
-   *  system prompts, tool arguments, E2B, or results. */
+   *  SECURITY (PRD §5): the key is ONLY ever decrypted transiently to build
+   *  the OnyxBase KV client (skills cloud sync, the scheduled-task server
+   *  sync) or to run the connection test in Settings → Cloud. It never
+   *  enters system prompts, tool arguments, E2B, or results. */
   async setOnyxBaseApiKey(userId: string, key: string | null): Promise<void> {
     let row = await db.user_settings.where("user_id").equals(userId).first();
     if (!row) {

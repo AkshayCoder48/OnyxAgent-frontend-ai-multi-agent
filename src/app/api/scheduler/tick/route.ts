@@ -15,7 +15,7 @@
 // overlapping tick still ran the FULL evaluation (14-18s of sequential
 // OnyxBase roundtrips + E2B lists), and those slow responses held the
 // browser's per-origin connection pool until route navigations (Agent ⇄
-// OnyxCode, Settings) queued 20-40s behind them. This route now collapses
+// Settings) queued 20-40s behind them. This route now collapses
 // per OnyxBase key: an in-flight tick is SHARED (concurrent callers await
 // the same evaluation), and a fresh memo (55s, mirroring the engine's
 // TICK_LOCK_MS) answers immediately. `force` bypasses both.

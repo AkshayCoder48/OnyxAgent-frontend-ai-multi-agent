@@ -1,7 +1,7 @@
 "use client";
 
 import { registerTool } from "./registry";
-import { codeSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // E2B Python sandbox — modules available in the code-interpreter template.
@@ -11,14 +11,13 @@ const PYTHON_NOTE =
 /**
  * Code execution tools — `run_python` and `run_terminal`.
  *
- * ONE CHAT = ONE APP (Code Mode): every execution runs in THIS
- * conversation's OWN sandbox (per-chat "separate" mode) — the same isolated
- * filesystem the file-authoring + preview tools use, so files written by one
- * app's chat are never visible in another's.
+ * Executions run in the user-level SHARED sandbox (`chatSandboxForCtx`) —
+ * the same filesystem the file tools operate on, so files written anywhere
+ * in the workspace are visible to subsequent executions.
  *
- * Auto-rotation: `codeSandboxForCtx(ctx)` is called before every execution.
- * If the chat's sandbox is >50 min old it's rotated (backup → kill → create →
- * restore) transparently, scoped to that chat only.
+ * Auto-rotation: `chatSandboxForCtx(ctx)` is called before every execution.
+ * If the sandbox is >50 min old it's rotated (backup → kill → create →
+ * restore) transparently.
  */
 
 const NO_KEY_ERROR =
@@ -40,7 +39,7 @@ registerTool(
     if (!code || !code.trim()) {
       return { error: "No code provided" };
     }
-    const sbx = await codeSandboxForCtx(ctx);
+    const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) {
       return {
         error: NO_KEY_ERROR,
@@ -119,7 +118,7 @@ registerTool(
     if (!command || !command.trim()) {
       return { error: "No command provided" };
     }
-    const sbx = await codeSandboxForCtx(ctx);
+    const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) {
       return {
         error: NO_KEY_ERROR,

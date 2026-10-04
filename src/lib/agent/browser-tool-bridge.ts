@@ -158,22 +158,13 @@ async function writeBridgeResult(
  *  BRIDGED tools (everything without a native sandbox implementation).
  *  Called at launch (startBackgroundTurn) after hot-loading custom + MCP
  *  tools, mirroring the in-browser runtime's per-turn loading sequence.
- *  `scope` (when provided) applies the same REQUEST-SCOPED EXPOSURE rules as
- *  the foreground runtime: code-only tools never bridge into normal Agent
- *  background turns, and the database write half is intent-gated in Code
- *  Mode (OnyxBase PRD §13/§22/§34). */
+ *  Applies the same REQUEST-SCOPED EXPOSURE rules as the foreground
+ *  runtime: the coding surface (file authoring + execution) never bridges —
+ *  those have native sandbox implementations and stay agent-invisible. */
 export function collectBridgeableTools(
   nativeNames: ReadonlySet<string>,
-  scope?: {
-    codeMode: boolean;
-    lastUserText?: string | null;
-    usedToolNames?: Iterable<string>;
-  },
 ): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
-  let tools = listTools().filter((t) => !nativeNames.has(t.name));
-  if (scope) {
-    tools = filterToolsForRequest(tools, scope);
-  }
+  const tools = filterToolsForRequest(listTools().filter((t) => !nativeNames.has(t.name)));
   return tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
 }
 

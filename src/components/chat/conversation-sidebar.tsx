@@ -11,7 +11,6 @@ import { Button, Skeleton } from "@/components/ui";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetClose } from "@/components/ui";
 import { useResizableSidebar } from "@/components/ui/resize-handle";
 import { cn } from "@/lib/utils";
-import { ROUTES } from "@/lib/constants";
 import { useChatSidebarStore } from "@/stores";
 import {
   Archive,
@@ -19,7 +18,6 @@ import {
   CalendarClock,
   ChevronLeft,
   ChevronRight,
-  Feather,
   MessageSquare,
   MoreVertical,
   Pencil,
@@ -27,7 +25,6 @@ import {
   Settings,
   Share2,
   SquarePen,
-  TerminalSquare,
   Trash2,
 } from "lucide-react";
 import type { Conversation } from "@/types";
@@ -439,10 +436,6 @@ interface ConversationListProps {
   /** CHAT-ONLY SCHEDULED TASKS: chat ids that are a task's dedicated chat
    *  (drives the clock badge on the conversation rows). */
   scheduledChatIds?: Set<string>;
-  /** Which experience this sidebar lists: "code" = OnyxCode app chats only
-   *  (entry button hidden, "New app" label); absent/"agent" = normal chats
-   *  (Code Mode entry button shown below New conversation). */
-  mode?: "agent" | "code";
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onArchive: (id: string) => void;
@@ -458,7 +451,6 @@ function ConversationList({
   currentConversationId,
   isLoading,
   scheduledChatIds = new Set(),
-  mode,
   onSelect,
   onDelete,
   onArchive,
@@ -469,8 +461,6 @@ function ConversationList({
   onLoadMore,
 }: ConversationListProps) {
   const t = useTranslations("chat");
-  const router = useRouter();
-  const isCode = mode === "code";
   const [view, setView] = useState<ConversationView>("active");
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -504,16 +494,6 @@ function ConversationList({
     onNavigate?.();
   };
 
-  const handleOpenCodeMode = () => {
-    router.push(ROUTES.CODE);
-    onNavigate?.();
-  };
-
-  const handleOpenAgentMode = () => {
-    router.push(ROUTES.CHAT);
-    onNavigate?.();
-  };
-
   const isArchivedView = view === "archived";
 
   return (
@@ -527,61 +507,13 @@ function ConversationList({
         >
           <span className="inline-flex items-center gap-2">
             <SquarePen className="h-4 w-4 shrink-0" />
-            {isCode ? "New app" : t("newChat")}
+            {t("newChat")}
           </span>
           <kbd className="text-primary-foreground/70 font-mono text-[10px] tracking-wider">
             ⌘N
           </kbd>
         </button>
       </div>
-
-      {/* OnyxCode Code Mode entry (agent sidebar only) — the OnyxAgent logo
-          (same feather chip as the header) + permanent black Beta badge.
-          Tapping it opens the /code route with its own, separate chats. */}
-      {!isCode && (
-        <div className="px-3 pb-2">
-          <button
-            type="button"
-            onClick={handleOpenCodeMode}
-            className="border-border bg-card hover:border-primary/40 hover:bg-accent/50 flex h-10 w-full items-center justify-between gap-2 rounded-xl border px-3.5 text-sm font-medium shadow-sm transition-colors"
-            title="OnyxCode (Beta) — build apps with the agent"
-          >
-            <span className="inline-flex min-w-0 items-center gap-2">
-              <span className="bg-primary/10 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md">
-                <Feather className="text-primary h-3.5 w-3.5" aria-hidden />
-              </span>
-              <span className="truncate">Code Mode</span>
-              <span className="ml-1 rounded bg-black px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white dark:bg-white dark:text-black">
-                Beta
-              </span>
-            </span>
-            <TerminalSquare className="text-muted-foreground h-4 w-4 shrink-0" aria-hidden />
-          </button>
-        </div>
-      )}
-
-      {/* Agent Mode entry (OnyxCode sidebar only — OnyxCode PRD §40): the
-          SAME mode-switch concept the agent sidebar shows, mirrored. While
-          inside Code Mode the button is labeled "Agent Mode" and returns the
-          user to the normal OnyxAgent chats. */}
-      {isCode && (
-        <div className="px-3 pb-2">
-          <button
-            type="button"
-            onClick={handleOpenAgentMode}
-            className="border-border bg-card hover:border-primary/40 hover:bg-accent/50 flex h-10 w-full items-center justify-between gap-2 rounded-xl border px-3.5 text-sm font-medium shadow-sm transition-colors"
-            title="Back to OnyxAgent — the normal chat agent"
-          >
-            <span className="inline-flex min-w-0 items-center gap-2">
-              <span className="bg-primary/10 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md">
-                <MessageSquare className="text-primary h-3.5 w-3.5" aria-hidden />
-              </span>
-              <span className="truncate">Agent Mode</span>
-            </span>
-            <ChevronRight className="text-muted-foreground h-4 w-4 shrink-0" aria-hidden />
-          </button>
-        </div>
-      )}
 
       {/* LIVE EXECUTIONS (spec §13): every running agent execution — they
           keep streaming no matter where the user navigates; clicking a row
@@ -710,12 +642,9 @@ function ConversationList({
 
 interface ConversationSidebarProps {
   className?: string;
-  /** Which experience this sidebar lists ("code" = OnyxCode app chats,
-   *  filtered; default "agent" = normal chats, Code Mode entry shown). */
-  mode?: "agent" | "code";
 }
 
-export function ConversationSidebar({ className, mode = "agent" }: ConversationSidebarProps) {
+export function ConversationSidebar({ className }: ConversationSidebarProps) {
   const t = useTranslations("chat");
   const router = useRouter();
   // Collapse state lives in the chat-sidebar store (not local state) so the
@@ -796,23 +725,18 @@ export function ConversationSidebar({ className, mode = "agent" }: ConversationS
     return () => window.removeEventListener(OPEN_CONVERSATION_EVENT, on);
   }, [selectConversation, close]);
 
-  // Code Mode keeps its own, separate chats (OnyxCode PRD §7): the sidebar
-  // only lists conversations stamped with this sidebar's mode. Unstamped
-  // (legacy) conversations count as normal agent chats.
-  const modeConversations = useMemo(
-    () =>
-      mode === "code"
-        ? conversations.filter((c) => c.mode === "code")
-        : conversations.filter((c) => !c.mode || c.mode === "agent"),
-    [conversations, mode],
+  // Legacy OnyxCode ("code") conversations are no longer listed — OnyxCode
+  // was removed. Unstamped conversations count as normal agent chats.
+  const agentConversations = useMemo(
+    () => conversations.filter((c) => !c.mode || c.mode === "agent"),
+    [conversations],
   );
 
   const listProps = {
-    conversations: modeConversations,
+    conversations: agentConversations,
     currentConversationId,
     isLoading,
     scheduledChatIds,
-    mode,
     onSelect: selectConversation,
     onDelete: deleteConversation,
     onArchive: archiveConversation,
@@ -970,30 +894,6 @@ export function ConversationSidebar({ className, mode = "agent" }: ConversationS
           >
             <SquarePen className="h-4 w-4" aria-hidden />
           </Button>
-          {mode !== "code" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground hover:text-foreground mt-2 h-10 w-10 p-0"
-              onClick={() => router.push(ROUTES.CODE)}
-              title="Code Mode (Beta)"
-              aria-label="Open Code Mode"
-            >
-              <TerminalSquare className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
-          {mode === "code" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground hover:text-foreground mt-2 h-10 w-10 p-0"
-              onClick={() => router.push(ROUTES.CHAT)}
-              title="Agent Mode — back to OnyxAgent"
-              aria-label="Back to Agent Mode"
-            >
-              <MessageSquare className="h-4 w-4" aria-hidden />
-            </Button>
-          )}
         </div>
 
         {/* Resize handle on the right edge — only while expanded (the rail

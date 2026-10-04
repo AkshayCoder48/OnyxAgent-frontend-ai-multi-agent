@@ -3,7 +3,7 @@
 import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
 import {
-  codeSandboxForCtx,
+  chatSandboxForCtx,
   ensureFreshSandboxForCtx,
 } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
@@ -12,11 +12,10 @@ import { zipSync } from "fflate";
 /**
  * File/workspace tools — ALL storage is the E2B sandbox.
  *
- * SANDBOX SPLIT (one chat = one app): the AUTHORING tools (create_file /
- * write_file / edit_file — the Code Mode write path) operate on THIS chat's
- * OWN per-conversation sandbox, so each app's files are isolated. The Files
- * capability (list/read/delete/browse/send/move — shared by BOTH modes)
- * keeps operating on the user-level shared workspace, exactly as before.
+ * All tools — the AUTHORING tools (create_file / write_file / edit_file)
+ * and the Files capability (list/read/delete/browse/send/move) — operate
+ * on the user-level SHARED workspace sandbox, so every tool sees the same
+ * files.
  *
  * The E2B sandbox is the SINGLE source of truth for files. There is NO OPFS
  * sync — files are written directly to the sandbox and read directly from it.
@@ -189,10 +188,9 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    const sbx = await codeSandboxForCtx(ctx);
+    const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      // AUTHORING = Code Mode: this chat's OWN sandbox (one chat = one app).
       const client = sbx.client;
       if (!overwrite) {
         // Check if the file already exists by trying to read it.
@@ -249,10 +247,9 @@ registerTool(
     if (content.length > 5 * 1024 * 1024) {
       throw new Error("File content exceeds 5 MB limit");
     }
-    const sbx = await codeSandboxForCtx(ctx);
+    const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      // AUTHORING = Code Mode: this chat's OWN sandbox (one chat = one app).
       const client = sbx.client;
       await client.writeFile(path, content);
       bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
@@ -289,10 +286,9 @@ registerTool(
     const find = args.find as string;
     const replace = args.replace as string;
     const replaceAll = (args.replace_all as boolean) ?? true;
-    const sbx = await codeSandboxForCtx(ctx);
+    const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      // AUTHORING = Code Mode: this chat's OWN sandbox (one chat = one app).
       const client = sbx.client;
       const original = await client.readFile(path);
       let updated: string;

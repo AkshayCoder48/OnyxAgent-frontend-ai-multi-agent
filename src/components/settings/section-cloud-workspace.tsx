@@ -41,27 +41,15 @@ import {
 } from "@/lib/onyxbase/kv-client";
 
 /**
- * Cloud Workspace settings (PRD §5/§34) — OnyxBase KV credentials for the
- * persistent workspace (push_workspace / retrieve_workspace).
+ * OnyxBase cloud settings — the API key that powers the OnyxBase-backed
+ * cloud features: skills cloud backup (Settings → Skills) and the
+ * server-side workspace sync for scheduled tasks (each scheduled run
+ * restores its workspace from the cloud before it starts and syncs it
+ * back after it finishes).
  *
  * The key is vault-encrypted at rest and NEVER reaches the LLM, the system
- * prompt, tool arguments, or the E2B sandbox. Only its PRESENCE is exposed
- * to the agent (cloudConfigured flag) — plus the non-secret workspace id.
+ * prompt, tool arguments, or the E2B sandbox.
  */
-
-function formatSynced(iso: string | null | undefined): string {
-  if (!iso) return "Never";
-  try {
-    const d = new Date(iso);
-    const diff = Date.now() - d.getTime();
-    if (diff < 60_000) return "Just now";
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min ago`;
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} h ago`;
-    return d.toLocaleString();
-  } catch {
-    return "Never";
-  }
-}
 
 export function SectionCloudWorkspace() {
   const { settings, loading, setOnyxBaseApiKey, update } = useSettings();
@@ -198,12 +186,13 @@ export function SectionCloudWorkspace() {
       {/* What this is */}
       <Alert>
         <Cloud className="size-4" />
-        <AlertTitle>Persistent cloud workspace</AlertTitle>
+        <AlertTitle>OnyxBase cloud backup</AlertTitle>
         <AlertDescription>
-          Your E2B sandbox is temporary — the cloud workspace is forever. With an OnyxBase
-          key, Onyx synchronizes the complete workspace to your private OnyxBase KV after
-          every meaningful task (<code>push_workspace</code>) and restores it into fresh
-          sandboxes (<code>retrieve_workspace</code>). Get a free key at{" "}
+          The OnyxBase API key connects Onyx to your private OnyxBase KV account. It
+          powers the skills cloud backup (every installed skill is pushed to the cloud
+          and can be restored from it — see Skills) and keeps scheduled tasks persistent:
+          each scheduled run restores its workspace from the cloud before it starts and
+          syncs it back after it finishes. Get a free key at{" "}
           <a
             href="https://onyxbase-chi.vercel.app"
             target="_blank"
@@ -283,7 +272,7 @@ export function SectionCloudWorkspace() {
         </div>
       </form>
 
-      {/* Status grid — workspace id (non-secret), last synced */}
+      {/* Status — workspace id (non-secret) */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-lg border bg-muted/30 p-3">
           <div className="flex items-center justify-between">
@@ -299,16 +288,8 @@ export function SectionCloudWorkspace() {
           </div>
           <p className="mt-1 font-mono text-sm">{settings?.onyxbase_workspace_id ?? "workspace_default"}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Fixed identifier — not a secret. Lets the agent know which workspace it operates on.
-          </p>
-        </div>
-        <div className="rounded-lg border bg-muted/30 p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-muted-foreground">Last Synced</span>
-          </div>
-          <p className="mt-1 text-sm font-medium">{formatSynced(settings?.onyxbase_last_synced)}</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Updated automatically after every successful <code>push_workspace</code>.
+            Fixed identifier — not a secret. The OnyxBase workspace your skill backups and
+            scheduled-task files sync to.
           </p>
         </div>
       </div>
@@ -346,9 +327,9 @@ export function SectionCloudWorkspace() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove OnyxBase API key?</AlertDialogTitle>
             <AlertDialogDescription>
-              The cloud workspace sync (push_workspace / retrieve_workspace) will stop
-              working until a new key is added. Your stored workspace remains in your
-              OnyxBase account.
+              Skills cloud backup and scheduled-task workspace sync will stop working
+              until a new key is added. Everything already stored in your OnyxBase
+              account stays there.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -212,7 +212,7 @@ export function resolveSchedulerKey(headerKey: string | null | undefined): strin
  * gets, run envelopes) — 2-5s per "list" and 14-18s per full tick. With
  * several clients polling, those slow requests held the browser's
  * per-origin connection pool open continuously, so the router's RSC fetch
- * for a route change (e.g. Agent ⇄ OnyxCode, Settings) QUEUED BEHIND THEM
+ * for a route change (e.g. Agent ⇄ Settings) QUEUED BEHIND THEM
  * — the reported "takes 20-40 seconds to navigate" lag.
  *
  * This wrapper caches reads for a few seconds (module-level, so every

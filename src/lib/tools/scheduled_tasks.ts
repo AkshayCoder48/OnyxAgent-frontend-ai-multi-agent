@@ -13,7 +13,7 @@
  * appears in the sidebar like any conversation, and every execution, tool
  * call and result lands in it. There is no separate task dashboard.
  *
- * SECURITY MODEL (same as push_workspace): the OnyxBase key is resolved from
+ * SECURITY MODEL: the OnyxBase key is resolved from
  * the encrypted vault HERE, at execution time, and sent to /api/scheduler/*
  * as a request header — it is never part of any tool schema, argument,
  * prompt, or result. The provider API key is likewise resolved client-side

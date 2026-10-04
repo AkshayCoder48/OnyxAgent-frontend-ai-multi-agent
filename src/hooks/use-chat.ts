@@ -17,7 +17,6 @@ import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
 import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { startBackgroundTurn } from "@/lib/agent/background-turn";
-import { isCodeMode } from "@/lib/code-mode";
 import {
   AUTO_ROUTER_PROVIDER_ID,
   type RouterCandidate,
@@ -75,19 +74,6 @@ Follow Onyx AI conventions:
 - When using tools, explain what you're doing briefly
 - Handle errors gracefully and suggest alternatives
 - Be precise and type-safe in your reasoning`;
-
-/**
- * OnyxCode Code Mode directive — appended to the system prompt while the user
- * is on /code. Codifies the app-building workflow so the user always gets
- * the REAL app they asked for in the live preview, never the scaffold's
- * placeholder landing page.
- */
-const ONYXCODE_DIRECTIVE = `You are currently in OnyxCode (Code Mode) — the user is building apps. Follow this workflow for every app request:
-1. create_app to scaffold the project (choose the framework that fits the request).
-2. IMMEDIATELY write the REAL app the user asked for with create_file_chunk — REPLACE the scaffold's placeholder landing page (index.html / app/page.tsx / src/App.jsx / server.js) with the actual pages, content, styles and behavior the user described. The scaffold is a starting point, NEVER the finished app.
-3. start_preview to serve the project at a public live URL (the framework is auto-detected from the files you wrote).
-4. Optionally verify with start_web_session, and store any app data with manage_database.
-File paths are relative to the sandbox workspace root (e.g. "projects/my-app/index.html"); absolute /home/user/... paths are also accepted. Never claim the app is done while the preview still shows the placeholder scaffold page.`;
 
 /**
  * Backendless chat hook — now a thin adapter over the ExecutionHub.
@@ -346,15 +332,13 @@ export function useChat(options: UseChatOptions = {}) {
       const settings = await settingsService.get(userId);
 
       // System prompt: user override (if enabled) → Onyx AI framework prompt
-      // (Onyx AI is the only framework — no selection anymore), plus the
-      // OnyxCode directive while the user is in Code Mode (/code).
+      // (Onyx AI is the only framework — no selection anymore).
       const basePrompt =
         (settings.system_prompt_enabled && settings.system_prompt
           ? settings.system_prompt
           : ONYX_AI_SYSTEM_PROMPT) ?? "";
       const parts = [basePrompt.trim()];
       if (basePrompt.trim()) parts.push(WEB_RESEARCH_DIRECTIVE);
-      if (isCodeMode()) parts.push(ONYXCODE_DIRECTIVE);
       const systemPrompt = parts.filter(Boolean).join("\n\n");
 
       return {
@@ -513,13 +497,7 @@ export function useChat(options: UseChatOptions = {}) {
         data: { round: 1, generation_id: turnGenerationId },
       });
       if (!convId) {
-        // OnyxCode Code Mode: turns started on /code stamp their lazily-created
-        // conversation with mode:"code" so the sidebars can filter them.
-        const conv = await conversationService.create(
-          userId,
-          "",
-          isCodeMode() ? "code" : undefined,
-        );
+        const conv = await conversationService.create(userId, "");
         convId = conv.id;
         // The pre-created conversation is what this turn runs against
         // (buildTurnOptions read the conversation id from the RENDER scope,

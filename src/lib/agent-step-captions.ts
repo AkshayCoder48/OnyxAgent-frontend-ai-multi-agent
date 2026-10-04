@@ -64,14 +64,7 @@ const EXACT_CAPTIONS: Record<string, string> = {
   manage_subagent_chat: "Managing a subagent chat",
   manage_chats: "Looking up past chats",
   ocr_document: "Reading text from a document",
-  // Cloud workspace sync (OnyxBase KV)
-  push_workspace: "Syncing the workspace to the cloud",
-  retrieve_workspace: "Restoring the workspace from the cloud",
-  // OnyxCode tools (Code Mode) — live captions for app-building tools.
-  create_app: "Creating your app",
-  start_preview: "Starting the preview",
-  manage_preview: "Managing the preview",
-  manage_database: "Working with the database",
+  // Background-agent web sessions (native sandbox tools).
   start_web_session: "Opening a web session",
   manage_web_session: "Using the web session",
   preview_image: "Showing an image",

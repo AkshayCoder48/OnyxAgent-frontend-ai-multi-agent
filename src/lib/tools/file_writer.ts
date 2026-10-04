@@ -3,7 +3,7 @@
 import { registerTool, type ToolContext } from "./registry";
 import type { E2BClient } from "@/lib/e2b/client";
 import {
-  codeSandboxForCtx,
+  chatSandboxForCtx,
   type ResolvedSandbox,
 } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
@@ -21,9 +21,10 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
  *     lets the agent inspect what's already on disk before deciding where to
  *     continue).
  *
- * All operations go through THIS chat's OWN E2B sandbox (one chat = one app —
- * the same per-chat filesystem create_app / start_preview / run_terminal
- * use), so the chunked-written app files stay isolated per conversation.
+ * All operations go through the shared workspace E2B sandbox
+ * (`chatSandboxForCtx` — the same filesystem run_python / run_terminal and
+ * the file tools use), so chunked-written files are visible to every other
+ * workspace tool.
  * Paths are relative to `/home/user` (the sandbox workspace root).
  *
  * Tools (3):
@@ -40,11 +41,11 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
  *  `/`, refuse `..`. Mirrors the `safePath` in e2b_files.ts so both modules
  *  agree on path semantics.
  *
- *  Absolute sandbox paths are accepted: tools like create_app report
- *  `/home/user/projects/<name>` and the model naturally reuses that prefix
- *  when writing files. Without this normalization those writes landed under
- *  `/home/user/home/user/…` — the agent's real website never appeared in
- *  the previewed project (the scaffold placeholder kept showing). */
+ *  Absolute sandbox paths are accepted: sandbox tool output reports paths
+ *  like `/home/user/projects/<name>` and the model naturally reuses that
+ *  prefix when writing files. Without this normalization those writes landed
+ *  under `/home/user/home/user/…` — the agent's real website never appeared
+ *  in the previewed project (the scaffold placeholder kept showing). */
 function safePath(p: string | undefined | null, fallback = "."): string {
   if (!p || typeof p !== "string") return fallback;
   let cleaned = p.trim();
@@ -88,12 +89,12 @@ function shellSingleQuote(s: string): string {
 const NO_KEY_ERROR =
   "File operations require an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
-/** Resolve THIS chat's own sandbox for the chunked-writer tools (Code Mode
- *  write path — one chat = one app = its own filesystem): the key, per-chat
- *  rotation, and the client in one call. Supports subagents that build a
- *  minimal context without the decrypted key (falls back through settings). */
+/** Resolve the shared workspace sandbox for the chunked-writer tools: the
+ *  key, freshness rotation, and the client in one call. Supports subagents
+ *  that build a minimal context without the decrypted key (falls back
+ *  through settings). */
 async function getSandbox(ctx: ToolContext): Promise<ResolvedSandbox | null> {
-  return codeSandboxForCtx(ctx);
+  return chatSandboxForCtx(ctx);
 }
 
 // ---------------------------------------------------------------------------

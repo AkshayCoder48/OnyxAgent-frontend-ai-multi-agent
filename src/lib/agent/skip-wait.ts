@@ -1,9 +1,8 @@
 "use client";
 
 /**
- * Skip-wait registry (OnyxCode PRD §4.4 — shared by normal Agent + Code
- * Mode). A tiny module-level bridge between the UI ("Continue while this
- * runs") and the agent runtime's tool-execution loop:
+ * Skip-wait registry. A tiny module-level bridge between the UI ("Continue
+ * while this runs") and the agent runtime's tool-execution loop:
  *
  *   - The runtime calls `getSkipWaitRace(conversationId, toolCallId)` when a
  *     tool STARTS running and races the handler promise against it.

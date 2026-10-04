@@ -38,18 +38,8 @@ import "./chat_inspect";
 import "./workspace_analysis";
 import "./image_preview";
 import "./ocr";
-import "./workspace_sync";
 import "./scheduled_tasks";
 import "./composio_tools";
 import "./uploaded_files";
-// OnyxCode Code Mode tools (OnyxCode PRD §2/§3) — registered once at boot;
-// per-request exposure is decided by `filterToolsForRequest`
-// (request-scoping.ts): the Code-only surface (category "code"/"exec" + the
-// file-authoring helpers) never reaches a normal OnyxAgent turn.
-import "./code_app";
-import "./code_preview";
-import "./code_database";
-import "./code_web_session";
-import "./code_diagnostics";
 
 export {};

@@ -52,7 +52,7 @@ const NOT_CONFIGURED_MESSAGE =
 // The background pollers (sidebar convergence, server-chat pull, scheduler
 // heartbeat) used to fire independently — a slow tick (up to 18s) + a slow
 // list + a pull could occupy several slots for tens of seconds, and the
-// router's RSC fetch for a route change (Agent ⇄ OnyxCode, Settings) then
+// router's RSC fetch for a route change (Agent ⇄ Settings) then
 // QUEUED BEHIND THEM — the reported "takes 20-40s to navigate". Two guards:
 //   1. SINGLE-FLIGHT: this tab runs AT MOST ONE scheduler request at a time
 //      (a tiny promise chain — pollers wait their turn instead of piling

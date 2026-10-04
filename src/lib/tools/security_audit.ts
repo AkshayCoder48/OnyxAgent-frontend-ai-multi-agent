@@ -85,9 +85,7 @@ registerTool(
     const scanPath = (args.path as string) || ".";
     const findings: Finding[] = [];
 
-    // Chat-aware: a Code Mode chat audits THIS app's own per-chat sandbox
-    // (one chat = one app); an agent chat audits the user's shared workspace
-    // (unchanged).
+    // Audits the user's shared workspace sandbox.
     const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) {
       return {

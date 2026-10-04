@@ -698,7 +698,7 @@ export { FULL_THINKING, FLASH_THINKING };
 
 /** Built-in demo providers — gallery + docs data (the component's stock
  *  example list). Real usage passes the live provider list instead
- *  (see CreationPrompt's CodeModelPicker for the wired-up version). */
+ *  (a stripped-down variant — the full picker is wired into the chat input). */
 export const defaultModelProviders: readonly ModelPickerProvider[] = [
   {
     id: "openai",

@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (62 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (61 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -64,7 +64,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 ### Subagent orchestration
 - spawn_subagent — Delegate a task: subagent_name, description, task_type (research/code/analysis/writing/general), role, disposable.
 - set_subagent_config — Give a subagent its own AI: provider_id + model, or custom_base_url + custom_model + custom_api_key.
-- query_subagent — Deliver a task to a subagent FIRE-AND-FORGET: returns on delivery (target_chat_id); it works independently.
+- query_subagent — Message a subagent, get its reply (it may call tools).
 - read_chat — Inspect any chat's CURRENT output — a subagent's live reply (even mid-stream) or a conversation transcript.
 - steer_subagent — Mid-run course correction or extra guidance.
 - complete_subagent — Finish (auto-disposes if disposable) / abort a task.
@@ -80,12 +80,8 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Media, charts & time
 - create_chart — Line/bar/pie/area/scatter charts from structured data — renders inline.
-- preview_image — Show an image inline in the chat (http(s) URL, base64, or a workspace path such as uploads/photo.jpg).
+- preview_image — Show an image inline in the chat (URL or base64).
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
-
-### Cloud workspace persistence (OnyxBase KV)
-- push_workspace — Synchronize the COMPLETE workspace to the persistent cloud (id workspace_default). Call after EVERY meaningful task that changes files — even small ones. Overwrites the cloud…
-- retrieve_workspace — Restore the persistent cloud workspace into the current sandbox. mode "check" probes the cloud; mode "restore" (default) writes the files and verifies SHA-256 per file. Call…
 
 ### External apps (Composio — 250+ platforms)
 - composio_search_tools — FIRST STEP for external-app tasks: natural-language tool discovery (e.g. "send a slack message"). Returns tool slugs + input schemas + which platforms are connected. Search before…
@@ -109,4 +105,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","push_workspace","retrieve_workspace","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];

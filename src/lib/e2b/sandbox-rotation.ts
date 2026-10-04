@@ -22,19 +22,9 @@
  * call `ensureFreshSandbox(apiKey)` before every file operation and code
  * execution, and the rotation happens automatically if needed.
  *
- * PER-TARGET ROTATION (Code Mode — one chat = one app): `ensureFreshSandbox`
- * takes an optional target (conversationId + mode). Shared targets keep the
- * LEGACY behavior exactly (timestamps + sandbox-id slot keyed by apiKey
- * only); separate targets rotate THAT conversation's own sandbox — mutex,
- * creation timestamp, localStorage sandbox-id key and client eviction are
- * all scoped per (apiKey, conversationId), so a rotation in one chat can
- * never touch another chat's sandbox or the shared workspace.
- *
  * FILE-LOSS SAFETY (PRD §9–10): rotation never kills sandboxes it isn't
  * replacing, and it backs up BEFORE killing — the client sandboxId makes
  * the rotation work even on a serverless cold start (empty server cache).
- * The durable layer for the 24h E2B TTL is the OnyxBase cloud workspace
- * (auto-restore below + push/retrieve_workspace tools).
  */
 
 import {
@@ -44,196 +34,11 @@ import {
   sandboxIdStorageKey,
   type E2BClient,
 } from "./client";
-import { isCodeMode } from "@/lib/code-mode";
 import type { ToolContext } from "@/lib/tools/registry";
 
 // 50 minutes — rotate BEFORE the 1-hour E2B sandbox timeout kills the sandbox.
 // E2B's max sandbox timeout is 1 hour, so we rotate at 50 min to be safe.
 const ROTATION_AGE_MS = 50 * 60 * 1000;
-
-// ─────────────────────────────────────────────────────────────────────────
-// Cloud-workspace auto-restore (PRD §16/§37).
-//
-// When a BRAND-NEW (empty) E2B sandbox is created and the user has OnyxBase
-// configured with a stored cloud workspace, transparently restore it so the
-// workspace survives sandbox expiry / app reopens / new sessions.
-//
-// SAFETY: restore ONLY runs when the sandbox is EMPTY — a sandbox that
-// already has files (post-rotation backup/restore, uploads, an earlier
-// restore) is NEVER overwritten by an older cloud snapshot. A per-sandbox
-// localStorage flag keeps the check to one localStorage read on every
-// subsequent call. A module-level mutex prevents concurrent restores.
-// ─────────────────────────────────────────────────────────────────────────
-let autoRestorePromise: Promise<void> | null = null;
-
-function restoredFlagKey(sandboxId: string): string {
-  return `onyxbase-restored:${sandboxId}`;
-}
-
-/** Files present in EVERY fresh E2B sandbox (template + app-managed) — a
- *  sandbox containing only these is "empty" for auto-restore purposes.
- *  Volatile shell-state files (.bash_history, .viminfo, …) are included:
- *  they appear the moment the user runs any command but are never user
- *  workspace content, so their presence must not block a cloud restore. */
-const FRESH_SANDBOX_BUILTIN = new Set([
-  ".bash_logout",
-  ".bashrc",
-  ".profile",
-  ".sudo_as_admin_successful",
-  ".bash_history",
-  ".wget-hsts",
-  ".viminfo",
-  ".python_history",
-  ".node_repl_history",
-  ".lesshst",
-  "onyx.md",
-  ".onyxagent_files.json",
-]);
-
-/** True when the sandbox has NO user content (only template + app-managed
- *  files) — i.e. a cloud snapshot should be restored into it. Syncs the
- *  ignore rules via a lazy import (avoids a static dependency cycle). */
-async function isFreshEmptySandbox(files: Array<{ path: string }>): Promise<boolean> {
-  const { isExcludedPath } = await import("@/lib/onyxbase/ignore");
-  return !files.some(
-    (f) => !FRESH_SANDBOX_BUILTIN.has(f.path.toLowerCase()) && !isExcludedPath(f.path),
-  );
-}
-
-async function runAutoRestore(apiKey: string): Promise<void> {
-  try {
-    if (typeof window === "undefined") return;
-    const { settingsService } = await import("@/lib/services");
-    const { useAuthStore } = await import("@/stores");
-    const userId = useAuthStore.getState().user?.id;
-    if (!userId) return;
-
-    // Unconfigured → silent no-op (never surfaces to the user).
-    const obKey = await settingsService.getDecryptedOnyxBaseApiKey(userId);
-    if (!obKey || !obKey.trim()) return;
-
-    const client = getE2BClient(apiKey, null, "shared");
-    const { id: sandboxId } = await client.createSandbox();
-    const flag = restoredFlagKey(sandboxId);
-    if (window.localStorage.getItem(flag)) return; // already handled
-
-    const markHandled = () => {
-      try {
-        window.localStorage.setItem(flag, "1");
-      } catch { /* ignore */ }
-    };
-
-    // Only a sandbox with NO user content gets the cloud snapshot — never
-    // clobber live files (rotation already restored them server-side).
-    // Fresh sandboxes always contain template dotfiles + the app-written
-    // Onyx.md, so "empty" ignores those (FRESH_SANDBOX_BUILTIN + rules).
-    const files = await client.walkFiles();
-    if (!(await isFreshEmptySandbox(files))) {
-      // Sandbox already has content — nothing to restore, ever, for this
-      // sandbox id. Consume the flag so we never re-check it.
-      markHandled();
-      return;
-    }
-
-    const settings = await settingsService.get(userId).catch(() => null);
-    const baseUrl = settings?.onyxbase_base_url || undefined;
-    const { OnyxBaseKV } = await import("@/lib/onyxbase/kv-client");
-    const { getCloudPointer, retrieveWorkspace } = await import(
-      "@/lib/onyxbase/workspace-sync"
-    );
-    const kv = new OnyxBaseKV(obKey, baseUrl);
-    // FLAG-CONSUMPTION SAFETY (PRD §9–10): the flag is consumed ONLY after a
-    // definitive answer. A transient pointer-read failure (OnyxBase's
-    // multi-instance KV can throw on a cold instance) returns WITHOUT
-    // setting the flag, so the next ensureFreshSandboxForCtx call retries —
-    // the old code marked ATTEMPTED up-front, so one network blip left a
-    // fresh sandbox permanently empty with the restore never re-attempted.
-    let pointer: Awaited<ReturnType<typeof getCloudPointer>>;
-    try {
-      pointer = await getCloudPointer(kv);
-    } catch {
-      return; // transient — flag NOT consumed; retried on a later call
-    }
-    if (!pointer) {
-      markHandled(); // definitively nothing in the cloud for this workspace
-      return; // nothing in the cloud yet
-    }
-
-    let result: Awaited<ReturnType<typeof retrieveWorkspace>>;
-    try {
-      result = await retrieveWorkspace({ e2b: client, kv, mode: "restore" });
-    } catch {
-      // The engine itself threw (bug / hard KV failure). Consume the flag
-      // so a broken restore can't loop on every tool call, but tell the
-      // user — silence is how "files vanished" went unnoticed before.
-      markHandled();
-      const { toast } = await import("sonner");
-      toast.error("Cloud workspace restore failed", {
-        description:
-          "The sandbox is empty and the cloud snapshot could not be read. " +
-          "Ask Onyx to run retrieve_workspace for a detailed report.",
-      });
-      return;
-    }
-    // The restore ATTEMPT completed — consume the flag (failed restores
-    // don't retry in a loop; the toasts below surface them honestly).
-    markHandled();
-
-    // Best-effort notification — the AI-side retrieve_workspace card shows
-    // the detailed glass UI; this toast covers the app-level auto path.
-    const { toast } = await import("sonner");
-    if (result.ok) {
-      toast.success("Cloud workspace restored", {
-        description: `${result.restoredFiles} files · ${
-          result.downloadedBytes >= 1048576
-            ? `${(result.downloadedBytes / 1048576).toFixed(1)} MB`
-            : `${Math.max(1, Math.round(result.downloadedBytes / 1024))} KB`
-        } from OnyxBase`,
-      });
-    } else if (result.status === "partial" && result.salvage) {
-      // Corrupt snapshot that salvage mode partially recovered — say so
-      // honestly instead of silence; the sync card has the full detail.
-      toast.warning("Cloud snapshot partially recovered", {
-        description:
-          `OnyxBase lost part of the snapshot. ${result.salvage.salvagedFiles} file(s) ` +
-          "salvaged to .onyx-salvage/ — see the restore card for details.",
-      });
-    } else if (result.status === "partial") {
-      toast.warning("Cloud workspace partially restored", {
-        description: `${result.restoredFiles} files restored — some were skipped.`,
-      });
-    } else if (result.status === "error") {
-      // Surface full failures too — silence made users believe their data
-      // would come back "in a minute" when it actually needed attention.
-      toast.error("Cloud workspace restore failed", {
-        description:
-          result.errors[0]?.code === "CHECKSUM_MISMATCH"
-            ? "OnyxBase lost part of the snapshot — nothing was deleted. Ask Onyx to run retrieve_workspace for a salvage report."
-            : (result.errors[0]?.message ?? "See the workspace sync card for details."),
-      });
-    }
-  } catch {
-    /* best-effort — never break tool execution. Deliberately does NOT
-       consume the flag: infrastructure failures before the restore decision
-       remain retryable on a later call (bounded — one attempt per tool call). */
-  }
-}
-
-/**
- * Fire-and-forget auto-restore guard — called after every sandbox
- * freshness check. Cheap (one localStorage read) once handled.
- *
- * Exported (PRD §22) so `analyze_workspace` can trigger it on its rare
- * FIRST-RUN path (brand-new sandbox, no known id) without going through
- * `ensureFreshSandboxForCtx` — which would also pay the rotation check.
- * Analysis itself NEVER triggers a restore on subsequent calls.
- */
-export function maybeAutoRestoreWorkspace(apiKey: string): void {
-  if (autoRestorePromise) return;
-  autoRestorePromise = runAutoRestore(apiKey).finally(() => {
-    autoRestorePromise = null;
-  });
-}
 
 // localStorage keys (per rotation target).
 function createdAtKey(t: SandboxTarget): string {
@@ -339,7 +144,7 @@ export async function resolveSandboxApiKey(ctx: {
  * The optional `target` selects WHICH sandbox: omitting it (or passing the
  * default) rotates the legacy user-level SHARED sandbox exactly as before;
  * passing `{ conversationId, mode: "separate" }` rotates THAT conversation's
- * own sandbox (Code Mode — one chat = one app). Timestamps, the localStorage
+ * own sandbox. Timestamps, the localStorage
  * sandbox-id slot and the rotation mutex are all per-target.
  *
  * Called before EVERY file operation and code execution. Transparent to
@@ -506,10 +311,7 @@ async function performRotation(t: SandboxTarget): Promise<void> {
  *
  * Used by the shared-surface file tools to do both steps in one call:
  *   const apiKey = await ensureFreshSandboxForCtx(ctx);
- *   if (!apiKey) return { error: "..." };
- *
- * Code Mode tools should use `codeSandboxForCtx` (THIS chat's own sandbox)
- * and dual-mode surfaces `chatSandboxForCtx` instead — see below.
+ *   if (!apiKey) return { error: "..." }
  */
 export async function ensureFreshSandboxForCtx(
   ctx: ToolContext,
@@ -517,47 +319,7 @@ export async function ensureFreshSandboxForCtx(
   const apiKey = await resolveSandboxApiKey(ctx);
   if (!apiKey) return null;
   await ensureFreshSandbox(apiKey);
-  // After the sandbox is known-fresh, opportunistically restore the cloud
-  // workspace into brand-new empty sandboxes (no-op when unconfigured or
-  // already restored — see runAutoRestore).
-  maybeAutoRestoreWorkspace(apiKey);
   return apiKey;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Per-chat sandbox resolution (Code Mode: one chat = one app = its own
-// filesystem, its own files — the sandbox counterpart of the per-chat
-// OnyxBase KV database namespace in src/lib/code/db-namespace.ts).
-// ─────────────────────────────────────────────────────────────────────────
-
-/** Look up a conversation's persisted mode. Returns null when the record
- *  can't be read (a brand-new chat mid-creation, or a minimal subagent
- *  context) — callers decide the fallback. */
-export async function conversationCodeMode(
-  conversationId: string,
-): Promise<"code" | "agent" | null> {
-  try {
-    const { db } = await import("@/lib/db");
-    const conv = await db.conversations.get(conversationId);
-    if (!conv) return null;
-    return conv.mode === "code" ? "code" : "agent";
-  } catch {
-    return null;
-  }
-}
-
-/** Does this conversation belong to Code Mode (per-chat app sandboxes)?
- *  An unknown record (not persisted yet) falls back to the ACTIVE UI mode —
- *  the /code workspace hosts only code chats, so the first turn of a new
- *  code chat still resolves correctly while it is being created. */
-export async function isCodeChat(
-  conversationId?: string | null,
-): Promise<boolean> {
-  if (!conversationId) return false;
-  const mode = await conversationCodeMode(conversationId);
-  if (mode === "code") return true;
-  if (mode === "agent") return false;
-  return isCodeMode();
 }
 
 /** A fully resolved sandbox: the target triple + the live client. */
@@ -565,62 +327,20 @@ export interface ResolvedSandbox extends SandboxTarget {
   client: E2BClient;
 }
 
-/** Build the per-chat target for a CODE-MODE tool: THIS conversation's own
- *  sandbox ("separate" mode — one chat = one app = its own files). When the
- *  context carries no conversationId we fall back to the shared workspace
- *  with a loud warn (the fallback degenerates to the shared sandbox
- *  server-side too — better than crashing the tool). */
-export function codeSandboxTarget(
-  apiKey: string,
-  ctx: { conversationId?: string },
-): SandboxTarget {
-  const conversationId = ctx.conversationId ?? null;
-  if (!conversationId) {
-    console.warn(
-      "[e2b] code tool ran without a conversationId — falling back to the " +
-        "shared sandbox (per-chat file isolation unavailable for this call)",
-    );
-  }
-  return { apiKey, conversationId, mode: "separate" };
-}
-
-/** Code Mode tools: resolve the key, ensure THIS chat's sandbox is fresh
- *  (per-chat rotation — the shared workspace and other chats are never
- *  touched), and return the per-chat client. Returns null when no sandbox
- *  key is configured (callers surface their NO_KEY_ERROR). */
-export async function codeSandboxForCtx(
-  ctx: ToolContext,
-): Promise<ResolvedSandbox | null> {
-  const apiKey = await resolveSandboxApiKey(ctx);
-  if (!apiKey) return null;
-  const target = codeSandboxTarget(apiKey, ctx);
-  await ensureFreshSandbox(apiKey, target);
-  // NOTE: deliberately NO shared-workspace auto-restore here — a code
-  // chat's sandbox is the app's own isolated world; the user-level cloud
-  // workspace restore belongs to the shared/agent path only.
-  return { ...target, client: targetE2BClient(target) };
-}
-
-/** Dual-mode surfaces (tools available in BOTH agent and code chats —
- *  push/retrieve_workspace, image path resolution, …): a Code chat resolves
- *  to THAT chat's own app sandbox; an agent chat keeps the legacy
- *  user-level shared workspace (the user's sandbox_mode setting, exactly as
- *  before). Freshness is ensured for whichever sandbox was resolved. */
+/** Shared-surface tools (image path resolution, security audit, …):
+ *  resolve the API key, ensure the user-level shared workspace sandbox is
+ *  fresh, and return its client. Returns null when no sandbox key is
+ *  configured (callers surface their own no-key error). */
 export async function chatSandboxForCtx(
   ctx: ToolContext,
 ): Promise<ResolvedSandbox | null> {
   const apiKey = await resolveSandboxApiKey(ctx);
   if (!apiKey) return null;
-  const conversationId = ctx.conversationId ?? null;
-  const target: SandboxTarget =
-    conversationId && (await isCodeChat(conversationId))
-      ? { apiKey, conversationId, mode: "separate" }
-      : { apiKey, conversationId: null, mode: ctx.sandboxMode ?? "shared" };
+  const target: SandboxTarget = {
+    apiKey,
+    conversationId: null,
+    mode: ctx.sandboxMode ?? "shared",
+  };
   await ensureFreshSandbox(apiKey, target);
-  if (target.mode === "shared") {
-    // The shared path keeps the cloud-workspace auto-restore (unchanged);
-    // per-chat app sandboxes never trigger it.
-    maybeAutoRestoreWorkspace(apiKey);
-  }
   return { ...target, client: targetE2BClient(target) };
 }

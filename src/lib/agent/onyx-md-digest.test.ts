@@ -34,6 +34,14 @@ import { BG_AGENT_SCRIPT } from "@/lib/e2b/bg-agent-script";
 
 const registryNames = (): string[] => listTools().map((t) => t.name);
 
+/** Native sandbox-only tools (in the bg runner's TOOLS array with FULL
+ * descriptions + parameter schemas, but NOT registered in the browser
+ * registry — they run entirely inside the sandbox). They must not be
+ * advertised in the digest (foreground agent turns cannot call them — that
+ * would violate the anti-hallucination rules), so they are exempt from the
+ * registry and digest parity checks below. */
+const NATIVE_ONLY_TOOLS = new Set(["start_web_session", "manage_web_session"]);
+
 /** Tool names mentioned in digest list lines ("- name — ..."). */
 const digestListedNames = (): string[] =>
   [...ONYX_MD_DIGEST.matchAll(/^- ([a-z0-9_]+)[ —[]/gm)].map((m) => m[1]!);
@@ -77,19 +85,25 @@ describe("tool digest ⇄ registry parity (PRD §13/§14)", () => {
 });
 
 describe("sandbox runner tool parity (bg-agent)", () => {
-  it("every bg-native tool name is a registered browser tool", () => {
+  it("every bg-native tool name is a registered browser tool (or native sandbox-only)", () => {
     const registered = new Set(registryNames());
-    const phantom = [...BG_NATIVE_TOOL_NAMES].filter((n) => !registered.has(n));
+    const phantom = [...BG_NATIVE_TOOL_NAMES].filter(
+      (n) => !registered.has(n) && !NATIVE_ONLY_TOOLS.has(n),
+    );
     expect(phantom, `BG_NATIVE_TOOL_NAMES lists unregistered tools: ${phantom.join(", ")}`).toEqual([]);
   });
 
   it("the bg runner's TOOLS array matches BG_NATIVE_TOOL_NAMES exactly", () => {
     const scriptTools = [...BG_AGENT_SCRIPT.matchAll(/\n {4}name: "([a-z0-9_]+)",/g)].map((m) => m[1]!);
     expect(new Set(scriptTools)).toEqual(new Set(BG_NATIVE_TOOL_NAMES));
-    // ...and every script tool is digest-documented (the runner's slim
-    // name-only list relies on the digest for capabilities):
+    // ...and every REGISTRY-DOCUMENTED script tool is digest-documented (the
+    // runner's slim name-only list relies on the digest for capabilities).
+    // Native sandbox-only tools carry full descriptions inside the script
+    // itself and are exempt (see NATIVE_ONLY_TOOLS).
     const digestNames = new Set(ONYX_MD_DIGEST_TOOLS);
-    const undocumented = scriptTools.filter((n) => !digestNames.has(n));
+    const undocumented = scriptTools.filter(
+      (n) => !digestNames.has(n) && !NATIVE_ONLY_TOOLS.has(n),
+    );
     expect(undocumented, `bg runner tools missing from the digest: ${undocumented.join(", ")}`).toEqual([]);
   });
 });

@@ -9,12 +9,11 @@ import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 
 /**
- * SkipWaitButton (OnyxCode PRD §4.4 + extension PRD §3.6) — "Continue while
- * this runs". Shown on RUNNING tool cards in BOTH the normal Agent and
- * Code Mode. Clicking backgrounds the tool: the agent's round continues
- * immediately (with a placeholder tool result for the API), the real
- * handler keeps running detached, and its late result lands in the same
- * card when it completes.
+ * SkipWaitButton (extension PRD §3.6) — "Continue while this runs". Shown on
+ * RUNNING tool cards in the agent chat. Clicking backgrounds the tool: the
+ * agent's round continues immediately (with a placeholder tool result for
+ * the API), the real handler keeps running detached, and its late result
+ * lands in the same card when it completes.
  *
  * Only meaningful for FOREGROUND executions (background turns already run
  * detached inside the sandbox) and for tools where waiting is the point of

@@ -8,7 +8,6 @@ import {
   Clock,
   Search,
   Globe,
-  Boxes,
   ChevronRight,
   Code2,
   Database,
@@ -23,7 +22,6 @@ import {
   MessageCircleQuestion,
   Loader2,
   BarChart3,
-  MonitorPlay,
   PenLine,
   Brain,
 } from "lucide-react";
@@ -47,13 +45,9 @@ import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
-import { CreateAppResult, parseCreateAppResult } from "./tool-results/create-app";
-import { PreviewResult, parsePreviewResult } from "./tool-results/preview";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
-import { WorkspaceSyncResult, isWorkspaceSyncTool } from "./tool-results/workspace-sync";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
-import { DatabaseToolResult, parseDatabaseResult } from "./tool-results/database";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import {
   WebSearchResults as DDGWebResults,
@@ -430,9 +424,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
   const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   const isAskUser = toolCall.name === "ask_user";
-  // Cloud workspace sync tools get the glassmorphic card in BOTH modes —
-  // they are payloads, not chrome (PRD §19).
-  const isWsSync = isWorkspaceSyncTool(toolCall.name);
   // Scheduled-task tools get their glass cards in BOTH modes too — the task
   // confirmation/list/history is content the user acts on, never chrome.
   const isSched = isScheduledTaskTool(toolCall.name);
@@ -522,7 +513,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <MemoryResult toolCall={toolCall} />
       )}
       {chartSpec && <ChartMessage spec={chartSpec} />}
-      {isWsSync && <WorkspaceSyncResult toolCall={toolCall} />}
       {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {/* inspect_image (Runtime PRD §54/§111) — the analyzed image + the
@@ -566,9 +556,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.
   const isRunPython = toolCall.name === "run_python";
-  // Cloud workspace sync tools — the glass card is the payload, always
-  // expanded (running panel streams live stage lines inside it).
-  const isWsSync = isWorkspaceSyncTool(toolCall.name);
   // Scheduled-task tools — same rule: the card is the payload.
   const isSched = isScheduledTaskTool(toolCall.name);
   // DDG search tools — detect and auto-expand
@@ -581,7 +568,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(
     toolCall.name === "ask_user" ||
       (isRunPython && toolCall.status === "completed") ||
-      isWsSync ||
       isSched ||
       (toolCall.name === "create_chart" &&
         toolCall.status === "completed" &&
@@ -787,26 +773,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [isEditFile, toolCall],
   );
   const isEditDiff = editDiffSpec !== null;
-  // OnyxCode Code Mode tools — rich cards for create_app / previews /
-  // web sessions (extension PRD §3.7). Same memoized-parse pattern as the
-  // chart/fileDownload specs above.
-  const createAppSpec = useMemo(
-    () =>
-      toolCall.name === "create_app" && toolCall.status === "completed"
-        ? parseCreateAppResult(toolCall.result)
-        : null,
-    [toolCall.name, toolCall.status, toolCall.result],
-  );
-  const isCreateApp = createAppSpec !== null;
-  const previewResultSpec = useMemo(
-    () =>
-      (toolCall.name === "start_preview" || toolCall.name === "manage_preview") &&
-      toolCall.status === "completed"
-        ? parsePreviewResult(toolCall.result)
-        : null,
-    [toolCall.name, toolCall.status, toolCall.result],
-  );
-  const isPreviewResult = previewResultSpec !== null;
+  // Web-session tools (start_web_session / manage_web_session — exposed to
+  // background agent jobs) get a rich card. Same memoized-parse pattern as
+  // the chart/fileDownload specs above.
   const webSessionResultSpec = useMemo(
     () =>
       (toolCall.name === "start_web_session" || toolCall.name === "manage_web_session") &&
@@ -816,40 +785,23 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [toolCall.name, toolCall.status, toolCall.result],
   );
   const isWebSessionResult = webSessionResultSpec !== null;
-  // OnyxCode database/storage tools (kv_*/storage_*/schema_upsert/
-  // inspect_database) — compact rich cards dispatched on the RESULT payload's
-  // `kind: "database"` marker (same pattern as preview/web-session).
-  const databaseResultSpec = useMemo(
-    () =>
-      toolCall.status === "completed"
-        ? parseDatabaseResult(toolCall.result)
-        : null,
-    [toolCall.status, toolCall.result],
-  );
-  const isDatabaseResult = databaseResultSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
   // Same for file_download cards and the edit_file diff (the card IS the
   // content). Uses the same render-time adjustment pattern as the running
   // auto-expand above (no effect → no cascading render).
   const [prevAutoExpand, setPrevAutoExpand] = useState(false);
-  const autoExpand = isChart || isFileDownload || isEditDiff || isCreateApp || isPreviewResult;
+  const autoExpand = isChart || isFileDownload || isEditDiff;
   if (autoExpand !== prevAutoExpand) {
     setPrevAutoExpand(autoExpand);
     if (autoExpand) setExpanded(true);
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isCreateApp || isPreviewResult || isWebSessionResult || isDatabaseResult;
-  const friendlyName = isCreateApp
-    ? "Create App"
-    : isPreviewResult
-      ? "Live Preview"
-      : isWebSessionResult
-        ? "Web Session"
-        : isDatabaseResult
-          ? "Database"
-          : isDateTime
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult;
+  const friendlyName = isWebSessionResult
+    ? "Web Session"
+    : isDateTime
     ? "Current Date & Time"
     : isRAGSearch
       ? "Knowledge Base Search"
@@ -913,15 +865,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                       ? "Composing…"
                       : toolCall.name;
 
-  const ToolIcon = isCreateApp
-    ? Boxes
-    : isPreviewResult
-      ? MonitorPlay
-      : isWebSessionResult
-        ? Globe
-        : isDatabaseResult
-          ? Database
-          : isDateTime
+  const ToolIcon = isWebSessionResult
+    ? Globe
+    : isDateTime
     ? Clock
     : isRAGSearch
       ? Search
@@ -1134,24 +1080,13 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // the tool's command/args so the user can see exactly what's
             // executing (e.g. the shell command for `run_terminal`).
             <RunningToolPanel toolCall={toolCall} turnId={turnId ?? undefined} />
-          ) : isWsSync ? (
-            // push_workspace / retrieve_workspace → glassmorphic sync card.
-            // Rendered for ALL statuses (running handled above; settled
-            // statuses parse the structured result). Never raw JSON.
-            <WorkspaceSyncResult toolCall={toolCall} />
           ) : isSched ? (
             // Scheduled-task tools → their own glass cards (creation
             // confirmation, task lists, run history, slim status cards).
             // Rendered for ALL statuses (running handled above).
             <ScheduledTaskResult toolCall={toolCall} />
-          ) : toolCall.status === "completed" && isCreateApp && createAppSpec ? (
-            <CreateAppResult data={createAppSpec} />
-          ) : toolCall.status === "completed" && isPreviewResult && previewResultSpec ? (
-            <PreviewResult data={previewResultSpec} />
           ) : toolCall.status === "completed" && isWebSessionResult && webSessionResultSpec ? (
             <WebSessionResult data={webSessionResultSpec} />
-          ) : toolCall.status === "completed" && isDatabaseResult && databaseResultSpec ? (
-            <DatabaseToolResult data={databaseResultSpec} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

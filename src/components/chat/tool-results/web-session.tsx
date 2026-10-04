@@ -2,7 +2,7 @@
 
 import { Camera, Globe } from "lucide-react";
 
-/** OnyxCode web-session result payload (see src/lib/tools/code_web_session.ts). */
+/** Web-session result payload (see src/lib/tools/web-session-driver.ts). */
 export interface WebSessionPayload {
   kind: "web_session";
   ok: boolean;
@@ -33,8 +33,9 @@ export function parseWebSessionResult(result: unknown): WebSessionPayload | null
 }
 
 /**
- * Rich card for the OnyxCode web-session tools (extension PRD §3.7): the
- * session's URL/title, extracted text, and the latest screenshot thumbnail.
+ * Rich card for the web-session tools (start_web_session /
+ * manage_web_session): the session's URL/title, extracted text, and the
+ * latest screenshot thumbnail.
  */
 export function WebSessionResult({ data }: { data: WebSessionPayload }) {
   return (

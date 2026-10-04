@@ -1,5 +1,5 @@
 /**
- * The OnyxCode web-session driver — a long-running Node process INSIDE the
+ * The web-session driver — a long-running Node process INSIDE the
  * E2B sandbox that owns a headless Chromium (Playwright) and serves a tiny
  * file protocol:
  *
@@ -9,18 +9,17 @@
  *   /home/user/.onyx/websession/shots/*.png   — screenshots
  *   /home/user/.onyx/websession/.ready        — "the loop is running" marker
  *
- * SHARED BY TWO HOSTS (both embed this source inside a String.raw template
- * literal — code_web_session.ts writes it into the sandbox over the API;
- * bg-agent-script.ts interpolates it into the background runner so
- * start_web_session / manage_web_session execute NATIVELY inside the
- * sandbox and keep working when the browser tab is closed):
+ * Embedded by bg-agent-script.ts inside a String.raw template literal — it
+ * is interpolated into the background runner so start_web_session /
+ * manage_web_session execute NATIVELY inside the sandbox and keep working
+ * when the browser tab is closed:
  *
  *   CONSTRAINT: this source must contain NO backticks and NO ${ } sequences
  *   — a nested backtick would terminate the host template, and ${ would be
  *   interpolated by it. Use string concatenation only.
  */
 export const WEB_SESSION_DRIVER_SOURCE = String.raw`#!/usr/bin/env node
-// OnyxCode web-session driver — file-protocol Playwright runner.
+// Web-session driver — file-protocol Playwright runner.
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -34,7 +33,7 @@ let browser = null;
 let page = null;
 let shotN = 0;
 
-// ── Diagnostics capture (OnyxCode PRD §26–§28) ──────────────────────────
+// ── Diagnostics capture ─────────────────────────────────────────────
 // Bounded ring buffers attached to every page: console errors/warnings,
 // uncaught page errors, failed network responses. Deduplicated by message
 // text so a repeating error never floods the log.
@@ -80,7 +79,7 @@ function attachDiagnostics(p) {
   });
 }
 
-// In-page serializer for browser_eval (OnyxCode PRD §8): DOM nodes,
+// In-page serializer for the eval action: DOM nodes,
 // NodeLists, Promises, circular references and non-serializable values all
 // produce USEFUL plain data instead of crashing the evaluation.
 // (Array-join, not a template literal — the hosts embed this file inside a
@@ -184,7 +183,7 @@ async function handle(cmd) {
       return { ok: true, action: "status", alive: !!browser && browser.isConnected(), url: page ? page.url() : null };
     }
     case "eval": {
-      // browser_eval (OnyxCode PRD §5–§9): REAL JavaScript execution in the
+      // eval: REAL JavaScript execution in the
       // live page. eval() supports expressions AND statements; the result
       // (incl. awaited Promises) is serialized in-page by __onyxSer so DOM
       // nodes, NodeLists and circular values return useful data.
@@ -205,7 +204,7 @@ async function handle(cmd) {
       return Object.assign({ action: "eval", url: p.url() }, result || { ok: false, error: "evaluation returned nothing" });
     }
     case "els": {
-      // Element inventory (OnyxCode PRD §11–§14): the interactive elements
+      // Element inventory: the interactive elements
       // of the current page with stable selectors + a11y info — the data
       // behind element tagging.
       const limit = Math.max(1, Math.min(200, Number(cmd.limit) || 80));

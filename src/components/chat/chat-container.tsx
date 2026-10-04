@@ -5,7 +5,6 @@ import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
 import { ChatEmptyState } from "./chat-empty-state";
-import { CodeEmptyState } from "@/components/code/code-empty-state";
 import { ChatInput } from "./chat-input";
 import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
@@ -212,10 +211,7 @@ function ThinkingStatus() {
 }
 
 export function ChatContainer(
-  {
-    onOpenSettings,
-    codeMode,
-  }: { onOpenSettings?: () => void; codeMode?: boolean } = {},
+  { onOpenSettings }: { onOpenSettings?: () => void } = {},
 ) {
   // SELECTOR-BASED SUBSCRIPTIONS (render isolation — the previous
   // no-selector destructure re-rendered this whole 900-line container on
@@ -659,7 +655,6 @@ export function ChatContainer(
       onStop={stopGeneration}
       rateLimitStatus={rateLimitStatus}
       conversationId={currentConversationId}
-      codeMode={codeMode}
     />
   );
 }
@@ -672,9 +667,6 @@ interface ChatUIProps {
   isLoadingConversation?: boolean;
   /** Active conversation id (null = new chat). Used to remount ChatInput on conversation switch. */
   conversationId?: string | null;
-  /** OnyxCode Code Mode — swap the empty state for the big creation surface
-   *  and hide the bottom composer while the conversation is empty (PRD §4.2). */
-  codeMode?: boolean;
   sendMessage: (
     content: string,
     fileIds?: string[],
@@ -705,7 +697,6 @@ function ChatUI({
   isProcessing,
   isLoadingConversation,
   conversationId,
-  codeMode,
   sendMessage,
   onModelChange,
   onProviderChange,
@@ -725,11 +716,6 @@ function ChatUI({
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
-  // OnyxCode (PRD §4.2): while a Code Mode conversation is EMPTY there is no
-  // bottom prompt box — the large creation surface IS the input. As soon as
-  // the first message is sent, the normal chat layout (messages + composer)
-  // takes over under the same OnyxCode header + tabs.
-  const codeEmpty = !!codeMode && messages.length === 0 && !isLoadingConversation;
   return (
     <div className="flex h-full w-full">
       {/* Centered ~760px message thread column (Terra editorial spec). */}
@@ -740,13 +726,6 @@ function ChatUI({
         >
           {isLoadingConversation ? (
             <ConversationSkeleton />
-          ) : codeEmpty ? (
-            <div className="flex h-full items-center">
-              <CodeEmptyState
-                onSend={(content, fileIds, files) => sendMessage(content, fileIds, files)}
-                disabled={!isConnected}
-              />
-            </div>
           ) : messages.length === 0 ? (
             <div className="flex h-full items-center">
               <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
@@ -814,7 +793,6 @@ function ChatUI({
         )}
         {/* Queued messages live next to the composer; the todo plan panel
             lives INSIDE the scroll container (inline in the response flow). */}
-        {!codeEmpty && (
         <div className="px-2 pb-2 sm:px-4 sm:pb-4">
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
@@ -869,7 +847,6 @@ function ChatUI({
             OnyxAgent can make mistakes. Double-check important information.
           </p>
         </div>
-        )}
       </div>
       <FilePreviewPanel />
       <SourcesPanel />

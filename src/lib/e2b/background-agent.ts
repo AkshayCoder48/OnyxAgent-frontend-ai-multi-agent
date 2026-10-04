@@ -118,15 +118,6 @@ export interface BgTurnOptions {
     description: string;
     parameters: Record<string, unknown>;
   }>;
-  /** MODE ISOLATION (OnyxCode PRD §3): true when this background turn
-   *  belongs to a Code Mode ("code") conversation. When false/undefined the
-   *  sandbox runner drops its native coding tools (run_terminal, run_python,
-   *  write_file, create_file, edit_file, the chunked writer trio) from the
-   *  LLM surface — a normal Agent background job never gains coding
-   *  capabilities, mirroring filterToolsForRequest in the foreground
-   *  runtime. The browserTools snapshot is already mode-filtered client-side
-   *  by collectBridgeableTools. */
-  codeMode?: boolean;
 }
 
 const JOBS_KEY = "onyx-bg-jobs";
@@ -243,10 +234,6 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     // sandbox implementation). The runner exposes these to the LLM as bridged
     // tools executed back in the browser.
     ...(opts.browserTools && opts.browserTools.length > 0 ? { browserTools: opts.browserTools } : {}),
-    // MODE ISOLATION — see BgTurnOptions.codeMode. Always seeded so the
-    // runner never has to guess (legacy state files without the flag are
-    // treated as agent-mode by the runner's default).
-    codeMode: opts.codeMode === true,
     messages: [
       // PRD §13/§14/§38 — the caller prompt (use-chat buildTurnOptions) has
       // no tool knowledge of its own; the sandbox runner appends the live

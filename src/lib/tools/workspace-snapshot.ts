@@ -43,12 +43,8 @@
  */
 
 import { getE2BClient, type E2BClient } from "@/lib/e2b/client";
-import {
-  maybeAutoRestoreWorkspace,
-  resolveSandboxApiKey,
-} from "@/lib/e2b/sandbox-rotation";
+import { resolveSandboxApiKey } from "@/lib/e2b/sandbox-rotation";
 import type { ToolContext } from "./registry";
-import { notifySandboxWrite } from "@/lib/code/workspace-activity";
 import * as opfs from "@/lib/storage/opfs";
 
 // ---------------------------------------------------------------------------
@@ -203,17 +199,11 @@ export function bumpWorkspaceVersion(scope: "files" | "local" = "files"): void {
   if (scope === "local") localVersion++;
   else {
     fsVersion++;
-    // Publish to the workspace-activity bus: the preview panel reloads its
-    // iframe once writes settle (HMR over the E2B proxy is unreliable, so
-    // without this the sidebar keeps showing the stale scaffold page), and
-    // the diagnostics/browser_eval path re-navigates its headless page.
-    notifySandboxWrite();
   }
 }
 
-/** Current sandbox-files version counter — consumers (e.g. the web-session
- *  page-freshness gate in code_diagnostics) compare it against the version
- *  they observed at load time to detect staleness. */
+/** Current sandbox-files version counter — lets consumers detect sandbox
+ *  file-tree staleness without re-walking the tree. */
 export function getWorkspaceFsVersion(): number {
   return fsVersion;
 }
@@ -827,10 +817,6 @@ async function buildSnapshot(
     } catch {
       // best-effort — the walk below retries through its own recovery path
     }
-    // Brand-new sandbox: kick the (fire-and-forget) cloud auto-restore so a
-    // configured OnyxBase workspace repopulates it. This is a FIRST-RUN cost
-    // — never a per-call one (PRD §22: analysis must not trigger restores).
-    maybeAutoRestoreWorkspace(apiKey);
   }
 
   // ── Parallel: ONE-round-trip tree walk ∥ local Dexie/OPFS scans ────────

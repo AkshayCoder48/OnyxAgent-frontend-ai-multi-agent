@@ -52,7 +52,6 @@ import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest
 import { promptKb } from "@/lib/agent/tool-digest";
 import { waitForAskUser, ASK_USER_RESPONSE_EVENT } from "@/lib/agent/ask-user-wait";
 import { conversationService, settingsService } from "@/lib/services";
-import { isCodeMode } from "@/lib/code-mode";
 import { clearSkipWait, getSkipWaitRace } from "@/lib/agent/skip-wait";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { readChatTheme, genuiThemePromptBlock } from "@/lib/genui/theme";
@@ -1687,31 +1686,12 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
     envVars: envVars ?? {},
   };
 
-  // Cloud-workspace status (OnyxBase KV) — the SAFE workspace-availability
-  // contract exposed to the model (PRD §25): workspaceId is a non-secret
-  // identifier; the OnyxBase API key NEVER enters the prompt — only this
-  // presence flag does. Resolved here per-turn so the model knows whether
-  // push_workspace / retrieve_workspace are usable.
-  let cloudConfigured = false;
-  try {
-    const obSettings = await settingsService.get(opts.userId);
-    cloudConfigured = !!obSettings?.onyxbase_api_key_present;
-  } catch {
-    /* non-fatal — prompt falls back to cloudConfigured: false */
-  }
-
   // 1. Persist the user's message + create conversation if needed.
   let conversationId = opts.conversationId;
   if (!conversationId) {
     const title =
       opts.userMessage.slice(0, 60) + (opts.userMessage.length > 60 ? "…" : "");
-    // OnyxCode Code Mode: turns started on /code stamp their lazily-created
-    // conversation with mode:"code" so the sidebars can filter them.
-    const conv = await conversationService.create(
-      opts.userId,
-      title,
-      isCodeMode() ? "code" : undefined,
-    );
+    const conv = await conversationService.create(opts.userId, title);
     conversationId = conv.id;
     emit({
       type: "conversation_created",
@@ -1783,24 +1763,19 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   const registeredTools = listTools(toolCtxForList);
 
   // REQUEST-SCOPED TOOL EXPOSURE (OnyxBase PRD §13/§22 + Runtime PRD §71/§72):
-  // Code-only tools (category "code") never ride into normal Agent turns,
-  // and the database WRITE half is intent-gated inside Code Mode. The scope
-  // is recomputed at the top of every round so tools used by earlier rounds
-  // of THIS turn latch the full database suite immediately.
+  // the coding surface (category "code"/"exec" tools + the file-authoring
+  // helpers) never rides into normal Agent turns — it belongs to subagents
+  // and sandbox-side background jobs. The scope is recomputed at the top of
+  // every round so tools used by earlier rounds of THIS turn latch in
+  // immediately.
   // (allToolCalls is declared here — before its first reader below — and
   // filled by the agent loop; see "IDEMPOTENT TOOL EXECUTION" further down.)
   const allToolCalls: ToolCall[] = [];
-  const codeModeTurn = isCodeMode();
   const historyToolNames = usedToolNamesFromHistory(history);
-  const lastUserRow = [...history].reverse().find((m) => m.role === "user");
-  const lastUserText =
-    (typeof lastUserRow?.content === "string" ? lastUserRow.content : "") || null;
   const buildScopedTools = () => {
     const used = new Set(historyToolNames);
     for (const tc of allToolCalls) used.add(tc.name);
     return filterToolsForRequest(registeredTools, {
-      codeMode: codeModeTurn,
-      lastUserText,
       usedToolNames: used,
     });
   };
@@ -1837,7 +1812,7 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   }
 
   // Debug: log the tool count so we can verify all built-in tools are registered
-  console.log(`[agent] Tools registered: ${registeredTools.length} → sent: ${tools.length}${codeModeTurn ? " (code mode)" : " (agent mode)"}`);
+  console.log(`[agent] Tools registered: ${registeredTools.length} → sent: ${tools.length}`);
 
   // Build the enhanced system prompt with the tool list + usage knowledge.
   // PRD §13/§14/§38 — RUNTIME-GROUNDED availability: this list is built from
@@ -1986,19 +1961,6 @@ ${ONYX_MD_DIGEST}
 ## Onyx.md — the full operating manual
 Detailed tool usage, execution policies and the complete GenUI reference: \`read_file\` /home/user/Onyx.md when you need more than the TOOL DIGEST above.
 
-## PERSISTENT WORKSPACE POLICY
-The active E2B workspace is your working environment; the OnyxBase KV cloud workspace is the persistent source of truth (E2B is temporary, the cloud is permanent).
-- Before workspace-dependent work, check workspace availability (see Live Workspace Context below). If unavailable, set expectations honestly — never pretend files were modified.
-- After EVERY meaningful task that changes workspace files, synchronize the COMPLETE workspace with \`push_workspace\` — even small changes. The tool discovers files automatically; no arguments required.
-- NEVER claim the workspace is backed up / synchronized unless \`push_workspace\` returned ok: true.
-- The persistent workspace identifier is \`workspace_default\` — fixed, not a secret. You may reference it to identify the workspace.
-- NEVER request, expose, print, echo, or transmit the user's OnyxBase API key. Authentication is handled entirely by the tool runtime — the key is not in your context, tool arguments, or the sandbox.
-- When a fresh E2B environment starts and persistent restoration is needed, call \`retrieve_workspace\` BEFORE workspace-dependent work (mode "check" probes the cloud, "restore" writes the files).
-- Workspace persistence uses OnyxBase KV (manifest + per-file records + chunks). Never use OnyxBase file storage for workspace sync, and never try to build your own backup scheme — push_workspace already replaces the cloud state atomically (obsolete files are removed; no backup versions pile up).
-- Files larger than 50 MB and secrets (.env files, private keys, credentials) are excluded from sync by design — never try to smuggle them into the cloud.
-- After restore, dependency rehydration (npm install etc.) is allowed but never run dangerous/arbitrary project commands unprompted.
-- DATA-LOSS SAFETY (critical): OnyxBase's backend has lost snapshot records before (2026-09-11 incident). If \`retrieve_workspace\` reports a corrupt/lost manifest, it automatically degrades: rebuild from per-file records, or SALVAGE checksum-verifiable files into \`.onyx-salvage/\`. NEVER respond to that with "run push_workspace to re-commit" — from an empty sandbox that would wipe the surviving cloud data (and the tool now REFUSES it with EMPTY_PUSH_BLOCKED). Instead: report honestly what was recovered vs. lost, keep salvaged files, and only push once the sandbox again holds real work. \`force=true\` on push_workspace requires the user's EXPLICIT confirmation — never set it on your own.
-
 ## SCHEDULED TASKS & AUTOMATION POLICY
 AUTONOMOUS SCHEDULED TASKS are full agent jobs that run on a server-side schedule with the browser closed. Every task owns ONE DEDICATED CHAT (its executions, tool calls and results land there — no separate dashboard).
 - ANY recurring or future intent ("every morning at 8 AM…", "tomorrow at 5 PM…") → CREATE a task with \`create_scheduled_task\` now — never just promise to do it later.
@@ -2023,7 +1985,7 @@ The two custom types take \`html\` / \`css\` / \`js\` props (script runs after m
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 
-  const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey}\n- workspaceId: workspace_default\n- cloudConfigured: ${cloudConfigured}${cloudConfigured ? "\nCloud workspace sync is ACTIVE — after completing any task that modifies workspace files, you MUST call push_workspace before responding." : "\nCloud workspace sync is not configured — do not call push_workspace / retrieve_workspace; suggest the user add an OnyxBase API key in Settings → Cloud Workspace if persistence matters."}`;
+  const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey}`;
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${workspaceStatusText}`;
 
@@ -2236,9 +2198,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
   const effectiveMaxRounds = MAX_ROUNDS;
 
-  // SKIP-WAIT (OnyxCode PRD §4.4): stays true while this turn is running;
-  // the late-result handlers of backgrounded tools re-checkpoint only
-  // while it is (after the turn ends, the final save owns the row).
+  // SKIP-WAIT: stays true while this turn is running; the late-result
+  // handlers of backgrounded tools re-checkpoint only while it is (after
+  // the turn ends, the final save owns the row).
   let turnActive = true;
 
   // ── AUTO ROUTER (per-round model routing) ──────────────────────────────
@@ -2823,8 +2785,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           },
         };
 
-        // Execute — with SKIP-WAIT support (OnyxCode PRD §4.4, shared by
-        // the normal Agent and Code Mode). The handler promise races a
+        // Execute — with SKIP-WAIT support. The handler promise races a
         // user-triggered skip; when the skip wins, the round continues with
         // a placeholder tool result and the REAL handler keeps running —
         // its late result replaces the placeholder in the message history,

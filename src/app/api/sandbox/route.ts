@@ -132,9 +132,11 @@ interface CacheEntry {
  *  `<<<genui>>>` specs).
  *  Version 3 = rename agent.md → Onyx.md with the Onyx identity + the
  *  compressed 47-tool compendium; stale /home/user/agent.md is purged.
- *  Version 4 = cloud workspace persistence — push_workspace +
- *  retrieve_workspace tools + the persistent-workspace policy (49 tools). */
-const AGENT_MD_VERSION = 5;
+ *  Version 4 = cloud workspace persistence tools + policy (49 tools;
+ *  since removed from the manual).
+ *  Version 6 = workspace-sync tools + persistent-workspace policy removed
+ *  from the manual (61 tools). */
+const AGENT_MD_VERSION = 6;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -691,19 +693,16 @@ async function getSandbox(
   // 1. Check the in-memory cache first.
   const cached = lookupCached(apiKey, conversationId, mode);
   if (cached) {
-    // PER-CHAT DIVERGENCE GUARD (the "preview sidebar shows the scaffold
-    // but a new tab shows the real app" bug): every tool call for a code
-    // chat carries the CLIENT's sandboxId — the authoritative per-chat
-    // slot (localStorage e2b-sandbox-id:<key>:<conversationId>) that
-    // create_app / create_file_chunk / run_terminal / start_preview ALL
-    // resolve through. If this server's cache entry for the same key holds
-    // a DIFFERENT live sandbox (a rotation whose kill failed, a replaced
-    // entry from another flow), preferring the cache would silently point
-    // get_host/exec/start_server at the WRONG (stale) sandbox — the dev
-    // server boots in one sandbox while the public URL embeds another's.
-    // For "separate" (per-chat) sandboxes the CLIENT's id wins; the cache
-    // is derived state. If the client's id can't be connected (dead), the
-    // cached sandbox remains the fallback.
+    // PER-CHAT DIVERGENCE GUARD: every call for a per-chat ("separate"
+    // mode) sandbox carries the CLIENT's sandboxId — the authoritative
+    // per-chat slot (localStorage e2b-sandbox-id:<key>:<conversationId>)
+    // that the per-chat tools resolve through. If this server's cache
+    // entry for the same key holds a DIFFERENT live sandbox (a rotation
+    // whose kill failed, a replaced entry from another flow), preferring
+    // the cache would silently point the call at the WRONG (stale)
+    // sandbox. For "separate" (per-chat) sandboxes the CLIENT's id wins;
+    // the cache is derived state. If the client's id can't be connected
+    // (dead), the cached sandbox remains the fallback.
     if (
       clientSandboxId &&
       mode === "separate" &&
@@ -1099,62 +1098,6 @@ export async function POST(req: NextRequest) {
             exit_code: -1,
             error: errMsg,
           });
-        }
-      }
-
-      case "get_host": {
-        // OnyxCode previews — resolve the PUBLIC host for a sandbox port
-        // (https://{port}-{sandboxId}.e2b.app). Used by start_preview to
-        // give the agent (and the Preview tab iframe) a live URL.
-        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
-        const port = (args.port as number) ?? 3000;
-        let host: string;
-        try {
-          host =
-            typeof sandbox.getHost === "function"
-              ? sandbox.getHost(port)
-              : `${port}-${sandbox.sandboxId}.e2b.app`;
-        } catch {
-          // Fallback: the well-known E2B public port-host pattern
-          // ({port}-{sandboxId}.e2b.app — port FIRST).
-          host = `${port}-${sandbox.sandboxId}.e2b.app`;
-        }
-        return NextResponse.json({
-          sandboxId: sandbox.sandboxId,
-          host,
-          url: `https://${host}`,
-        });
-      }
-
-      case "start_server": {
-        // OnyxCode previews — start a LONG-RUNNING dev server as a
-        // background command (detached from this request; timeoutMs: 0 =
-        // runs until explicitly killed via `pkill` in a later exec).
-        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
-        const command = args.command as string;
-        const cwd = (args.cwd as string) ?? DEFAULT_CWD;
-        const envs = (args.envs as Record<string, string> | undefined) ?? undefined;
-        if (!command || typeof command !== "string") {
-          return NextResponse.json({ error: "command is required" }, { status: 400 });
-        }
-        try {
-          const handle = await sandbox.commands.run(command, {
-            cwd,
-            timeoutMs: 0,
-            background: true,
-            ...(envs ? { envs } : {}),
-          });
-          return NextResponse.json({
-            sandboxId: sandbox.sandboxId,
-            pid: handle.pid,
-            started: true,
-          });
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          return NextResponse.json(
-            { sandboxId: sandbox.sandboxId, started: false, error: errMsg },
-            { status: 500 },
-          );
         }
       }
 

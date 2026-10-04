@@ -4,13 +4,13 @@
  * Skills ↔ OnyxBase KV sync (PRD §8).
  *
  * Skills live browser-side (Dexie `skills` rows + OPFS
- * `users/<id>/skills/<slug>/`), which the sandbox-oriented workspace sync
- * cannot see. This engine uploads them to their OWN KV namespace whenever
- * the user performs a workspace push (the `push_workspace` tool rides this
- * flow) or presses "Push skills to cloud" in Settings → Skills.
+ * `users/<id>/skills/<slug>/`), which no sandbox-side flow can see. This
+ * engine uploads them to their OWN KV namespace when the user presses
+ * "Push skills to cloud" in Settings → Skills (and restores them from
+ * there).
  *
- * KV LAYOUT (own namespace; follows the workspace-sync conventions — see
- * `workspace-sync.ts`, whose chunking/pacing lessons are reused verbatim):
+ * KV LAYOUT (own namespace; chunking/pacing lessons reused verbatim from
+ * the old workspace sync):
  *
  *   skills:<userId>:manifest
  *       → the committed POINTER with the full manifest inlined (skills
@@ -175,8 +175,8 @@ export interface SkillsPushResult {
   durationMs: number;
 }
 
-/** Compact skills summary attached to the push_workspace tool result (the
- *  model + tool-result cards render this inline). */
+/** Compact skills summary for UI rendering (Settings → Skills push
+ *  results). */
 export interface SkillsPushSummary {
   tool: "push_skills";
   ok: boolean;
@@ -1120,7 +1120,7 @@ export async function restoreSkillFromCloud(
 }
 
 // ---------------------------------------------------------------------------
-// Credential resolution (mirrors the push_workspace tool's resolveOnyxBase).
+// Credential resolution.
 // ---------------------------------------------------------------------------
 
 /** Resolve the encrypted OnyxBase key + build the KV client. Returns null

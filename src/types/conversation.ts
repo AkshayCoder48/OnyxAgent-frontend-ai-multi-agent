@@ -9,9 +9,10 @@ export interface Conversation {
   is_archived: boolean;
   is_demo: boolean;
   active_knowledge_base_ids?: string[];
-  /** Which experience this conversation belongs to. "code" = OnyxCode
-   *  (Code Mode) chats — filtered out of the normal Agent sidebar; absent
-   *  or "agent" = normal OnyxAgent chats. */
+  /** LEGACY field. "code" marks conversations from the removed OnyxCode
+   *  feature — they stay hidden from the sidebar and can no longer be
+   *  created. Absent or "agent" = normal agent conversations; every new
+   *  conversation is agent-mode. */
   mode?: "agent" | "code";
 }
 
