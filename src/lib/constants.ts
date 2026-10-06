@@ -19,6 +19,7 @@ export const ROUTES = {
   FORGOT_PASSWORD: "/forgot-password",
   DASHBOARD: "/dashboard",
   CHAT: "/chat",
+  KNOWLEDGE_BASE: "/knowledge-base",
   PROFILE: "/profile",
   SETTINGS: "/settings",
   SETTINGS_PROFILE: "/settings/profile",

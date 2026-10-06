@@ -6,6 +6,7 @@
 
 const EXACT_CAPTIONS: Record<string, string> = {
   search_knowledge_base: "Searching the knowledge base",
+  knowledge_base: "Working with the Knowledge Base",
   search_documents: "Searching the documents",
   web_search_tool: "Searching the web",
   search_web: "Searching the web",

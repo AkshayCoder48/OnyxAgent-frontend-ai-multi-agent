@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { Feather, MessageSquare, type LucideIcon } from "lucide-react";
+import { Feather, LibraryBig, MessageSquare, type LucideIcon } from "lucide-react";
 import { useActiveRoute } from "@/lib/active-route";
 import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
@@ -11,6 +11,7 @@ type NavEntry = { labelKey: string; href: string; icon: LucideIcon };
 
 const NAV: NavEntry[] = [
   { labelKey: "chat", href: ROUTES.CHAT, icon: MessageSquare },
+  { labelKey: "knowledgeBase", href: ROUTES.KNOWLEDGE_BASE, icon: LibraryBig },
 ];
 
 export function Header() {

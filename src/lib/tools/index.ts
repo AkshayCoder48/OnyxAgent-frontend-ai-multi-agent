@@ -32,6 +32,7 @@ import "./web_fetch";
 import "./security_audit";
 import "./workflow";
 import "./memory";
+import "./knowledge_base";
 import "./counterfactual";
 import "./subagents";
 import "./chat_inspect";

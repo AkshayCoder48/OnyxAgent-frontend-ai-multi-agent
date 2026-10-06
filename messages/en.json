@@ -35,6 +35,7 @@
     "chat": "Chat",
     "settings": "Settings",
     "knowledge": "Knowledge",
+    "knowledgeBase": "Knowledge Base",
     "knowledgeBases": "Knowledge bases",
     "knowledgeBasesDesc": "Documents & collections",
     "rag": "RAG",

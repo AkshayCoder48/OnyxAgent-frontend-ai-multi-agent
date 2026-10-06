@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Globe,
   Image as ImageIcon,
+  Library,
   ListChecks,
   ListTodo,
   MessageCircleQuestion,
@@ -160,6 +161,11 @@ const RULES: Record<string, TenseRule> = {
     present: "Working with memories",
     icon: Brain,
   },
+  knowledge_base: {
+    past: "Used the workspace Knowledge Base",
+    present: "Using the Knowledge Base",
+    icon: Library,
+  },
   manage_env_var: {
     past: "Managed environment variables",
     present: "Managing environment variables",
@@ -260,12 +266,69 @@ function friendlyDetail(toolCall: ToolCall): string | undefined {
 /** One tool call → one friendly step (past + present sentence, detail, icon). */
 export function friendlyStep(toolCall: ToolCall): FriendlyStep {
   const name = toolCall.name ?? "";
+  // knowledge_base — ONE tool, action-aware narration (the internal op is
+  // the detail, never a separate tool in the UI): "Searching workspace
+  // knowledge for “postgres”" / "Saved “DB Architecture” to the Knowledge
+  // Base" / "Hosting a file in the Knowledge Base".
+  if (name === "knowledge_base") {
+    return kbStep(toolCall);
+  }
   const rule = RULES[name] ?? {
     past: `Used ${humanize(name)}`,
     present: `Using ${humanize(name)}`,
     icon: Wrench,
   };
   return { past: rule.past, present: rule.present, detail: friendlyDetail(toolCall), icon: rule.icon };
+}
+
+/** Action-aware narration for the unified knowledge_base tool. */
+function kbStep(toolCall: ToolCall): FriendlyStep {
+  const args = (toolCall.args ?? {}) as Record<string, unknown>;
+  const action = typeof args.action === "string" ? args.action : "";
+  const title = typeof args.title === "string" && args.title.trim() ? clip(args.title.trim(), 48) : null;
+  const fname = typeof args.name === "string" && args.name.trim() ? clip(args.name.trim(), 48) : null;
+  const query = typeof args.query === "string" && args.query.trim() ? clip(args.query.trim(), 48) : null;
+
+  switch (action) {
+    case "search":
+      return {
+        past: query ? `Searched workspace knowledge for “${query}”` : "Searched workspace knowledge",
+        present: query ? `Searching workspace knowledge for “${query}”` : "Searching workspace knowledge",
+        icon: Library,
+      };
+    case "get":
+      return { past: "Read a saved knowledge item", present: "Reading a saved knowledge item", icon: Library };
+    case "save":
+      return {
+        past: title ? `Saved “${title}” to the Knowledge Base` : "Saved knowledge to the Knowledge Base",
+        present: title ? `Saving “${title}” to the Knowledge Base` : "Saving knowledge to the Knowledge Base",
+        icon: Library,
+      };
+    case "update":
+      return {
+        past: title ? `Updated “${title}” in the Knowledge Base` : "Updated knowledge in the Knowledge Base",
+        present: "Updating knowledge in the Knowledge Base",
+        icon: Library,
+      };
+    case "delete":
+      return { past: "Deleted knowledge from the Knowledge Base", present: "Deleting knowledge from the Knowledge Base", icon: Library };
+    case "list":
+      return { past: "Listed the workspace knowledge", present: "Listing the workspace knowledge", icon: Library };
+    case "save_file":
+      return {
+        past: fname ? `Hosted “${fname}” in the Knowledge Base` : "Hosted a file in the Knowledge Base",
+        present: fname ? `Hosting “${fname}” in the Knowledge Base` : "Hosting a file in the Knowledge Base",
+        icon: Library,
+      };
+    case "get_file":
+      return { past: "Fetched a hosted file link", present: "Fetching a hosted file link", icon: Library };
+    case "list_files":
+      return { past: "Listed hosted files", present: "Listing hosted files", icon: Library };
+    case "delete_file":
+      return { past: "Deleted a hosted file", present: "Deleting a hosted file", icon: Library };
+    default:
+      return { past: "Used the workspace Knowledge Base", present: "Using the Knowledge Base", icon: Library };
+  }
 }
 
 /** The settled card header sentence — "Searched the web for “weather”". */

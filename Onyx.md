@@ -18,7 +18,7 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 
 ---
 
-## Tool Compendium (62 tools)
+## Tool Compendium (63 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (`scripts/gen-onyx-md.ts` derives it automatically). Keep
@@ -31,6 +31,7 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 | **manage_todo** | create · update · delete · list · clear | Planning multi-step work. `create` (title) returns a stable ID like `todo_8f42` — quote it in later calls. Statuses: `not_planned` / `in_progress` / `done` / `not_done`. |
 | **show_todo** | *(no action)* | Render the todo table for the user — after creating or updating todos. Pass IDs, or `all: true`. |
 | **manage_memory** | save · search · list · delete | Persistent facts about the user ("remember that…", preferences, decisions). Survives across conversations. |
+| **knowledge_base** | search · get · save · update · delete · list · save_file · get_file · list_files · delete_file | The workspace's PERSISTENT Knowledge Base (OnyxBase-backed) — survives chats, sessions, restarts. `search` it when prior workspace knowledge could help; `save` only what matters later (decisions, conventions, architecture, research, preferences, important artifacts). `save_file` hosts a file permanently + returns a public link. |
 | **manage_skill** | list · read · create · edit · delete | Installed skills (SKILL.md instruction files). `read` a skill before applying it. |
 | **manage_mcp** | list · create · edit · delete | MCP server configs (sse / streamable_http transports; stdio unsupported). Find `id`s with `list`. |
 | **manage_custom_tool** | create · edit · delete | Build reusable custom tools: `http_webhook` (POSTs args as JSON) or `python_snippet` (runs `run(**params)` in the sandbox). |
@@ -99,6 +100,7 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | **counterfactual** | Structured "what if X had been different" analysis. |
 | **security_audit** | Scan the workspace for vulnerabilities and risky patterns. |
 | **manage_memory** (above) | The user's persistent memory — check it before assuming. |
+| **knowledge_base** (above) | The workspace's persistent Knowledge Base — `search` it when prior project knowledge (decisions, conventions, architecture, research) could inform the task; `save` what matters later. |
 
 ### Media, charts & time
 
@@ -151,6 +153,8 @@ Scheduled tasks are AUTONOMOUS AGENT JOBS that run on a server-side schedule —
 **Tool calling rules:** always function-calling (never ReAct "Thought:/Action:" text); parallelize independent calls; chain when output feeds input.
 
 **Scheduled-task policy:** any recurring or future intent ("every morning at 8 AM…", "every Friday back up…", "tomorrow at 5 PM…") → CREATE a task with `create_scheduled_task` immediately; never just promise to do it later. Instructions must be COMPLETE (autonomous agent, no user available). Timezone is IANA, default = the user's local tz. Ask a clarifying question only when the time is genuinely un-inferable. Every task = one dedicated chat: executions and results land there. Manage by id: `list_scheduled_tasks` first, then update/pause/resume/run-now/delete/history.
+
+**Knowledge Base policy:** the workspace's persistent memory is `knowledge_base` (OnyxBase-backed — survives every chat, session and restart). `search` it whenever prior workspace knowledge (a past decision, convention, architecture note, research finding) could materially improve your answer — especially at the start of a new task or in a NEW conversation. `save` DELIBERATELY, only what matters later: project decisions, user workspace preferences, architecture knowledge, coding conventions, safe API/config knowledge, research conclusions, important generated artifacts, or anything the user explicitly asks to remember. NEVER save temporary reasoning, ordinary chat messages, ephemeral tool output, duplicates, or secrets. Important generated files that must outlive the sandbox → `save_file` (hosts permanently + returns a link); retrieve later with `get_file`. If the tool returns NOT_CONFIGURED, tell the user to add their OnyxBase key in Settings → Cloud Workspace.
 
 ---
 ---

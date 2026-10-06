@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (61 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (62 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -23,6 +23,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_todo [create / update / delete / list / clear] — Planning multi-step work. create (title) returns a stable ID like todo_8f42 — quote it in later calls. Statuses: not_planned / in_progress / done / not_done.
 - show_todo — Render the todo table for the user — after creating or updating todos. Pass IDs, or all: true.
 - manage_memory [save / search / list / delete] — Persistent facts about the user ("remember that…", preferences, decisions). Survives across conversations.
+- knowledge_base [search / get / save / update / delete / list / save_file / get_file / list_files / delete_file] — The workspace's PERSISTENT Knowledge Base (OnyxBase-backed) — survives chats, sessions, restarts. search it when prior workspace knowledge could help; save only what matters later…
 - manage_skill [list / read / create / edit / delete] — Installed skills (SKILL.md instruction files). read a skill before applying it.
 - manage_mcp [list / create / edit / delete] — MCP server configs (sse / streamable_http transports; stdio unsupported). Find ids with list.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params) in the sandbox).
@@ -105,4 +106,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];

@@ -45,6 +45,7 @@ import { RunPythonResult } from "./tool-results/run-python";
 import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file-download";
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
+import { KnowledgeBaseResult } from "./tool-results/knowledge-base";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
@@ -424,6 +425,11 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
   const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   const isAskUser = toolCall.name === "ask_user";
+  // knowledge_base — the unified KB tool's payload chips (save/search/
+  // hosted-file link) render beneath the narration line, same slot as the
+  // memory chips. ONE presentation for the whole tool — the internal op
+  // never appears as a separate tool.
+  const isKnowledgeBase = toolCall.name === "knowledge_base";
   // Scheduled-task tools get their glass cards in BOTH modes too — the task
   // confirmation/list/history is content the user acts on, never chrome.
   const isSched = isScheduledTaskTool(toolCall.name);
@@ -512,6 +518,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       {(isMemorySave || isMemoryList || isMemorySearch) && isCompleted && (
         <MemoryResult toolCall={toolCall} />
       )}
+      {isKnowledgeBase && isCompleted && <KnowledgeBaseResult toolCall={toolCall} />}
       {chartSpec && <ChartMessage spec={chartSpec} />}
       {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
@@ -682,6 +689,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isMemorySave = toolCall.name === "memory_save" || memoryAction === "save";
   const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
   const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
+  // knowledge_base — ONE unified tool, ONE presentation: saves render inline
+  // chips in the main response; searches/lists render chips behind the
+  // disclosure (same placement rules as the memory tools).
+  const isKnowledgeBase = toolCall.name === "knowledge_base";
+  const kbAction = isKnowledgeBase ? String(toolCall.args?.action ?? "") : null;
   // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
   // todos drive the TodoPreview table; memoized so streaming deltas don't
   // re-parse on every render.
@@ -1065,6 +1077,14 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <MemoryResult toolCall={toolCall} />
       )}
 
+      {/* INLINE KB CHIPS (knowledge_base save / save_file): what the agent
+          just persisted to the workspace Knowledge Base renders directly in
+          the MAIN RESPONSE — the AI-saved knowledge is content the user
+          cares about, never chrome. */}
+      {isKnowledgeBase && (kbAction === "save" || kbAction === "save_file") && toolCall.status === "completed" && (
+        <KnowledgeBaseResult toolCall={toolCall} />
+      )}
+
       {/* Disclosure panel — the ARGUMENTS/OUTPUT and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -1134,6 +1154,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // memory_search → the matching memories as chips behind the
             // disclosure (search results can be many; not auto-shown).
             <MemoryResult toolCall={toolCall} />
+          ) : isKnowledgeBase && (kbAction === "search" || kbAction === "list") && toolCall.status === "completed" ? (
+            // knowledge_base search/list → the matches as chips behind the
+            // disclosure. Everything else (get/update/delete/file links)
+            // falls through to the default raw view when expanded.
+            <KnowledgeBaseResult toolCall={toolCall} />
           ) : isLoadSkill ? (
             <LoadSkillResult resultText={resultText} status={toolCall.status} />
           ) : isListSkills ? null : (

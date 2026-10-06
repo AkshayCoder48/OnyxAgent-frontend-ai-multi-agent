@@ -18,6 +18,7 @@ import {
   CalendarClock,
   ChevronLeft,
   ChevronRight,
+  LibraryBig,
   MessageSquare,
   MoreVertical,
   Pencil,
@@ -858,6 +859,16 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
               variant="ghost"
               size="sm"
               className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
+              onClick={() => router.push("/en/knowledge-base")}
+              title="Knowledge Base"
+              aria-label="Knowledge Base"
+            >
+              <LibraryBig className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
               onClick={() => router.push("/en/settings")}
               title="Settings"
               aria-label="Settings"
@@ -939,6 +950,16 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
               </p>
               <p className="text-muted-foreground truncate text-[10px]">Free plan</p>
             </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0"
+              onClick={() => { router.push("/en/knowledge-base"); close(); }}
+              title="Knowledge Base"
+              aria-label="Knowledge Base"
+            >
+              <LibraryBig className="h-4 w-4" />
+            </Button>
             <Button
               variant="ghost"
               size="sm"
