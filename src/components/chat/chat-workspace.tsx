@@ -14,10 +14,11 @@ import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
+import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
 import { setUrlParam } from "@/lib/utils";
-import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks } from "lucide-react";
+import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks, LibraryBig } from "lucide-react";
 
-type SidePanel = "platforms" | "files" | "timeline" | "logs" | null;
+type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | null;
 
 /* ------------------------------------------------------------------
  * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
@@ -55,6 +56,7 @@ const PANEL_WIDTH_PREFS = {
   files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
+  knowledge: { storageKey: "kb-sidebar-width", defaultWidth: 380 },
 } as const;
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
@@ -168,6 +170,7 @@ export function ChatWorkspace() {
   const filesOpen = sidePanel === "files" && !subagentOpen;
   const timelineOpen = sidePanel === "timeline" && !subagentOpen;
   const logsOpen = sidePanel === "logs" && !subagentOpen;
+  const knowledgeOpen = sidePanel === "knowledge" && !subagentOpen;
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
@@ -255,7 +258,9 @@ export function ChatWorkspace() {
           ? filesOpen
           : panel === "timeline"
             ? timelineOpen
-            : logsOpen;
+            : panel === "knowledge"
+              ? knowledgeOpen
+              : logsOpen;
     setSidePanel(wasVisible ? null : panel);
   };
 
@@ -305,6 +310,21 @@ export function ChatWorkspace() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* Knowledge Base — the workspace's persistent knowledge (AI-saved
+                items + hosted files) as a docked sidebar; the compact sibling
+                of the full /knowledge-base page. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => toggleSidePanel("knowledge")}
+              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+              title="Knowledge Base"
+              aria-label="Toggle knowledge panel"
+              aria-expanded={knowledgeOpen}
+              aria-controls="kb-panel"
+            >
+              <LibraryBig className="h-4 w-4" />
+            </Button>
             {/* Composio Platforms — a docked catalog sidebar that exists ONLY
                 while a Composio key is stored (direct platform connections
                 from chat: search, sort, filter, OAuth connect). */}
@@ -389,6 +409,21 @@ export function ChatWorkspace() {
           and full-height drawers below md. One at a time; each is
           resizable with the width persisted and CSS-fitted so the chat
           column never drops below ~400px. */}
+      <DockedPanel
+        id="kb-panel"
+        label="Knowledge Base"
+        open={knowledgeOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="kb-sidebar-width"
+        defaultWidth={380}
+        minWidth={300}
+        maxWidth={640}
+        sheetCloseButton
+        sheetClassName="w-[88vw] max-w-sm"
+      >
+        <KnowledgeBasePanel />
+      </DockedPanel>
+
       <DockedPanel
         id="platforms-panel"
         label="Platforms"

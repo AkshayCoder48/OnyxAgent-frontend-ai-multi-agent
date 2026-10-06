@@ -30,7 +30,7 @@ registerTool(
 Accepts (base64 wins; url and path are interchangeable):
 - url: An HTTP/HTTPS URL to an image (e.g. "https://example.com/chart.png") — or a workspace path (same as path)
 - base64: A base64-encoded image with data URI prefix (e.g. "data:image/png;base64,iVBOR...")
-- path: An image from the workspace — a sandbox path (e.g. "projects/my-app/public/logo.png", ".onyx/websession/shots/shot-3.png", "uploads/photo.jpg") or an uploaded file name (e.g. "photo.jpg"). Resolved locally and displayed inline.
+- path: An image from the workspace — a sandbox path (e.g. "projects/my-app/public/logo.png", ".onyx/browser/shots/shot-3.png", "uploads/photo.jpg") or an uploaded file name (e.g. "photo.jpg"). Resolved locally and displayed inline.
 - alt: Optional alt text / caption shown below the image
 
 The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.`,
@@ -48,7 +48,7 @@ The image renders inline in the chat, just like a chart. The user sees it immedi
       path: {
         type: "string",
         description:
-          "Workspace image to display: a sandbox path (e.g. 'uploads/photo.jpg', '.onyx/websession/shots/shot-2.png') or an uploaded file name.",
+          "Workspace image to display: a sandbox path (e.g. 'uploads/photo.jpg', '.onyx/browser/shots/shot-2.png') or an uploaded file name.",
       },
       alt: {
         type: "string",

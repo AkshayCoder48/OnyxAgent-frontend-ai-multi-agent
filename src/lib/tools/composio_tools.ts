@@ -20,6 +20,7 @@ import {
   resolveComposioHeaders,
   persistComposioSessionId,
 } from "@/lib/composio/browser";
+import { recordToolToolkits } from "@/lib/composio/branding";
 import type { ToolResult } from "@/types";
 
 /** Direct fetch that keeps the route's stable `error` code (jsonFetch would
@@ -99,6 +100,11 @@ registerTool(
         await persistComposioSessionId(ctx.userId, r.sessionId);
       }
       const tools = Array.isArray(r.tools) ? r.tools : [];
+      // Harvest the authoritative toolName→toolkit mapping (each result
+      // carries Composio's own tool_schemas.toolkit) so later execute calls
+      // can brand themselves with the REAL platform logo (PRD §18–§23).
+      // Pure client-side cache record — the result shape is untouched.
+      recordToolToolkits(tools as ReadonlyArray<{ slug?: unknown; toolkit?: unknown }>);
       if (!tools.length) {
         return {
           success: true,

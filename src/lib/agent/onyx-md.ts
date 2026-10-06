@@ -25,7 +25,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (63 tools)
+## Tool Compendium (64 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
@@ -35,10 +35,10 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 | Tool | Actions | Use it when |
 |---|---|---|
-| **manage_todo** | create · update · delete · list · clear | Planning multi-step work. \`create\` (title) returns a stable ID like \`todo_8f42\` — quote it in later calls. Statuses: \`not_planned\` / \`in_progress\` / \`done\` / \`not_done\`. |
+| **manage_todo** | create · update · delete · list · clear | Planning multi-step work. \`create\` returns a stable ID like \`todo_8f42\` — quote it later. Statuses: not_planned/in_progress/done/not_done. |
 | **show_todo** | *(no action)* | Render the todo table for the user — after creating or updating todos. Pass IDs, or \`all: true\`. |
 | **manage_memory** | save · search · list · delete | Persistent facts about the user ("remember that…", preferences, decisions). Survives across conversations. |
-| **knowledge_base** | search · get · save · update · delete · list · save_file · get_file · list_files · delete_file | The workspace's PERSISTENT Knowledge Base (OnyxBase-backed) — survives chats, sessions, restarts. \`search\` it when prior workspace knowledge could help; \`save\` only what matters later (decisions, conventions, architecture, research, preferences, important artifacts). \`save_file\` hosts a file permanently + returns a public link. |
+| **knowledge_base** | search · get · save · update · delete · list · file hosting | Persistent workspace Knowledge Base (OnyxBase) — survives chats. \`search\` when prior knowledge helps; \`save\` what matters later; \`save_file\` hosts files + links. |
 | **manage_skill** | list · read · create · edit · delete | Installed skills (SKILL.md instruction files). \`read\` a skill before applying it. |
 | **manage_mcp** | list · create · edit · delete | MCP server configs (sse / streamable_http transports; stdio unsupported). Find \`id\`s with \`list\`. |
 | **manage_custom_tool** | create · edit · delete | Build reusable custom tools: \`http_webhook\` (POSTs args as JSON) or \`python_snippet\` (runs \`run(**params)\` in the sandbox). |
@@ -83,6 +83,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 | **web_search** | Text web search (LangSearch if configured, else Miklium). Titles, URLs, snippets. |
 | **image_search** / **video_search** | Find pictures / videos: URLs, thumbnails, dimensions, sources. |
 | **web_fetch** | Read a URL's full text — deep-read AFTER \`web_search\`. |
+| **use_browser** | ONE browser tool: persistent sandbox browser, tabs, click/type/screenshot/elements/JS/uploads/downloads. Semantic targeting. For sites needing real interaction. |
 
 ### Subagent orchestration
 You are an orchestrator — spawn specialists for complex work. Every subagent shares your sandbox and tools.
@@ -124,8 +125,8 @@ When the user connects Composio (Settings → Integrations), you can use externa
 
 | Tool | Use |
 |---|---|
-| **composio_search_tools** | FIRST STEP for external-app tasks: natural-language tool discovery (e.g. "send a slack message"). Returns tool slugs + input schemas + which platforms are connected. Search before executing. |
-| **composio_connect_platform** | Get the OAuth authorization link for a platform (slug like \`slack\`, \`github\`). Share it with the user and WAIT — you cannot authorize yourself. |
+| **composio_search_tools** | FIRST STEP for external-app tasks: describe the use case in plain language; returns matching tool slugs + which platforms are connected. Search BEFORE executing. |
+| **composio_connect_platform** | Get the OAuth link for a platform (slug like \`slack\`, \`github\`). Share it with the user and WAIT — you cannot authorize yourself. |
 | **composio_execute_tool** | Execute a discovered tool: \`toolName\` + \`args\` matching its schema. \`CONNECTION_REQUIRED\` → share a connect link and wait; never fabricate results. |
 
 ### Scheduled tasks & automation (8 tools)
@@ -134,13 +135,13 @@ Scheduled tasks are AUTONOMOUS AGENT JOBS that run on a server-side schedule —
 
 | Tool | Use |
 |---|---|
-| **create_scheduled_task** | Turn any recurring/future intent into automation. The task gets its own dedicated chat (the name becomes its title). Args: \`name\`, \`instructions\` (the COMPLETE agent job, executed verbatim by an autonomous agent with no user available — self-contained: what to do, files to write with paths), \`schedule\` {type: once/daily/weekly/monthly/interval/cron, expression, time, timezone (IANA — default the user's local tz), startAt?, endAt?}. Daily="HH:MM"; weekly=weekday 0-6 (0=Sun)+time; monthly=day+time; interval=seconds≥60; once=ISO datetime; cron=5-field. |
+| **create_scheduled_task** | Turn recurring/future intent into automation. Own dedicated chat (name = title). Args: \`name\`, \`instructions\` (the COMPLETE autonomous job — no user available: what to do, files + paths), \`schedule\` {type: once/daily/weekly/monthly/interval/cron, expression, time, timezone (IANA), startAt?, endAt?}. Daily="HH:MM"; weekly=weekday 0-6+time; monthly=day+time; interval=seconds≥60; once=ISO; cron=5-field. |
 | **update_scheduled_task** | Change name/description/instructions/schedule/enabled by task id. Find ids with \`list_scheduled_tasks\`. |
 | **delete_scheduled_task** | Permanently remove a task + its history (its dedicated chat stays as a normal conversation). |
 | **pause_scheduled_task** / **resume_scheduled_task** | Stop executions / resume the schedule. |
 | **run_scheduled_task_now** | Execute immediately (background sandbox) without touching future runs — the result lands in the task's chat. |
 | **list_scheduled_tasks** | All tasks with id/name/schedule/timezone/status/next+last run/dedicated chat — filter active/paused/failed/upcoming. |
-| **get_scheduled_task_history** | Execution history: time, duration, status, error, result, files changed, tool calls (the full result messages live in the task's chat). "Did my morning task run?" → this. |
+| **get_scheduled_task_history** | Execution history: time, duration, status, error, result, files changed, tool calls. "Did my morning task run?" → this. |
 
 ---
 

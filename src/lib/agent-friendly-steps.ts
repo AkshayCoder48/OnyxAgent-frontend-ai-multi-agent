@@ -166,6 +166,11 @@ const RULES: Record<string, TenseRule> = {
     present: "Using the Knowledge Base",
     icon: Library,
   },
+  use_browser: {
+    past: "Used the browser",
+    present: "Using the browser",
+    icon: Globe,
+  },
   manage_env_var: {
     past: "Managed environment variables",
     present: "Managing environment variables",
@@ -273,6 +278,11 @@ export function friendlyStep(toolCall: ToolCall): FriendlyStep {
   if (name === "knowledge_base") {
     return kbStep(toolCall);
   }
+  // use_browser — the ONE browser tool, action-aware narration ("Opened
+  // example.com" / "Clicked “Sign in”" / "Took a screenshot").
+  if (name === "use_browser") {
+    return browserStep(toolCall);
+  }
   const rule = RULES[name] ?? {
     past: `Used ${humanize(name)}`,
     present: `Using ${humanize(name)}`,
@@ -328,6 +338,79 @@ function kbStep(toolCall: ToolCall): FriendlyStep {
       return { past: "Deleted a hosted file", present: "Deleting a hosted file", icon: Library };
     default:
       return { past: "Used the workspace Knowledge Base", present: "Using the Knowledge Base", icon: Library };
+  }
+}
+
+/** Action-aware narration for the unified browser tool (🌐 Browser). */
+function browserStep(toolCall: ToolCall): FriendlyStep {
+  const args = (toolCall.args ?? {}) as Record<string, unknown>;
+  const action = typeof args.action === "string" ? args.action : "";
+  const url = typeof args.url === "string" && args.url.trim() ? domainOf(args.url.trim()) ?? basename(args.url.trim()) : null;
+  const targetText = (t: unknown): string | null => {
+    if (typeof t === "string" && t.trim()) return clip(t.trim(), 40);
+    if (t && typeof t === "object") {
+      const o = t as Record<string, unknown>;
+      const v = o.name ?? o.text ?? o.label ?? o.placeholder ?? o.alt ?? o.css ?? o.xpath ?? o.ref;
+      if (typeof v === "string" && v.trim()) return clip(v.trim(), 40);
+    }
+    return null;
+  };
+  const target = targetText(args.target);
+  const text = typeof args.text === "string" && args.text.trim() ? clip(args.text.trim(), 40) : null;
+
+  switch (action) {
+    case "navigate":
+      return {
+        past: url ? `Opened ${url}` : "Opened a website",
+        present: url ? `Opening ${url}` : "Opening a website",
+        icon: Globe,
+      };
+    case "click":
+      return {
+        past: target ? `Clicked “${target}”` : "Clicked a page element",
+        present: target ? `Clicking “${target}”` : "Clicking a page element",
+        icon: Globe,
+      };
+    case "type":
+      return {
+        past: target ? `Typed “${text ?? "…"}” into “${target}”` : `Typed “${text ?? "…"}”`,
+        present: "Typing into the page",
+        icon: Globe,
+      };
+    case "press":
+      return { past: `Pressed ${typeof args.key === "string" ? args.key : "a key"}`, present: "Pressing a key", icon: Globe };
+    case "scroll":
+      return { past: "Scrolled the page", present: "Scrolling the page", icon: Globe };
+    case "wait":
+      return { past: "Waited for the page", present: "Waiting for the page", icon: Globe };
+    case "screenshot":
+      return { past: "Took a screenshot", present: "Taking a screenshot", icon: Globe };
+    case "get_page":
+      return { past: "Read the current page", present: "Reading the current page", icon: Globe };
+    case "get_elements":
+      return { past: "Inspected the page elements", present: "Inspecting the page elements", icon: Globe };
+    case "evaluate":
+      return { past: "Ran JavaScript in the page", present: "Running JavaScript in the page", icon: Globe };
+    case "select":
+      return { past: "Chose a dropdown option", present: "Choosing a dropdown option", icon: Globe };
+    case "upload":
+      return { past: "Uploaded files through the browser", present: "Uploading files through the browser", icon: Globe };
+    case "download":
+      return { past: "Downloaded a file", present: "Downloading a file", icon: Globe };
+    case "new_tab":
+      return { past: "Opened a new tab", present: "Opening a new tab", icon: Globe };
+    case "switch_tab":
+      return { past: "Switched browser tabs", present: "Switching browser tabs", icon: Globe };
+    case "close_tab":
+      return { past: "Closed a browser tab", present: "Closing a browser tab", icon: Globe };
+    case "go_back":
+      return { past: "Went back", present: "Going back", icon: Globe };
+    case "go_forward":
+      return { past: "Went forward", present: "Going forward", icon: Globe };
+    case "refresh":
+      return { past: "Refreshed the page", present: "Refreshing the page", icon: Globe };
+    default:
+      return { past: "Used the browser", present: "Using the browser", icon: Globe };
   }
 }
 

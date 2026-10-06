@@ -39,8 +39,12 @@ const registryNames = (): string[] => listTools().map((t) => t.name);
  * registry — they run entirely inside the sandbox). They must not be
  * advertised in the digest (foreground agent turns cannot call them — that
  * would violate the anti-hallucination rules), so they are exempt from the
- * registry and digest parity checks below. */
-const NATIVE_ONLY_TOOLS = new Set(["start_web_session", "manage_web_session"]);
+ * registry and digest parity checks below.
+ *
+ * use_browser is NOT here: it IS registered in the browser registry (the
+ * foreground runtime executes it through the E2B HTTP API), so it must
+ * appear in the digest like every other registered tool. */
+const NATIVE_ONLY_TOOLS = new Set<string>([]);
 
 /** Tool names mentioned in digest list lines ("- name — ..."). */
 const digestListedNames = (): string[] =>

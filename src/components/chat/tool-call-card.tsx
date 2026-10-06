@@ -10,7 +10,6 @@ import {
   Globe,
   ChevronRight,
   Code2,
-  Database,
   Download,
   FileMinus,
   FilePlus,
@@ -47,9 +46,13 @@ import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
 import { KnowledgeBaseResult } from "./tool-results/knowledge-base";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
+import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
+import { useAuthStore } from "@/stores/auth-store";
+import { isComposioToolName, useComposioBranding } from "@/lib/composio/branding";
+import { ComposioToolBadge } from "./tool-results/composio-branding";
 import {
   WebSearchResults as DDGWebResults,
   ImageSearchResults as DDGImageResults,
@@ -290,6 +293,11 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     toolCall.status === "running" || toolCall.status === "pending";
   const isError = toolCall.status === "error";
   const isCompleted = toolCall.status === "completed";
+  // Composio platform branding (PRD §18–§23, §25): composio_* calls show
+  // the REAL app logo + name, resolved dynamically from Composio metadata —
+  // never the generic agent glyph when a valid logo exists.
+  const isComposio = isComposioToolName(toolCall.name);
+  const branding = useComposioBranding(useAuthStore.getState().user?.id, toolCall);
   // The friendly narration for the settled line ("Searched the web for
   // "weather"") and its glyph, both from the shared plain-language rules.
   const step = useMemo(() => friendlyStep(toolCall), [toolCall]);
@@ -442,10 +450,21 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         role="status"
         aria-live="polite"
       >
-        <ToolIcon
-          className={cn("h-3.5 w-3.5 shrink-0", isError ? "text-destructive/70" : "text-muted-foreground")}
-          aria-hidden
-        />
+        {isComposio ? (
+          <ComposioToolBadge branding={branding} size={14} />
+        ) : (
+          <ToolIcon
+            className={cn("h-3.5 w-3.5 shrink-0", isError ? "text-destructive/70" : "text-muted-foreground")}
+            aria-hidden
+          />
+        )}
+        {/* Platform identity chip — the app name rides next to the badge
+            (PRD §26: “GitHub — …”), before the friendly sentence. */}
+        {isComposio && branding?.appName ? (
+          <span className="bg-foreground/[0.06] text-foreground/75 inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium">
+            {branding.appName}
+          </span>
+        ) : null}
         {isRunning ? (
           <>
             <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
@@ -485,6 +504,19 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                 </>
               )}
             </span>
+            {/* composio_execute_tool — the Composio tool slug is useful
+                context; subtle mono detail (“GitHub · GITHUB_CREATE_ISSUE”
+                reads chip + slug). Shown even when the platform is still
+                unresolved — the slug is the honest identifier, never a
+                platform guess (PRD §23). */}
+            {isComposio &&
+              toolCall.name === "composio_execute_tool" &&
+              typeof toolCall.args?.toolName === "string" &&
+              toolCall.args.toolName.trim() ? (
+              <span className="ml-1 min-w-0 shrink truncate font-mono text-[11px] text-foreground/45">
+                {toolCall.args.toolName.trim()}
+              </span>
+            ) : null}
             {isCompleted && (
               <>
                 <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} className="ml-1" />
@@ -563,6 +595,10 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.
   const isRunPython = toolCall.name === "run_python";
+  // Composio platform branding (PRD §18–§23, §25): composio_* calls show
+  // the REAL app logo + name, resolved dynamically from Composio metadata.
+  const isComposio = isComposioToolName(toolCall.name);
+  const branding = useComposioBranding(useAuthStore.getState().user?.id, toolCall);
   // Scheduled-task tools — same rule: the card is the payload.
   const isSched = isScheduledTaskTool(toolCall.name);
   // DDG search tools — detect and auto-expand
@@ -650,7 +686,21 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const settledHint = toolCall.status !== "pending" && toolCall.status !== "running"
     ? settledArgHint(toolCall.args)
     : null;
-  const displayHint = inputHint ?? settledHint;
+  // composio_* — the platform-specific primary arg rides the mono chip: the
+  // Composio tool slug for execute, the toolkit slug for connect (search
+  // already surfaces its query via inputHint above).
+  const composioArgHint = isComposio
+    ? toolCall.name === "composio_execute_tool"
+      ? typeof toolCall.args?.toolName === "string" && toolCall.args.toolName.trim()
+        ? toolCall.args.toolName.trim()
+        : null
+      : toolCall.name === "composio_connect_platform"
+        ? typeof toolCall.args?.toolkit === "string" && toolCall.args.toolkit.trim()
+          ? toolCall.args.toolkit.trim()
+          : null
+        : null
+    : null;
+  const displayHint = composioArgHint ?? inputHint ?? settledHint;
 
   const resultText =
     toolCall.result !== undefined
@@ -797,6 +847,16 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     [toolCall.name, toolCall.status, toolCall.result],
   );
   const isWebSessionResult = webSessionResultSpec !== null;
+  // use_browser — the ONE unified browser tool: its result card carries the
+  // 🌐 Browser identity (never a Composio integration, PRD §21/§25).
+  const browserResultSpec = useMemo(
+    () =>
+      toolCall.name === "use_browser" && toolCall.status === "completed"
+        ? parseBrowserResult(toolCall.result)
+        : null,
+    [toolCall.name, toolCall.status, toolCall.result],
+  );
+  const isBrowserResult = browserResultSpec !== null;
   // A chart that finishes after this card mounted (live streaming) won't
   // have triggered the initial-state default — expand it on transition.
   // Same for file_download cards and the edit_file diff (the card IS the
@@ -810,8 +870,14 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult;
-  const friendlyName = isWebSessionResult
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult;
+  const friendlyName = isComposio
+    ? // The REAL platform name once branding resolves (GitHub, Slack…);
+      // fallback is the platform the call ran through.
+      branding?.appName ?? "Composio"
+    : isBrowserResult
+    ? "Browser"
+    : isWebSessionResult
     ? "Web Session"
     : isDateTime
     ? "Current Date & Time"
@@ -877,7 +943,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                       ? "Composing…"
                       : toolCall.name;
 
-  const ToolIcon = isWebSessionResult
+  const ToolIcon = isBrowserResult
+    ? Globe
+    : isWebSessionResult
     ? Globe
     : isDateTime
     ? Clock
@@ -979,20 +1047,28 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             phase) instead of hard-cutting (PRD §20). */}
         {isRunning ? (
           <span key="running" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
-            <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+            {isComposio ? (
+              <ComposioToolBadge branding={branding} size={16} />
+            ) : (
+              <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+            )}
             <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
               {liveCaption}
             </ShimmerLabel>
           </span>
         ) : (
           <span key="settled" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
-            <ToolIcon
-              className={cn(
-                "h-3.5 w-3.5 shrink-0",
-                hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
-              )}
-              aria-hidden
-            />
+            {isComposio ? (
+              <ComposioToolBadge branding={branding} size={16} />
+            ) : (
+              <ToolIcon
+                className={cn(
+                  "h-3.5 w-3.5 shrink-0",
+                  hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
+                )}
+                aria-hidden
+              />
+            )}
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {friendlyName}
             </span>
@@ -1107,6 +1183,8 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <ScheduledTaskResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isWebSessionResult && webSessionResultSpec ? (
             <WebSessionResult data={webSessionResultSpec} />
+          ) : toolCall.status === "completed" && isBrowserResult ? (
+            <BrowserResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

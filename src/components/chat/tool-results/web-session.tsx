@@ -2,7 +2,9 @@
 
 import { Camera, Globe } from "lucide-react";
 
-/** Web-session result payload (see src/lib/tools/web-session-driver.ts). */
+/** Web-session result payload (the RETIRED start_/manage_web_session tools —
+ *  kept so OLD conversations in history keep rendering; new browser runs
+ *  use use_browser + use-browser.tsx). */
 export interface WebSessionPayload {
   kind: "web_session";
   ok: boolean;

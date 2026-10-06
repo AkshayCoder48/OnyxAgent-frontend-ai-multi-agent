@@ -44,12 +44,10 @@ export const BG_NATIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "preview_image",
   "ocr_document",
   "counterfactual",
-  // Web sessions (user fix, 2026-09-29: "some tools are not able to run in
-  // background giving error tab not opened") — the Playwright driver + file
-  // protocol are entirely sandbox-side, so the runner implements them
-  // NATIVELY (bg-agent-script.ts). They must NOT be seeded into
-  // state.browserTools — bridging them back to the browser made them die
+  // Browser (CloakBrowser PRD) — the Python browser driver + file protocol
+  // are entirely sandbox-side, so the runner implements use_browser
+  // NATIVELY (bg-agent-script.ts). It must NOT be seeded into
+  // state.browserTools — bridging it back to the browser would make it die
   // with the tab closed.
-  "start_web_session",
-  "manage_web_session",
+  "use_browser",
 ]);

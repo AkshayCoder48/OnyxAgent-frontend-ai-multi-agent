@@ -40,10 +40,10 @@
  */
 
 import { ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
-// The Playwright web-session driver, shared verbatim with the browser-side
-// tools (code_web_session.ts) — interpolated into the runner below so
-// start_/manage_web_session run NATIVELY inside the sandbox.
-import { WEB_SESSION_DRIVER_SOURCE } from "@/lib/tools/web-session-driver";
+// The CloakBrowser browser driver (Python), shared verbatim with the
+// browser-side use_browser tool — interpolated into the runner below so
+// use_browser runs NATIVELY inside the sandbox.
+import { BROWSER_DRIVER_PY_SOURCE } from "@/lib/e2b/browser-driver";
 
 export const BG_AGENT_SCRIPT = String.raw`
 // OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
@@ -1701,13 +1701,13 @@ async function ocrFetch(url, base64DataUri, filename) {
   return parse(res);
 }
 
-// ── Web-session driver (shared verbatim with the browser tools) ────────
-// The Playwright driver source from web-session-driver.ts — written to
-// /home/user/.onyx/websession/driver.mjs and started detached. JSON-encoded
-// so the shebang + imports inside it stay a plain STRING here (they would
-// be syntax errors if embedded raw mid-file).
-const WEB_SESSION_DRIVER_SOURCE = ${JSON.stringify(WEB_SESSION_DRIVER_SOURCE)};
-const WS_DIR = path.join(HOME, ".onyx", "websession");
+// ── Browser driver (shared verbatim with the browser-side use_browser) ──
+// The PYTHON CloakBrowser driver source from browser-driver.ts — written to
+// /home/user/.onyx/browser/driver.py and started detached (pip installs
+// cloakbrowser + playwright; the browser binary downloads on first launch).
+// JSON-encoded so the shebang + imports inside it stay a plain STRING here.
+const BROWSER_DRIVER_PY = ${JSON.stringify(BROWSER_DRIVER_PY_SOURCE)};
+const WS_DIR = path.join(HOME, ".onyx", "browser");
 const WS_INSTALL_TIMEOUT_S = 280;
 
 /** exec() as a promise (never throws — returns {err, stdout, stderr}). */
@@ -1719,41 +1719,48 @@ function wsExec(command, timeoutSec) {
   });
 }
 
-/** Serialize driver boots — concurrent manage_web_session calls must not
+/** Serialize driver boots — concurrent use_browser calls must not
  *  double-install/double-boot. */
 let wsDriverBoot = null;
 
-/** Install (once) + boot the web-session driver, and confirm it is ALIVE.
- *  Liveness = .ready marker AND a running driver process (a stale marker
- *  from a crashed driver used to hang every command). Restarts reuse the
- *  existing node_modules — only a FRESH sandbox pays the Chromium install. */
+/** Install (once) + boot the BROWSER driver (Python/CloakBrowser), and
+ *  confirm it is ALIVE. Liveness = .ready marker AND a running driver
+ *  process (a stale marker from a crashed driver used to hang every
+ *  command). Restarts reuse the installed pip packages — only a FRESH
+ *  sandbox pays the runtime install (the browser binary downloads inside
+ *  the driver on first launch, with a standard-Chromium fallback). */
 async function ensureWsDriver() {
   if (!wsDriverBoot) {
     wsDriverBoot = (async () => {
-      const readyCmd = 'test -f ' + WS_DIR + '/.ready && pgrep -f "[d]river.mjs" >/dev/null && echo READY || echo NO';
+      const readyCmd = 'test -f ' + WS_DIR + '/.ready && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO';
       const alive = await wsExec(readyCmd);
       if (!alive.err && alive.stdout.trim() === "READY") return { ok: true };
-      await fs.mkdir(WS_DIR, { recursive: true });
-      await fs.writeFile(path.join(WS_DIR, "driver.mjs"), WEB_SESSION_DRIVER_SOURCE);
+      await fs.mkdir(path.join(WS_DIR, "shots"), { recursive: true });
+      await fs.mkdir(path.join(WS_DIR, "profile"), { recursive: true });
+      await fs.mkdir(path.join(HOME, "downloads"), { recursive: true });
+      await fs.writeFile(path.join(WS_DIR, "driver.py"), BROWSER_DRIVER_PY);
       await fs.rm(path.join(WS_DIR, ".ready"), { force: true }).catch(() => {});
-      const installed = await wsExec('test -d ' + WS_DIR + '/node_modules/playwright && echo YES || echo NO');
+      const installed = await wsExec('python3 -c "import cloakbrowser" 2>/dev/null && echo YES || echo NO', 30);
+      const checkPkgs = 'python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo YES || echo NO';
       if (installed.stdout.trim() !== "YES") {
-        const inst = await wsExec(
-          'cd ' + WS_DIR + ' && npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund --loglevel=error playwright && npx playwright install chromium --with-deps',
-          WS_INSTALL_TIMEOUT_S,
-        );
-        if (inst.err) {
-          return { ok: false, error: "Failed to install Playwright/Chromium in the sandbox: " + ((inst.stderr || inst.err).slice(-300) || "npm install failed") };
+        // NOTE: no pipes on the pip calls — piping through tail would mask
+        // pip's exit code and break the fallback logic.
+        let inst = await wsExec('pip install --quiet cloakbrowser playwright', WS_INSTALL_TIMEOUT_S);
+        if (inst.err || (await wsExec(checkPkgs, 30)).stdout.trim() !== "YES") {
+          inst = await wsExec('pip install --quiet --break-system-packages cloakbrowser playwright', WS_INSTALL_TIMEOUT_S);
+        }
+        if ((await wsExec(checkPkgs, 30)).stdout.trim() !== "YES") {
+          return { ok: false, error: "Failed to install the browser runtime in the sandbox: " + ((inst.stderr || inst.err || inst.stdout).slice(-300) || "pip install failed") };
         }
       }
-      await wsExec('cd ' + WS_DIR + ' && nohup node driver.mjs > driver.log 2>&1 &');
+      await wsExec('cd ' + WS_DIR + ' && nohup python3 driver.py > driver.log 2>&1 &');
       for (let i = 0; i < 40; i++) {
         const r = await wsExec(readyCmd);
         if (!r.err && r.stdout.trim() === "READY") return { ok: true };
         await sleep(400);
       }
       const log = await wsExec('tail -c 400 ' + WS_DIR + '/driver.log 2>/dev/null');
-      return { ok: false, error: "The web-session driver did not start in time." + (log.stdout ? " Driver log: " + log.stdout.slice(0, 200) : "") };
+      return { ok: false, error: "The browser driver did not start in time." + (log.stdout ? " Driver log: " + log.stdout.slice(0, 200) : "") };
     })();
   }
   const result = await wsDriverBoot;
@@ -1772,7 +1779,7 @@ async function wsSendCommand(cmd, timeoutMs) {
   await fs.writeFile(path.join(WS_DIR, "cmd.json"), JSON.stringify(Object.assign({ id }, cmd)));
   const deadline = Date.now() + (timeoutMs ?? 60_000);
   for (;;) {
-    if (Date.now() >= deadline) return { ok: false, error: "Web session command timed out." };
+    if (Date.now() >= deadline) return { ok: false, error: "Browser command timed out." };
     try {
       const parsed = JSON.parse(await fs.readFile(resPath, "utf8"));
       await fs.rm(resPath, { force: true }).catch(() => {});
@@ -2482,13 +2489,13 @@ const TOOLS = [
   },
   {
     name: "preview_image",
-    description: "Display an image inline in the chat. Use this to show the user a visual — a generated image, a screenshot, a diagram URL, a chart from an external service, etc. Accepts: - url: An HTTP/HTTPS URL to an image (e.g. \"https://example.com/chart.png\") — or a workspace path (same as path) - base64: A base64-encoded image with data URI prefix (e.g. \"data:image/png;base64,iVBOR...\") - path: A workspace/sandbox image path (e.g. \"projects/my-app/public/logo.png\", \".onyx/websession/shots/shot-2.png\", \"uploads/photo.jpg\") - alt: Optional alt text / caption shown below the image The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.",
+    description: "Display an image inline in the chat. Use this to show the user a visual — a generated image, a screenshot, a diagram URL, a chart from an external service, etc. Accepts: - url: An HTTP/HTTPS URL to an image (e.g. \"https://example.com/chart.png\") — or a workspace path (same as path) - base64: A base64-encoded image with data URI prefix (e.g. \"data:image/png;base64,iVBOR...\") - path: A workspace/sandbox image path (e.g. \"projects/my-app/public/logo.png\", \".onyx/browser/shots/shot-2.png\", \"uploads/photo.jpg\") - alt: Optional alt text / caption shown below the image The image renders inline in the chat, just like a chart. The user sees it immediately without needing to click anything.",
     parameters: {
       type: "object",
       properties: {
         url: { type: "string", description: "HTTP/HTTPS URL of the image to display — or a workspace/sandbox path." },
         base64: { type: "string", description: "Base64 data URI of the image (e.g. 'data:image/png;base64,iVBOR...'). Use this when you have the raw image data." },
-        path: { type: "string", description: "Workspace image to display: a sandbox path (e.g. 'uploads/photo.jpg', '.onyx/websession/shots/shot-2.png')." },
+        path: { type: "string", description: "Workspace image to display: a sandbox path (e.g. 'uploads/photo.jpg', '.onyx/browser/shots/shot-2.png')." },
         alt: { type: "string", description: "Optional caption / alt text shown below the image." },
       },
       additionalProperties: false,
@@ -2605,67 +2612,45 @@ const TOOLS = [
       };
     },
   },
-  // ── Web sessions — NATIVE in the sandbox ────────────────────────
-  // start_web_session / manage_web_session run ENTIRELY inside the
-  // sandbox (web-session-driver.ts — the source is injected verbatim):
-  // cmd.json is written to the local filesystem and res-<id>.json is
-  // polled locally. They used to live in the browser registry and BRIDGED
-  // back to the user's browser — dying with the tab closed ("this page was
-  // probably closed or asleep", the "tools not able to run in background /
-  // tab not opened" bug). Native here means the sandbox owns the whole
-  // Playwright lifecycle.
+  // ── Browser — NATIVE in the sandbox (use_browser) ───────────────
+  // The ONE AI-facing browser tool (CloakBrowser PRD): a persistent,
+  // multi-tab browser session (cookies/localStorage kept in the profile
+  // under ~/.onyx/browser) driven through the file-protocol Python driver
+  // (browser-driver.ts — the source is injected verbatim). Native here
+  // means the sandbox owns the whole browser lifecycle, so background
+  // turns keep browsing when the user's tab is closed.
   {
-    name: "start_web_session",
-    description: "Start a headless Chromium (Playwright) web session INSIDE the sandbox for testing and interacting with web pages — including local servers running in the sandbox (use http://localhost:PORT, e.g. http://localhost:3000). Installs Chromium on first use (can take a couple of minutes; consider skip-wait). Returns a session id; drive it with manage_web_session (navigate, click, type, screenshot, extract…).",
-    parameters: {
-      type: "object",
-      properties: {
-        url: {
-          type: "string",
-          description: "URL to open first (public https:// URL, or http://localhost:PORT to test a preview running in the sandbox).",
-        },
-      },
-      required: ["url"],
-      additionalProperties: false,
-    },
-    run: async (args) => {
-      const url = String(args.url ?? "");
-      if (!url) return { ok: false, error: "url is required." };
-      const booted = await ensureWsDriver();
-      if (!booted.ok) return { ok: false, error: booted.error };
-      const nav = await wsSendCommand({ action: "navigate", url }, 60_000);
-      if (nav.ok === false) return { ok: false, error: String(nav.error ?? "Navigation failed.") };
-      return {
-        kind: "web_session",
-        ok: true,
-        action: "start",
-        sessionId: "ws_default",
-        url: nav.url ?? url,
-        title: nav.title ?? null,
-        status: typeof nav.status === "number" ? nav.status : null,
-        message: "Web session ready. Drive it with manage_web_session actions: navigate, click, type, press, screenshot, extract, title, content, status, close.",
-      };
-    },
-  },
-  {
-    name: "manage_web_session",
-    description: "Drive an active web session (headless Chromium in the sandbox, started by start_web_session). Actions: navigate (url), click (selector), type (selector, text), press (key), screenshot (returns the image), extract (visible text, optional selector), title, content (HTML), eval (run JavaScript in the page), els (interactive-element inventory with selectors + a11y info), console (captured console errors/warnings + page errors, deduplicated), network (failed 4xx/5xx + failed requests), status, close. Selectors are CSS. Use http://localhost:PORT to interact with local servers.",
+    name: "use_browser",
+    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page inspection, forms, uploads and downloads. Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), screenshot (fullPage?), get_page (), get_elements (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), go_back, go_forward, refresh. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["navigate", "click", "type", "press", "screenshot", "extract", "title", "content", "eval", "els", "console", "network", "status", "close"],
-          description: "The interaction to perform.",
+          enum: [
+            "navigate", "click", "type", "press", "scroll", "wait", "screenshot",
+            "get_page", "get_elements", "evaluate", "select", "upload", "download",
+            "new_tab", "switch_tab", "close_tab", "go_back", "go_forward", "refresh",
+          ],
+          description: "The browser operation to perform.",
         },
-        url: { type: "string", description: "For navigate." },
-        selector: { type: "string", description: "CSS selector (click/type/press/extract)." },
+        url: { type: "string", description: "URL to open (navigate / new_tab / download)." },
+        target: { description: "Element to act on: a selector string or a semantic object ({role,name} / {text} / {label} / {placeholder} / {css} / {xpath} / {ref})." },
         text: { type: "string", description: "Text to type (type action)." },
-        key: { type: "string", description: "Key to press (press action), e.g. Enter." },
-        fullPage: { type: "boolean", description: "Screenshot the full page (optional)." },
-        code: { type: "string", description: "JavaScript to evaluate (eval action)." },
-        limit: { type: "number", description: "Max entries (console/network) or elements (els)." },
-        clear: { type: "boolean", description: "Clear the captured console/network log after reading." },
+        submit: { type: "boolean", description: "Press Enter after typing (type action)." },
+        clear: { type: "boolean", description: "Clear the field before typing (default true)." },
+        key: { type: "string", description: "Key to press (press action), e.g. 'Enter'." },
+        code: { type: "string", description: "JavaScript to evaluate in the page (evaluate action)." },
+        direction: { type: "string", enum: ["down", "up", "left", "right"], description: "Scroll direction (default down)." },
+        amount: { type: "number", description: "Scroll distance in px (default 600)." },
+        ms: { type: "number", description: "Milliseconds to wait (wait action, default 1000)." },
+        selector: { type: "string", description: "Selector to wait for (wait action)." },
+        fullPage: { type: "boolean", description: "Capture the full page (screenshot action)." },
+        filter: { type: "string", description: "Substring filter for get_elements." },
+        limit: { type: "number", description: "Max elements for get_elements (default 60)." },
+        value: { type: "string", description: "Option value to select (select action)." },
+        files: { type: "array", items: { type: "string" }, description: "Workspace file paths to upload (upload action)." },
+        tab: { description: "Tab index (number) or tab id like 'tab_2' (switch_tab / close_tab)." },
       },
       required: ["action"],
       additionalProperties: false,
@@ -2673,18 +2658,21 @@ const TOOLS = [
     run: async (args) => {
       const action = String(args.action ?? "");
       const booted = await ensureWsDriver();
-      if (!booted.ok) return { ok: false, error: booted.error };
+      if (!booted.ok) {
+        return { kind: "browser", success: false, action, error: { type: "browser_startup_failed", message: booted.error, recoverable: true } };
+      }
       const cmd = { action };
-      if (args.url !== undefined) cmd.url = String(args.url);
-      if (args.selector !== undefined) cmd.selector = String(args.selector);
-      if (args.text !== undefined) cmd.text = String(args.text);
-      if (args.key !== undefined) cmd.key = String(args.key);
-      if (args.fullPage !== undefined) cmd.fullPage = !!args.fullPage;
-      if (args.code !== undefined) cmd.code = String(args.code);
-      if (args.limit !== undefined) cmd.limit = Number(args.limit) || 0;
-      if (args.clear !== undefined) cmd.clear = !!args.clear;
-      const result = await wsSendCommand(cmd, 60_000);
-      return { kind: "web_session", ok: result.ok !== false, action, ...result };
+      for (const k of ["url", "target", "text", "submit", "clear", "key", "code", "direction", "amount", "ms", "selector", "fullPage", "filter", "limit", "value", "files", "tab"]) {
+        if (args[k] !== undefined) cmd[k] = args[k];
+      }
+      // First browser boot (binary download) can be slow — generous ceiling.
+      const timeoutMs = 6 * 60_000;
+      const result = await wsSendCommand(cmd, timeoutMs);
+      if (result && result.ok === false && typeof result.error === "string") {
+        // Old-driver shape — normalize into the structured error envelope.
+        return { kind: "browser", success: false, action, error: { type: "browser_error", message: result.error, recoverable: true } };
+      }
+      return { kind: "browser", action, ...result };
     },
   },
 ];
@@ -2735,10 +2723,9 @@ const NATIVE_CODE_ONLY_TOOLS = new Set([
   "read_file_section",
   "run_terminal",
   "run_python",
-  // Web sessions are native sandbox-only tools (not part of the browser
-  // registry) — same isolation here.
-  "start_web_session",
-  "manage_web_session",
+  // The browser is a native sandbox tool (the Python driver + file
+  // protocol are entirely sandbox-side) — same isolation here.
+  "use_browser",
 ]);
 
 async function runBridgeTool(callId, name, args) {

@@ -33,6 +33,7 @@ import "./security_audit";
 import "./workflow";
 import "./memory";
 import "./knowledge_base";
+import "./use_browser";
 import "./counterfactual";
 import "./subagents";
 import "./chat_inspect";

@@ -9,6 +9,9 @@ export interface TimelineStep {
   verb: string;
   chip: string;
   icon: LucideIcon;
+  /** Optional branded icon OVERRIDE (e.g. a Composio platform badge) —
+   *  rendered in place of `icon` when present. */
+  iconNode?: React.ReactNode;
 }
 
 export interface TimelineStat {
@@ -107,7 +110,9 @@ export function ToolTimeline({
             const Icon = step.icon;
             return (
               <div key={i} className="flex items-center gap-2 py-0.5 text-sm">
-                <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                {step.iconNode ?? (
+                  <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                )}
                 {streaming && isLast ? (
                   <ShimmerLabel className="text-sm">{step.verb}</ShimmerLabel>
                 ) : (

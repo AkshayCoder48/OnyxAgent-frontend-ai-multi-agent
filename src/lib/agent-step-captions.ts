@@ -68,6 +68,13 @@ const EXACT_CAPTIONS: Record<string, string> = {
   // Background-agent web sessions (native sandbox tools).
   start_web_session: "Opening a web session",
   manage_web_session: "Using the web session",
+  use_browser: "Using the browser",
+  // Composio external-app integrations (session meta-tools) — present tense
+  // mirrors agent-friendly-steps, so the running caption matches the settled
+  // sentence ("Searched app integrations" / "Searching app integrations").
+  composio_search_tools: "Searching app integrations",
+  composio_connect_platform: "Preparing an app connection link",
+  composio_execute_tool: "Using an app integration",
   preview_image: "Showing an image",
   inspect_image: "Inspecting an image",
 };

@@ -11,6 +11,9 @@ import {
 } from "@/components/assistant-ui/elements";
 import { deriveTimeline } from "@/lib/agent-tool-steps";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
+import { isComposioToolName, useComposioBranding } from "@/lib/composio/branding";
+import { ComposioToolBadge } from "./tool-results/composio-branding";
+import { useAuthStore } from "@/stores/auth-store";
 import { ListTree, X } from "lucide-react";
 
 /**
@@ -39,6 +42,9 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
   const displayMode = useToolDisplayStore((s) => s.mode);
   const isSimple = displayMode === "simple";
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Composio branding is user-scoped only through the vault-decrypted key
+  // (the catalog load) — the resolved maps are shared.
+  const userId = useAuthStore((s) => s.user?.id ?? null);
 
   const { steps, friendlySteps, stats, filesChanged, anyRunning } = useMemo(() => {
     const all: ToolCall[] = [];
@@ -57,14 +63,25 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
       all.push(...toolCalls);
     }
     const derived = deriveTimeline(all);
+    // Composio rows swap the generic glyph for the REAL platform badge
+    // (PRD §18–§23, §25) — zipped against deriveTimeline's pending- filter
+    // so step i maps back to the tool call that produced it.
+    const brandable = all.filter(
+      (tc) => Boolean(tc.name) && !tc.name.startsWith("pending-"),
+    );
     return {
-      steps: derived.steps,
+      steps: derived.steps.map((step, i) => {
+        const tc = brandable[i];
+        return tc && isComposioToolName(tc.name)
+          ? { ...step, iconNode: <TimelineComposioIcon toolCall={tc} userId={userId} /> }
+          : step;
+      }),
       friendlySteps: all.map(friendlyStep),
       stats: derived.stats,
       filesChanged: derived.filesChanged,
       anyRunning: running,
     };
-  }, [messages]);
+  }, [messages, userId]);
 
   // REAL-TIME AUTO-FOLLOW: while a turn runs and new steps arrive, keep the
   // newest step in view (the user watches progress, not a stale crop). When
@@ -157,4 +174,19 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
       </div>
     </div>
   );
+}
+
+/** One technical-timeline row's Composio platform badge — resolves branding
+ *  live (catalog load / search-result harvest) so the row re-brands itself
+ *  when the real platform identity lands (PRD §18–§23, §25). Simple-mode
+ *  rows show no per-tool icons, so they need no badge. */
+function TimelineComposioIcon({
+  toolCall,
+  userId,
+}: {
+  toolCall: ToolCall;
+  userId: string | null;
+}) {
+  const branding = useComposioBranding(userId, toolCall);
+  return <ComposioToolBadge branding={branding} size={14} />;
 }
