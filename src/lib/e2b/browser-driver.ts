@@ -249,11 +249,17 @@ def state_payload(extra=None):
         title = p.title()
     except Exception:
         title = ""
+    try:
+        vs = p.viewport_size
+        viewport = {"width": int(vs["width"]), "height": int(vs["height"])} if vs else None
+    except Exception:
+        viewport = None
     out = {
         "sessionId": session_id,
         "runtime": runtime,
         "url": url,
         "title": title,
+        "viewport": viewport,
         "tabs": tab_summary(),
         "activeTab": active_idx,
         "tabCount": len(pages),
@@ -326,6 +332,24 @@ def target_label(target):
             if target.get(k):
                 return "%s=%s" % (k, str(target[k])[:60])
     return "element"
+
+
+def loc_box(loc):
+    """Best-effort element bounding box in VIEWPORT pixels — the chat UI
+    turns it into the computer-use cursor position (center of the box as a
+    percentage of the viewport). None when the box can't be read."""
+    try:
+        b = loc.first.bounding_box(timeout=2000)
+        if not b:
+            return None
+        return {
+            "x": int(round(b.get("x") or 0)),
+            "y": int(round(b.get("y") or 0)),
+            "w": int(round(b.get("width") or 0)),
+            "h": int(round(b.get("height") or 0)),
+        }
+    except Exception:
+        return None
 
 
 # In-page serializer for evaluate: DOM nodes, NodeLists, Promises, circular
@@ -446,9 +470,13 @@ def do_navigate(cmd):
 def do_click(cmd):
     target = cmd.get("target")
     loc = resolve_target(active_page(), target)
+    box = loc_box(loc)
     loc.first.click(timeout=12000)
     active_page().wait_for_timeout(400)
-    return state_payload({"success": True, "action": "click", "target": target_label(target)})
+    out = state_payload({"success": True, "action": "click", "target": target_label(target)})
+    if box:
+        out["box"] = box
+    return out
 
 
 def do_type(cmd):
@@ -456,6 +484,7 @@ def do_type(cmd):
     text = "" if cmd.get("text") is None else str(cmd.get("text"))
     clear = cmd.get("clear") is not False
     loc = resolve_target(active_page(), target)
+    box = loc_box(loc)
     if clear:
         loc.first.fill("", timeout=12000)
     # Humanized per-character typing when the runtime supports it
@@ -467,7 +496,10 @@ def do_type(cmd):
     if cmd.get("submit"):
         loc.first.press("Enter", timeout=8000)
         active_page().wait_for_timeout(600)
-    return state_payload({"success": True, "action": "type", "target": target_label(target), "text": text[:80]})
+    out = state_payload({"success": True, "action": "type", "target": target_label(target), "text": text[:80]})
+    if box:
+        out["box"] = box
+    return out
 
 
 def do_press(cmd):
@@ -572,12 +604,16 @@ def do_evaluate(cmd):
 def do_select(cmd):
     target = cmd.get("target")
     loc = resolve_target(active_page(), target)
+    box = loc_box(loc)
     value = cmd.get("value")
     values = cmd.get("values")
     if values is None and value is not None:
         values = [str(value)]
     loc.first.select_option(values, timeout=12000)
-    return state_payload({"success": True, "action": "select", "target": target_label(target)})
+    out = state_payload({"success": True, "action": "select", "target": target_label(target)})
+    if box:
+        out["box"] = box
+    return out
 
 
 def do_upload(cmd):
@@ -596,8 +632,12 @@ def do_upload(cmd):
         return err_payload("bad_request", "files (workspace paths) are required for upload", False)
     target = cmd.get("target")
     loc = resolve_target(active_page(), target)
+    box = loc_box(loc)
     loc.first.set_input_files(paths, timeout=15000)
-    return state_payload({"success": True, "action": "upload", "target": target_label(target), "files": [os.path.basename(x) for x in paths]})
+    out = state_payload({"success": True, "action": "upload", "target": target_label(target), "files": [os.path.basename(x) for x in paths]})
+    if box:
+        out["box"] = box
+    return out
 
 
 def do_download(cmd):

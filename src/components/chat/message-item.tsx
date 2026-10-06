@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import type { ChatMessage, ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
+import { BrowserUseGroup } from "./tool-results/use-browser";
+import { mapBrowserRunStarts } from "@/lib/browser-run-group";
 import { deriveAgentPhase } from "@/lib/agent/timeline";
 import { useTypewriter } from "@/components/assistant-ui/elements/letter-stream";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
@@ -1056,9 +1058,19 @@ export const MessageItem = React.memo(function MessageItem({
                 )}
                 {message.toolCalls && message.toolCalls.length > 0 && (
                   <div className="w-full space-y-2">
-                    {message.toolCalls.map((toolCall) => (
-                      <ToolCallCard key={toolCall.id} toolCall={toolCall} />
-                    ))}
+                    {(() => {
+                      // Consecutive use_browser calls collapse into ONE
+                      // BrowserUseGroup frame (run start renders the group,
+                      // continuations render nothing); every other tool
+                      // keeps its own ToolCallCard.
+                      const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
+                      return (message.toolCalls ?? []).map((toolCall) => {
+                        const run = browserRuns.runStartedBy(toolCall.id);
+                        if (run) return <BrowserUseGroup key={toolCall.id} toolCalls={run} />;
+                        if (browserRuns.isContinuation(toolCall.id)) return null;
+                        return <ToolCallCard key={toolCall.id} toolCall={toolCall} />;
+                      });
+                    })()}
                   </div>
                 )}
                 {/* ONE in-place status line — the model is generating. */}
@@ -1070,6 +1082,16 @@ export const MessageItem = React.memo(function MessageItem({
           // ── Walk the timeline into chronological process items. ────────
           const items = buildFlowItems(parts);
           const streaming = Boolean(message.isStreaming);
+
+          // Browser-run grouping: consecutive use_browser TOOL items with no
+          // other item (thinking or text) between them render as ONE
+          // BrowserUseGroup at the run's FIRST item; continuations render
+          // nothing. The items array itself is untouched — browser items
+          // still count as tool items for every index computation below
+          // (lastToolItemIdx, processItems, trailingItems, todoSplice).
+          const browserRuns = mapBrowserRunStarts(
+            items.map((it) => (it.kind === "tool" ? it.toolCall : null)),
+          );
 
           // Last TOOL item — the process/final-answer boundary. Text
           // generated after the last tool is the FINAL ANSWER: while the
@@ -1152,6 +1174,15 @@ export const MessageItem = React.memo(function MessageItem({
               );
             }
             if (it.kind === "tool") {
+              const run = browserRuns.runStartedBy(it.toolCall.id);
+              if (run) {
+                return (
+                  <div key={it.partId} className="w-full">
+                    <BrowserUseGroup toolCalls={run} />
+                  </div>
+                );
+              }
+              if (browserRuns.isContinuation(it.toolCall.id)) return null;
               return (
                 <div key={it.partId} className="w-full">
                   <ToolCallCard toolCall={it.toolCall} turnId={message.conversationId} />

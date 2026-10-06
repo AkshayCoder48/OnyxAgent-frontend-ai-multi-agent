@@ -61,6 +61,8 @@ const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real bro
 
 TARGETING (prefer semantic): a target is EITHER a string selector (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]", "ref=e12") OR an object like {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
 
+DOCUMENTATION SITES: for AI agents a documentation index is often available at llms.txt — fetch it first when you need docs, and use .md for canonical markdown pages (.mdx is kept as a backwards-compatible alias on supported URL paths).
+
 The browser session persists across calls — navigate, then click, then type, all on the same session. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes; consider telling the user).`;
 
 registerTool(
@@ -186,5 +188,9 @@ registerTool(
     return { kind: "browser", action, ...result };
   },
   false,
-  "exec",
+  // "web" (NOT "exec") — category "exec" is the coding surface hidden
+  // from foreground turns by filterToolsForRequest (request-scoping.ts);
+  // registering this tool as "exec" made the model never see it, so it
+  // truthfully told users "I don't have the use_browser tool".
+  "web",
 );
