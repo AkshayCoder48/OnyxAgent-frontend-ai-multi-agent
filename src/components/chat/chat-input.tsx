@@ -15,7 +15,12 @@ import { FileCard, FileCardImage } from "./file-card";
 import { getFileUrl } from "@/lib/file-api";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { ComposerQuotePreview } from "@/components/assistant-ui/elements";
+import {
+  ComposerQuotePreview,
+  ComposerVoice,
+  ComposerVoiceButton,
+} from "@/components/assistant-ui/elements";
+import { useDictation } from "@/hooks/use-dictation";
 import { useQuoteStore } from "@/stores";
 
 interface ChatInputProps {
@@ -64,6 +69,18 @@ export function ChatInput({
   const quote = useQuoteStore((s) => s.quote);
   const clearQuote = useQuoteStore((s) => s.clearQuote);
 
+  // DICTATION (assistant-ui "Dictation" element, PRD §23): tapping the mic
+  // swaps the textarea for a live waveform; the finalized transcript lands
+  // as composer text after a brief "Transcribing" settle. `isProcessing`
+  // deliberately does NOT gate the mic — users can compose the next message
+  // while the AI works, same as typing.
+  const handleDictationText = useCallback((text: string) => {
+    setMessage((prev) => (prev ? `${prev} ${text}` : text));
+    // The textarea remounts in the same commit — focus it once text lands.
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+  const dictation = useDictation({ onFinalText: handleDictationText });
+
   const showPalette = !!slashContext && message.startsWith("/") && !message.includes("\n");
   const allCommands = commands ?? BUILTIN_COMMANDS;
   const filteredCommands = useMemo(
@@ -100,7 +117,9 @@ export function ChatInput({
       return () => cancelAnimationFrame(raf);
     }
     el.style.height = next;
-  }, [message]);
+    // Re-measure also when dictation toggles, so a remounted textarea (voice
+    // surface swapped out) regains the height its content needs.
+  }, [message, dictation.active]);
 
   // Prompt-submission pulse (PRD §20): a subtle scale/blur breath on the
   // composer as the message leaves (.mb-send-pulse). Toggling the class
@@ -291,27 +310,46 @@ export function ChatInput({
           )}
         </Button>
 
-        {/* Center: Textarea */}
-        <div className="relative flex-1 min-w-0">
-          <textarea
-            ref={textareaRef}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setIsFocused(true)}
-            onBlur={() => setIsFocused(false)}
-            placeholder="Reply to OnyxAgent… or type / for commands"
-            disabled={disabled}
-            rows={1}
-            className={cn(
-              "placeholder:text-muted-foreground/60 mb-height min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
-              isFocused && "placeholder:text-muted-foreground/40",
-            )}
-          />
+        {/* Center: Textarea — replaced by the dictation voice surface
+            while a session is live (assistant-ui "Dictation" element swap). */}
+        <div className="relative min-w-0 flex-1">
+          {dictation.active ? (
+            <ComposerVoice
+              recording={dictation.recording}
+              seconds={dictation.seconds}
+              interim={dictation.interim}
+            />
+          ) : (
+            <textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              placeholder="Reply to OnyxAgent… or type / for commands"
+              disabled={disabled}
+              rows={1}
+              className={cn(
+                "placeholder:text-muted-foreground/60 mb-height min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
+                isFocused && "placeholder:text-muted-foreground/40",
+              )}
+            />
+          )}
         </div>
 
-        {/* Right: Send/Stop */}
+        {/* Right: Dictation mic + Send/Stop */}
         <div className="flex shrink-0 items-center gap-1 pb-0.5">
+          {/* Mic hidden entirely where the Web Speech API is absent
+              (PRD §24 approved behavior — nothing to explain). */}
+          {dictation.supported && (
+            <ComposerVoiceButton
+              active={dictation.active}
+              onClick={dictation.active ? dictation.stop : dictation.start}
+              disabled={disabled}
+              aria-label={dictation.active ? "Stop dictation" : "Start voice dictation"}
+            />
+          )}
           {isProcessing && onStop ? (
             <Button
               type="button"
@@ -341,6 +379,13 @@ export function ChatInput({
           )}
         </div>
       </div>
+
+      {/* Dictation failure hint — inline, auto-dismisses (~4s) */}
+      {dictation.error && (
+        <p role="alert" className="animate-fade-in pt-1 text-[10px] text-muted-foreground/70">
+          {dictation.error}
+        </p>
+      )}
 
       {/* Subtle hint row — shows when input is focused and empty */}
       {isFocused && !message && attachedFiles.length === 0 && (

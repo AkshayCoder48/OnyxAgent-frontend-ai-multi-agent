@@ -5,3 +5,4 @@ export { useChat } from "./use-chat";
 export { useConversations } from "./use-conversations";
 export { useConversationShares } from "./use-conversation-shares";
 export { useSlashCommands, isBuiltinEnabled, BUILTIN_COMMAND_LIST } from "./use-slash-commands";
+export { useDictation } from "./use-dictation";

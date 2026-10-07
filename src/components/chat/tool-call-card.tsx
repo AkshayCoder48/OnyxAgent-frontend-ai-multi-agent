@@ -25,7 +25,7 @@ import {
   Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ShimmerLabel, chipClass, CollapsePanel, LetterStream, useTypewriter, LinkPreview } from "@/components/assistant-ui/elements";
+import { ShimmerLabel, chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
@@ -416,16 +416,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
 
   const isShowTodo = toolCall.name === "show_todo";
   const isManageTodo = toolCall.name === "manage_todo" || toolCall.name === "manage_todos";
-  // LINK PREVIEW (assistant-ui "Link preview" element): the URL a web
-  // fetch read unfurls into a compact card beneath the line — the
-  // destination is the payload of a fetch, always visible (content, not
-  // chrome) even in simple mode.
-  const fetchUrlPreview = useMemo(() => {
-    if (!isCompleted) return null;
-    if (toolCall.name !== "web_fetch" && toolCall.name !== "fetch_url") return null;
-    const url = typeof toolCall.args?.url === "string" ? toolCall.args.url : "";
-    return /^https?:\/\//.test(url) ? url : null;
-  }, [isCompleted, toolCall.name, toolCall.args]);
   // Merged manage_memory actions keep the old per-tool rendering paths:
   // save → "added" chip, list → "existing" chips, search → disclosure chips.
   const memoryAction = toolCall.name === "manage_memory" ? String(toolCall.args?.action ?? "") : null;
@@ -560,9 +550,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <ImageInspectionResult result={toolCall.result} />
       )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
-      {fetchUrlPreview && (
-        <LinkPreview href={fetchUrlPreview} layout="compact" className="px-1.5 sm:px-2" />
-      )}
       {isAskUser && (
         <AskUserResult
           args={toolCall.args}

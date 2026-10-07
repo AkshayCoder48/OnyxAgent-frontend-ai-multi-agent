@@ -8,6 +8,7 @@ import * as React from "react";
 import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Video, ExternalLink, Eye, ThumbsUp, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { LinkPreview } from "@/components/assistant-ui/elements";
 import { cn } from "@/lib/utils";
 
 interface ResultProps {
@@ -301,53 +302,64 @@ export function WebSearchResults({ result }: ResultProps) {
   }>(result);
   const results = parsed?.output?.results ?? [];
   const provider = parsed?.output?.provider ?? "miklium";
-  if (results.length === 0) return <GenericToolResult result={result} />;
+
+  // Parse each hit into LinkPreview card data — only http(s) URLs with a
+  // parseable hostname become cards (LinkPreview also self-gates unsafe
+  // protocols, but never feed it garbage). DDG's own icon is used as the
+  // favicon when it's an http(s) URL, else the Google s2 favicon service.
+  const cards = results.slice(0, 8).flatMap((item, i) => {
+    const url = typeof item.url === "string" ? item.url : "";
+    if (!/^https?:\/\//i.test(url)) return [];
+    const hostname = hostnameOf(url);
+    if (!hostname) return [];
+    const icon = typeof item.icon === "string" && /^https?:\/\//i.test(item.icon) ? item.icon : null;
+    return [
+      {
+        key: `${url}-${i}`,
+        url,
+        title: item.title || item.domain || url,
+        desc: item.description || item.snippet || "",
+        siteName: domainOf(url),
+        favicon: icon ?? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`,
+      },
+    ];
+  });
+  if (cards.length === 0) return <GenericToolResult result={result} />;
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-          <Globe className="h-3 w-3" /> {results.length} web result{results.length !== 1 ? "s" : ""}
+          <Globe className="h-3 w-3" /> {cards.length} web result{cards.length !== 1 ? "s" : ""}
         </div>
         <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">
           {provider}
         </Badge>
       </div>
-      <div className="space-y-1.5">
-        {results.slice(0, 8).map((item, i) => {
-          const title = item.title || item.domain || item.url;
-          const desc = item.description || item.snippet;
-          const domain = item.domain || (item.url ? domainOf(item.url) : "");
-          return (
-            <a
-              key={i}
-              href={item.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group flex gap-2.5 rounded-xl border border-border bg-card/50 p-2.5 hover:bg-accent hover:border-primary/30 transition-all"
-            >
-              <span className="bg-primary/10 text-primary flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold tabular-nums">
-                {i + 1}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  {item.icon ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.icon} alt="" className="h-3.5 w-3.5 shrink-0 rounded-sm" />
-                  ) : null}
-                  <p className="text-foreground truncate text-xs font-semibold group-hover:text-primary transition-colors">{title}</p>
-                </div>
-                <div className="text-muted-foreground mt-0.5 flex items-center gap-1 text-[10px]">
-                  <ExternalLink className="h-2.5 w-2.5 shrink-0" />
-                  <span className="truncate">{domain}</span>
-                </div>
-                {desc && (
-                  <p className="text-muted-foreground mt-1 line-clamp-2 text-[11px] leading-relaxed">{desc}</p>
-                )}
-              </div>
-            </a>
-          );
-        })}
+      {/* LINK PREVIEW (assistant-ui "Link preview" element): the hits unfurl
+          as a horizontally scrollable row of cards — swipe on touch,
+          drag-scroll/trackpad or arrow keys (the row is focusable) on
+          desktop. `items-stretch` + `h-full` keep every card the same height
+          regardless of title/snippet length. */}
+      <div
+        role="group"
+        aria-label="Web search results"
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- WAI-ARIA scrollable-region pattern: a labeled focusable group lets keyboard users reach the row and scroll it with arrow keys.
+        tabIndex={0}
+        className="scrollbar-thin snap-x snap-mandatory focus-visible:outline-primary flex items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-2 focus-visible:outline-2 focus-visible:outline-offset-4"
+      >
+        {cards.map((card) => (
+          <LinkPreview
+            key={card.key}
+            href={card.url}
+            title={card.title}
+            description={card.desc}
+            siteName={card.siteName}
+            favicon={card.favicon}
+            layout="card"
+            className="h-full w-[240px] shrink-0 snap-start sm:w-[260px]"
+          />
+        ))}
       </div>
     </div>
   );
@@ -691,6 +703,15 @@ function domainOf(url: string): string {
     return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return url;
+  }
+}
+
+/** Hostname of a URL (www kept), or null when it isn't parseable. */
+function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
   }
 }
 

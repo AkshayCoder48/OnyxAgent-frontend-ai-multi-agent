@@ -77,6 +77,7 @@
     "date-fns": "^4.1.0",
     "dexie": "^4.4.4",
     "dexie-react-hooks": "^4.4.0",
+    "dots-swarm": "^0.1.0-alpha.4",
     "embla-carousel-react": "^8.6.0",
     "fflate": "^0.8.3",
     "framer-motion": "^12.23.2",

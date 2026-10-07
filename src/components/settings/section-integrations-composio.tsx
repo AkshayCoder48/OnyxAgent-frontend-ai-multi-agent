@@ -54,6 +54,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { SectionCard } from "@/components/settings/settings-section";
 import { MoreOptions } from "@/components/settings/more-options";
+import { GlassSquircleIcon } from "@/components/chat/tool-results/composio-branding";
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
 import {
@@ -1006,6 +1007,79 @@ export function SectionIntegrationsComposio() {
 }
 
 // ---------------------------------------------------------------------------
+// Toolkit dock icon — the glass/mirror squircle treatment (shared wrapper)
+// ---------------------------------------------------------------------------
+
+/** macOS-dock hover lift for the card's icon — the card itself is NOT
+ *  clickable (its buttons are), so the lift is tied to the CARD's hover
+ *  (group) rather than faking an interactive affordance on the icon. */
+const DOCK_HOVER =
+  "transition duration-300 ease-out group-hover:scale-110 group-hover:-translate-y-2 group-hover:shadow-2xl";
+
+/** The settings card's toolkit icon — the SAME glass/mirror squircle wrapper
+ *  as the chat-side Composio badges (shared GlassSquircleIcon), at the dock
+ *  size: the real CDN logo on a softened white tile → the platform's initial
+ *  on a primary gradient tile → the generic Blocks glyph. Never a broken
+ *  image: onError falls through to the letter avatar. */
+function ToolkitDockIcon({ toolkit }: { toolkit: ComposioToolkitCard }) {
+  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+  const logo = toolkit.logo;
+  // A new logo URL resets a previous load failure (render-time prop-change
+  // adjustment — same pattern as ComposioToolBadge).
+  const [prevLogo, setPrevLogo] = React.useState(logo);
+  if (logo !== prevLogo) {
+    setPrevLogo(logo);
+    setFailedSrc(null);
+  }
+  const name = toolkit.name.trim() || toolkit.slug;
+
+  if (logo && failedSrc !== logo) {
+    return (
+      <GlassSquircleIcon
+        boxClass="h-14 w-14"
+        surfaceClassName="bg-white/90"
+        className={DOCK_HOVER}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element -- remote multi-domain Composio CDN logos (next/image would need per-domain config); the img is aria-hidden, so onError needs no a11y waiver */}
+        <img
+          src={logo}
+          alt=""
+          aria-hidden
+          className="size-full object-contain p-[18%]"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          draggable={false}
+          onError={() => setFailedSrc(logo)}
+        />
+      </GlassSquircleIcon>
+    );
+  }
+
+  if (name) {
+    return (
+      <GlassSquircleIcon
+        boxClass="h-14 w-14"
+        surfaceClassName="bg-gradient-to-br from-primary/80 to-primary"
+        className={DOCK_HOVER}
+      >
+        <span
+          aria-hidden
+          className="text-primary-foreground text-xl font-semibold leading-none"
+        >
+          {name.charAt(0).toUpperCase()}
+        </span>
+      </GlassSquircleIcon>
+    );
+  }
+
+  return (
+    <GlassSquircleIcon boxClass="h-14 w-14" className={DOCK_HOVER}>
+      <Blocks aria-hidden className="text-muted-foreground h-6 w-6" />
+    </GlassSquircleIcon>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Platform card
 // ---------------------------------------------------------------------------
 
@@ -1029,28 +1103,13 @@ function PlatformCard({
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 rounded-lg border bg-card p-4 transition-colors",
+        "group flex flex-col gap-3 rounded-lg border bg-card p-4 transition-colors",
         state === "connected" ? "border-emerald-500/30" : "border-border hover:border-foreground/20",
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2.5">
-          {toolkit.logo ? (
-            // Remote Composio CDN logos (many domains) — plain img by design.
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={toolkit.logo}
-              alt=""
-              aria-hidden
-              className="size-8 shrink-0 rounded-md bg-white object-contain p-0.5"
-              loading="lazy"
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
-              <Blocks className="size-4 text-muted-foreground" />
-            </span>
-          )}
+        <div className="flex min-w-0 items-center gap-3">
+          <ToolkitDockIcon toolkit={toolkit} />
           <div className="min-w-0">
             <p className="truncate text-sm font-medium text-foreground">{toolkit.name}</p>
             <p className="truncate text-[11px] text-muted-foreground">

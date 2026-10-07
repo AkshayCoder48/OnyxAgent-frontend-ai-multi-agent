@@ -38,6 +38,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
@@ -47,10 +48,12 @@ SHOTS = os.path.join(DIR, "shots")
 PROFILE = os.path.join(DIR, "profile")
 DOWNLOADS = "/home/user/downloads"
 READY = os.path.join(DIR, ".ready")
+LIVE_JSON = os.path.join(DIR, "live.json")
+LIVE_JPG = os.path.join(DIR, "live.jpg")
 for d in (DIR, SHOTS, DOWNLOADS):
     os.makedirs(d, exist_ok=True)
 
-LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-blink-features=AutomationControlled"]
+LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-blink-features=AutomationControlled", "--remote-debugging-port=9222"]
 
 context = None
 pw = None
@@ -68,6 +71,204 @@ ref_map = {}          # element ref -> CSS/XPath selector (from get_elements)
 
 CONSOLE_MAX = 80
 NETWORK_MAX = 60
+
+# ── LIVE CAST (realtime browser view, PRD §2-§4) ────────────────────────────
+# A side thread streams JPEG frames of the ACTIVE tab via CDP
+# Page.startScreencast (frames pushed on repaint) into live.jpg, while the
+# main loop publishes the interaction state (cursor, action, url, title)
+# into live.json after every action. The UI polls both files. The side
+# thread NEVER touches the main loop's Playwright objects (sync API is
+# thread-affine) — it opens its OWN connection over the CDP port instead.
+
+LIVE_LOCK = threading.Lock()
+LIVE_STATE = {
+    "cursor": {"x": 640, "y": 400},
+    "action": None,
+    "seq": 0,
+    "tab": None,
+    "url": "",
+    "title": "",
+    "viewport": {"width": 1280, "height": 800},
+    "lastFrameAt": 0.0,
+}
+
+
+def write_live_json():
+    """Snapshot LIVE_STATE + the active tab's url/title/viewport into
+    live.json (atomic replace). Main loop only — touches main objects."""
+    try:
+        with LIVE_LOCK:
+            try:
+                LIVE_STATE["tab"] = pages[active_idx]["id"] if pages else None
+            except Exception:
+                LIVE_STATE["tab"] = None
+            p = None
+            try:
+                p = pages[active_idx]["page"] if pages else None
+            except Exception:
+                p = None
+            if p is not None:
+                try:
+                    LIVE_STATE["url"] = p.url
+                except Exception:
+                    pass
+                try:
+                    LIVE_STATE["title"] = p.title()
+                except Exception:
+                    pass
+                try:
+                    vs = p.viewport_size
+                    if vs:
+                        LIVE_STATE["viewport"] = {"width": int(vs["width"]), "height": int(vs["height"])}
+                except Exception:
+                    pass
+            snapshot = dict(LIVE_STATE)
+        snapshot["ts"] = int(time.time() * 1000)
+        tmp = LIVE_JSON + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(snapshot))
+        os.replace(tmp, LIVE_JSON)
+    except Exception:
+        pass
+
+
+def publish_live(action=None, cursor=None):
+    """Publish an interaction event (cursor in viewport px) to live.json."""
+    try:
+        with LIVE_LOCK:
+            if action is not None:
+                LIVE_STATE["action"] = action
+            if cursor is not None:
+                try:
+                    LIVE_STATE["cursor"] = {"x": int(round(cursor[0])), "y": int(round(cursor[1]))}
+                except Exception:
+                    pass
+            LIVE_STATE["seq"] = LIVE_STATE.get("seq", 0) + 1
+        write_live_json()
+    except Exception:
+        pass
+
+
+def cursor_of_box(box):
+    """Center of an interacted element's box, in viewport px."""
+    try:
+        return (box["x"] + box["w"] / 2.0, box["y"] + box["h"] / 2.0)
+    except Exception:
+        return None
+
+
+def mark_active_tab():
+    ""<arg_value>Stamp the ACTIVE page with a marker the live thread can find from its
+    own CDP connection (exact tab matching even across duplicate URLs)."""
+    try:
+        p = pages[active_idx]["page"]
+        p.evaluate("window.__onyx_active_tab = %r" % pages[active_idx]["id"])
+    except Exception:
+        pass
+
+
+def live_pick_page(live_browser):
+    """The live thread's page picker: marker match, then URL, then first."""
+    with LIVE_LOCK:
+        want_tab = LIVE_STATE.get("tab")
+        want_url = LIVE_STATE.get("url") or ""
+    fallback = None
+    first = None
+    try:
+        contexts = list(live_browser.contexts)
+    except Exception:
+        return None
+    for ctx in contexts:
+        try:
+            page_list = list(ctx.pages)
+        except Exception:
+            continue
+        for p in page_list:
+            if first is None:
+                first = p
+            try:
+                if want_tab and p.evaluate("window.__onyx_active_tab || ''") == want_tab:
+                    return p
+            except Exception:
+                pass
+            try:
+                if fallback is None and want_url and p.url == want_url:
+                    fallback = p
+            except Exception:
+                pass
+    return fallback if fallback is not None else first
+
+
+def live_cast_loop():
+    """The live-cast daemon: own CDP connection, Page.startScreencast on the
+    active tab, frames → live.jpg (atomic). Reconnects forever; a failure
+    here never affects the command loop."""
+    while True:
+        pwp = None
+        try:
+            from playwright.sync_api import sync_playwright
+            pwp = sync_playwright().start()
+            live_browser = pwp.chromium.connect_over_cdp("http://127.0.0.1:9222", timeout=8000)
+            cdp = None
+            watched = None
+            while True:
+                page = live_pick_page(live_browser)
+                if page is not watched:
+                    if cdp is not None:
+                        try:
+                            cdp.send("Page.stopScreencast")
+                        except Exception:
+                            pass
+                        cdp = None
+                    watched = page
+                    if page is not None:
+                        try:
+                            cdp = page.context.new_cdp_session(page)
+
+                            def _on_frame(frame, _cdp=cdp):
+                                try:
+                                    now = time.time()
+                                    sid = frame.get("sessionId")
+                                    if sid is not None:
+                                        try:
+                                            _cdp.send("Page.screencastFrameAck", {"sessionId": sid})
+                                        except Exception:
+                                            pass
+                                    if now - LIVE_STATE.get("lastFrameAt", 0.0) < 0.12:
+                                        return
+                                    data = frame.get("data") or ""
+                                    if data:
+                                        tmp = LIVE_JPG + ".tmp"
+                                        with open(tmp, "wb") as f:
+                                            f.write(base64.b64decode(data))
+                                        os.replace(tmp, LIVE_JPG)
+                                    with LIVE_LOCK:
+                                        LIVE_STATE["lastFrameAt"] = now
+                                except Exception:
+                                    pass
+
+                            cdp.on("Page.screencastFrame", _on_frame)
+                            cdp.send("Page.startScreencast", {
+                                "format": "jpeg",
+                                "quality": 55,
+                                "maxWidth": 1152,
+                                "maxHeight": 720,
+                                "everyNthFrame": 4,
+                            })
+                            log("live cast attached to tab")
+                        except Exception as e:
+                            log("live cast attach failed: %s" % e)
+                            cdp = None
+                time.sleep(0.5)
+        except Exception as e:
+            log("live cast loop: %s" % e)
+        finally:
+            try:
+                if pwp is not None:
+                    pwp.stop()
+            except Exception:
+                pass
+        time.sleep(3.0)
 
 
 def log(msg):

@@ -1,8 +1,6 @@
 "use client";
-import * as React from "react";
 import type { ToolCall } from "@/types";
 import { CopyButton } from "../copy-button";
-import { LinkPreview, extractUrls } from "@/components/assistant-ui/elements";
 
 /** Pretty-print tool args. Handles three shapes:
  *  - object → JSON.stringify with indent
@@ -88,22 +86,6 @@ export function GenericToolResult({
     /* not JSON — render as text */
   }
 
-  // LINK PREVIEWS (assistant-ui "Link preview" element): a URL the tool
-  // returned (or the URL a fetch tool requested — args.url) unfurls into a
-  // compact card with enough context to decide whether to open it.
-  const previewUrls = React.useMemo(() => {
-    if (toolCall.status !== "completed") return [];
-    const urls: string[] = [];
-    const argsUrl = toolCall.args?.url;
-    if (typeof argsUrl === "string" && /^https?:\/\//i.test(argsUrl)) {
-      urls.push(argsUrl);
-    }
-    for (const u of extractUrls(resultText, 3)) {
-      if (!urls.includes(u)) urls.push(u);
-    }
-    return urls.slice(0, 3);
-  }, [toolCall.status, toolCall.args, resultText]);
-
   if (toolCall.status !== "completed" && !resultText) {
     return (
       <p className="text-muted-foreground py-2 text-xs italic">
@@ -140,13 +122,6 @@ export function GenericToolResult({
             {resultText}
           </p>
         ))}
-      {previewUrls.length > 0 && (
-        <div className="flex flex-col gap-2">
-          {previewUrls.map((url) => (
-            <LinkPreview key={url} href={url} layout="compact" />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

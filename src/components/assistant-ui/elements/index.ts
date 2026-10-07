@@ -46,6 +46,7 @@ export {
 } from "./generative-ui";
 export { LinkPreview, extractFirstUrl, extractUrls, type LinkPreviewProps } from "./link-preview";
 export { SelectionToolbar, ComposerQuotePreview } from "./quote-reply";
+export { ComposerVoice, ComposerVoiceButton } from "./dictation";
 export {
   useTypewriter,
   LetterStream,

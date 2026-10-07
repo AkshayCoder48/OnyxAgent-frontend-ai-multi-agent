@@ -1,5 +1,6 @@
 "use client";
-import { Globe, Link } from "lucide-react";
+import { Globe } from "lucide-react";
+import { LinkPreview } from "@/components/assistant-ui/elements";
 
 interface WebHit {
   title: string;
@@ -27,16 +28,26 @@ export function parseWebSearch(result: string): WebSearchPayload | null {
   return null;
 }
 
-function domainOf(url: string): string {
+/** Hostname of a URL, or null when it isn't parseable. */
+function hostnameOf(url: string): string | null {
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    return new URL(url).hostname;
   } catch {
-    return url;
+    return null;
   }
 }
 
 export function WebSearchResults({ data }: { data: WebSearchPayload }) {
-  if (data.results.length === 0) {
+  // Only http(s) hits with a parseable hostname become cards — never feed
+  // LinkPreview garbage (it also self-gates unsafe protocols).
+  const cards = data.results.flatMap((hit, i) => {
+    if (!hit.url || !/^https?:\/\//i.test(hit.url)) return [];
+    const hostname = hostnameOf(hit.url);
+    if (!hostname) return [];
+    return [{ hit, hostname, key: `${hit.url}-${i}` }];
+  });
+
+  if (cards.length === 0) {
     return (
       <div className="text-muted-foreground flex items-center gap-2 py-2 text-sm">
         <Globe className="h-4 w-4" />
@@ -50,35 +61,34 @@ export function WebSearchResults({ data }: { data: WebSearchPayload }) {
       <div className="text-foreground/55 flex items-center gap-2 font-mono text-[10px] tracking-wider uppercase">
         <Globe className="h-3 w-3" />
         <span>
-          {data.results.length} web result{data.results.length !== 1 ? "s" : ""}
+          {cards.length} web result{cards.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      <div className="border-foreground/10 divide-foreground/8 divide-y overflow-hidden rounded-xl border">
-        {data.results.map((hit, i) => (
-          <a
-            key={`${hit.url}-${i}`}
+      {/* LINK PREVIEW (assistant-ui "Link preview" element): the results
+          unfurl as a horizontally scrollable row of cards — swipe on touch,
+          drag-scroll/trackpad or arrow keys (the row is focusable) on
+          desktop. `items-stretch` + `h-full` keep every card the same height
+          regardless of title/snippet length. */}
+      <div
+        role="group"
+        aria-label="Web search results"
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- WAI-ARIA scrollable-region pattern: a labeled focusable group lets keyboard users reach the row and scroll it with arrow keys.
+        tabIndex={0}
+        className="scrollbar-thin snap-x snap-mandatory focus-visible:outline-primary flex items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-2 focus-visible:outline-2 focus-visible:outline-offset-4"
+      >
+        {cards.map(({ hit, hostname, key }) => (
+          <LinkPreview
+            key={key}
             href={hit.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:bg-foreground/[0.03] block px-3 py-2.5 transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <span className="bg-foreground/8 text-foreground/65 inline-flex h-5 min-w-[1.5rem] shrink-0 items-center justify-center rounded px-1 font-mono text-[10px] tabular-nums">
-                {i + 1}
-              </span>
-              <p className="text-foreground truncate text-xs font-medium">{hit.title}</p>
-            </div>
-            <div className="text-primary mt-1 flex items-center gap-1 truncate pl-[calc(1.5rem+0.5rem)] text-[10px]">
-              <Link className="h-2.5 w-2.5 shrink-0" />
-              {domainOf(hit.url)}
-            </div>
-            {hit.content && (
-              <p className="text-foreground/55 mt-1 line-clamp-2 pl-[calc(1.5rem+0.5rem)] text-[11px] leading-relaxed">
-                {hit.content}
-              </p>
-            )}
-          </a>
+            title={hit.title}
+            description={hit.content}
+            siteName={hostname.replace(/^www\./, "")}
+            favicon={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`}
+            imageAlt={hit.title ? `Preview image from ${hit.title}` : ""}
+            layout="card"
+            className="h-full w-[240px] shrink-0 snap-start sm:w-[260px]"
+          />
         ))}
       </div>
     </div>

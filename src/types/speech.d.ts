@@ -19,13 +19,19 @@ interface SpeechRecognitionAlternative {
   readonly confidence: number;
 }
 
+interface SpeechRecognitionErrorEvent extends Event {
+  /** Failure code — "not-allowed", "no-speech", "aborted", "network", … */
+  readonly error: string;
+  readonly message?: string;
+}
+
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   onresult: ((event: SpeechRecognitionEvent) => void) | null;
   onend: (() => void) | null;
-  onerror: ((event: Event) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
   start(): void;
   stop(): void;
   abort(): void;
