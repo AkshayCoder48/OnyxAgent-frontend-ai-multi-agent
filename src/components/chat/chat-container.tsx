@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -18,9 +18,9 @@ import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-st
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
-import { Orb } from "@/components/assistant-ui/elements";
-import { ShimmerLabel } from "@/components/assistant-ui/elements";
-import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
+import { ThinkingIndicator } from "@/components/assistant-ui/elements";
+import { AgentCompanion } from "./agent-companion";
+import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { Hourglass } from "lucide-react";
@@ -186,28 +186,14 @@ function useChatScrollController(
 }
 
 /**
- * Thinking status line shown between send and first token: the Orb lattice
- * glyph leading a shimmering "Thinking" label on one baseline-aligned row.
- * No status pill, no elapsed clock, no pause button — the composer's stop
- * button stops the turn.
- *
- * Mounts fresh per turn. The orb is the response's RANDOM pick (one of the
- * full 25-variant collection, chosen once when the response began — never
- * per chunk), noticeably LARGER than before (28px), and the label shares
- * ONE flex row with `items-center` so the text sits exactly on the
- * lattice's midline at any font size — no fixed offsets, no baseline drift,
- * stable while the orb animates.
+ * Thinking status line shown between send and first token: the canonical
+ * ThinkingIndicator — pulsing dot + STATIC "Thinking" label (Realtime PRD:
+ * no orb glyph, no shimmering words; the companion carries the
+ * personality). No status pill, no elapsed clock, no pause button — the
+ * composer's stop button stops the turn. Mounts fresh per turn.
  */
 function ThinkingStatus() {
-  // Read once per mount — the module singleton holds the response's orb; a
-  // remount (next turn) re-reads it, and nothing else re-renders from this.
-  const orbVariant = useMemo(() => currentResponseOrb(), []);
-  return (
-    <span className="flex min-h-8 w-fit items-center gap-2.5">
-      <Orb variant={orbVariant} size={28} className="shrink-0" />
-      <ShimmerLabel className="text-sm font-medium">Thinking</ShimmerLabel>
-    </span>
-  );
+  return <ThinkingIndicator label="Thinking" className="px-1" />;
 }
 
 export function ChatContainer(
@@ -642,7 +628,6 @@ export function ChatContainer(
       onProviderChange={setProviderId}
       onTemperatureChange={setTemperature}
       onThinkingEffortChange={setThinkingEffort}
-      onRegenerate={handleRegenerate}
       slashContext={slashContext}
       slashCommands={slashCommands}
       queuedMessages={queuedMessages}
@@ -676,7 +661,6 @@ interface ChatUIProps {
   onProviderChange?: (providerId: string | null) => void;
   onTemperatureChange?: (temperature: number | null) => void;
   onThinkingEffortChange?: (effort: "low" | "medium" | "high" | null) => void;
-  onRegenerate?: (messageId: string) => void;
   slashContext?: import("./slash-commands").SlashCommandContext;
   slashCommands?: import("./slash-commands").SlashCommand[];
   queuedMessages?: import("@/hooks/use-chat").QueuedMessage[];
@@ -702,7 +686,6 @@ function ChatUI({
   onProviderChange,
   onTemperatureChange,
   onThinkingEffortChange,
-  onRegenerate,
   slashContext,
   slashCommands,
   queuedMessages,
@@ -716,8 +699,14 @@ function ChatUI({
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
+  // The companion's single source of truth (Realtime PRD §30) — derived from
+  // the SAME isProcessing + messages the thread renders.
+  const activity = useAgentActivity(Boolean(isProcessing), messages);
   return (
     <div className="flex h-full w-full">
+      {/* The dots-swarm companion — the app's visual identity (fixed,
+          viewport canvas; mounted once per chat view). */}
+      <AgentCompanion activity={activity} />
       {/* Centered ~760px message thread column (Terra editorial spec). */}
       <div className="mx-auto flex h-full w-full max-w-[760px] min-w-0 flex-1 flex-col">
         <div
@@ -740,17 +729,13 @@ function ChatUI({
             <div key={conversationId ?? "new-chat"} className="mb-thread-in">
               <MessageList
                 messages={messages}
-                onRegenerate={onRegenerate}
                 onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
-                isRegenerating={isProcessing}
               />
             </div>
           )}
           {/* Thinking bar — shows as soon as the user sends a message and
-              stays until the AI generates its first character/tool call.
-              The RANDOM response orb (one of 25, picked once per response)
-              leads the shimmering label + ticking elapsed badge on ONE
-              items-center flex row — vertically centered, no drift. */}
+              stays until the AI generates its first character/tool call:
+              pulsing dot + static "Thinking" label (no orb, no shimmer). */}
           {isProcessing && !messages.some((m) => m.isStreaming) && (
             <div className="animate-slide-up-fade px-1 py-2">
               <ThinkingStatus />

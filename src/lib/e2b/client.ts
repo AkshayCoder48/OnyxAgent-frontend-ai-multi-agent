@@ -400,6 +400,29 @@ export class E2BClient {
     await this.writeFile(path, text);
   }
 
+  /** Open the REALTIME BROWSER LIVE-CAST stream (SSE over POST — the
+   *  `browser_live_stream` op in /api/sandbox). Returns the raw Response;
+   *  the caller reads `event: state|frame|waiting|bye|fatal` SSE messages
+   *  from its body. NOT routed through call() — this is a long-lived
+   *  stream, not a JSON round-trip, so it skips coalescing/backoff. */
+  async browserLiveStream(signal: AbortSignal): Promise<Response> {
+    return fetch(API_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiKey: this.apiKey,
+        action: "browser_live_stream",
+        args: {},
+        conversationId: this.conversationId,
+        sandboxMode: this.mode,
+        // The stored sandbox id lets a cold server reconnect to the SAME
+        // sandbox the browser tool is driving (shared-mode slot).
+        sandboxId: this.sandboxId,
+      }),
+      signal,
+    });
+  }
+
   // ---------------------------------------------------------------
   // Workspace cloud-sync transport (OnyxBase KV push/retrieve).
   // Binary-safe bulk operations — the sync engine lives in the browser

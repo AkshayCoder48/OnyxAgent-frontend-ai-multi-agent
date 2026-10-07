@@ -1,7 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Camera, Check, Download, ExternalLink, Globe, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  Camera,
+  Check,
+  Download,
+  ExternalLink,
+  Globe,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  MousePointer2,
+} from "lucide-react";
 import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
@@ -11,6 +22,7 @@ import {
   type ComputerStep,
 } from "@/components/assistant-ui/elements";
 import { ToolDurationBadge, ToolLiveElapsed } from "../tool-duration";
+import { useBrowserLive, type BrowserLive } from "@/hooks/use-browser-live";
 
 /**
  * use_browser results — the ONE browser tool's presentation (🌐 Browser
@@ -236,19 +248,368 @@ function replayStart(total: number, reducedMotion: boolean): number {
   return Math.max(0, total - (reducedMotion ? 1 : PLAY_WINDOW));
 }
 
+/** A call is in-flight (pending or running). */
+function isCallActive(call: ToolCall): boolean {
+  return call.status === "running" || call.status === "pending";
+}
+
+/** Driver actions that read as the page MOVING (loading). */
+const LOADING_ACTIONS = new Set([
+  "navigate",
+  "new_tab",
+  "switch_tab",
+  "close_tab",
+  "go_back",
+  "go_forward",
+  "refresh",
+]);
+
+/** Driver actions that read as hands-on interaction. */
+const INTERACTING_ACTIONS = new Set([
+  "mouse_move",
+  "click",
+  "type",
+  "scroll",
+  "keypress",
+  "select",
+  "upload",
+  "download",
+]);
+
+/** Live phase → the one-word status the toolbar chip shows. */
+function liveStatusOf(live: BrowserLive): string {
+  if (live.phase === "connecting") return "starting";
+  if (live.phase === "live") {
+    const a = live.state?.action ?? null;
+    if (a && LOADING_ACTIONS.has(a)) return "loading";
+    if (a && INTERACTING_ACTIONS.has(a)) return "interacting";
+    return "waiting";
+  }
+  if (live.phase === "closed") return "closed";
+  return "unavailable";
+}
+
+/** The pulsing LIVE dot (green) / status dot. */
+function LiveDot({ tone }: { tone: "live" | "connecting" | "closed" | "error" }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "relative flex h-2 w-2 shrink-0",
+        tone === "live" && "text-emerald-500",
+        tone === "connecting" && "text-amber-500",
+        tone === "closed" && "text-muted-foreground",
+        tone === "error" && "text-destructive",
+      )}
+    >
+      {(tone === "live" || tone === "connecting") && (
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-60 motion-reduce:animate-none" />
+      )}
+      <span className="relative inline-flex h-2 w-2 rounded-full bg-current" />
+    </span>
+  );
+}
+
+/** Toolbar chrome shared by the inline surface and the expanded overlay. */
+function LiveToolbar({
+  live,
+  runningSince,
+  minimized,
+  onToggleMinimize,
+  onExpand,
+  onExitExpand,
+}: {
+  live: BrowserLive;
+  runningSince: number | null;
+  minimized: boolean;
+  onToggleMinimize: () => void;
+  onExpand?: () => void;
+  onExitExpand?: () => void;
+}) {
+  const tone =
+    live.phase === "live" ? "live" : live.phase === "connecting" ? "connecting" : live.phase === "closed" ? "closed" : "error";
+  const url = live.state?.url && live.state.url !== "about:blank" ? live.state.url : "about:blank";
+  return (
+    <div className="flex items-center gap-2 px-3 py-2">
+      <span className="flex shrink-0 items-center gap-1.5" aria-hidden>
+        <span className="h-2 w-2 rounded-full bg-red-400/70" />
+        <span className="h-2 w-2 rounded-full bg-amber-400/70" />
+        <span className="h-2 w-2 rounded-full bg-emerald-400/70" />
+      </span>
+      <span
+        className={cn(
+          "ml-1 inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-foreground/[0.04] px-2 py-0.5",
+          "font-mono text-[10px] font-semibold tracking-wide uppercase",
+        )}
+        title={live.phase === "error" ? (live.error ?? undefined) : undefined}
+      >
+        <LiveDot tone={tone} />
+        {liveStatusOf(live)}
+      </span>
+      <span
+        className="w-0 min-w-0 flex-1 truncate rounded-md border border-border bg-background/70 px-2 py-1 font-mono text-[11px] text-muted-foreground"
+        title={live.state?.title || url}
+      >
+        {url}
+      </span>
+      {runningSince !== null ? <ToolLiveElapsed startedAt={runningSince} /> : null}
+      <span className="flex shrink-0 items-center gap-0.5">
+        {onExitExpand ? (
+          <button
+            type="button"
+            onClick={onExitExpand}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            aria-label="Exit expanded view"
+          >
+            <Minimize2 className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        ) : null}
+        {onExpand ? (
+          <button
+            type="button"
+            onClick={onExpand}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+            aria-label="Expand live browser view"
+          >
+            <Maximize2 className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onToggleMinimize}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+          aria-label={minimized ? "Restore live browser view" : "Minimize live browser view"}
+          aria-pressed={minimized}
+        >
+          <Camera
+            className={cn("h-3.5 w-3.5 transition-transform", minimized && "rotate-180")}
+            aria-hidden
+          />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/** The live screen: newest screencast frame + real cursor overlay + click
+ * ripple. Honest placeholders while the driver boots or the stream is
+ * unavailable — never a fake screenshot. */
+function LiveScreen({ live }: { live: BrowserLive }) {
+  const state = live.state;
+  const vp = state?.viewport ?? { width: 1280, height: 800 };
+  const cx = Math.min(100, Math.max(0, ((state?.cursor.x ?? vp.width / 2) / vp.width) * 100));
+  const cy = Math.min(100, Math.max(0, ((state?.cursor.y ?? vp.height / 2) / vp.height) * 100));
+  const clicking = state?.action === "click";
+
+  return (
+    <div className="relative aspect-[16/10] overflow-hidden border-t border-border bg-muted/40">
+      {live.frameUrl ? (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          src={live.frameUrl}
+          alt={state?.title ? `Live view of ${state.title}` : "Live browser view"}
+          className="size-full object-cover object-top"
+        />
+      ) : live.phase === "error" ? (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-muted/40 px-4 text-center">
+          <AlertTriangle className="h-7 w-7 shrink-0 text-muted-foreground/60" aria-hidden />
+          <p className="text-xs font-medium text-foreground/80">Live view unavailable</p>
+          <p className="max-w-sm text-[10px] leading-relaxed text-muted-foreground">
+            {live.error ?? "The live stream could not be opened."} The browser tool itself
+            keeps running — results still land below.
+          </p>
+        </div>
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-muted/40 px-4 text-center">
+          <Loader2 className="h-6 w-6 shrink-0 animate-spin text-muted-foreground/60" aria-hidden />
+          <p className="text-xs font-medium text-foreground/80">Starting the sandbox browser…</p>
+          <p className="text-[10px] leading-relaxed text-muted-foreground/80">
+            First launch installs the runtime (up to a few minutes); the live view
+            connects the moment the browser is up.
+          </p>
+        </div>
+      )}
+
+      {/* Real cursor overlay — position in % of the driver viewport, CSS
+          transition smooths between the ~300ms state updates. */}
+      {live.phase === "live" && state ? (
+        <span className="pointer-events-none absolute inset-0" aria-hidden>
+          <MousePointer2
+            className="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 text-foreground drop-shadow-[0_1px_2px_rgba(0,0,0,0.65)] transition-[left,top] duration-300 ease-out motion-reduce:transition-none"
+            style={{ left: `${cx}%`, top: `${cy}%` }}
+          />
+          {clicking ? (
+            <span
+              key={state.seq}
+              className="absolute h-8 w-8 rounded-full border-2 border-foreground/80 bg-foreground/25 animate-live-click-ripple motion-reduce:hidden"
+              style={{ left: `${cx}%`, top: `${cy}%` }}
+            />
+          ) : null}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/** LiveBrowserSurface — the REALTIME browser surface shown while the
+ * session is active (and through its single close animation). Inline card
+ * with optional minimized bar + expanded overlay. */
+function LiveBrowserSurface({
+  live,
+  runningSince,
+  closing,
+}: {
+  live: BrowserLive;
+  runningSince: number | null;
+  closing: boolean;
+}) {
+  const [minimized, setMinimized] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Escape exits the expanded overlay.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
+  return (
+    <>
+      <div
+        data-slot="browser-live-surface"
+        role="group"
+        aria-label="Live browser session"
+        className={cn(
+          "w-full select-none overflow-hidden rounded-xl border border-border bg-card",
+          closing && "animate-browser-session-close motion-reduce:animate-none",
+        )}
+      >
+        <LiveToolbar
+          live={live}
+          runningSince={runningSince}
+          minimized={minimized}
+          onToggleMinimize={() => setMinimized((m) => !m)}
+          onExpand={() => setExpanded(true)}
+        />
+        {!minimized ? <LiveScreen live={live} /> : null}
+      </div>
+
+      {expanded ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-8"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Expanded live browser view"
+          /* Backdrop click dismisses; Escape (handled above) is the keyboard
+             path — the dialog itself is not scrollable/interactive content. */
+          // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setExpanded(false);
+          }}
+        >
+          <div className="w-full max-w-5xl">
+            <div className="overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
+              <LiveToolbar
+                live={live}
+                runningSince={runningSince}
+                minimized={false}
+                onToggleMinimize={() => setExpanded(false)}
+                onExitExpand={() => setExpanded(false)}
+              />
+              <LiveScreen live={live} />
+            </div>
+            <p className="mt-2 text-center text-[10px] text-muted-foreground">
+              Live sandbox browser · Esc or the button to exit
+            </p>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 /**
  * BrowserUseGroup — ONE run of consecutive use_browser calls as a single
- * paper card: the assistant-ui Computer use frame (chrome + newest
- * screenshot + trailing cursor) with one compact row per call beneath it
- * (narration, duration, and the payload bits that exist). Receives the
- * calls oldest→newest; a still-running/pending tail is fine while streaming.
+ * paper card. While the run is ACTIVE this renders the REALTIME live
+ * browser surface (real viewport frames + real cursor, PRD §2–§4); when
+ * the session ENDS it plays the close animation EXACTLY ONCE (dedup via
+ * the active-session ref) and settles into the recorded Computer use
+ * frame with one compact row per call beneath it.
  */
 export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
   const steps = useMemo(() => deriveBrowserSteps(toolCalls), [toolCalls]);
 
-  // PLAY-ONCE ANIMATION: on mount (and whenever the run grows) the cursor
-  // replays the last few steps, ~700ms apart, then rests on the newest one.
+  // ── session lifecycle (PRD §14: ONE close animation per SESSION) ────
+  // The stream runs from the FIRST active call until the close animation
+  // finishes — it stays ON through the grace period so consecutive
+  // use_browser calls (which can momentarily all-settle between actions)
+  // never tear down the live view mid-session.
+  const anyActive = toolCalls.some(isCallActive);
+  const sessionId = toolCalls[0]?.id ?? "browser-session";
+  const activeSessionRef = useRef<string | null>(null);
+  const [streamOn, setStreamOn] = useState(false);
+  const [closing, setClosing] = useState(false);
   const reducedMotion = useMemo(() => prefersReducedMotion(), []);
+
+  // Render-time adjustment (the repo's converging-setState pattern): the
+  // stream switches ON the moment any call activates, and a late
+  // continuation retracts any in-flight close animation.
+  if (anyActive) {
+    if (!streamOn) setStreamOn(true);
+    if (closing) setClosing(false);
+  }
+
+  useEffect(() => {
+    if (anyActive) {
+      activeSessionRef.current = sessionId;
+      return;
+    }
+    if (activeSessionRef.current === null) return;
+    let closeTimer: number | null = null;
+    // GRACE: consecutive calls of the SAME run land a beat apart (all
+    // settled in between). Only declare the session over — and play the
+    // close animation ONCE — after the quiet period passes. Reactivation
+    // inside the window cancels it entirely.
+    const graceTimer = window.setTimeout(() => {
+      activeSessionRef.current = null;
+      if (reducedMotion) {
+        setStreamOn(false);
+        return;
+      }
+      setClosing(true);
+      closeTimer = window.setTimeout(() => {
+        setClosing(false);
+        setStreamOn(false);
+      }, 680);
+    }, 1500);
+    return () => {
+      window.clearTimeout(graceTimer);
+      if (closeTimer !== null) window.clearTimeout(closeTimer);
+    };
+  }, [anyActive, sessionId, reducedMotion]);
+
+  // The live stream stays enabled through the close animation so the last
+  // frame stays on screen while it folds away.
+  const live = useBrowserLive({ enabled: streamOn });
+  const showLive = streamOn;
+
+  // Earliest running call's start → the toolbar's live elapsed badge.
+  const runningSince = useMemo(() => {
+    let t: number | null = null;
+    for (const c of toolCalls) {
+      if (isCallActive(c) && typeof c.startedAt === "number") {
+        if (t === null || c.startedAt < t) t = c.startedAt;
+      }
+    }
+    return t;
+  }, [toolCalls]);
+
+  // PLAY-ONCE ANIMATION (settled view): on mount (and whenever the run
+  // grows) the cursor replays the last few steps, ~700ms apart, then rests
+  // on the newest one.
   const [playHead, setPlayHead] = useState(() => ({
     total: steps.length,
     index: replayStart(steps.length, reducedMotion),
@@ -308,23 +669,27 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
       data-slot="browser-use-group"
       className={cn(paperCardClass, "w-full space-y-3 p-3 sm:p-4")}
     >
-      <ComputerUse url={url} steps={steps} activeIndex={playIndex}>
-        {shot?.dataUrl ? (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img src={shot.dataUrl} alt={shotAlt} className="size-full object-cover object-top" />
-        ) : (
-          /* Honest placeholder — no screenshot has landed yet, never a fake one. */
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-muted/40 px-4 text-center">
-            <Globe className="h-8 w-8 shrink-0 text-muted-foreground/50" aria-hidden />
-            <p className="max-w-full truncate font-mono text-[11px] text-muted-foreground">
-              {url}
-            </p>
-            <p className="text-[10px] text-muted-foreground/70">
-              Live browser session — no screenshot yet
-            </p>
-          </div>
-        )}
-      </ComputerUse>
+      {showLive ? (
+        <LiveBrowserSurface live={live} runningSince={runningSince} closing={closing} />
+      ) : (
+        <ComputerUse url={url} steps={steps} activeIndex={playIndex}>
+          {shot?.dataUrl ? (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img src={shot.dataUrl} alt={shotAlt} className="size-full object-cover object-top" />
+          ) : (
+            /* Honest placeholder — no screenshot has landed yet, never a fake one. */
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-muted/40 px-4 text-center">
+              <Globe className="h-8 w-8 shrink-0 text-muted-foreground/50" aria-hidden />
+              <p className="max-w-full truncate font-mono text-[11px] text-muted-foreground">
+                {url}
+              </p>
+              <p className="text-[10px] text-muted-foreground/70">
+                Browser session — no screenshot captured
+              </p>
+            </div>
+          )}
+        </ComputerUse>
+      )}
 
       {/* Per-call rows — parity with the old per-call cards. */}
       <div className="divide-y divide-border">
@@ -342,7 +707,7 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
  *  the newest one. */
 function BrowserCallRow({ toolCall }: { toolCall: ToolCall }) {
   const step = friendlyStep(toolCall);
-  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const isRunning = isCallActive(toolCall);
   const isError = toolCall.status === "error";
   const args = (toolCall.args ?? {}) as Record<string, unknown>;
   const action = typeof args.action === "string" ? args.action : "";

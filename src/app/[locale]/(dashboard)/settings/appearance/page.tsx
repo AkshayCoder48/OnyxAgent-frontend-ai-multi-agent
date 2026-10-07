@@ -4,6 +4,7 @@ import * as React from "react";
 import { Moon, Sun } from "lucide-react";
 import { toast } from "sonner";
 import { SectionCard } from "@/components/settings/settings-section";
+import { CompanionSettings } from "@/components/settings/companion-settings";
 import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme";
 import { useThemeStore } from "@/stores/theme-store";
@@ -337,6 +338,9 @@ export default function AppearanceSettingsPage() {
           Reset to default
         </button>
       </SectionCard>
+
+      {/* ── Companion (Realtime PRD §31–§37) — the dots-swarm pet ── */}
+      <CompanionSettings />
     </div>
   );
 }

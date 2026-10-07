@@ -11,11 +11,9 @@ import { deriveAgentPhase } from "@/lib/agent/timeline";
 import { useTypewriter } from "@/components/assistant-ui/elements/letter-stream";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
-import { CopyButton } from "./copy-button";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronRight, Loader2, RefreshCw } from "lucide-react";
-import { RatingButtons } from "./rating-buttons";
+import { ChevronRight } from "lucide-react";
 import { getFileUrl, loadFileUrls } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
@@ -25,18 +23,15 @@ import { FilesFooter, deriveStreamingTree } from "./streaming-file-tree";
 import { formatDuration } from "./tool-duration";
 import {
   CollapsePanel,
-  Orb,
   ThinkingIndicator,
   ThinkingReasoning,
 } from "@/components/assistant-ui/elements";
-import { currentResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 import { ResearchPanel } from "./research-panel";
 import { GenUICreationGate } from "@/components/genui/GenUICreationGate";
 import { useGenUIFromText } from "@/hooks/useGenUIStream";
-import { extractGenUINodes, buildTextSegments } from "@/lib/genui/stream-parser";
+import { extractGenUINodes } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
-import { useAiStatusPhrases } from "@/hooks/use-ai-status-phrases";
 import { stripUploadTags } from "@/lib/uploads/registry";
 
 /**
@@ -82,15 +77,6 @@ function ReasoningPanel({
 }) {
   const isThinking = variant === "thinking";
 
-  // AI-written follow-up phrases for the bare thinking line (per-turn,
-  // from the backend LLM — see AgentStatusLine).
-  const taskText = useLastUserTaskText();
-  const aiPhrases = useAiStatusPhrases({
-    activity: isThinking ? "thinking" : "reasoning",
-    task: taskText,
-    enabled: isStreaming,
-  });
-
   // Split the (possibly still-streaming) reasoning text into sentences —
   // the element reveals them row by row. PRD §5 (reasoning formatting):
   // normalize ONLY unintended repeated whitespace — never a blanket trim
@@ -124,7 +110,6 @@ function ReasoningPanel({
     return (
       <ThinkingIndicator
         label={isThinking ? "Thinking" : "Reasoning"}
-        phrases={aiPhrases ?? undefined}
         className="mb-2"
       />
     );
@@ -147,7 +132,6 @@ function ReasoningPanel({
             <ThinkingIndicator
               showDot={false}
               label={isThinking ? "Thinking" : "Reasoning"}
-              phrases={aiPhrases ?? undefined}
               className="min-w-0"
             />
           ) : undefined
@@ -166,33 +150,6 @@ function ReasoningBlock(props: { text: string; isStreaming: boolean }) {
 }
 
 /**
- * Random response orb glyph (PRD §25–§28): the 25-variant pick made once
- * when this AI response began (see response-orb.ts). Rendered at 28px —
- * noticeably larger than the old 18px — and leading the thinking label on
- * ONE items-center flex row so the text sits on the lattice midline.
- * Reading the singleton via useMemo means only this glyph re-renders when
- * the response's orb is chosen — never the app, chat, or message list.
- */
-function ResponseOrbGlyph({ size = 28 }: { size?: number }) {
-  const variant = React.useMemo(() => currentResponseOrb(), []);
-  return <Orb variant={variant} size={size} className="shrink-0" />;
-}
-
-/** The conversation's LAST user message (the current task), bounded —
- *  context for the AI-written status phrases. The selector returns a
- *  primitive, so this only re-renders the host when the task text actually
- *  changes (a new user message), never per streaming token. */
-function useLastUserTaskText(): string {
-  return useChatStore((s) => {
-    for (let i = s.messages.length - 1; i >= 0; i--) {
-      const m = s.messages[i]!;
-      if (m.role === "user" && m.content) return m.content.slice(0, 400);
-    }
-    return "";
-  });
-}
-
-/**
  * AgentStatusLine — THE one in-place execution status for a STREAMING
  * assistant message WITHOUT tool calls (the classic flow and the legacy
  * fallback). Exactly one instance per message, rendered at the END of the
@@ -207,33 +164,22 @@ function useLastUserTaskText(): string {
  * While a live reasoning stream is open the ThinkingReasoning panel
  * header IS the “Thinking…” status, so this line hides (no duplicate
  * status components). Settled messages render nothing (completed state).
+ *
+ * Realtime PRD: the label is STATIC text (fades once when it changes);
+ * the companion + the pulsing dot carry the liveness — no orb glyph, no
+ * phrase cycling.
  */
 function AgentStatusLine({ message }: { message: ChatMessage }) {
   const phase = deriveAgentPhase(message);
-  // AI-WRITTEN STATUS TEXT (user directive): the follow-up phrases cycling
-  // under "Working/Thinking" are generated per-turn by the backend LLM
-  // (/api/status-caption) from the user's request — never the old canned
-  // "Reading the context" rotation.
-  const taskText = useLastUserTaskText();
-  const aiPhrases = useAiStatusPhrases({
-    activity: phase === "working" ? "working" : "thinking",
-    task: taskText,
-    enabled: phase !== null,
-  });
   if (!phase) return null;
-  const nothingStreamed =
-    (message.parts ?? []).length === 0 && !message.content;
   return (
     <div
       className="flex min-h-8 items-center gap-2.5 px-1"
       role="status"
       aria-live="polite"
     >
-      <ResponseOrbGlyph size={nothingStreamed ? 28 : 22} />
       <ThinkingIndicator
-        showDot={false}
         label={phase === "working" ? "Working" : "Thinking"}
-        phrases={aiPhrases ?? undefined}
         className="min-w-0"
       />
     </div>
@@ -464,20 +410,12 @@ function TextBubble({
 interface MessageItemProps {
   message: ChatMessage;
   groupPosition?: "first" | "middle" | "last" | "single";
-  /** When false, hides the footer (copy/timestamp/regenerate). Used for
-   *  grouped messages where only the last message should show the footer. */
-  showFooter?: boolean;
   /** True for the message that owns the live todo plan — the inline
    *  ResearchPanel renders at the exact position where the todo tool ran
    *  inside this message's part flow (not stuck at the thread bottom). */
   showTodoPanel?: boolean;
   /** Wired to the inline todo panel's "Cut" (dismiss) button. */
   onTodoDismiss?: () => void;
-  onRegenerate?: () => void;
-  /** True while a (re)generation turn is running — disables the regenerate
-   *  button and swaps its icon for a spinner (PRD §6: the button must show
-   *  a loading state and never fire a duplicate regeneration). */
-  isRegenerating?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -696,16 +634,6 @@ function WorkingPanel({
   // there) — inside the panel the trigger owns it, so null ⇒ "Thinking".
   const phase = streaming ? (deriveAgentPhase(message) ?? "thinking") : null;
 
-  // AI-written follow-up phrases for the live Thinking ⇄ Working trigger
-  // (per-turn, backend LLM — see AgentStatusLine). The panel's own label
-  // always leads the rotation; the AI phrases follow it.
-  const taskText = useLastUserTaskText();
-  const aiPhrases = useAiStatusPhrases({
-    activity: phase === "working" ? "working" : "thinking",
-    task: taskText,
-    enabled: streaming,
-  });
-
   const [expanded, setExpanded] = React.useState(streaming || hasDeliverables);
   const [userToggled, setUserToggled] = React.useState(false);
   // AUTO EXPAND/COLLAPSE (render-time adjustment — no effect, no cascading
@@ -755,13 +683,12 @@ function WorkingPanel({
           aria-hidden
         />
         {streaming ? (
-          // ThinkingIndicator without its dot: a keyed shimmer label —
-          // the fade replays every time Thinking switches to Working and
-          // back, per the spec. The follow-up phrases are AI-written.
+          // STATIC status label (Realtime PRD): the dot-less indicator sits
+          // next to the chevron; the label fades once when Thinking flips
+          // to Working. No phrase cycling, no shimmer.
           <ThinkingIndicator
             showDot={false}
             label={phase === "working" ? "Working" : "Thinking"}
-            phrases={aiPhrases ?? undefined}
             className="min-w-0"
           />
         ) : (
@@ -791,11 +718,8 @@ function WorkingPanel({
 export const MessageItem = React.memo(function MessageItem({
   message,
   groupPosition,
-  showFooter = true,
   showTodoPanel = false,
   onTodoDismiss,
-  onRegenerate,
-  isRegenerating = false,
 }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
@@ -842,29 +766,9 @@ export const MessageItem = React.memo(function MessageItem({
     [message.parts],
   );
 
-  // COPY TEXT (PRD §4: "copy the actual message text, not rendered HTML or
-  // hidden UI content"). GenUI widget specs live inline in the raw content
-  // between <<<genui>>> … <<</genui>>> sentinels — the clipboard gets the
-  // plain text the user actually SEES, with the raw JSON specs stripped.
-  // Upload tags are equally internal — they never reach the clipboard.
-  const copyText = React.useMemo(() => {
-    const raw =
-      message.content ||
-      (message.parts ?? [])
-        .filter((p) => p.type === "text" && p.content)
-        .map((p) => p.content)
-        .join("\n\n");
-    if (!raw) return "";
-    if (raw.includes("<<<genui>>>")) {
-      const segments = buildTextSegments(raw, undefined, true);
-      return segments
-        .filter((s) => s.type === "text")
-        .map((s) => s.text ?? "")
-        .join("\n\n")
-        .trim();
-    }
-    return stripUploadTags(raw);
-  }, [message.content, message.parts]);
+  // COPY TEXT was the old footer's clipboard payload — the footer (and the
+  // copy action) are gone entirely (Realtime PRD §20–§21), so the memo went
+  // with them.
 
   // Id of the LAST research/todo tool part in the original parts order —
   // the inline plan panel renders exactly there ("on the response bar where
@@ -964,18 +868,9 @@ export const MessageItem = React.memo(function MessageItem({
             : "w-full max-w-full",
         )}
       >
-        {/* Assistant identity — small terracotta mark + serif-italic name
-            (Terra spec). Only on the first message of a consecutive group. */}
-        {!isUser && (!isGrouped || groupPosition === "first") && (
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex h-4 w-4 items-center justify-center text-primary" aria-hidden>
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current">
-                <path d="M8 1.5 14.5 8 8 14.5 1.5 8Z" />
-              </svg>
-            </span>
-            <span className="assistant-name text-[15px] leading-none">OnyxAgent</span>
-          </div>
-        )}
+        {/* Realtime PRD §18–§19: NO assistant identity header/logo — the
+            companion is the visual identity; responses start directly with
+            their content. */}
         {isUser &&
           (() => {
             const attachments: AttachmentDisplay[] =
@@ -1288,67 +1183,10 @@ export const MessageItem = React.memo(function MessageItem({
           />
         )}
 
-        {/* Footer (copy/timestamp/regenerate) — only shown ONCE for the entire
-            multi-round response, after all parts are complete. Hidden for
-            non-last grouped messages (showFooter=false from MessageList). */}
-        {showFooter && !message.isStreaming && (message.content || (message.parts ?? []).some((p) => p.type === "text" && p.content)) && (
-          <div
-            className={cn(
-              "flex flex-wrap items-center gap-0.5 transition-opacity duration-150",
-              // Subtle hover action row (Terra spec) — always visible on touch.
-              "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100",
-              isUser && "flex-row-reverse",
-            )}
-          >
-            {message.timestamp && (
-              <span className="text-muted-foreground mr-1 text-[10px]">
-                {new Date(message.timestamp).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-            )}
-            <CopyButton
-              text={copyText}
-              className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground h-7 w-7 rounded-md bg-transparent"
-            />
-            {!isUser && message.conversationId && (
-              <RatingButtons
-                messageId={message.id}
-                conversationId={message.conversationId}
-                currentRating={message.user_rating ?? null}
-                ratingCount={message.rating_count ?? undefined}
-                onRatingChange={(d) =>
-                  updateMessage(message.id, (m) => ({
-                    ...m,
-                    user_rating: d.rating,
-                    rating_count: d.rating_count,
-                  }))
-                }
-                isAssistant
-              />
-            )}
-            {!isUser && onRegenerate && (
-              <button
-                type="button"
-                onClick={onRegenerate}
-                disabled={isRegenerating}
-                title={isRegenerating ? "Regenerating…" : "Regenerate response"}
-                aria-label={isRegenerating ? "Regenerating response" : "Regenerate response"}
-                className={cn(
-                  "text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors",
-                  isRegenerating && "cursor-not-allowed opacity-60",
-                )}
-              >
-                {isRegenerating ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-                )}
-              </button>
-            )}
-          </div>
-        )}
+        {/* Realtime PRD §20–§21: NO message action footer. The old hover
+            row (timestamp + copy + thumbs + regenerate) was invisible but
+            clickable on desktop (`sm:opacity-0` until hover) — invisible
+            hitboxes are removed ENTIRELY: no visuals, no handlers. */}
       </div>
     </div>
   );
@@ -1364,7 +1202,7 @@ export const MessageItem = React.memo(function MessageItem({
   //   - message.parts (array — shallow ref check; the store creates a new array
   //     only for the changed message, so ref equality is sufficient)
   //   - message.toolCalls (same — new array only when changed)
-  //   - groupPosition / showFooter / onRegenerate (parent props)
+  //   - groupPosition / onTodoDismiss (parent props)
   //
   // If any of these differ, re-render. Otherwise skip.
   return (
@@ -1377,17 +1215,9 @@ export const MessageItem = React.memo(function MessageItem({
     // "Worked {time}" panel summary — stamped on settle; without this the
     // memo blocked the re-render and the panel never appeared.
     prev.message.generation === next.message.generation &&
-    // Rating feedback mutates ONLY these two fields — without them in the
-    // comparator the memo blocked the re-render and the selected thumb never
-    // appeared (the "rating does nothing" half of the actions bug).
-    prev.message.user_rating === next.message.user_rating &&
-    prev.message.rating_count === next.message.rating_count &&
     prev.groupPosition === next.groupPosition &&
-    prev.showFooter === next.showFooter &&
     prev.showTodoPanel === next.showTodoPanel &&
-    prev.onTodoDismiss === next.onTodoDismiss &&
-    prev.onRegenerate === next.onRegenerate &&
-    prev.isRegenerating === next.isRegenerating
+    prev.onTodoDismiss === next.onTodoDismiss
   );
 });
 

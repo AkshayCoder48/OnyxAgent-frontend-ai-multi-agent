@@ -25,7 +25,7 @@ import {
   Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ShimmerLabel, chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/components/assistant-ui/elements";
+import { chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/components/assistant-ui/elements";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
@@ -457,9 +457,13 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         ) : null}
         {isRunning ? (
           <>
-            <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
+            {/* STATIC running caption (Realtime PRD §16): plain foreground
+                text — never a shimmer (the shimmer made the caption dull/
+                invisible on the black canvas). Liveness = the spinner glyph
+                + elapsed badge. */}
+            <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {liveCaption}
-            </ShimmerLabel>
+            </span>
             {/* Live streamed-arg hint (Runtime PRD §21–§23): the real
                 path/URL/key from the PARTIAL arguments — visible the moment
                 it exists in the arg stream, never a fabricated filename. */}
@@ -472,9 +476,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             )}
             <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
             <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
-            <span className="streaming-dots" aria-hidden="true">
-              <span /> <span /> <span />
-            </span>
           </>
         ) : (
           <>
@@ -1039,9 +1040,10 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             ) : (
               <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
             )}
-            <ShimmerLabel className="min-w-0 truncate text-sm font-medium text-foreground/90">
+            {/* STATIC running caption (Realtime PRD §16) — no shimmer. */}
+            <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {liveCaption}
-            </ShimmerLabel>
+            </span>
           </span>
         ) : (
           <span key="settled" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
@@ -1314,9 +1316,6 @@ function RunningToolPanel({
         <Loader2 className="text-primary h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
         <span className="text-foreground/90 text-sm font-medium">
           {liveCaptionForPanel}
-        </span>
-        <span className="streaming-dots" aria-hidden="true">
-          <span /> <span /> <span />
         </span>
         <span className="ml-auto">
           <SkipWaitButton toolCall={toolCall} turnId={turnId} />

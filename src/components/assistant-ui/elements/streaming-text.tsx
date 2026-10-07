@@ -68,7 +68,7 @@ export function StreamingText({
         );
       })}
       {streaming && shown > 0 && (
-        <span aria-hidden className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-blue-500 align-middle" />
+        <span aria-hidden className="bg-primary ml-0.5 inline-block h-3.5 w-[2px] animate-pulse align-middle motion-reduce:animate-none" />
       )}
     </p>
   );

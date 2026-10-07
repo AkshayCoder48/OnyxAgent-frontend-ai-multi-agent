@@ -9,12 +9,8 @@ import { useQuoteStore } from "@/stores";
 
 interface MessageListProps {
   messages: ChatMessage[];
-  onRegenerate?: (messageId: string) => void;
   /** Wired to the INLINE todo plan panel's "Cut" button. */
   onTodoDismiss?: () => void;
-  /** True while an agent turn (send OR regenerate) is running — disables the
-   *  regenerate action so it can't double-fire (PRD §6). */
-  isRegenerating?: boolean;
 }
 
 /**
@@ -116,18 +112,9 @@ function hasResearchPart(message: ChatMessage): boolean {
   );
 }
 
-export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerating = false }: MessageListProps) {
+export function MessageList({ messages, onTodoDismiss }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
   const setQuote = useQuoteStore((s) => s.setQuote);
-
-  // PERF: Find the last assistant message index once (O(n) single pass)
-  // instead of on every render's map callback.
-  const lastAssistantIndex = React.useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.role === "assistant") return i;
-    }
-    return -1;
-  }, [messages]);
 
   // Todo plan ownership — the LAST assistant message that ran the todo
   // tool owns the inline plan panel. The plan is a live, conversation-level
@@ -152,7 +139,6 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerat
       <SelectionToolbar onQuote={setQuote} />
       {messages.map((message, index) => {
         const groupPos = groupPositions.get(message.id);
-        const isLastInGroup = !groupPos || groupPos === "last" || groupPos === "single";
         const prev = messages[index - 1];
 
         return (
@@ -168,15 +154,8 @@ export function MessageList({ messages, onRegenerate, onTodoDismiss, isRegenerat
               <MessageItem
                 message={message}
                 groupPosition={groupPos}
-                showFooter={isLastInGroup}
                 showTodoPanel={!!todoOwnerId && message.id === todoOwnerId}
                 onTodoDismiss={onTodoDismiss}
-                onRegenerate={
-                  onRegenerate && index === lastAssistantIndex && !message.isStreaming
-                    ? () => onRegenerate(message.id)
-                    : undefined
-                }
-                isRegenerating={isRegenerating}
               />
             </div>
           </div>

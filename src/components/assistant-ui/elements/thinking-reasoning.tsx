@@ -190,9 +190,7 @@ export function ThinkingReasoning({
             // to the pre-thinking indicator so the status text never swaps.
             <span className={styles.trLiveNode}>{headerNode}</span>
           ) : (
-            <span className={styles.trLabel + " " + styles.trShimmer}>
-              {activeLabel}
-            </span>
+            <span className={styles.trLabel}>{activeLabel}</span>
           )}
           {done && (
             <svg

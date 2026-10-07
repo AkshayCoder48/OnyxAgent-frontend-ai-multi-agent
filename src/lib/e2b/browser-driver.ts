@@ -85,55 +85,99 @@ LIVE_STATE = {
     "cursor": {"x": 640, "y": 400},
     "action": None,
     "seq": 0,
+    "frameSeq": 0,
     "tab": None,
     "url": "",
     "title": "",
     "viewport": {"width": 1280, "height": 800},
+    "booted": False,
+    "closed": False,
+    "sessionId": session_id,
+    "runtime": None,
     "lastFrameAt": 0.0,
 }
+LIVE_DIRTY = True
 
 
-def write_live_json():
-    """Snapshot LIVE_STATE + the active tab's url/title/viewport into
-    live.json (atomic replace). Main loop only — touches main objects."""
+def refresh_live_pages():
+    """MAIN THREAD ONLY: copy the active tab's identity (url/title/
+    viewport/tab id/runtime) into LIVE_STATE. Playwright's sync API is
+    thread-affine, so page objects are read HERE, never in the side
+    threads. Marks the state dirty; live.json lands within 100ms."""
     try:
+        p = None
         with LIVE_LOCK:
             try:
                 LIVE_STATE["tab"] = pages[active_idx]["id"] if pages else None
             except Exception:
                 LIVE_STATE["tab"] = None
-            p = None
+            LIVE_STATE["runtime"] = runtime
+            LIVE_STATE["sessionId"] = session_id
             try:
                 p = pages[active_idx]["page"] if pages else None
             except Exception:
                 p = None
-            if p is not None:
-                try:
-                    LIVE_STATE["url"] = p.url
-                except Exception:
-                    pass
-                try:
-                    LIVE_STATE["title"] = p.title()
-                except Exception:
-                    pass
-                try:
-                    vs = p.viewport_size
+        if p is not None:
+            try:
+                url = p.url
+                title = p.title()
+                vs = p.viewport_size
+                with LIVE_LOCK:
+                    LIVE_STATE["url"] = url
+                    LIVE_STATE["title"] = title
                     if vs:
                         LIVE_STATE["viewport"] = {"width": int(vs["width"]), "height": int(vs["height"])}
-                except Exception:
-                    pass
-            snapshot = dict(LIVE_STATE)
-        snapshot["ts"] = int(time.time() * 1000)
-        tmp = LIVE_JSON + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(json.dumps(snapshot))
-        os.replace(tmp, LIVE_JSON)
+            except Exception:
+                pass
+        _mark_live_dirty()
     except Exception:
         pass
 
 
+def _mark_live_dirty():
+    global LIVE_DIRTY
+    with LIVE_LOCK:
+        LIVE_DIRTY = True
+
+
+def live_pub_loop():
+    """The ONLY live.json writer (single-writer — no file races): every
+    100ms, when the state is dirty, snapshot LIVE_STATE + ts into
+    live.json atomically. Never touches Playwright objects."""
+    global LIVE_DIRTY
+    while True:
+        time.sleep(0.1)
+        try:
+            dirty = False
+            snapshot = None
+            with LIVE_LOCK:
+                if LIVE_DIRTY:
+                    dirty = True
+                    LIVE_DIRTY = False
+                    snapshot = dict(LIVE_STATE)
+            if dirty and snapshot is not None:
+                snapshot["ts"] = int(time.time() * 1000)
+                tmp = LIVE_JSON + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write(json.dumps(snapshot))
+                os.replace(tmp, LIVE_JSON)
+        except Exception:
+            pass
+
+
+def live_frame_seen():
+    """LIVE THREAD: a screencast frame was captured — bump frameSeq so
+    the polling reader knows a fresh live.jpg exists."""
+    global LIVE_DIRTY
+    with LIVE_LOCK:
+        LIVE_STATE["frameSeq"] = LIVE_STATE.get("frameSeq", 0) + 1
+        LIVE_STATE["lastFrameAt"] = time.time()
+        LIVE_DIRTY = True
+
+
 def publish_live(action=None, cursor=None):
-    """Publish an interaction event (cursor in viewport px) to live.json."""
+    """MAIN THREAD: publish an interaction event (cursor in viewport px)
+    and refresh the page-derived state; live.json lands within 100ms."""
     try:
         with LIVE_LOCK:
             if action is not None:
@@ -144,7 +188,7 @@ def publish_live(action=None, cursor=None):
                 except Exception:
                     pass
             LIVE_STATE["seq"] = LIVE_STATE.get("seq", 0) + 1
-        write_live_json()
+        refresh_live_pages()
     except Exception:
         pass
 
@@ -158,7 +202,7 @@ def cursor_of_box(box):
 
 
 def mark_active_tab():
-    ""<arg_value>Stamp the ACTIVE page with a marker the live thread can find from its
+    """Stamp the ACTIVE page with a marker the live thread can find from its
     own CDP connection (exact tab matching even across duplicate URLs)."""
     try:
         p = pages[active_idx]["page"]
@@ -242,8 +286,7 @@ def live_cast_loop():
                                         with open(tmp, "wb") as f:
                                             f.write(base64.b64decode(data))
                                         os.replace(tmp, LIVE_JPG)
-                                    with LIVE_LOCK:
-                                        LIVE_STATE["lastFrameAt"] = now
+                                        live_frame_seen()
                                 except Exception:
                                     pass
 
@@ -349,6 +392,10 @@ def boot_browser():
             viewport={"width": 1280, "height": 800},
         )
         runtime = "cloakbrowser"
+        with LIVE_LOCK:
+            LIVE_STATE["booted"] = True
+            LIVE_STATE["closed"] = False
+        refresh_live_pages()
         log("booted cloakbrowser runtime (humanize=True, persistent profile)")
         return
     except Exception as e:
@@ -378,6 +425,10 @@ def boot_browser():
                 viewport={"width": 1280, "height": 800},
             )
         runtime = "chromium"
+        with LIVE_LOCK:
+            LIVE_STATE["booted"] = True
+            LIVE_STATE["closed"] = False
+        refresh_live_pages()
         log("booted standard chromium fallback runtime (persistent profile)")
     except Exception as e:
         boot_error = (boot_error + " | chromium fallback failed: %s" % (e,)) if boot_error else str(e)
@@ -658,6 +709,7 @@ def do_navigate(cmd):
     if not (url.startswith("http://") or url.startswith("https://") or url.startswith("file://") or url.startswith("about:")):
         url = "https://" + url
     p = active_page()
+    publish_live("navigate")
     resp = p.goto(url, wait_until="domcontentloaded", timeout=45000)
     try:
         title = p.title()
@@ -672,8 +724,10 @@ def do_click(cmd):
     target = cmd.get("target")
     loc = resolve_target(active_page(), target)
     box = loc_box(loc)
+    publish_live("mouse_move", cursor_of_box(box))
     loc.first.click(timeout=12000)
     active_page().wait_for_timeout(400)
+    publish_live("click")
     out = state_payload({"success": True, "action": "click", "target": target_label(target)})
     if box:
         out["box"] = box
@@ -686,6 +740,7 @@ def do_type(cmd):
     clear = cmd.get("clear") is not False
     loc = resolve_target(active_page(), target)
     box = loc_box(loc)
+    publish_live("mouse_move", cursor_of_box(box))
     if clear:
         loc.first.fill("", timeout=12000)
     # Humanized per-character typing when the runtime supports it
@@ -697,6 +752,7 @@ def do_type(cmd):
     if cmd.get("submit"):
         loc.first.press("Enter", timeout=8000)
         active_page().wait_for_timeout(600)
+    publish_live("type")
     out = state_payload({"success": True, "action": "type", "target": target_label(target), "text": text[:80]})
     if box:
         out["box"] = box
@@ -706,6 +762,7 @@ def do_type(cmd):
 def do_press(cmd):
     key = str(cmd.get("key") or "Enter")
     p = active_page()
+    publish_live("keypress")
     p.keyboard.press(key)
     p.wait_for_timeout(300)
     return state_payload({"success": True, "action": "press", "key": key})
@@ -715,6 +772,7 @@ def do_scroll(cmd):
     p = active_page()
     direction = str(cmd.get("direction") or "down")
     amount = int(cmd.get("amount") or 600)
+    publish_live("scroll")
     try:
         p.mouse.wheel(amount if direction == "right" else 0, amount if direction == "down" else -amount)
     except Exception:
@@ -810,6 +868,7 @@ def do_select(cmd):
     values = cmd.get("values")
     if values is None and value is not None:
         values = [str(value)]
+    publish_live("select")
     loc.first.select_option(values, timeout=12000)
     out = state_payload({"success": True, "action": "select", "target": target_label(target)})
     if box:
@@ -834,6 +893,7 @@ def do_upload(cmd):
     target = cmd.get("target")
     loc = resolve_target(active_page(), target)
     box = loc_box(loc)
+    publish_live("upload")
     loc.first.set_input_files(paths, timeout=15000)
     out = state_payload({"success": True, "action": "upload", "target": target_label(target), "files": [os.path.basename(x) for x in paths]})
     if box:
@@ -845,6 +905,7 @@ def do_download(cmd):
     p = active_page()
     url = cmd.get("url")
     target = cmd.get("target")
+    publish_live("download")
     try:
         if target is not None:
             loc = resolve_target(p, target)
@@ -888,6 +949,7 @@ def do_download(cmd):
 def do_new_tab(cmd):
     global tab_seq, active_idx
     ensure_pages()
+    publish_live("new_tab")
     p = context.new_page()
     tab_seq += 1
     tid = "tab_%d" % tab_seq
@@ -920,6 +982,7 @@ def pick_tab(cmd):
 
 def do_switch_tab(cmd):
     ensure_pages()
+    publish_live("switch_tab")
     failed = pick_tab(cmd)
     if failed:
         return failed
@@ -963,6 +1026,7 @@ def do_close_tab(cmd):
 
 def do_history(cmd):
     p = active_page()
+    publish_live(str(cmd.get("action") or "refresh"))
     if cmd.get("action") == "go_back" or cmd.get("dir") == "back":
         p.go_back(timeout=30000)
     elif cmd.get("action") == "go_forward" or cmd.get("dir") == "forward":
@@ -1006,6 +1070,11 @@ def do_close(cmd):
     pages = []
     active_idx = 0
     ref_map = {}
+    with LIVE_LOCK:
+        LIVE_STATE["closed"] = True
+        LIVE_STATE["booted"] = False
+        LIVE_STATE["action"] = None
+    publish_live("close")
     return {"success": True, "action": "close", "message": "Browser session closed. The persistent profile was kept."}
 
 
@@ -1039,6 +1108,9 @@ HANDLERS = {
 def main():
     with open(READY, "w") as f:
         f.write("1")
+    threading.Thread(target=live_pub_loop, daemon=True).start()
+    threading.Thread(target=live_cast_loop, daemon=True).start()
+    refresh_live_pages()
     log("driver loop started (pid %d)" % os.getpid())
     seen = ""
     while True:
@@ -1068,6 +1140,11 @@ def main():
             with open(res_path + ".tmp", "w") as f:
                 f.write(json.dumps(result))
             os.replace(res_path + ".tmp", res_path)
+            # Live-cast upkeep (PRD §2-§4): after every command the active
+            # tab marker + url/title/viewport refresh so the live view tracks
+            # what the agent just did, even for actions that publish nothing.
+            mark_active_tab()
+            refresh_live_pages()
         except json.JSONDecodeError:
             time.sleep(0.3)
         except Exception:

@@ -20,13 +20,16 @@ export const TEXT_SHIMMER_KEYFRAMES = `
 
 /**
  * Inline style that paints the shimmer gradient clipped to the glyphs.
- * Colors follow the theme tokens (muted → foreground → muted) so it reads
- * on both the light and dark palettes.
+ * Colors follow the APP's theme tokens (muted → foreground → muted) so it
+ * reads on both the light and dark palettes — the previous foreign `--ink`
+ * tokens never existed here, so the hardcoded fallbacks painted a dull grey
+ * that read as invisible on the black canvas (the "caption text goes dull/
+ * invisible during shine" bug, Realtime PRD §16).
  */
 export function textShimmerStyle(durationSeconds = 2.2): CSSProperties {
   return {
     backgroundImage:
-      "linear-gradient(90deg, var(--ink-muted, #8a8f98) 0%, var(--ink, #f5f5f5) 50%, var(--ink-muted, #8a8f98) 100%)",
+      "linear-gradient(90deg, var(--color-muted-foreground, #8a8f98) 0%, var(--color-foreground, #f5f5f5) 50%, var(--color-muted-foreground, #8a8f98) 100%)",
     backgroundSize: "200% 100%",
     WebkitBackgroundClip: "text",
     backgroundClip: "text",

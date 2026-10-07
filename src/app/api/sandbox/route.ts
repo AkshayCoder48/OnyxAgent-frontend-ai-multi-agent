@@ -1663,6 +1663,159 @@ export async function POST(req: NextRequest) {
         });
       }
 
+      case "browser_live_stream": {
+        // REALTIME BROWSER VIEW (PRD §2-§4) — an SSE stream of the sandbox
+        // browser driver's live cast: `state` events (cursor, action, url,
+        // title, tab, booted/closed flags — live.json, rewritten by the
+        // driver's publisher thread within ~100ms of any change) and `frame`
+        // events (base64 JPEG screencast frames — live.jpg, ~8fps max from
+        // the driver's CDP Page.startScreencast, re-read ONLY when the
+        // driver bumps frameSeq, so an idle page costs zero frame reads).
+        //
+        // One long-lived POST per active browser session — the client reads
+        // it with fetch + a stream reader (EventSource cannot POST the apiKey
+        // body). Ends on client abort, or after BROWSER_LIVE_MAX_MS with a
+        // `bye` (the client reconnects while its session is still running).
+        const encoder = new TextEncoder();
+        const startedAt = Date.now();
+        const BROWSER_LIVE_MAX_MS = 6 * 60_000;
+        const BROWSER_LIVE_POLL_MS = 300;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            let closed = false;
+            const finish = () => {
+              if (closed) return;
+              closed = true;
+              try {
+                controller.close();
+              } catch {
+                /* already closed */
+              }
+            };
+            const send = (event: string, data: unknown) => {
+              if (closed) return;
+              try {
+                controller.enqueue(
+                  encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+                );
+              } catch {
+                closed = true;
+              }
+            };
+            // Client abort → stop immediately (the tick loop checks `closed`).
+            req.signal.addEventListener("abort", finish);
+
+            void (async () => {
+              let sandbox: Sandbox;
+              try {
+                sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+              } catch (err) {
+                send("fatal", {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+                finish();
+                return;
+              }
+              send("hello", { sandboxId: sandbox.sandboxId });
+              const LIVE_JSON = "/home/user/.onyx/browser/live.json";
+              const LIVE_JPG = "/home/user/.onyx/browser/live.jpg";
+              let lastSig = "";
+              let lastFrameSeq = -1;
+              let missStreak = 0;
+              let lastBeat = Date.now();
+
+              const tick = async (): Promise<void> => {
+                if (closed) return;
+                if (Date.now() - startedAt > BROWSER_LIVE_MAX_MS) {
+                  send("bye", { reason: "timeout" });
+                  finish();
+                  return;
+                }
+                // Periodic heartbeat comment keeps proxies from idling out.
+                if (Date.now() - lastBeat > 15_000) {
+                  lastBeat = Date.now();
+                  if (!closed) {
+                    try {
+                      controller.enqueue(encoder.encode(`: keepalive\n\n`));
+                    } catch {
+                      closed = true;
+                    }
+                  }
+                }
+                try {
+                  const raw = await sandbox.files
+                    .read(LIVE_JSON, { format: "text" })
+                    .catch(() => null);
+                  if (raw && raw.trim()) {
+                    missStreak = 0;
+                    let state: Record<string, unknown> | null = null;
+                    try {
+                      state = JSON.parse(raw) as Record<string, unknown>;
+                    } catch {
+                      state = null;
+                    }
+                    if (state) {
+                      const c = (state.cursor ?? {}) as { x?: unknown; y?: unknown };
+                      const sig = [
+                        state.seq,
+                        state.frameSeq,
+                        state.url,
+                        state.title,
+                        state.action,
+                        state.closed,
+                        state.booted,
+                        c.x,
+                        c.y,
+                      ].join("|");
+                      if (sig !== lastSig) {
+                        lastSig = sig;
+                        send("state", state);
+                      }
+                      const frameSeq = typeof state.frameSeq === "number" ? state.frameSeq : -1;
+                      if (frameSeq >= 0 && frameSeq !== lastFrameSeq) {
+                        lastFrameSeq = frameSeq;
+                        const bytes = await sandbox.files
+                          .read(LIVE_JPG, { format: "bytes" })
+                          .catch(() => null);
+                        if (bytes && bytes.length > 0) {
+                          send("frame", {
+                            frameSeq,
+                            b64: Buffer.from(bytes).toString("base64"),
+                          });
+                        }
+                      }
+                    }
+                  } else {
+                    // No live.json yet — the driver is still booting (first
+                    // browser action installs + starts it). Tell the client
+                    // periodically so it can show the connecting phase.
+                    missStreak++;
+                    if (missStreak === 1 || missStreak % 33 === 0) {
+                      send("waiting", { ms: Date.now() - startedAt });
+                    }
+                  }
+                } catch {
+                  // transient read error — keep ticking
+                }
+                if (!closed) {
+                  setTimeout(() => void tick(), BROWSER_LIVE_POLL_MS);
+                }
+              };
+              void tick();
+            })();
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "x-vercel-no-buffering": "1",
+            "x-accel-buffering": "no",
+          },
+        });
+      }
+
       case "batch_write_bytes": {
         // Binary-safe batch write: files as [{ path, base64 }]. Directories
         // are created implicitly by the E2B write. Used by cloud restore.

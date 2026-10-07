@@ -6,3 +6,7 @@ export { useConversations } from "./use-conversations";
 export { useConversationShares } from "./use-conversation-shares";
 export { useSlashCommands, isBuiltinEnabled, BUILTIN_COMMAND_LIST } from "./use-slash-commands";
 export { useDictation } from "./use-dictation";
+export { useBrowserLive } from "./use-browser-live";
+export type { BrowserLive, BrowserLivePhase, BrowserLiveState } from "./use-browser-live";
+export { useAgentActivity } from "./use-agent-activity";
+export type { AgentActivity } from "./use-agent-activity";

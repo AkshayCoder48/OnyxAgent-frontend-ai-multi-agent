@@ -30,7 +30,6 @@ import {
   useExecutionChatValue,
   type ExecutionRecord,
 } from "@/lib/agent/execution-hub";
-import { beginResponseOrb } from "@/components/assistant-ui/elements/response-orb";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -408,9 +407,6 @@ export function useChat(options: UseChatOptions = {}) {
 
       const userMessageId = nanoid();
       execution.processor.setUserMessageId(userMessageId);
-      // A new AI response is starting with this user message — pick this
-      // response's random orb ONCE (25 variants, no immediate repeat).
-      beginResponseOrb();
       execution.store.getState().addMessage({
         id: userMessageId,
         role: "user",

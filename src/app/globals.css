@@ -101,6 +101,70 @@
   --duration-fast: 150ms;
   --duration-base: 220ms;
   --duration-slow: 400ms;
+
+  /* Tactile checkbox check-stroke draw-in (ui/checkbox.tsx). The
+     @keyframes live inside @theme so Tailwind emits them together with
+     the `animate-check-draw` utility; prefers-reduced-motion stands it
+     down via `motion-reduce:animate-none` on the stroke. */
+  --animate-check-draw: check-draw 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes check-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* Realtime browser session close (chat/tool-results/use-browser.tsx) —
+     ONE polished fold-away per browser SESSION (never per action): the
+     live surface scales down, blurs and folds toward the center, then the
+     recorded frame settles in. `motion-reduce` consumers skip applying it. */
+  --animate-browser-session-close: browser-session-close 620ms cubic-bezier(0.4, 0, 0.6, 1) both;
+  @keyframes browser-session-close {
+    0% {
+      opacity: 1;
+      transform: perspective(900px) translateZ(0) rotateX(0deg) scale(1);
+      filter: blur(0);
+    }
+    55% {
+      opacity: 0.96;
+      transform: perspective(900px) translateZ(-34px) rotateX(5deg) scale(0.96);
+      filter: blur(2px);
+    }
+    100% {
+      opacity: 0;
+      transform: perspective(900px) translateZ(-120px) rotateX(14deg) scale(0.88);
+      filter: blur(10px);
+    }
+  }
+
+  /* Live-view click ripple — re-mounted per interaction seq, plays once. */
+  --animate-live-click-ripple: live-click-ripple 700ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes live-click-ripple {
+    0% {
+      opacity: 0.85;
+      transform: translate(-50%, -50%) scale(0.4);
+    }
+    100% {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(2.4);
+    }
+  }
+
+  /* Companion sleep Zs (chat/agent-companion.tsx) — four staggered drifts
+     up-and-right while the agent idles (user-supplied sway animation). */
+  --animate-companion-z: companion-z 2s ease-out both;
+  @keyframes companion-z {
+    0% {
+      transform: translate(0, 0) rotate(0deg);
+      opacity: 1;
+    }
+    100% {
+      transform: translate(44px, -56px) rotate(30deg);
+      opacity: 0;
+    }
+  }
 }
 
 /* Light theme — the OPT-IN counterpart (theme toggle / Settings →
@@ -192,6 +256,105 @@
   --chat-user-bg: #ecfeff;
   --chat-user-fg: #0a0a0a;
   --chat-user-border: #cffafe;
+}
+
+/* =========================================================================
+   Switch & Checkbox — physical, tactile primitives (Task 8).
+   Switch: iOS-style physical toggle adapted from Uiverse
+   (JaydipPrajapati1910, "switch") — recessed 48×24 pill track (inset
+   0 4px 6px depth + top highlight + hairline border), raised light
+   thumb with twin inset grip slots, twin indicator LEDs at the far end
+   of the track (dull red standby → lit green active). Checkbox:
+   tactile box adapted from Uiverse (adamgiebl) — 28px rounded-[10px]
+   plate, layered inset shadows (5px inner + 24px vignette ring + light
+   bevel), inner 18px lighter square ("double square"), green checked
+   fill that grows in via the animatable 0px → 2px/24px inset rings,
+   plus a soft ~10px glow.
+   Every color is a CSS var so the dark/light palettes AND the live
+   brand color flow straight through: the ACTIVE switch track composes
+   var(--color-primary) (never a hardcoded indigo/blue). rgba() values
+   below are shadows — physically dark in both themes by design.
+   ========================================================================= */
+:root {
+  /* Switch — dark canvas (app default) */
+  --switch-track: rgb(255 255 255 / 0.08);
+  --switch-track-active: var(--color-primary);
+  --switch-thumb: #eef1f5;
+  --switch-border: rgb(255 255 255 / 0.14);
+  --switch-indicator: #e05c5c;
+  --switch-indicator-active: #4ade80;
+  --switch-shadow-inset: inset 0 4px 6px rgb(0 0 0 / 0.45),
+    inset 0 1px 0 rgb(255 255 255 / 0.07);
+  --switch-shadow-thumb: 0 2px 4px rgb(0 0 0 / 0.5), 0 0 1px rgb(0 0 0 / 0.55),
+    inset 0 0 0 1px rgb(0 0 0 / 0.12), inset 0 1px 0 rgb(255 255 255 / 0.9);
+
+  /* Checkbox — dark canvas (app default). The 4th (glow) layer of the
+     unchecked shadow is a transparent 0-spread pad so the checked
+     glow interpolates smoothly instead of snapping. */
+  --checkbox-surface: rgb(255 255 255 / 0.09);
+  --checkbox-inner: rgb(255 255 255 / 0.2);
+  --checkbox-checked: #22c55e;
+  --checkbox-checked-glow: rgb(34 197 94 / 0.45);
+  --checkbox-shadow: inset 0 0 5px rgb(0 0 0 / 0.55),
+    inset 0 0 0 0px var(--checkbox-checked), inset 0 0 0 24px rgb(0 0 0 / 0.4),
+    0 0 0 0 transparent, 0 1px 0 rgb(255 255 255 / 0.08);
+  --checkbox-shadow-checked: inset 0 0 5px rgb(0 0 0 / 0.4),
+    inset 0 0 0 2px var(--checkbox-checked),
+    inset 0 0 0 24px var(--checkbox-checked),
+    0 0 10px 2px var(--checkbox-checked-glow), 0 1px 0 rgb(255 255 255 / 0.12);
+}
+:root.light:not(.custom-scheme) {
+  /* Switch — light canvas */
+  --switch-track: rgb(15 23 42 / 0.1);
+  --switch-track-active: var(--color-primary);
+  --switch-thumb: #ffffff;
+  --switch-border: rgb(15 23 42 / 0.18);
+  --switch-indicator: #c24141;
+  --switch-indicator-active: #16a34a;
+  --switch-shadow-inset: inset 0 4px 6px rgb(0 0 0 / 0.18),
+    inset 0 1px 0 rgb(255 255 255 / 0.8);
+  --switch-shadow-thumb: 0 2px 4px rgb(0 0 0 / 0.25), 0 0 1px rgb(0 0 0 / 0.2),
+    inset 0 0 0 1px rgb(15 23 42 / 0.16), inset 0 1px 0 rgb(255 255 255 / 0.9);
+
+  /* Checkbox — light canvas */
+  --checkbox-surface: #eef1f5;
+  --checkbox-inner: #e2e5ea;
+  --checkbox-checked: #16a34a;
+  --checkbox-checked-glow: rgb(22 163 74 / 0.4);
+  --checkbox-shadow: inset 0 0 5px rgb(0 0 0 / 0.22),
+    inset 0 0 0 0px var(--checkbox-checked), inset 0 0 0 24px rgb(0 0 0 / 0.1),
+    0 0 0 0 transparent, 0 1px 0 rgb(255 255 255 / 0.9);
+  --checkbox-shadow-checked: inset 0 0 5px rgb(0 0 0 / 0.35),
+    inset 0 0 0 2px var(--checkbox-checked),
+    inset 0 0 0 24px var(--checkbox-checked),
+    0 0 10px 2px var(--checkbox-checked-glow), 0 1px 0 rgb(255 255 255 / 0.45);
+}
+/* Explicit .dark mirror (repo palette pattern) — same values as the
+   class-less :root default above so <html class="dark"> and the SSR
+   shell paint the exact same tactile primitives. */
+:root.dark:not(.custom-scheme) {
+  --switch-track: rgb(255 255 255 / 0.08);
+  --switch-track-active: var(--color-primary);
+  --switch-thumb: #eef1f5;
+  --switch-border: rgb(255 255 255 / 0.14);
+  --switch-indicator: #e05c5c;
+  --switch-indicator-active: #4ade80;
+  --switch-shadow-inset: inset 0 4px 6px rgb(0 0 0 / 0.45),
+    inset 0 1px 0 rgb(255 255 255 / 0.07);
+  --switch-shadow-thumb: 0 2px 4px rgb(0 0 0 / 0.5), 0 0 1px rgb(0 0 0 / 0.55),
+    inset 0 0 0 1px rgb(0 0 0 / 0.12), inset 0 1px 0 rgb(255 255 255 / 0.9);
+
+  --checkbox-surface: rgb(255 255 255 / 0.09);
+  --checkbox-inner: rgb(255 255 255 / 0.2);
+  --checkbox-checked: #22c55e;
+  --checkbox-checked-glow: rgb(34 197 94 / 0.45);
+  --checkbox-shadow: inset 0 0 5px rgb(0 0 0 / 0.55),
+    inset 0 0 0 0px var(--checkbox-checked), inset 0 0 0 24px rgb(0 0 0 / 0.4),
+    0 0 0 0 transparent, 0 1px 0 rgb(255 255 255 / 0.08);
+  --checkbox-shadow-checked: inset 0 0 5px rgb(0 0 0 / 0.4),
+    inset 0 0 0 2px var(--checkbox-checked),
+    inset 0 0 0 24px var(--checkbox-checked),
+    0 0 10px 2px var(--checkbox-checked-glow), 0 1px 0 rgb(255 255 255 / 0.12);
 }
 
 /* =========================================================================
