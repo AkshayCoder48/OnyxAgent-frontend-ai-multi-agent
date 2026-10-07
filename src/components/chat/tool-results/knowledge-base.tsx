@@ -68,7 +68,7 @@ export function parseKBResult(toolCall: ToolCall): {
   const toChip = (line: unknown): MemoryChip | null => {
     if (typeof line !== "string" || !line.trim()) return null;
     const m = /"([^"]+)"|“([^”]+)”/.exec(line);
-    const text = m ? (m[1] ?? m[2]) : line;
+    const text = m ? (m[1] ?? m[2] ?? line) : line;
     return { id: line.slice(0, 80), text: text.length > 90 ? `${text.slice(0, 89)}…` : text, change: "existing" };
   };
   if (action === "search" && Array.isArray(obj.results)) {

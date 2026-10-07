@@ -36,6 +36,7 @@ export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -47,10 +48,11 @@ CMD = os.path.join(DIR, "cmd.json")
 SHOTS = os.path.join(DIR, "shots")
 PROFILE = os.path.join(DIR, "profile")
 DOWNLOADS = "/home/user/downloads"
+RECORDINGS = os.path.join(DIR, "recordings")
 READY = os.path.join(DIR, ".ready")
 LIVE_JSON = os.path.join(DIR, "live.json")
 LIVE_JPG = os.path.join(DIR, "live.jpg")
-for d in (DIR, SHOTS, DOWNLOADS):
+for d in (DIR, SHOTS, DOWNLOADS, RECORDINGS):
     os.makedirs(d, exist_ok=True)
 
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-blink-features=AutomationControlled", "--remote-debugging-port=9222"]
@@ -814,6 +816,237 @@ def do_screenshot(cmd):
     })
 
 
+# ── SCREEN RECORDING (PRD §6) ─────────────────────────────────────────────
+# screen_record.start/stop/status — captures the ACTIVE tab at ~2fps through
+# a SIDE THREAD with its OWN CDP connection (the sync Playwright API is
+# thread-affine; this is the same proven pattern as the live-cast loop), then
+# assembles the frames into a playable .mp4 with the imageio-ffmpeg wheel
+# (installs on demand — a static ffmpeg binary, no apt needed). Recording
+# NEVER starts automatically; only when the agent explicitly asks for it.
+
+REC_LOCK = threading.Lock()
+REC = {
+    "on": False,          # capturing right now
+    "frames": [],         # captured jpeg frames (bytes), oldest first
+    "bytes": 0,           # total captured bytes (size cap accounting)
+    "started": None,      # wall-clock ms when start was requested
+    "lastFrame": 0.0,     # pacing gate (min interval between kept frames)
+    "thread": None,
+    "stop_evt": None,
+    "err": None,
+}
+REC_MAX_BYTES = 220 * 1024 * 1024   # ~55 min at 2fps/30KB — hard ceiling
+REC_MIN_INTERVAL = 0.45             # ~2 fps keep rate
+
+
+def rec_cast_loop(stop_evt):
+    """The recording daemon: own CDP connection, Page.startScreencast on the
+    ACTIVE tab (follows tab switches exactly like the live cast), frames
+    appended into REC['frames']. Never touches the main loop's Playwright
+    objects; a failure here only sets REC['err'] — the command loop is
+    unaffected."""
+    pwp = None
+    try:
+        from playwright.sync_api import sync_playwright
+        pwp = sync_playwright().start()
+        rec_browser = pwp.chromium.connect_over_cdp("http://127.0.0.1:9222", timeout=8000)
+        cdp = None
+        watched = None
+        while not stop_evt.is_set():
+            page = live_pick_page(rec_browser)
+            if page is not watched:
+                if cdp is not None:
+                    try:
+                        cdp.send("Page.stopScreencast")
+                    except Exception:
+                        pass
+                    cdp = None
+                watched = page
+                if page is not None:
+                    try:
+                        cdp = page.context.new_cdp_session(page)
+
+                        def _on_frame(frame, _cdp=cdp):
+                            try:
+                                sid = frame.get("sessionId")
+                                if sid is not None:
+                                    try:
+                                        _cdp.send("Page.screencastFrameAck", {"sessionId": sid})
+                                    except Exception:
+                                        pass
+                                with REC_LOCK:
+                                    if not REC["on"]:
+                                        return
+                                    now = time.time()
+                                    if now - REC["lastFrame"] < REC_MIN_INTERVAL:
+                                        return
+                                    data = frame.get("data") or ""
+                                    if not data:
+                                        return
+                                    raw = base64.b64decode(data)
+                                    if REC["bytes"] + len(raw) > REC_MAX_BYTES:
+                                        REC["on"] = False
+                                        REC["err"] = "recording reached its size cap (%d frames kept)" % len(REC["frames"])
+                                        return
+                                    REC["frames"].append(raw)
+                                    REC["bytes"] += len(raw)
+                                    REC["lastFrame"] = now
+                            except Exception:
+                                pass
+
+                        cdp.on("Page.screencastFrame", _on_frame)
+                        cdp.send("Page.startScreencast", {
+                            "format": "jpeg",
+                            "quality": 60,
+                            "maxWidth": 1152,
+                            "maxHeight": 720,
+                            "everyNthFrame": 12,
+                        })
+                        log("screen recording attached to the active tab")
+                    except Exception as e:
+                        log("screen recording attach failed: %s" % e)
+                        cdp = None
+            time.sleep(0.5)
+    except Exception as e:
+        with REC_LOCK:
+            REC["err"] = "recording stream failed: %s" % e
+    finally:
+        try:
+            if pwp is not None:
+                pwp.stop()
+        except Exception:
+            pass
+
+
+def _ensure_ffmpeg():
+    """imageio-ffmpeg ships a static ffmpeg binary as a wheel — install on
+    demand. Returns True when the encoder is importable."""
+    try:
+        import imageio_ffmpeg  # noqa: F401
+        return True
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "imageio-ffmpeg"],
+            capture_output=True, timeout=240,
+        )
+        import imageio_ffmpeg  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def do_screen_record(cmd):
+    op = str(cmd.get("operation") or cmd.get("op") or "status").strip().lower()
+    if op == "start":
+        with REC_LOCK:
+            if REC["on"]:
+                return state_payload({
+                    "success": True, "action": "screen_record", "operation": "start",
+                    "recording": True, "startedAt": REC["started"],
+                    "note": "a recording is already in progress",
+                })
+            REC["on"] = True
+            REC["frames"] = []
+            REC["bytes"] = 0
+            REC["err"] = None
+            REC["started"] = int(time.time() * 1000)
+            REC["lastFrame"] = 0.0
+            stop_evt = threading.Event()
+            REC["stop_evt"] = stop_evt
+        os.makedirs(RECORDINGS, exist_ok=True)
+        t = threading.Thread(target=rec_cast_loop, args=(stop_evt,), daemon=True)
+        with REC_LOCK:
+            REC["thread"] = t
+        t.start()
+        # Warm the encoder dependency in the background — it is usually
+        # ready by the time recording stops.
+        threading.Thread(target=_ensure_ffmpeg, daemon=True).start()
+        with REC_LOCK:
+            started = REC["started"]
+        return state_payload({
+            "success": True, "action": "screen_record", "operation": "start",
+            "recording": True, "startedAt": started,
+            "message": "Screen recording started — it keeps running while you continue browsing. Call screen_record with operation 'stop' to finish and get the video.",
+        })
+    if op == "stop":
+        with REC_LOCK:
+            if not REC["on"] and not REC["frames"]:
+                return err_payload("not_recording", "No recording is in progress (call screen_record with operation 'start' first).", False)
+            REC["on"] = False
+            frames = list(REC["frames"])
+            REC["frames"] = []
+            REC["bytes"] = 0
+            started = REC["started"]
+            REC["started"] = None
+            stop_evt = REC["stop_evt"]
+            REC["stop_evt"] = None
+            thread = REC["thread"]
+            REC["thread"] = None
+            rec_err = REC["err"]
+            REC["err"] = None
+        if stop_evt is not None:
+            stop_evt.set()
+        if thread is not None:
+            thread.join(timeout=5)
+        if not frames:
+            return err_payload(
+                "recording_failed",
+                "The recording captured no frames.%s" % (" " + rec_err if rec_err else ""),
+                True,
+            )
+        if not _ensure_ffmpeg():
+            return err_payload(
+                "recording_failed",
+                "No video encoder is available in the sandbox (pip install imageio-ffmpeg failed) — %d frames were captured but could not be assembled into a video." % len(frames),
+                True,
+            )
+        import imageio_ffmpeg
+        tmpdir = os.path.join(RECORDINGS, "rec-%d" % int(time.time()))
+        os.makedirs(tmpdir, exist_ok=True)
+        out_path = os.path.join(RECORDINGS, "recording-%d.mp4" % int(time.time()))
+        try:
+            for i, raw in enumerate(frames):
+                with open(os.path.join(tmpdir, "f%06d.jpg" % i), "wb") as f:
+                    f.write(raw)
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            subprocess.run(
+                [exe, "-y", "-framerate", "2", "-i", os.path.join(tmpdir, "f%06d.jpg"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path],
+                capture_output=True, timeout=900,
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
+            return err_payload("recording_failed", "Assembling the recording into a video failed.", True)
+        duration = round(len(frames) / 2.0, 1)
+        return state_payload({
+            "success": True, "action": "screen_record", "operation": "stop",
+            "recording": False,
+            "file": out_path,
+            "name": os.path.basename(out_path),
+            "frames": len(frames),
+            "durationSec": duration,
+            "sizeBytes": os.path.getsize(out_path),
+            "startedAt": started,
+            "message": "Screen recording saved (%s, %ss)." % (os.path.basename(out_path), duration),
+        })
+    # status
+    with REC_LOCK:
+        on = REC["on"]
+        n = len(REC["frames"])
+        started = REC["started"]
+        rec_err = REC["err"]
+    out = {"success": True, "action": "screen_record", "operation": "status", "recording": on, "frames": n}
+    if started:
+        out["startedAt"] = started
+        out["durationMs"] = int(time.time() * 1000) - started
+    if rec_err:
+        out["note"] = rec_err
+    return state_payload(out)
+
+
 def do_get_page(cmd):
     p = active_page()
     try:
@@ -822,6 +1055,46 @@ def do_get_page(cmd):
         text = ""
     text = (text or "")[:6000]
     return state_payload({"success": True, "action": "get_page", "text": text})
+
+
+def do_read(cmd):
+    """Alias of get_page (PRD §3 unified verb surface)."""
+    out = do_get_page(cmd)
+    out["action"] = "read"
+    return out
+
+
+FORMS_JS = """
+(() => {
+  var out = [];
+  var nodes = document.querySelectorAll('input, textarea, select');
+  for (var el of nodes) {
+    var r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
+    var type = (el.getAttribute('type') || el.tagName.toLowerCase());
+    if (type === 'hidden') continue;
+    var lbl = '';
+    try {
+      if (el.labels && el.labels.length) lbl = (el.labels[0].innerText || '').trim().slice(0, 60);
+    } catch (e) {}
+    if (!lbl) lbl = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '';
+    var row = { tag: el.tagName.toLowerCase(), type: type, label: lbl.slice(0, 60) || null };
+    if (el.id) row.id = el.id;
+    if (type === 'checkbox' || type === 'radio') row.checked = !!el.checked;
+    else if (type !== 'password') row.value = String(el.value || '').slice(0, 80);
+    if (el.disabled) row.disabled = true;
+    if (el.tagName === 'SELECT') {
+      var opts = [];
+      for (var o of el.selectedOptions) opts.push(String(o.value || o.text).slice(0, 60));
+      row.selected = opts.slice(0, 4);
+      row.optionCount = el.options.length;
+    }
+    out.push(row);
+    if (out.length >= 40) break;
+  }
+  return out;
+})()
+"""
 
 
 def do_get_elements(cmd):
@@ -841,6 +1114,63 @@ def do_get_elements(cmd):
             continue
         out.append(row)
     return state_payload({"success": True, "action": "get_elements", "count": len(out), "elements": out})
+
+
+def do_inspect(cmd):
+    """Alias of get_elements (PRD §3 unified verb surface)."""
+    out = do_get_elements(cmd)
+    out["action"] = "inspect"
+    return out
+
+
+def do_snapshot(cmd):
+    """STRUCTURED PAGE SNAPSHOT (PRD §5) — a machine-readable representation
+    of the current page optimized for agent reasoning: URL + title +
+    viewport, visible text, interactive elements (with refs the agent can
+    target in subsequent actions), ARIA hints and form field state, all in
+    ONE payload. Refs stay compatible with click/type/select targets."""
+    global ref_map
+    p = active_page()
+    limit = max(1, min(160, int(cmd.get("limit") or 80)))
+    flt = str(cmd.get("filter") or "").lower()
+    els = p.evaluate(ELEMENTS_JS)
+    ref_map = {}
+    elements = []
+    for i, el in enumerate(els[:limit]):
+        ref = "e%d" % (i + 1)
+        ref_map[ref] = el["selector"]
+        if flt and flt not in (el.get("text") or "").lower() and flt not in (el.get("selector") or "").lower() and flt not in str(el.get("role") or "").lower():
+            continue
+        row = {
+            "ref": ref,
+            "tag": el.get("tag"),
+            "role": el.get("role"),
+            "text": (el.get("text") or "")[:90] or None,
+            "selector": el.get("selector"),
+        }
+        if el.get("type"):
+            row["type"] = el.get("type")
+        if el.get("name"):
+            row["name"] = el.get("name")
+        if el.get("box"):
+            row["box"] = el.get("box")
+        elements.append(row)
+    try:
+        text = p.evaluate("() => document.body ? document.body.innerText : ''")
+    except Exception:
+        text = ""
+    try:
+        forms = p.evaluate(FORMS_JS) or []
+    except Exception:
+        forms = []
+    return state_payload({
+        "success": True,
+        "action": "snapshot",
+        "text": (text or "")[:6000],
+        "count": len(elements),
+        "elements": elements,
+        "forms": forms,
+    })
 
 
 def do_evaluate(cmd):
@@ -1086,7 +1416,11 @@ HANDLERS = {
     "scroll": do_scroll,
     "wait": do_wait,
     "screenshot": do_screenshot,
+    "screen_record": do_screen_record,
+    "snapshot": do_snapshot,
+    "read": do_read,
     "get_page": do_get_page,
+    "inspect": do_inspect,
     "get_elements": do_get_elements,
     "evaluate": do_evaluate,
     "select": do_select,
@@ -1098,6 +1432,9 @@ HANDLERS = {
     "go_back": lambda c: do_history(dict(c, action="go_back")),
     "go_forward": lambda c: do_history(dict(c, action="go_forward")),
     "refresh": lambda c: do_history(dict(c, action="refresh")),
+    "back": lambda c: do_history(dict(c, action="go_back")),
+    "forward": lambda c: do_history(dict(c, action="go_forward")),
+    "reload": lambda c: do_history(dict(c, action="refresh")),
     "console": do_console,
     "network": do_network,
     "get_state": do_state,

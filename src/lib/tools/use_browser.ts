@@ -26,10 +26,17 @@ const ACTIONS = [
   "press",
   "scroll",
   "wait",
+  "read",
+  "snapshot",
   "screenshot",
+  "screen_record",
+  "inspect",
+  "evaluate",
+  "back",
+  "forward",
+  "reload",
   "get_page",
   "get_elements",
-  "evaluate",
   "select",
   "upload",
   "download",
@@ -41,7 +48,7 @@ const ACTIONS = [
   "refresh",
 ] as const;
 
-const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page inspection, forms, uploads and downloads. Pass \`action\` plus only the fields that action needs:
+const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. Pass \`action\` plus only the fields that action needs:
 
 - "navigate" (url) — open a URL (https://… or http://localhost:PORT for sandbox-local servers).
 - "click" (target) — click a link/button/element.
@@ -49,15 +56,17 @@ const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real bro
 - "press" (key) — press a keyboard key (e.g. "Enter", "Control+a").
 - "scroll" (direction?, amount?) — scroll the page (down/up/left/right).
 - "wait" (ms? | selector? | text?) — wait for a moment / element / text.
-- "screenshot" (fullPage?) — capture the current page as an image (returned inline).
-- "get_page" () — compact page summary: URL, title, visible text.
-- "get_elements" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors. Use the returned "ref" (e.g. "e12") or selector in subsequent actions.
+- "read" () — compact page summary: URL, title, visible text.
+- "snapshot" (filter?, limit?) — STRUCTURED page snapshot for reasoning: visible text + every interactive element with refs + roles/ARIA + form field state, in one machine-readable payload. The returned "ref" (e.g. "e12") or selector works in subsequent actions.
+- "screenshot" (fullPage?) — capture the current page as an image (returned inline, full page where supported).
+- "screen_record" (operation) — screen recording: operation "start" begins capturing the active tab (keeps recording while you continue working), "stop" finishes and returns the playable video file, "status" reports the current recording state. Recording NEVER starts automatically — only when you explicitly request it.
+- "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors.
 - "evaluate" (code) — run JavaScript in the page and get the result.
 - "select" (target, value) — choose an option in a <select> dropdown.
 - "upload" (target, files) — upload WORKSPACE files (paths like "uploads/report.pdf") to a file input.
 - "download" (url? | target?) — capture a download into the workspace (~/downloads), returns the file path.
 - "new_tab" (url?) / "switch_tab" (tab: index or id) / "close_tab" (tab?) — tab management.
-- "go_back" / "go_forward" / "refresh" — history navigation.
+- "back" / "forward" / "reload" — history navigation (aliases: go_back / go_forward / refresh).
 
 TARGETING (prefer semantic): a target is EITHER a string selector (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]", "ref=e12") OR an object like {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
 
@@ -75,6 +84,11 @@ registerTool(
         type: "string",
         enum: [...ACTIONS],
         description: "The browser operation to perform.",
+      },
+      operation: {
+        type: "string",
+        enum: ["start", "stop", "status"],
+        description: "Sub-operation for the screen_record action: 'start' begins recording the active tab, 'stop' finishes and returns the video file, 'status' reports the recording state.",
       },
       url: { type: "string", description: "URL to open (navigate / new_tab / download)." },
       target: {
@@ -153,6 +167,7 @@ registerTool(
     // Build the wire command (only the fields the driver knows).
     const cmd: Record<string, unknown> = { action };
     for (const k of [
+      "operation",
       "url",
       "target",
       "text",
@@ -178,9 +193,15 @@ registerTool(
       ctx.onToolOutput?.("", line, "stdout");
     };
 
+    // OPERATION-AWARE TIMEOUTS (PRD §9): the ceiling belongs to the
+    // OPERATION, never to the overall task. Recording assembly (stop)
+    // installs the video encoder and encodes — it gets the longest budget;
+    // screenshots / snapshots / downloads get the mid budget; everything
+    // else rides the session manager's default (90s) or the first-boot
+    // budget (6 min).
+    const HEAVY_OPS = new Set(["screen_record", "screenshot", "snapshot", "download"]);
     const result: BrowserCommandResult = await sendBrowserCommand(sbx.client, cmd, {
-      // Screenshots / downloads / first boot can be slow; the session
-      // manager already sizes generous timeouts for those cases.
+      timeoutMs: HEAVY_OPS.has(action) ? 8 * 60_000 : undefined,
       onProgress,
     });
 

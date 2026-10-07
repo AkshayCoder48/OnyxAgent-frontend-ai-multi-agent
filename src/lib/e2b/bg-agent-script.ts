@@ -1171,8 +1171,10 @@ async function streamRoundEvents(state, round, finalRound) {
   };
 
   const resetForRetry = () => {
-    // Pass-through emitters hold nothing — retries never duplicate deltas
-    // (retry loop only runs BEFORE any content arrived).
+    // Rewinds the accumulators for a re-stream of this round. With the
+    // REWIND+RETRY policy the loop can run even AFTER partial content
+    // arrived: the round_retry event tells the browser to rewind its UI
+    // parts first, so the re-stream can never duplicate content (PRD §17).
     content = "";
     reasoning = "";
     emittedLen = 0;
@@ -1184,8 +1186,26 @@ async function streamRoundEvents(state, round, finalRound) {
     preEmitted.clear();
   };
 
-  // Retry loop — only BEFORE any content arrived (no duplicate deltas).
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  // Retry loop. Two failure classes with OPPOSITE retry policies:
+  //   • SHAPE/PERMANENT (HTTP 400 self-heal ladder): capped at MAX_ATTEMPTS —
+  //     a permanently invalid request must not spin forever (PRD §15).
+  //   • TRANSIENT/TRANSPORT (network, dead wire, premature stream cut,
+  //     provider stream error — including gateways that answer with a JSON
+  //     error payload injected INTO the SSE stream — and 5xx/408): retried
+  //     INDEFINITELY with capped exponential backoff (2s→30s). The TASK owns
+  //     its lifetime (PRD §9/§19): no wall-clock cap, no attempt cap — a
+  //     transport blip never terminates the run. Only an explicit user Stop
+  //     ends it. When partial content already streamed, the round is
+  //     REWOUND in the UI first (round_retry event) so the re-stream can
+  //     never duplicate content.
+  let ladderSteps = 0;      // counted 400 self-heal continues (capped)
+  let transientAttempt = 0; // transient failures since this round started
+  const nextTransientDelay = () => {
+    transientAttempt += 1;
+    // 2s, 4s, 8s, 16s, 30s, 30s, … (PRD §15 backoff ladder)
+    return Math.min(2000 * transientAttempt, 30_000);
+  };
+  for (let attempt = 1; ; attempt++) {
     let res = null;
     let fetchErr = null;
     // NO HARD TIMEOUT: the previous 600-second setTimeout(ac.abort) was
@@ -1220,7 +1240,8 @@ async function streamRoundEvents(state, round, finalRound) {
       // (this attempt doesn't count as a failure).
       const detail400 = await res.text().catch(() => "");
       const badParam = parseUnsupportedParam(detail400);
-      if (badParam && body[badParam] !== undefined && !state.paramBans.includes(badParam)) {
+      if (badParam && body[badParam] !== undefined && !state.paramBans.includes(badParam) && ladderSteps < MAX_ATTEMPTS) {
+        ladderSteps += 1;
         state.paramBans.push(badParam);
         delete body[badParam];
         if (badParam === "reasoning_effort") delete body.thinking;
@@ -1236,9 +1257,11 @@ async function streamRoundEvents(state, round, finalRound) {
       // this specific error and retry the same request WITH it restored.
       if (
         state.replayReasoning !== true &&
+        ladderSteps < MAX_ATTEMPTS &&
         /reasoning_content/i.test(detail400) &&
         /must be passed|required|pass(ed)? back|include/i.test(detail400)
       ) {
+        ladderSteps += 1;
         state.replayReasoning = true;
         body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
         emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "restored reasoning_content replay (provider requires it)" });
@@ -1248,12 +1271,15 @@ async function streamRoundEvents(state, round, finalRound) {
       // compact system → dropped system → no tools. Each step is learned
       // into state.wireCompat for the rest of this run; the body is
       // rebuilt (messages re-transformed, tools omitted when learned).
-      const healReason = nextWireCompatStep(state, {
-        messages: state.messages,
-        hasToolsParam: body.tools !== undefined,
-        errorText: detail400,
-      });
+      const healReason = ladderSteps < MAX_ATTEMPTS
+        ? nextWireCompatStep(state, {
+            messages: state.messages,
+            hasToolsParam: body.tools !== undefined,
+            errorText: detail400,
+          })
+        : null;
       if (healReason) {
+        ladderSteps += 1;
         body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
         if (state.wireCompat.noTools) {
           delete body.tools;
@@ -1266,11 +1292,12 @@ async function streamRoundEvents(state, round, finalRound) {
     if (res && !res.ok) {
       // RATE-LIMIT POLICY (user-requested change): 429/529 is NOT retried
       // — fail fast with a clear message (auto-retrying burns the quota).
-      // Only transient 5xx / 408 still retry with backoff.
+      // Transient 5xx / 408 retry INDEFINITELY with capped backoff (a
+      // gateway hiccup is transport, not task failure — PRD §15/§16).
       const retryable = (res.status >= 500 || res.status === 408) && res.status !== 529;
-      if (retryable && attempt < MAX_ATTEMPTS) {
-        const delay = Math.min(2000 * attempt, 15_000);
-        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "HTTP " + res.status });
+      if (retryable) {
+        const delay = nextTransientDelay();
+        emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "HTTP " + res.status });
         await sleep(delay);
         continue;
       }
@@ -1286,9 +1313,10 @@ async function streamRoundEvents(state, round, finalRound) {
       return { content: "", reasoning: "", toolCalls: [], error: "LLM HTTP " + res.status + " " + cleanDetail(detail, res.status) + requestShapeHint(state, round, body) };
     }
     if (!res || !res.body) {
-      if (fetchErr && attempt < MAX_ATTEMPTS) {
-        const delay = Math.min(2000 * attempt, 15_000);
-        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: "network: " + fetchErr });
+      if (fetchErr) {
+        // Pure network failure — TRANSIENT, retried indefinitely (PRD §15).
+        const delay = nextTransientDelay();
+        emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "network: " + fetchErr });
         await sleep(delay);
         continue;
       }
@@ -1303,7 +1331,13 @@ async function streamRoundEvents(state, round, finalRound) {
         const msg = json.choices?.[0]?.message ?? {};
         return await feedCompleteMessage(msg, round, feedDeltas, finishStream);
       } catch (e) {
-        return { content: "", reasoning: "", toolCalls: [], error: "LLM JSON parse failed: " + (e && e.message ? e.message : String(e)) };
+        // A body that CLAIMS application/json but fails to parse (gateway
+        // glitch / HTML error page) is TRANSIENT — rewind nothing (nothing
+        // streamed) and retry (PRD §13: malformed payloads never kill the run).
+        const delay = nextTransientDelay();
+        emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "LLM JSON parse failed: " + (e && e.message ? e.message : String(e)) });
+        await sleep(delay);
+        continue;
       }
     }
 
@@ -1389,36 +1423,46 @@ async function streamRoundEvents(state, round, finalRound) {
       try { ac.abort(); } catch {} // release the connection
     }
     // PREMATURE STREAM CUT: output arrived but the stream ended with no
-    // completion signal at all. Route it through the SAME handling as a
-    // mid-stream failure below: zero-content cuts retry (duplicate-free),
-    // partial-content cuts end in an error state (PRD §26 — the user is
-    // told the answer is truncated, never a silent "done").
+    // completion signal at all. Route it through the SAME transient handling
+    // as a mid-stream failure below: rewind + retry (PRD §13-§17).
     if (
       !streamError && !sawFinishReason && !sawDoneMarker && !sawUsageChunk &&
       (content || reasoning || toolAcc.size > 0)
     ) {
-      streamError = "Response stream was cut off mid-generation (no finish signal) — the answer may be incomplete";
+      streamError = "Response stream was cut off mid-generation (no finish signal)";
     }
-    if (streamError && !content && !reasoning && toolAcc.size === 0) {
-      // Nothing streamed yet — a retry is duplicate-free.
-      if (attempt < MAX_ATTEMPTS) {
-        const delay = Math.min(2000 * attempt, 15_000);
-        emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: delay, reason: streamError });
-        resetForRetry();
-        await sleep(delay);
-        continue;
+    if (streamError) {
+      // ABORT is the only non-transient stream error — the runner is being
+      // torn down (user Stop / sandbox stop); retrying would ignore it.
+      if (/abort/i.test(streamError)) {
+        const result = await finishStream();
+        emitEvent({ t: "status", kind: "llm_end", round });
+        return { ...result, error: streamError };
       }
-      return { content: "", reasoning: "", toolCalls: [], error: streamError };
+      // TRANSIENT STREAM FAILURE → REWIND + RETRY (PRD §13-§16): network
+      // drops, dead wires, premature cuts and provider stream errors (the
+      // "json error injected into SSE stream" gateway glitch class) are
+      // TRANSPORT failures, not agent errors — they must never terminate
+      // the run. Everything the failed attempt already streamed is rewound
+      // in the UI FIRST (round_retry event → the browser processor drops
+      // its buffered deltas and rewinds the flushed parts), then the SAME
+      // round re-streams from scratch. Indefinite: backoff 2s→30s cap;
+      // the explicit user Stop stays the only authority that ends the task.
+      const hadPartial = Boolean(content || reasoning || toolAcc.size > 0);
+      if (hadPartial) {
+        emitEvent({ t: "round_retry", round });
+      }
+      const delay = nextTransientDelay();
+      emitEvent({
+        t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay,
+        reason: streamError + (hadPartial ? " — partial output rewound, retrying" : ""),
+      });
+      resetForRetry();
+      await sleep(delay);
+      continue;
     }
-    // Mid-stream failure: the partial text is ALREADY streamed + preserved
-    // in the UI — end the round in an ERROR state so the user knows the
-    // answer is truncated (PRD §26: partial response → error state, never
-    // a silent "done", never a blank replacement).
     const result = await finishStream();
     emitEvent({ t: "status", kind: "llm_end", round });
-    if (streamError) {
-      return { ...result, error: streamError };
-    }
     return result;
   }
   const r = await finishStream();
@@ -2621,19 +2665,22 @@ const TOOLS = [
   // turns keep browsing when the user's tab is closed.
   {
     name: "use_browser",
-    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page inspection, forms, uploads and downloads. Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), screenshot (fullPage?), get_page (), get_elements (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), go_back, go_forward, refresh. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
+    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), read (), snapshot (filter?, limit?), screenshot (fullPage?), screen_record (operation: 'start'|'stop'|'status'), inspect (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), back / forward / reload. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
           enum: [
-            "navigate", "click", "type", "press", "scroll", "wait", "screenshot",
-            "get_page", "get_elements", "evaluate", "select", "upload", "download",
+            "navigate", "click", "type", "press", "scroll", "wait", "read",
+            "snapshot", "screenshot", "screen_record", "inspect", "evaluate",
+            "back", "forward", "reload",
+            "get_page", "get_elements", "select", "upload", "download",
             "new_tab", "switch_tab", "close_tab", "go_back", "go_forward", "refresh",
           ],
           description: "The browser operation to perform.",
         },
+        operation: { type: "string", enum: ["start", "stop", "status"], description: "Sub-operation for screen_record: 'start' begins recording, 'stop' finishes and returns the video file, 'status' reports the state." },
         url: { type: "string", description: "URL to open (navigate / new_tab / download)." },
         target: { description: "Element to act on: a selector string or a semantic object ({role,name} / {text} / {label} / {placeholder} / {css} / {xpath} / {ref})." },
         text: { type: "string", description: "Text to type (type action)." },
@@ -2646,8 +2693,8 @@ const TOOLS = [
         ms: { type: "number", description: "Milliseconds to wait (wait action, default 1000)." },
         selector: { type: "string", description: "Selector to wait for (wait action)." },
         fullPage: { type: "boolean", description: "Capture the full page (screenshot action)." },
-        filter: { type: "string", description: "Substring filter for get_elements." },
-        limit: { type: "number", description: "Max elements for get_elements (default 60)." },
+        filter: { type: "string", description: "Substring filter for snapshot / inspect / get_elements." },
+        limit: { type: "number", description: "Max elements for snapshot / inspect / get_elements (default 60-80)." },
         value: { type: "string", description: "Option value to select (select action)." },
         files: { type: "array", items: { type: "string" }, description: "Workspace file paths to upload (upload action)." },
         tab: { description: "Tab index (number) or tab id like 'tab_2' (switch_tab / close_tab)." },
@@ -2662,11 +2709,12 @@ const TOOLS = [
         return { kind: "browser", success: false, action, error: { type: "browser_startup_failed", message: booted.error, recoverable: true } };
       }
       const cmd = { action };
-      for (const k of ["url", "target", "text", "submit", "clear", "key", "code", "direction", "amount", "ms", "selector", "fullPage", "filter", "limit", "value", "files", "tab"]) {
+      for (const k of ["operation", "url", "target", "text", "submit", "clear", "key", "code", "direction", "amount", "ms", "selector", "fullPage", "filter", "limit", "value", "files", "tab"]) {
         if (args[k] !== undefined) cmd[k] = args[k];
       }
       // First browser boot (binary download) can be slow — generous ceiling.
-      const timeoutMs = 6 * 60_000;
+      // Screenshots / recording assembly can take longer still.
+      const timeoutMs = (action === "screen_record" || action === "screenshot" || action === "snapshot") ? 8 * 60_000 : 6 * 60_000;
       const result = await wsSendCommand(cmd, timeoutMs);
       if (result && result.ok === false && typeof result.error === "string") {
         // Old-driver shape — normalize into the structured error envelope.
@@ -2723,9 +2771,12 @@ const NATIVE_CODE_ONLY_TOOLS = new Set([
   "read_file_section",
   "run_terminal",
   "run_python",
-  // The browser is a native sandbox tool (the Python driver + file
-  // protocol are entirely sandbox-side) — same isolation here.
-  "use_browser",
+  // NOTE: use_browser is intentionally NOT here. It is a native sandbox
+  // tool (the Python driver + file protocol are entirely sandbox-side), so
+  // it WORKS in background turns — filtering it out made the model truthfully
+  // tell users "I don't have access to the use_browser tool this turn".
+  // BG_NATIVE_TOOL_NAMES already prevents it from being bridged back to the
+  // (closed) browser — the native implementation is the one that must stay.
 ]);
 
 async function runBridgeTool(callId, name, args) {
@@ -2938,6 +2989,11 @@ async function main() {
   // system nudge + fresh request) up to twice. Only a third empty answer
   // ends the turn as an error.
   let emptyRetries = 0;
+  // UNEXPECTED RUNNER EXCEPTIONS (PRD §15): a code-level crash inside a
+  // round is treated as transient FIRST — rewind + retry with backoff
+  // before a task is ever declared failed. The task's lifetime is owned by
+  // the run, not by a single crashed attempt.
+  let roundCrashRetries = 0;
   for (let round = 1; round <= maxRounds; round++) {
     const isFinalRound = round === maxRounds;
     if (isFinalRound && state.toolsEnabled !== false) {
@@ -2951,6 +3007,15 @@ async function main() {
     try {
       result = await streamRoundEvents(state, round, isFinalRound);
     } catch (e) {
+      if (roundCrashRetries < 5) {
+        roundCrashRetries += 1;
+        const msg = String(e && e.message ? e.message : e);
+        await emitEvent({ t: "round_retry", round });
+        await emitEvent({ t: "status", kind: "retry", round, attempt: roundCrashRetries, delayMs: Math.min(2000 * roundCrashRetries, 15_000), reason: "runner exception: " + msg });
+        await sleep(Math.min(2000 * roundCrashRetries, 15_000));
+        round--; // replay this round number
+        continue;
+      }
       const msg = String(e && e.message ? e.message : e);
       await emitEvent({ t: "error", message: msg });
       await setTerminal("error", msg);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { notFound } from "next/navigation";
 import {
   FileSearch as FileSearchIcon,
@@ -47,7 +47,8 @@ import { PageHeader } from "@/components/dashboard/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { EmptyState } from "@/components/states";
 import { MessageItem } from "@/components/chat/message-item";
-import type { ChatMessage } from "@/types";
+import { BrowserUseGroup } from "@/components/chat/tool-results/use-browser";
+import type { ChatMessage, ToolCall as ToolCallData } from "@/types";
 import {
   Alert,
   AlertDescription,
@@ -300,6 +301,11 @@ function AgentElementsShowcase() {
         </div>
 
         <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Use Browser — unified tool-call UI (settled run)</p>
+          <BrowserToolPreview />
+        </div>
+
+        <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Code diff + file tree</p>
           <CodeDiff
             filename="composer.tsx"
@@ -521,6 +527,65 @@ const COMPUTER_STEPS: readonly ComputerStep[] = [
   { id: "cu-3", action: "type", target: "input", x: 55, y: 58 },
   { id: "cu-4", action: "press", target: "Enter", x: 55, y: 58 },
 ];
+
+/** Use Browser — the unified tool-call surface (Browser-Tool Reliability
+ * PRD §8): a settled run of consecutive use_browser calls rendered as one
+ * compact, technical, collapsible tool line. Mock payloads mirror the
+ * driver's wire shapes. */
+function BrowserToolPreview() {
+  // Static mock clock — impure calls (Date.now) are banned during render.
+  const t = 1_760_000_000_000;
+  const mk = (
+    id: string,
+    action: string,
+    args: Record<string, unknown>,
+    result: unknown,
+    status: ToolCallData["status"] = "completed",
+    dur = 900,
+  ): ToolCallData => ({
+    id,
+    name: "use_browser",
+    args: { action, ...args },
+    result,
+    status,
+    startedAt: t - 30_000,
+    endedAt: t - 30_000 + dur,
+  });
+  const calls: ToolCallData[] = [
+    mk("b1", "navigate", { url: "https://example.com" }, {
+      kind: "browser", success: true, action: "navigate", status: 200,
+      url: "https://example.com", title: "Example Domain",
+      viewport: { width: 1280, height: 800 },
+    }),
+    mk("b2", "snapshot", {}, {
+      kind: "browser", success: true, action: "snapshot", count: 2,
+      url: "https://example.com", title: "Example Domain",
+      elements: [
+        { ref: "e1", tag: "a", role: "link", text: "More information...", selector: "a" },
+        { ref: "e2", tag: "input", text: null, selector: "input[type=search]" },
+      ],
+      forms: [{ tag: "input", type: "search", label: "Search", value: "" }],
+    }, "completed", 1400),
+    mk("b3", "click", { target: { role: "link", name: "More information..." } }, {
+      kind: "browser", success: true, action: "click",
+      url: "https://example.com", title: "Example Domain",
+    }, "completed", 600),
+    mk("b4", "screen_record", { operation: "stop" }, {
+      kind: "browser", success: true, action: "screen_record", operation: "stop",
+      file: "/home/user/.onyx/browser/recordings/recording-1760.json.mp4",
+      name: "recording-1760.mp4", frames: 48, durationSec: 24, sizeBytes: 1_572_864,
+    }, "completed", 5200),
+    mk("b5", "evaluate", { code: "document.title" }, {
+      kind: "browser", success: false, action: "evaluate",
+      error: { type: "evaluation_failed", message: "Page context destroyed during navigation", recoverable: true },
+    }, "error", 300),
+  ];
+  return (
+    <div className="w-full max-w-xl rounded-xl border border-border bg-secondary/40 p-3">
+      <BrowserUseGroup toolCalls={calls} />
+    </div>
+  );
+}
 
 function ComputerUsePreview() {
   const [active, setActive] = useState(COMPUTER_STEPS.length - 1);

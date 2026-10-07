@@ -385,8 +385,32 @@ function browserStep(toolCall: ToolCall): FriendlyStep {
       return { past: "Waited for the page", present: "Waiting for the page", icon: Globe };
     case "screenshot":
       return { past: "Took a screenshot", present: "Taking a screenshot", icon: Globe };
+    case "read":
+      return { past: "Read the current page", present: "Reading the current page", icon: Globe };
     case "get_page":
       return { past: "Read the current page", present: "Reading the current page", icon: Globe };
+    case "snapshot": {
+      const op = typeof args.operation === "string" ? args.operation : "";
+      return {
+        past: "Captured a page snapshot",
+        present: "Capturing a page snapshot",
+        icon: Globe,
+        detail: op || undefined,
+      };
+    }
+    case "screen_record": {
+      const op = typeof args.operation === "string" ? args.operation : "status";
+      const label =
+        op === "start" ? "Started a screen recording" : op === "stop" ? "Stopped the screen recording" : "Checked the recording status";
+      return {
+        past: label,
+        present: op === "start" ? "Starting a screen recording" : op === "stop" ? "Stopping the screen recording" : "Checking the recording status",
+        icon: Globe,
+        detail: op,
+      };
+    }
+    case "inspect":
+      return { past: "Inspected the page elements", present: "Inspecting the page elements", icon: Globe };
     case "get_elements":
       return { past: "Inspected the page elements", present: "Inspecting the page elements", icon: Globe };
     case "evaluate":
@@ -405,10 +429,16 @@ function browserStep(toolCall: ToolCall): FriendlyStep {
       return { past: "Closed a browser tab", present: "Closing a browser tab", icon: Globe };
     case "go_back":
       return { past: "Went back", present: "Going back", icon: Globe };
+    case "back":
+      return { past: "Went back", present: "Going back", icon: Globe };
     case "go_forward":
+      return { past: "Went forward", present: "Going forward", icon: Globe };
+    case "forward":
       return { past: "Went forward", present: "Going forward", icon: Globe };
     case "refresh":
       return { past: "Refreshed the page", present: "Refreshing the page", icon: Globe };
+    case "reload":
+      return { past: "Reloaded the page", present: "Reloading the page", icon: Globe };
     default:
       return { past: "Used the browser", present: "Using the browser", icon: Globe };
   }

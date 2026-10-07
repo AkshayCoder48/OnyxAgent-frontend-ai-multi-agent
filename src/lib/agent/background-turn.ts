@@ -893,15 +893,26 @@ function replayEvent(
       } else if (kind === "llm_end") {
         emit("llm_completed", { round, ts });
       } else if (kind === "retry") {
+        // Transient-failure auto-recovery banner (PRD §16): the sandbox
+        // runner retries transport/stream errors INDEFINITELY (2s→30s
+        // backoff) — there is no maxAttempts to show, just the attempt
+        // counter + the honest reason. NEVER a fatal error event.
         emit("rate_limited", {
           retryAfterMs: ev.delayMs ?? 2_000,
           attempt: ev.attempt ?? 1,
-          maxAttempts: 4,
           reason: typeof ev.reason === "string" ? ev.reason : undefined,
           ts,
         });
       }
       // "boot" and unknown kinds carry no UI state — ignored.
+      break;
+    }
+    case "round_retry": {
+      // The runner rewound a partially-streamed round (transient stream
+      // failure — PRD §17 idempotency): the processor drops buffered
+      // deltas and rewinds the flushed parts so the re-stream never
+      // duplicates content.
+      emit("round_retry", { round, ts });
       break;
     }
     case "todo_event": {

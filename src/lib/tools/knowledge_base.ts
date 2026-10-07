@@ -58,10 +58,8 @@ interface KBOpResult {
 /** Human one-line summary for a KB item (used by list/search results). */
 function summaryLine(s: KBItemSummary | KBSearchResult): string {
   const tags = s.tags.length ? ` [${s.tags.join(", ")}]` : "";
-  const excerpt =
-    "excerpt" in s && typeof (s as KBSearchResult).excerpt === "string"
-      ? ` — ${(s as KBSearchResult).excerpt.slice(0, 100)}`
-      : "";
+  const rawExcerpt = "excerpt" in s ? (s as KBSearchResult).excerpt : undefined;
+  const excerpt = typeof rawExcerpt === "string" ? ` — ${rawExcerpt.slice(0, 100)}` : "";
   return `${s.id} · (${s.type}${s.source === "ai" ? ", ai-saved" : ""}) "${s.title}"${tags}${excerpt} · updated ${s.updatedAt}`;
 }
 

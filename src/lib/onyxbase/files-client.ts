@@ -317,14 +317,15 @@ export class OnyxBaseFiles {
     const r = await this.req<Record<string, unknown>>("GET", "/v1/stats");
     if (!r.ok) throw this.fail(r, "Reading usage stats");
     const d = r.data ?? {};
+    const counts = (d.counts ?? {}) as Record<string, unknown>;
     const num = (v: unknown): number | undefined =>
       typeof v === "number" && Number.isFinite(v) ? v : undefined;
     return {
-      records: num(d.records ?? d.recordCount ?? d.counts?.records),
-      collections: num(d.collections ?? d.collectionCount ?? d.counts?.collections),
-      apiKeys: num(d.apiKeys ?? d.counts?.apiKeys),
-      logs: num(d.logs ?? d.counts?.logs),
-      files: num(d.files ?? d.fileCount ?? d.counts?.files),
+      records: num(d.records ?? d.recordCount ?? counts.records),
+      collections: num(d.collections ?? d.collectionCount ?? counts.collections),
+      apiKeys: num(d.apiKeys ?? counts.apiKeys),
+      logs: num(d.logs ?? counts.logs),
+      files: num(d.files ?? d.fileCount ?? counts.files),
       fileBytes: num(d.fileBytes ?? d.filesBytes ?? d.bytes),
       raw: d,
     };

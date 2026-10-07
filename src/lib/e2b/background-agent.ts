@@ -24,6 +24,7 @@ import { ensureToolDigest } from "@/lib/agent/tool-digest";
 export interface BgEvent {
   t:
     | "round_start"
+    | "round_retry"
     | "text_delta"
     | "reasoning_delta"
     | "tool_call"

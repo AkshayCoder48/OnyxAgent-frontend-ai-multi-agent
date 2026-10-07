@@ -564,10 +564,11 @@ export class AgentEventProcessor {
       }
 
       case "rate_limited": {
-        // Rate-limit auto-retry was REMOVED (user request) — the foreground
-        // runtime no longer emits this event. The background runner still
-        // emits it for its SELF-HEAL / transient-5xx / network retries (and
-        // for the sandbox reconnect banner). Show the honest reason.
+        // TRANSIENT-FAILURE RECOVERY BANNER (PRD §16): the runtimes retry
+        // transport/stream errors INDEFINITELY (2s→30s backoff) — this is
+        // the "Recovering…" surface, never a fatal error. maxAttempts is
+        // absent for uncapped retries; when present (legacy emitters) the
+        // old "attempt X/Y" copy is kept.
         const d = wsEvent.data as {
           retryAfterMs?: number;
           attempt?: number;
@@ -575,11 +576,15 @@ export class AgentEventProcessor {
           reason?: string;
         };
         const attempt = d.attempt ?? 1;
-        const max = d.maxAttempts ?? 3;
+        const max = d.maxAttempts;
         const secs = Math.max(1, Math.round((d.retryAfterMs ?? 1000) / 1000));
-        const text = d.reason
-          ? `Provider hiccup — retrying in ${secs}s (attempt ${attempt}/${max}): ${d.reason}`
-          : `Provider hiccup — retrying automatically in ${secs}s… (attempt ${attempt}/${max})`;
+        const text = max
+          ? d.reason
+            ? `Provider hiccup — retrying in ${secs}s (attempt ${attempt}/${max}): ${d.reason}`
+            : `Provider hiccup — retrying automatically in ${secs}s… (attempt ${attempt}/${max})`
+          : d.reason
+            ? `Recovering — ${d.reason}. Retrying in ${secs}s (attempt ${attempt}, the task keeps running).`
+            : `Recovering from a temporary stream error — retrying in ${secs}s (attempt ${attempt}, the task keeps running).`;
         this.store.getState().setRateLimitStatus(text);
         break;
       }

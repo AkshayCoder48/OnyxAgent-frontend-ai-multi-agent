@@ -306,7 +306,18 @@ interface ChatCompletionTool {
 
 // ---------------------------------------------------------------------------
 // SSE parser — turns a ReadableStream<Uint8Array> into a stream of parsed
-// JSON chunks. Tolerant of partial-event buffering and `data: [DONE]`.
+// JSON chunks. ROBUST EVENT FRAMING (Browser-Tool Reliability PRD §13):
+//   1. Buffer incoming bytes; normalize CRLF → LF (some proxies rewrite
+//      line endings — without this, "\r\n\r\n"-separated streams never
+//      split and every event was silently lost).
+//   2. Split COMPLETE events only (double newline) — partial tails stay
+//      buffered until more bytes arrive.
+//   3. Join multi-line `data:` fields with \n BEFORE parsing (a JSON payload
+//      split across data lines is ONE event, not several broken ones).
+//   4. Parse each event's JSON independently — a malformed payload is
+//      logged as a transport error and DROPPED; it can never throw, never
+//      break the loop, and never terminates the agent turn.
+//   5. `data: [DONE]` flips the sawDone out-param (premature-EOF detection).
 // ---------------------------------------------------------------------------
 
 export async function* parseSSEStream(
@@ -319,49 +330,73 @@ export async function* parseSSEStream(
 ): AsyncGenerator<Record<string, unknown>> {
   const decoder = new TextDecoder();
   let buffer = "";
+  /** Malformed-event accounting (PRD §13 §7: record, don't die). Only the
+   *  FIRST few are logged in detail — a storm of them still counts. */
+  let malformed = 0;
+
+  /** Parse ONE complete SSE block → zero or more parsed JSON payloads. */
+  const parseBlock = (rawEvent: string): Array<Record<string, unknown>> => {
+    const out: Array<Record<string, unknown>> = [];
+    const dataLines: string[] = [];
+    for (const line of rawEvent.split("\n")) {
+      const trimmedEnd = line.replace(/\r$/, "");
+      if (trimmedEnd.startsWith("data:")) {
+        dataLines.push(trimmedEnd.slice(5).replace(/^ /, ""));
+      }
+      // `event:` / `id:` / `: keepalive` comment lines are ignored — only
+      // the data payload matters for the chat-completions wire format.
+    }
+    if (dataLines.length === 0) return out;
+    const payload = dataLines.join("\n");
+    const trimmed = payload.trim();
+    if (!trimmed) return out;
+    if (trimmed === "[DONE]") {
+      if (meta) meta.sawDone = true;
+      return out;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (parsed && typeof parsed === "object") out.push(parsed);
+    } catch {
+      malformed += 1;
+      if (malformed <= 3) {
+        console.warn(
+          "[agent] SSE transport: dropped a malformed event (stream continues)",
+          trimmed.slice(0, 160),
+        );
+      }
+      // PRD §13: reject the malformed individual event, keep the stream.
+    }
+    return out;
+  };
+
   try {
     while (true) {
       if (signal?.aborted) return;
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE events are separated by `\n\n`.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      // SSE events are separated by a blank line.
       let idx: number;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const rawEvent = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        for (const line of rawEvent.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const payload = trimmed.slice(5).trim();
-          if (!payload || payload === "[DONE]") {
-            if (payload === "[DONE]" && meta) meta.sawDone = true;
-            continue;
-          }
-          try {
-            yield JSON.parse(payload) as Record<string, unknown>;
-          } catch {
-            // ignore malformed line — keep streaming.
-          }
+        for (const parsed of parseBlock(rawEvent)) {
+          yield parsed;
         }
       }
     }
-    // flush trailing partial event
-    if (buffer.trim()) {
-      for (const line of buffer.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (!payload || payload === "[DONE]") {
-          if (payload === "[DONE]" && meta) meta.sawDone = true;
-          continue;
-        }
-        try {
-          yield JSON.parse(payload) as Record<string, unknown>;
-        } catch {
-          // ignore
-        }
+    // Flush any trailing complete-looking block (stream ended).
+    const tail = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    if (tail) {
+      for (const parsed of parseBlock(tail)) {
+        yield parsed;
       }
+    }
+    if (malformed > 0) {
+      logWarn("agent", `SSE transport recovered from ${malformed} malformed event(s) — the stream continued`, {
+        context: { malformed_events: malformed },
+      });
     }
   } finally {
     try {
@@ -2181,7 +2216,20 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // once per turn — SSE reconnects, provider retries, React rerenders and
   // event replays can never trigger a second execution.
   const executedToolCallIds = new Set<string>();
-  let retryCountThisTurn = 0;
+  // TRANSIENT RETRY POLICY (Browser-Tool Reliability PRD §9/§15/§19): the
+  // turn has NO wall-clock budget and NO attempt cap for TRANSPORT-class
+  // failures (network, dead wire, stream cut, provider stream error, JSON
+  // glitch, 5xx/408) — they retry indefinitely with capped exponential
+  // backoff (1s→2s→4s→…→30s), each retry rewinding the round first
+  // (round_retry event) so re-streamed content never duplicates. Rate
+  // limits (429/529) and context errors keep their own fail-fast/handoff
+  // policies. Only an explicit user Stop ends an otherwise-healthy turn.
+  let transientRetriesThisTurn = 0;
+  const nextTransientDelayMs = () => {
+    transientRetriesThisTurn += 1;
+    // 1s, 2s, 4s, 8s, 16s, 30s, 30s, … (PRD §15 backoff ladder)
+    return Math.min(1000 * 2 ** Math.max(0, transientRetriesThisTurn - 1), 30_000);
+  };
   // "WORKED {TIME}" PANEL (PRD §§12–22): wall-clock window of this
   // generation — persisted on the final saves so a reload shows the same
   // "Worked 18s" summary (the panel's contents come from the persisted
@@ -2310,18 +2358,27 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // AUTO CONTEXT ERROR DETECTION: If the error is related to context
       // window overflow or DEGRADED functions, automatically generate a
       // handoff letter, reduce history, and retry ONCE.
-      // TRANSIENT RETRY: a genuine timeout / connection blip / anomalous
-      // stream gets up to 3 quiet retries (each logged). Rate-limit errors
-      // are deliberately NOT retried (user request): 429 fails fast with a
-      // clear message — auto-retrying would keep burning the quota.
-      const isTimeout =
-        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error/i.test(message);
-      if (isTimeout && retryCountThisTurn < 3 && round < effectiveMaxRounds) {
-        retryCountThisTurn += 1;
-        console.warn(`[agent] Timeout/network error on round ${round} (retry ${retryCountThisTurn}/3), retrying...`, message.slice(0, 100));
-        logWarn("agent", `Transient network/timeout error — auto-retrying (attempt ${retryCountThisTurn}/3)`, {
+      // TRANSIENT RETRY (PRD §15): transport-class failures (network, dead
+      // wire, stream cut, provider stream error — including gateways that
+      // inject a JSON error payload into the SSE stream — empty responses,
+      // 524s) retry INDEFINITELY with capped exponential backoff. The turn
+      // has no wall-clock budget (PRD §9/§19); only an explicit user Stop
+      // ends it. Rate-limit errors are deliberately NOT retried (user
+      // request): 429 fails fast with a clear message — auto-retrying would
+      // keep burning the quota.
+      const isTransientTransport =
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal/i.test(message);
+      // NOTE: no attempt cap and no round exclusion — even the final round
+      // re-streams after a transport blip (round -= 1 re-enters it).
+      if (isTransientTransport) {
+        const delayMs = nextTransientDelayMs();
+        console.warn(
+          `[agent] Transient transport error on round ${round} (auto-retry #${transientRetriesThisTurn} in ${Math.round(delayMs / 1000)}s) — the turn keeps running`,
+          message.slice(0, 120),
+        );
+        logWarn("agent", `Transient transport error — auto-retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn}, no cap)`, {
           detail: message,
-          context: { round, model: lastServedModel },
+          context: { round, model: lastServedModel, retry_in_ms: delayMs },
         });
         // IDEMPOTENT RETRY (timeline PRD §17): this round is about to be
         // RE-STREAMED. Everything the failed attempt already emitted
@@ -2330,11 +2387,21 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         // chunk that arrived before the failure.
         emit({
           type: "round_retry",
-          data: { round, attempt: retryCountThisTurn },
+          data: { round, attempt: transientRetriesThisTurn },
           timestamp: nowISO(),
         });
-        // Wait 1 second before retrying to let the connection recover
-        await new Promise((r) => setTimeout(r, 1000));
+        // Recovery visibility (PRD §16): the banner tells the user the
+        // agent is recovering — never a raw error dump.
+        emit({
+          type: "rate_limited",
+          data: {
+            retryAfterMs: delayMs,
+            attempt: transientRetriesThisTurn,
+            reason: "Temporary stream error — the agent is retrying automatically",
+          },
+          timestamp: nowISO(),
+        });
+        await new Promise((r) => setTimeout(r, delayMs));
         round -= 1; // don't consume a round on retry
         continue; // retry the same round
       }

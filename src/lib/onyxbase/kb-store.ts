@@ -443,7 +443,7 @@ async function writeItem(
   // leaves an orphan envelope-less chunk (harmless, invisible to the catalog).
   for (let n = 1; n <= chunks.length; n++) {
     if (chunks.length === 1) break; // inline — no chunk records
-    await kvWriteRetry(kv, chunkKey(userId, item.id, n), chunks[n - 1]);
+    await kvWriteRetry(kv, chunkKey(userId, item.id, n), chunks[n - 1] ?? "");
   }
   await kvWriteRetry(kv, itemKey(userId, item.id), JSON.stringify(envelope));
   return {
