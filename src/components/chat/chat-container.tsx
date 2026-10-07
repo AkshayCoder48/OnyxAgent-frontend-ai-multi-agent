@@ -19,8 +19,6 @@ import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import { ThinkingIndicator } from "@/components/assistant-ui/elements";
-import { AgentCompanion } from "./agent-companion";
-import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { Hourglass } from "lucide-react";
@@ -699,15 +697,11 @@ function ChatUI({
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
-  // The companion's single source of truth (Realtime PRD §30) — derived from
-  // the SAME isProcessing + messages the thread renders.
-  const activity = useAgentActivity(Boolean(isProcessing), messages);
   return (
     <div className="flex h-full w-full">
-      {/* The dots-swarm companion — the app's visual identity (fixed,
-          viewport canvas; mounted once per chat view). */}
-      <AgentCompanion activity={activity} />
-      {/* Centered ~760px message thread column (Terra editorial spec). */}
+      {/* Centered ~760px message thread column (Terra editorial spec). The
+          companion is the INLINE cursor riding the response stream
+          (CompanionCursor in markdown-content) — no floating pet. */}
       <div className="mx-auto flex h-full w-full max-w-[760px] min-w-0 flex-1 flex-col">
         <div
           ref={scrollContainerRef}

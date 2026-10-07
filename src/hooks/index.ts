@@ -8,5 +8,4 @@ export { useSlashCommands, isBuiltinEnabled, BUILTIN_COMMAND_LIST } from "./use-
 export { useDictation } from "./use-dictation";
 export { useBrowserLive } from "./use-browser-live";
 export type { BrowserLive, BrowserLivePhase, BrowserLiveState } from "./use-browser-live";
-export { useAgentActivity } from "./use-agent-activity";
-export type { AgentActivity } from "./use-agent-activity";
+export { statusCaptionFor } from "./use-status-caption";

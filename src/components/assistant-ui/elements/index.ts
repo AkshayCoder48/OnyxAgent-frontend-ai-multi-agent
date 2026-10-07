@@ -33,6 +33,7 @@ export { MessagePair } from "./message-pair";
 export { StoppedRun } from "./stopped-run";
 export { ThinkingIndicator } from "./thinking-indicator";
 export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";
+export { CompanionCursor } from "./companion-cursor";
 export { Orb, OrbCursor, type OrbProps, type OrbVariant, type LatticeVariant, ORB_TASKS } from "./orb";
 export { InlineCitation, type Source } from "./inline-citation";
 export { DocumentReference, type DocumentAnchor } from "./document-reference";

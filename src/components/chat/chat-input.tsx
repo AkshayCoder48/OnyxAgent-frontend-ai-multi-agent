@@ -341,12 +341,15 @@ export function ChatInput({
         {/* Right: Dictation mic + Send/Stop */}
         <div className="flex shrink-0 items-center gap-1 pb-0.5">
           {/* Mic hidden entirely where the Web Speech API is absent
-              (PRD §24 approved behavior — nothing to explain). */}
+              (PRD §24 approved behavior — nothing to explain). While a
+              session is LIVE the stop button is NEVER disabled — the user
+              must always be able to stop a recording (a socket drop or a
+              pending question must not lock the waveform in place). */}
           {dictation.supported && (
             <ComposerVoiceButton
               active={dictation.active}
               onClick={dictation.active ? dictation.stop : dictation.start}
-              disabled={disabled}
+              disabled={disabled && !dictation.active}
               aria-label={dictation.active ? "Stop dictation" : "Start voice dictation"}
             />
           )}

@@ -29,6 +29,11 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 const TRANSCRIBE_SETTLE_MS = 600;
 /** How long the inline error hint stays visible. */
 const ERROR_HINT_MS = 4000;
+/** STOP WATCHDOG: some engines (notably Chrome with interimResults on)
+ * occasionally never fire `onend` after `.stop()` — without a guard the
+ * waveform would record forever with a dead stop button. If the engine
+ * hasn't ended within this window, force the end path ourselves. */
+const STOP_WATCHDOG_MS = 900;
 
 /** No-op subscription — Web Speech availability never changes at runtime. */
 const subscribeNoop = () => () => {};
@@ -88,6 +93,11 @@ export function useDictation({
   const secondsTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const errorTimerRef = useRef<number | null>(null);
+  const watchdogTimerRef = useRef<number | null>(null);
+  /** True from the moment onend/onerror ran until the next start() — makes
+   *  handleEnd idempotent (the watchdog + a late engine onend must not
+   *  double-fire the settle/land sequence). */
+  const endedRef = useRef(true);
 
   const clearSecondsTimer = useCallback(() => {
     if (secondsTimerRef.current !== null) {
@@ -103,6 +113,13 @@ export function useDictation({
     }
   }, []);
 
+  const clearWatchdog = useCallback(() => {
+    if (watchdogTimerRef.current !== null) {
+      window.clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+  }, []);
+
   /** Land the accumulated finals (if any) and return to idle. Idempotent. */
   const landFinals = useCallback(() => {
     clearSettleTimer();
@@ -114,9 +131,14 @@ export function useDictation({
     setActive(false);
   }, [clearSettleTimer]);
 
-  /** onend / manual end: stop the clock, settle briefly only when finals
-   *  are pending — otherwise go straight back to idle (PRD §49). */
+  /** onend / manual end / watchdog: stop the clock, settle briefly only
+   *  when finals are pending — otherwise go straight back to idle (PRD
+   *  §49). Idempotent (endedRef) so a late engine onend after the watchdog
+   *  already closed the session changes nothing. */
   const handleEnd = useCallback(() => {
+    if (endedRef.current) return;
+    endedRef.current = true;
+    clearWatchdog();
     recognitionRef.current = null;
     clearSecondsTimer();
     setRecording(false);
@@ -125,7 +147,7 @@ export function useDictation({
     } else {
       landFinals();
     }
-  }, [clearSecondsTimer, landFinals]);
+  }, [clearSecondsTimer, clearWatchdog, landFinals]);
 
   const start = useCallback(() => {
     // Guard: a session is already live — rapid taps must not stack
@@ -159,7 +181,9 @@ export function useDictation({
       // Only permission failures need a visible hint; everything else
       // (no-speech, aborted, network) is followed by onend, which resets.
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setError("Microphone permission denied");
+        setError(
+          "Microphone blocked — allow mic access (if the app is embedded, open it in its own tab) and tap the mic again",
+        );
         if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
         errorTimerRef.current = window.setTimeout(() => setError(null), ERROR_HINT_MS);
       }
@@ -167,6 +191,7 @@ export function useDictation({
     recognition.onend = handleEnd;
 
     finalsRef.current = "";
+    endedRef.current = false;
     setSeconds(0);
     setInterim("");
     setError(null);
@@ -189,17 +214,22 @@ export function useDictation({
   const stop = useCallback(() => {
     const recognition = recognitionRef.current;
     if (recognition) {
+      endedRef.current = false; // a watchdog-forced end may follow
       try {
         recognition.stop(); // triggers onend → settle → land
       } catch {
         handleEnd();
       }
+      // WATCHDOG: if the engine never fires onend (a known engine quirk),
+      // close the session ourselves — the stop button must ALWAYS work.
+      clearWatchdog();
+      watchdogTimerRef.current = window.setTimeout(handleEnd, STOP_WATCHDOG_MS);
       return;
     }
     // No live capture — we're mid-"Transcribing": flush now instead of
     // letting the settle timer hold the composer hostage.
     landFinals();
-  }, [handleEnd, landFinals]);
+  }, [handleEnd, landFinals, clearWatchdog]);
 
   // Unmount: abort capture and clear every timer (calling onFinalText after
   // unmount would target a dead composer).
@@ -217,6 +247,7 @@ export function useDictation({
       if (secondsTimerRef.current !== null) window.clearInterval(secondsTimerRef.current);
       if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
       if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+      if (watchdogTimerRef.current !== null) window.clearTimeout(watchdogTimerRef.current);
     };
   }, []);
 

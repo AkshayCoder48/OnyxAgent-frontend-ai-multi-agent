@@ -152,17 +152,31 @@
     }
   }
 
-  /* Companion sleep Zs (chat/agent-companion.tsx) — four staggered drifts
-     up-and-right while the agent idles (user-supplied sway animation). */
-  --animate-companion-z: companion-z 2s ease-out both;
-  @keyframes companion-z {
-    0% {
-      transform: translate(0, 0) rotate(0deg);
-      opacity: 1;
-    }
+  /* Companion cursor (assistant-ui/elements/companion-cursor.tsx) — the
+     inline streaming companion: a gentle bob for the face and a periodic
+     eye-blink. Reduced-motion users get a static face (utilities apply
+     motion-reduce:animate-none). */
+  --animate-companion-bob: companion-bob 1.6s ease-in-out infinite;
+  @keyframes companion-bob {
+    0%,
     100% {
-      transform: translate(44px, -56px) rotate(30deg);
-      opacity: 0;
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-1.5px);
+    }
+  }
+
+  --animate-companion-blink: companion-blink 4.4s infinite;
+  @keyframes companion-blink {
+    0%,
+    91%,
+    96%,
+    100% {
+      transform: scaleY(1);
+    }
+    93.5% {
+      transform: scaleY(0.08);
     }
   }
 }

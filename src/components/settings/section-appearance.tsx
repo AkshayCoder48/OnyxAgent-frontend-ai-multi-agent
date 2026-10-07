@@ -6,7 +6,6 @@ import { Check, Monitor, Moon, Sun } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
-import { CompanionSettings } from "@/components/settings/companion-settings";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
@@ -265,9 +264,6 @@ export function SectionAppearance() {
           Reset to default
         </Button>
       </section>
-
-      {/* ── Companion (Realtime PRD §31–§37) — the dots-swarm pet ── */}
-      <CompanionSettings />
 
       {/* ── Advanced: interface scaling ── */}
       <MoreOptions defaultOpen={fontSize !== "base"}>

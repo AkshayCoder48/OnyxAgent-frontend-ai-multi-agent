@@ -1795,7 +1795,15 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
         parameters: t.parameters as Record<string, unknown>,
       },
     }));
-  let tools: ChatCompletionTool[] = toWireTools(buildScopedTools());
+  // SINGLE SOURCE OF TRUTH (the "I don't have access to use_browser this
+  // turn" fix): the tools array AND the prompt's tool list are built from
+  // the SAME scoped snapshot. Previously the prompt listed the FULL
+  // registry (including run_python / run_terminal / create_file … that are
+  // NOT sent), so the model learned the list lies and generalized to "I
+  // don't have access to use_browser this turn" — a hallucination bred by
+  // our own inconsistency. Now the two can never disagree.
+  const initialScopedTools = buildScopedTools();
+  let tools: ChatCompletionTool[] = toWireTools(initialScopedTools);
   if (tools.length > MAX_LLM_TOOLS) {
     logWarn(
       "llm",
@@ -1816,16 +1824,18 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 
   // Build the enhanced system prompt with the tool list + usage knowledge.
   // PRD §13/§14/§38 — RUNTIME-GROUNDED availability: this list is built from
-  // the LIVE registry at turn time (never a static copy), so dynamically
-  // registered tools (custom tools, the MCP/Composio meta-tools) appear the
-  // turn they load. Built-in capabilities live in the TOOL DIGEST below (one
-  // line per tool, generated from Onyx.md) — here we only anchor the exact
-  // names that exist THIS TURN, plus one-line blurbs for tools the digest
-  // does not document (dynamic ones). This keeps the prompt compact: the
-  // full per-tool descriptions already travel in the tools array itself.
+  // the LIVE SCOPED registry at turn time (never a static copy — and never
+  // the unscoped registry), so dynamically registered tools (custom tools,
+  // the MCP/Composio meta-tools) appear the turn they load AND the list
+  // exactly matches the tool definitions riding in the request. Built-in
+  // capabilities live in the TOOL DIGEST below (one line per tool,
+  // generated from Onyx.md) — here we only anchor the exact names that
+  // exist THIS TURN, plus one-line blurbs for tools the digest does not
+  // document (dynamic ones). This keeps the prompt compact: the full
+  // per-tool descriptions already travel in the tools array itself.
   const digestToolNames = new Set<string>(ONYX_MD_DIGEST_TOOLS);
-  const documented = registeredTools.filter((t) => digestToolNames.has(t.name));
-  const undocumented = registeredTools.filter((t) => !digestToolNames.has(t.name));
+  const documented = initialScopedTools.filter((t) => digestToolNames.has(t.name));
+  const undocumented = initialScopedTools.filter((t) => !digestToolNames.has(t.name));
   const firstSentence = (d: string): string => {
     const s = (d || "").replace(/\s+/g, " ").trim();
     const m = /^[^.!?]*[.!?]/.exec(s);
@@ -1835,8 +1845,8 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
     const sp = cut.lastIndexOf(" ");
     return `${(sp > 60 ? cut.slice(0, sp) : cut).replace(/[,;:.]+$/, "")}…`;
   };
-  const toolListText = registeredTools.length > 0
-    ? `\n\n## Available Tools (${registeredTools.length} total — LIVE registry for THIS turn)\nYou have access to these tools. Use them ONLY by calling them through the FUNCTION-CALLING API (the tool_calls mechanism) — NEVER as plain text ("Thought: ... Action: run_terminal Input: {...}" does nothing).\n\nBuilt-in tools (${documented.length}) — capabilities in the TOOL DIGEST below:\n${documented.map((t) => t.name).join(", ")}${undocumented.length > 0 ? `\n\nDynamic tools (${undocumented.length} — MCP servers / custom tools, active this turn):\n${undocumented.map((t) => `- **${t.name}** — ${firstSentence(t.description)}`).join("\n")}` : ""}\n\nThis list + your active tool definitions are the ONLY source of truth for what you can call this turn — not your memory, not Onyx.md alone. Every tool named here is real and callable.`
+  const toolListText = initialScopedTools.length > 0
+    ? `\n\n## Available Tools (${initialScopedTools.length} total — LIVE registry for THIS turn)\nYou have access to these tools. Use them ONLY by calling them through the FUNCTION-CALLING API (the tool_calls mechanism) — NEVER as plain text ("Thought: ... Action: run_terminal Input: {...}" does nothing).\n\nBuilt-in tools (${documented.length}) — capabilities in the TOOL DIGEST below:\n${documented.map((t) => t.name).join(", ")}${undocumented.length > 0 ? `\n\nDynamic tools (${undocumented.length} — MCP servers / custom tools, active this turn):\n${undocumented.map((t) => `- **${t.name}** — ${firstSentence(t.description)}`).join("\n")}` : ""}\n\nThis list + your active tool definitions are the ONLY source of truth for what you can call this turn — not your memory, not Onyx.md alone. Every tool named here is real and callable, and this list is EXACTLY the set of tool definitions attached to this request.\n\nNEVER claim you lack a tool that is named above. If you suspect a tool might not work (missing key, not configured, site unreachable), CALL IT ANYWAY and report the real error it returns — e.g. never say "I don't have access to the use_browser tool this turn" when use_browser is in this list; call it, and if the browser is not configured the call itself returns a clear, actionable error you can relay. Substituting inferior workarounds (plain web search / direct fetches) for a listed tool the task needs is a failure mode — use the listed tool.`
     : "";
 
   const toolKnowledgeBase = `
@@ -1985,7 +1995,13 @@ The two custom types take \`html\` / \`css\` / \`js\` props (script runs after m
 
 ${genuiThemePromptBlock(readChatTheme())}`;
 
-  const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey}`;
+  // Live workspace context. CRITICAL (the "I don't have access to
+  // use_browser" fix): `workspaceAvailable` reports the E2B sandbox for
+  // FILES/CODE only — local file mode forces it false even when a key is
+  // configured, and use_browser resolves its OWN sandbox key at call time,
+  // so a false value here must NEVER be read as "the browser is
+  // unavailable". The line below says so explicitly.
+  const workspaceStatusText = `\n\n## Live Workspace Context\n- workspaceAvailable: ${!!sandboxApiKey} (E2B sandbox for files/code)\n- use_browser: independent of workspaceAvailable — it is in your tool list this turn and resolves its own sandbox when called; if the browser is not configured, the CALL returns a clear actionable error. Never assume it (or any listed tool) is unavailable — call it.`;
 
   const enhancedSystemPrompt = `${opts.systemPrompt}${toolListText}${toolKnowledgeBase}${workspaceStatusText}`;
 

@@ -43,6 +43,12 @@ export interface ThinkingReasoningProps {
    *  shimmer labels stacked). The settled "Thought for Ns" header still
    *  renders once the stream ends. */
   headerlessLive?: boolean;
+  /** NO AUTO-COLLAPSE (user directive: "if no tool ran, auto detect and
+   *  remove auto collapsing"): when true, the DONE state stays EXPANDED
+   *  by default — the user folds it manually. Default false keeps the
+   *  classic fold-to-summary behavior (used where a host panel owns the
+   *  collapse, or where collapsing is desired). */
+  keepOpenOnDone?: boolean;
 }
 
 const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
@@ -91,8 +97,10 @@ export function ThinkingReasoning({
   activeLabel = "Thinking…",
   headerNode,
   headerlessLive = false,
+  keepOpenOnDone = false,
 }: ThinkingReasoningProps) {
   const [open, setOpen] = useState(false);
+  const [userToggled, setUserToggled] = useState(false);
   const [capped, setCapped] = useState(false);
   const [fade, setFade] = useState({ top: false, bottom: true });
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -152,17 +160,21 @@ export function ThinkingReasoning({
   };
 
   const toggle = () => {
-    const next = !open;
+    const next = !expanded;
     if (next) {
       setFade({ top: false, bottom: true });
       if (viewportRef.current) viewportRef.current.scrollTop = 0;
     }
+    setUserToggled(true);
     setOpen(next);
   };
 
   // While thinking the reasoning is always open; once done it folds into
-  // the summary and the user can toggle it back open.
-  const expanded = done ? open : true;
+  // the summary and the user can toggle it back open — UNLESS
+  // keepOpenOnDone (no-tools turns): the block rests EXPANDED and only a
+  // manual toggle folds it (auto-collapse removed for tool-less turns).
+  const doneExpanded = userToggled ? open : keepOpenOnDone;
+  const expanded = done ? doneExpanded : true;
 
   const showTop = scrollable ? fade.top : capped;
   const showBottom = scrollable ? fade.bottom : capped;

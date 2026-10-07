@@ -17,6 +17,7 @@ import { ChevronRight } from "lucide-react";
 import { getFileUrl, loadFileUrls } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
+import { statusCaptionFor } from "@/hooks/use-status-caption";
 import { FileCard, FileCardImage } from "./file-card";
 import { CitationsFooter } from "./citations";
 import { FilesFooter, deriveStreamingTree } from "./streaming-file-tree";
@@ -57,23 +58,27 @@ function extractGenUIFromMessage(message: ChatMessage): GenUINode[] | null {
 }
 
 /**
- * ThinkingBlock / ReasoningBlock — the CLASSIC (tool-less) reasoning
- * display: the full ThinkingReasoning element with its own header — the
- * live reasoning streams visibly, letter by letter ("Thinking…" header),
- * then folds into a "Thought for Ns" / "Reasoned for Ns" summary once
- * the stream ends. Turns WITH tool calls stream their reasoning inside
- * the WorkingPanel instead (PanelThinkingRun, headerless live mode).
- * Elapsed seconds are measured locally from the moment streaming starts
- * until it ends.
+ * ThinkingBlock / ReasoningBlock — the LEGACY (tool-less, pre-parts)
+ * reasoning display: the full ThinkingReasoning element with its own
+ * header. THE CIRCLE STAYS when real thinking starts streaming (user
+ * directive: the pulsing dot that shows "just before thinking" must NOT
+ * be removed after the AI really starts thinking) — the live header is
+ * the SAME dot+label indicator, and it only swaps its label at settle.
+ * NO AUTO-COLLAPSE for tool-less turns (user directive): the block rests
+ * expanded with its "Thought for Ns" summary; the user folds manually.
  */
 function ReasoningPanel({
   text,
   isStreaming,
   variant,
+  ranTools = false,
 }: {
   text: string;
   isStreaming: boolean;
   variant: "thinking" | "reasoning";
+  /** Turns that ran tool calls keep the classic auto-fold (the host
+   *  WorkingPanel owns the collapse); tool-less turns rest expanded. */
+  ranTools?: boolean;
 }) {
   const isThinking = variant === "thinking";
 
@@ -123,14 +128,14 @@ function ReasoningPanel({
         elapsedSeconds={elapsedSeconds}
         verb={isThinking ? "Thought" : "Reasoned"}
         activeLabel={isThinking ? "Thinking…" : "Reasoning…"}
-        // THINKING-TEXT CONTINUITY: the live header is the SAME cycling
-        // indicator shown before the first sentence arrived — the status
-        // text no longer swaps to a different static label the moment real
-        // reasoning starts streaming.
+        keepOpenOnDone={!ranTools}
+        // CIRCLE CONTINUITY: the live header is the SAME dot+label indicator
+        // shown before the first sentence arrived — the pulsing dot stays
+        // beside the caption for the whole thinking stream (never removed
+        // when real thinking starts).
         headerNode={
           isStreaming ? (
             <ThinkingIndicator
-              showDot={false}
               label={isThinking ? "Thinking" : "Reasoning"}
               className="min-w-0"
             />
@@ -141,47 +146,51 @@ function ReasoningPanel({
   );
 }
 
-function ThinkingBlock(props: { text: string; isStreaming: boolean }) {
+function ThinkingBlock(props: {
+  text: string;
+  isStreaming: boolean;
+  ranTools?: boolean;
+}) {
   return <ReasoningPanel {...props} variant="thinking" />;
 }
 
-function ReasoningBlock(props: { text: string; isStreaming: boolean }) {
+function ReasoningBlock(props: {
+  text: string;
+  isStreaming: boolean;
+  ranTools?: boolean;
+}) {
   return <ReasoningPanel {...props} variant="reasoning" />;
 }
 
 /**
  * AgentStatusLine — THE one in-place execution status for a STREAMING
- * assistant message WITHOUT tool calls (the classic flow and the legacy
- * fallback). Exactly one instance per message, rendered at the END of the
- * parts flow; it never stacks with itself across transitions — the label
- * updates in place:
+ * assistant message WITHOUT a host panel (pure-text classic flow and the
+ * legacy fallback). Exactly one instance per message, rendered at the END
+ * of the parts flow; it never stacks with itself across transitions — the
+ * label updates in place:
  *
  *   Thinking  — the model is generating (opening text or the answer).
- *   Working   — a tool call is executing / its result is being awaited.
+ *   Writing   — the answer text is actively streaming at the tail.
  *
- * Turns WITH tool calls render the WorkingPanel instead — its trigger
- * line IS the Thinking ⇄ Working status (plus "Worked {time}" at rest).
- * While a live reasoning stream is open the ThinkingReasoning panel
- * header IS the “Thinking…” status, so this line hides (no duplicate
- * status components). Settled messages render nothing (completed state).
- *
- * Realtime PRD: the label is STATIC text (fades once when it changes);
- * the companion + the pulsing dot carry the liveness — no orb glyph, no
- * phrase cycling.
+ * CAPTION GENERATION (user directive: "re add it into that circle (caption)
+ * just like thinking"): the pulsing-dot circle's label is a GENERATED
+ * caption derived from the turn's live parts — the circle NEVER disappears
+ * and its caption narrates the real activity (Thinking / Writing / …).
+ * Turns whose thinking/tools render inside a panel show no second status
+ * row (the panel trigger owns the circle). Settled messages render
+ * nothing.
  */
 function AgentStatusLine({ message }: { message: ChatMessage }) {
   const phase = deriveAgentPhase(message);
   if (!phase) return null;
+  const caption = statusCaptionFor(message) ?? (phase === "working" ? "Working" : "Thinking");
   return (
     <div
       className="flex min-h-8 items-center gap-2.5 px-1"
       role="status"
       aria-live="polite"
     >
-      <ThinkingIndicator
-        label={phase === "working" ? "Working" : "Thinking"}
-        className="min-w-0"
-      />
+      <ThinkingIndicator label={caption} className="min-w-0" />
     </div>
   );
 }
@@ -597,76 +606,98 @@ function workedSummary(message: ChatMessage): {
   };
 }
 
+/** "Thought {time}" resting summary for a tool-less turn — total live
+ *  thinking/reasoning time, from the processor-stamped part windows. */
+function thoughtSeconds(message: ChatMessage): number {
+  let total = 0;
+  for (const p of message.parts ?? []) {
+    if (p.type !== "thinking" && p.type !== "reasoning") continue;
+    const start = p.roundStartedAt;
+    const end = p.reasoningEndedAt;
+    if (typeof start === "number" && typeof end === "number" && end > start) {
+      total += end - start;
+    }
+  }
+  return total / 1000;
+}
+
 /**
- * WorkingPanel — ONE collapsible unit owning the ENTIRE generation process
- * of an assistant turn (user spec, 2026-09-27):
+ * WorkingPanel — ONE collapsible unit owning the ENTIRE pre-answer phase
+ * of an assistant turn (user directive: "all this pre-have inside a
+ * collapsible panel"):
  *
- *   Thinking ⇄ Working — while the turn streams, the trigger label is the
- *   live phase: "Thinking" while the model reasons or generates, "Working"
- *   while a tool executes — one line, switching in place, never a second
- *   status row. The live reasoning STREAMS VISIBLY inside (letter by
- *   letter, headerless); each round's thinking then folds into its own
- *   "Thought for Ns" row the moment it ends. All tool calls, inner
- *   thinking and texts generated during the process live inside — strict
- *   chronological order (timeline PRD §25: array position is the truth).
+ *   ● Thinking / Browsing perchance.org / Writing — while the turn
+ *   streams, the trigger is the pulsing-dot circle + a GENERATED caption
+ *   (statusCaptionFor — the circle is NEVER removed, and its caption
+ *   narrates the real activity just like "Thinking" did). One line,
+ *   updating in place, never a second status row. The live reasoning
+ *   STREAMS VISIBLY inside (letter by letter, headerless); each round's
+ *   thinking then folds into its own "Thought for Ns" row the moment it
+ *   ends. All tool calls, inner thinking and texts generated during the
+ *   process live inside — strict chronological order (timeline PRD §25:
+ *   array position is the truth).
  *
- *   The final answer (text after the last tool) streams at the tail of the
- *   process while live — no mid-stream jumps: a tool arriving later simply
- *   appends after it — then renders BELOW the panel once the turn settles
- *   and the panel collapses into its "Worked {time}" resting row. No
- *   PROCESS divider or label — nothing but the real event renderers.
+ *   AUTO-COLLAPSE RULE (user directive: "if no tool ran, auto detect and
+ *   remove auto collapsing"): the panel force-collapses into its resting
+ *   row at settle ONLY when the turn ran tool calls (or holds a
+ *   deliverable that would keep it open). A tool-less turn rests
+ *   EXPANDED — “Thought {time}” — and the user folds it manually.
  */
 function WorkingPanel({
   message,
   hasDeliverables,
+  ranTools,
   children,
 }: {
   message: ChatMessage;
   /** A payload tool (chart / download / preview / Q&A) or the live plan
-   *  panel keeps the panel from force-collapsing at settle. */
+   *  panel keeps the panel from force-collapsing at settle — they must
+   *  stay visible. */
   hasDeliverables: boolean;
+  /** True when the turn made at least one (non-research) tool call —
+   *  gates the auto-collapse-at-settle + the "Worked" resting label. */
+  ranTools: boolean;
   /** The process content — thinking runs, tool cards, texts. */
   children: React.ReactNode;
 }) {
   const streaming = Boolean(message.isStreaming);
-  // Live phase: deriveAgentPhase returns null while a reasoning stream is
-  // open (the classic flow's ThinkingReasoning header owns the status
-  // there) — inside the panel the trigger owns it, so null ⇒ "Thinking".
-  const phase = streaming ? (deriveAgentPhase(message) ?? "thinking") : null;
+  // CAPTION GENERATION: the live trigger label narrates the turn's real
+  // activity (Thinking → Browsing … → Writing). Falls back to Thinking.
+  const caption = streaming ? (statusCaptionFor(message) ?? "Thinking") : null;
 
-  const [expanded, setExpanded] = React.useState(streaming || hasDeliverables);
+  const [expanded, setExpanded] = React.useState(streaming || !ranTools);
   const [userToggled, setUserToggled] = React.useState(false);
   // AUTO EXPAND/COLLAPSE (render-time adjustment — no effect, no cascading
-  // renders): expanded for the whole live stream, force-collapsed the
-  // moment the turn settles ("collapsed at end") — unless the process
-  // carries a deliverable, which must stay visible. A manual toggle during
-  // the stream wins until settle; after settle the user is free again.
+  // renders): expanded for the whole live stream; at settle the panel
+  // force-collapses ONLY when the turn ran tools (or carries a
+  // deliverable, which keeps it open regardless). Tool-less turns keep
+  // resting EXPANDED — no auto-collapse. A manual toggle during the
+  // stream wins until settle; after settle the user is free again.
   const autoTarget = streaming;
   const [prevAuto, setPrevAuto] = React.useState(autoTarget);
   if (autoTarget !== prevAuto) {
     setPrevAuto(autoTarget);
     if (autoTarget) {
       if (!userToggled) setExpanded(true);
-    } else if (!hasDeliverables) {
+    } else if (ranTools && !hasDeliverables) {
       setExpanded(false);
       setUserToggled(false);
     }
   }
 
   const worked = workedSummary(message);
+  const thoughtTime = ranTools ? null : formatDuration(thoughtSeconds(message)) || null;
 
   return (
     <div className="mb-2 min-w-0 max-w-full">
-      {/* ONE trigger line — the live Thinking/Working status while
-          streaming, the "Worked {time}" resting summary after settle. */}
+      {/* ONE trigger line — the live circle+caption while streaming, the
+          resting summary after settle. */}
       <button
         type="button"
         aria-expanded={expanded}
         aria-label={
           streaming
-            ? phase === "working"
-              ? "Agent is working (toggle process details)"
-              : "Agent is thinking (toggle process details)"
+            ? `Agent is ${(caption ?? "thinking").toLowerCase()} (toggle process details)`
             : "Toggle work summary"
         }
         onClick={() => {
@@ -683,17 +714,18 @@ function WorkingPanel({
           aria-hidden
         />
         {streaming ? (
-          // STATIC status label (Realtime PRD): the dot-less indicator sits
-          // next to the chevron; the label fades once when Thinking flips
-          // to Working. No phrase cycling, no shimmer.
-          <ThinkingIndicator
-            showDot={false}
-            label={phase === "working" ? "Working" : "Thinking"}
-            className="min-w-0"
-          />
-        ) : (
+          // THE CIRCLE + GENERATED CAPTION (user directives: the circle
+          // stays for the whole stream; caption generation re-added into
+          // that circle, just like thinking). Static label text — it fades
+          // once whenever the caption changes. No shimmer, no cycling.
+          <ThinkingIndicator label={caption ?? "Thinking"} className="min-w-0" />
+        ) : ranTools ? (
           <span className="text-sm font-medium text-foreground/90">
             Worked{worked.time ? ` ${worked.time}` : ""}
+          </span>
+        ) : (
+          <span className="text-sm font-medium text-foreground/90">
+            Thought{thoughtTime ? ` ${thoughtTime}` : ""}
           </span>
         )}
         {worked.failed && (
@@ -912,31 +944,36 @@ export const MessageItem = React.memo(function MessageItem({
         {(() => {
           // `parts` is memoized at the top of the component (above).
           //
-          // WORKING-PANEL FLOW (user spec, 2026-09-27): a turn that made
-          // tool calls renders ONE collapsible WorkingPanel owning the
-          // whole process — every round's inner thinking (live while it
-          // streams, then a "Thought for Ns" row), every tool call and
-          // every text generated along the way, in strict chronological
-          // order. The trigger label switches Thinking ⇄ Working in place
-          // and the panel collapses into "Worked {time}" when the turn
-          // settles. The final answer (text after the last tool) renders
-          // below the panel. Tool-less turns keep the classic frameless
-          // flow (thinking block → text) + the one AgentStatusLine.
+          // UNIFIED PANEL FLOW (user directive: "all this pre-have inside a
+          // collapsible panel"): a turn with ANY pre-answer process — tool
+          // calls OR thinking/reasoning runs — renders ONE collapsible
+          // WorkingPanel owning that whole process: every round's inner
+          // thinking (live while it streams, then a "Thought for Ns" row),
+          // every tool call and every text generated along the way, in
+          // strict chronological order. The panel trigger is the
+          // pulsing-dot circle + a generated caption (Thinking / Browsing …
+          // / Writing) and rests as "Worked {time}" (tools ran) or
+          // "Thought {time}" — auto-collapsed ONLY when tools ran. Pure-text
+          // turns (no tools, no thinking) keep the frameless flow + the one
+          // AgentStatusLine.
 
           // ── Legacy fallback: user / pre-parts messages. ────────────────
           if (!useParts) {
+            const legacyRanTools = !!(message.toolCalls && message.toolCalls.length > 0);
             return (
               <>
                 {!isUser && message.thinking && (
                   <ThinkingBlock
                     text={message.thinking}
                     isStreaming={Boolean(message.isStreaming)}
+                    ranTools={legacyRanTools}
                   />
                 )}
                 {!isUser && message.reasoning && (
                   <ReasoningBlock
                     text={message.reasoning}
                     isStreaming={Boolean(message.isStreaming)}
+                    ranTools={legacyRanTools}
                   />
                 )}
                 {message.content && (
@@ -983,33 +1020,43 @@ export const MessageItem = React.memo(function MessageItem({
           // BrowserUseGroup at the run's FIRST item; continuations render
           // nothing. The items array itself is untouched — browser items
           // still count as tool items for every index computation below
-          // (lastToolItemIdx, processItems, trailingItems, todoSplice).
+          // (boundaryIdx, processItems, trailingItems, todoSplice).
           const browserRuns = mapBrowserRunStarts(
             items.map((it) => (it.kind === "tool" ? it.toolCall : null)),
           );
 
-          // Last TOOL item — the process/final-answer boundary. Text
-          // generated after the last tool is the FINAL ANSWER: while the
-          // turn streams it stays at the tail of the process (inside the
-          // panel — a tool arriving later simply appends after it, so
-          // nothing ever jumps mid-stream); when the turn settles it
-          // renders BELOW the collapsed panel as the message body.
+          // PROCESS/ANSWER BOUNDARY. With tools: the LAST TOOL item — text
+          // after it is the final answer. Tool-less (thinking-only) turns:
+          // the LAST THINKING item — the answer is the text that follows
+          // the thinking. While the turn streams, answer text stays at the
+          // tail of the process (inside the panel — a tool or thinking run
+          // arriving later simply appends after it, so nothing ever jumps
+          // mid-stream); when the turn settles it renders BELOW the panel
+          // as the message body.
           let lastToolItemIdx = -1;
+          let lastThinkingItemIdx = -1;
           for (let i = 0; i < items.length; i++) {
-            if (items[i]!.kind === "tool") lastToolItemIdx = i;
+            const kind = items[i]!.kind;
+            if (kind === "tool") lastToolItemIdx = i;
+            if (kind === "thinking") lastThinkingItemIdx = i;
           }
-          const hasPanel = lastToolItemIdx >= 0;
+          const ranTools = lastToolItemIdx >= 0;
+          const boundaryIdx = ranTools ? lastToolItemIdx : lastThinkingItemIdx;
+          // NO process (pure-text answer) → no panel: the frameless flow +
+          // the AgentStatusLine (the circle + caption at the streaming
+          // tail). Any thinking or tool run → the unified panel.
+          const hasPanel = boundaryIdx >= 0;
 
           const processItems = hasPanel
             ? items.filter(
                 (it, i) =>
-                  it.kind !== "text" || i < lastToolItemIdx || streaming,
+                  it.kind !== "text" || i < boundaryIdx || streaming,
               )
             : items;
           const trailingItems =
             hasPanel && !streaming
               ? items.filter(
-                  (it, i) => it.kind === "text" && i > lastToolItemIdx,
+                  (it, i) => it.kind === "text" && i > boundaryIdx,
                 )
               : [];
 
@@ -1121,7 +1168,11 @@ export const MessageItem = React.memo(function MessageItem({
 
             return (
               <>
-                <WorkingPanel message={message} hasDeliverables={hasDeliverables}>
+                <WorkingPanel
+                  message={message}
+                  hasDeliverables={hasDeliverables}
+                  ranTools={ranTools}
+                >
                   {processItems.map((it) => (
                     <React.Fragment key={it.partId}>
                       {todoSplice?.beforePartId === it.partId
@@ -1146,7 +1197,8 @@ export const MessageItem = React.memo(function MessageItem({
             );
           }
 
-          // ── CLASSIC PATH (no tool calls): frameless editorial flow. ────
+          // ── CLASSIC PATH (pure-text answer — no tools, no thinking):
+          // frameless editorial flow + the one status line. ──────────────
           return (
             <>
               {items.map((it) => (

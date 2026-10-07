@@ -46,6 +46,8 @@ import {
 import { PageHeader } from "@/components/dashboard/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { EmptyState } from "@/components/states";
+import { MessageItem } from "@/components/chat/message-item";
+import type { ChatMessage } from "@/types";
 import {
   Alert,
   AlertDescription,
@@ -93,6 +95,10 @@ function Gallery() {
         title="Component gallery"
         description="Core design-system primitives, in one place."
       />
+
+      <Section title="Streaming turn — unified panel + captions + companion cursor">
+        <StreamingTurnPreview />
+      </Section>
 
       <Section title="Button variants">
         {(["default", "secondary", "outline", "ghost", "destructive", "link"] as const).map((v) => (
@@ -605,6 +611,176 @@ function OrbGrid() {
           <span className="font-mono text-[9px] tabular-nums text-muted-foreground">{v}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * STREAMING TURN PREVIEW — mounts the REAL MessageItem with synthetic
+ * messages so the unified collapsible panel, the live status captions, the
+ * persistent thinking circle and the companion cursor can be eyeballed
+ * without a provider. Stages follow a real turn's life:
+ *   thinking → browsing (tool) → writing → settled.
+ * ─────────────────────────────────────────────────────────────────────────── */
+const TURN_STAGES = ["thinking", "browsing", "writing", "settled"] as const;
+type TurnStage = (typeof TURN_STAGES)[number];
+
+const STAGE_LABEL: Record<TurnStage, string> = {
+  thinking: "1 · Thinking (tool-less, circle + caption)",
+  browsing: "2 · Browsing (tool turn, generated caption)",
+  writing: "3 · Writing (answer streams with companion cursor)",
+  settled: "4 · Settled (no tools → stays expanded)",
+};
+
+function synthMessage(
+  parts: import("@/types").MessagePart[],
+  isStreaming: boolean,
+  now: number,
+): ChatMessage {
+  return {
+    id: "synthetic-turn",
+    role: "assistant",
+    content: "",
+    timestamp: new Date(now),
+    isStreaming,
+    parts,
+  };
+}
+
+function StreamingTurnPreview() {
+  const [stage, setStage] = useState<TurnStage>("thinking");
+  // Synthetic clock — captured ONCE per mount via the lazy initializer (an
+  // impure call inside the initializer is fine; calling Date.now() in the
+  // render body trips the React-Compiler purity rule).
+  const [now] = useState(() => Date.now());
+
+  const thinkingRun = (open: boolean, text: string) => ({
+    id: "p-think",
+    type: "thinking" as const,
+    content: text,
+    round: 1,
+    roundStartedAt: now - 5200,
+    ...(open ? {} : { reasoningEndedAt: now - 3000 }),
+  });
+
+  const browserCall = (status: "running" | "completed") => ({
+    id: "tc-browser",
+    name: "use_browser",
+    args: { action: "navigate", url: "https://perchance.org/" } as Record<string, unknown>,
+    status,
+    startedAt: now - 2800,
+    ...(status === "completed"
+      ? {
+          endedAt: now - 1200,
+          result: {
+            kind: "browser",
+            action: "navigate",
+            ok: true,
+            url: "https://perchance.org/",
+            title: "perchance.org — random generators",
+          },
+        }
+      : {}),
+  });
+
+  const message = (() => {
+    if (stage === "thinking") {
+      return synthMessage(
+        [
+          thinkingRun(true, "The user wants an interactive tour of perchance.org."),
+          {
+            id: "p-think-2",
+            type: "thinking" as const,
+            content:
+              "I'll open the site in the sandbox browser, walk the homepage, and summarize what the platform offers.",
+            round: 1,
+            roundStartedAt: now - 5200,
+          },
+        ],
+        true,
+        now,
+      );
+    }
+    if (stage === "browsing") {
+      return synthMessage(
+        [
+          {
+            ...thinkingRun(false, "Opening perchance.org in the sandbox browser to explore it interactively."),
+            id: "p-think",
+          },
+          { id: "p-tool", type: "tool" as const, toolCall: browserCall("running"), round: 2, roundStartedAt: now - 2800 },
+        ],
+        true,
+        now,
+      );
+    }
+    if (stage === "writing") {
+      return synthMessage(
+        [
+          {
+            ...thinkingRun(false, "The site is a random-generator platform. Now writing the summary."),
+            id: "p-think",
+          },
+          {
+            id: "p-tool",
+            type: "tool" as const,
+            toolCall: browserCall("completed"),
+            round: 2,
+            roundStartedAt: now - 2800,
+            roundEndedAt: now - 1200,
+          },
+          {
+            id: "p-text",
+            type: "text" as const,
+            content:
+              "Here's what I found on **perchance.org** — it's a free platform for building and sharing random text generators",
+            round: 3,
+          },
+        ],
+        true,
+        now,
+      );
+    }
+    // settled — tool-less turn: panel rests EXPANDED with "Thought Ns"
+    return synthMessage(
+      [
+        {
+          ...thinkingRun(false, "Answering directly from what I already know about the platform."),
+          id: "p-think",
+          roundStartedAt: now - 5200,
+          roundEndedAt: now - 200,
+        },
+        {
+          id: "p-text",
+          type: "text" as const,
+          content:
+            "perchance.org is a free platform for creating and sharing random generators — no signup needed.",
+          round: 2,
+        },
+      ],
+      false,
+      now,
+    );
+  })();
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2">
+        {TURN_STAGES.map((s) => (
+          <Button
+            key={s}
+            size="sm"
+            variant={s === stage ? "default" : "outline"}
+            onClick={() => setStage(s)}
+          >
+            {STAGE_LABEL[s]}
+          </Button>
+        ))}
+      </div>
+      {/* The REAL chat renderer — same component the thread uses. */}
+      <div className="rounded-xl border border-border/60 bg-background/50 p-3">
+        <MessageItem message={message} />
+      </div>
     </div>
   );
 }

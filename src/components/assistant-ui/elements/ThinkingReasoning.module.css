@@ -133,7 +133,7 @@
   margin-left: 0.12em;
   vertical-align: -0.15em;
   border-radius: 1px;
-  background: #3b82f6;
+  background: var(--color-primary);
   animation: trCaretBlink 900ms steps(2, start) infinite;
 }
 

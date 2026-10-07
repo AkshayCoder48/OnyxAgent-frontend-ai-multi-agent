@@ -11,4 +11,3 @@ export { useSourcesPanelStore } from "./sources-panel-store";
 export { useResearchStore } from "./research-store";
 export { useLogStore } from "./log-store";
 export { useQuoteStore } from "./quote-store";
-export { useCompanionStore, COMPANION_SIZES } from "./companion-store";

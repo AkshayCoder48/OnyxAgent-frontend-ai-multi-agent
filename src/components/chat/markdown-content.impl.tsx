@@ -9,7 +9,7 @@ import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { ChevronDown, ExternalLink } from "lucide-react";
 
 import { CopyButton } from "./copy-button";
-import { OrbCursor } from "@/components/assistant-ui/elements";
+import { CompanionCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
 import type { SourceItem } from "@/lib/chat-sources";
 
@@ -790,7 +790,9 @@ export const MarkdownContent = React.memo(function MarkdownContent({
       <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
         <StreamFreshContext.Provider value={streamState}>{rendered}</StreamFreshContext.Provider>
       </CiteSourcesContext.Provider>
-      <OrbCursor variant="C2" size={14} />
+      {/* THE COMPANION — a cute little face riding inline right after the
+          latest streamed letter (user spec: the companion IS the cursor). */}
+      <CompanionCursor size={15} />
     </div>
   );
 }, (prev, next) => {
