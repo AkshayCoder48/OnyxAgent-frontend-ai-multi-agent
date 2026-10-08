@@ -102,14 +102,14 @@ export function WebPageResult({ toolCall }: { toolCall: ToolCall }) {
           <span className="min-w-0 break-words">{fetchError}</span>
         </p>
       ) : isHttp ? (
-        /* The LIVE page — tall by default (the user asked for a preview you
-            can actually SEE), sandboxed, optionally interactive, enlargeable
-            to 75% of the viewport. */
+        /* The LIVE page — enlarged by default (the user asked for a preview
+            they can actually SEE and interact with), sandboxed, optionally
+            interactive, enlargeable to 75% of the viewport. */
         <LivePageFrame
           url={url}
           title={title}
           badge="Web Page"
-          heightClass="h-[24rem] sm:h-[30rem]"
+          heightClass="h-[30rem] sm:h-[38rem]"
           note={typeof payload?.length === "number" && payload.length > 0 ? `${payload.length.toLocaleString()} chars extracted` : undefined}
         />
       ) : null}

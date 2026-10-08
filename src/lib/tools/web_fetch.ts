@@ -10,7 +10,7 @@ import { registerTool } from "./registry";
 
 registerTool(
   "web_fetch",
-  "Fetch and extract readable text content from a web page URL. Returns the page title, text content, and metadata. Useful for reading articles, documentation, or API responses. Supports HTML pages and text files.",
+  "Fetch and extract readable text content from a web page URL — the DEFAULT way to READ any page (articles, documentation, APIs). Returns the page title, text content, and metadata. Much faster and cheaper than the browser: use this for plain reading, and reserve use_browser for pages that need real interaction (clicks, forms, login, JS, anti-bot walls). Docs tip: try /llms.txt and prefer .md pages when available. Supports HTML pages and text files.",
   {
     type: "object",
     properties: {

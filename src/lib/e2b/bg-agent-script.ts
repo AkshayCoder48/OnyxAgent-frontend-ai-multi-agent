@@ -2019,7 +2019,7 @@ const TOOLS = [
   },
   {
     name: "web_fetch",
-    description: "Fetch a URL and return its readable text (title + body, 20KB cap).",
+    description: "Fetch a URL and return its readable text (title + body, 20KB cap) — the DEFAULT way to READ any page (articles, docs, APIs); much faster than the browser. Reserve use_browser for pages needing real interaction. Docs tip: try /llms.txt and prefer .md pages.",
     parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
     run: async (args) => {
       try {
@@ -2694,7 +2694,7 @@ const TOOLS = [
   // turns keep browsing when the user's tab is closed.
   {
     name: "use_browser",
-    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), read (), snapshot (filter?, limit?), screenshot (fullPage?), screen_record (operation: 'start'|'stop'|'status'), inspect (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), back / forward / reload. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
+    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads; for simply READING a page's text use web_fetch instead (it is the default reader, much faster). Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), read (), snapshot (filter?, limit?), screenshot (fullPage?), screen_record (operation: 'start'|'stop'|'status'), inspect (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), back / forward / reload. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
     parameters: {
       type: "object",
       properties: {

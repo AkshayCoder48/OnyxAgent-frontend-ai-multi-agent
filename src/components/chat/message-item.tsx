@@ -442,6 +442,13 @@ const PAYLOAD_TOOL_NAMES = new Set([
   "send_folder",
   "preview_image",
   "ask_user",
+  // Web page tools — the LIVE page preview (sandboxed iframe of the fetched
+  // / browsed site) is a DELIVERABLE: it must never end up hidden under the
+  // force-collapsed "Worked Ns" panel at settle. The user reads (and
+  // interacts with) the page right in the chat flow.
+  "web_fetch",
+  "fetch_url",
+  "use_browser",
 ]);
 
 /** One chronological step of the generation process, built by walking the
@@ -665,7 +672,12 @@ function WorkingPanel({
   // activity (Thinking → Browsing … → Writing). Falls back to Thinking.
   const caption = streaming ? (statusCaptionFor(message) ?? "Thinking") : null;
 
-  const [expanded, setExpanded] = React.useState(streaming || !ranTools);
+  // INITIAL STATE: expanded while streaming, for tool-less turns, AND for
+  // turns holding a DELIVERABLE — a message can mount ALREADY SETTLED (chat
+  // history loaded from the database, restored conversations), and the
+  // web page preview / chart / download inside must never be born hidden
+  // under a collapsed "Worked Ns" row.
+  const [expanded, setExpanded] = React.useState(streaming || !ranTools || hasDeliverables);
   const [userToggled, setUserToggled] = React.useState(false);
   // AUTO EXPAND/COLLAPSE (render-time adjustment — no effect, no cascading
   // renders): expanded for the whole live stream; at settle the panel

@@ -627,7 +627,7 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
             url={currentUrl}
             title={currentTitle}
             badge="Browser"
-            heightClass="h-[22rem] sm:h-[28rem]"
+            heightClass="h-[26rem] sm:h-[34rem]"
             note={
               anyActive
                 ? "run in progress — the preview follows the agent's current page"
@@ -730,7 +730,7 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
           url={frameUrl}
           title={payload.title ?? null}
           badge="Browser"
-          heightClass="h-[22rem] sm:h-[28rem]"
+          heightClass="h-[26rem] sm:h-[34rem]"
         />
       ) : null}
 

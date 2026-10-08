@@ -48,7 +48,11 @@ const ACTIONS = [
   "refresh",
 ] as const;
 
-const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. Pass \`action\` plus only the fields that action needs:
+const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads.
+
+WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads. For simply READING a page's text (articles, docs, APIs) use web_fetch instead — it is the default for reading and much faster/cheaper.
+
+Pass \`action\` plus only the fields that action needs:
 
 - "navigate" (url) — open a URL (https://… or http://localhost:PORT for sandbox-local servers).
 - "click" (target) — click a link/button/element.
@@ -70,7 +74,7 @@ const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real bro
 
 TARGETING (prefer semantic): a target is EITHER a string selector (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]", "ref=e12") OR an object like {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
 
-DOCUMENTATION SITES: for AI agents a documentation index is often available at llms.txt — fetch it first when you need docs, and use .md for canonical markdown pages (.mdx is kept as a backwards-compatible alias on supported URL paths).
+DOCUMENTATION SITES: do NOT reach for the browser to read docs — use web_fetch on /llms.txt and .md pages first (it is the default reader); the browser is only for doc sites that need interaction to render.
 
 The browser session persists across calls — navigate, then click, then type, all on the same session. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes; consider telling the user).`;
 
