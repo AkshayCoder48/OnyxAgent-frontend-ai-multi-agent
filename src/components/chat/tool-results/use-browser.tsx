@@ -20,6 +20,7 @@ import {
   monoLabelClass,
 } from "@/components/assistant-ui/elements";
 import { ToolDurationBadge, ToolLiveElapsed } from "../tool-duration";
+import { LivePageFrame } from "./live-page-frame";
 
 /**
  * use_browser results — the browser presented as a TOOL, not a UI.
@@ -31,6 +32,9 @@ import { ToolDurationBadge, ToolLiveElapsed } from "../tool-duration";
  *  - `BrowserUseGroup` — a run of consecutive use_browser calls as ONE
  *    collapsible tool line ("Use Browser") with a mono operation list:
  *    `→ Navigate example.com ✓ 0.8s`, `→ Snapshot 42 elements ✓ 1.2s`, …
+ *    Above the list, the run's CURRENT PAGE renders as a REAL live
+ *    preview — a tall sandboxed <iframe> of the page's URL, always
+ *    visible without expanding anything (interactivity opt-in).
  *    Event-driven only (PRD §25): a row appears exactly when the backend
  *    emitted the call — never a faked "Browsing…" state.
  *  - `BrowserResult` — the per-call fallback for a use_browser call
@@ -505,6 +509,15 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
     return null;
   }, [toolCalls]);
 
+  // The current page's title — same newest-settled derivation as the URL.
+  const currentTitle = useMemo(() => {
+    for (let i = toolCalls.length - 1; i >= 0; i--) {
+      const p = parseBrowserResult(toolCalls[i]!.result);
+      if (p?.title) return p.title;
+    }
+    return null;
+  }, [toolCalls]);
+
   // Run stats (PRD §26): operations, screenshots, snapshots, failures.
   const stats = useMemo(() => {
     let screenshots = 0;
@@ -603,6 +616,27 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
         </span>
       </button>
 
+      {/* LIVE PAGE PREVIEW — always visible, NEVER hidden behind the
+          disclosure: the run's current page renders itself in a tall
+          sandboxed <iframe> (interactivity opt-in, enlarge ⤢, reload ⟳,
+          new-tab escape). The op list below stays collapsed until opened —
+          but the PAGE the agent is on is the payload the user came for. */}
+      {currentUrl && /^https?:\/\//i.test(currentUrl) ? (
+        <div className="px-1.5 pb-1 sm:px-2">
+          <LivePageFrame
+            url={currentUrl}
+            title={currentTitle}
+            badge="Browser"
+            heightClass="h-[22rem] sm:h-[28rem]"
+            note={
+              anyActive
+                ? "run in progress — the preview follows the agent's current page"
+                : undefined
+            }
+          />
+        </div>
+      ) : null}
+
       {/* Operation list — compact mono rows, scrollable when long. */}
       <CollapsePanel open={expanded}>
         <div className="space-y-0.5 px-1.5 pt-0.5 pb-2 sm:px-2">
@@ -648,6 +682,8 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
   const tabs = Array.isArray(payload.tabs) ? payload.tabs : [];
   const text = typeof payload.text === "string" ? payload.text : null;
   const elements = Array.isArray(payload.elements) ? payload.elements : null;
+  const frameUrl =
+    ok && typeof payload.url === "string" && /^https?:\/\//i.test(payload.url) ? payload.url : null;
 
   return (
     <div className="space-y-2.5 px-1.5 py-1 sm:px-2">
@@ -683,6 +719,19 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
 
       {payload.title ? (
         <p className="truncate text-sm font-medium text-foreground/80">{payload.title}</p>
+      ) : null}
+
+      {/* THE LIVE PAGE — the real preview strategy: the page's URL in a
+          tall sandboxed <iframe>, not a text excerpt. The extracted text
+          and element refs stay available below (and in the op rows) as the
+          honest fallback when a site refuses framing. */}
+      {frameUrl ? (
+        <LivePageFrame
+          url={frameUrl}
+          title={payload.title ?? null}
+          badge="Browser"
+          heightClass="h-[22rem] sm:h-[28rem]"
+        />
       ) : null}
 
       {/* Error — structured, never silent (PRD §27). */}

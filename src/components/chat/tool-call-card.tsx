@@ -616,11 +616,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
       isAnyDDGSearch ||
-      // web_fetch: the live page preview is the payload — expand when it
-      // landed (the user asked for a REAL preview, not a collapsed URL
-      // line).
-      ((toolCall.name === "web_fetch" || toolCall.name === "fetch_url") &&
-        toolCall.status === "completed") ||
+      // web_fetch: no longer auto-expands — the LIVE page preview renders
+      // INLINE beneath the line (never hidden behind the disclosure), so
+      // the collapsed card is exactly the preview + the friendly label.
       // edit_file: the CodeDiff is the payload — expand when it landed.
       (toolCall.name === "edit_file" &&
         toolCall.status === "completed" &&
@@ -1169,6 +1167,14 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <KnowledgeBaseResult toolCall={toolCall} />
       )}
 
+      {/* INLINE WEB PAGE PREVIEW (web_fetch / fetch_url): the LIVE site
+          renders directly in the main response — always visible beneath
+          the tool line, NEVER hidden behind the collapsed output
+          disclosure (the user must not have to expand the tool call to
+          see the page). Enlarging the line now reveals the raw
+          arguments/output, not the preview. */}
+      {isWebFetch ? <WebPageResult toolCall={toolCall} /> : null}
+
       {/* Disclosure panel — the ARGUMENTS/OUTPUT and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -1193,11 +1199,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <WebSessionResult data={webSessionResultSpec} />
           ) : toolCall.status === "completed" && isBrowserResult ? (
             <BrowserResult toolCall={toolCall} />
-          ) : toolCall.status === "completed" && isWebFetch ? (
-            // web_fetch → the LIVE page preview: a real sandboxed iframe of
-            // the fetched URL (interactivity opt-in) + the extracted text
-            // excerpt + open-in-tab — never a bare URL dump.
-            <WebPageResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

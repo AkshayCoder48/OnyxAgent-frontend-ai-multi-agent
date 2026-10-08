@@ -1,39 +1,24 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import {
-  ExternalLink,
-  Globe,
-  Loader2,
-  MousePointerClick,
-  ShieldAlert,
-} from "lucide-react";
+import { useMemo } from "react";
+import { ExternalLink, Globe, ShieldAlert } from "lucide-react";
 import type { ToolCall } from "@/types";
-import { cn } from "@/lib/utils";
+import { LivePageFrame } from "./live-page-frame";
 
 /**
- * WebPageResult — a REAL preview of the fetched site inside the web_fetch /
- * fetch_url tool-call card ("a preview of that site for real, interactive
- * optional"):
+ * WebPageResult — the web_fetch / fetch_url tool-call card's REAL preview of
+ * the fetched site:
  *
- *  - A SANDBOXED <iframe> of the page's actual URL — the site renders
- *    itself with its own JS and layout. The sandbox allows scripts, forms
- *    and popups but NOT same-origin, so a framed page can never touch this
- *    app's origin.
- *  - NON-INTERACTIVE BY DEFAULT: a transparent overlay over the frame
- *    captures pointer events, so the chat keeps scrolling normally through
- *    the preview and a stray tap can't navigate the frame. The
- *    "Interact" toggle lifts the overlay and hands the frame real pointer
- *    events — links, buttons and inputs work; toggling back re-shields it.
- *  - HONEST FRAMING FALLBACK: many sites send X-Frame-Options /
- *    CSP frame-ancestors and refuse to be framed — the frame then stays
- *    blank. The preview therefore always carries the fetched TEXT excerpt
- *    (what the model actually read) plus an open-in-new-tab affordance, so
- *    a framing refusal degrades to a text preview, never a dead rectangle.
+ *  - A generous LivePageFrame — the page's actual URL in a sandboxed
+ *    <iframe> (interactivity opt-in, enlarge ⤢, reload ⟳, new-tab escape).
+ *    The frame defaults to a TALL viewport (h-[24rem] sm:h-[30rem]) so the
+ *    site is readable without expanding anything.
+ *  - The fetched TEXT excerpt (what the model actually read) stays available
+ *    behind a collapsed <details> — it is the honest fallback when a site
+ *    refuses framing.
  *
  * Event-driven only: everything shown comes from the tool call's own args
- * and result payload — no invented "loading the page…" state beyond the
- * iframe's real load event.
+ * and result payload.
  */
 
 /** web_fetch result payload (see src/lib/tools/web_fetch.ts). */
@@ -65,9 +50,6 @@ function hostOf(url: string): string {
 }
 
 export function WebPageResult({ toolCall }: { toolCall: ToolCall }) {
-  const [interactive, setInteractive] = useState(false);
-  const [frameLoaded, setFrameLoaded] = useState(false);
-
   const args = (toolCall.args ?? {}) as Record<string, unknown>;
   const payload = useMemo(() => parseFetchPayload(toolCall.result), [toolCall.result]);
 
@@ -86,7 +68,7 @@ export function WebPageResult({ toolCall }: { toolCall: ToolCall }) {
 
   return (
     <div className="space-y-2.5 px-1.5 py-1 sm:px-2">
-      {/* Header — identity + the two affordances. */}
+      {/* Header — identity + the fetched size. */}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="inline-flex h-5 items-center gap-1 rounded-full bg-primary/10 px-2 text-[10px] font-semibold tracking-wide text-primary uppercase">
           <Globe className="h-3 w-3" aria-hidden />
@@ -108,28 +90,6 @@ export function WebPageResult({ toolCall }: { toolCall: ToolCall }) {
             {payload.length.toLocaleString()} chars
           </span>
         ) : null}
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {/* Interactivity toggle — OPTIONAL by design. */}
-          <button
-            type="button"
-            onClick={() => setInteractive((v) => !v)}
-            aria-pressed={interactive}
-            className={cn(
-              "inline-flex h-6 items-center gap-1 rounded-md border px-1.5 font-mono text-[10px] transition-colors",
-              interactive
-                ? "border-primary/40 bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-            )}
-            title={
-              interactive
-                ? "Interactive — the preview responds to clicks. Turn off to scroll the chat through it."
-                : "Preview only — make the live page interactive"
-            }
-          >
-            <MousePointerClick className="h-3 w-3" aria-hidden />
-            {interactive ? "Interacting" : "Interact"}
-          </button>
-        </span>
       </div>
 
       {title ? (
@@ -142,65 +102,16 @@ export function WebPageResult({ toolCall }: { toolCall: ToolCall }) {
           <span className="min-w-0 break-words">{fetchError}</span>
         </p>
       ) : isHttp ? (
-        <>
-          {/* The LIVE page — sandboxed (no same-origin), optionally interactive. */}
-          <div className="relative overflow-hidden rounded-lg border border-border bg-muted/30">
-            {!frameLoaded ? (
-              <div className="flex aspect-[16/10] w-full items-center justify-center gap-2 text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                <span className="font-mono text-[10px]">loading live preview…</span>
-              </div>
-            ) : null}
-            {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- onLoad is a load lifecycle event, not an interaction */}
-            <iframe
-              src={url}
-              title={title ? `Live preview of ${title}` : `Live preview of ${url}`}
-              onLoad={() => setFrameLoaded(true)}
-              loading="lazy"
-              referrerPolicy="no-referrer"
-              // Scripts/forms/popups allowed so the real site works; SAME-ORIGIN
-              // deliberately withheld — a framed third-party page must never
-              // gain access to this app's origin.
-              sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-              className={cn(
-                "aspect-[16/10] w-full bg-background",
-                frameLoaded ? "block" : "hidden",
-                !interactive && "pointer-events-none",
-              )}
-            />
-            {/* Interaction shield — captures pointer events while the
-                preview is non-interactive so the chat scrolls through it
-                normally. Clicking it flips the page interactive (one tap,
-                no hidden traps). */}
-            {!interactive && frameLoaded ? (
-              <button
-                type="button"
-                aria-label="Make the live preview interactive"
-                onClick={() => setInteractive(true)}
-                className="absolute inset-0 flex cursor-pointer items-end justify-center bg-transparent p-2"
-              >
-                <span className="rounded-full border border-border bg-background/85 px-2.5 py-1 font-mono text-[10px] text-muted-foreground backdrop-blur-sm">
-                  tap to interact
-                </span>
-              </button>
-            ) : null}
-          </div>
-          {/* Framing-refusal honesty note — blank frame ⇒ the site blocks
-              embedding; the excerpt + open-in-tab remain the real content. */}
-          <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/80">
-            Live preview loads the real site — some sites block embedding; if the frame
-            stays blank, {host ? `${host} ` : ""}refuses framing.{" "}
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline decoration-foreground/30 underline-offset-2 transition-colors hover:text-foreground"
-            >
-              Open in a new tab
-            </a>
-            .
-          </p>
-        </>
+        /* The LIVE page — tall by default (the user asked for a preview you
+            can actually SEE), sandboxed, optionally interactive, enlargeable
+            to 75% of the viewport. */
+        <LivePageFrame
+          url={url}
+          title={title}
+          badge="Web Page"
+          heightClass="h-[24rem] sm:h-[30rem]"
+          note={typeof payload?.length === "number" && payload.length > 0 ? `${payload.length.toLocaleString()} chars extracted` : undefined}
+        />
       ) : null}
 
       {/* The fetched TEXT — what the model actually read. Always present:
