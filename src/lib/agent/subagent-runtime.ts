@@ -13,6 +13,7 @@ import {
 } from "@/lib/agent/param-policy";
 import {
   buildWireMessages,
+  beginTurnWireCompat,
   getWireCompat,
   nextStrictGatewayStep,
   wireAllowsTools,
@@ -264,6 +265,10 @@ async function runSubagentLoop(
     // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
     // bounded per subagent run so a dead provider can't loop forever.
     let gatewayRetries = 0;
+    // BEGIN-OF-RUN RESET ("browser tool isn't available in this mode" fix):
+    // a noTools downgrade learned on an earlier turn/session must not strip
+    // THIS subagent's tool surface — subagents live and die by their tools.
+    beginTurnWireCompat(config.baseUrl, config.model);
 
     while (maxIterations-- > 0) {
       // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of

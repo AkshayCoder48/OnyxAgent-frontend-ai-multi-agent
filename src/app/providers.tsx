@@ -7,6 +7,7 @@ import { ThemeProvider } from "@/components/theme";
 import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
 import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
+import { applyPersistedBrand } from "@/lib/brand";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -15,6 +16,13 @@ interface ProvidersProps {
 /** Apply saved color scheme on app mount so it persists across refreshes. */
 function ColorSchemeInitializer() {
   useEffect(() => {
+    // BRAND FIRST (the “highlighted text is always cyan” fix): the
+    // persisted brand preset + font size apply on EVERY app load — they
+    // used to be set only while the Settings → Appearance section was
+    // mounted, so every fresh load reverted to the default cyan tokens.
+    // Runs BEFORE the custom color-scheme block below so a full custom
+    // scheme (when one is saved) still takes precedence.
+    applyPersistedBrand();
     try {
       const saved = localStorage.getItem("onyx-color-scheme");
       if (!saved) return;

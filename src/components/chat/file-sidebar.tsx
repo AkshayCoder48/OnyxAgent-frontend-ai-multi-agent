@@ -122,9 +122,9 @@ const FILE_ICON_COLORS: Record<string, string> = {
   xml: "text-blue-500",
   // Spreadsheets → green
   csv: "text-emerald-500", xls: "text-emerald-500", xlsx: "text-emerald-500", tsv: "text-emerald-500",
-  // Images → terracotta
-  png: "text-[#0891b2]", jpg: "text-[#0891b2]", jpeg: "text-[#0891b2]", gif: "text-[#0891b2]",
-  svg: "text-[#0891b2]", webp: "text-[#0891b2]", bmp: "text-[#0891b2]", ico: "text-[#0891b2]",
+  // Images → the active brand color (theme-aware, follows Appearance)
+  png: "text-primary", jpg: "text-primary", jpeg: "text-primary", gif: "text-primary",
+  svg: "text-primary", webp: "text-primary", bmp: "text-primary", ico: "text-primary",
   // Documents → red
   pdf: "text-rose-500", doc: "text-rose-500", docx: "text-rose-500",
   // Archives → amber

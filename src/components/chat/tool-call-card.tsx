@@ -47,6 +47,7 @@ import { MemoryResult } from "./tool-results/memory";
 import { KnowledgeBaseResult } from "./tool-results/knowledge-base";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
 import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
+import { WebPageResult } from "./tool-results/web-page";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
@@ -551,6 +552,13 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <ImageInspectionResult result={toolCall.result} />
       )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
+      {/* web_fetch / fetch_url — the LIVE page preview is CONTENT (the real
+          site rendering itself, interactivity opt-in), so it rides beneath
+          the friendly sentence in BOTH display modes — same slot rule as
+          charts / images / downloads. */}
+      {((toolCall.name === "web_fetch" || toolCall.name === "fetch_url") && isCompleted) && (
+        <WebPageResult toolCall={toolCall} />
+      )}
       {isAskUser && (
         <AskUserResult
           args={toolCall.args}
@@ -608,6 +616,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
       isAnyDDGSearch ||
+      // web_fetch: the live page preview is the payload — expand when it
+      // landed (the user asked for a REAL preview, not a collapsed URL
+      // line).
+      ((toolCall.name === "web_fetch" || toolCall.name === "fetch_url") &&
+        toolCall.status === "completed") ||
       // edit_file: the CodeDiff is the payload — expand when it landed.
       (toolCall.name === "edit_file" &&
         toolCall.status === "completed" &&
@@ -716,6 +729,12 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isAskUser = toolCall.name === "ask_user";
   const isLoadSkill = toolCall.name === "load_skill";
   const isListSkills = toolCall.name === "list_skills" || (toolCall.name === "manage_skill" && toolCall.args?.action === "list");
+  // web_fetch / fetch_url — the tool card carries a REAL live preview of the
+  // fetched site (sandboxed iframe, optional interactivity) instead of the
+  // raw args/output dump.
+  const isWebFetch =
+    (toolCall.name === "web_fetch" || toolCall.name === "fetch_url") &&
+    toolCall.status === "completed";
   // edit_file — the find/replace pair renders as a CodeDiff (assistant-ui
   // "Code diff" element) once the edit completes successfully.
   const isEditFile = toolCall.name === "edit_file";
@@ -858,7 +877,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult || isWebFetch;
   const friendlyName = isComposio
     ? // The REAL platform name once branding resolves (GitHub, Slack…);
       // fallback is the platform the call ran through.
@@ -1174,6 +1193,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <WebSessionResult data={webSessionResultSpec} />
           ) : toolCall.status === "completed" && isBrowserResult ? (
             <BrowserResult toolCall={toolCall} />
+          ) : toolCall.status === "completed" && isWebFetch ? (
+            // web_fetch → the LIVE page preview: a real sandboxed iframe of
+            // the fetched URL (interactivity opt-in) + the extracted text
+            // excerpt + open-in-tab — never a bare URL dump.
+            <WebPageResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDateTime ? (
             <DateTimeResult result={resultText} />
           ) : toolCall.status === "completed" && isRAGSearch ? (

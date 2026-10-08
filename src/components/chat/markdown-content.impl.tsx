@@ -11,6 +11,7 @@ import { ChevronDown, ExternalLink } from "lucide-react";
 import { CopyButton } from "./copy-button";
 import { CompanionCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
+import { SaveCodeButton } from "./code-save-dialog";
 import type { SourceItem } from "@/lib/chat-sources";
 
 /** Parse `language-xyz` from a fenced-code `<code>` className. */
@@ -327,8 +328,8 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
   }
 
   // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
-  // strip with language/filename on the left and a Copy affordance on the
-  // right; muted warm syntax tones come from the `.chat-code` hljs scope.
+  // strip with language/filename on the left and Save + Copy affordances on
+  // the right; muted warm syntax tones come from the `.chat-code` hljs scope.
   return (
     <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
       {(lang || codeContent) && (
@@ -338,11 +339,19 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
         >
           <span>{lang ?? "code"}</span>
           {codeContent && (
-            <CopyButton
-              text={codeContent}
-              label="Copy"
-              className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
-            />
+            <span className="flex shrink-0 items-center gap-1">
+              {/* Save to Files — asks for location / name / extension. */}
+              <SaveCodeButton
+                code={codeContent}
+                lang={lang}
+                className="text-[#a5947c] hover:text-[#e8decc]"
+              />
+              <CopyButton
+                text={codeContent}
+                label="Copy"
+                className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
+              />
+            </span>
           )}
         </div>
       )}
@@ -479,10 +488,14 @@ const SHARED_COMPONENTS = {
   code({ className, children, ...props }: React.ComponentPropsWithoutRef<"code">) {
     const isInline = !className;
     if (isInline) {
-      // Inline code = paper chip with deep-terracotta text (Terra spec).
+      // Inline code = paper chip (Terra spec). BRAND-AWARE INK: the text
+      // follows --color-primary (Settings → Appearance brand presets —
+      // cyan/terracotta/emerald/amber/orange/rose + light/dark themes).
+      // The old hardcoded #0e7490 / #67e8f9 pair stayed cyan under EVERY
+      // brand — the "highlighted text is always cyan" bug.
       return (
         <code
-          className="bg-secondary rounded px-1.5 py-0.5 font-mono text-[0.85em] text-[#0e7490] dark:text-[#67e8f9]"
+          className="bg-secondary text-primary rounded px-1.5 py-0.5 font-mono text-[0.85em]"
           {...props}
         >
           {children}

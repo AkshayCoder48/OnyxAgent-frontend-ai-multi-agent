@@ -185,6 +185,14 @@ export default function AppearanceSettingsPage() {
     setActiveScheme(scheme.name);
     applyScheme(scheme);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(scheme));
+    // LAST CHOICE WINS (the two appearance pickers clear each other): a
+    // scheme pick clears the brand preset so the next boot doesn't layer
+    // a stale brand under this scheme. @/lib/brand owns the key name.
+    try {
+      localStorage.removeItem("settings.brand");
+    } catch {
+      /* ignore */
+    }
   }
 
   function resetScheme() {

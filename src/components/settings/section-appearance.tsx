@@ -6,6 +6,14 @@ import { Check, Monitor, Moon, Sun } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
+import {
+  applyBrandPreset as applyBrandPresetFromLib,
+  readPersistedBrandId,
+  selectBrandPreset,
+  BRAND_PRESETS,
+  FONT_KEY,
+  type BrandPreset,
+} from "@/lib/brand";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
@@ -20,99 +28,16 @@ import {
 
 type FontSize = "sm" | "base" | "lg";
 
-interface BrandPreset {
-  id: string;
-  label: string;
-  // CSS color value for --primary (oklch string)
-  primary: string;
-  // CSS color value for --primary-foreground
-  primaryForeground: string;
-  // visible swatch color (uses primary)
-  swatch: string;
-}
-
-// Cyan-first preset list. Cyan is the app default (white canvas, black
-// ink, cyan buttons); no purple/violet/indigo presets, per the design
-// spec. Picking Cyan clears the overrides so the design tokens from
-// globals.css take over again.
-const BRAND_PRESETS: BrandPreset[] = [
-  {
-    id: "cyan",
-    label: "Cyan",
-    primary: "#0891b2",
-    primaryForeground: "#ffffff",
-    swatch: "#0891b2",
-  },
-  {
-    id: "terracotta",
-    label: "Terracotta",
-    primary: "#c4552f",
-    primaryForeground: "#faf6f0",
-    swatch: "#c4552f",
-  },
-  {
-    id: "emerald",
-    label: "Emerald",
-    primary: "oklch(0.62 0.17 162)",
-    primaryForeground: "oklch(0.985 0 0)",
-    swatch: "oklch(0.62 0.17 162)",
-  },
-  {
-    id: "amber",
-    label: "Amber",
-    primary: "oklch(0.7 0.16 70)",
-    primaryForeground: "oklch(0.145 0 0)",
-    swatch: "oklch(0.7 0.16 70)",
-  },
-  {
-    id: "orange",
-    label: "Orange",
-    primary: "oklch(0.66 0.2 50)",
-    primaryForeground: "oklch(0.985 0 0)",
-    swatch: "oklch(0.66 0.2 50)",
-  },
-  {
-    id: "rose",
-    label: "Rose",
-    primary: "oklch(0.62 0.24 16)",
-    primaryForeground: "oklch(0.985 0 0)",
-    swatch: "oklch(0.62 0.24 16)",
-  },
-];
+// Brand presets + persistence live in @/lib/brand — the ONE source of truth,
+// applied at app boot too (the pick survives reloads; it used to revert to
+// cyan on every load because applyBrand only ran while this settings
+// section was mounted — the “highlighted text is always cyan” bug).
 
 const FONT_SIZE_MAP: Record<FontSize, string> = {
   sm: "14px",
   base: "16px",
   lg: "18px",
 };
-
-const BRAND_KEY = "settings.brand";
-const FONT_KEY = "settings.font-size";
-
-/** CSS vars the picker overrides (Tailwind v4 token names). */
-const BRAND_OVERRIDES = [
-  "--color-primary",
-  "--color-primary-foreground",
-  "--color-brand",
-  "--color-brand-hover",
-  "--color-ring",
-  "--color-chart",
-] as const;
-
-function applyBrand(preset: BrandPreset) {
-  const root = document.documentElement;
-  if (preset.id === "cyan") {
-    // Restore theme defaults by removing inline overrides.
-    for (const prop of BRAND_OVERRIDES) root.style.removeProperty(prop);
-    return;
-  }
-  root.style.setProperty("--color-primary", preset.primary);
-  root.style.setProperty("--color-primary-foreground", preset.primaryForeground);
-  root.style.setProperty("--color-brand", preset.primary);
-  root.style.setProperty("--color-brand-hover", preset.primary);
-  root.style.setProperty("--color-ring", preset.primary);
-  root.style.setProperty("--color-chart", preset.primary);
-}
 
 function applyFont(size: FontSize) {
   document.documentElement.style.fontSize = FONT_SIZE_MAP[size];
@@ -131,18 +56,14 @@ export function SectionAppearance() {
 
   React.useEffect(() => {
     setMounted(true);
-    // Map unknown/legacy ids onto the cyan default ("neutral" was a
-    // legacy default; "terracotta" remains a valid pick).
-    const rawSaved = localStorage.getItem(BRAND_KEY) ?? "cyan";
-    const savedBrand =
-      rawSaved === "neutral" || !BRAND_PRESETS.some((p) => p.id === rawSaved)
-        ? "cyan"
-        : rawSaved;
+    // Validated persisted ids (unknown/legacy ids map onto cyan) — the
+    // SAME normalization the boot applier uses (@/lib/brand).
+    const savedBrand = readPersistedBrandId();
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
     setBrand(savedBrand);
     setFontSize(savedFont);
     const preset = BRAND_PRESETS.find((p) => p.id === savedBrand) ?? BRAND_PRESETS[0]!;
-    applyBrand(preset);
+    applyBrandPresetFromLib(preset);
     applyFont(savedFont);
   }, []);
 
@@ -153,8 +74,9 @@ export function SectionAppearance() {
 
   function handleBrand(preset: BrandPreset) {
     setBrand(preset.id);
-    applyBrand(preset);
-    localStorage.setItem(BRAND_KEY, preset.id);
+    // selectBrandPreset applies the preset AND clears the competing custom
+    // color-scheme — the LAST choice is the one that survives reloads.
+    selectBrandPreset(preset);
     toast.success(`Brand color: ${preset.label}`);
   }
 

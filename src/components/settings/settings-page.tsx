@@ -200,7 +200,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
                             className={cn(
                               "group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
                               isActive
-                                ? "bg-accent text-accent-foreground border border-[#a5f3fc] dark:border-[#155e75]"
+                                ? "bg-accent text-accent-foreground border border-primary/50 dark:border-primary/40"
                                 : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent",
                             )}
                           >

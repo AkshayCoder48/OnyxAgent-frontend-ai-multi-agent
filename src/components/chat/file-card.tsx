@@ -52,9 +52,9 @@ function badgeColorFor(ext: string): string {
   if (["py", "js", "ts", "tsx", "jsx", "json", "yaml", "yml", "toml", "sh", "sql"].includes(e)) {
     return "bg-blue-500 text-white";
   }
-  // Purple: images
+  // Brand color: images (theme-aware, follows Appearance)
   if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(e)) {
-    return "bg-[#0891b2] text-white";
+    return "bg-primary text-primary-foreground";
   }
   // Red: documents
   if (["pdf", "doc", "docx"].includes(e)) {

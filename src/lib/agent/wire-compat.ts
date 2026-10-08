@@ -142,6 +142,25 @@ export function getWireCompat(baseUrl: string, model: string): Readonly<WireComp
   return modesFor(baseUrl, model);
 }
 
+/** BEGIN-OF-TURN RESET (the "browser tool isn't available in this mode"
+ * fix): give the tool surface a FRESH chance on every turn. The ladder's
+ * noTools step used to stay learned for the whole session — one generic-400
+ * false positive (a content filter, a transient gateway quirk) and every
+ * later request for that provider silently shipped WITHOUT tools, so the
+ * model truthfully claimed it lacked use_browser and fell back to plain
+ * search. toolText / system steps stay learned (they only change message
+ * ENCODING — safe); noTools is the one step that removes CAPABILITY, so it
+ * must never outlive the request that learned it. Call at the top of every
+ * agent turn / subagent run, before the request body is built. */
+export function beginTurnWireCompat(baseUrl: string, model: string): void {
+  const mode = modesFor(baseUrl, model) as WireCompatMode;
+  if (mode.noTools) {
+    mode.noTools = false;
+    // noTools is never persisted, so nothing to un-persist — the reset is
+    // purely the in-session (and hydrated) mode object.
+  }
+}
+
 /** Does the current request still carry native tool structures on the wire? */
 export function wireHasToolStructures(messages: readonly WireMessage[]): boolean {
   return messages.some(
@@ -313,8 +332,17 @@ function nextStep(
     mode.system = "dropped";
     return "no system message (provider rejects system prompts)";
   }
-  // 4. no tools.
-  if (hasToolsParam && !mode.noTools) {
+  // 4. no tools — EXPLICIT TOOL EVIDENCE ONLY (the "browser tool isn't
+  //    available in this mode" fix). This is the ONLY step that removes
+  //    CAPABILITY rather than re-encoding, and a generic 400 "Something was
+  //    wrong with the input data" is usually a content filter, NOT a tools
+  //    rejection. Take the step only when the error itself names tools
+  //    ("tools is not supported", "invalid tools parameter", …) — and even
+  //    then it lasts only until the next turn's beginTurnWireCompat reset.
+  //    The learned step is applied to the in-flight retry by the caller's
+  //    buildBody(); generic errors fall through to "exhausted" and surface
+  //    the honest content-filter explanation instead.
+  if (hasToolsParam && !mode.noTools && /\btool/i.test(errorText)) {
     mode.noTools = true;
     return "no tools param (provider rejects tool declarations)";
   }

@@ -818,7 +818,15 @@ function nextWireCompatStep(state, opts) {
     mode.system = "dropped";
     return "no system message (provider rejects system prompts)";
   }
-  if (opts.hasToolsParam && !mode.noTools) {
+  if (opts.hasToolsParam && !mode.noTools && /\btool/i.test(String(opts.errorText || ""))) {
+    // EXPLICIT TOOL EVIDENCE ONLY ("browser tool isn't available in this
+    // mode" fix): this is the one step that removes CAPABILITY, and a
+    // generic 400 "Something was wrong with the input data" is usually a
+    // content filter, not a tools rejection. Require the error itself to
+    // name tools; generic errors fall through to "exhausted" and surface
+    // the honest content-filter explanation. streamRoundEvents resets
+    // noTools at the top of every round, so even a genuine rejection only
+    // degrades ONE round at a time.
     mode.noTools = true;
     return "no tools param (provider rejects tool declarations)";
   }
@@ -983,6 +991,17 @@ async function streamRoundEvents(state, round, finalRound) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
+  // BEGIN-OF-ROUND RESET ("browser tool isn't available in this mode" fix):
+  // a noTools downgrade learned on an EARLIER round's generic 400 (usually a
+  // content-filter false positive) used to strip tools from EVERY later
+  // round of the run — the model then truthfully told users it had no
+  // browser tool and fell back to plain search. Each round now gets a fresh
+  // tool attempt: one extra 400 on genuinely tool-rejecting providers costs
+  // nothing (rejected pre-generation), while a false positive self-heals on
+  // the very next round.
+  if (finalRound !== true && state.wireCompat && state.wireCompat.noTools) {
+    state.wireCompat.noTools = false;
+  }
   const body = {
     model: p.model,
     // WIRE SAFETY: the history is sanitized — every assistant tool_calls
@@ -1240,9 +1259,16 @@ async function streamRoundEvents(state, round, finalRound) {
       // (this attempt doesn't count as a failure).
       const detail400 = await res.text().catch(() => "");
       const badParam = parseUnsupportedParam(detail400);
+      // TOOL PARAMS (tools / tool_choice) are stripped ONE-SHOT — never
+      // recorded into state.paramBans ("browser tool isn't available in this
+      // mode" fix): a 400 naming tools is too often a content-filter false
+      // positive, and a recorded ban would strip the tool surface from every
+      // later round of the run. delete body[badParam] below makes the branch
+      // non-repeating within this request; the next round re-attempts tools.
+      const isToolParamName = badParam === "tools" || badParam === "tool_choice";
       if (badParam && body[badParam] !== undefined && !state.paramBans.includes(badParam) && ladderSteps < MAX_ATTEMPTS) {
         ladderSteps += 1;
-        state.paramBans.push(badParam);
+        if (!isToolParamName) state.paramBans.push(badParam);
         delete body[badParam];
         if (badParam === "reasoning_effort") delete body.thinking;
         if (badParam === "thinking") delete body.reasoning_effort;
@@ -1503,9 +1529,12 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
       const detail = await res.text().catch(() => "");
       // Self-heal once: an unsupported-parameter 400 names the offending
       // field — strip it, remember the ban, retry this single request.
+      // TOOL PARAMS (tools / tool_choice): one-shot strip only, never
+      // recorded (content-filter false positives must not strip the tool
+      // surface from later rounds — "browser tool isn't available" fix).
       const badParam = parseUnsupportedParam(detail);
       if (badParam && nb[badParam] !== undefined && !state.paramBans.includes(badParam)) {
-        state.paramBans.push(badParam);
+        if (badParam !== "tools" && badParam !== "tool_choice") state.paramBans.push(badParam);
         delete nb[badParam];
         if (badParam === "reasoning_effort") delete nb.thinking;
         if (badParam === "thinking") delete nb.reasoning_effort;

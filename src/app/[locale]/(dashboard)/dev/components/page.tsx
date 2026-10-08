@@ -97,6 +97,10 @@ function Gallery() {
         <StreamingTurnPreview />
       </Section>
 
+      <Section title="Chat surface — live web page preview · code-block Save · brand-aware inline code">
+        <ChatSurfacePreview />
+      </Section>
+
       <Section title="Button variants">
         {(["default", "secondary", "outline", "ghost", "destructive", "link"] as const).map((v) => (
           <Button key={v} variant={v}>
@@ -774,6 +778,76 @@ function StreamingTurnPreview() {
       <div className="rounded-xl border border-border/60 bg-background/50 p-3">
         <MessageItem message={message} />
       </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * CHAT SURFACE PREVIEW — mounts the REAL MessageItem with a settled
+ * web_fetch tool call + a markdown answer, so the three chat surfaces
+ * are verifiable without a provider:
+ *   1. web_fetch → the LIVE page preview (sandboxed iframe, optional
+ *      interactivity, extracted-text fallback);
+ *   2. the fenced code block → the Save-to-Files button (location /
+ *      name / extension dialog) next to Copy;
+ *   3. inline `code` → the brand-aware chip (follows Settings →
+ *      Appearance, never a hardcoded cyan).
+ * ─────────────────────────────────────────────────────────────────────── */
+function ChatSurfacePreview() {
+  const [now] = useState(() => Date.now());
+  const message: ChatMessage = {
+    id: "synthetic-chat-surface",
+    role: "assistant",
+    content: "",
+    timestamp: new Date(now),
+    isStreaming: false,
+    parts: [
+      {
+        id: "p-webfetch",
+        type: "tool" as const,
+        round: 1,
+        roundStartedAt: now - 4000,
+        roundEndedAt: now - 2400,
+        toolCall: {
+          id: "tc-webfetch",
+          name: "web_fetch",
+          args: { url: "https://example.com" } as Record<string, unknown>,
+          status: "completed",
+          startedAt: now - 4000,
+          endedAt: now - 2400,
+          result: {
+            url: "https://example.com",
+            title: "Example Domain",
+            content:
+              "Example Domain. This domain is for use in illustrative examples in documents. You may use this domain in literature without prior coordination or asking permission. More information…",
+            length: 178,
+          },
+        },
+      },
+      {
+        id: "p-answer",
+        type: "text" as const,
+        round: 2,
+        content: [
+          "Here's the page — the preview below is the **real live site** (tap Interact to use it):",
+          "",
+          "A quick helper for it, with inline `fetch_page()` code:",
+          "",
+          "```python",
+          "import urllib.request",
+          "",
+          'def fetch_page(url: str) -> str:',
+          '    """Fetch a page and return its text."""',
+          "    with urllib.request.urlopen(url, timeout=30) as r:",
+          '        return r.read().decode("utf-8", errors="replace")',
+          "```",
+        ].join("\n"),
+      },
+    ],
+  };
+  return (
+    <div className="rounded-xl border border-border/60 bg-background/50 p-3">
+      <MessageItem message={message} />
     </div>
   );
 }

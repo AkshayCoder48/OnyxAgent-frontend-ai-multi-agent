@@ -63,6 +63,7 @@ import {
 } from "@/lib/agent/param-policy";
 import {
   buildWireMessages,
+  beginTurnWireCompat,
   getWireCompat,
   nextStrictGatewayStep,
   wireAllowsTools,
@@ -795,6 +796,12 @@ async function streamRound(
   // is never mutated by a downgrade. `wireMode` is a live reference into the
   // session-scoped registry: steps learned by nextStrictGatewayStep below
   // are honored by the next buildBody() call.
+  //
+  // BEGIN-OF-TURN RESET: a noTools step learned on an earlier turn's generic
+  // 400 (content-filter false positive) must NOT strip this turn's tools —
+  // use_browser et al. get a fresh chance every turn ("browser tool isn't
+  // available in this mode" fix).
+  beginTurnWireCompat(provider.baseUrl, provider.model);
   const wireMode = getWireCompat(provider.baseUrl, provider.model);
   const buildBody = (): Record<string, unknown> => {
     const b: Record<string, unknown> = {
@@ -881,7 +888,13 @@ async function streamRound(
       const badParam = parseUnsupportedParam(errText);
       if (badParam && !strippedParams.has(badParam) && body[badParam] !== undefined) {
         strippedParams.add(badParam);
-        learnParamBan(provider.baseUrl, provider.model, badParam);
+        // TOOL PARAMS (tools / tool_choice): strip + retry ONE-SHOT only —
+        // never learned, never persisted (param-policy refuses them; see
+        // isToolParam). A 400 naming tools is too often a content-filter
+        // false positive; the next turn re-attempts with the full tool
+        // surface (use_browser included). This was the root cause of the
+        // "browser tool isn't available in this mode" regression.
+        learnParamBan(provider.baseUrl, provider.model, badParam); // no-op for tool params
         delete body[badParam];
         if (badParam === "reasoning_effort") delete body.thinking; // paired
         if (badParam === "thinking") delete body.reasoning_effort; // paired
