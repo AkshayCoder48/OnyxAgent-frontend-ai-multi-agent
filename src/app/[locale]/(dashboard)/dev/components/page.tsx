@@ -44,6 +44,8 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { EmptyState } from "@/components/states";
 import { MessageItem } from "@/components/chat/message-item";
 import { BrowserUseGroup } from "@/components/chat/tool-results/use-browser";
+import { FilesFooter } from "@/components/chat/streaming-file-tree";
+import { LivePageFrame } from "@/components/chat/tool-results/live-page-frame";
 import type { ChatMessage, ToolCall as ToolCallData } from "@/types";
 import {
   Alert,
@@ -301,6 +303,26 @@ function AgentElementsShowcase() {
         </div>
 
         <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Live page frame — blocked embedding + unreachable fallbacks</p>
+          {/* github.com sends X-Frame-Options: deny — the frame-check guard
+              auto-switches to the reader snapshot (never the browser's
+              "refused to connect" error page). */}
+          <LivePageFrame
+            url="https://github.com"
+            title="GitHub"
+            badge="Web Page"
+            heightClass="h-64"
+          />
+          {/* Unreachable host — the honest "Site not accessible" card with
+              retry + new-tab escape. */}
+          <LivePageFrame
+            url="https://onyx-frame-check-test.invalid"
+            badge="Web Page"
+            heightClass="h-48"
+          />
+        </div>
+
+        <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Code diff + file tree</p>
           <CodeDiff
             filename="composer.tsx"
@@ -323,6 +345,58 @@ function AgentElementsShowcase() {
             visibleCount={4}
             totalAdditions={70}
             totalDeletions={6}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Files footer — Uiverse tree (guide lines, folder glyph swap)</p>
+          <FilesFooter
+            nodes={[
+              {
+                id: "src",
+                label: "src",
+                icon: "folder",
+                children: [
+                  {
+                    id: "src/app",
+                    label: "app",
+                    icon: "folder",
+                    children: [
+                      { id: "src/app/layout.tsx", label: "layout.tsx", icon: "file-code", description: "+12" },
+                      { id: "src/app/page.tsx", label: "page.tsx", icon: "file-code", description: "+48 −3" },
+                    ],
+                  },
+                  {
+                    id: "src/components",
+                    label: "components",
+                    icon: "folder",
+                    children: [
+                      {
+                        id: "src/components/ui",
+                        label: "ui",
+                        icon: "folder",
+                        children: [
+                          { id: "src/components/ui/button.tsx", label: "button.tsx", icon: "file-code", description: "+27" },
+                        ],
+                      },
+                      { id: "src/components/header.tsx", label: "header.tsx", icon: "file-code", description: "+9 −1" },
+                      { id: "src/components/footer.tsx", label: "footer.tsx", icon: "file-code", description: "+6" },
+                    ],
+                  },
+                  {
+                    id: "src/lib",
+                    label: "lib",
+                    icon: "folder",
+                    children: [
+                      { id: "src/lib/utils.ts", label: "utils.ts", icon: "file-code", description: "+3" },
+                    ],
+                  },
+                ],
+              },
+            ]}
+            fileCount={7}
+            totalAdditions={105}
+            totalDeletions={4}
           />
         </div>
 

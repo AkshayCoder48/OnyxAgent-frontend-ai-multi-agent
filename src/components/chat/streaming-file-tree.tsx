@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CollapsePanel } from "@/components/assistant-ui/elements";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { FILE_TOOLS } from "@/lib/agent-tool-steps";
@@ -511,25 +512,25 @@ export function StreamingFileTree({
   );
 }
 
-// ── FilesFooter — the compact end-of-turn card (CitationsFooter style) ──────
+// ── FilesFooter — the compact end-of-turn card ──────────────────────────────
+//
+// Tree UI per the Uiverse "file tree" design (ashif_6672), re-themed onto the
+// app's design tokens:
+//   - rows: 28px flex rows, 8px gap, 4px radius, hover = muted wash;
+//   - folders: closed Folder glyph (muted) ↔ open FolderOpen glyph
+//     (foreground) — the icon swap IS the open/closed affordance (no
+//     chevron), exactly like the reference;
+//   - files: the plain lucide File glyph (folded corner), muted;
+//   - guide lines: nested levels indent 11px behind a vertical border rail,
+//     and every child carries an 11px horizontal connector tick;
+//   - open/close animates via the CollapsePanel grid-template-rows 0fr→1fr
+//     trick (same mechanism as the reference's .tree-children-wrapper).
 
-/** Compact file glyph by extension (3px smaller than the live tree's). */
-function FooterNodeGlyph({ icon, className }: { icon: string; className?: string }) {
-  switch (icon) {
-    case "folder":
-      return <Folder className={className} />;
-    case "file-code":
-      return <FileCode className={className} />;
-    case "file-text":
-      return <FileText className={className} />;
-    case "file-minus":
-      return <FileMinus className={className} />;
-    case "image":
-      return <ImageIcon className={className} />;
-    default:
-      return <File className={className} />;
-  }
-}
+/** Shared <li> classes — the per-child horizontal connector tick (the
+ * Uiverse tree guide line: an 11px tick at the row's vertical center,
+ * reaching back to the parent's vertical rail). */
+const TREE_LI =
+  "relative mt-1 first:mt-0 before:absolute before:-left-[11px] before:top-3.5 before:h-px before:w-[11px] before:bg-border before:content-['']";
 
 function FooterFolder({
   node,
@@ -543,36 +544,28 @@ function FooterFolder({
   const [open, setOpen] = React.useState(defaultOpen);
   const children = node.children ?? [];
   return (
-    <>
+    <li className={TREE_LI}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="hover:bg-foreground/[0.05] flex w-full cursor-pointer items-center gap-1 rounded-md px-1.5 py-[3px] text-left transition-colors"
-        style={{ paddingLeft: depth * 14 + 6 }}
+        className="flex h-7 w-full cursor-pointer items-center gap-2 rounded px-2 text-left text-sm text-foreground transition-colors hover:bg-muted/70"
       >
-        <ChevronRight
-          className={cn(
-            "text-muted-foreground/70 h-3 w-3 shrink-0 transition-transform duration-150",
-            open && "rotate-90",
-          )}
-          aria-hidden
-        />
-        <FooterNodeGlyph icon="folder" className="text-amber-500/80 dark:text-amber-400/80 h-3 w-3 shrink-0" />
-        <span className="text-foreground/75 truncate text-[11.5px] font-medium">{node.label}</span>
+        {open ? (
+          <FolderOpen className="h-4 w-4 shrink-0 text-foreground" aria-hidden />
+        ) : (
+          <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+        )}
+        <span className="truncate font-medium">{node.label}</span>
       </button>
-      {open && (
-        <div role="group">
-          {children.map((child) => (
-            <FooterNode key={child.id} node={child} depth={depth + 1} defaultOpen={defaultOpen} />
-          ))}
-        </div>
-      )}
-    </>
+      <CollapsePanel open={open}>
+        <FooterChildren nodes={children} depth={depth + 1} defaultOpen={defaultOpen} />
+      </CollapsePanel>
+    </li>
   );
 }
 
-function FooterFile({ node, depth }: { node: StreamingTreeNode; depth: number }) {
+function FooterFile({ node }: { node: StreamingTreeNode; depth: number }) {
   const failed = node.state === "error";
   const deleted = node.state === "deleted";
   // Description carries "+N −M" churn (from deriveStreamingTree).
@@ -581,25 +574,29 @@ function FooterFile({ node, depth }: { node: StreamingTreeNode; depth: number })
   const deletions = m && m[2] ? Number(m[2]) : null;
   return (
     <div
-      className="hover:bg-foreground/[0.05] group flex w-full items-center gap-1 rounded-md px-1.5 py-[3px] transition-colors"
-      style={{ paddingLeft: depth * 14 + 6 }}
+      className="group flex h-7 w-full cursor-default items-center gap-2 rounded px-2 transition-colors hover:bg-muted/70"
       title={node.id}
     >
-      {/* Spacer aligning with the folder chevron column. */}
-      <span className="h-3 w-3 shrink-0" aria-hidden />
-      <FooterNodeGlyph
-        icon={node.icon ?? "file"}
-        className={cn("h-3 w-3 shrink-0", deleted ? "text-muted-foreground/50" : "text-muted-foreground")}
+      <File
+        className={cn(
+          "h-4 w-4 shrink-0",
+          deleted ? "text-muted-foreground/50" : "text-muted-foreground",
+        )}
+        aria-hidden
       />
       <span
         className={cn(
-          "truncate text-[11.5px]",
-          failed ? "text-destructive/90" : deleted ? "text-muted-foreground/60 line-through" : "text-foreground/80",
+          "truncate",
+          failed
+            ? "text-destructive/90"
+            : deleted
+              ? "text-muted-foreground/60 line-through"
+              : "text-foreground/85",
         )}
       >
         {node.label}
       </span>
-      <span className="text-muted-foreground/50 group-hover:text-muted-foreground ml-auto shrink-0 pl-2 font-mono text-[10px] tabular-nums">
+      <span className="text-muted-foreground/60 ml-auto shrink-0 pl-2 font-mono text-[10px] tabular-nums">
         {failed ? (
           <span className="text-destructive/80">failed</span>
         ) : deleted ? (
@@ -615,6 +612,25 @@ function FooterFile({ node, depth }: { node: StreamingTreeNode; depth: number })
   );
 }
 
+/** One nesting level — the 11px indent rail + per-child connector ticks. */
+function FooterChildren({
+  nodes,
+  depth,
+  defaultOpen,
+}: {
+  nodes: StreamingTreeNode[];
+  depth: number;
+  defaultOpen: boolean;
+}) {
+  return (
+    <ul className="ml-[11px] list-none border-l border-border pl-[11px]">
+      {nodes.map((child) => (
+        <FooterNode key={child.id} node={child} depth={depth} defaultOpen={defaultOpen} />
+      ))}
+    </ul>
+  );
+}
+
 function FooterNode({
   node,
   depth,
@@ -627,14 +643,15 @@ function FooterNode({
   if (node.children?.length) {
     return <FooterFolder node={node} depth={depth} defaultOpen={defaultOpen} />;
   }
-  return <FooterFile node={node} depth={depth} />;
+  return <li className={TREE_LI}><FooterFile node={node} depth={depth} /></li>;
 }
 
 /**
  * FilesFooter — the settled end-of-turn files card. Rendered ONLY after
- * `isStreaming` flips false (same gate as the sources footer), styled
- * exactly like the CitationsFooter: compact bordered card, mono uppercase
- * "Files · N" header, tight 11.5px rows, scroll-capped tree.
+ * `isStreaming` flips false (same gate as the sources footer): compact
+ * bordered card, mono uppercase "Files · N" header, and the Uiverse-style
+ * tree below (guide-line rails, folder open/closed glyph swap, 28px rows),
+ * scroll-capped so a 50-file run still fits the UI.
  */
 export function FilesFooter({
   nodes,
@@ -671,10 +688,12 @@ export function FilesFooter({
           </span>
         )}
       </div>
-      <div className="scrollbar-thin max-h-72 min-w-0 space-y-0 overflow-y-auto pr-0.5">
-        {nodes.map((node) => (
-          <FooterNode key={node.id} node={node} depth={0} defaultOpen={defaultOpen} />
-        ))}
+      <div className="scrollbar-thin max-h-72 min-w-0 overflow-y-auto pr-0.5">
+        <ul className="list-none">
+          {nodes.map((node) => (
+            <FooterNode key={node.id} node={node} depth={0} defaultOpen={defaultOpen} />
+          ))}
+        </ul>
       </div>
     </div>
   );
