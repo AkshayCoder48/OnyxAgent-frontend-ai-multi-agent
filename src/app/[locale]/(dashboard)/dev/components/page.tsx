@@ -1,12 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { notFound } from "next/navigation";
 import {
   FileSearch as FileSearchIcon,
-  Globe,
   PenLine as PenLineIcon,
-  RotateCcw,
   Sparkles,
   Terminal as TerminalIcon,
   Trash2,
@@ -18,7 +16,6 @@ import {
   ArtifactCard,
   CheckpointHistory,
   CodeDiff,
-  ComputerUse,
   FileTree,
   GenerationLoader,
   InlineCitation,
@@ -37,7 +34,6 @@ import {
   TodoList,
   ToolCall,
   ToolTimeline,
-  type ComputerStep,
   type LatticeVariant,
   type MemoryChip,
   type TimelineEvent,
@@ -296,11 +292,6 @@ function AgentElementsShowcase() {
         </div>
 
         <div className="space-y-2">
-          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Computer use (browser frame)</p>
-          <ComputerUsePreview />
-        </div>
-
-        <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Use Browser — unified tool-call UI (settled run)</p>
           <BrowserToolPreview />
         </div>
@@ -518,16 +509,6 @@ function LoaderPreview() {
   return <GenerationLoader label="Generating" tick={tick} />;
 }
 
-/** Computer-use preview — a static browser run (navigate → click → type →
- *  press Enter) with a Replay button that walks the cursor 0 → last so the
- *  trail/footer animation is verifiable by hand (and in E2E). */
-const COMPUTER_STEPS: readonly ComputerStep[] = [
-  { id: "cu-1", action: "navigate", target: "perchance.org", x: 50, y: 10 },
-  { id: "cu-2", action: "click", target: "AI Image Generator", x: 22, y: 30 },
-  { id: "cu-3", action: "type", target: "input", x: 55, y: 58 },
-  { id: "cu-4", action: "press", target: "Enter", x: 55, y: 58 },
-];
-
 /** Use Browser — the unified tool-call surface (Browser-Tool Reliability
  * PRD §8): a settled run of consecutive use_browser calls rendered as one
  * compact, technical, collapsible tool line. Mock payloads mirror the
@@ -583,59 +564,6 @@ function BrowserToolPreview() {
   return (
     <div className="w-full max-w-xl rounded-xl border border-border bg-secondary/40 p-3">
       <BrowserUseGroup toolCalls={calls} />
-    </div>
-  );
-}
-
-function ComputerUsePreview() {
-  const [active, setActive] = useState(COMPUTER_STEPS.length - 1);
-  const replayRef = useRef<number | null>(null);
-
-  // Clear a replay in flight when the gallery unmounts.
-  useEffect(
-    () => () => {
-      if (replayRef.current !== null) window.clearInterval(replayRef.current);
-    },
-    [],
-  );
-
-  const replay = () => {
-    if (replayRef.current !== null) window.clearInterval(replayRef.current);
-    let i = 0;
-    setActive(0);
-    replayRef.current = window.setInterval(() => {
-      i += 1;
-      setActive(Math.min(i, COMPUTER_STEPS.length - 1));
-      if (i >= COMPUTER_STEPS.length - 1 && replayRef.current !== null) {
-        window.clearInterval(replayRef.current);
-        replayRef.current = null;
-      }
-    }, 700);
-  };
-
-  return (
-    <div className="w-full max-w-xl space-y-2">
-      <ComputerUse
-        url="perchance.org/ai-text-to-image-generator"
-        steps={COMPUTER_STEPS}
-        activeIndex={active}
-      >
-        <div className="flex size-full flex-col items-center justify-center gap-1.5 bg-muted">
-          <Globe className="h-8 w-8 text-muted-foreground/50" aria-hidden />
-          <span className="font-mono text-[10px] text-muted-foreground">screenshot.png</span>
-        </div>
-      </ComputerUse>
-      <div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={replay}
-          aria-label="Replay the browser step animation"
-        >
-          <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-          Replay
-        </Button>
-      </div>
     </div>
   );
 }

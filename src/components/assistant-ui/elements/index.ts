@@ -4,7 +4,6 @@
  * tokens. All components are props-driven (no runtime/provider required).
  */
 export { ShimmerLabel, CollapsePanel, DeltaChip } from "./surfaces";
-export { ComputerUse, type ComputerStep } from "./computer-use";
 export {
   paperCardClass,
   fieldBlockClass,
