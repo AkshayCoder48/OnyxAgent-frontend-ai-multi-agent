@@ -213,9 +213,9 @@ registerTool(
     return { kind: "browser", action, ...result };
   },
   false,
-  // "web" (NOT "exec") — category "exec" is the coding surface hidden
-  // from foreground turns by filterToolsForRequest (request-scoping.ts);
-  // registering this tool as "exec" made the model never see it, so it
-  // truthfully told users "I don't have the use_browser tool".
+  // "web" — the browsing category it belongs to. (It was once registered as
+  // "exec", which hid it behind the since-retired coding-surface filter —
+  // the model then truthfully told users "I don't have the use_browser
+  // tool". Kept on "web" regardless: it describes browsing, not execution.)
   "web",
 );

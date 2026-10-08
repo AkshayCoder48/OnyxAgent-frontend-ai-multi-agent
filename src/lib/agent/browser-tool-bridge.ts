@@ -158,9 +158,9 @@ async function writeBridgeResult(
  *  BRIDGED tools (everything without a native sandbox implementation).
  *  Called at launch (startBackgroundTurn) after hot-loading custom + MCP
  *  tools, mirroring the in-browser runtime's per-turn loading sequence.
- *  Applies the same REQUEST-SCOPED EXPOSURE rules as the foreground
- *  runtime: the coding surface (file authoring + execution) never bridges —
- *  those have native sandbox implementations and stay agent-invisible. */
+ *  filterToolsForRequest is currently a pass-through (the coding-surface
+ *  isolation was retired), and every tool it used to drop is native anyway
+ *  — excluded here by `nativeNames` (BG_NATIVE_TOOL_NAMES). */
 export function collectBridgeableTools(
   nativeNames: ReadonlySet<string>,
 ): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {

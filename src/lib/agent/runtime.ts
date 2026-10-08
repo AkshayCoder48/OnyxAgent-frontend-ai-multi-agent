@@ -1810,12 +1810,12 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   const toolCtxForList = { ...toolCtx, conversationId };
   const registeredTools = listTools(toolCtxForList);
 
-  // REQUEST-SCOPED TOOL EXPOSURE (OnyxBase PRD §13/§22 + Runtime PRD §71/§72):
-  // the coding surface (category "code"/"exec" tools + the file-authoring
-  // helpers) never rides into normal Agent turns — it belongs to subagents
-  // and sandbox-side background jobs. The scope is recomputed at the top of
-  // every round so tools used by earlier rounds of THIS turn latch in
-  // immediately.
+  // REQUEST-SCOPED TOOL EXPOSURE: filterToolsForRequest is currently a
+  // pass-through (the OnyxCode-era coding-surface isolation was retired —
+  // the main agent now gets the COMPLETE registry, identical to the subagent
+  // runtime, the sandbox background runner and the TOOL DIGEST). The scope
+  // is still recomputed at the top of every round so a future policy latches
+  // tools used by earlier rounds of THIS turn in immediately.
   // (allToolCalls is declared here — before its first reader below — and
   // filled by the agent loop; see "IDEMPOTENT TOOL EXECUTION" further down.)
   const allToolCalls: ToolCall[] = [];

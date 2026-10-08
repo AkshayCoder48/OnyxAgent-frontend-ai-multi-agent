@@ -1,41 +1,28 @@
 /**
- * REQUEST-SCOPED TOOL EXPOSURE (Runtime PRD §71/§72)
+ * REQUEST-SCOPED TOOL EXPOSURE (Runtime PRD §71/§72 — since retired).
  *
- * The registry holds ~70+ tools, but NOT every request should carry every
- * definition. The foreground OnyxAgent turn never sees the CODING surface:
+ * History: this module used to strip the CODING surface (category "exec"
+ * tools + the file-authoring helpers create_file / write_file / edit_file /
+ * verify_path / create_file_chunk / read_file_section) from normal
+ * OnyxAgent turns — the OnyxCode PRD reserved coding for Code Mode chats,
+ * subagents and sandbox-side jobs. OnyxCode was later deleted entirely
+ * (commit de15168) and the isolation became self-contradictory:
  *
- *  - category "exec" (run_python / run_terminal) and category "code" tools
- *    (reserved for sandbox-side/background use),
- *  - the file-AUTHORING helpers (create_file / write_file / edit_file /
- *    verify_path + the chunked writer trio).
+ *  - the TOOL DIGEST injected into EVERY turn still documented the coding
+ *    tools, so models kept calling them;
+ *  - foreground turns executed those calls fine (the runtime looks tools up
+ *    in the FULL registry) but never advertised them on the wire;
+ *  - background turns — the default execution path — refused them with
+ *    "Unknown tool in background mode: write_file".
  *
- * Files (read/list/send/upload/delete), Connectors and everything else the
- * agent uses remain available. Background sandbox jobs build their own
- * native tool surface (see e2b/bg-native-tools.ts) and are not affected by
- * this filter.
- *
- * The filter is PURE and cheap (name/category set lookups) — safe to call
- * once per round.
+ * The isolation is now fully retired: the main agent receives the complete
+ * registry on every turn, identical to the subagent runtime, the sandbox
+ * background runner (BG_NATIVE_TOOL_NAMES) and the digest. The filter is
+ * kept as a pass-through seam so a future scoping policy has one place to
+ * land without touching call sites.
  */
 
 import type { ToolDefinition } from "./registry";
-
-/** Tool categories excluded from normal OnyxAgent turns (coding surface). */
-const AGENT_EXCLUDED_CATEGORIES = new Set(["code", "exec"]);
-
-/** Shared-category tools that are nonetheless excluded from agent turns:
- * the file-AUTHORING helpers (create_file / write_file / edit_file + the
- * chunked writer trio) are the coding write path. Reading, listing,
- * browsing, sending, deleting and uploading files stays available — that is
- * the Files capability. */
-const AGENT_EXCLUDED_TOOL_NAMES = new Set([
-  "create_file",
-  "write_file",
-  "edit_file",
-  "verify_path",
-  "create_file_chunk",
-  "read_file_section",
-]);
 
 export interface RequestToolScope {
   /** The latest user message text. Optional (unused by the current filter,
@@ -46,16 +33,14 @@ export interface RequestToolScope {
   usedToolNames?: Iterable<string>;
 }
 
-/** Filter a registry snapshot for one request. NEVER mutates the input. */
+/** Filter a registry snapshot for one request. NEVER mutates the input.
+ * Currently a pass-through — see the module header for why the coding
+ * surface is no longer excluded. */
 export function filterToolsForRequest(
   tools: ToolDefinition[],
   _scope?: RequestToolScope,
 ): ToolDefinition[] {
-  return tools.filter(
-    (t) =>
-      !(t.category && AGENT_EXCLUDED_CATEGORIES.has(t.category)) &&
-      !AGENT_EXCLUDED_TOOL_NAMES.has(t.name),
-  );
+  return tools;
 }
 
 /** Collect the tool names used in a conversation's message history —

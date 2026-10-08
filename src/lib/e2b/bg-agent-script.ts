@@ -597,9 +597,9 @@ function parseBareToolCall(text) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const name = typeof parsed.name === "string" ? parsed.name
     : (parsed.function && typeof parsed.function.name === "string" ? parsed.function.name : null);
-  // ALL_TOOLS (not the raw TOOLS table): in agent mode the coding tools are
-  // filtered out, so a bare-text tool call naming them must NOT be promoted
-  // out of plain text either (mode isolation defense in depth).
+  // ALL_TOOLS (not the raw TOOLS table): bridged browser tools exist only
+  // in ALL_TOOLS, so a bare-text call naming one of those must promote too;
+  // any name in NEITHER list stays plain text.
   if (!name || !ALL_TOOLS.some((x) => x.name === name)) return null;
   let args = parsed.arguments ?? (parsed.function && parsed.function.arguments) ?? {};
   if (typeof args === "string") {
@@ -2787,26 +2787,19 @@ const BRIDGE_ACK_WINDOW_MS = 25_000;
 
 let ALL_TOOLS = TOOLS;
 
-// MODE ISOLATION: sandbox-native tools that never reach the background
-// agent's LLM surface — the coding write path + E2B execution. Files stay
-// shared: read_file, list_folder, delete_file, create_folder, move_file,
-// send_file, send_folder, search_documents all remain.
-const NATIVE_CODE_ONLY_TOOLS = new Set([
-  "write_file",
-  "create_file",
-  "edit_file",
-  "verify_path",
-  "create_file_chunk",
-  "read_file_section",
-  "run_terminal",
-  "run_python",
-  // NOTE: use_browser is intentionally NOT here. It is a native sandbox
-  // tool (the Python driver + file protocol are entirely sandbox-side), so
-  // it WORKS in background turns — filtering it out made the model truthfully
-  // tell users "I don't have access to the use_browser tool this turn".
-  // BG_NATIVE_TOOL_NAMES already prevents it from being bridged back to the
-  // (closed) browser — the native implementation is the one that must stay.
-]);
+// FULL NATIVE SURFACE: every tool in the TOOLS table — the file-authoring
+// path (write_file, create_file, edit_file + the chunked writer trio),
+// run_terminal / run_python, use_browser — is exposed to the background
+// agent. They are all implemented NATIVELY inside this sandbox (fs /
+// child_process / the Python browser driver), so none of them needs the
+// browser tab. (The old OnyxCode-era mode-isolation filter used to strip
+// them, which starved background turns of file authoring while the TOOL
+// DIGEST injected into the system prompt still documented them — the model
+// followed the digest, called write_file, and hit
+// "Unknown tool in background mode".) Browser-only tools (chats, memories,
+// skills, MCP, custom tools, ask_user …) arrive as BRIDGED entries below;
+// the client's BG_NATIVE_TOOL_NAMES keeps native names like use_browser
+// from ever being bridged back to the (possibly closed) browser.
 
 async function runBridgeTool(callId, name, args) {
   const token = String(callId || name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
@@ -2954,14 +2947,10 @@ async function main() {
     }
     if (bridged.length) ALL_TOOLS = TOOLS.concat(bridged);
   }
-  // MODE ISOLATION: a background agent turn never sees the sandbox-native
-  // CODING tools — file authoring (write_file, create_file, edit_file, the
-  // chunked writer trio) and E2B execution (run_terminal, run_python) —
-  // exactly like filterToolsForRequest in the foreground runtime. Files
-  // stay shared: reading, listing, deleting, sending and searching remain
-  // available. (state.browserTools is already filtered client-side by
-  // collectBridgeableTools.)
-  ALL_TOOLS = ALL_TOOLS.filter((t) => !NATIVE_CODE_ONLY_TOOLS.has(t.name));
+  // (No mode isolation: ALL_TOOLS keeps the FULL native surface — every
+  // TOOLS entry plus the bridged browser tools above. The tool surface must
+  // match what the TOOL DIGEST documents, or the model calls tools the
+  // runner refuses with "Unknown tool in background mode".)
   // Tool-list text (the SAME discipline the in-browser runtime uses) so the
   // model knows its exact surface — prevents hallucinated tool names.
   // When the system prompt already carries the TOOL DIGEST (injected
