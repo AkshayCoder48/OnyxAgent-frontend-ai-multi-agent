@@ -3,7 +3,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
-import type { ChatMessage, ChatMessageFile } from "@/types";
+import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
@@ -13,7 +13,7 @@ import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Copy, Check, CornerDownLeft, Pencil, Quote } from "lucide-react";
 import { getFileUrl, loadFileUrls } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
@@ -24,8 +24,13 @@ import { FilesFooter, deriveStreamingTree } from "./streaming-file-tree";
 import { formatDuration } from "./tool-duration";
 import {
   CollapsePanel,
+  ghostButtonClass,
+  iconSwapClass,
+  iconSwapInClass,
+  MessageActions,
   ThinkingIndicator,
   ThinkingReasoning,
+  type Reaction,
 } from "@/components/assistant-ui/elements";
 import { ResearchPanel } from "./research-panel";
 import { GenUICreationGate } from "@/components/genui/GenUICreationGate";
@@ -33,7 +38,9 @@ import { useGenUIFromText } from "@/hooks/useGenUIStream";
 import { extractGenUINodes } from "@/lib/genui/stream-parser";
 import type { GenUINode } from "@/lib/genui/types";
 import { useChatStore } from "@/stores/chat-store";
+import { useAuthStore, useQuoteStore } from "@/stores";
 import { stripUploadTags } from "@/lib/uploads/registry";
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 
 /**
  * Extract + validate GenUI nodes from a message's full text (content + parts).
@@ -425,6 +432,288 @@ interface MessageItemProps {
   showTodoPanel?: boolean;
   /** Wired to the inline todo panel's "Cut" (dismiss) button. */
   onTodoDismiss?: () => void;
+  /** Message-action row (assistant-ui "Message actions"): re-run the turn
+   *  that produced an assistant message. */
+  onRegenerate?: (assistantMessageId: string) => void;
+  /** User-message actions: edit a sent prompt + re-run the turn from it. */
+  onEditUserMessage?: (userMessageId: string, newContent: string) => void;
+}
+
+// ---------------------------------------------------------------------------
+// MESSAGE ACTION ROWS — the assistant-ui "Message actions" element (copy /
+// rate / regenerate / more under an assistant reply) + the user-message row
+// (copy / edit). Both rows are ALWAYS VISIBLE — no opacity-0 hover games
+// (the Realtime PRD removed invisible hitboxes entirely): quiet muted
+// glyphs that confirm THEMSELVES in place (copy swaps to a check + emerald
+// tint, a rating fills in, regenerate spins while it runs).
+// ---------------------------------------------------------------------------
+
+/** The copyable text of an assistant message — exactly what's rendered
+ *  (function-call sanitizer applied; parts text join as the fallback). */
+function assistantCopyText(message: ChatMessage): string {
+  const fromParts = (message.parts ?? [])
+    .filter((p) => p.type === "text" && p.content)
+    .map((p) => p.content ?? "")
+    .join("\n\n");
+  return stripFunctionCallTags(message.content || fromParts).trim();
+}
+
+function AssistantMessageActions({
+  message,
+  onRegenerate,
+}: {
+  message: ChatMessage;
+  onRegenerate?: (assistantMessageId: string) => void;
+}) {
+  const { copy, copied } = useCopyToClipboard();
+  const [reaction, setReaction] = React.useState<Reaction>(null);
+  const [ratingReady, setRatingReady] = React.useState(false);
+  const [regenerating, setRegenerating] = React.useState(false);
+  const [moreOpen, setMoreOpen] = React.useState(false);
+  const setQuote = useQuoteStore((s) => s.setQuote);
+  const text = React.useMemo(() => assistantCopyText(message), [message]);
+
+  // Persisted rating (local-first Dexie): hydrate once per message, then
+  // apply visual state ONLY after a write actually succeeded (the same
+  // "never confirm an action that didn't happen" discipline RatingButtons
+  // uses).
+  React.useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const userId = useAuthStore.getState().user?.id;
+        if (userId) {
+          const { ratingService } = await import("@/lib/services");
+          const r = await ratingService.getMessageRatings(message.id, userId);
+          if (alive) {
+            setReaction(
+              r.user_rating === RatingValue.LIKE
+                ? "up"
+                : r.user_rating === RatingValue.DISLIKE
+                  ? "down"
+                  : null,
+            );
+          }
+        }
+      } catch {
+        /* no stored rating — stays null */
+      } finally {
+        if (alive) setRatingReady(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [message.id]);
+
+  const handleReaction = (next: Reaction) => {
+    if (!ratingReady || next === reaction) return;
+    void (async () => {
+      const userId = useAuthStore.getState().user?.id;
+      if (!userId) return;
+      try {
+        const { ratingService } = await import("@/lib/services");
+        if (next === null) {
+          await ratingService.remove(message.id, userId);
+        } else {
+          await ratingService.rate(
+            message.id,
+            userId,
+            next === "up" ? RatingValue.LIKE : RatingValue.DISLIKE,
+          );
+        }
+        setReaction(next);
+      } catch {
+        /* write failed — keep the current state */
+      }
+    })();
+  };
+
+  const handleRegenerate = () => {
+    if (regenerating || !onRegenerate) return;
+    setRegenerating(true);
+    onRegenerate(message.id);
+    // The re-run replaces this message almost immediately; the reset only
+    // matters when the regenerate was silently blocked (a live execution)
+    // so the spinner can never stick.
+    window.setTimeout(() => setRegenerating(false), 1500);
+  };
+
+  const menuItemClass =
+    "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent hover:text-foreground";
+
+  return (
+    <div className="relative -ml-1">
+      <MessageActions
+        copied={copied}
+        reaction={reaction}
+        regenerating={regenerating}
+        onCopy={() => {
+          if (text) void copy(text);
+        }}
+        onReactionChange={handleReaction}
+        onRegenerate={handleRegenerate}
+        onMore={() => setMoreOpen((v) => !v)}
+      />
+      {moreOpen ? (
+        <>
+          <button
+            type="button"
+            aria-hidden
+            tabIndex={-1}
+            className="fixed inset-0 z-40 cursor-default"
+            onClick={() => setMoreOpen(false)}
+          />
+          <div
+            role="menu"
+            aria-label="More response actions"
+            className="animate-slide-up-fade absolute top-full right-0 z-50 mt-1 w-52 overflow-hidden rounded-lg border border-border bg-background p-1 shadow-lg"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className={menuItemClass}
+              onClick={() => {
+                if (text) setQuote(text);
+                setMoreOpen(false);
+              }}
+            >
+              <Quote className="h-3.5 w-3.5 shrink-0" aria-hidden /> Quote reply
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className={menuItemClass}
+              onClick={() => {
+                if (text) void copy(text);
+                setMoreOpen(false);
+              }}
+            >
+              <Copy className="h-3.5 w-3.5 shrink-0" aria-hidden /> Copy as Markdown
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** Copy + edit row under a USER message (the visible text never carries the
+ *  hidden upload tags — copy/edit operate on the stripped prompt). */
+function UserMessageActions({
+  message,
+  onStartEdit,
+}: {
+  message: ChatMessage;
+  onStartEdit: () => void;
+}) {
+  const { copy, copied } = useCopyToClipboard();
+  const displayText = React.useMemo(
+    () => stripUploadTags(message.content || "").trim(),
+    [message.content],
+  );
+  return (
+    <div data-slot="user-message-actions" className="-mr-1 flex items-center gap-0.5">
+      <button
+        type="button"
+        onClick={() => {
+          if (displayText) void copy(displayText);
+        }}
+        aria-label={copied ? "Copied message" : "Copy message"}
+        title={copied ? "Copied" : "Copy"}
+        className={cn(
+          ghostButtonClass,
+          "h-7 w-7",
+          copied && "text-emerald-600 dark:text-emerald-400",
+        )}
+      >
+        <span key={copied ? "check" : "copy"} className={iconSwapClass}>
+          <span className={iconSwapInClass}>
+            {copied ? (
+              <Check className="h-3.5 w-3.5" aria-hidden />
+            ) : (
+              <Copy className="h-3.5 w-3.5" aria-hidden />
+            )}
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onStartEdit}
+        aria-label="Edit message"
+        title="Edit & resubmit"
+        className={cn(ghostButtonClass, "h-7 w-7")}
+      >
+        <Pencil className="h-3.5 w-3.5" aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+/** Inline editor that replaces the user bubble while editing — Enter
+ *  resubmits (the turn re-runs from the edited prompt), Esc cancels. */
+function UserMessageEditor({
+  initial,
+  onCancel,
+  onSave,
+}: {
+  initial: string;
+  onCancel: () => void;
+  onSave: (text: string) => void;
+}) {
+  const [text, setText] = React.useState(initial);
+  const taRef = React.useRef<HTMLTextAreaElement | null>(null);
+
+  React.useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+
+  const canSave = text.trim().length > 0;
+  return (
+    <div className="w-full min-w-0">
+      <textarea
+        ref={taRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            if (canSave) onSave(text);
+          }
+        }}
+        rows={Math.max(2, Math.min(8, initial ? initial.split("\n").length : 2))}
+        aria-label="Edit message"
+        className="mb-height w-full resize-none rounded-2xl rounded-tr-sm border border-border bg-background px-3.5 py-2.5 text-sm leading-relaxed text-foreground shadow-sm outline-none transition-colors focus:border-primary/50"
+      />
+      <div className="mt-1.5 flex items-center justify-end gap-2">
+        <span className="text-muted-foreground mr-auto text-[11px]">
+          Enter to resubmit · Esc to cancel
+        </span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground inline-flex h-7 items-center rounded-md px-2.5 text-xs font-medium transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={() => onSave(text)}
+          disabled={!canSave}
+          className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          <CornerDownLeft className="h-3.5 w-3.5" aria-hidden /> Save &amp; submit
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -442,13 +731,11 @@ const PAYLOAD_TOOL_NAMES = new Set([
   "send_folder",
   "preview_image",
   "ask_user",
-  // Web page tools — the LIVE page preview (sandboxed iframe of the fetched
-  // / browsed site) is a DELIVERABLE: it must never end up hidden under the
-  // force-collapsed "Worked Ns" panel at settle. The user reads (and
-  // interacts with) the page right in the chat flow.
-  "web_fetch",
-  "fetch_url",
-  "use_browser",
+  // Web page tools (web_fetch / fetch_url / use_browser) are deliberately
+  // NOT here anymore: the live page preview lives INSIDE the tool call's
+  // disclosure — visible only after the user enlarges the tool call, never
+  // always-on in the chat flow. A settled web turn force-collapses its
+  // "Worked Ns" panel like any other tool turn.
 ]);
 
 /** One chronological step of the generation process, built by walking the
@@ -764,11 +1051,18 @@ export const MessageItem = React.memo(function MessageItem({
   groupPosition,
   showTodoPanel = false,
   onTodoDismiss,
+  onRegenerate,
+  onEditUserMessage,
 }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
   const openSources = useSourcesPanelStore((s) => s.open);
   const isGrouped = groupPosition && groupPosition !== "single";
+
+  // USER-MESSAGE EDITING (assistant-ui "Edit user message" flow): while
+  // editing, the bubble is replaced by the inline editor (see the legacy
+  // render path below) and the copy/edit row hides.
+  const [editingUser, setEditingUser] = React.useState(false);
 
   // ATTACHMENT URL WARM-UP (File Persistence PRD §25): after a refresh the
   // blob-URL cache is cold — image previews (and file-preview opens) need
@@ -988,7 +1282,16 @@ export const MessageItem = React.memo(function MessageItem({
                     ranTools={legacyRanTools}
                   />
                 )}
-                {message.content && (
+                {isUser && editingUser ? (
+                  <UserMessageEditor
+                    initial={stripUploadTags(message.content || "")}
+                    onCancel={() => setEditingUser(false)}
+                    onSave={(text) => {
+                      setEditingUser(false);
+                      onEditUserMessage?.(message.id, text);
+                    }}
+                  />
+                ) : message.content ? (
                   <TextBubble
                     text={message.content}
                     showCursor={!isUser && Boolean(message.isStreaming)}
@@ -999,7 +1302,7 @@ export const MessageItem = React.memo(function MessageItem({
                     isStreaming={Boolean(message.isStreaming)}
                     identityKey={message.id}
                   />
-                )}
+                ) : null}
                 {message.toolCalls && message.toolCalls.length > 0 && (
                   <div className="w-full space-y-2">
                     {(() => {
@@ -1247,10 +1550,20 @@ export const MessageItem = React.memo(function MessageItem({
           />
         )}
 
-        {/* Realtime PRD §20–§21: NO message action footer. The old hover
-            row (timestamp + copy + thumbs + regenerate) was invisible but
-            clickable on desktop (`sm:opacity-0` until hover) — invisible
-            hitboxes are removed ENTIRELY: no visuals, no handlers. */}
+        {/* MESSAGE ACTION ROWS (assistant-ui "Message actions" + user
+            edit/copy): always visible once the turn settles — each action
+            confirms itself in place (copy → check + emerald, rating fills,
+            regenerate spins). No hover-only opacity games (Realtime PRD
+            §20–§21: no invisible hitboxes). */}
+        {!isUser && !message.isStreaming && (
+          <AssistantMessageActions message={message} onRegenerate={onRegenerate} />
+        )}
+        {isUser && !editingUser && (
+          <UserMessageActions
+            message={message}
+            onStartEdit={() => setEditingUser(true)}
+          />
+        )}
       </div>
     </div>
   );
@@ -1281,7 +1594,9 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.generation === next.message.generation &&
     prev.groupPosition === next.groupPosition &&
     prev.showTodoPanel === next.showTodoPanel &&
-    prev.onTodoDismiss === next.onTodoDismiss
+    prev.onTodoDismiss === next.onTodoDismiss &&
+    prev.onRegenerate === next.onRegenerate &&
+    prev.onEditUserMessage === next.onEditUserMessage
   );
 });
 

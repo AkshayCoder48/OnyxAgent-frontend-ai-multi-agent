@@ -30,6 +30,13 @@ export const chipClass =
 export const ghostButtonClass =
   "inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground";
 
+/** Icon-swap tokens (assistant-ui "Message actions" element): the wrapper
+ *  clips + centers the swapping glyph pair; iconSwapIn is the entrance the
+ *  incoming glyph plays (keyframes in globals.css, motion section). */
+export const iconSwapClass =
+  "relative inline-flex h-3.5 w-3.5 items-center justify-center";
+export const iconSwapInClass = "icon-swap-in inline-flex";
+
 export const monoLabelClass =
   "font-mono text-[10px] font-medium tracking-wider text-muted-foreground uppercase";
 

@@ -11,6 +11,11 @@ interface MessageListProps {
   messages: ChatMessage[];
   /** Wired to the INLINE todo plan panel's "Cut" button. */
   onTodoDismiss?: () => void;
+  /** Message-action row (assistant-ui "Message actions"): re-run the turn
+   *  that produced an assistant message. */
+  onRegenerate?: (assistantMessageId: string) => void;
+  /** User-message actions: edit a sent prompt + re-run the turn from it. */
+  onEditUserMessage?: (userMessageId: string, newContent: string) => void;
 }
 
 /**
@@ -112,7 +117,7 @@ function hasResearchPart(message: ChatMessage): boolean {
   );
 }
 
-export function MessageList({ messages, onTodoDismiss }: MessageListProps) {
+export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserMessage }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
   const setQuote = useQuoteStore((s) => s.setQuote);
 
@@ -156,6 +161,8 @@ export function MessageList({ messages, onTodoDismiss }: MessageListProps) {
                 groupPosition={groupPos}
                 showTodoPanel={!!todoOwnerId && message.id === todoOwnerId}
                 onTodoDismiss={onTodoDismiss}
+                onRegenerate={onRegenerate}
+                onEditUserMessage={onEditUserMessage}
               />
             </div>
           </div>

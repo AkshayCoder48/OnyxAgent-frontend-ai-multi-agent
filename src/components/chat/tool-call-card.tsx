@@ -289,6 +289,40 @@ export const ToolCallCard = React.memo(function ToolCallCard({
 // SIMPLE MODE — one non-expandable friendly line per tool call.
 // ---------------------------------------------------------------------------
 
+/** SIMPLE MODE web-page disclosure: the live page preview is NOT always-on —
+ *  a quiet "Show page preview" toggle row reveals the WebPageResult through
+ *  the same grid 0fr→1fr animation every disclosure uses. The preview
+ *  becomes visible only after the user enlarges the tool call (user
+ *  directive: "visible after we enlarge the tool call, not always visible"). */
+function SimpleWebPageDisclosure({ toolCall }: { toolCall: ToolCall }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="px-1.5 sm:px-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="hover:bg-foreground/5 text-muted-foreground hover:text-foreground mb-1 inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium transition-colors"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
+            open && "rotate-90",
+          )}
+          aria-hidden
+        />
+        <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {open ? "Hide page preview" : "Show page preview"}
+      </button>
+      <CollapsePanel open={open}>
+        <div className="pb-1">
+          <WebPageResult toolCall={toolCall} />
+        </div>
+      </CollapsePanel>
+    </div>
+  );
+}
+
 function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isRunning =
     toolCall.status === "running" || toolCall.status === "pending";
@@ -552,12 +586,12 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <ImageInspectionResult result={toolCall.result} />
       )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
-      {/* web_fetch / fetch_url — the LIVE page preview is CONTENT (the real
-          site rendering itself, interactivity opt-in), so it rides beneath
-          the friendly sentence in BOTH display modes — same slot rule as
-          charts / images / downloads. */}
-      {((toolCall.name === "web_fetch" || toolCall.name === "fetch_url") && isCompleted) && (
-        <WebPageResult toolCall={toolCall} />
+      {/* web_fetch / fetch_url — the LIVE page preview is CONTENT, but it
+          only renders AFTER the user enlarges the tool call (the preview
+          lives behind the "Show page preview" disclosure — never
+          always-on in the chat flow). */}
+      {(toolCall.name === "web_fetch" || toolCall.name === "fetch_url") && isCompleted && (
+        <SimpleWebPageDisclosure toolCall={toolCall} />
       )}
       {isAskUser && (
         <AskUserResult
@@ -616,9 +650,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         toolCall.status === "completed" &&
         parseFileDownloadResult(toolCall.result) !== null) ||
       isAnyDDGSearch ||
-      // web_fetch: no longer auto-expands — the LIVE page preview renders
-      // INLINE beneath the line (never hidden behind the disclosure), so
-      // the collapsed card is exactly the preview + the friendly label.
+      // web_fetch: no auto-expand — the LIVE page preview lives INSIDE the
+      // disclosure (visible only after the user enlarges the tool call), so
+      // the card rests collapsed like every other tool.
       // edit_file: the CodeDiff is the payload — expand when it landed.
       (toolCall.name === "edit_file" &&
         toolCall.status === "completed" &&
@@ -1167,14 +1201,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <KnowledgeBaseResult toolCall={toolCall} />
       )}
 
-      {/* INLINE WEB PAGE PREVIEW (web_fetch / fetch_url): the LIVE site
-          renders directly in the main response — always visible beneath
-          the tool line, NEVER hidden behind the collapsed output
-          disclosure (the user must not have to expand the tool call to
-          see the page). Enlarging the line now reveals the raw
-          arguments/output, not the preview. */}
-      {isWebFetch ? <WebPageResult toolCall={toolCall} /> : null}
-
       {/* Disclosure panel — the ARGUMENTS/OUTPUT and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -1213,6 +1239,12 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <ImageInspectionResult result={toolCall.result} />
           ) : toolCall.status === "completed" && isFileDownload && fileDownloadSpec ? (
             <FileDownloadResult payload={fileDownloadSpec} />
+          ) : isWebFetch ? (
+            // web_fetch / fetch_url — the LIVE page preview (sandboxed
+            // iframe of the fetched site, interactivity opt-in) renders
+            // INSIDE the disclosure: enlarging the tool call reveals the
+            // page; the `</>` toggle still swaps to the raw view.
+            <WebPageResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDDGWebSearch ? (
             <DDGWebResults result={toolCall.result} />
           ) : toolCall.status === "completed" && isDDGImageSearch ? (

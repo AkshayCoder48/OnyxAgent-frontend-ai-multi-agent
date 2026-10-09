@@ -66,7 +66,10 @@ const WEB_RESEARCH_DIRECTIVE = `## Web Research & Citations (MANDATORY)
 // Onyx AI — OnyxAgent's native agent framework (renamed from the legacy
 // "pydantic_ai" option; stored values are normalized on read). This is THE
 // framework prompt: Onyx AI is the only framework the app uses.
-const ONYX_AI_SYSTEM_PROMPT = `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
+// EXPORTED for the Settings → Agent Settings system-prompt editor (the
+// "Insert default" button seeds the textarea with the baseline so users can
+// customize FROM it instead of from a blank page).
+export const ONYX_AI_SYSTEM_PROMPT = `You are an AI agent built with Onyx AI — OnyxAgent's native agent framework. You have access to tools that you can call to help the user.
 Follow Onyx AI conventions:
 - Call tools using the FUNCTION-CALLING API when they would help answer the user's request. NEVER write tool calls as text (e.g. "Action: run_terminal Input: {...}"). ALWAYS use the tool-calling mechanism.
 - Structure your responses clearly with markdown
@@ -665,6 +668,54 @@ export function useChat(options: UseChatOptions = {}) {
     [isProcessing, messages, conversationId, doSend],
   );
 
+  /**
+   * EDIT USER MESSAGE (assistant-ui "Edit user message" flow) — re-run the
+   * conversation from an edited prompt. The edited user message and EVERY
+   * message after it are dropped from the live store + Dexie (no branching
+   * in this app — editing rewrites the timeline from that point), then the
+   * edited text is sent as a fresh turn with the same attachments.
+   */
+  const editUserMessage = useCallback(
+    (userMessageId: string, newContent: string) => {
+      if (isProcessing) return;
+      const trimmed = newContent.trim();
+      if (!trimmed) return;
+
+      const msgs = messages;
+      const idx = msgs.findIndex((m) => m.id === userMessageId);
+      if (idx < 0) return;
+      const userMsg = msgs[idx]!;
+      if (userMsg.role !== "user") return;
+      const convId = userMsg.conversationId ?? conversationId ?? null;
+
+      // 1. Drop the edited message + everything after it from the live store.
+      const doomed = msgs.slice(idx);
+      const global = useChatStore.getState();
+      for (const m of doomed) global.removeMessage(m.id);
+
+      // 2. Delete the same rows from Dexie (best-effort — a failure only
+      //    means stale rows reappear on the next history load).
+      void (async () => {
+        if (!convId) return;
+        try {
+          const { conversationService } = await import("@/lib/services");
+          for (const m of doomed) {
+            if (!m.isTemporaryId) {
+              await conversationService.deleteMessage(convId, m.id);
+            }
+          }
+        } catch (err) {
+          console.warn("[useChat] editUserMessage: failed to delete old rows from Dexie", err);
+        }
+      })();
+
+      // 3. Send the edited text as a fresh turn (doSend re-attaches the
+      //    upload tags from the original file set).
+      void doSend(trimmed, userMsg.fileIds, userMsg.files);
+    },
+    [isProcessing, messages, conversationId, doSend],
+  );
+
   const sendAskUserResponses = useCallback((answers: AskUserAnswer[]) => {
     // Optimistically hide the panel, then unblock the runtime's wait.
     const convId = useConversationStore.getState().currentConversationId;
@@ -778,6 +829,8 @@ export function useChat(options: UseChatOptions = {}) {
     disconnect,
     sendMessage: sendChatMessage,
     regenerate,
+    /** Edit a sent user message + re-run the turn from the edited prompt. */
+    editUserMessage,
     stopGeneration,
     clearMessages,
     queuedMessages,

@@ -22,6 +22,7 @@ import { useSettings } from "@/hooks/use-data";
 import { useAuthStore } from "@/stores";
 import type { UserSettings } from "@/types";
 import { MoreOptions } from "@/components/settings/more-options";
+import { SystemPromptEditor } from "@/components/settings/system-prompt-editor";
 
 type ThinkingEffort = "low" | "medium" | "high";
 
@@ -61,8 +62,8 @@ export function SectionAgentSettings() {
   const [temperature, setTemperature] = React.useState(0.7);
   const [thinkingEnabled, setThinkingEnabled] = React.useState(false);
   const [thinkingEffort, setThinkingEffort] = React.useState<ThinkingEffort>("medium");
-  const [, setSystemPrompt] = React.useState("");
-  const [, setSystemPromptEnabled] = React.useState(false);
+  const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [systemPromptEnabled, setSystemPromptEnabled] = React.useState(false);
   const [envRows, setEnvRows] = React.useState<EnvRow[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);
@@ -119,14 +120,17 @@ export function SectionAgentSettings() {
   async function handleSave() {
     setSaving(true);
     try {
+      const trimmedPrompt = systemPrompt.trim();
       const patch: Partial<UserSettings> = {
         default_model: defaultModel.trim() || null,
         default_temperature: temperature,
         default_thinking_enabled: thinkingEnabled,
         default_thinking_effort: thinkingEffort,
-        // System prompt removed — the runtime now uses a built-in rich prompt.
-        system_prompt: null,
-        system_prompt_enabled: false,
+        // Custom system prompt (editable below): applies on every turn only
+        // when enabled AND non-empty — an empty custom prompt falls back to
+        // the built-in Onyx prompt in buildTurnOptions.
+        system_prompt: trimmedPrompt || null,
+        system_prompt_enabled: systemPromptEnabled && !!trimmedPrompt,
         env_vars: rowsToEnvVars(envRows),
       };
       await update(patch);
@@ -182,6 +186,15 @@ export function SectionAgentSettings() {
             <span>Precise (0)</span>
             <span>Creative (2)</span>
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <SystemPromptEditor
+            value={systemPrompt}
+            enabled={systemPromptEnabled}
+            onValueChange={setSystemPrompt}
+            onEnabledChange={setSystemPromptEnabled}
+          />
         </div>
       </section>
 

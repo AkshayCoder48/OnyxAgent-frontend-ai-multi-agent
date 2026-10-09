@@ -35,6 +35,7 @@ import {
   Switch,
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
+import { SystemPromptSection } from "@/components/settings/system-prompt-editor";
 import { MoreOptions } from "@/components/settings/more-options";
 import { ProviderDiagnosticsDialog } from "@/components/settings/provider-diagnostics";
 import { useAuth } from "@/hooks";
@@ -371,6 +372,15 @@ export default function ConfigSettingsPage() {
 
       {/* E2B Sandbox + SkillsMP + LangSearch API keys moved to the
           dedicated /settings/api-keys page (PRD §11). */}
+
+      {/* System prompt — the user-facing override for the built-in Onyx
+          agent prompt (applies on every turn when enabled + non-empty). */}
+      <SectionCard
+        title="System prompt"
+        description="Customize the identity and behavior instructions your agent starts every turn with. Leave empty to keep the built-in Onyx prompt."
+      >
+        <SystemPromptSection />
+      </SectionCard>
 
       {/* Data management — export/import all local data */}
       <SectionCard

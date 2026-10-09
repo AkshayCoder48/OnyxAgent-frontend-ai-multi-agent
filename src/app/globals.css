@@ -3238,6 +3238,25 @@ html.theme-transitioning .animate-backdrop {
   animation: mb-fade-in-soft 160ms ease-out both;
 }
 
+/* icon-swap-in — the assistant-ui "Message actions" copy→check cross-fade:
+   the incoming glyph scales up from 60% with a slight counter-rotation and
+   lands sharp. GPU-friendly (opacity/transform only); pairs with the
+   iconSwapClass wrapper in surfaces.tsx (the key change remounts the glyph,
+   replaying the entrance). */
+@keyframes icon-swap-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6) rotate(-10deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+.icon-swap-in {
+  animation: icon-swap-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 @keyframes mb-blur-in {
   from {
     opacity: 0;

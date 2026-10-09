@@ -241,6 +241,7 @@ export function ChatContainer(
     isProcessing,
     sendMessage,
     regenerate,
+    editUserMessage,
     stopGeneration,
     clearMessages,
     queuedMessages,
@@ -577,6 +578,16 @@ export function ChatContainer(
     [regenerate],
   );
 
+  // EDIT USER MESSAGE: drops the edited prompt + everything after it, then
+  // re-runs the turn with the edited text (same attachments). Guarded
+  // against live executions inside the hook itself.
+  const handleEditUserMessage = useCallback(
+    (userMessageId: string, newContent: string) => {
+      editUserMessage(userMessageId, newContent);
+    },
+    [editUserMessage],
+  );
+
   // Slash command handlers — passed down to ChatInput so the / palette can
   // run them locally without going through the agent.
   const slashContext = {
@@ -636,6 +647,8 @@ export function ChatContainer(
       onAnswerQuestions={sendAskUserResponses}
       onTodoAction={sendTodoAction}
       onStop={stopGeneration}
+      onRegenerate={handleRegenerate}
+      onEditUserMessage={handleEditUserMessage}
       rateLimitStatus={rateLimitStatus}
       conversationId={currentConversationId}
     />
@@ -669,6 +682,11 @@ interface ChatUIProps {
   onAnswerQuestions?: (answers: AskUserAnswer[]) => void;
   onTodoAction?: (action: "dismiss" | "reset" | "snapshot") => void;
   onStop?: () => void;
+  /** Message-action row (assistant-ui "Message actions"): re-run the turn
+   *  that produced an assistant message. */
+  onRegenerate?: (assistantMessageId: string) => void;
+  /** User-message actions: edit a sent prompt + re-run the turn from it. */
+  onEditUserMessage?: (userMessageId: string, newContent: string) => void;
   /** Rate-limit backoff note (PRD §7) — shown instead of a dead-looking turn. */
   rateLimitStatus?: string | null;
 }
@@ -694,6 +712,8 @@ function ChatUI({
   onAnswerQuestions,
   onTodoAction,
   onStop,
+  onRegenerate,
+  onEditUserMessage,
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
@@ -724,6 +744,8 @@ function ChatUI({
               <MessageList
                 messages={messages}
                 onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
+                onRegenerate={onRegenerate}
+                onEditUserMessage={onEditUserMessage}
               />
             </div>
           )}

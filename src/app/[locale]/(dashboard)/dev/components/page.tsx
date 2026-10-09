@@ -858,13 +858,16 @@ function StreamingTurnPreview() {
 
 /* ────────────────────────────────────────────────────────────────────────
  * CHAT SURFACE PREVIEW — mounts the REAL MessageItem with a settled
- * web_fetch tool call + a markdown answer, so the three chat surfaces
- * are verifiable without a provider:
- *   1. web_fetch → the LIVE page preview (sandboxed iframe, optional
- *      interactivity, extracted-text fallback);
- *   2. the fenced code block → the Save-to-Files button (location /
+ * web_fetch tool call + a markdown answer, so the chat surfaces are
+ * verifiable without a provider:
+ *   1. web_fetch → the "Show page preview" disclosure: enlarging the tool
+ *      call reveals the LIVE page preview (sandboxed iframe, optional
+ *      interactivity, extracted-text fallback) — never always-on;
+ *   2. the message-action row → copy (check + emerald), rate (fills in),
+ *      regenerate (spins), more (Quote / Copy as Markdown);
+ *   3. the fenced code block → the Save-to-Files button (location /
  *      name / extension dialog) next to Copy;
- *   3. inline `code` → the brand-aware chip (follows Settings →
+ *   4. inline `code` → the brand-aware chip (follows Settings →
  *      Appearance, never a hardcoded cyan).
  * ─────────────────────────────────────────────────────────────────────── */
 function ChatSurfacePreview() {
@@ -903,7 +906,7 @@ function ChatSurfacePreview() {
         type: "text" as const,
         round: 2,
         content: [
-          "Here's the page — the preview below is the **real live site** (tap Interact to use it):",
+          "Here's the page — enlarge the **Web page** tool call above (or its “Show page preview” toggle) to see the real live site:",
           "",
           "A quick helper for it, with inline `fetch_page()` code:",
           "",
