@@ -71,6 +71,7 @@ import {
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import { manageContext } from "@/lib/agent/context/context-manager";
+import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
 import {
   classifyRouterError,
   pickCandidate,
@@ -2105,6 +2106,30 @@ ${genuiThemePromptBlock(readChatTheme())}`;
       `compaction=${managedContext.compaction.level} removed=${managedContext.compaction.removedMessages} ` +
       `trimmed=${managedContext.compaction.trimmedMessages} digested=${managedContext.compaction.digestedMessages}`,
   );
+
+  // CONTEXT-INDICATOR HONESTY (the "fake compacting" fix): surface the REAL
+  // post-compaction usage to the client store so the ContextIndicator can
+  // project the NEXT turn from measured numbers (systemTokens + toolsTokens
+  // are stable turn-to-turn for the same toolset) instead of its own
+  // ever-growing heuristic over the full local history. Purely an observable
+  // side effect — nothing below reads it and the request-building logic is
+  // untouched. Browser-only guard (this runtime is "use client", but tests
+  // import it under node); the optional call also tolerates store mocks.
+  if (typeof window !== "undefined") {
+    try {
+      const snapshot: ManagedContextSnapshot = {
+        model: opts.provider.model,
+        conversationId,
+        usage: managedContext.usage,
+        compaction: managedContext.compaction,
+        historyMessageCount: contextHistory.length,
+        at: Date.now(),
+      };
+      useChatStore.getState().setLastManagedContext?.(snapshot);
+    } catch {
+      // Best-effort — the indicator falls back to its baseline estimate.
+    }
+  }
 
   let handoffContext = "";
 

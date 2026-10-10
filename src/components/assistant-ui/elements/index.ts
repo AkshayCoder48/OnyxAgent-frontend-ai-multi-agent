@@ -32,6 +32,10 @@ export { GenerationLoader } from "./loading-state";
 export { StreamingText, type Segment } from "./streaming-text";
 export { MessagePair } from "./message-pair";
 export { MessageActions, type Reaction, type MessageActionsProps } from "./message-actions";
+export {
+  ImageGeneration,
+  type ImageGenerationProps,
+} from "./image-generation";
 export { StoppedRun } from "./stopped-run";
 export { ThinkingIndicator } from "./thinking-indicator";
 export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";

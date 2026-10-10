@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
+import { ImageGenerationBlock } from "./tool-results/image-generation";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
 import { deriveAgentPhase } from "@/lib/agent/timeline";
@@ -731,6 +732,10 @@ const PAYLOAD_TOOL_NAMES = new Set([
   "send_folder",
   "preview_image",
   "ask_user",
+  // generate_image renders the ImageGeneration element frame + the final
+  // image DIRECTLY in the flow (never inside a collapsible card) — it is a
+  // deliverable, so a turn containing it stays expanded.
+  "generate_image",
   // Web page tools (web_fetch / fetch_url / use_browser) are deliberately
   // NOT here anymore: the live page preview lives INSIDE the tool call's
   // disclosure — visible only after the user enlarges the tool call, never
@@ -1315,6 +1320,10 @@ export const MessageItem = React.memo(function MessageItem({
                         const run = browserRuns.runStartedBy(toolCall.id);
                         if (run) return <BrowserUseGroup key={toolCall.id} toolCalls={run} />;
                         if (browserRuns.isContinuation(toolCall.id)) return null;
+                        // generate_image renders as the ImageGeneration
+                        // element — never a collapsible tool-call card.
+                        if (toolCall.name === "generate_image")
+                          return <ImageGenerationBlock key={toolCall.id} toolCall={toolCall} />;
                         return <ToolCallCard key={toolCall.id} toolCall={toolCall} />;
                       });
                     })()}
@@ -1440,6 +1449,14 @@ export const MessageItem = React.memo(function MessageItem({
                 );
               }
               if (browserRuns.isContinuation(it.toolCall.id)) return null;
+              // generate_image renders as the ImageGeneration element —
+              // never a collapsible tool-call card.
+              if (it.toolCall.name === "generate_image")
+                return (
+                  <div key={it.partId} className="w-full">
+                    <ImageGenerationBlock toolCall={it.toolCall} />
+                  </div>
+                );
               return (
                 <div key={it.partId} className="w-full">
                   <ToolCallCard toolCall={it.toolCall} turnId={message.conversationId} />

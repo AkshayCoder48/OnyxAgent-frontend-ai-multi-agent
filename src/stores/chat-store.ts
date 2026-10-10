@@ -3,6 +3,7 @@
 import { create, createStore, type StoreApi } from "zustand";
 import type { AskUserQuestion, ChatMessage, MessagePart, ToolCall } from "@/types";
 import { canMergeIntoLastTextPart } from "@/lib/agent/timeline";
+import type { CompactionMeta, ContextUsage } from "@/lib/agent/context/context-manager";
 
 function newPartId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -83,6 +84,37 @@ if (typeof window !== "undefined") {
 // One-shot guard for restorePersisted — survives Fast Refresh double-mounts
 // and StrictMode's double effect invocation.
 let persistedRestored = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MANAGED-CONTEXT SNAPSHOT (context-indicator honesty)
+//
+// The Onyx Context Manager compacts what is SENT each turn; the persistent
+// history never shrinks. The old ContextIndicator estimated usage from that
+// ever-growing local history with a fixed 8.5K baseline — so its % only ever
+// climbed and, past 90%, the pill claimed "Compacting" forever. The runtime
+// now publishes the REAL post-compaction usage here right after manageContext
+// runs (browser-side; foreground runtime + background turns), and the
+// indicator projects from these measured numbers instead of guessing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The real managed context of the last request-build (post-compaction).
+ *  Purely observable — nothing consumes it to build requests. */
+export interface ManagedContextSnapshot {
+  /** Model id the snapshot was computed for — gates reuse when the user
+   *  switches models (fixed tokens + window differ per model). */
+  model: string;
+  /** Conversation the snapshot belongs to (gates reuse after a switch). */
+  conversationId: string | null;
+  /** Measured post-compaction usage (see ContextUsage). */
+  usage: ContextUsage;
+  /** What the manager actually did this turn. */
+  compaction: CompactionMeta;
+  /** How many history messages went INTO manageContext (pre-compaction,
+   *  after the runtime's bounded-window pre-cap). */
+  historyMessageCount: number;
+  /** Wall-clock ms of the publication. */
+  at: number;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MESSAGE-SLICE FACTORY
@@ -618,9 +650,16 @@ interface ChatState extends MessageActions {
   selectedProviderId: string | null;
   /** Currently selected model (set by ChatControls, read by subagents). */
   selectedModel: string | null;
+  /** REAL managed-context usage of the last request-build (post-compaction),
+   *  published by the runtime / background turn. Null before the first turn
+   *  (the indicator falls back to its 8.5K baseline estimate). */
+  lastManagedContext: ManagedContextSnapshot | null;
 
   setSelectedProviderId: (id: string | null) => void;
   setSelectedModel: (model: string | null) => void;
+  /** Publish the last turn's managed-context snapshot (runtime + background
+   *  turns; observable side effect only). */
+  setLastManagedContext: (snapshot: ManagedContextSnapshot) => void;
   /** One-shot post-hydration restore of the sessionStorage-persisted
    *  messages (see the restorePersisted body for why it is NOT done in
    *  create()). Called from ChatContainer's mount effect with the active
@@ -642,11 +681,13 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   selectedProviderId: null,
   selectedModel: null,
+  lastManagedContext: null,
 
   ...buildMessageActions<ChatState>(set, { persist: savePersisted }),
 
   setSelectedProviderId: (id) => set({ selectedProviderId: id }),
   setSelectedModel: (model) => set({ selectedModel: model }),
+  setLastManagedContext: (snapshot) => set({ lastManagedContext: snapshot }),
 
   restorePersisted: (activeConversationId?: string | null) =>
     set((state) => {
@@ -683,12 +724,14 @@ export const useChatStore = create<ChatState>((set) => ({
     }
     pendingMessages = null;
     set((state) => {
-      if (state.messages.length === 0) return state;
+      if (state.messages.length === 0 && state.lastManagedContext === null) return state;
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem(PERSIST_KEY);
         window.sessionStorage.removeItem(PERSIST_CONV_KEY);
       }
-      return { messages: [] };
+      // Drop the managed-context snapshot too — it belongs to the
+      // conversation being cleared and must not leak into the next one.
+      return { messages: [], lastManagedContext: null };
     });
   },
 }));
@@ -721,7 +764,7 @@ export function reconcilePersisted(activeConversationId: string | null): void {
     if (typeof window !== "undefined") {
       window.sessionStorage.removeItem(PERSIST_KEY);
     }
-    useChatStore.setState({ messages: [] });
+    useChatStore.setState({ messages: [], lastManagedContext: null });
     setPersistedConversationId(activeConversationId);
   }
 }

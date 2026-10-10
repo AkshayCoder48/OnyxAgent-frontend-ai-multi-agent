@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (63 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (64 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -23,7 +23,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_todo [create / update / delete / list / clear] — Planning multi-step work. create returns a stable ID like todo_8f42 — quote it later. Statuses: not_planned/in_progress/done/not_done.
 - show_todo — Render the todo table for the user — after creating or updating todos. Pass IDs, or all: true.
 - manage_memory [save / search / list / delete] — Persistent facts about the user ("remember that…", preferences, decisions). Survives across conversations.
-- knowledge_base [search / get / save / update / delete / list / file hosting] — Persistent workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps; save what matters later; save_file hosts files + links.
+- knowledge_base [search / get / save / update / delete / list / file hosting] — Persistent workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps; save what matters; save_file hosts files + links.
 - manage_skill [list / read / create / edit / delete] — Installed skills (SKILL.md instruction files). read a skill before applying it.
 - manage_mcp [list / create / edit / delete] — MCP server configs (sse / streamable_http transports; stdio unsupported). Find ids with list.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params) in the sandbox).
@@ -58,10 +58,10 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Web & search
 - web_search — Text web search (LangSearch if configured, else Miklium). Titles, URLs, snippets.
-- image_search — Find pictures / videos: URLs, thumbnails, dimensions, sources.
-- video_search — Find pictures / videos: URLs, thumbnails, dimensions, sources.
+- image_search — Find pictures / videos: URLs, thumbnails, sources.
+- video_search — Find pictures / videos: URLs, thumbnails, sources.
 - web_fetch — Read a URL's full text — the DEFAULT way to read any page; deep-read AFTER web_search.
-- use_browser — ONE browser tool — ONLY for pages needing real interaction (click, type, login, JS, anti-bot); plain reading is web_fetch's job. Tabs, screenshots, elements.
+- use_browser — ONLY for pages needing real interaction (click, type, login, JS, anti-bot); plain reading is web_fetch's job.
 
 ### Subagent orchestration
 - spawn_subagent — Delegate a task: subagent_name, description, task_type (research/code/analysis/writing/general), role, disposable.
@@ -82,16 +82,17 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Media, charts & time
 - create_chart — Line/bar/pie/area/scatter charts from structured data — renders inline.
+- generate_image — Free unlimited AI image generation (Perchance, in the user's browser) — renders inline.
 - preview_image — Show an image inline in the chat (URL or base64).
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
 ### External apps (Composio — 250+ platforms)
-- composio_search_tools — FIRST STEP for external-app tasks: describe the use case in plain language; returns matching tool slugs + which platforms are connected. Search BEFORE executing.
-- composio_connect_platform — Get the OAuth link for a platform (slug like slack, github). Share it with the user and WAIT — you cannot authorize yourself.
-- composio_execute_tool — Execute a discovered tool: toolName + args matching its schema. CONNECTION_REQUIRED → share a connect link and wait; never fabricate results.
+- composio_search_tools — FIRST STEP for external-app tasks: describe the use case plainly; returns matching tool slugs + connected platforms. Search BEFORE executing.
+- composio_connect_platform — Get the OAuth link for a platform (slug like slack). Share it and WAIT — you cannot authorize yourself.
+- composio_execute_tool — Execute a discovered tool: toolName + args per its schema. CONNECTION_REQUIRED → share a connect link and wait; never fabricate results.
 
 ### Scheduled tasks & automation (8 tools)
-- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat (name = title). Args: name, instructions (the COMPLETE autonomous job — no user available: what to do, files +…
+- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions (the COMPLETE autonomous job — no user available: what to do, files + paths), schedule…
 - update_scheduled_task — Change name/description/instructions/schedule/enabled by task id. Find ids with list_scheduled_tasks.
 - delete_scheduled_task — Permanently remove a task + its history (its dedicated chat stays as a normal conversation).
 - pause_scheduled_task — Stop executions / resume the schedule.
@@ -107,4 +108,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","generate_image","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];

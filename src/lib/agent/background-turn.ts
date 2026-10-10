@@ -133,7 +133,11 @@ interface RunContext {
 /** Text-only conversation history for the sandbox runner (no tool parts).
  *  Reads the execution's store when provided (the hub always provides it),
  *  falling back to the global chat store for legacy callers. */
-function buildHistory(turn: AgentTurnOptions, store?: ExecutionChatStore): Array<{ role: "user" | "assistant" | "system"; content: string }> {
+function buildHistory(
+  turn: AgentTurnOptions,
+  store?: ExecutionChatStore,
+  resolvedConversationId?: string | null,
+): Array<{ role: "user" | "assistant" | "system"; content: string }> {
   void turn; // history reads the live store (below); the options param
   // is kept for future turn-scoped history shaping.
   const history: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
@@ -155,10 +159,11 @@ function buildHistory(turn: AgentTurnOptions, store?: ExecutionChatStore): Array
   // ONYX CONTEXT MANAGER (Infinite Context PRD): budget-aware window instead
   // of the old fixed slice(-20) — the same tiered compaction the foreground
   // runtime uses, so background turns get identical context shaping.
+  const boundedHistory = history.slice(-80); // bounded default window (cost control)
   const managed = manageContext({
     systemPrompt: turn.systemPrompt ?? "",
     tools: [],
-    history: history.slice(-80), // bounded default window (cost control)
+    history: boundedHistory,
     model: turn.provider.model,
   });
   // Managed messages minus the LEADING system prompt (the sandbox runner
@@ -169,6 +174,24 @@ function buildHistory(turn: AgentTurnOptions, store?: ExecutionChatStore): Array
       `${Math.round(managed.usage.usagePercentage * 100)}% ${managed.usage.status} ` +
       `compaction=${managed.compaction.level} removed=${managed.compaction.removedMessages}`,
   );
+  // CONTEXT-INDICATOR HONESTY (background-turn parity): publish the same
+  // managed-context snapshot the foreground runtime publishes, so the
+  // ContextIndicator stays honest for background turns too. Browser-only
+  // guard + optional call (store mocks in tests strip the action).
+  if (typeof window !== "undefined") {
+    try {
+      useChatStore.getState().setLastManagedContext?.({
+        model: turn.provider.model,
+        conversationId: resolvedConversationId ?? turn.conversationId ?? null,
+        usage: managed.usage,
+        compaction: managed.compaction,
+        historyMessageCount: boundedHistory.length,
+        at: Date.now(),
+      });
+    } catch {
+      // Best-effort — the indicator falls back to its baseline estimate.
+    }
+  }
   return shaped;
 }
 
@@ -764,7 +787,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         disabledParams: ctx.turn.provider.disabledParams ?? [],
       },
       systemPrompt: ctx.turn.systemPrompt,
-      history: buildHistory(ctx.turn, ctx.store),
+      history: buildHistory(ctx.turn, ctx.store, conversationId),
       assistantMessageId,
       conversationId,
       seedTodos,
