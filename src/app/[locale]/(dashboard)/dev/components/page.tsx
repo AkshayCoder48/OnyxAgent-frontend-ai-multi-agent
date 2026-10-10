@@ -18,6 +18,7 @@ import {
   CodeDiff,
   FileTree,
   GenerationLoader,
+  ImageGeneration,
   InlineCitation,
   DocumentReference,
   MemoryChips,
@@ -43,6 +44,7 @@ import { PageHeader } from "@/components/dashboard/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { EmptyState } from "@/components/states";
 import { MessageItem } from "@/components/chat/message-item";
+import { ImageGenerationBlock } from "@/components/chat/tool-results/image-generation";
 import { BrowserUseGroup } from "@/components/chat/tool-results/use-browser";
 import { FilesFooter } from "@/components/chat/streaming-file-tree";
 import { LivePageFrame } from "@/components/chat/tool-results/live-page-frame";
@@ -300,6 +302,11 @@ function AgentElementsShowcase() {
         <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Use Browser — unified tool-call UI (settled run)</p>
           <BrowserToolPreview />
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Image generation element — dot-grid frame → resolved image (Perchance)</p>
+          <ImageGenerationPreview />
         </div>
 
         <div className="space-y-2">
@@ -585,6 +592,84 @@ function LoaderPreview() {
     return () => clearInterval(id);
   }, []);
   return <GenerationLoader label="Generating" tick={tick} />;
+}
+
+/** Image generation element — the dot-grid frame (assistant-ui style) as
+ *  used by the generate_image tool: generating state, settled state, an
+ *  interactive regenerate replay, and the FULL chat block (success + failure)
+ *  with mock tool calls. Regenerate in the mock fires a REAL perchance
+ *  generation (works in a normal browser; errors honestly where blocked). */
+const MOCK_GENERATED_IMAGE =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><defs><radialGradient id="g" cx="30%" cy="25%"><stop offset="0%" stop-color="#f5c6a5"/><stop offset="55%" stop-color="#c97b4a"/><stop offset="100%" stop-color="#3d2b1f"/></radialGradient></defs><rect width="512" height="512" fill="url(#g)"/><circle cx="150" cy="150" r="46" fill="#fff3e0" opacity=".85"/><rect x="60" y="330" width="392" height="16" rx="8" fill="#2a1c12" opacity=".55"/><rect x="90" y="366" width="332" height="10" rx="5" fill="#2a1c12" opacity=".35"/></svg>`,
+  );
+
+function ImageGenerationPreview() {
+  const [generating, setGenerating] = useState(false);
+  const [count, setCount] = useState(0);
+  const replay = () => {
+    setGenerating(true);
+    window.setTimeout(() => {
+      setGenerating(false);
+      setCount((c) => c + 1);
+    }, 2600);
+  };
+  const mockDone: ToolCallData = {
+    id: "demo_gen_ok",
+    name: "generate_image",
+    args: { prompt: "A calm mountain lake at dawn", resolution: "512x512", guidance_scale: 7 },
+    result: {
+      ok: true,
+      url: MOCK_GENERATED_IMAGE,
+      prompt: "A calm mountain lake at dawn",
+      seed: 481516,
+      resolution: "512x512",
+      guidanceScale: 7,
+      timeMs: 6200,
+    },
+    status: "completed",
+  };
+  const mockFailed: ToolCallData = {
+    id: "demo_gen_err",
+    name: "generate_image",
+    args: { prompt: "a castle in a thunderstorm", resolution: "512x768" },
+    result: { ok: false, code: 429, error: "Too many requests right now. Please try again shortly.", retryAfter: 12 },
+    status: "completed",
+  };
+  return (
+    <div className="grid w-full gap-6 sm:grid-cols-2">
+      <div className="space-y-2">
+        <p className="text-[11px] text-muted-foreground">Generating (live state)</p>
+        <ImageGeneration
+          prompt="A calm mountain lake at dawn"
+          generating
+          label="512 × 512"
+          className="max-w-[16rem]"
+        />
+      </div>
+      <div className="space-y-2">
+        <p className="text-[11px] text-muted-foreground">
+          Settled + interactive regenerate{count > 0 ? ` · rolled ${count}×` : ""}
+        </p>
+        <ImageGeneration
+          prompt="A calm mountain lake at dawn"
+          generating={generating}
+          onRegenerate={replay}
+          label="512 × 512"
+          className="max-w-[16rem]"
+        />
+      </div>
+      <div className="space-y-2">
+        <p className="text-[11px] text-muted-foreground">Chat block — success (image + regenerate)</p>
+        <ImageGenerationBlock toolCall={mockDone} />
+      </div>
+      <div className="space-y-2">
+        <p className="text-[11px] text-muted-foreground">Chat block — failure (429, honest retry)</p>
+        <ImageGenerationBlock toolCall={mockFailed} />
+      </div>
+    </div>
+  );
 }
 
 /** Use Browser — the unified tool-call surface (Browser-Tool Reliability

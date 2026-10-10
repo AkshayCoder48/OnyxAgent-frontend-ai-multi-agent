@@ -66,6 +66,13 @@ export interface ContextUsage {
   status: ContextStatus;
   modelSource: "override" | "known-model" | "safe-fallback";
   modelLabel: string;
+  /** OVERFLOW HONESTY: true when even the emergency composition (full system
+   *  prompt + minimal history + current input) exceeds the input budget —
+   *  i.e. NO tier can fit the request (small/unknown model windows where the
+   *  fixed system+tools weight alone crowds out the budget). Compaction
+   *  cannot fix this; the UI surfaces a distinct "window too small" state
+   *  instead of a fake perpetual "Compacting". */
+  overflowUnfixable: boolean;
 }
 
 export interface CompactionMeta {
@@ -95,6 +102,15 @@ export interface ManageContextInput {
   /** The CURRENT turn's user input (already the last history entry — pass
    *  null to count it separately). */
   currentInput?: string | null;
+  /** Optional replacement for the fixed (system+tools+input) token weight.
+   *  Used by client-side PROJECTIONS (ContextIndicator) that know the real
+   *  per-turn system+tools weight from the last managed snapshot but don't
+   *  have the prompt/tool schemas locally — they pass an empty prompt + no
+   *  tools plus this override so the tier math runs against the REAL fixed
+   *  weight. When set it REPLACES the estimated weight entirely (the
+   *  caller's history is expected to already include the current input).
+   *  Never set by the runtime itself. */
+  fixedTokensOverride?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +221,10 @@ export function manageContext(input: ManageContextInput): ManagedContext {
   const historyTokensRaw = history.reduce((sum, m) => sum + estimateTokens(m.content), 0);
 
   // ── Budget check (before compaction). ───────────────────────────────────
-  const fixedTokens = systemTokens + toolsTokens + currentInputTokens;
+  // fixedTokensOverride (see ManageContextInput) lets projection callers
+  // supply the measured system+tools weight; the runtime never sets it.
+  const fixedTokens =
+    input.fixedTokensOverride ?? (systemTokens + toolsTokens + currentInputTokens);
   const ratioWith = (historyTokens: number) =>
     (fixedTokens + historyTokens) / inputBudget;
 
@@ -237,6 +256,7 @@ export function manageContext(input: ManageContextInput): ManagedContext {
         status: statusFor(ratio),
         modelSource: modelInfo.source,
         modelLabel: modelInfo.label,
+        overflowUnfixable: false,
       },
       compaction: cleanupApplied ? { ...compaction, applied: true, level: "cleanup" } : compaction,
     };
@@ -345,6 +365,13 @@ export function manageContext(input: ManageContextInput): ManagedContext {
     + (digest ? estimateTokens(digest) : 0);
   const finalRatio = (fixedTokens + finalHistoryTokens) / inputBudget;
 
+  // OVERFLOW HONESTY (R3): after every tier — including the emergency
+  // minimum — the request still cannot fit? Then no amount of compaction
+  // fixes it (the fixed system+tools weight alone crowds out the budget on
+  // small/unknown model windows). Flag it so the UI can say so honestly
+  // instead of promising an in-progress compaction that never lands.
+  const overflowUnfixable = finalRatio >= 1;
+
   const messages: ContextMessage[] = [];
   if (input.systemPrompt) messages.push({ role: "system", content: input.systemPrompt });
   if (digest) messages.push({ role: "system", content: digest });
@@ -364,6 +391,7 @@ export function manageContext(input: ManageContextInput): ManagedContext {
       status: statusFor(finalRatio),
       modelSource: modelInfo.source,
       modelLabel: modelInfo.label,
+      overflowUnfixable,
     },
     compaction,
   };

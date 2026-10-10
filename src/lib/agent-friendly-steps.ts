@@ -152,6 +152,7 @@ const RULES: Record<string, TenseRule> = {
   },
   preview_image: { past: "Showed an image", present: "Showing an image", icon: ImageIcon },
   inspect_image: { past: "Inspected an image", present: "Inspecting an image", icon: ImageIcon },
+  generate_image: { past: "Generated an image", present: "Generating an image", icon: ImageIcon },
 
   // ── Merged multi-function tools (tool-count cap) ─────────────────────
   // Each maps to the old family it absorbed; sentences stay generic and
