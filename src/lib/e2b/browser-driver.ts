@@ -33,10 +33,12 @@
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
 # profile, Playwright-driven, file-protocol command loop.
+import asyncio
 import base64
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -377,13 +379,137 @@ def attach_page_listeners(p):
     p.on("requestfailed", on_requestfailed)
 
 
+class BootFailure(RuntimeError):
+    """Browser boot failed after both engines. The command loop reports
+    the error, then EXITS the driver process: a failed boot may leave
+    leaked Playwright instances / node driver processes parked in this
+    process, and the session manager boots a FRESH driver on the next
+    command (the persistent profile keeps the session state)."""
+
+
+def _unpoison_asyncio():
+    """Clear THIS thread's running-loop flag.
+
+    A leaked Playwright Sync instance parks its dispatcher greenlet inside
+    loop.run_until_complete() and leaves the thread's running-loop flag set
+    FOREVER — every later sync_playwright().start() in this thread then
+    fails immediately with 'It looks like you are using Playwright Sync API
+    inside the asyncio loop. Please use the Async API instead.' (verified:
+    start() -> leak -> start() FAILS -> _set_running_loop(None) -> start()
+    OK). The flag is cleared with the same private API Playwright itself
+    uses (EventInfo.value calls asyncio._set_running_loop); per-thread, so
+    the live-cast and recording threads are unaffected."""
+    try:
+        asyncio._set_running_loop(None)
+    except Exception:
+        pass
+
+
+def _clear_stale_profile_locks():
+    """Remove Chromium's stale ProcessSingleton locks before launching.
+
+    A hard-killed Chromium (sandbox pause/resume, OOM, crash) leaves
+    Singleton{Lock,Cookie,Socket} in the profile dir — the next
+    launch_persistent_context with the same user-data-dir then REFUSES to
+    start, which (pre-fix) leaked the fallback Playwright instance and
+    poisoned this thread for every later boot. Orphan chromium processes
+    still holding OUR profile (no live driver connection owns them — we
+    are booting, so any survivor is a zombie) are reaped first."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "user-data-dir=" + PROFILE],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.split()
+        for pid in out:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+                log("reaped orphan chromium pid %s holding the browser profile" % pid)
+            except Exception:
+                pass
+        if out:
+            time.sleep(0.4)
+    except Exception:
+        pass
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = os.path.join(PROFILE, name)
+        try:
+            if os.path.lexists(p):
+                os.remove(p)
+                log("removed stale profile lock: %s" % name)
+        except Exception:
+            pass
+
+
+def _context_alive():
+    """Cheap liveness probe: a REAL CDP roundtrip (page.title()). Cached
+    properties like context.pages stay readable after the connection dies,
+    so only a roundtrip proves the browser is still there (sandbox
+    pause/resume kills the browser while the driver keeps running)."""
+    if context is None:
+        return False
+    try:
+        _ = context.pages
+        if not pages:
+            return True
+        pages[0]["page"].title()
+        return True
+    except Exception as e:
+        msg = str(e)
+        if ("closed" in msg.lower() or "Connection" in msg
+                or "EOF" in msg or "Not connected" in msg):
+            return False
+        # Page-level transient error on a LIVE context — do not nuke it.
+        return True
+
+
+def _reset_browser_state():
+    """Drop a dead browser context/pages/pw so boot_browser() can rebuild
+    on the persistent profile. Best-effort closes (the objects may already
+    be dead — that is exactly the case being handled)."""
+    global context, pw, runtime, pages, active_idx
+    try:
+        if context is not None:
+            context.close()
+    except Exception:
+        pass
+    context = None
+    try:
+        if pw is not None:
+            pw.stop()
+    except Exception:
+        pass
+    pw = None
+    runtime = None
+    pages = []
+    active_idx = 0
+    # A dead-but-unstoppable instance can leave the running-loop flag set.
+    _unpoison_asyncio()
+
+
 def boot_browser():
     """Launch the persistent-profile browser: CloakBrowser with
-    humanize=True first, stock Playwright Chromium as the fallback."""
+    humanize=True first, stock Playwright Chromium as the fallback.
+
+    Boot hardening (the 'Sync API inside the asyncio loop' fix):
+    - stale profile locks are cleared first (a hard-killed Chromium's
+      Singleton locks used to make BOTH launches fail and leak);
+    - the asyncio running-loop flag is cleared before EACH attempt (a
+      leaked Playwright instance from any earlier failed attempt/close
+      poisons the thread forever otherwise);
+    - the fallback's pw is STOPPED on failure (never leaked);
+    - a dead context (sandbox resume) is detected and rebuilt;
+    - a total boot failure raises BootFailure -> the driver exits after
+      reporting, so the next command boots a FRESH driver."""
     global context, pw, runtime, boot_error
     if context is not None:
-        return
+        if _context_alive():
+            return
+        log("browser context is dead — rebooting (the persistent profile keeps cookies/localStorage)")
+        _reset_browser_state()
+    boot_error = None
+    _clear_stale_profile_locks()
     # -- attempt 1: CloakBrowser (stealth Chromium, humanized input) ------
+    _unpoison_asyncio()
     try:
         from cloakbrowser import launch_persistent_context as cb_launch
         context = cb_launch(
@@ -401,9 +527,14 @@ def boot_browser():
         log("booted cloakbrowser runtime (humanize=True, persistent profile)")
         return
     except Exception as e:
+        # cloakbrowser stops its internal playwright instance on launch
+        # failure, but that stop can itself fail (warning path) — unpoison
+        # so the fallback below gets a clean thread either way.
+        _unpoison_asyncio()
         boot_error = "cloakbrowser launch failed: %s" % (e,)
         log(boot_error)
     # -- attempt 2: stock Playwright Chromium (runtime-agnostic fallback) --
+    _unpoison_asyncio()
     try:
         from playwright.sync_api import sync_playwright
         pw = sync_playwright().start()
@@ -433,8 +564,20 @@ def boot_browser():
         refresh_live_pages()
         log("booted standard chromium fallback runtime (persistent profile)")
     except Exception as e:
+        # STOP the instance — a leaked sync_playwright() parks its greenlet
+        # inside run_until_complete and leaves this thread's running-loop
+        # flag set forever (every later boot then fails with 'Sync API
+        # inside the asyncio loop'). stop() itself can fail — unpoison
+        # again after it.
+        try:
+            if pw is not None:
+                pw.stop()
+        except Exception:
+            pass
+        pw = None
+        _unpoison_asyncio()
         boot_error = (boot_error + " | chromium fallback failed: %s" % (e,)) if boot_error else str(e)
-        raise RuntimeError(boot_error)
+        raise BootFailure(boot_error)
 
 
 def ensure_pages():
@@ -1391,12 +1534,12 @@ def do_state(cmd):
 
 def do_close(cmd):
     global context, pages, active_idx, ref_map
-    try:
-        if context is not None:
-            context.close()
-    except Exception:
-        pass
-    context = None
+    # FULL teardown (asyncio-poisoning fix): stopping pw here is essential
+    # when the session ran on the stock-Chromium fallback — a live pw parks
+    # its greenlet inside run_until_complete and leaves the main thread's
+    # running-loop flag set, so the NEXT boot_browser() (both attempts)
+    # failed with 'Sync API inside the asyncio loop'.
+    _reset_browser_state()
     pages = []
     active_idx = 0
     ref_map = {}
@@ -1468,8 +1611,17 @@ def main():
             if handler is None:
                 result = err_payload("bad_request", "Unknown action: %s" % action, False)
             else:
+                boot_failed = False
                 try:
                     result = handler(cmd)
+                except BootFailure as e:
+                    log("browser boot failure: %s" % (e,))
+                    result = err_payload(
+                        "browser_startup_failed",
+                        "%s A fresh browser driver will start on the next command." % (e,),
+                        True,
+                    )
+                    boot_failed = True
                 except Exception as e:
                     log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
                     result = playw_err(e)
@@ -1477,6 +1629,19 @@ def main():
             with open(res_path + ".tmp", "w") as f:
                 f.write(json.dumps(result))
             os.replace(res_path + ".tmp", res_path)
+            # BOOT-FAILURE EXIT (asyncio-poisoning fix): the reply is already
+            # on disk — now exit so leaked Playwright/node resources die
+            # with this process. The session manager's liveness check sees
+            # a dead driver and boots a FRESH one for the next command; the
+            # lock cleanup + unpoison in that fresh boot make it succeed.
+            if boot_failed:
+                log("exiting after browser boot failure — a fresh driver boots on the next command")
+                try:
+                    os.remove(READY)
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                os._exit(1)
             # Live-cast upkeep (PRD §2-§4): after every command the active
             # tab marker + url/title/viewport refresh so the live view tracks
             # what the agent just did, even for actions that publish nothing.
