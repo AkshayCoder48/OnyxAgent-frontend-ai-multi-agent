@@ -11,7 +11,7 @@ import type { ChatMessage } from "@/types";
  * no hallucinated narration):
  *
  *   "Thinking"                    — a reasoning stream is open
- *   "Browsing perchance.org"      — use_browser running (URL host from args)
+ *   "Browsing example.com"         — use_browser running (URL host from args)
  *   "Searching the web"           — web/image/video search running
  *   "Reading example.com"         — web_fetch running
  *   "Running code"                — run_python / run_terminal
@@ -91,9 +91,19 @@ function toolCaption(name: string, args: Record<string, unknown> | undefined): s
     case "create_chart":
       return "Creating a chart";
     case "preview_image":
-    case "image_gen":
-    case "generate_image":
       return "Creating an image";
+    case "media_generation": {
+      const op = String(args?.operation ?? "");
+      if (op.startsWith("generate_image")) return "Generating an image";
+      if (op.startsWith("generate_video")) return "Generating a video";
+      if (op.startsWith("generate_audio")) return "Generating audio";
+      if (op.startsWith("generate_3d")) return "Generating a 3D model";
+      if (op === "generate_text") return "Generating text";
+      if (op === "check_pollen_balance") return "Checking Pollen balance";
+      if (op.startsWith("list_models")) return "Listing Pollinations models";
+      if (op === "publish_model" || op === "publish_agent") return "Publishing to Pollinations";
+      return "Using Pollinations AI";
+    }
     case "spawn_subagent":
       return "Spawning a subagent";
     case "query_subagent":

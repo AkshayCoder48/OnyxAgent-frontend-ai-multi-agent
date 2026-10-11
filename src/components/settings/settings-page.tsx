@@ -6,6 +6,7 @@ import {
   Bot,
   Cloud,
   CloudCog,
+  Flower2,
   Moon,
   Palette,
   Plug,
@@ -23,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 
 import { SectionProviders } from "./section-providers";
+import { SectionPollinations } from "./section-pollinations";
 import { SectionAgentSettings } from "./section-agent-settings";
 import { SectionSlashCommands } from "./section-slash-commands";
 import { SectionE2B } from "./section-e2b";
@@ -33,6 +35,7 @@ import { SectionAppearance } from "./section-appearance";
 
 export type SettingsSectionId =
   | "providers"
+  | "pollinations"
   | "agent"
   | "slash"
   | "e2b"
@@ -74,6 +77,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: "AI Providers",
         description: "BYO-key model providers",
         icon: Bot,
+      },
+      {
+        id: "pollinations",
+        label: "Pollinations AI",
+        description: "Media generation, Pollen & models",
+        icon: Flower2,
       },
       {
         id: "agent",
@@ -269,6 +278,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
             </div>
             <Separator className="mb-6" />
             {active === "providers" && <SectionProviders />}
+            {active === "pollinations" && <SectionPollinations />}
             {active === "agent" && <SectionAgentSettings />}
             {active === "slash" && <SectionSlashCommands />}
             {active === "e2b" && <SectionE2B />}

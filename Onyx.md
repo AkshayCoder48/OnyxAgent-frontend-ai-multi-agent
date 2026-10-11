@@ -109,7 +109,7 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | Tool | Use |
 |---|---|
 | **create_chart** | Line/bar/pie/area/scatter charts from structured data — renders inline. |
-| **generate_image** | Free unlimited AI image generation (Perchance, in the user's browser) — renders inline. |
+| **media_generation** | Unified Pollinations AI access: discover live models (with modalities + Pollen pricing), pick/set defaults, check Pollen balance & usage, and generate images, video, audio, 3D, embeddings — plus realtime sessions and publishing your own models/agents. Chargeable generations require the user's explicit two-step confirmation. |
 | **preview_image** | Show an image inline in the chat (URL or base64). |
 | **ocr_document** (above) | Read text out of screenshots, photos, scans, PDFs. |
 | **current_datetime** | Current UTC date/time in ISO 8601 — whenever time matters. |

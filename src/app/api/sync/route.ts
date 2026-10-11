@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { db } from "@/lib/db";
+import { prisma as db } from "@/lib/prisma/client";
 import type { CloudConversation } from "@prisma/client";
 
 export const runtime = "nodejs";

@@ -6,7 +6,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { AuthScreen } from "@/components/auth/auth-screen";
 import { OnboardingFlow } from "@/components/onboarding/onboarding-flow";
 import { ChatContainer } from "@/components/chat/chat-container";
-import { SettingsPage } from "@/components/settings/settings-page";
+import { SettingsPage, type SettingsSectionId } from "@/components/settings/settings-page";
 import { SharedView } from "@/components/chat/shared-view";
 
 export function AppShell() {
@@ -67,9 +67,34 @@ export default AppShell;
 // ---------------------------------------------------------------------------
 function MainApp() {
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  // Section the settings overlay should land on (e.g. the Pollinations OAuth
+  // return trip — the callback redirects to /?pollinations_code=… while the
+  // settings overlay is closed, so we reopen it on that section).
+  const [initialSection, setInitialSection] = React.useState<SettingsSectionId | undefined>(undefined);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (
+      params.has("pollinations_code") ||
+      params.has("pollinations_state") ||
+      params.has("pollinations_error")
+    ) {
+      setInitialSection("pollinations");
+      setSettingsOpen(true);
+    }
+  }, []);
 
   if (settingsOpen) {
-    return <SettingsPage onClose={() => setSettingsOpen(false)} />;
+    return (
+      <SettingsPage
+        onClose={() => {
+          setSettingsOpen(false);
+          setInitialSection(undefined);
+        }}
+        initialSection={initialSection}
+      />
+    );
   }
 
   return <ChatContainer onOpenSettings={() => setSettingsOpen(true)} />;

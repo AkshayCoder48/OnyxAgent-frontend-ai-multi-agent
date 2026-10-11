@@ -11,6 +11,7 @@ import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
 import { PendingMessages } from "./pending-messages";
+import { PollinationsConfirmDialog } from "./pollinations-confirm";
 import { QuestionPrompt } from "@/components/ui";
 import type { AskUserQuestion, AskUserAnswer } from "@/types";
 import { useConversationStore, useChatStore, useAuthStore } from "@/stores";
@@ -783,6 +784,12 @@ function ChatUI({
               switch to a blank MessageList. */}
           <div ref={messagesEndRef} />
         </div>{" "}
+        {/* Pollinations media_generation two-step confirmation — the tool
+            BLOCKS until this dialog dispatches a response (same mount slot
+            as QuestionPrompt; self-subscribes to the Pollinations store). */}
+        <div className="px-2 sm:px-4">
+          <PollinationsConfirmDialog />
+        </div>
         {pendingQuestions && pendingQuestions.length > 0 && onAnswerQuestions && (
           <div className="px-2 pb-2 sm:px-4 sm:pb-2">
             <QuestionPrompt

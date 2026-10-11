@@ -26,6 +26,7 @@ export const ROUTES = {
   SETTINGS_ACCOUNT: "/settings/account",
   SETTINGS_APPEARANCE: "/settings/appearance",
   SETTINGS_CONFIG: "/settings/config",
+  SETTINGS_POLLINATIONS: "/settings/pollinations",
   SETTINGS_SKILLS: "/settings/skills",
   SETTINGS_TOOLS: "/settings/tools",
   SETTINGS_ENV: "/settings/env",

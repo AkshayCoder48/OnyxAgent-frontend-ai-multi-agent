@@ -20,7 +20,7 @@ import { ShimmerLabel, ghostButtonClass, monoLabelClass } from "./surfaces";
  * generating, fully transparent once done) over a fixed decorative gradient
  * that only changes blur + opacity as `generating` flips. Once a real URL
  * arrives, the caller swaps in a renderer that shows it (see the chat
- * generate_image tool block).
+ * media_generation tool block).
  *
  * Everything is built from the app's semantic theme tokens (brand, primary,
  * muted, border) so every appearance re-skins the element at once.

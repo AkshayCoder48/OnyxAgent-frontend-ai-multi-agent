@@ -77,7 +77,7 @@ const EXACT_CAPTIONS: Record<string, string> = {
   composio_execute_tool: "Using an app integration",
   preview_image: "Showing an image",
   inspect_image: "Inspecting an image",
-  generate_image: "Generating an image",
+  media_generation: "Using Pollinations AI",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */

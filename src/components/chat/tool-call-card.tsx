@@ -20,6 +20,7 @@ import {
   ListTodo,
   MessageCircleQuestion,
   Loader2,
+  Sparkles,
   BarChart3,
   PenLine,
   Brain,
@@ -49,6 +50,7 @@ import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-sess
 import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
 import { WebPageResult } from "./tool-results/web-page";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
+import { MediaGenerationResult, mediaOperationLabel } from "./tool-results/media-generation";
 import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import { useAuthStore } from "@/stores/auth-store";
@@ -458,6 +460,9 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const isMemoryList = toolCall.name === "memory_list" || memoryAction === "list";
   const isMemorySearch = toolCall.name === "memory_search" || memoryAction === "search";
   const isAskUser = toolCall.name === "ask_user";
+  // media_generation — Pollinations deliverables (image/video/audio/3D,
+  // balance cards, model lists) render inline: content, never chrome.
+  const isMediaGeneration = toolCall.name === "media_generation";
   // knowledge_base — the unified KB tool's payload chips (save/search/
   // hosted-file link) render beneath the narration line, same slot as the
   // memory chips. ONE presentation for the whole tool — the internal op
@@ -605,6 +610,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
           }
         />
       )}
+      {isMediaGeneration && <MediaGenerationResult toolCall={toolCall} />}
       {runPythonAnswer && (
         <p className="text-foreground/80 px-1.5 py-1.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap sm:px-2">
           {runPythonAnswer.length > 600
@@ -642,6 +648,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
     toolCall.name === "ask_user" ||
       (isRunPython && toolCall.status === "completed") ||
       isSched ||
+      // media_generation — the generated media / balance card is the
+      // payload; expand the disclosure when it lands.
+      (toolCall.name === "media_generation" && toolCall.status === "completed") ||
       (toolCall.name === "create_chart" &&
         toolCall.status === "completed" &&
         parseChartResult(toolCall.result) !== null) ||
@@ -759,6 +768,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       : null;
   const isWebSearch = webResults !== null;
   const isAskUser = toolCall.name === "ask_user";
+  const isMediaGeneration = toolCall.name === "media_generation";
   const isLoadSkill = toolCall.name === "load_skill";
   const isListSkills = toolCall.name === "list_skills" || (toolCall.name === "manage_skill" && toolCall.args?.action === "list");
   // web_fetch / fetch_url — the tool card carries a REAL live preview of the
@@ -909,11 +919,17 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult || isWebFetch;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isMediaGeneration || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult || isWebFetch;
   const friendlyName = isComposio
     ? // The REAL platform name once branding resolves (GitHub, Slack…);
       // fallback is the platform the call ran through.
       branding?.appName ?? "Composio"
+    : isMediaGeneration
+    ? mediaOperationLabel(
+        typeof toolCall.args?.operation === "string"
+          ? (toolCall.args.operation as string)
+          : undefined,
+      )
     : isBrowserResult
     ? "Browser"
     : isWebSessionResult
@@ -982,7 +998,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
                       ? "Composing…"
                       : toolCall.name;
 
-  const ToolIcon = isBrowserResult
+  const ToolIcon = isMediaGeneration
+    ? Sparkles
+    : isBrowserResult
     ? Globe
     : isWebSessionResult
     ? Globe
@@ -1251,6 +1269,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             <DDGImageResults result={toolCall.result} />
           ) : toolCall.status === "completed" && isDDGVideoSearch ? (
             <DDGVideoResults result={toolCall.result} />
+          ) : toolCall.name === "media_generation" ? (
+            // media_generation — the full Pollinations presentation (media
+            // deliverables, balance/usage cards, live model lists, honest
+            // failures + cancellations) takes priority over the raw JSON view.
+            <MediaGenerationResult toolCall={toolCall} />
           ) : isAskUser ? (
             <AskUserResult args={toolCall.args} resultText={resultText} />
           ) : isRunPython ? (

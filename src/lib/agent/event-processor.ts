@@ -347,6 +347,12 @@ export class AgentEventProcessor {
     this.turnStartedAt = null;
     this.store.getState().setPendingQuestions(null);
     this.store.getState().setProcessing(false);
+    // Any still-open media_generation confirmation resolves as cancelled
+    // (the tool's waiter also resolves on its own abort signal, but the
+    // dialog must not linger in the UI).
+    void import("@/lib/pollinations/store").then(({ usePollinationsStore }) => {
+      usePollinationsStore.getState().setPendingConfirmation(null);
+    });
   }
 
   // ── THE EVENT HANDLER ───────────────────────────────────────────────────
@@ -989,6 +995,20 @@ export class AgentEventProcessor {
             allowCustom: q.allow_custom,
           })),
         );
+        break;
+      }
+
+      case "media_generation_confirm": {
+        // media_generation tool ⇄ chat UI — surface the two-step generation
+        // confirmation (prompt prep → final confirm). The tool BLOCKS on a
+        // window CustomEvent; the dialog (mounted near the composer, like
+        // QuestionPrompt) dispatches it. Abort/turn-end resolves as cancel.
+        const payload = wsEvent.data as import("@/lib/pollinations/types").ConfirmRequestPayload;
+        if (payload && typeof payload === "object" && payload.requestId) {
+          void import("@/lib/pollinations/store").then(({ usePollinationsStore }) => {
+            usePollinationsStore.getState().setPendingConfirmation(payload);
+          });
+        }
         break;
       }
 

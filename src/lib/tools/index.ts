@@ -39,10 +39,10 @@ import "./subagents";
 import "./chat_inspect";
 import "./workspace_analysis";
 import "./image_preview";
-import "./image_generation";
 import "./ocr";
 import "./scheduled_tasks";
 import "./composio_tools";
 import "./uploaded_files";
+import "./media_generation";
 
 export {};

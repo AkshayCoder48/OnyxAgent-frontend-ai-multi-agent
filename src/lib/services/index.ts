@@ -55,6 +55,7 @@ import type {
 } from "@/types";
 import { RatingValue } from "@/types";
 import type { UserSlashCommandRecord } from "@/lib/slash-commands-api";
+import type { PollinationsConnectionMeta } from "@/lib/pollinations/types";
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -1293,6 +1294,19 @@ export interface UserSettings {
    *  without the vault-encrypted API key). Reused across prompts so we never
    *  create a session per turn. */
   composio_session_id?: string | null;
+  /** Whether a Pollinations BYOP key is stored (vault-encrypted under
+   *  `extra.pollinations_api_key_encrypted`; metadata in
+   *  `extra.pollinations_meta`). Powers the media_generation tool + the
+   *  Settings → Pollinations AI section. */
+  pollinations_connected?: boolean;
+  /** How the Pollinations key was obtained: "oauth" (official BYOP flow) or
+   *  "manual" (user pasted their own key). */
+  pollinations_method?: "oauth" | "manual";
+  /** ISO expiry of the connected Pollinations key (OAuth keys are time-boxed;
+   *  manual keys have no expiry). */
+  pollinations_expires_at?: string | null;
+  /** Granted scopes of the connected Pollinations key. */
+  pollinations_scope?: string | null;
 }
 
 /** Normalize a stored/provided OnyxBase base URL for comparison only —
@@ -1362,6 +1376,12 @@ export const settingsService = {
       onyxbase_last_synced: (row.extra?.onyxbase_last_synced as string | null | undefined) ?? null,
       composio_api_key_present: !!row.extra?.composio_api_key_encrypted,
       composio_session_id: (row.extra?.composio_session_id as string | null | undefined) ?? null,
+      pollinations_connected: !!row.extra?.pollinations_api_key_encrypted,
+      pollinations_method: (row.extra?.pollinations_meta as PollinationsConnectionMeta | undefined)?.method,
+      pollinations_expires_at:
+        (row.extra?.pollinations_meta as PollinationsConnectionMeta | undefined)?.expiresAt ?? null,
+      pollinations_scope:
+        (row.extra?.pollinations_meta as PollinationsConnectionMeta | undefined)?.scope ?? null,
     };
   },
 
@@ -1536,6 +1556,93 @@ export const settingsService = {
   /** Legacy alias — same as `getDecryptedSandboxKey`. */
   async getDecryptedE2BKey(userId: string): Promise<string | null> {
     return this.getDecryptedSandboxKey(userId);
+  },
+
+  // -------------------------------------------------------------------------
+  // Pollinations AI (BYOP — the user's OWN scoped key, vault-encrypted).
+  // -------------------------------------------------------------------------
+
+  /** Non-secret connection metadata (method, expiry, scope, profile) kept in
+   *  `extra.pollinations_meta` alongside the vault-encrypted key. */
+  async getPollinationsConnection(
+    userId: string,
+  ): Promise<{ token: string | null; meta: PollinationsConnectionMeta | null }> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return { token: null, meta: null };
+    const enc = row.extra?.pollinations_api_key_encrypted as string | null | undefined;
+    if (!enc) return { token: null, meta: null };
+    try {
+      if (!isVaultUnlocked()) {
+        const { restoreVaultFromSession } = await import("@/lib/crypto/vault");
+        await restoreVaultFromSession();
+      }
+      const token = await vaultDecrypt(enc);
+      if (!token) return { token: null, meta: null };
+      const meta = (row.extra?.pollinations_meta as PollinationsConnectionMeta | undefined) ?? null;
+      return { token, meta };
+    } catch {
+      return { token: null, meta: null };
+    }
+  },
+
+  async setPollinationsConnection(
+    userId: string,
+    token: string,
+    meta: PollinationsConnectionMeta,
+  ): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    const encrypted = await vaultEncrypt(token);
+    await db.user_settings.update(row!.id, {
+      extra: { ...(row.extra ?? {}), pollinations_api_key_encrypted: encrypted, pollinations_meta: meta },
+      updated_at: nowISO(),
+    });
+  },
+
+  async clearPollinationsConnection(userId: string): Promise<void> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) return;
+    const extra = { ...(row.extra ?? {}) };
+    delete extra.pollinations_api_key_encrypted;
+    delete extra.pollinations_meta;
+    await db.user_settings.update(row.id, { extra, updated_at: nowISO() });
+  },
+
+  /** Model defaults + generation prefs + activity log (all non-secret, in
+   *  `extra.pollinations_*`). */
+  async getPollinationsConfig(userId: string): Promise<{
+    defaults: Record<string, string>;
+    prefs: Record<string, unknown>;
+    activityLog: unknown[];
+  }> {
+    const row = await db.user_settings.where("user_id").equals(userId).first();
+    const extra = (row?.extra ?? {}) as Record<string, unknown>;
+    return {
+      defaults:
+        extra.pollinations_defaults && typeof extra.pollinations_defaults === "object"
+          ? (extra.pollinations_defaults as Record<string, string>)
+          : {},
+      prefs:
+        extra.pollinations_prefs && typeof extra.pollinations_prefs === "object"
+          ? (extra.pollinations_prefs as Record<string, unknown>)
+          : {},
+      activityLog: Array.isArray(extra.pollinations_activity_log) ? (extra.pollinations_activity_log as unknown[]) : [],
+    };
+  },
+
+  async setPollinationsValue(userId: string, key: string, value: unknown): Promise<void> {
+    let row = await db.user_settings.where("user_id").equals(userId).first();
+    if (!row) {
+      await this.get(userId);
+      row = await db.user_settings.where("user_id").equals(userId).first();
+    }
+    await db.user_settings.update(row!.id, {
+      extra: { ...(row!.extra ?? {}), [key]: value },
+      updated_at: nowISO(),
+    });
   },
 
   async setTavilyKey(userId: string, key: string | null): Promise<void> {

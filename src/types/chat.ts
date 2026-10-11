@@ -211,6 +211,7 @@ export type WSEventType =
   | "message_saved"
   | "tool_approval_required"
   | "ask_user"
+  | "media_generation_confirm"
   | "todo_event"
   | "subagent_status"
   | "subagent_message"
@@ -338,6 +339,15 @@ export interface AskUserEvent {
   data: {
     questions: { question: string; options: string[]; allow_custom: boolean }[];
   };
+}
+
+/** media_generation tool ⇄ UI — the mandatory two-step generation
+ *  confirmation (prompt preparation + final confirm). The TOOL waits on a
+ *  window CustomEvent (pollinations:confirm-response) carrying the user's
+ *  decision; nothing executes until the user confirms. */
+export interface MediaGenerationConfirmEvent {
+  type: "media_generation_confirm";
+  data: import("@/lib/pollinations/types").ConfirmRequestPayload;
 }
 
 export type ResearchTodoStatus = "pending" | "in_progress" | "completed" | "blocked";
