@@ -1,11 +1,16 @@
 // Dynamic tool creation — AI creates/edits/deletes custom tools at runtime.
 // Tools are persisted to IndexedDB via customToolService and hot-registered.
-import { registerTool, type ToolHandler } from "./registry";
+import { registerTool, unregisterTool, updateTool, listTools, type ToolHandler } from "./registry";
 import type { ToolResult } from "@/types";
 import { customToolService } from "@/lib/services";
 
 // In-memory cache of dynamically registered tool handlers (keyed by tool name)
 const dynamicHandlers = new Map<string, ToolHandler>();
+
+/** True when the name currently holds a live registry slot. */
+function hasLiveRegistration(name: string): boolean {
+  return listTools().some((t) => t.name === name);
+}
 
 /** Re-register all active custom tools from IndexedDB for the given user. */
 export async function loadDynamicTools(userId: string): Promise<void> {
@@ -204,12 +209,25 @@ registerTool(
       if (args.http_headers !== undefined) patch.http_headers = args.http_headers;
       if (args.python_source !== undefined) patch.python_source = args.python_source;
       await customToolService.update(existing.id, patch);
-      // Re-register
+      // Re-register — UPDATE the live registry slot in place. A plain
+      // registerTool call is a first-wins NO-OP for an already-registered
+      // name, which previously left the model-visible tool list showing the
+      // OLD description/schema/handler until a reload (tool-reliability PRD
+      // §4.1: the registry is the single source of truth for the request's
+      // tool definitions).
       const updated = (await customToolService.list(ctx.userId)).find((t) => t.name === name)!;
       const handler = buildHandler(updated.impl_kind, updated.http_url ?? null, updated.http_headers, updated.python_source ?? null);
       if (handler) {
         dynamicHandlers.set(name, handler);
-        registerTool(name, updated.description, updated.parameters_schema as Record<string, unknown>, handler, false);
+        if (hasLiveRegistration(name)) {
+          updateTool(name, {
+            description: updated.description,
+            parameters: updated.parameters_schema as Record<string, unknown>,
+            handler,
+          });
+        } else {
+          registerTool(name, updated.description, updated.parameters_schema as Record<string, unknown>, handler, false);
+        }
       }
       return { success: true, output: { updated: name } };
     }
@@ -221,6 +239,11 @@ registerTool(
       if (!existing) return { success: false, output: null, error: `Tool '${name}' not found` };
       await customToolService.delete(existing.id);
       dynamicHandlers.delete(name);
+      // UNREGISTER the live slot — previously only the handler cache was
+      // cleaned, so the deleted tool stayed in listTools() (model-visible
+      // tool definitions AND still executable through the stale handler)
+      // until a page reload (tool-reliability PRD §4.1).
+      unregisterTool(name);
       return { success: true, output: { deleted: name } };
     }
 

@@ -24,6 +24,8 @@ import {
   handleBrowserToolCall,
 } from "@/lib/agent/browser-tool-bridge";
 import { manageContext } from "@/lib/agent/context/context-manager";
+import { resolveModelContext } from "@/lib/agent/context/model-context";
+import { priorToolUseAnnotation } from "@/lib/tools/request-scoping";
 
 /**
  * Background agent turn — runs the agent loop INSIDE the E2B sandbox as a
@@ -146,12 +148,21 @@ function buildHistory(
   // browser-side tool context).
   for (const msg of messages) {
     if (msg.role !== "user" && msg.role !== "assistant") continue;
-    const text =
+    let text =
       msg.content ||
       (msg.parts ?? [])
         .filter((p) => p.type === "text" && p.content)
         .map((p) => p.content)
         .join("\n\n");
+    // PRIOR-TURN TOOL-USE ANNOTATION (tool-reliability Part B — parity
+    // with the fg runtime's buildPriorMessages): the runner receives
+    // text-only history, so the model could never see its own past tool
+    // usage across turns. A compact one-line `[Used tools: …]` on prior
+    // assistant messages restores that behavioral signal.
+    if (msg.role === "assistant" && Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0) {
+      const annotation = priorToolUseAnnotation(msg.toolCalls.map((tc) => tc?.name));
+      if (annotation) text = text && text.trim() ? `${text}\n\n${annotation}` : annotation;
+    }
     if (text && text.trim()) {
       history.push({ role: msg.role, content: text });
     }
@@ -770,7 +781,22 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       // REQUEST-SCOPED EXPOSURE for the bridged snapshot: the coding surface
       // (file authoring + execution) never bridges — the background agent
       // implements those natively in the sandbox (bg-native-tools.ts).
-      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES);
+      // INTENT SCOPING ("the model never calls tools" fix): the bridged
+      // list is scoped with the same intent-based policy the fg runtime
+      // uses — the turn's user message + tools already used in this
+      // conversation + the model's context window.
+      const storeMessages = ctx.store ? ctx.store.getState().messages : [];
+      const historyToolNames = new Set<string>();
+      for (const m of storeMessages) {
+        if (Array.isArray(m.toolCalls)) {
+          for (const tc of m.toolCalls) if (tc?.name) historyToolNames.add(tc.name);
+        }
+      }
+      browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES, {
+        lastUserText: ctx.turn.userMessage,
+        usedToolNames: historyToolNames,
+        modelContextWindow: resolveModelContext(ctx.turn.provider.model).contextWindow,
+      });
     } catch {
       browserTools = [];
     }
@@ -859,7 +885,15 @@ function replayEvent(
   const ts = typeof ev.ts === "number" ? ev.ts : Date.now();
   switch (ev.t) {
     case "round_start":
-      emit("model_request_start", { round, ts });
+      // TOOL OBSERVABILITY passthrough: the runner stamps tools/wire onto
+      // each round_start so the Logs panel can answer "were tools even
+      // attached?" for background turns (parity with the fg runtime).
+      emit("model_request_start", {
+        round,
+        ts,
+        ...(typeof ev.tools === "number" ? { tools: ev.tools } : {}),
+        ...(typeof ev.wire === "string" && ev.wire ? { wire: ev.wire } : {}),
+      });
       break;
     case "reasoning":
       // v1 legacy monolithic reasoning — one big delta.

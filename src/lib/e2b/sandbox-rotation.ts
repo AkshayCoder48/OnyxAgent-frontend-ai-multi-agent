@@ -34,6 +34,7 @@ import {
   sandboxIdStorageKey,
   type E2BClient,
 } from "./client";
+import { resetBrowserSessionCache } from "./browser-session";
 import type { ToolContext } from "@/lib/tools/registry";
 
 // 50 minutes — rotate BEFORE the 1-hour E2B sandbox timeout kills the sandbox.
@@ -274,6 +275,17 @@ async function performRotation(t: SandboxTarget): Promise<void> {
         } catch {
           // ignore
         }
+      }
+      // BROWSER SESSION CACHE (CloakBrowser integration): the rotation just
+      // replaced the sandbox — the old driver (and its cached boot promise)
+      // is dead. Without this reset the first post-rotation browser action
+      // pays a full command timeout (~90s) against a dead driver before the
+      // reconnect path re-boots it. The restored ~/.onyx/browser/profile
+      // backup keeps cookies + localStorage across the rotation.
+      try {
+        resetBrowserSessionCache();
+      } catch {
+        // best-effort — module init order should never break rotation
       }
       if (t.mode === "separate" && t.conversationId) {
         // Precise eviction — only THIS chat's client is dropped (it reloads

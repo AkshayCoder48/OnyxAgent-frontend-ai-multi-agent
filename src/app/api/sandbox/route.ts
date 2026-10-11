@@ -602,6 +602,18 @@ async function createAndCacheSandbox(
     // always-fresh authoritative source — this create-time set is a
     // best-effort baseline for connected sandboxes.
     //
+    // CUSTOM TEMPLATE (CloakBrowser PRD §2.1): when E2B_TEMPLATE_ID is set
+    // (the operator built e2b-template/Dockerfile — cloakbrowser + the
+    // stealth Chromium binary baked in), sandboxes start from it and the
+    // browser tool skips its ~280s runtime pip-install. Unset → the default
+    // code-interpreter template, and the browser runtime self-installs on
+    // first use (browser-session.ts). Never hardcode the name: a missing
+    // template on the E2B account would break ALL sandbox creation.
+    const templateId = process.env.E2B_TEMPLATE_ID?.trim() || undefined;
+    if (templateId) {
+      console.log(`[sandbox] using custom template: ${templateId}`);
+    }
+    //
     // LIFECYCLE (background-turn critical): onTimeout "pause" + autoResume.
     // Without this E2B's default KILLS the sandbox when its timeout expires —
     // including any background agent job running inside it. With it, the
@@ -614,6 +626,7 @@ async function createAndCacheSandbox(
     // limit RESETS after each pause/resume cycle.)
     sandbox = await Sandbox.create({
       apiKey,
+      ...(templateId ? { template: templateId } : {}),
       timeoutMs: 3_600_000, // 1 hour (E2B Hobby max continuous runtime)
       envs,
       lifecycle: { onTimeout: "pause", autoResume: true },
@@ -629,8 +642,10 @@ async function createAndCacheSandbox(
       sharedCache.clear();
       separateCache.clear();
       // Retry the create — should succeed now that the account has 0 sandboxes.
+      const retryTemplateId = process.env.E2B_TEMPLATE_ID?.trim() || undefined;
       sandbox = await Sandbox.create({
         apiKey,
+        ...(retryTemplateId ? { template: retryTemplateId } : {}),
         timeoutMs: 3_600_000,
         envs,
         lifecycle: { onTimeout: "pause", autoResume: true },

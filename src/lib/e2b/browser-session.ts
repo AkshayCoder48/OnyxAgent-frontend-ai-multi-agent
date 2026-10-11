@@ -127,8 +127,13 @@ export async function ensureBrowserDriver(
         // Runtime deps: cloakbrowser (primary, humanize=True) + playwright
         // (the standard-Chromium fallback). Both pip packages are small;
         // the browser BINARY downloads on first launch inside the driver.
+        // cloakbrowser is PINNED (==0.6.1): the pinned major was verified
+        // against the live PyPI API (launch_persistent_context(user_data_dir,
+        // humanize=…, headless=…, args=…, viewport=…) — Playwright-drop-in).
+        // Bump deliberately after verifying a new release's API surface.
         // NOTE: no pipes on the pip calls — `| tail` would mask pip's exit
         // code; success is verified with an import probe instead.
+        const PIP_PKGS = "cloakbrowser==0.6.1 playwright";
         const pkgsOk = () =>
           execInSandbox(
             client,
@@ -139,14 +144,14 @@ export async function ensureBrowserDriver(
         if (!(await pkgsOk())) {
           let inst = await execInSandbox(
             client,
-            `pip install --quiet cloakbrowser playwright`,
+            `pip install --quiet ${PIP_PKGS}`,
             INSTALL_TIMEOUT_S,
           );
           if (!inst.ok || !(await pkgsOk())) {
             // Externally-managed environments need --break-system-packages.
             inst = await execInSandbox(
               client,
-              `pip install --quiet --break-system-packages cloakbrowser playwright`,
+              `pip install --quiet --break-system-packages ${PIP_PKGS}`,
               INSTALL_TIMEOUT_S,
             );
           }

@@ -46,7 +46,7 @@ import type {
   AskUserQuestion,
 } from "@/types";
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
-import { filterToolsForRequest, usedToolNamesFromHistory } from "@/lib/tools/request-scoping";
+import { filterToolsForRequest, priorToolUseAnnotation, usedToolNamesFromHistory } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
 import { promptKb } from "@/lib/agent/tool-digest";
@@ -71,6 +71,7 @@ import {
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import { manageContext } from "@/lib/agent/context/context-manager";
+import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
 import {
   classifyRouterError,
@@ -476,6 +477,20 @@ export function extractDelta(chunk: Record<string, unknown>): DeltaAccumulator |
       name: tc.function?.name,
       arguments: tc.function?.arguments,
     }));
+  } else {
+    // LEGACY `function_call` (tool-reliability PRD §7.2 — "incorrect
+    // handling of tool_calls and function_call"): pre-tools-API OpenAI-compat
+    // providers stream a single call as delta.function_call {name, arguments}
+    // with NO index and NO id. Normalize it to the modern tool_calls shape
+    // (index 0 — the legacy protocol allows at most ONE call per message) so
+    // the accumulator + executor handle it identically. Without this, the
+    // call surfaced as visible text and never executed.
+    const fc = delta.function_call as
+      | { name?: string; arguments?: string }
+      | undefined;
+    if (fc && typeof fc === "object" && (fc.name || fc.arguments)) {
+      out.toolCalls = [{ index: 0, name: fc.name, arguments: fc.arguments }];
+    }
   }
   return out;
 }
@@ -490,6 +505,64 @@ export function extractFinishReason(chunk: Record<string, unknown>): string | nu
   const choice = choices[0];
   if (!choice) return null;
   return choice.finish_reason ?? choice.stop_reason ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Index-less tool-call delta resolution (tool-reliability PRD §7.2 — "tool
+// calls split across multiple SSE chunks" / "tool-call IDs arriving in
+// separate chunks").
+//
+// Standard OpenAI chunks key each streamed call by `index`. Some OpenAI-
+// compatible providers OMIT it — keying purely on `tc.index` then merged
+// every parallel call into ONE accumulator entry (Map key `undefined`),
+// concatenating distinct JSON payloads into a malformed blob that then
+// failed as MALFORMED_TOOL_ARGUMENTS instead of executing.
+//
+// Resolution order for a delta with no index:
+//   1. an `id` that matches an existing entry → that entry's key (ids may
+//      arrive on a separate chunk from the arguments);
+//   2. a NAME delta that differs from the most recent entry's name WHILE
+//      that entry is already accumulating arguments → a NEW call started →
+//      allocate the next free slot;
+//   3. otherwise → the most recently created entry (argument continuation);
+//   4. empty accumulator → slot 0.
+// ---------------------------------------------------------------------------
+
+export interface AccumulatedToolCallEntry {
+  key: number;
+  id: string;
+  name: string;
+  args: string;
+}
+
+function nextFreeAccumulatorKey(entries: readonly AccumulatedToolCallEntry[]): number {
+  let k = 0;
+  while (entries.some((e) => e.key === k)) k++;
+  return k;
+}
+
+/** Resolve which accumulator slot a streamed tool-call delta belongs to. */
+export function resolveToolCallAccumulatorKey(
+  tc: { index?: number; id?: string; name?: string; arguments?: string },
+  entries: readonly AccumulatedToolCallEntry[],
+): number {
+  if (typeof tc.index === "number") return tc.index;
+  if (tc.id) {
+    const byId = entries.find((e) => e.id === tc.id);
+    if (byId) return byId.key;
+    return nextFreeAccumulatorKey(entries);
+  }
+  const last = entries[entries.length - 1];
+  if (!last) return 0;
+  if (
+    tc.name &&
+    last.args.length > 0 &&
+    last.name &&
+    last.name !== tc.name
+  ) {
+    return nextFreeAccumulatorKey(entries);
+  }
+  return last.key;
 }
 
 /**
@@ -681,6 +754,15 @@ function parseFencedToolCalls(text: string): {
   }
   return { toolCalls, cleanText };
 }
+
+// ---------------------------------------------------------------------------
+// Qwen-style XML tool-call parser (tool-reliability PRD §7.2 — provider-
+// specific streaming formats). Qwen models served through gateways without
+// native tool-calling write calls as XML tags in the plain TEXT stream:
+//
+//   <tool_call>
+//   {"name": "get_current_weather", "arguments": {"location": "Paris"}}
+//   
 
 /**
  * While streaming, hold back the tail of the accumulated text if it could be
@@ -1089,7 +1171,16 @@ async function streamRound(
     // `model` = the model actually serving THIS round (with the Auto
     // Router it can differ round to round; the event-processor stamps it
     // onto the assistant message so the UI badge shows the served model).
-    data: { round: roundNumber ?? 1, model: provider.model },
+    // TOOL OBSERVABILITY (tool-reliability Part B): `tools` = how many tool
+    // definitions ride this request; `wire` = the active strict-gateway
+    // wire-compat mode — so "were tools even attached?" is answerable from
+    // the Logs panel without devtools.
+    data: {
+      round: roundNumber ?? 1,
+      model: provider.model,
+      tools: tools.length,
+      wire: `${wireMode.system}${wireMode.toolText ? "+toolText" : ""}${wireMode.noTools ? "+noTools" : ""}`,
+    },
     timestamp: nowISO(),
   });
 
@@ -1278,7 +1369,15 @@ async function streamRound(
             textBeforeTools = content;
           }
           for (const tc of delta.toolCalls) {
-            const existing = toolCallAccumulator.get(tc.index) ?? {
+            // INDEX-LESS DELTA FIX (tool-reliability PRD §7.2): resolve the
+            // accumulator slot via resolveToolCallAccumulatorKey — providers
+            // that omit `index` previously merged every parallel call into
+            // ONE malformed entry (Map key `undefined`).
+            const snapshot = Array.from(toolCallAccumulator.entries()).map(
+              ([key, v]) => ({ key, id: v.id, name: v.name, args: v.args }),
+            );
+            const slot = resolveToolCallAccumulatorKey(tc, snapshot);
+            const existing = toolCallAccumulator.get(slot) ?? {
               id: tc.id ?? nanoid(),
               name: tc.name ?? "",
               args: "",
@@ -1286,7 +1385,7 @@ async function streamRound(
             if (tc.id) existing.id = tc.id;
             if (tc.name) existing.name = tc.name;
             if (tc.arguments) existing.args += tc.arguments;
-            toolCallAccumulator.set(tc.index, existing);
+            toolCallAccumulator.set(slot, existing);
           }
           // Emit tool_call_delta so the UI can show streaming tool call
           // arguments in realtime (the user sees the AI "writing" the file
@@ -1821,11 +1920,20 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   // filled by the agent loop; see "IDEMPOTENT TOOL EXECUTION" further down.)
   const allToolCalls: ToolCall[] = [];
   const historyToolNames = usedToolNamesFromHistory(history);
+  // INTENT-SCOPED TOOL SURFACE ("the model never calls tools" fix): the
+  // request carries the CORE (or, on small-context models, ESSENTIAL)
+  // surface + tools matched from the user's intent + everything already
+  // used in this conversation — not the full 64-tool registry whose ~20k
+  // token payload crushed small models. See tools/request-scoping.ts.
+  const scopeUserText = opts.userMessage ?? "";
+  const scopeContextWindow = resolveModelContext(opts.provider.model).contextWindow;
   const buildScopedTools = () => {
     const used = new Set(historyToolNames);
     for (const tc of allToolCalls) used.add(tc.name);
     return filterToolsForRequest(registeredTools, {
+      lastUserText: scopeUserText,
       usedToolNames: used,
+      modelContextWindow: scopeContextWindow,
     });
   };
 
@@ -2075,13 +2183,25 @@ ${genuiThemePromptBlock(readChatTheme())}`;
   const preCappedHistory = history.length > DEFAULT_MAX_HISTORY
     ? history.slice(-DEFAULT_MAX_HISTORY)
     : history;
-  const contextHistory: Array<{ role: "user" | "assistant" | "system"; content: string; reasoning?: string | null }> =
+  const contextHistory: Array<{
+    role: "user" | "assistant" | "system";
+    content: string;
+    reasoning?: string | null;
+    /** PRIOR-TURN TOOL-USE ANNOTATION (tool-reliability Part B): carried
+     * through compaction so buildPriorMessages can annotate prior
+     * assistant messages with `[Used tools: …]` — the model otherwise
+     * never sees its own past tool usage (role:"tool" rows and
+     * assistant.tool_calls are dropped from the replay for strict-gateway
+     * pair safety). */
+    tool_calls?: Array<{ tool_name?: string; name?: string }>;
+  }> =
     preCappedHistory
       .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
       .map((m) => ({
         role: m.role as "user" | "assistant" | "system",
         content: m.content ?? "",
         reasoning: (m as { reasoning?: string | null }).reasoning ?? null,
+        tool_calls: (m as { tool_calls?: Array<{ tool_name?: string; name?: string }> }).tool_calls,
       }));
   const managedContext = manageContext({
     systemPrompt: enhancedSystemPrompt,
@@ -2218,6 +2338,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               ? m.content.replace(/\n\n_\(stopped\)_/g, "").trim()
               : "",
           };
+          // PRIOR-TURN TOOL-USE ANNOTATION (tool-reliability Part B): the
+          // replay deliberately drops role:"tool" rows and assistant
+          // tool_calls (strict-gateway pair safety), which left the model
+          // with ZERO visibility of its own past tool usage — weakening the
+          // behavioral pattern to act at all. A compact one-line annotation
+          // (`[Used tools: web_search, use_browser]`) on assistant messages
+          // that made tool calls restores that signal without any wire-
+          // protocol risk.
+          const toolAnnotation = priorToolUseAnnotation(m.tool_calls?.map((tc) => tc?.tool_name ?? tc?.name) ?? []);
+          if (toolAnnotation) {
+            wire.content = wire.content ? `${wire.content}\n\n${toolAnnotation}` : toolAnnotation;
+          }
           // STRICT-COMPAT (LLM HTTP 400 fix): reasoning_content is NOT sent by
           // default — strict OpenAI-compatible validators reject unknown
           // fields with a generic 400. The reasoning rides along under the

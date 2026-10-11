@@ -58,6 +58,12 @@ export interface BgEvent {
   /** todo_event: the full todo-list snapshot (wire shape matches the
    *  in-browser registry so the live TodoPreview renders identically). */
   todos?: unknown[];
+  /** round_start: how many tool definitions ride this round's request
+   *  (tool observability — forwarded into model_request_start). */
+  tools?: number;
+  /** round_start: the active wire-compat mode label (e.g. "native",
+   *  "compact+toolText"). */
+  wire?: string;
   /** status events: "boot" | "first_token" | "retry" | "llm_end" */
   kind?: string;
   attempt?: number;

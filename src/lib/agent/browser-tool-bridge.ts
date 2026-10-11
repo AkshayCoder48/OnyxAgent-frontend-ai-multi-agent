@@ -158,13 +158,18 @@ async function writeBridgeResult(
  *  BRIDGED tools (everything without a native sandbox implementation).
  *  Called at launch (startBackgroundTurn) after hot-loading custom + MCP
  *  tools, mirroring the in-browser runtime's per-turn loading sequence.
- *  filterToolsForRequest is currently a pass-through (the coding-surface
- *  isolation was retired), and every tool it used to drop is native anyway
- *  — excluded here by `nativeNames` (BG_NATIVE_TOOL_NAMES). */
+ *  INTENT SCOPING (tool-reliability Part B): the optional scope applies the
+ *  same intent-based policy the fg runtime uses (user message + history
+ *  latch + model context window) to the bridged snapshot. `nativeNames`
+ *  (BG_NATIVE_TOOL_NAMES) already excludes the sandbox-native surface. */
 export function collectBridgeableTools(
   nativeNames: ReadonlySet<string>,
+  scope?: import("@/lib/tools/request-scoping").RequestToolScope,
 ): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
-  const tools = filterToolsForRequest(listTools().filter((t) => !nativeNames.has(t.name)));
+  const tools = filterToolsForRequest(
+    listTools().filter((t) => !nativeNames.has(t.name)),
+    scope,
+  );
   return tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
 }
 

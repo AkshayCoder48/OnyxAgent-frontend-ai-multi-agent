@@ -645,7 +645,11 @@ function parseSSEFrames(buffer) {
 
 /** Pull content / reasoning / tool-call fragments out of one streamed chunk
  *  (mirrors the in-browser runtime's extractDelta, INCLUDING the flattened
- *  tool-call shape {index, id, name, arguments} the UI pipeline expects). */
+ *  tool-call shape {index, id, name, arguments} the UI pipeline expects).
+ *  INDEX-LESS DELTAS STAY INDEX-LESS (undefined) — the accumulator resolves
+ *  them via resolveAccKey (port of the fg resolveToolCallAccumulatorKey;
+ *  coercing to 0 here merged parallel index-less calls into one mangled
+ *  blob that failed as MALFORMED_TOOL_ARGUMENTS instead of executing). */
 function extractDeltas(chunk) {
   const choices = Array.isArray(chunk.choices) ? chunk.choices : null;
   if (!choices || !choices.length) {
@@ -663,15 +667,62 @@ function extractDeltas(chunk) {
     out.toolCalls = rawToolCalls.map((tc) => {
       const fn = (tc && tc.function && typeof tc.function === "object") ? tc.function : {};
       return {
-        index: typeof tc.index === "number" ? tc.index : 0,
+        index: typeof tc.index === "number" ? tc.index : undefined,
         id: typeof tc.id === "string" ? tc.id : undefined,
         name: typeof fn.name === "string" ? fn.name : undefined,
         arguments: typeof fn.arguments === "string" ? fn.arguments
           : (fn.arguments && typeof fn.arguments === "object" ? JSON.stringify(fn.arguments) : undefined),
       };
     });
+  } else {
+    // LEGACY function_call (tool-reliability PRD §7.2 — fg parity fix):
+    // pre-tools-API OpenAI-compat providers stream a single call as
+    // delta.function_call {name, arguments} with NO index and NO id.
+    // Normalize to the modern tool_calls shape (index 0 — the legacy
+    // protocol allows at most ONE call per message) so the accumulator +
+    // executor handle it identically. Without this the call surfaced as
+    // visible text and never executed.
+    const fc = delta.function_call;
+    if (fc && typeof fc === "object" && (fc.name || fc.arguments)) {
+      out.toolCalls = [{
+        index: 0,
+        id: undefined,
+        name: typeof fc.name === "string" ? fc.name : undefined,
+        arguments: typeof fc.arguments === "string" ? fc.arguments
+          : (fc.arguments && typeof fc.arguments === "object" ? JSON.stringify(fc.arguments) : undefined),
+      }];
+    }
   }
   return out;
+}
+
+// ── Index-less tool-call delta resolution (fg parity — port of
+// resolveToolCallAccumulatorKey in agent/runtime.ts). ──────────────────
+/** Next free accumulator slot. */
+function nextFreeAccKey(acc) {
+  let k = 0;
+  while (acc.has(k)) k++;
+  return k;
+}
+
+/** Resolve which accumulator slot a streamed tool-call delta belongs to.
+ *  Order: explicit index → id match (ids arrive on separate chunks from
+ *  arguments) → new-name-while-accumulating (a NEW parallel call started)
+ *  → most recent entry (argument continuation) → slot 0. */
+function resolveAccKey(tc, acc) {
+  if (typeof tc.index === "number") return tc.index;
+  if (tc.id) {
+    for (const [k, e] of acc) if (e && e.id && e.id === tc.id) return k;
+    return nextFreeAccKey(acc);
+  }
+  let lastKey = -1;
+  let last = null;
+  for (const [k, e] of acc) if (k > lastKey) { lastKey = k; last = e; }
+  if (!last) return 0;
+  if (tc.name && last.args.length > 0 && last.name && last.name !== tc.name) {
+    return nextFreeAccKey(acc);
+  }
+  return lastKey;
 }
 
 /** reader.read() with an idle timeout — the losing promise's eventual
@@ -1110,7 +1161,12 @@ async function streamRoundEvents(state, round, finalRound) {
     if (d.toolCalls) {
       markFirstToken();
       for (const tc of d.toolCalls) {
-        const idx = typeof tc.index === "number" ? tc.index : toolAcc.size;
+        // FG-PARITY ACCUMULATOR KEYING (tool-reliability Part B): index-less
+        // deltas are resolved by id / new-name / recency instead of merging
+        // into slot toolAcc.size — parallel index-less calls previously
+        // interleaved two JSON payloads into one entry and failed as
+        // MALFORMED_TOOL_ARGUMENTS.
+        const idx = resolveAccKey(tc, toolAcc);
         const existing = toolAcc.get(idx) ?? { id: "", name: "", args: "" };
         if (tc.id) existing.id = tc.id;
         if (tc.name) existing.name = tc.name;
@@ -1818,9 +1874,12 @@ async function ensureWsDriver() {
       if (installed.stdout.trim() !== "YES") {
         // NOTE: no pipes on the pip calls — piping through tail would mask
         // pip's exit code and break the fallback logic.
-        let inst = await wsExec('pip install --quiet cloakbrowser playwright', WS_INSTALL_TIMEOUT_S);
+        // cloakbrowser is PINNED (==0.6.1) — verified against the live PyPI
+        // API (launch_persistent_context is a Playwright drop-in). Keep in
+        // sync with browser-session.ts's PIP_PKGS.
+        let inst = await wsExec('pip install --quiet cloakbrowser==0.6.1 playwright', WS_INSTALL_TIMEOUT_S);
         if (inst.err || (await wsExec(checkPkgs, 30)).stdout.trim() !== "YES") {
-          inst = await wsExec('pip install --quiet --break-system-packages cloakbrowser playwright', WS_INSTALL_TIMEOUT_S);
+          inst = await wsExec('pip install --quiet --break-system-packages cloakbrowser==0.6.1 playwright', WS_INSTALL_TIMEOUT_S);
         }
         if ((await wsExec(checkPkgs, 30)).stdout.trim() !== "YES") {
           return { ok: false, error: "Failed to install the browser runtime in the sandbox: " + ((inst.stderr || inst.err || inst.stdout).slice(-300) || "pip install failed") };
@@ -3020,7 +3079,18 @@ async function main() {
         content: "You have used your last available tool round. Provide your final answer to the user now. Do not request any more tools.",
       });
     }
-    await emitEvent({ t: "round_start", round });
+    // TOOL OBSERVABILITY (tool-reliability Part B — parity with the fg
+    // runtime's model_request_start): the browser-side processor forwards
+    // tools/wire into the model_request_start event so "were tools even
+    // attached?" is answerable from the Logs panel for background turns too.
+    {
+      const wm = wireMode(state);
+      await emitEvent({
+        t: "round_start", round,
+        tools: state.toolsEnabled === false ? 0 : ALL_TOOLS.length,
+        wire: wm.system + (wm.toolText ? "+toolText" : "") + (wm.noTools ? "+noTools" : ""),
+      });
+    }
     let result;
     try {
       result = await streamRoundEvents(state, round, isFinalRound);

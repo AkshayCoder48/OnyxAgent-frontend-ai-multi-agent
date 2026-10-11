@@ -47,6 +47,13 @@ export interface ContextMessage {
    *  manager never reads it, but spreads it through so provider-specific
    *  fields survive compaction. */
   reasoning?: string | null;
+  /** Optional passthrough (tool-reliability Part B): the original Dexie
+   *  tool_calls of an assistant message. The manager never reads it; the
+   *  runtime uses it in buildPriorMessages to annotate prior assistant
+   *  messages with a compact `[Used tools: …]` line (the wire replay drops
+   *  role:"tool" rows + assistant.tool_calls for strict-gateway pair
+   *  safety, which otherwise erased all visibility of past tool use). */
+  tool_calls?: Array<{ tool_name?: string; name?: string }>;
 }
 
 export type ContextStatus = "healthy" | "monitor" | "prepare" | "compact" | "emergency";

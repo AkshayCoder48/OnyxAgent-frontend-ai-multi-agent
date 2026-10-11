@@ -87,25 +87,68 @@ export interface WireCompatMode {
 const DEFAULT_MODE: WireCompatMode = { toolText: false, system: "native", noTools: false };
 
 const learnedModes = new Map<string, WireCompatMode>();
-// v2 — bumped when noTools stopped persisting (false-positive protection:
-// a provider-side CONTENT filter (verified live on gen.pollinations.ai
-// community routes — they filter USER messages mentioning tools/MCP
-// workloads) made the ladder's noTools step learn permanently even though
-// the provider accepts tools fine).
-const PERSIST_KEY = "onyx-wire-compat-v2";
+// v3 — persisted entries now carry `learnedAt` and EXPIRE after
+// PERSIST_TTL_MS (7 days). v2's permanent persistence was itself a
+// tool-reliability bug: one content-filter 400 (not a structural
+// rejection) permanently replaced the ~24KB agent system prompt with
+// "You are helpful. Be concise." — the model still received tool
+// definitions but ZERO tool-use instructions, digest or web-research
+// directives, and behaved as a plain chatbot forever after ("almost never
+// calls tools"). Downgrades are still worth persisting WITHIN a learning
+// window (re-learning costs 1-3 extra 400s on rate-limited providers),
+// but they must re-probe periodically. v2 entries (no learnedAt) are
+// dropped on read — legacy permanent downgrades expire immediately.
+// noTools is never persisted at all (capability removal, session-scoped
+// only — see beginTurnWireCompat).
+const PERSIST_KEY = "onyx-wire-compat-v3";
+/** Persisted downgrades expire after 7 days → the provider gets re-probed
+ * with the full agent prompt. */
+const PERSIST_TTL_MS = 7 * 24 * 3600_000;
+
+interface PersistedWireCompatMode extends WireCompatMode {
+  /** When this downgrade was learned (ms epoch). Missing on v2 entries. */
+  learnedAt?: number;
+}
 
 function modeKey(baseUrl: string, model: string): string {
   return `${baseUrl.replace(/\/+$/, "")}|${model}`;
 }
 
-/** Read the persisted modes map (SSR/test-safe — {} when unavailable). */
-function readPersistedModes(): Record<string, WireCompatMode> {
+/** Read the persisted modes map (SSR/test-safe — {} when unavailable).
+ * EXPIRED entries (older than PERSIST_TTL_MS, or v2 entries without
+ * learnedAt) are skipped and lazily pruned from storage — the provider
+ * gets a fresh native-mode probe. */
+function readPersistedModes(): Record<string, PersistedWireCompatMode> {
   try {
     if (typeof localStorage === "undefined") return {};
     const raw = localStorage.getItem(PERSIST_KEY);
     if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, WireCompatMode>;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = JSON.parse(raw) as Record<string, PersistedWireCompatMode>;
+    if (!parsed || typeof parsed !== "object") return {};
+    const now = Date.now();
+    const fresh: Record<string, PersistedWireCompatMode> = {};
+    let pruned = false;
+    for (const [key, mode] of Object.entries(parsed)) {
+      const expired =
+        !mode ||
+        typeof mode !== "object" ||
+        typeof mode.system !== "string" ||
+        typeof mode.learnedAt !== "number" ||
+        now - mode.learnedAt > PERSIST_TTL_MS;
+      if (expired) {
+        pruned = true;
+        continue;
+      }
+      fresh[key] = mode;
+    }
+    if (pruned) {
+      try {
+        localStorage.setItem(PERSIST_KEY, JSON.stringify(fresh));
+      } catch {
+        // quota — reading still works for this call
+      }
+    }
+    return fresh;
   } catch {
     return {};
   }
@@ -116,7 +159,7 @@ function persistMode(key: string, mode: WireCompatMode): void {
   try {
     if (typeof localStorage === "undefined") return;
     const all = readPersistedModes();
-    all[key] = mode;
+    all[key] = { ...mode, noTools: false, learnedAt: Date.now() };
     localStorage.setItem(PERSIST_KEY, JSON.stringify(all));
   } catch {
     // Quota / private-mode — session memory still works.

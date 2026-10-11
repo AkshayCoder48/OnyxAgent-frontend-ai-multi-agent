@@ -93,7 +93,9 @@ const _registry = new Map<string, ToolDefinition>();
 const _order: string[] = [];
 
 /**
- * Register a tool. Throws if a tool with the same name is already registered.
+ * Register a tool. Idempotent for re-registration (HMR / StrictMode
+ * double-mount): a tool with the same name keeps its FIRST registration.
+ * To REPLACE a tool's definition/handler use `updateTool` (below).
  */
 export function registerTool<TArgs = Record<string, unknown>>(
   name: string,
@@ -117,6 +119,47 @@ export function registerTool<TArgs = Record<string, unknown>>(
     category,
   });
   _order.push(name);
+}
+
+/**
+ * Update an EXISTING tool's definition in place (same registry slot, same
+ * position). Used by the custom-tool edit flow (manage_custom_tool action
+ * "edit") — previously edit re-called registerTool, which was a silent
+ * NO-OP for already-registered names (first-wins), so edits never reached
+ * the model-visible tool list until a reload. Throws when the tool is not
+ * registered (call registerTool first).
+ */
+export function updateTool(
+  name: string,
+  def: Partial<Omit<ToolDefinition, "name">>,
+): void {
+  const existing = _registry.get(name);
+  if (!existing) {
+    throw new Error(`updateTool: '${name}' is not registered`);
+  }
+  _registry.set(name, {
+    ...existing,
+    ...(def.description !== undefined ? { description: def.description } : {}),
+    ...(def.parameters !== undefined ? { parameters: def.parameters } : {}),
+    ...(def.handler !== undefined ? { handler: def.handler as ToolHandler } : {}),
+    ...(def.requires_approval !== undefined ? { requires_approval: def.requires_approval } : {}),
+    ...(def.category !== undefined ? { category: def.category } : {}),
+  });
+}
+
+/**
+ * Unregister a tool (custom-tool delete flow). The tool disappears from
+ * `listTools()` — the model-visible tool list AND the executor surface —
+ * immediately. Registering the same name again later works (fresh slot,
+ * appended in registration order).
+ */
+export function unregisterTool(name: string): boolean {
+  const deleted = _registry.delete(name);
+  if (deleted) {
+    const i = _order.indexOf(name);
+    if (i !== -1) _order.splice(i, 1);
+  }
+  return deleted;
 }
 
 /** Get a single tool by name (or undefined). */

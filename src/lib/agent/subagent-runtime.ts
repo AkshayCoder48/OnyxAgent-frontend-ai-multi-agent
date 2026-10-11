@@ -5,6 +5,7 @@ import { useSubagentStore, type SubagentConfig, type SubagentMessage } from "@/s
 import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { listTools } from "@/lib/tools/registry";
+import { filterToolsForRequest } from "@/lib/tools/request-scoping";
 import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import {
   applyParamPolicy,
@@ -97,7 +98,15 @@ async function resolveApiConfig(subagent: SubagentConfig) {
     model,
     baseUrl,
     noPrefix,
-    toolsEnabled: provider.tools_enabled,
+    // TOOL-CALLING PARITY (tool-reliability PRD §4.3): `undefined` means the
+    // provider row predates the tools_enabled column (no Dexie backfill) —
+    // the MAIN runtime treats undefined as ON (`toolsEnabled !== false`,
+    // runtime.ts). The subagent path previously used raw truthiness, so
+    // legacy providers silently ran subagents TOOLLESS (the model could
+    // never call tools even though they were advertised). Normalize here so
+    // all four gates below (request tools, non-streamed + streamed tool-call
+    // execution) behave identically to the main runtime.
+    toolsEnabled: provider.tools_enabled !== false,
     thinkingEnabled: (provider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
     disabledParams: (provider as { disabled_params?: string[] }).disabled_params ?? [],
   };
@@ -220,12 +229,6 @@ async function runSubagentLoop(
 
   try {
     const config = await resolveApiConfig(subagent);
-    const allTools = listTools();
-    const toolsSchema = allTools.map((t) => ({
-      type: "function" as const,
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    }));
-
     // Build message history from the session.
     const updatedSession = useSubagentStore.getState().sessions.find((s) => s.id === sid);
     const sessionMessages = (updatedSession?.messages ?? [])
@@ -233,13 +236,28 @@ async function runSubagentLoop(
     const trimmedSessionMessages = sessionMessages.length > 20
       ? sessionMessages.slice(-20)
       : sessionMessages;
-    // PRD §13/§14/§38 — subagents get the FULL registry toolset (toolsSchema
-    // above) but their system prompt used to be just a name+description,
-    // so subagents denied tools they actually had. Inject the tool digest
-    // (every tool + availability rules) + the LIVE tool names for this
-    // session, so subagent tool knowledge matches the main agent's.
+    // PRD §13/§14/§38 — subagents' system prompt used to be just a
+    // name+description, so subagents denied tools they actually had. Inject
+    // the tool digest (every tool + availability rules) + the LIVE tool
+    // names for this session, so subagent tool knowledge matches the main
+    // agent's.
     const subagentBasePrompt =
       subagent.systemPrompt || `You are ${subagent.name}, a subagent. ${subagent.description}`;
+    // INTENT-SCOPED TOOL SURFACE (tool-reliability Part B — parity with the
+    // main runtime): subagents get the CORE surface + tools matched from
+    // their OWN brief (description + task) instead of the full 64-tool
+    // registry. Subagents are focused workers — their payload stays lean
+    // without losing their domain tools. (No modelContextWindow → CORE
+    // base; subagent briefs match generously via the intent rules.)
+    const firstTask = sessionMessages.find((m) => m.role === "user")?.content ?? "";
+    const subagentBrief = `${subagent.name} ${subagent.description} ${subagentBasePrompt} ${firstTask}`;
+    const allTools = filterToolsForRequest(listTools(), {
+      lastUserText: subagentBrief,
+    });
+    const toolsSchema = allTools.map((t) => ({
+      type: "function" as const,
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
     const subagentSystemPrompt = ensureToolDigest(
       `${subagentBasePrompt}\n\n## Active tools this turn (${allTools.length})\n${allTools.map((t) => t.name).join(", ")}\nAll of them are real and callable via function-calling — never claim you lack a tool that is in your definitions; never call one that is not.`,
     );
