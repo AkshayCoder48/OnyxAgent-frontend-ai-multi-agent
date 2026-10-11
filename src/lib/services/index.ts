@@ -1617,6 +1617,9 @@ export const settingsService = {
     defaults: Record<string, string>;
     prefs: Record<string, unknown>;
     activityLog: unknown[];
+    /** True once the one-time "Pollinations" text-provider backfill ran —
+     * gates auto-recreation so a user who deletes the row keeps it deleted. */
+    textProviderBackfilled: boolean;
   }> {
     const row = await db.user_settings.where("user_id").equals(userId).first();
     const extra = (row?.extra ?? {}) as Record<string, unknown>;
@@ -1630,6 +1633,7 @@ export const settingsService = {
           ? (extra.pollinations_prefs as Record<string, unknown>)
           : {},
       activityLog: Array.isArray(extra.pollinations_activity_log) ? (extra.pollinations_activity_log as unknown[]) : [],
+      textProviderBackfilled: extra.pollinations_text_provider_backfilled === true,
     };
   },
 

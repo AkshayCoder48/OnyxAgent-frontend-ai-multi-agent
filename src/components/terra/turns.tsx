@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -64,26 +64,6 @@ function RouteBadge({ route }: { route: RouteInfo }) {
   );
 }
 
-/** Forces a periodic re-render while `active` — works in background tabs. */
-function useTick(active: boolean): void {
-  const [, force] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = () => {
-      if (cancelled) return;
-      force((n) => n + 1);
-      timer = setTimeout(tick, 200);
-    };
-    timer = setTimeout(tick, 200);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [active]);
-}
-
 /** Phrases cycled through the thinking block while the model works. */
 const THINKING_PHRASES = [
   "Thinking",
@@ -103,15 +83,12 @@ const WORKING_PHRASES = [
 
 function ThinkingBlock({ message }: { message: Message }) {
   const live = Boolean(message.streaming) && message.text.length === 0;
-  useTick(live);
-  // Snapshot the running timer once, then let the tick animate the clock.
-  const [mounted] = useState(() => ({ at: Date.now(), base: message.thinkMs ?? 0 }));
   const [userToggle, setUserToggle] = useState<boolean | null>(null);
   const open = userToggle ?? live;
 
-  const seconds = live
-    ? (mounted.base + (Date.now() - mounted.at)) / 1000
-    : (message.thinkMs ?? 0) / 1000;
+  // The "Thought for Xs" label only renders once the turn is DONE, so the
+  // stable stored duration is all it ever needs — no live clock required.
+  const seconds = (message.thinkMs ?? 0) / 1000;
 
   return (
     <div className="overflow-hidden rounded-xl border border-hairline bg-paper">

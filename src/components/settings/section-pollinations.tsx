@@ -434,6 +434,9 @@ export function SectionPollinations() {
   const prefs = usePollinationsStore((s) => s.prefs);
   const jobs = usePollinationsStore((s) => s.jobs);
   const activityLog = usePollinationsStore((s) => s.activityLog);
+  const textProviderId = usePollinationsStore((s) => s.textProviderId);
+  const textProviderModelCount = usePollinationsStore((s) => s.textProviderModelCount);
+  const textProviderError = usePollinationsStore((s) => s.textProviderError);
 
   // OAuth flow / inline key form state.
   const [oauthStarting, setOauthStarting] = React.useState(false);
@@ -480,10 +483,11 @@ export function SectionPollinations() {
             scope: result.scope,
             profile: result.profile ?? undefined,
           });
+          const syncState = usePollinationsStore.getState();
           toast.success("Pollinations connected", {
-            description: result.profile?.githubUsername
-              ? `Connected as @${result.profile.githubUsername} — media generation is ready.`
-              : "Media generation is ready.",
+            description: syncState.textProviderError
+              ? `${result.profile?.githubUsername ? `Connected as @${result.profile.githubUsername} — ` : ""}Media generation is ready, but the AI Providers sync failed (see the status note).`
+              : `${result.profile?.githubUsername ? `Connected as @${result.profile.githubUsername} — ` : ""}Media generation is ready, and “Pollinations” was added to AI Providers for chat.`,
             icon: <CheckCircle2 className="size-4" />,
           });
         } catch (err) {
@@ -566,7 +570,9 @@ export function SectionPollinations() {
       setKeyInput("");
       setShowKeyForm(false);
       toast.success("Pollinations API key saved", {
-        description: "Encrypted at rest with AES-GCM in your browser.",
+        description: usePollinationsStore.getState().textProviderError
+          ? "Encrypted at rest (AES-GCM) in your browser — but the AI Providers sync failed (see the status note)."
+          : "Encrypted at rest (AES-GCM) in your browser — “Pollinations” was also added to AI Providers for chat.",
         icon: <CheckCircle2 className="size-4" />,
       });
     } catch (err) {
@@ -719,6 +725,29 @@ export function SectionPollinations() {
               </span>
             )}
           </div>
+
+          {/* BYOP bridge — auto-synced "Pollinations" text provider status */}
+          {connected && textProviderId && (
+            <p className="text-muted-foreground flex items-start gap-2 text-xs">
+              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+              <span>
+                Text chat provider synced — “Pollinations” is available in AI Providers
+                {typeof textProviderModelCount === "number"
+                  ? ` with ${textProviderModelCount} live chat model${textProviderModelCount === 1 ? "" : "s"} (OpenAI-compatible, free models first)`
+                  : ""}
+                . Delete it there to opt out; reconnecting re-adds it.
+              </span>
+            </p>
+          )}
+          {connected && textProviderError && (
+            <p className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                Text chat provider couldn’t be synced to AI Providers: {textProviderError} — it will
+                retry when you reconnect.
+              </span>
+            </p>
+          )}
 
           {/* OAuth exchange in progress (post-redirect) */}
           {oauthExchanging && (

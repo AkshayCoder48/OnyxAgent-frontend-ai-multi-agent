@@ -20,7 +20,7 @@ export function ImageResult({ data }: { data: ToolResultData }) {
       {src ? (
         <img
           src={src}
-          alt={`Image analyzed by the agent: ${path}`}
+          alt={path ? `Analyzed: ${path}` : "Analysis result"}
           loading="lazy"
           decoding="async"
           className="h-20 w-20 shrink-0 rounded-lg border border-hairline/60 bg-background object-cover"

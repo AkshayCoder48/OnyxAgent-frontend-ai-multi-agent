@@ -19,6 +19,14 @@ import { create } from "zustand";
 import { nanoid } from "nanoid";
 import { settingsService } from "@/lib/services";
 import {
+  backfillTextProvider,
+  findTextProvider,
+  removeTextProvider,
+  syncProviderModels,
+  TEXT_PROVIDER_BACKFILL_FLAG,
+  upsertTextProvider,
+} from "./provider-sync";
+import {
   accountCall,
   fetchPollinationsModels,
   PollinationsApiError,
@@ -52,6 +60,11 @@ interface PollinationsState {
   connectionMeta: PollinationsConnectionMeta | null;
   /** Decrypted BYOP key — in-memory only (vault-encrypted at rest). */
   token: string | null;
+
+  // Auto-synced "Pollinations" text provider (AI Providers config)
+  textProviderId: string | null;
+  textProviderModelCount: number | null;
+  textProviderError: string | null;
 
   // Pollen balance
   balance: PollenBalance | null;
@@ -99,6 +112,10 @@ export const usePollinationsStore = create<PollinationsState>((set, get) => ({
   connectionMeta: null,
   token: null,
 
+  textProviderId: null,
+  textProviderModelCount: null,
+  textProviderError: null,
+
   balance: null,
   balanceError: null,
   balanceLoading: false,
@@ -136,6 +153,43 @@ export const usePollinationsStore = create<PollinationsState>((set, get) => ({
       });
       if (token && !expired) {
         void get().refreshBalance();
+        // BYOP bridge — ONE-TIME backfill of the "Pollinations" text provider
+        // for users connected before this feature shipped. Flag-gated: a
+        // user who deletes the row on purpose never sees it resurrect on
+        // boot (an explicit reconnect always re-adds it, via connect()).
+        void (async () => {
+          try {
+            if (config.textProviderBackfilled !== true) {
+              const result = await backfillTextProvider(userId, token, get().models);
+              set({
+                textProviderId: result.id,
+                textProviderModelCount: result.modelCount,
+                textProviderError: null,
+              });
+              await settingsService
+                .setPollinationsValue(userId, TEXT_PROVIDER_BACKFILL_FLAG, true)
+                .catch(() => {});
+              if (result.created) {
+                void get().logActivity({
+                  operation: "provider-sync",
+                  status: "completed",
+                  detail: `Text API provider added to AI Providers — ${result.modelCount} live chat model${result.modelCount === 1 ? "" : "s"}.`,
+                });
+              }
+            } else {
+              // Already backfilled — surface the current row state for the UI.
+              const row = await findTextProvider(userId);
+              set({
+                textProviderId: row?.id ?? null,
+                textProviderModelCount: row?.modelCount ?? null,
+              });
+            }
+          } catch (err) {
+            set({
+              textProviderError: err instanceof Error ? err.message : String(err),
+            });
+          }
+        })();
       }
     } catch {
       set({ connectionStatus: "disconnected" });
@@ -149,12 +203,51 @@ export const usePollinationsStore = create<PollinationsState>((set, get) => ({
     }
     set({ connectionStatus: "connected", connectionMeta: meta, token, balanceError: null });
     void get().refreshBalance();
+    // BYOP bridge: mirror the fresh connection into the AI Providers config
+    // as an OpenAI-compatible "Pollinations" text provider. Models come
+    // from the live catalogue (refreshModels below keeps the list current).
+    if (userId) {
+      try {
+        const result = await upsertTextProvider(userId, token, get().models);
+        set({
+          textProviderId: result.id,
+          textProviderModelCount: result.modelCount,
+          textProviderError: null,
+        });
+        void get().logActivity({
+          operation: "provider-sync",
+          status: "completed",
+          detail: result.created
+            ? `Text API provider added to AI Providers — ${result.modelCount} live chat model${result.modelCount === 1 ? "" : "s"}.`
+            : `Text API provider updated in AI Providers — ${result.modelCount} live chat model${result.modelCount === 1 ? "" : "s"}.`,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        set({ textProviderError: message });
+        void get().logActivity({
+          operation: "provider-sync",
+          status: "failed",
+          detail: `Could not add the text API provider to AI Providers: ${message}`,
+        });
+      }
+      await settingsService
+        .setPollinationsValue(userId, TEXT_PROVIDER_BACKFILL_FLAG, true)
+        .catch(() => {});
+    }
+    void get().refreshModels();
   },
 
   disconnect: async () => {
     const userId = get().userId;
     if (userId) {
       await settingsService.clearPollinationsConnection(userId).catch(() => {});
+      // Remove the auto-synced text provider — its key is revoked with the
+      // connection, so leaving it would only produce auth errors in chat.
+      try {
+        await removeTextProvider(userId);
+      } catch {
+        /* best-effort — the row dies with the connection regardless */
+      }
     }
     set({
       connectionStatus: "disconnected",
@@ -162,6 +255,9 @@ export const usePollinationsStore = create<PollinationsState>((set, get) => ({
       token: null,
       balance: null,
       balanceError: null,
+      textProviderId: null,
+      textProviderModelCount: null,
+      textProviderError: null,
     });
   },
 
@@ -199,6 +295,17 @@ export const usePollinationsStore = create<PollinationsState>((set, get) => ({
     try {
       const models = await fetchPollinationsModels();
       set({ models, modelsLoading: false, modelsFetchedAt: new Date().toISOString() });
+      // Keep the synced "Pollinations" text provider's model list current
+      // (live catalogue → provider row). No-op when the row was deleted on
+      // purpose — deletion is respected until the next explicit connect.
+      const { userId, token } = get();
+      if (userId && token) {
+        syncProviderModels(userId, models)
+          .then((count) => {
+            if (count !== null) set({ textProviderModelCount: count });
+          })
+          .catch(() => {});
+      }
       return models;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
