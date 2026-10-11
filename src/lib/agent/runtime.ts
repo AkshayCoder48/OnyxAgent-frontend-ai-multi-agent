@@ -550,6 +550,17 @@ export function resolveToolCallAccumulatorKey(
   if (tc.id) {
     const byId = entries.find((e) => e.id === tc.id);
     if (byId) return byId.key;
+    // ID BACKFILL (tool-reliability PRD §7.2 — "ids arriving on separate
+    // chunks"): some gateways emit the call's {name, arguments} first and
+    // its id on a LATER chunk. When that id arrives WITH the name, match
+    // the existing id-less entry with the same name instead of allocating
+    // a stray slot — the stray left the real entry id-less, so the
+    // executor minted a synthetic id the provider later rejected on
+    // replay. (Parity: bg-agent-script.ts resolveAccKey.)
+    if (tc.name) {
+      const byName = entries.find((e) => !e.id && e.name === tc.name);
+      if (byName) return byName.key;
+    }
     return nextFreeAccumulatorKey(entries);
   }
   const last = entries[entries.length - 1];
@@ -1377,8 +1388,12 @@ async function streamRound(
               ([key, v]) => ({ key, id: v.id, name: v.name, args: v.args }),
             );
             const slot = resolveToolCallAccumulatorKey(tc, snapshot);
+            // Empty id until a real one streams in (a synthetic nanoid
+            // here would defeat resolveToolCallAccumulatorKey's id-backfill
+            // name-match — it keys "no id yet" off empty). Fallbacks are
+            // minted at pre-emit / finalization instead.
             const existing = toolCallAccumulator.get(slot) ?? {
-              id: tc.id ?? nanoid(),
+              id: tc.id ?? "",
               name: tc.name ?? "",
               args: "",
             };
@@ -1414,7 +1429,10 @@ async function streamRound(
                 data: {
                   tool_name: tc.name || `pending-${index}`,
                   args: { _streaming: tc.args } as Record<string, unknown>,
-                  tool_call_id: tc.id,
+                  // Stable UI id even while the real id hasn't streamed in
+                  // yet (id-backfill accumulators keep id empty until the
+                  // id chunk arrives; the final tool_call event re-keys).
+                  tool_call_id: tc.id || `pre-${roundIndex}-${index}`,
                   _preemit: true,
                 },
                 timestamp: nowISO(),
@@ -1454,7 +1472,7 @@ async function streamRound(
   const toolCalls = Array.from(toolCallAccumulator.values()).map((tc) => {
     const parsed = parseToolCallArguments(tc.args);
     return {
-      id: tc.id,
+      id: tc.id || nanoid(),
       name: tc.name,
       args: parsed.args,
       ...(parsed.malformed ? { malformed: true, rawArgs: parsed.raw } : {}),

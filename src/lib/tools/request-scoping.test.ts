@@ -29,14 +29,6 @@ function fakeTool(name: string) {
   } as const;
 }
 
-describe("zz debug boot", () => {
-  it("registry state at start", () => {
-    const names = listTools().map((t) => t.name);
-    console.log("BOOT count:", names.length, "has show_todo:", names.includes("show_todo"));
-    expect(true).toBe(true);
-  });
-});
-
 describe("filterToolsForRequest — surfaces", () => {
   it("passes everything through when no scope is given (back-compat)", () => {
     const all = listTools();
@@ -144,13 +136,16 @@ describe("filterToolsForRequest — latches & dynamic pass-through", () => {
   it("preserves registration order", () => {
     const scoped = filterToolsForRequest(listTools(), { lastUserText: "" });
     const allNames = nameOf(listTools());
-    console.log("DEBUG scoped:", JSON.stringify(scoped.map(t=>t.name)));
-    console.log("DEBUG all:", JSON.stringify(allNames));
-    const orderIdx = scoped.map((n) => allNames.indexOf(n));
-    const missing = scoped.map((t) => t.name).filter((n) => !allNames.includes(n));
-    console.log("MISSING:", JSON.stringify(missing), "orderIdx:", JSON.stringify(orderIdx));
+    const scopedNames = scoped.map((t) => t.name);
+    // Every scoped tool is a real registered tool (no fabricated entries)…
+    for (const n of scopedNames) {
+      expect(allNames).toContain(n);
+    }
+    // …and the scoped list keeps the registry's registration order (the
+    // digest in the system prompt and the wire tools array line up).
+    const orderIdx = scopedNames.map((n) => allNames.indexOf(n));
     for (let i = 1; i < orderIdx.length; i++) {
-      expect(orderIdx[i]).toBeGreaterThan(orderIdx[i - 1]!);
+      expect(orderIdx[i]!).toBeGreaterThan(orderIdx[i - 1]!);
     }
   });
 

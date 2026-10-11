@@ -707,12 +707,23 @@ function nextFreeAccKey(acc) {
 
 /** Resolve which accumulator slot a streamed tool-call delta belongs to.
  *  Order: explicit index → id match (ids arrive on separate chunks from
- *  arguments) → new-name-while-accumulating (a NEW parallel call started)
- *  → most recent entry (argument continuation) → slot 0. */
+ *  arguments) → ID-BACKFILL name match → new-name-while-accumulating (a NEW
+ *  parallel call started) → most recent entry (argument continuation) →
+ *  slot 0. */
 function resolveAccKey(tc, acc) {
   if (typeof tc.index === "number") return tc.index;
   if (tc.id) {
     for (const [k, e] of acc) if (e && e.id && e.id === tc.id) return k;
+    // ID BACKFILL (tool-reliability PRD §7.2 — "ids arriving on separate
+    // chunks"): a gateway may emit {name, arguments} first and the id on a
+    // LATER chunk. When that id arrives WITH the name, match the existing
+    // id-less entry with the same name instead of allocating a stray slot
+    // (the stray left the real entry id-less → the executor minted a
+    // synthetic id the provider rejected on replay). FG parity:
+    // resolveToolCallAccumulatorKey in agent/runtime.ts.
+    if (tc.name) {
+      for (const [k, e] of acc) if (e && !e.id && e.name && e.name === tc.name) return k;
+    }
     return nextFreeAccKey(acc);
   }
   let lastKey = -1;

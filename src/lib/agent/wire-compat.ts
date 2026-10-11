@@ -185,6 +185,15 @@ export function getWireCompat(baseUrl: string, model: string): Readonly<WireComp
   return modesFor(baseUrl, model);
 }
 
+/** TEST-ONLY: drop the in-session learned modes (localStorage untouched).
+ *  The module-level `learnedModes` Map hydrates lazily and then serves from
+ *  memory — without this reset, one vitest case's hydration leaks into the
+ *  next case through the session cache and TTL/expiry assertions test the
+ *  FIRST case's mode instead of the storage they just wrote. */
+export function resetWireCompatForTests(): void {
+  learnedModes.clear();
+}
+
 /** BEGIN-OF-TURN RESET (the "browser tool isn't available in this mode"
  * fix): give the tool surface a FRESH chance on every turn. The ladder's
  * noTools step used to stay learned for the whole session — one generic-400
