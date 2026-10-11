@@ -119,10 +119,43 @@ export function ContextIndicator() {
 
   // Coarse signature — recompute only when the conversation actually grows
   // or the model changes, not on every streaming token.
-  const signature = React.useMemo(
-    () => `${selectedModel ?? ""}:${messages.length}:${messages.reduce((n, m) => n + (m.content?.length ?? 0), 0)}`,
-    [selectedModel, messages],
+  //
+  // PERF (streaming PRD): the raw content-length component changes on EVERY
+  // token flush, which re-ran the full estimate below (O(n) history scan +
+  // estimateTokens per message + a whole manageContext() compaction
+  // simulation + a synchronous sessionStorage read) at 30–60×/sec while
+  // streaming. The pill is a coarse UI metric — a 1s cadence during
+  // streaming is imperceptible. Turn boundaries (messages.length) and
+  // idle-state changes still land instantly.
+  const liveLen = React.useMemo(
+    () => messages.reduce((n, m) => n + (m.content?.length ?? 0), 0),
+    [messages],
   );
+  const [throttledLen, setThrottledLen] = React.useState(liveLen);
+  const lastLenTickRef = React.useRef(0);
+  React.useEffect(() => {
+    if (!isStreaming) {
+      // Idle: keep the pill exact — every final length lands immediately.
+      lastLenTickRef.current = 0;
+      setThrottledLen(liveLen);
+      return;
+    }
+    const now = Date.now();
+    if (now - lastLenTickRef.current >= 1000) {
+      lastLenTickRef.current = now;
+      setThrottledLen(liveLen);
+      return;
+    }
+    const t = window.setTimeout(
+      () => {
+        lastLenTickRef.current = Date.now();
+        setThrottledLen(liveLen);
+      },
+      1000 - (now - lastLenTickRef.current),
+    );
+    return () => window.clearTimeout(t);
+  }, [liveLen, isStreaming]);
+  const signature = `${selectedModel ?? ""}:${messages.length}:${throttledLen}`;
 
   const estimate = React.useMemo(() => {
     const model = selectedModel ?? "";

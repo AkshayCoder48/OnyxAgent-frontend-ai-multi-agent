@@ -14,7 +14,10 @@ interface ThemeToggleProps {
 }
 
 export function ThemeToggle({ variant = "icon", className }: ThemeToggleProps) {
-  const { theme, setTheme } = useThemeStore();
+  // Narrow selectors — a whole-store subscription would re-render the toggle
+  // on every theme-store write.
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
   // "Is hydrated" flag via useSyncExternalStore: the server snapshot is
   // false and the client snapshot is true, so the placeholder renders during
   // SSR/hydration and the real UI afterwards — without an effect + setState

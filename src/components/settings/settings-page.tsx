@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import {
   ArrowLeft,
   Bot,
@@ -23,15 +24,55 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 
-import { SectionProviders } from "./section-providers";
-import { SectionPollinations } from "./section-pollinations";
-import { SectionAgentSettings } from "./section-agent-settings";
-import { SectionSlashCommands } from "./section-slash-commands";
-import { SectionE2B } from "./section-e2b";
-import { SectionCloudWorkspace } from "./section-cloud-workspace";
-import { SectionCustomTools } from "./section-custom-tools";
-import { SectionSkills } from "./section-skills";
-import { SectionAppearance } from "./section-appearance";
+/**
+ * Settings sections are heavy (Pollinations ~1.4k lines, several others
+ * 500-800+). Statically importing all of them pulls ~6k lines of settings UI
+ * into the main bundle even though only one section is ever mounted at a
+ * time. Each section is therefore code-split via `next/dynamic` with
+ * `ssr: false` (the settings overlay is a client-only UI) and a compact
+ * skeleton fallback. The nav metadata below stays static so the shell
+ * renders instantly. Follows the same pattern as chart-message.tsx.
+ */
+const SectionSkeleton = () => (
+  <div className="h-64 w-full animate-pulse rounded-lg bg-muted/40" aria-hidden />
+);
+
+const SectionProviders = dynamic(
+  () => import("./section-providers").then((m) => m.SectionProviders),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionPollinations = dynamic(
+  () => import("./section-pollinations").then((m) => m.SectionPollinations),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionAgentSettings = dynamic(
+  () => import("./section-agent-settings").then((m) => m.SectionAgentSettings),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionSlashCommands = dynamic(
+  () => import("./section-slash-commands").then((m) => m.SectionSlashCommands),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionE2B = dynamic(
+  () => import("./section-e2b").then((m) => m.SectionE2B),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionCloudWorkspace = dynamic(
+  () => import("./section-cloud-workspace").then((m) => m.SectionCloudWorkspace),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionCustomTools = dynamic(
+  () => import("./section-custom-tools").then((m) => m.SectionCustomTools),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionSkills = dynamic(
+  () => import("./section-skills").then((m) => m.SectionSkills),
+  { ssr: false, loading: SectionSkeleton },
+);
+const SectionAppearance = dynamic(
+  () => import("./section-appearance").then((m) => m.SectionAppearance),
+  { ssr: false, loading: SectionSkeleton },
+);
 
 export type SettingsSectionId =
   | "providers"

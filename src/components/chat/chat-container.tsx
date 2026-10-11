@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -211,7 +211,7 @@ export function ChatContainer(
     (s) => s.hydratedConversationId,
   );
   const isConversationLoading = useConversationStore((s) => s.isLoading);
-  const addChatMessage = useChatStore((s) => s.addMessage);
+  const replaceAllMessages = useChatStore((s) => s.replaceAllMessages);
   const restorePersisted = useChatStore((s) => s.restorePersisted);
   const { fetchConversations, selectConversation } = useConversations();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
@@ -471,7 +471,13 @@ export function ChatContainer(
     loadedConvIdRef.current = currentConversationId;
     paintedMessagesRef.current = currentMessages;
 
-    clearMessages();
+    // BATCHED PAINT (perf PRD §6): the old path issued clearMessages() + N
+    // sequential addChatMessage() store writes — each one a full
+    // subscription/render pass over the whole thread (O(N²) render work;
+    // a 200-message switch painted ~20k component renders and visibly
+    // froze low-end devices). One replaceAllMessages write lands the
+    // entire array in a single pass.
+    const painted: import("@/types").ChatMessage[] = [];
     currentMessages.forEach((msg) => {
       // Use the shared helper that preserves thinking, reasoning, parts,
       // and tool calls — the manual rebuild below discarded thinking and
@@ -493,9 +499,10 @@ export function ChatContainer(
           | null
           | undefined,
       });
-      addChatMessage(chatMsg);
+      painted.push(chatMsg);
     });
-  }, [currentMessages, hydratedConversationId, addChatMessage, clearMessages, currentConversationId]);
+    replaceAllMessages(painted);
+  }, [currentMessages, hydratedConversationId, replaceAllMessages, currentConversationId]);
 
   // ── MOUNT REFRESH ─────────────────────────────────────────────────────
   // Once per mount: when the selected conversation is ALREADY marked
@@ -591,7 +598,14 @@ export function ChatContainer(
 
   // Slash command handlers — passed down to ChatInput so the / palette can
   // run them locally without going through the agent.
-  const slashContext = {
+  //
+  // PERF: memoized + reading `messages` through a ref. This object was
+  // rebuilt on every ChatContainer render (i.e. every store flush while
+  // streaming) — an unstable `slashContext` prop defeats ChatInput's
+  // React.memo, forcing a full composer re-render per token.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const slashContext = useMemo(() => ({
     // `/clear` deletes messages from BOTH memory and Dexie so they don't
     // reappear on navigation. This is different from the internal
     // `clearMessages` which only clears memory (used when switching chats).
@@ -608,8 +622,9 @@ export function ChatContainer(
       clearMessages();
     },
     regenerateLast: () => {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
+      const msgs = messagesRef.current;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
         if (m && m.role === "assistant") {
           handleRegenerate(m.id);
           return;
@@ -623,7 +638,8 @@ export function ChatContainer(
         document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
       }
     },
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [currentConversationId, clearMessages, handleRegenerate, onOpenSettings]);
 
   return (
     <ChatUI
@@ -718,6 +734,17 @@ function ChatUI({
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
+
+  // PERF (streaming-perf PRD): these two were inline closures recreated on
+  // every ChatUI render — i.e. on EVERY store flush while streaming. They
+  // flowed into MessageList → MessageItem and ChatControls, defeating the
+  // memoization that keeps settled messages and the composer from
+  // re-rendering per token. Hoisted + stable.
+  const handleTodoDismiss = useCallback(() => onTodoAction?.("dismiss"), [onTodoAction]);
+  const handleProviderSelect = useCallback(
+    (p: { id: string } | null) => onProviderChange?.(p ? p.id : null),
+    [onProviderChange],
+  );
   return (
     <div className="flex h-full w-full">
       {/* Centered ~760px message thread column (Terra editorial spec). The
@@ -744,7 +771,7 @@ function ChatUI({
             <div key={conversationId ?? "new-chat"} className="mb-thread-in">
               <MessageList
                 messages={messages}
-                onTodoDismiss={onTodoAction ? () => onTodoAction("dismiss") : undefined}
+                onTodoDismiss={onTodoAction ? handleTodoDismiss : undefined}
                 onRegenerate={onRegenerate}
                 onEditUserMessage={onEditUserMessage}
               />
@@ -805,7 +832,7 @@ function ChatUI({
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}
-          <div className="glass-card border-border focus-within:border-primary/40 rounded-2xl border transition-all input-focus-glow">
+          <div className="glass-card border-border focus-within:border-primary/40 rounded-2xl border transition-[border-color,box-shadow] input-focus-glow">
             <div className="px-2.5 pt-2.5 sm:px-4 sm:pt-4">
               <ChatInput
                 key={conversationId ?? "new-chat"}
@@ -843,7 +870,7 @@ function ChatUI({
                 </kbd>
                 <ChatControls
                   onModelChange={onModelChange}
-                  onProviderSelect={(p) => onProviderChange?.(p ? p.id : null)}
+                  onProviderSelect={handleProviderSelect}
                   onTemperatureChange={onTemperatureChange}
                   onThinkingEffortChange={onThinkingEffortChange}
                 />

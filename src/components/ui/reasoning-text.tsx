@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/reasoning-text-utils/ease";
 import {
   TEXT_SHIMMER_CLASS_NAME,
-  TEXT_SHIMMER_KEYFRAMES,
   textShimmerStyle,
 } from "@/components/ui/reasoning-text-utils/text-shimmer";
 import { cn } from "@/lib/utils";
@@ -187,55 +186,55 @@ export function ReasoningText({
     return () => window.clearInterval(timer);
   }, [interval, safePhrases.length]);
 
+  // NOTE: the onyx-text-shimmer keyframes live ONCE in globals.css — this
+  // component used to inject a <style> tag per instance (shimmer keyframes
+  // duplicated for every mounted ReasoningText).
   return (
-    <>
-      <style>{TEXT_SHIMMER_KEYFRAMES}</style>
-      <span
-        role="status"
-        aria-live="polite"
-        aria-labelledby={statusId}
-        className={cn(
-          "inline-flex items-center gap-2 text-sm font-medium text-muted-foreground",
-          className,
-        )}
-      >
-        {indicator !== null && (
-          <span
-            aria-hidden="true"
-            className="inline-flex size-3 shrink-0 items-center justify-center"
-          >
-            {indicator ?? (
-              <Loader
-                variant="ascii-line"
-                size={14}
-                speed={0.8}
-                label="Reasoning"
-              />
-            )}
-          </span>
-        )}
-
-        {/* leading-snug: the row is overflow-hidden for the cascade's
-            rise/fall chars — at line-height 1 the descenders (g, y, p) were
-            clipped. 1.375 leaves room for the full glyph box. */}
-        <span className="grid overflow-hidden text-left leading-snug">
-          <span className="invisible col-start-1 row-start-1 whitespace-nowrap">
-            {longestPhrase}…
-          </span>
-          {activeVariant === "cascade" ? (
-            <CascadePhrase {...phraseProps} />
-          ) : activeVariant === "scramble" ? (
-            <ScramblePhrase {...phraseProps} />
-          ) : (
-            <SwapPhrase {...phraseProps} />
+    <span
+      role="status"
+      aria-live="polite"
+      aria-labelledby={statusId}
+      className={cn(
+        "inline-flex items-center gap-2 text-sm font-medium text-muted-foreground",
+        className,
+      )}
+    >
+      {indicator !== null && (
+        <span
+          aria-hidden="true"
+          className="inline-flex size-3 shrink-0 items-center justify-center"
+        >
+          {indicator ?? (
+            <Loader
+              variant="ascii-line"
+              size={14}
+              speed={0.8}
+              label="Reasoning"
+            />
           )}
         </span>
+      )}
 
-        <span id={statusId} className="sr-only">
-          {phrase}
+      {/* leading-snug: the row is overflow-hidden for the cascade's
+          rise/fall chars — at line-height 1 the descenders (g, y, p) were
+          clipped. 1.375 leaves room for the full glyph box. */}
+      <span className="grid overflow-hidden text-left leading-snug">
+        <span className="invisible col-start-1 row-start-1 whitespace-nowrap">
+          {longestPhrase}…
         </span>
+        {activeVariant === "cascade" ? (
+          <CascadePhrase {...phraseProps} />
+        ) : activeVariant === "scramble" ? (
+          <ScramblePhrase {...phraseProps} />
+        ) : (
+          <SwapPhrase {...phraseProps} />
+        )}
       </span>
-    </>
+
+      <span id={statusId} className="sr-only">
+        {phrase}
+      </span>
+    </span>
   );
 }
 

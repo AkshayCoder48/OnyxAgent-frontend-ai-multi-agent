@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { FileText, Globe, Link, X } from "lucide-react";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
 import type { SourceItem } from "@/lib/chat-sources";
@@ -112,8 +112,16 @@ function WebSourceRow({ item, highlighted }: { item: SourceItem; highlighted: bo
   return inner;
 }
 
-export function SourcesPanel() {
-  const { isOpen, sources, highlightedIndex, close } = useSourcesPanelStore();
+// PERF (streaming PRD): memoized + SELECTOR-BASED subscription. This
+// mounts inside ChatUI which re-renders on every store flush while a turn
+// streams — the previous no-selector destructure re-rendered the panel on
+// ANY sources-panel-store field change, and the panel itself re-rendered
+// per token. It now subscribes to exactly the four fields it reads.
+export const SourcesPanel = memo(function SourcesPanel() {
+  const isOpen = useSourcesPanelStore((s) => s.isOpen);
+  const sources = useSourcesPanelStore((s) => s.sources);
+  const highlightedIndex = useSourcesPanelStore((s) => s.highlightedIndex);
+  const close = useSourcesPanelStore((s) => s.close);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -185,4 +193,4 @@ export function SourcesPanel() {
       </div>
     </div>
   );
-}
+});

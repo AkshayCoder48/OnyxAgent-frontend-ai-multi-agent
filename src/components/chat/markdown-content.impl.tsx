@@ -685,6 +685,67 @@ function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
 // code-heavy responses.
 const REMARK_PLUGINS = [remarkGfm];
 
+// ── STABLE-PREFIX PARSE CACHE (streaming markdown perf, PRD §6.4) ──────────
+// While the typewriter reveals the answer, everything before the last
+// completed block boundary has STOPPED changing — yet the full document
+// was re-parsed on every reveal tick, making stream render cost quadratic
+// in the answer length (a 30KB answer = ~25 full remark+GFM parses/sec).
+// The completed prefix is now parsed ONCE, cached by content hash, and
+// only the trailing partial block re-parses per tick. Identical element
+// references make React bail out of the frozen prefix subtree entirely —
+// the same trick the syntax-highlight cache below/above already uses.
+const PREFIX_CACHE_MAX = 48;
+const prefixCache = new Map<string, React.ReactNode>();
+
+function mdElement(text: string): React.ReactNode {
+  const key = hashString(text);
+  const cached = prefixCache.get(key);
+  if (cached !== undefined) return cached;
+  const el = (
+    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={SHARED_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  );
+  prefixCache.set(key, el);
+  if (prefixCache.size > PREFIX_CACHE_MAX) {
+    const oldest = prefixCache.keys().next().value;
+    if (oldest !== undefined) prefixCache.delete(oldest);
+  }
+  return el;
+}
+
+/** Split streamed markdown at the last SAFE block boundary: the last
+ *  blank line that is NOT inside a fenced code block (a fence can contain
+ *  blank lines — splitting there would break the code block mid-stream).
+ *  Returns null when the content is too short to benefit. */
+function splitStablePrefix(content: string): { prefix: string; tail: string } | null {
+  if (content.length < 160) return null;
+  const lines = content.split("\n");
+  let fence: string | null = null;
+  let pos = 0;
+  let lastBoundary = -1;
+  // The LAST line is excluded as a boundary host — the tail must keep at
+  // least the final line to re-parse (an empty tail is useless work).
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i]!;
+    const trimmed = line.trim();
+    if (fence === null) {
+      const open = /^(\`{3,}|~{3,})/.exec(trimmed);
+      if (open) {
+        fence = open[1]!;
+      } else if (trimmed === "" && i > 0 && i < lines.length - 2) {
+        // Blank line outside any fence — a completed block boundary.
+        lastBoundary = pos;
+      }
+    } else if (trimmed.startsWith(fence)) {
+      fence = null;
+    }
+    pos += line.length + 1;
+  }
+  if (lastBoundary < 80) return null; // prefix too small to be worth caching
+  return { prefix: content.slice(0, lastBoundary), tail: content.slice(lastBoundary) };
+}
+
 // Stable empty array for the sources context default (avoids a new [] per
 // render, which would churn every consumer).
 const EMPTY_SOURCES: readonly SourceItem[] = [];
@@ -765,7 +826,27 @@ export const MarkdownContent = React.memo(function MarkdownContent({
     remarkPlugins: REMARK_PLUGINS,
     components: SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"],
   };
-  const rendered: React.ReactNode = segments
+
+  // STREAMING STABLE-PREFIX SPLIT (see module-scope cache above): while
+  // streaming (and not on the rare <details>-segmented path), freeze the
+  // completed prefix and only re-parse the trailing partial block per
+  // reveal tick. When the stream settles the memo re-runs with
+  // streaming=false → a single full-document parse (the post-settle
+  // render is exact; transient split cosmetics self-correct).
+  const prefixSplit = React.useMemo(() => {
+    if (!streaming || segments) return null;
+    const split = splitStablePrefix(processed);
+    if (!split) return null;
+    return { el: mdElement(split.prefix), tail: split.tail };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processed, streaming, segments]);
+
+  const rendered: React.ReactNode = prefixSplit ? (
+    <>
+      {prefixSplit.el}
+      <ReactMarkdown {...mdProps}>{prefixSplit.tail}</ReactMarkdown>
+    </>
+  ) : segments
     ? segments.map((seg, i) =>
         seg.kind === "md" ? (
           seg.text.trim() ? (

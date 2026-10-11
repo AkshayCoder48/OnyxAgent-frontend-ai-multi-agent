@@ -47,7 +47,10 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function Sidebar() {
-  const { isOpen, close } = useSidebarStore();
+  // Narrow selectors — a whole-store subscription would re-render the
+  // sidebar on every sidebar-store write.
+  const isOpen = useSidebarStore((s) => s.isOpen);
+  const close = useSidebarStore((s) => s.close);
 
   return (
     <Sheet open={isOpen} onOpenChange={close}>

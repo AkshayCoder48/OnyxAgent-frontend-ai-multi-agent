@@ -121,6 +121,18 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
   const groupPositions = useGroupPositions(messages);
   const setQuote = useQuoteStore((s) => s.setQuote);
 
+  // ENTRANCE-ANIMATION GATE (perf PRD): hydrated history must not replay
+  // entrance animations — a 100-message thread used to mount with 100
+  // concurrent animate-message-in transitions PLUS the per-message blur
+  // bubble entrances on every conversation switch / reload (a visible
+  // first-paint stall on low-end devices). Signal: `isTemporaryId` — only
+  // messages created during a LIVE turn carry it; DB-hydrated rows arrive
+  // with `false` (see conversation-to-chat.ts). This survives the switch
+  // sequence (store paints the new conversation's history AFTER this list
+  // mounts — an index/mount-time baseline would wrongly animate that
+  // batch, an id-identity gate cannot either; the temp-id flag is exact).
+  const shouldAnimate = (m: ChatMessage) => m.isTemporaryId === true;
+
   // Todo plan ownership — the LAST assistant message that ran the todo
   // tool owns the inline plan panel. The plan is a live, conversation-level
   // entity (keyed by conversation in the research store), so rendering it
@@ -145,21 +157,28 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
       {messages.map((message, index) => {
         const groupPos = groupPositions.get(message.id);
         const prev = messages[index - 1];
+        const animate = shouldAnimate(message);
 
         return (
           // STABLE RENDER KEY: the message's temp id survives the end-of-turn
           // `message_saved` id swap (see ChatMessage.renderKey), so finalizing
           // a turn never remounts the message subtree — GenUI cards keep
           // their DOM identity and iframes don't reload at completion.
-          <div key={message.renderKey ?? message.id}>
+          //
+          // `.mb-row-cv` (content-visibility: auto): the browser skips
+          // layout + paint for offscreen rows — long threads only pay for
+          // the visible window (+ scroll anchoring). `auto` intrinsic-size
+          // lets Chrome remember each row's real height after first paint.
+          <div key={message.renderKey ?? message.id} className="mb-row-cv">
             {isNewDay(prev, message) && (
               <DateSeparator date={new Date(message.timestamp)} />
             )}
-            <div className="animate-message-in">
+            <div className={animate ? "animate-message-in" : undefined}>
               <MessageItem
                 message={message}
                 groupPosition={groupPos}
                 showTodoPanel={!!todoOwnerId && message.id === todoOwnerId}
+                animateEntrance={animate}
                 onTodoDismiss={onTodoDismiss}
                 onRegenerate={onRegenerate}
                 onEditUserMessage={onEditUserMessage}

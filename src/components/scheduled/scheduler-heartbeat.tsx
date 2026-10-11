@@ -30,8 +30,12 @@ export function SchedulerHeartbeat() {
     if (!userId) return; // guard: only with a user
 
     let cancelled = false;
+    // When the last tick actually RAN (0 = never) — drives the catch-up
+    // tick when the tab becomes visible again.
+    let lastTickAt = 0;
 
     const beat = async () => {
+      lastTickAt = Date.now();
       try {
         const res = await tickHeartbeat(userId);
         if (cancelled || !res || !res.ok || !res.ticked) return;
@@ -58,11 +62,30 @@ export function SchedulerHeartbeat() {
       }
     };
 
-    void beat();
-    const id = window.setInterval(() => void beat(), 60_000);
+    // ── VISIBILITY GATING ────────────────────────────────────────────────
+    // Background tabs skip every tick (no silent 60s POST /api/scheduler/
+    // tick while the tab is hidden). On visibilitychange→visible, if a tick
+    // was missed (last tick older than the interval — including "never",
+    // when the app mounted hidden), fire ONE immediate catch-up tick; the
+    // regular cadence resumes from there.
+    const beatIfVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void beat();
+    };
+
+    beatIfVisible();
+    const id = window.setInterval(beatIfVisible, 60_000);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastTickAt > 60_000) void beat();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [userId, router]);
 

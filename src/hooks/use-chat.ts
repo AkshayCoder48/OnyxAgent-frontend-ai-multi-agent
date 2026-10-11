@@ -11,6 +11,7 @@ import { useChatStore, useAuthStore } from "@/stores";
 import type {
   AskUserAnswer,
   AskUserQuestion,
+  ChatMessage,
   ChatMessageFile,
 } from "@/types";
 import { restoreTodos } from "@/lib/tools/todos";
@@ -168,6 +169,22 @@ export function useChat(options: UseChatOptions = {}) {
     false,
   );
   const isProcessing = execSummary?.status === "running" && execProcessing;
+
+  // STABLE MERGED MESSAGE READER (streaming-perf PRD): regenerate /
+  // editUserMessage previously closed over `messages` in their deps — every
+  // store flush (~30–60×/sec while streaming) gave the callbacks NEW
+  // identities, cascading through ChatContainer → MessageItem props and
+  // defeating MessageItem's React.memo for EVERY message in the list (the
+  // dominant streaming lag on long threads). Both callbacks only ever run
+  // on a user click (and are blocked while a turn is live), so reading the
+  // store imperatively at call time is equally fresh — while the callback
+  // identity stays stable across every flush.
+  const execIdForMerged = execSummary?.id ?? null;
+  const getMergedMessages = useCallback((): ChatMessage[] => {
+    const execStore = execIdForMerged ? executionHub.getStore(execIdForMerged) : null;
+    if (execStore) return execStore.getState().messages;
+    return useChatStore.getState().messages;
+  }, [execIdForMerged]);
 
   // Outbound queue: messages typed while a turn is in flight. Held here (not
   // in the chat history) so the UI can surface them as cancellable "pending"
@@ -624,7 +641,7 @@ export function useChat(options: UseChatOptions = {}) {
     (assistantMessageId: string) => {
       if (isProcessing) return;
 
-      const msgs = messages;
+      const msgs = getMergedMessages();
       const idx = msgs.findIndex((m) => m.id === assistantMessageId);
       if (idx < 0) return;
 
@@ -665,7 +682,7 @@ export function useChat(options: UseChatOptions = {}) {
       // 3. Re-run the turn with the original prompt.
       void doSend(userMsg.content, userMsg.fileIds, userMsg.files);
     },
-    [isProcessing, messages, conversationId, doSend],
+    [isProcessing, getMergedMessages, conversationId, doSend],
   );
 
   /**
@@ -681,7 +698,7 @@ export function useChat(options: UseChatOptions = {}) {
       const trimmed = newContent.trim();
       if (!trimmed) return;
 
-      const msgs = messages;
+      const msgs = getMergedMessages();
       const idx = msgs.findIndex((m) => m.id === userMessageId);
       if (idx < 0) return;
       const userMsg = msgs[idx]!;
@@ -713,7 +730,7 @@ export function useChat(options: UseChatOptions = {}) {
       //    upload tags from the original file set).
       void doSend(trimmed, userMsg.fileIds, userMsg.files);
     },
-    [isProcessing, messages, conversationId, doSend],
+    [isProcessing, getMergedMessages, conversationId, doSend],
   );
 
   const sendAskUserResponses = useCallback((answers: AskUserAnswer[]) => {

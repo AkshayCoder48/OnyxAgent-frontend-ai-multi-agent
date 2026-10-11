@@ -39,14 +39,32 @@ export function ServerChatSync() {
   const viewedConversationId = useConversationStore((s) => s.currentConversationId);
 
   // ── Pull loop: mount + every 45s — silent, never throws. ─────────────────
+  // VISIBILITY GATED: hidden tabs skip every pull (no silent 45s server
+  // polling while the tab is in the background); on visibilitychange→visible
+  // a missed schedule (last pull older than the interval, including "never")
+  // fires ONE immediate catch-up pull, then the cadence resumes.
   useEffect(() => {
     if (!userId) return;
+    let lastPullAt = 0;
     const pull = () => {
+      lastPullAt = Date.now();
       void pullServerMessages(userId);
     };
-    pull();
-    const id = window.setInterval(pull, PULL_INTERVAL_MS);
-    return () => window.clearInterval(id);
+    const pullIfVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      pull();
+    };
+    pullIfVisible();
+    const id = window.setInterval(pullIfVisible, PULL_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastPullAt > PULL_INTERVAL_MS) pull();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [userId]);
 
   // ── Mirror (a): the viewed conversation changes to a linked chat →

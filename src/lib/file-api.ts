@@ -30,11 +30,49 @@ export interface FileUploadResponse {
   file_type: string;
 }
 
-// In-memory cache of fileId → blob URL. Populated by `uploadFile` and
-// `loadFileUrl`. The URL is valid for the page lifetime; we don't revoke
-// until the page unloads (a few hundred small images is fine — the browser
-// caps object URL memory).
+// In-memory LRU of fileId → blob URL, capped at BLOB_URL_CACHE_MAX
+// entries. Populated by `uploadFile` and `loadFileUrl`; re-inserting an id
+// refreshes its recency (Map preserves insertion order, so the FIRST key
+// is always the least-recently-used). When a cap-exceeding insert evicts
+// the LRU entry, its object URL is REVOKED — an unbounded, never-revoked
+// map leaked the underlying blobs for the whole session (memory leak).
+// Evicted ids simply miss in `getFileUrl`; callers re-warm them via
+// `loadFileUrl`/`loadFileUrls` (which re-mint a fresh URL from OPFS).
+const BLOB_URL_CACHE_MAX = 60;
 const blobURLCache = new Map<string, string>();
+
+/** Insert/refresh a cache entry, evicting + revoking the LRU entry when
+ *  the cap is exceeded. */
+function cacheBlobUrl(fileId: string, url: string): void {
+  // delete + set so a re-warmed id lands at the MRU end.
+  blobURLCache.delete(fileId);
+  blobURLCache.set(fileId, url);
+  while (blobURLCache.size > BLOB_URL_CACHE_MAX) {
+    const lruId = blobURLCache.keys().next().value;
+    if (lruId === undefined) break;
+    const lruUrl = blobURLCache.get(lruId);
+    blobURLCache.delete(lruId);
+    if (lruUrl) URL.revokeObjectURL(lruUrl);
+  }
+}
+
+/** Revoke EVERY cached object URL and clear the cache (page teardown or
+ *  explicit cleanup — frees the underlying blob memory immediately). */
+export function revokeAllFileUrls(): void {
+  for (const url of blobURLCache.values()) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {}
+  }
+  blobURLCache.clear();
+}
+
+// One-shot page-unload cleanup: the document dies with the page anyway,
+// but revoking explicitly lets the browser drop the blob memory promptly
+// (covers reloads/BFAT in the same tab too).
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => revokeAllFileUrls(), { once: true });
+}
 
 function fileTypeFromMime(mime: string): string {
   if (mime.startsWith("image/")) return "image";
@@ -81,7 +119,7 @@ export async function uploadFile(
   if (!blobUrl) {
     try {
       blobUrl = URL.createObjectURL(file);
-      blobURLCache.set(id, blobUrl);
+      cacheBlobUrl(id, blobUrl);
     } catch {
       blobUrl = "";
     }
@@ -197,14 +235,20 @@ export function getFileUrl(fileId: string): string {
  */
 export async function loadFileUrl(fileId: string): Promise<string> {
   const cached = blobURLCache.get(fileId);
-  if (cached) return cached;
+  if (cached) {
+    // LRU touch — re-insert as most-recently-used so files still being
+    // rendered don't age out from under hot paths.
+    blobURLCache.delete(fileId);
+    blobURLCache.set(fileId, cached);
+    return cached;
+  }
   const userId = useAuthStore.getState().user?.id;
   if (!userId) return "";
   const row = await fileService.get(fileId, userId);
   if (!row) return "";
   try {
     const url = await makeBlobURL(row.storage_path);
-    blobURLCache.set(fileId, url);
+    cacheBlobUrl(fileId, url);
     return url;
   } catch {
     return "";

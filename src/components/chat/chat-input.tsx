@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { memo, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
 import { ArrowUp, Loader2, Paperclip, Square, Sparkles } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
@@ -47,7 +47,14 @@ interface ChatInputProps {
  * - Focus glow effect via parent wrapper
  * - Fully theme-aware (uses semantic color tokens)
  */
-export function ChatInput({
+/**
+ * PERF (streaming PRD): memoized — ChatUI re-renders on every store flush
+ *  while a turn streams; with stable props (sendMessage, onStop, memoized
+ *  slashContext, query-cached commands) the composer skips per-token
+ *  re-renders entirely, so typing stays responsive during active streaming.
+ *  Its own local state (text, attachments) still updates normally.
+ */
+export const ChatInput = memo(function ChatInput({
   onSend,
   disabled,
   isProcessing,
@@ -399,4 +406,4 @@ export function ChatInput({
       )}
     </form>
   );
-}
+});

@@ -7,16 +7,9 @@ import type { CSSProperties } from "react";
 
 export const TEXT_SHIMMER_CLASS_NAME = "onyx-text-shimmer";
 
-export const TEXT_SHIMMER_KEYFRAMES = `
-@keyframes onyx-text-shimmer {
-  0% {
-    background-position: 150% 0;
-  }
-  100% {
-    background-position: -50% 0;
-  }
-}
-`;
+// The @keyframes onyx-text-shimmer live in src/app/globals.css (single
+// definition) — they were previously a <style> tag injected per
+// ReasoningText instance.
 
 /**
  * Inline style that paints the shimmer gradient clipped to the glyphs.

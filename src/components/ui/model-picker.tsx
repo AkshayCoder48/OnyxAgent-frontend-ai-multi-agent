@@ -12,10 +12,13 @@ import {
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import {
+  useCallback,
+  useEffect,
   useId,
   useMemo,
   useRef,
   useState,
+  memo,
   type ComponentProps,
   type KeyboardEvent,
   type ReactNode,
@@ -346,21 +349,41 @@ function CapabilityChips({
   );
 }
 
-function ModelRow({
+/**
+ * Long model lists (100+ rows) render incrementally: the first window mounts
+ * immediately and each "Show more" click reveals another window. Keeps the
+ * popover mount cheap without pulling in a virtualization dependency.
+ */
+const ROW_WINDOW = 50;
+
+/**
+ * Memoized so re-renders of the picker (typing in the debounced search, effort
+ * changes, …) skip rows whose props did not change. `onPick`/`registerRow` are
+ * stable callbacks from the parent and `rowRef` is derived per row.
+ */
+const ModelRow = memo(function ModelRow({
   model,
   provider,
   selected,
   onPick,
   showProvider,
-  rowRef,
+  index,
+  registerRow,
 }: {
   model: ModelPickerModel;
   provider: ModelPickerProvider;
   selected: boolean;
-  onPick: () => void;
+  onPick: (model: ModelPickerModel, provider: ModelPickerProvider) => void;
   showProvider: boolean;
-  rowRef?: (element: HTMLButtonElement | null) => void;
+  index: number;
+  registerRow: (index: number, element: HTMLButtonElement | null) => void;
 }) {
+  const rowRef = useCallback(
+    (element: HTMLButtonElement | null) => {
+      registerRow(index, element);
+    },
+    [registerRow, index],
+  );
   return (
     <button
       type="button"
@@ -368,7 +391,7 @@ function ModelRow({
       aria-selected={selected}
       data-selected={selected ? "true" : undefined}
       ref={rowRef}
-      onClick={onPick}
+      onClick={() => onPick(model, provider)}
       className={cn(
         "group/row flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left outline-hidden transition-colors",
         "hover:bg-accent focus-visible:bg-accent",
@@ -408,7 +431,7 @@ function ModelRow({
       <CapabilityChips capabilities={model.capabilities} />
     </button>
   );
-}
+});
 
 /**
  * A provider-rail model picker — search across every provider, browse one
@@ -434,10 +457,16 @@ export function ModelPicker({
   const [internalValue, setInternalValue] = useState(defaultValue);
   const [internalThinking, setInternalThinking] = useState(defaultThinking);
   const [internalOpen, setInternalOpen] = useState(defaultOpen ?? false);
+  // Raw search input stays instant; the expensive filtering below runs on the
+  // debounced query so fast typing doesn't recompute the row list every keystroke.
+  const [inputValue, setInputValue] = useState("");
   const [query, setQuery] = useState("");
   const visible = useMemo(() => visibleProviders(providers), [providers]);
-  const selected = findModel(providers, value ?? internalValue);
   const modelId = value ?? internalValue;
+  const selected = useMemo(
+    () => findModel(providers, modelId),
+    [providers, modelId],
+  );
   const activeEffort = thinking ?? internalThinking;
 
   const [activeProviderId, setActiveProviderId] = useState<string | null>(
@@ -447,6 +476,25 @@ export function ModelPicker({
     visible.find((provider) => provider.id === activeProviderId) ??
     visible[0];
   const searching = query.trim().length > 0;
+  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Debounce the raw input into the query used for filtering (150ms).
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(inputValue), 150);
+    return () => clearTimeout(timer);
+  }, [inputValue]);
+
+  // Row windowing: the first ROW_WINDOW rows mount; "Show more" reveals the
+  // next window. The window is keyed to the current row source (query +
+  // provider tab), so it resets implicitly whenever that changes — no
+  // state-reset effect needed.
+  const rowSource = `${query.trim()}\u0000${activeProviderId ?? ""}`;
+  const [rowWindow, setRowWindow] = useState<{ source: string; count: number }>({
+    source: rowSource,
+    count: ROW_WINDOW,
+  });
+  const visibleCount =
+    rowWindow.source === rowSource ? rowWindow.count : ROW_WINDOW;
 
   const rows = useMemo(() => {
     if (searching) {
@@ -464,29 +512,59 @@ export function ModelPicker({
     }));
   }, [searching, query, activeProvider, visible]);
 
-  const setOpen = (next: boolean) => {
-    setInternalOpen(next);
-    onOpenChange?.(next);
-  };
+  // Windowed slice of the rows — only what `visibleCount` allows mounts.
+  const renderedRows =
+    rows.length > visibleCount ? rows.slice(0, visibleCount) : rows;
+
+  const setOpen = useCallback(
+    (next: boolean) => {
+      setInternalOpen(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange],
+  );
 
   const isControlledOpen = open !== undefined;
   const openState = isControlledOpen ? open : internalOpen;
 
-  const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const pick = useCallback(
+    (modelId: string, providerId: string, nextThinking?: ThinkingEffort) => {
+      setInternalValue(modelId);
+      onValueChange?.(modelId, providerId, nextThinking);
+      if (closeOnSelect) setOpen(false);
+    },
+    [closeOnSelect, onValueChange, setOpen],
+  );
 
-  const pick = (modelId: string, providerId: string, nextThinking?: ThinkingEffort) => {
-    setInternalValue(modelId);
-    onValueChange?.(modelId, providerId, nextThinking);
-    if (closeOnSelect) setOpen(false);
-  };
+  // Stable per-row pick handler so memoized rows don't re-render on every
+  // parent render.
+  const handlePick = useCallback(
+    (model: ModelPickerModel, provider: ModelPickerProvider) => {
+      pick(model.id, provider.id, activeEffort ?? model.defaultThinking);
+    },
+    [pick, activeEffort],
+  );
+
+  // Stable row ref registrar — each row derives its own ref callback from
+  // this plus its index.
+  const registerRow = useCallback(
+    (index: number, element: HTMLButtonElement | null) => {
+      rowRefs.current[index] = element;
+    },
+    [],
+  );
 
   const onListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
+      // Only consider the currently rendered window (stale slots beyond it
+      // belong to unmounted rows and hold null).
+      const entries = rowRefs.current.slice(0, renderedRows.length);
+      if (entries.length === 0) return;
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      const next = rowRefs.current.findIndex((el) => el === document.activeElement);
-      const target = next === -1 ? 0 : (next + delta + rowRefs.current.length) % rowRefs.current.length;
-      rowRefs.current[target]?.focus();
+      const next = entries.findIndex((el) => el === document.activeElement);
+      const target = next === -1 ? 0 : (next + delta + entries.length) % entries.length;
+      entries[target]?.focus();
       return;
     }
     if (!searching && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
@@ -513,7 +591,10 @@ export function ModelPicker({
         open={openState}
         onOpenChange={(next) => {
           if (!isControlledOpen) setInternalOpen(next);
-          if (!next) setQuery("");
+          if (!next) {
+            setInputValue("");
+            setQuery("");
+          }
           onOpenChange?.(next);
         }}
       >
@@ -554,17 +635,20 @@ export function ModelPicker({
             />
             <input
               type="text"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              value={inputValue}
+              onChange={(event) => setInputValue(event.target.value)}
               placeholder="Search models…"
               aria-label="Search models"
               autoComplete="off"
               className="h-8 w-full rounded-lg bg-muted/50 pr-7 pl-8 text-[13px] text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-hidden"
             />
-            {searching && (
+            {inputValue.trim().length > 0 && (
               <button
                 type="button"
-                onClick={() => setQuery("")}
+                onClick={() => {
+                  setInputValue("");
+                  setQuery("");
+                }}
                 aria-label="Clear search"
                 className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
@@ -630,21 +714,37 @@ export function ModelPicker({
                 </p>
               ) : (
                 <div className="flex flex-col gap-0.5">
-                  {rows.map(({ provider, model }, index) => (
+                  {renderedRows.map(({ provider, model }, index) => (
                     <ModelRow
                       key={`${provider.id}:${model.id}`}
                       model={model}
                       provider={provider}
                       selected={model.id === modelId}
                       showProvider={searching && visible.length > 1}
-                      onPick={() =>
-                        pick(model.id, provider.id, activeEffort ?? model.defaultThinking)
-                      }
-                      rowRef={(element) => {
-                        rowRefs.current[index] = element;
-                      }}
+                      onPick={handlePick}
+                      index={index}
+                      registerRow={registerRow}
                     />
                   ))}
+                  {rows.length > renderedRows.length && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRowWindow({
+                          source: rowSource,
+                          count:
+                            rows.length - visibleCount <= ROW_WINDOW
+                              ? rows.length
+                              : visibleCount + ROW_WINDOW,
+                        })
+                      }
+                      className="mt-1 w-full rounded-md px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      {rows.length - renderedRows.length <= ROW_WINDOW
+                        ? `Show all ${rows.length} models`
+                        : `Show more (${renderedRows.length} of ${rows.length})`}
+                    </button>
+                  )}
                 </div>
               )}
             </div>

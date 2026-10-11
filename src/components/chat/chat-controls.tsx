@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -89,7 +89,13 @@ const EFFORT_OPTIONS: { label: string; value: ThinkingEffort; hint: string }[] =
  * Chat settings) with a single button that summarizes current state and opens
  * a tabbed control surface.
  */
-export function ChatControls({
+/**
+ * PERF (streaming PRD): memoized — ChatUI re-renders on every store flush
+ *  while a turn streams; with stable props (sendMessage/setters are stable
+ *  useCallbacks, slashContext is memoized in ChatContainer) the composer
+ *  now skips those re-renders entirely, keeping typing buttery during
+ *  active streaming. */
+export const ChatControls = memo(function ChatControls({
   onModelChange,
   onTemperatureChange,
   onThinkingEffortChange,
@@ -372,7 +378,7 @@ export function ChatControls({
       </PopoverContent>
     </Popover>
   );
-}
+});
 
 function TabButton({
   icon: Icon,
@@ -402,6 +408,76 @@ function TabButton({
   );
 }
 
+/** Memoized built-in model row — skips re-render when the filter list
+ * re-renders on debounced search changes. */
+const BuiltinModelRow = memo(function BuiltinModelRow({
+  m,
+  isActive,
+  onPick,
+}: {
+  m: { value: string; label: string; caption?: string };
+  isActive: boolean;
+  onPick: (m: { value: string; label: string }) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onPick(m)}
+        className={cn(
+          "flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
+          isActive
+            ? "border-foreground/30 bg-accent text-foreground"
+            : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
+        )}
+      >
+        <span className="min-w-0">
+          <span className="block truncate font-medium">{m.label}</span>
+          {m.caption && (
+            <span className="text-foreground/55 block truncate text-[10px] leading-tight">
+              {m.caption}
+            </span>
+          )}
+        </span>
+        {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
+      </button>
+    </li>
+  );
+});
+
+/** Memoized custom-provider model row. */
+const ProviderModelRow = memo(function ProviderModelRow({
+  modelId,
+  provider,
+  isActive,
+  onPick,
+}: {
+  modelId: string;
+  provider: CustomProvider;
+  isActive: boolean;
+  onPick: (p: CustomProvider, modelId: string) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onPick(provider, modelId)}
+        className={cn(
+          "flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
+          isActive
+            ? "border-foreground/30 bg-accent text-foreground"
+            : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
+        )}
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate font-mono">{modelId}</span>
+        </span>
+        {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
+      </button>
+    </li>
+  );
+});
+
 /** Model picker panel. `selectedModel` + `selectedProviderId` come from the
  *  authoritative chat store — this panel is a pure view of that state. */
 function ModelPanel({
@@ -422,7 +498,14 @@ function ModelPanel({
   const [customModelId, setCustomModelId] = useState("");
   const [customProviderId, setCustomProviderId] = useState("");
   const [search, setSearch] = useState("");
-  const q = search.trim().toLowerCase();
+  // Debounce the raw input (150ms): typing stays instant while the filter
+  // work below only runs on the settled query.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 150);
+    return () => clearTimeout(timer);
+  }, [search]);
+  const q = debouncedSearch.trim().toLowerCase();
 
   // Filter built-in models by name (case-insensitive substring).
   const filteredModels = useMemo(
@@ -480,28 +563,7 @@ function ModelPanel({
               m.value === AUTO_ROUTER_MODEL_VALUE &&
               selectedProviderId === AUTO_ROUTER_PROVIDER_ID;
             return (
-              <li key={m.value}>
-                <button
-                  type="button"
-                  onClick={() => onPickBuiltin(m)}
-                  className={cn(
-                    "flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
-                    isActive
-                      ? "border-foreground/30 bg-accent text-foreground"
-                      : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
-                  )}
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate font-medium">{m.label}</span>
-                    {m.caption && (
-                      <span className="text-foreground/55 block truncate text-[10px] leading-tight">
-                        {m.caption}
-                      </span>
-                    )}
-                  </span>
-                  {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
-                </button>
-              </li>
+              <BuiltinModelRow key={m.value} m={m} isActive={isActive} onPick={onPickBuiltin} />
             );
           })}
         </ul>
@@ -530,23 +592,13 @@ function ModelPanel({
                     const isActive =
                       selectedProviderId === p.id && selectedModel === modelId;
                     return (
-                      <li key={`${p.id}::${modelId}`}>
-                        <button
-                          type="button"
-                          onClick={() => onPickProviderModel(p, modelId)}
-                          className={cn(
-                            "flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
-                            isActive
-                              ? "border-foreground/30 bg-accent text-foreground"
-                              : "border-border text-foreground/75 hover:border-foreground/25 hover:bg-accent/60 hover:text-foreground",
-                          )}
-                        >
-                          <span className="flex min-w-0 items-center gap-1.5">
-                            <span className="truncate font-mono">{modelId}</span>
-                          </span>
-                          {isActive && <Check className="text-foreground h-3.5 w-3.5 shrink-0" />}
-                        </button>
-                      </li>
+                      <ProviderModelRow
+                        key={`${p.id}::${modelId}`}
+                        modelId={modelId}
+                        provider={p}
+                        isActive={isActive}
+                        onPick={onPickProviderModel}
+                      />
                     );
                   })}
                 </ul>

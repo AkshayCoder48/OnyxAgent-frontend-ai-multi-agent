@@ -63,6 +63,7 @@ import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
 import type { Skill } from "@/types";
 import { isOPFSAvailable } from "@/lib/storage/opfs";
+import { qk } from "@/lib/query-keys";
 import {
   exportSkillZip,
   installSkillFiles,
@@ -251,7 +252,7 @@ export function SectionSkills() {
           icon: <XCircle className="size-4" />,
         });
       }
-      await qc.invalidateQueries({ queryKey: ["skills", userId] });
+      await qc.invalidateQueries({ queryKey: qk.skills.list(userId) });
       await runReconcile();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
@@ -304,7 +305,7 @@ export function SectionSkills() {
     } finally {
       setPushing(false);
       pushingRef.current.clear();
-      await qc.invalidateQueries({ queryKey: ["skills", userId] });
+      await qc.invalidateQueries({ queryKey: qk.skills.list(userId) });
       await runReconcile();
     }
   }
@@ -328,7 +329,7 @@ export function SectionSkills() {
       toast.error(err instanceof Error ? err.message : "Restore failed");
     } finally {
       setRestoringSlug(null);
-      await qc.invalidateQueries({ queryKey: ["skills", userId] });
+      await qc.invalidateQueries({ queryKey: qk.skills.list(userId) });
       await runReconcile();
     }
   }
@@ -345,7 +346,7 @@ export function SectionSkills() {
       toast.success(`Removed skill: ${target.name}`, {
         description: "Removed locally only — a pushed cloud copy (if any) stays restorable under More options.",
       });
-      await qc.invalidateQueries({ queryKey: ["skills", userId] });
+      await qc.invalidateQueries({ queryKey: qk.skills.list(userId) });
       await runReconcile();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to uninstall skill");
@@ -360,7 +361,7 @@ export function SectionSkills() {
       const { skillService } = await import("@/lib/services");
       await skillService.setActive(skill.id, !skill.is_active);
       await refreshRows();
-      await qc.invalidateQueries({ queryKey: ["skills", userId] });
+      await qc.invalidateQueries({ queryKey: qk.skills.list(userId) });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to toggle skill");
     } finally {

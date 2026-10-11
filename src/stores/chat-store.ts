@@ -667,6 +667,12 @@ interface ChatState extends MessageActions {
   restorePersisted: (activeConversationId?: string | null) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
+  /** Batched history paint (perf PRD §6): replace the whole message array
+   *  in ONE store write. Conversation switching previously issued
+   *  clearMessages() + N sequential addChatMessage() writes — each one a
+   *  full subscription/render pass (O(N²) render work on long threads:
+   *  a 200-message chat painted ~20k component renders). */
+  replaceAllMessages: (messages: ChatMessage[]) => void;
 }
 
 export const useChatStore = create<ChatState>((set) => ({
@@ -733,6 +739,14 @@ export const useChatStore = create<ChatState>((set) => ({
       // conversation being cleared and must not leak into the next one.
       return { messages: [], lastManagedContext: null };
     });
+  },
+
+  replaceAllMessages: (messages) => {
+    // One write, one render pass, one debounced persist. The shallow
+    // per-message copy keeps the same semantics as addChatMessage (each
+    // row gets a fresh object reference so memo comparators see change).
+    set(() => ({ messages: messages.map((m) => ({ ...m })) }));
+    savePersisted(messages);
   },
 }));
 

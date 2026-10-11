@@ -430,6 +430,12 @@ interface MessageItemProps {
    *  ResearchPanel renders at the exact position where the todo tool ran
    *  inside this message's part flow (not stuck at the thread bottom). */
   showTodoPanel?: boolean;
+  /** PERF: play the entrance animation ONLY for messages that arrive
+   *  during a live session. Hydrated history (conversation switch / page
+   *  reload) mounts every row at once — playing the blur-in entrance on
+   *  all of them caused 100+ concurrent filter animations and a visible
+   *  first-paint stall on long threads. */
+  animateEntrance?: boolean;
   /** Wired to the inline todo panel's "Cut" (dismiss) button. */
   onTodoDismiss?: () => void;
   /** Message-action row (assistant-ui "Message actions"): re-run the turn
@@ -1054,6 +1060,7 @@ export const MessageItem = React.memo(function MessageItem({
   message,
   groupPosition,
   showTodoPanel = false,
+  animateEntrance = true,
   onTodoDismiss,
   onRegenerate,
   onEditUserMessage,
@@ -1151,6 +1158,29 @@ export const MessageItem = React.memo(function MessageItem({
     return host.id;
   }, [isUser, message.genui, parts]);
 
+  // PERF (streaming PRD): the timeline derivation (buildFlowItems walk +
+  // browser-run grouping + boundary scan) previously ran INLINE in the
+  // render below on every render — for the actively streaming message that
+  // is every ~32ms flush. Memoized on `[parts]` (the store only allocates a
+  // new parts array when this message actually changed), settled messages
+  // derive once and streaming re-derivations are limited to real changes.
+  const flow = React.useMemo(() => {
+    const items = buildFlowItems(parts);
+    const browserRuns = mapBrowserRunStarts(
+      items.map((it) => (it.kind === "tool" ? it.toolCall : null)),
+    );
+    let lastToolItemIdx = -1;
+    let lastThinkingItemIdx = -1;
+    for (let i = 0; i < items.length; i++) {
+      const kind = items[i]!.kind;
+      if (kind === "tool") lastToolItemIdx = i;
+      if (kind === "thinking") lastThinkingItemIdx = i;
+    }
+    const ranTools = lastToolItemIdx >= 0;
+    const boundaryIdx = ranTools ? lastToolItemIdx : lastThinkingItemIdx;
+    return { items, browserRuns, ranTools, boundaryIdx, hasPanel: boundaryIdx >= 0 };
+  }, [parts]);
+
   // Persist GenUI nodes when streaming completes. Once `isStreaming` flips
   // to false, if the message text contains `<<<genui>>>` sentinels but
   // `message.genui` isn't set yet, parse + validate the spec and store it
@@ -1198,7 +1228,12 @@ export const MessageItem = React.memo(function MessageItem({
         isUser ? "justify-end" : "justify-start",
         // Entrance animation: AI messages blur+fade in from top, user
         // messages slide in from the right. Both use spring easing.
-        isUser ? "bubble-user-in" : "bubble-ai-in",
+        // GATED (perf): only for live-session arrivals — hydrated history
+        // mounts all rows at once and must not run hundreds of concurrent
+        // blur-filter entrances.
+        isUser
+          ? animateEntrance && "bubble-user-in"
+          : animateEntrance && "bubble-ai-in",
       )}
     >
       <div
@@ -1331,40 +1366,13 @@ export const MessageItem = React.memo(function MessageItem({
           }
 
           // ── Walk the timeline into chronological process items. ────────
-          const items = buildFlowItems(parts);
+          // (Derivation memoized above in `flow` — see PERF note there.)
+          const items = flow.items;
           const streaming = Boolean(message.isStreaming);
-
-          // Browser-run grouping: consecutive use_browser TOOL items with no
-          // other item (thinking or text) between them render as ONE
-          // BrowserUseGroup at the run's FIRST item; continuations render
-          // nothing. The items array itself is untouched — browser items
-          // still count as tool items for every index computation below
-          // (boundaryIdx, processItems, trailingItems, todoSplice).
-          const browserRuns = mapBrowserRunStarts(
-            items.map((it) => (it.kind === "tool" ? it.toolCall : null)),
-          );
-
-          // PROCESS/ANSWER BOUNDARY. With tools: the LAST TOOL item — text
-          // after it is the final answer. Tool-less (thinking-only) turns:
-          // the LAST THINKING item — the answer is the text that follows
-          // the thinking. While the turn streams, answer text stays at the
-          // tail of the process (inside the panel — a tool or thinking run
-          // arriving later simply appends after it, so nothing ever jumps
-          // mid-stream); when the turn settles it renders BELOW the panel
-          // as the message body.
-          let lastToolItemIdx = -1;
-          let lastThinkingItemIdx = -1;
-          for (let i = 0; i < items.length; i++) {
-            const kind = items[i]!.kind;
-            if (kind === "tool") lastToolItemIdx = i;
-            if (kind === "thinking") lastThinkingItemIdx = i;
-          }
-          const ranTools = lastToolItemIdx >= 0;
-          const boundaryIdx = ranTools ? lastToolItemIdx : lastThinkingItemIdx;
-          // NO process (pure-text answer) → no panel: the frameless flow +
-          // the AgentStatusLine (the circle + caption at the streaming
-          // tail). Any thinking or tool run → the unified panel.
-          const hasPanel = boundaryIdx >= 0;
+          const browserRuns = flow.browserRuns;
+          const ranTools = flow.ranTools;
+          const boundaryIdx = flow.boundaryIdx;
+          const hasPanel = flow.hasPanel;
 
           const processItems = hasPanel
             ? items.filter(
@@ -1593,11 +1601,18 @@ export const MessageItem = React.memo(function MessageItem({
     prev.message.parts === next.message.parts &&
     prev.message.toolCalls === next.message.toolCalls &&
     prev.message.genui === next.message.genui &&
+    // Legacy (pre-parts) streaming fields + attachments — same-store
+    // reference churn rules apply: new refs only when actually changed.
+    prev.message.thinking === next.message.thinking &&
+    prev.message.reasoning === next.message.reasoning &&
+    prev.message.files === next.message.files &&
+    prev.message.fileIds === next.message.fileIds &&
     // "Worked {time}" panel summary — stamped on settle; without this the
     // memo blocked the re-render and the panel never appeared.
     prev.message.generation === next.message.generation &&
     prev.groupPosition === next.groupPosition &&
     prev.showTodoPanel === next.showTodoPanel &&
+    prev.animateEntrance === next.animateEntrance &&
     prev.onTodoDismiss === next.onTodoDismiss &&
     prev.onRegenerate === next.onRegenerate &&
     prev.onEditUserMessage === next.onEditUserMessage

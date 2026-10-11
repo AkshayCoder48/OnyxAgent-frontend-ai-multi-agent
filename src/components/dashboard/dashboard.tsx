@@ -66,7 +66,9 @@ async function fetchStats(userId: string): Promise<Stats> {
 const PAGE_LOADED_AT = Date.now();
 
 export function Dashboard({ onNewChat, onOpenSettings }: DashboardProps) {
-  const { user } = useAuthStore();
+  // Narrow selector — a whole-store subscription would re-render the
+  // dashboard on every auth-store write.
+  const user = useAuthStore((s) => s.user);
   const { conversations, selectConversation: select } = useConversations();
 
   const statsQuery = useQuery({

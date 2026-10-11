@@ -15,6 +15,14 @@
      utilities — that is what makes "all buttons" actually reskin.)
    - Accessible: the focus-visible ring is re-implemented (the glass
      box-shadow replaces Tailwind's layered ring shadow).
+
+   PERFORMANCE (2026 audit):
+   - The whole skin (blend-mode shine sweeps, animated conic edges,
+     per-button backdrop-filter, press transforms) is HOVER-POINTER-ONLY:
+     touch devices never materialise any of it.
+   - `prefers-reduced-motion: reduce` stands the motion effects down.
+   - `transition: all` on universal button selectors was scoped to the
+     properties that actually animate.
    ========================================================================= */
 
 @property --angle-1 {
@@ -86,247 +94,261 @@
 }
 
 /* =========================================================================
-   THE SKIN — every <button> in the app
+   THE SKIN — every <button> in the app (hover-capable pointers only;
+   the touch press-flash block is gone — touch devices skip the skin's
+   pseudo-layers entirely)
    ========================================================================= */
 
-:root.exp-glass button {
-  /* Kill the native/solid backgrounds and borders; the glass takes over. */
-  background: linear-gradient(
-    -75deg,
-    var(--gb-glass-1),
-    var(--gb-glass-2),
-    var(--gb-glass-3)
-  );
-  border-style: solid;
-  border-width: 0px;
-  border-color: transparent;
+@media (hover: hover) and (pointer: fine) {
+  :root.exp-glass button {
+    /* Kill the native/solid backgrounds and borders; the glass takes over. */
+    background: linear-gradient(
+      -75deg,
+      var(--gb-glass-1),
+      var(--gb-glass-2),
+      var(--gb-glass-3)
+    );
+    border-style: solid;
+    border-width: 0px;
+    border-color: transparent;
 
-  border-radius: 999vw;
+    border-radius: 999vw;
 
-  color: var(--gb-fg);
+    color: var(--gb-fg);
 
-  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
-  touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+    touch-action: manipulation;
 
-  -webkit-backdrop-filter: var(--gb-bf);
-  backdrop-filter: var(--gb-bf);
+    -webkit-backdrop-filter: var(--gb-bf);
+    backdrop-filter: var(--gb-bf);
 
-  box-shadow:
-    inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
-    inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
-    0 0.25em 0.125em -0.125em rgba(0, 0, 0, 0.2),
-    0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
-    0 0 0 0 rgba(255, 255, 255, 1);
+    box-shadow:
+      inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
+      inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
+      0 0.25em 0.125em -0.125em rgba(0, 0, 0, 0.2),
+      0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
+      0 0 0 0 rgba(255, 255, 255, 1);
 
-  transition: all var(--gb-time) var(--gb-ease);
+    /* Scoped (was `transition: all`): only the properties the hover /
+       press / state changes actually animate. */
+    transition:
+      transform var(--gb-time) var(--gb-ease),
+      box-shadow var(--gb-time) var(--gb-ease),
+      background var(--gb-time) var(--gb-ease),
+      -webkit-backdrop-filter var(--gb-time) var(--gb-ease),
+      backdrop-filter var(--gb-time) var(--gb-ease);
 
-  /* Contain the ring/shine pseudo layers without re-ordering siblings.
-     (No overflow clipping — the edge ring intentionally bleeds half a
-     border-width past the button box, like the reference.) */
-  isolation: isolate;
-}
-
-/* Only position buttons that aren't already absolutely placed —
-   (Tailwind's .absolute/.fixed/.sticky layered utilities must win.) */
-:root.exp-glass button:not(.absolute):not(.fixed):not(.sticky) {
-  position: relative;
-}
-
-:root.exp-glass button span,
-:root.exp-glass button {
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-/* ---- Hover: glass clears + tucks in ---------------------------------- */
-:root.exp-glass button:hover {
-  /* Clear the glass on hover — var override, not a re-declaration (the
-     compiler would strip the standard property from a literal value). */
-  --gb-bf: blur(0.01em);
-
-  transform: scale(0.975);
-
-  box-shadow:
-    inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
-    inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
-    0 0.15em 0.05em -0.1em rgba(0, 0, 0, 0.25),
-    0 0 0.05em 0.1em inset rgba(255, 255, 255, 0.5),
-    0 0 0 0 rgba(255, 255, 255, 1);
-}
-
-:root.exp-glass button:active {
-  transform: perspective(14em) rotate3d(1, 0, 0, 22deg) scale(0.965);
-
-  box-shadow:
-    inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
-    inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
-    0 0.125em 0.125em -0.125em rgba(0, 0, 0, 0.2),
-    0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
-    0 0.225em 0.05em 0 rgba(0, 0, 0, 0.05),
-    0 0.25em 0 rgba(255, 255, 255, 0.75),
-    inset 0 0.25em 0.05em 0 rgba(0, 0, 0, 0.15);
-}
-
-/* ---- Focus-visible: keep a visible ring (re-implements the layered
-       Tailwind ring the glass box-shadow replaces) ---------------------- */
-:root.exp-glass button:focus-visible {
-  box-shadow:
-    inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
-    inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
-    0 0.25em 0.125em -0.125em rgba(0, 0, 0, 0.2),
-    0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
-    0 0 0 2px var(--color-ring);
-}
-
-/* =========================================================================
-   THE RING — animated conic edge (button::after, mask-composite)
-   ========================================================================= */
-
-:root.exp-glass button::after {
-  content: "";
-
-  position: absolute;
-  z-index: 1;
-
-  top: calc(-1 * var(--gb-border) / 2);
-  left: calc(-1 * var(--gb-border) / 2);
-  right: calc(-1 * var(--gb-border) / 2);
-  bottom: calc(-1 * var(--gb-border) / 2);
-
-  padding: var(--gb-border);
-  box-sizing: border-box;
-
-  border-radius: 999vw;
-
-  background:
-    conic-gradient(
-      from var(--angle-1) at 50% 50%,
-      var(--gb-edge),
-      transparent 5% 40%,
-      var(--gb-edge) 50%,
-      transparent 60% 95%,
-      var(--gb-edge)
-    ),
-    linear-gradient(180deg, var(--gb-edge-line), var(--gb-edge-line));
-
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-
-  box-shadow: inset 0 0 0 calc(var(--gb-border) / 2) rgba(255, 255, 255, 0.5);
-
-  pointer-events: none;
-
-  transition:
-    all var(--gb-time) var(--gb-ease),
-    --angle-1 500ms ease;
-}
-
-:root.exp-glass button:hover::after {
-  --angle-1: -125deg;
-}
-
-:root.exp-glass button:active::after {
-  --angle-1: -75deg;
-}
-
-/* =========================================================================
-   THE SHINE — diagonal sweep (button::before, background-position)
-   ========================================================================= */
-
-:root.exp-glass button::before {
-  content: "";
-
-  position: absolute;
-  z-index: 3;
-
-  inset: 0;
-
-  box-sizing: border-box;
-  border-radius: 999vw;
-
-  pointer-events: none;
-
-  background: linear-gradient(
-    var(--angle-2),
-    rgba(255, 255, 255, 0) 0%,
-    var(--gb-shine) 40% 50%,
-    rgba(255, 255, 255, 0) 55%
-  );
-
-  background-size: 200% 200%;
-  background-position: 0% 50%;
-  background-repeat: no-repeat;
-
-  mix-blend-mode: screen;
-
-  transition:
-    background-position calc(var(--gb-time) * 1.25) var(--gb-ease),
-    --angle-2 calc(var(--gb-time) * 1.25) var(--gb-ease);
-}
-
-:root.exp-glass button:hover::before {
-  background-position: 25% 50%;
-}
-
-:root.exp-glass button:active::before {
-  background-position: 50% 15%;
-  --angle-2: -15deg;
-}
-
-/* =========================================================================
-   STATE AWARENESS — selected/toggled buttons get a brand-tinted glass so
-   semantics survive the reskin (tabs, toggles, switches, segmented picks).
-   ========================================================================= */
-
-:root.exp-glass button[aria-checked="true"],
-:root.exp-glass button[aria-pressed="true"],
-:root.exp-glass button[aria-selected="true"],
-:root.exp-glass button[data-state="on"],
-:root.exp-glass button[data-state="checked"],
-:root.exp-glass button[data-state="active"],
-:root.exp-glass button.bg-foreground {
-  --gb-glass-1: var(--gb-tint-1);
-  --gb-glass-2: var(--gb-tint-2);
-  --gb-glass-3: var(--gb-tint-3);
-  --gb-edge: oklch(from var(--color-brand) l c h / 0.75);
-  --gb-edge-line: oklch(from var(--color-brand) l c h / 0.25);
-}
-
-/* ---- Primary actions keep their weight: a stronger brand-tinted glass. */
-:root.exp-glass button.bg-primary {
-  --gb-glass-1: var(--gb-tint-strong-1);
-  --gb-glass-2: var(--gb-tint-strong-2);
-  --gb-glass-3: var(--gb-tint-strong-3);
-  --gb-edge: oklch(from var(--color-brand) l c h / 0.85);
-  --gb-edge-line: rgba(255, 255, 255, 0.4);
-}
-
-:root.exp-glass button.bg-destructive {
-  --gb-glass-1: oklch(from var(--color-destructive) l c h / 0.5);
-  --gb-glass-2: oklch(from var(--color-destructive) l c h / 0.72);
-  --gb-glass-3: oklch(from var(--color-destructive) l c h / 0.5);
-  --gb-edge: oklch(from var(--color-destructive) l c h / 0.85);
-}
-
-/* =========================================================================
-   TOUCH DEVICES — keep the resting angles (no hover state exists)
-   ========================================================================= */
-
-@media (hover: none) and (pointer: coarse) {
-  :root.exp-glass button::before,
-  :root.exp-glass button:active::before {
-    --angle-2: -45deg;
+    /* Contain the ring/shine pseudo layers without re-ordering siblings.
+       (No overflow clipping — the edge ring intentionally bleeds half a
+       border-width past the button box, like the reference.) */
+    isolation: isolate;
   }
 
-  :root.exp-glass button::after,
-  :root.exp-glass button:hover::after,
+  /* Only position buttons that aren't already absolutely placed —
+     (Tailwind's .absolute/.fixed/.sticky layered utilities must win.) */
+  :root.exp-glass button:not(.absolute):not(.fixed):not(.sticky) {
+    position: relative;
+  }
+
+  :root.exp-glass button span,
+  :root.exp-glass button {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* ---- Hover: glass clears + tucks in ---------------------------------- */
+  :root.exp-glass button:hover {
+    /* Clear the glass on hover — var override, not a re-declaration (the
+       compiler would strip the standard property from a literal value). */
+    --gb-bf: blur(0.01em);
+
+    transform: scale(0.975);
+
+    box-shadow:
+      inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
+      inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
+      0 0.15em 0.05em -0.1em rgba(0, 0, 0, 0.25),
+      0 0 0.05em 0.1em inset rgba(255, 255, 255, 0.5),
+      0 0 0 0 rgba(255, 255, 255, 1);
+  }
+
+  :root.exp-glass button:active {
+    transform: perspective(14em) rotate3d(1, 0, 0, 22deg) scale(0.965);
+
+    box-shadow:
+      inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
+      inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
+      0 0.125em 0.125em -0.125em rgba(0, 0, 0, 0.2),
+      0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
+      0 0.225em 0.05em 0 rgba(0, 0, 0, 0.05),
+      0 0.25em 0 rgba(255, 255, 255, 0.75),
+      inset 0 0.25em 0.05em 0 rgba(0, 0, 0, 0.15);
+  }
+
+  /* ---- Focus-visible: keep a visible ring (re-implements the layered
+        Tailwind ring the glass box-shadow replaces) ---------------------- */
+  :root.exp-glass button:focus-visible {
+    box-shadow:
+      inset 0 0.125em 0.125em rgba(0, 0, 0, 0.05),
+      inset 0 -0.125em 0.125em rgba(255, 255, 255, 0.5),
+      0 0.25em 0.125em -0.125em rgba(0, 0, 0, 0.2),
+      0 0 0.1em 0.25em inset rgba(255, 255, 255, 0.2),
+      0 0 0 2px var(--color-ring);
+  }
+
+  /* =========================================================================
+     THE RING — animated conic edge (button::after, mask-composite)
+     ========================================================================= */
+
+  :root.exp-glass button::after {
+    content: "";
+
+    position: absolute;
+    z-index: 1;
+
+    top: calc(-1 * var(--gb-border) / 2);
+    left: calc(-1 * var(--gb-border) / 2);
+    right: calc(-1 * var(--gb-border) / 2);
+    bottom: calc(-1 * var(--gb-border) / 2);
+
+    padding: var(--gb-border);
+    box-sizing: border-box;
+
+    border-radius: 999vw;
+
+    background:
+      conic-gradient(
+        from var(--angle-1) at 50% 50%,
+        var(--gb-edge),
+        transparent 5% 40%,
+        var(--gb-edge) 50%,
+        transparent 60% 95%,
+        var(--gb-edge)
+      ),
+      linear-gradient(180deg, var(--gb-edge-line), var(--gb-edge-line));
+
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+
+    box-shadow: inset 0 0 0 calc(var(--gb-border) / 2) rgba(255, 255, 255, 0.5);
+
+    pointer-events: none;
+
+    /* Scoped (was `transition: all, --angle-1`): only the registered
+       angle custom property animates on the ring. */
+    transition: --angle-1 500ms ease;
+  }
+
+  :root.exp-glass button:hover::after {
+    --angle-1: -125deg;
+  }
+
   :root.exp-glass button:active::after {
     --angle-1: -75deg;
+  }
+
+  /* =========================================================================
+     THE SHINE — diagonal sweep (button::before, background-position)
+     ========================================================================= */
+
+  :root.exp-glass button::before {
+    content: "";
+
+    position: absolute;
+    z-index: 3;
+
+    inset: 0;
+
+    box-sizing: border-box;
+    border-radius: 999vw;
+
+    pointer-events: none;
+
+    background: linear-gradient(
+      var(--angle-2),
+      rgba(255, 255, 255, 0) 0%,
+      var(--gb-shine) 40% 50%,
+      rgba(255, 255, 255, 0) 55%
+    );
+
+    background-size: 200% 200%;
+    background-position: 0% 50%;
+    background-repeat: no-repeat;
+
+    mix-blend-mode: screen;
+
+    transition:
+      background-position calc(var(--gb-time) * 1.25) var(--gb-ease),
+      --angle-2 calc(var(--gb-time) * 1.25) var(--gb-ease);
+  }
+
+  :root.exp-glass button:hover::before {
+    background-position: 25% 50%;
+  }
+
+  :root.exp-glass button:active::before {
+    background-position: 50% 15%;
+    --angle-2: -15deg;
+  }
+
+  /* =========================================================================
+     STATE AWARENESS — selected/toggled buttons get a brand-tinted glass so
+     semantics survive the reskin (tabs, toggles, switches, segmented picks).
+     ========================================================================= */
+
+  :root.exp-glass button[aria-checked="true"],
+  :root.exp-glass button[aria-pressed="true"],
+  :root.exp-glass button[aria-selected="true"],
+  :root.exp-glass button[data-state="on"],
+  :root.exp-glass button[data-state="checked"],
+  :root.exp-glass button[data-state="active"],
+  :root.exp-glass button.bg-foreground {
+    --gb-glass-1: var(--gb-tint-1);
+    --gb-glass-2: var(--gb-tint-2);
+    --gb-glass-3: var(--gb-tint-3);
+    --gb-edge: oklch(from var(--color-brand) l c h / 0.75);
+    --gb-edge-line: oklch(from var(--color-brand) l c h / 0.25);
+  }
+
+  /* ---- Primary actions keep their weight: a stronger brand-tinted glass. */
+  :root.exp-glass button.bg-primary {
+    --gb-glass-1: var(--gb-tint-strong-1);
+    --gb-glass-2: var(--gb-tint-strong-2);
+    --gb-glass-3: var(--gb-tint-strong-3);
+    --gb-edge: oklch(from var(--color-brand) l c h / 0.85);
+    --gb-edge-line: rgba(255, 255, 255, 0.4);
+  }
+
+  :root.exp-glass button.bg-destructive {
+    --gb-glass-1: oklch(from var(--color-destructive) l c h / 0.5);
+    --gb-glass-2: oklch(from var(--color-destructive) l c h / 0.72);
+    --gb-glass-3: oklch(from var(--color-destructive) l c h / 0.5);
+    --gb-edge: oklch(from var(--color-destructive) l c h / 0.85);
+  }
+}
+
+/* =========================================================================
+   REDUCED MOTION — the experimental skin's motion effects (sweep
+   transitions, angle spins, press/hover transforms) stand down entirely;
+   the static glass fill remains (it is a paint, not a motion).
+   ========================================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  :root.exp-glass button,
+  :root.exp-glass button::before,
+  :root.exp-glass button::after {
+    transition: none;
+    animation: none;
+  }
+
+  :root.exp-glass button:hover,
+  :root.exp-glass button:active {
+    transform: none;
   }
 }

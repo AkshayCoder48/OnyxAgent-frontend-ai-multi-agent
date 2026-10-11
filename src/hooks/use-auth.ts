@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useShallow } from "zustand/react/shallow";
 import { useAuthStore, resetInitState } from "@/stores";
 import { ApiError } from "@/lib/api-client";
 import { ROUTES } from "@/lib/constants";
@@ -30,8 +31,18 @@ const DEFAULT_USER: User = {
 
 export function useAuth() {
   const router = useRouter();
+  // Narrow, shallow-compared slice of the auth store — a whole-store
+  // subscription would re-render every consumer on ANY auth-store write.
   const { user, isLoading, setUser, setLoading, logout: storeLogout } =
-    useAuthStore();
+    useAuthStore(
+      useShallow((s) => ({
+        user: s.user,
+        isLoading: s.isLoading,
+        setUser: s.setUser,
+        setLoading: s.setLoading,
+        logout: s.logout,
+      })),
+    );
 
   // Run init once on mount. In non-auth mode this auto-creates the default
   // local user (if needed) and unlocks the vault. The store has a 5-second

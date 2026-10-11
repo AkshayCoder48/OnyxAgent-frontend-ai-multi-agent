@@ -1811,6 +1811,17 @@
   animation: message-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* PERF (streaming PRD): browser-level row windowing for the message list.
+   Offscreen rows skip layout + paint entirely — long conversations only
+   pay for the visible window (plus scroll-anchoring compensation).
+   `contain-intrinsic-size: auto …` lets the browser remember each row's
+   REAL height once rendered, so the scroll position stays stable as the
+   user scrolls (no jumps, no fighting the auto-follow controller). */
+.mb-row-cv {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
+}
+
 /* Button press feedback */
 @keyframes button-press {
   0% { transform: scale(1); }
@@ -1922,15 +1933,11 @@ html.theme-transitioning .animate-backdrop {
   background: var(--color-background);
 }
 
-/* --- Motion blur on streaming text --- */
-.motion-blur-text {
-  filter: blur(0.4px);
-  animation: motion-blur-pulse 1.2s ease-in-out infinite;
-}
-@keyframes motion-blur-pulse {
-  0%, 100% { filter: blur(0.3px); }
-  50% { filter: blur(0.6px); }
-}
+/* --- Motion blur on streaming text ---
+   (.motion-blur-text + its infinite blur keyframes removed 2026 audit:
+   zero TSX references, and an infinite filter:blur() animation forces a
+   repaint every frame while present. .motion-blur-strong below is the
+   one-shot variant and stays.) */
 .motion-blur-strong {
   animation: motion-blur-strong 0.4s ease-out;
 }
@@ -1953,6 +1960,19 @@ html.theme-transitioning .animate-backdrop {
 @keyframes shimmer-slide {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
+}
+
+/* --- Text shimmer (reasoning/streaming states) ---
+   HOISTED from reasoning-text.tsx, which used to inject this <style> tag
+   PER INSTANCE — one definition here serves every instance. The gradient
+   itself is an inline style (theme-aware) applied by textShimmerStyle(). */
+@keyframes onyx-text-shimmer {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -50% 0;
+  }
 }
 
 /* --- Ripple tap effect --- */
@@ -2507,15 +2527,6 @@ html.theme-transitioning .animate-backdrop {
   box-shadow: 0 1px 0 0 color-mix(in srgb, var(--color-foreground) 15%, transparent);
 }
 
-/* --- Panel slide + glass --- */
-.panel-glass-in {
-  animation: panel-glass-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-@keyframes panel-glass-in {
-  from { opacity: 0; backdrop-filter: blur(0); transform: translateY(10px); }
-  to { opacity: 1; backdrop-filter: blur(12px); transform: translateY(0); }
-}
-
 /* --- Message bubble entrance (glassmorphic) --- */
 .bubble-glass-in {
   animation: bubble-glass-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -2561,7 +2572,6 @@ html.theme-transitioning .animate-backdrop {
 
 /* --- Reduced motion: disable ALL custom animations --- */
 @media (prefers-reduced-motion: reduce) {
-  .motion-blur-text,
   .shimmer,
   .float-orb,
   .glow-pulse,
@@ -2577,7 +2587,6 @@ html.theme-transitioning .animate-backdrop {
   .slide-blur-in-left,
   .bounce-in,
   .rotate-in,
-  .panel-glass-in,
   .bubble-glass-in,
   .subagent-slide-in {
     animation: none !important;
@@ -2792,24 +2801,18 @@ html.theme-transitioning .animate-backdrop {
 }
 .input-focus-glow:focus-within::before {
   opacity: 1;
+  /* Compositor-only pulse: the gradient layer itself is STATIC (no
+     background-position/gradient repaints). A subtle opacity breath
+     1 → 0.85 → 1 keeps the glow alive at ~zero paint cost — opacity
+     animations run on the compositor thread. */
   animation: prompt-box-glow 3s ease-in-out infinite;
 }
 @keyframes prompt-box-glow {
   0%, 100% {
-    background: linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--color-primary) 30%, transparent),
-      color-mix(in srgb, var(--color-primary) 5%, transparent),
-      color-mix(in srgb, var(--color-primary) 30%, transparent)
-    );
+    opacity: 1;
   }
   50% {
-    background: linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--color-primary) 50%, transparent),
-      color-mix(in srgb, var(--color-primary) 15%, transparent),
-      color-mix(in srgb, var(--color-primary) 50%, transparent)
-    );
+    opacity: 0.85;
   }
 }
 .input-focus-glow::after {
@@ -2817,22 +2820,26 @@ html.theme-transitioning .animate-backdrop {
   position: absolute;
   inset: 0;
   border-radius: inherit;
+  /* STATIC box-shadow (painted once into the layer) — the old
+     prompt-box-pulse animated box-shadow values, forcing a repaint
+     every frame while the composer was focused. Visibility is now
+     driven by a composited opacity fade. */
   box-shadow:
-    0 0 0 0 color-mix(in srgb, var(--color-primary) 0%, transparent);
-  transition: box-shadow 0.4s ease;
+    0 0 20px -5px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  opacity: 0;
+  transition: opacity 0.4s ease;
   pointer-events: none;
 }
 .input-focus-glow:focus-within::after {
-  box-shadow:
-    0 0 20px -5px color-mix(in srgb, var(--color-primary) 20%, transparent);
-  animation: prompt-box-pulse 3s ease-in-out infinite;
+  opacity: 1;
 }
-@keyframes prompt-box-pulse {
-  0%, 100% {
-    box-shadow: 0 0 20px -5px color-mix(in srgb, var(--color-primary) 15%, transparent);
+/* Reduced motion — the focus glow settles instantly; no pulse at all. */
+@media (prefers-reduced-motion: reduce) {
+  .input-focus-glow:focus-within::before {
+    animation: none;
   }
-  50% {
-    box-shadow: 0 0 30px -3px color-mix(in srgb, var(--color-primary) 25%, transparent);
+  .input-focus-glow::after {
+    transition: none;
   }
 }
 
@@ -2948,15 +2955,17 @@ html.theme-transitioning .animate-backdrop {
    ═══════════════════════════════════════════════════════════════════════════ */
 .onyx-ws-card {
   position: relative;
-  /* glass surface: translucent bg + backdrop blur + soft shadow */
+  /* PRE-BLENDED glass: no backdrop-filter — it re-samples + blurs the
+     scrolling message list behind the card on every frame. The blur is
+     baked in instead: slightly more opaque card layers read nearly
+     identically over the page background, and the border + shadow keep
+     the depth cue. */
   background:
     linear-gradient(
       135deg,
-      color-mix(in oklab, var(--card) 82%, transparent),
-      color-mix(in oklab, var(--card) 66%, transparent)
+      color-mix(in oklab, var(--card) 94%, transparent),
+      color-mix(in oklab, var(--card) 80%, transparent)
     );
-  -webkit-backdrop-filter: blur(14px) saturate(1.25);
-  backdrop-filter: blur(14px) saturate(1.25);
   border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
   box-shadow:
     0 1px 2px rgb(0 0 0 / 0.04),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { Download, ExternalLink, FileAudio, FileCode, FileImage, FileText, FileVideo, Loader2, X } from "lucide-react";
 
 import { useFilePreviewStore } from "@/stores";
@@ -54,7 +54,9 @@ function KindIcon({ kind, className }: { kind: PreviewKind; className?: string }
  * Switches viewer based on MIME type / extension; the user can drag the left
  * edge to resize, and the chosen width persists across sessions.
  */
-export function FilePreviewPanel() {
+// PERF (streaming PRD): memoized — mounts inside ChatUI (re-renders per
+// store flush while streaming); self-subscribes to the preview store.
+export const FilePreviewPanel = memo(function FilePreviewPanel() {
   const file = useFilePreviewStore((s) => s.file);
 
   if (!file) return null;
@@ -63,7 +65,7 @@ export function FilePreviewPanel() {
   // (panel width, cached blob URL) resets whenever a different file is
   // opened — no effects needed for the reset.
   return <FilePreviewContent key={file.id} />;
-}
+});
 
 /**
  * Inner content — separated so hooks can live after the outer early-return

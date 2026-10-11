@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button, Textarea } from "@/components/ui";
@@ -174,7 +174,11 @@ function ModelCard({ model }: { model: ConfirmModelInfo }) {
   );
 }
 
-export function PollinationsConfirmDialog() {
+// PERF (streaming PRD): memoized — this mounts inside ChatUI which re-renders
+// on every store flush while a turn streams; the dialog self-subscribes to
+// the Pollinations store and needs no props, so it now skips per-token
+// re-renders entirely.
+export const PollinationsConfirmDialog = memo(function PollinationsConfirmDialog() {
   const payload = usePollinationsStore((s) => s.pendingConfirmation);
 
   // Editable prompt — re-seeded whenever a NEW requestId arrives (each
@@ -396,4 +400,4 @@ export function PollinationsConfirmDialog() {
       </div>
     </div>
   );
-}
+});

@@ -528,7 +528,7 @@ export class AgentEventProcessor {
                   this.openStreamGate();
                 }
                 this.thinkingTimer = null;
-              }, this.gateDelayFor(16)); // ~300ms start-gate, then 16ms (~60fps)
+              }, this.gateDelayFor(32)); // ~300ms start-gate, then 32ms (~30fps). PERF: was 16ms (60 store writes/sec) — the thinking path re-copies the parts array + re-splits every sentence on each flush; 32ms halves that work with no visible difference (StreamingSentence paces its own letter reveal).
             }
           }
         }
@@ -551,7 +551,7 @@ export class AgentEventProcessor {
                   this.openStreamGate();
                 }
                 this.reasoningTimer = null;
-              }, this.gateDelayFor(16));
+              }, this.gateDelayFor(32)); // PERF: was 16ms — see the thinking_delta note above.
             }
           }
         }

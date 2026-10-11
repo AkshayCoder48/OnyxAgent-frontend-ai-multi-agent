@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSubagentStore, type SubagentConfig } from "@/stores/subagent-store";
-import { aiProviderService } from "@/lib/services";
-import { useAuth } from "@/hooks";
+import { useProviders } from "@/hooks/use-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -21,25 +20,15 @@ interface AIProvider {
 
 export default function SubagentsSettingsPage() {
   const { subagents, updateSubagent, deleteSubagent, loadFromStorage } = useSubagentStore();
-  const { user } = useAuth();
-  const [providers, setProviders] = useState<AIProvider[]>([]);
+  // Cached TanStack query (shared key with Settings/Config) instead of a
+  // per-mount aiProviderService.list fetch — navigating back to this page
+  // now reuses the cache instead of refetching from IndexedDB every time.
+  const { providers } = useProviders();
   const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
     loadFromStorage();
   }, [loadFromStorage]);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    (async () => {
-      try {
-        const list = await aiProviderService.list(user.id);
-        setProviders(list);
-      } catch {
-        // ignore
-      }
-    })();
-  }, [user?.id]);
 
   return (
     <div className="space-y-6">

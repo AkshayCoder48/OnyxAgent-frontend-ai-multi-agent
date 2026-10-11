@@ -12,7 +12,8 @@ import { useThemeStore, getResolvedTheme } from "@/stores/theme-store";
  * every state change and was a serious interaction/perf tax).
  */
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const { theme } = useThemeStore();
+  // Narrow selector — only re-renders when the theme value itself changes.
+  const theme = useThemeStore((s) => s.theme);
 
   useEffect(() => {
     const root = document.documentElement;

@@ -61,6 +61,27 @@ export const qk = {
     /** USER-SCOPED (same boot-swap rationale as conversations.list). */
     list: (userId?: string) => ["slash-commands", "list", userId ?? "anon"] as const,
   },
+  aiProviders: {
+    all: () => ["ai-providers"] as const,
+    /** USER-SCOPED — matches the key used by use-data.ts useProviders so
+     * every consumer (pickers, Settings, route pages) shares one cache. */
+    list: (userId?: string) => ["ai-providers", userId ?? "anon"] as const,
+  },
+  userSettings: {
+    all: () => ["user-settings"] as const,
+    /** USER-SCOPED — matches use-data.ts useSettings. */
+    detail: (userId?: string) => ["user-settings", userId ?? "anon"] as const,
+  },
+  customTools: {
+    all: () => ["custom-tools"] as const,
+    /** USER-SCOPED — matches use-data.ts useCustomTools. */
+    list: (userId?: string) => ["custom-tools", userId ?? "anon"] as const,
+  },
+  skills: {
+    all: () => ["skills"] as const,
+    /** USER-SCOPED — matches use-data.ts useSkills + section-skills.tsx. */
+    list: (userId?: string) => ["skills", userId ?? "anon"] as const,
+  },
   admin: {
     stats: () => ["admin", "stats"] as const,
     events: () => ["admin", "events"] as const,

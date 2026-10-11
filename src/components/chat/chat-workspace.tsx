@@ -61,15 +61,29 @@ const PANEL_WIDTH_PREFS = {
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
 
-/** Live viewport width (re-renders on resize only). */
+/** Live viewport width — re-renders on resize only.
+ *  DEBOUNCED ~100ms trailing edge: a window-resize drag fires dozens of
+ *  events per second and each one used to re-render the whole workspace
+ *  (auto-rail math included). The initial read is synchronous, so the
+ *  first render already has the correct width. */
 function useViewportWidth() {
   const [width, setWidth] = useState(() =>
     typeof window === "undefined" ? 1280 : window.innerWidth,
   );
   useEffect(() => {
-    const onResize = () => setWidth(window.innerWidth);
+    let timer: number | null = null;
+    const onResize = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        setWidth(window.innerWidth);
+      }, 100);
+    };
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
   return width;
 }

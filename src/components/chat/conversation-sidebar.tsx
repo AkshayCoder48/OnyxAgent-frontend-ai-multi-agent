@@ -400,6 +400,10 @@ function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
     if (!userId) return;
     let cancelled = false;
     const converge = async () => {
+      // VISIBILITY GATE (perf PRD §16): background tabs must not burn
+      // network + Dexie churn on a 60s loop. Skip while hidden; fire one
+      // catch-up converge on return-to-visible if the schedule was missed.
+      if (document.visibilityState !== "visible") return;
       const res = await schedulerApi(userId, "list");
       if (cancelled || !res.ok || !Array.isArray(res.tasks)) return;
       noteSchedulerTasks(res.tasks.length);
@@ -421,9 +425,14 @@ function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
     };
     void converge().catch(() => {});
     const id = window.setInterval(() => void converge().catch(() => {}), 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void converge().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [userId]);
   return linked;
@@ -466,17 +475,35 @@ function ConversationList({
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  const all = conversations ?? [];
-  const activeCount = all.filter((c) => !c.is_archived).length;
-  const archivedCount = all.filter((c) => c.is_archived).length;
-  const filtered = all.filter((c) => (view === "active" ? !c.is_archived : c.is_archived));
+  // (The `= []` destructuring default already guarantees a stable empty
+  // array when the prop is undefined — no per-render fallback allocation,
+  // so the useMemo dependencies below stay stable.)
+  const all = conversations;
+  // PERF (streaming PRD): these derivations previously ran as FOUR O(n)
+  // passes + a date grouping on EVERY render of the sidebar — which fires
+  // on auth changes, resize drags, link-registry ticks and search
+  // keystrokes. Memoized on the actual inputs; `all` is the query-cached
+  // array reference (stable between fetches).
+  const { activeCount, archivedCount } = useMemo(() => {
+    let a = 0;
+    for (const c of all) if (!c.is_archived) a++;
+    return { activeCount: a, archivedCount: all.length - a };
+  }, [all]);
+  const filtered = useMemo(
+    () => all.filter((c) => (view === "active" ? !c.is_archived : c.is_archived)),
+    [all, view],
+  );
   const q = query.trim().toLowerCase();
-  const visible = q
-    ? filtered.filter((c) => (c.title || "").toLowerCase().includes(q))
-    : filtered;
+  const visible = useMemo(
+    () =>
+      q
+        ? filtered.filter((c) => (c.title || "").toLowerCase().includes(q))
+        : filtered,
+    [filtered, q],
+  );
 
   // Date-grouped history (Terra spec): TODAY / YESTERDAY / THIS WEEK / OLDER.
-  const groups = groupByDate(visible);
+  const groups = useMemo(() => groupByDate(visible), [visible]);
 
   const handleSelect = useCallback(
     (id: string) => {

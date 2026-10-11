@@ -416,6 +416,12 @@ function NumberField({
 // The section.
 // ---------------------------------------------------------------------------
 
+/** Model catalogue freshness window. The catalogue lives in the module-level
+ * Pollinations store, so remounting this section usually already has fresh
+ * data — only hit the live API when the last successful fetch is older than
+ * this. Manual refresh buttons in the models card remain for forced fetches. */
+const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+
 export function SectionPollinations() {
   // Auth-resolved gating (same pattern as use-data.ts — the transient
   // "local-user" id must never own the stored connection).
@@ -512,8 +518,16 @@ export function SectionPollinations() {
     (async () => {
       const store = usePollinationsStore.getState();
       await store.init(userId);
-      // The catalogue must never be stale — live fetch on every mount.
-      void store.refreshModels();
+      // Reuse the cached catalogue when the last successful fetch is recent
+      // (mount-fetch storm guard). Read the timestamp AFTER init so we see the
+      // settled store state.
+      const { modelsFetchedAt } = usePollinationsStore.getState();
+      const fetchedAtMs = modelsFetchedAt ? new Date(modelsFetchedAt).getTime() : 0;
+      const stale =
+        !Number.isFinite(fetchedAtMs) || Date.now() - fetchedAtMs > MODELS_CACHE_TTL_MS;
+      if (stale) {
+        void store.refreshModels();
+      }
       await handleOAuthReturn();
     })();
   }, [userId]);

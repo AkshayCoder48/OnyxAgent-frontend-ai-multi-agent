@@ -5,7 +5,7 @@
    buttons that don't go through the cva (Radix triggers, sheet/dialog
    close buttons, prompt cards, segmented controls, icon strips…) still
    get the fluid shine. A soft white glint slides across the button on
-   hover / focus-visible, and flashes across on touch presses.
+   hover / focus-visible.
 
    Stand-down list (a button is left completely untouched when it …):
    - `.exp-glass` is on <html> — the experimental glass skin owns every
@@ -24,10 +24,18 @@
    keeps every hit target intact — un-layered on purpose, same as
    glass-buttons.css, which is what makes "every button" actually work)
    and motion-safe (`prefers-reduced-motion` fades the glint out).
+
+   PERFORMANCE: the glint (a `mix-blend-mode: screen` gradient layer on
+   every button) only exists on hover-capable pointers — touch devices
+   skip the pseudo-layer entirely (the old touch press-flash is gone:
+   nothing to animate without hover). Blend layers on thousands of
+   mobile buttons were pure overhead.
    ========================================================================= */
 
 /* Only position buttons that aren't already absolutely placed — Tailwind's
-   .absolute/.fixed/.sticky layered utilities must keep winning. */
+   .absolute/.fixed/.sticky layered utilities must keep winning. (Kept for
+   ALL pointers: `position: relative` is layout-neutral without the glint
+   and keeps absolutely-positioned children anchored identically.) */
 :root:not(.exp-glass)
   button:not(.absolute):not(.fixed):not(.sticky):not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip) {
   position: relative;
@@ -35,52 +43,42 @@
 
 /* The glint — a 250%-wide gradient whose highlight band sits just outside
    the visible 40% window at rest (0% 0) and just outside it again once
-   hovered (100% 0), so the band makes exactly one full pass per hover. */
-:root:not(.exp-glass)
-  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip)::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  border-radius: inherit;
-  pointer-events: none;
-
-  background: linear-gradient(
-    105deg,
-    transparent 42%,
-    rgba(255, 255, 255, 0.4) 50%,
-    transparent 58%
-  );
-  background-size: 250% 100%;
-  background-position: 0% 0;
-  background-repeat: no-repeat;
-
-  mix-blend-mode: screen;
-  opacity: 0;
-
-  transition:
-    background-position 650ms cubic-bezier(0.25, 1, 0.5, 1),
-    opacity 180ms ease;
-}
-
-:root:not(.exp-glass)
-  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):hover::before,
-:root:not(.exp-glass)
-  button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):focus-visible::before {
-  opacity: 1;
-  background-position: 100% 0;
-}
-
-/* Touch devices — no hover to ride, so the press itself flashes the glint
-   across in one long, lazy sweep. */
-@media (hover: none) and (pointer: coarse) {
+   hovered (100% 0), so the band makes exactly one full pass per hover.
+   Hover-capable pointers only. */
+@media (hover: hover) and (pointer: fine) {
   :root:not(.exp-glass)
-    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):active::before {
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    pointer-events: none;
+
+    background: linear-gradient(
+      105deg,
+      transparent 42%,
+      rgba(255, 255, 255, 0.4) 50%,
+      transparent 58%
+    );
+    background-size: 250% 100%;
+    background-position: 0% 0;
+    background-repeat: no-repeat;
+
+    mix-blend-mode: screen;
+    opacity: 0;
+
+    transition:
+      background-position 650ms cubic-bezier(0.25, 1, 0.5, 1),
+      opacity 180ms ease;
+  }
+
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):hover::before,
+  :root:not(.exp-glass)
+    button:not([class*="gleam-edge"]):not([class*="before:"]):not(.dot-nav):not(.cite-chip):focus-visible::before {
     opacity: 1;
     background-position: 100% 0;
-    transition:
-      background-position 900ms cubic-bezier(0.25, 1, 0.5, 1),
-      opacity 120ms ease;
   }
 }
 
