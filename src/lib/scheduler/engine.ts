@@ -68,8 +68,13 @@ import { serverPushWorkspace, serverRestoreWorkspace } from "./ws-sync";
 const HOME = "/home/user";
 /** Max concurrent scheduled runs (E2B Hobby = limited concurrency). */
 const MAX_CONCURRENT_RUNS = 2;
-/** A run older than this while still "running" is declared failed. */
-const RUN_STALE_MS = 55 * 60_000;
+/** A run older than this while still "running" is declared failed.
+ *  RAISED 55min → 6h (Persistent Execution PRD §3): interactive runs now
+ *  auto-extend their round budget and legitimately run for hours; the
+ *  stale-kill only exists for genuinely-hung runs (the runner's own
+ *  transient ladder already recovers live failures). The E2B 24h sandbox
+ *  TTL remains the hard outer bound. */
+const RUN_STALE_MS = 6 * 60 * 60_000;
 /** Consecutive unreachable finalization checks before declaring failure. */
 const MAX_UNREACHABLE_CHECKS = 5;
 /** Tick lock window. 55s (was 20s): with heartbeats at 60s per client and
@@ -1086,7 +1091,10 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
         ? { scheduledTask: { taskId: input.taskId, runId: null, name: input.name ?? "" } }
         : {}),
       chatExecution: { execId, chatId, trigger: input.trigger, taskId: input.taskId ?? null },
-      maxRounds: 30,
+      // maxRounds intentionally NOT set: the runner's SOFT default (120,
+      // auto-extending at the boundary — Persistent Execution PRD §3)
+      // governs; an explicit low cap here would reintroduce the
+      // "stops after N rounds" bug for scheduled runs.
       status: "starting",
       content: "",
       startedAt,

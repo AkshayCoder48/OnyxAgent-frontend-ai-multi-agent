@@ -1027,6 +1027,44 @@ async function fetchNoTimeout(urlStr, opts) {
 
 // ── The streaming LLM call ──────────────────────────────────────────────
 const MAX_ATTEMPTS = 8; // 4 + headroom for the strict-gateway self-heal ladder
+// RATE-LIMIT LADDER (Persistent Execution PRD §8): 429/529 are provider-side
+// throttling — a TRANSIENT condition, not task failure. The runner WAITS it
+// out with bounded backoff honoring the provider's own Retry-After /
+// x-ratelimit-reset-* headers when present, otherwise 5s→120s exponential.
+// 10 attempts ≈ 10+ minutes of worst-case waiting before the honest
+// terminal error; a productive round resets the tally, so a working window
+// always gets a fresh ladder. (The old fail-fast was the #2 cause of "the
+// AI stops automatically" — one throttle event killed a whole run.)
+const RATE_LIMIT_MAX_ATTEMPTS = 10;
+function rateLimitRetryDelayMs(res, attempt) {
+  let hinted = 0;
+  try {
+    const ra = res.headers.get("retry-after");
+    if (ra) {
+      const asSec = Number(ra);
+      if (Number.isFinite(asSec) && asSec >= 0) hinted = asSec * 1000;
+      else {
+        const asDate = Date.parse(ra);
+        if (Number.isFinite(asDate)) hinted = asDate - Date.now();
+      }
+    }
+    if (!hinted) {
+      for (const h of ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "x-ratelimit-reset"]) {
+        const v = res.headers.get(h);
+        if (!v) continue;
+        const epoch = Number(v);
+        if (Number.isFinite(epoch) && epoch > 1e12) { hinted = epoch - Date.now(); break; }
+        const m = /^\s*(?:(\d+(?:\.\d+)?)\s*h)?(?:(\d+)\s*m(?!s))?(?:(\d+(?:\.\d+)?)\s*s)?(?:(\d+)\s*ms)?\s*$/.exec(v);
+        if (m && (m[1] || m[2] || m[3] || m[4])) {
+          hinted = ((Number(m[1]) || 0) * 3600 + (Number(m[2]) || 0) * 60 + (Number(m[3]) || 0)) * 1000 + Number(m[4] || 0);
+          break;
+        }
+      }
+    }
+  } catch {}
+  if (hinted > 0) return Math.min(Math.max(hinted, 3000), 300_000);
+  return Math.min(5000 * 2 ** Math.max(0, attempt - 1), 120_000);
+}
 // DEAD-WIRE GUARD (not a duration cap): reader.read() rejecting after this
 // many milliseconds with ZERO bytes on the wire. Provider keep-alive comments
 // (": ping" / empty SSE frames) arrive as bytes and reset it, so an ACTIVE
@@ -1383,11 +1421,29 @@ async function streamRoundEvents(state, round, finalRound) {
       }
     }
     if (res && !res.ok) {
-      // RATE-LIMIT POLICY (user-requested change): 429/529 is NOT retried
-      // — fail fast with a clear message (auto-retrying burns the quota).
+      // RATE-LIMIT RETRY (Persistent Execution PRD §8): 429/529 are
+      // transient provider throttling — the run WAITS it out with bounded,
+      // provider-informed backoff (Retry-After / x-ratelimit-reset honored)
+      // and resumes the SAME round instead of dying mid-task. The tally
+      // lives on state (survives crash-resume) and resets after any
+      // productive round; a provider that throttles through the ENTIRE
+      // bounded wait surfaces an honest terminal error instead of a
+      // silent infinite loop.
+      if (res.status === 429 || res.status === 529) {
+        if (!Number.isFinite(state._rateLimitRetries)) state._rateLimitRetries = 0;
+        if (state._rateLimitRetries < RATE_LIMIT_MAX_ATTEMPTS) {
+          state._rateLimitRetries += 1;
+          const waitMs = rateLimitRetryDelayMs(res, state._rateLimitRetries);
+          emitEvent({ t: "status", kind: "retry", round, attempt: state._rateLimitRetries, delayMs: waitMs, reason: "Rate limit (HTTP " + res.status + ") — waiting for the provider window to reopen, then resuming the SAME task (no progress lost)" });
+          await sleep(waitMs);
+          continue;
+        }
+        const detailRl = await res.text().catch(() => "");
+        return { content: "", reasoning: "", toolCalls: [], error: "Rate limit persisted through " + RATE_LIMIT_MAX_ATTEMPTS + " spaced waits (HTTP " + res.status + ") — the provider kept throttling for the entire window. The run stopped without losing progress; re-send it once the provider recovers. " + cleanDetail(detailRl, res.status) };
+      }
       // Transient 5xx / 408 retry INDEFINITELY with capped backoff (a
       // gateway hiccup is transport, not task failure — PRD §15/§16).
-      const retryable = (res.status >= 500 || res.status === 408) && res.status !== 529;
+      const retryable = res.status >= 500 || res.status === 408;
       if (retryable) {
         const delay = nextTransientDelay();
         emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "HTTP " + res.status });
@@ -1395,9 +1451,6 @@ async function streamRoundEvents(state, round, finalRound) {
         continue;
       }
       const detail = await res.text().catch(() => "");
-      if (res.status === 429 || res.status === 529) {
-        return { content: "", reasoning: "", toolCalls: [], error: "Rate limit reached (HTTP " + res.status + ") — the provider is throttling requests. Wait a moment and send again. " + cleanDetail(detail, res.status) };
-      }
       // 4xx on stream:true → MAY be "streaming not supported" — one
       // non-streaming fallback attempt before giving up.
       if (res.status < 500 && res.status !== 408) {
@@ -2846,14 +2899,17 @@ const DIGEST_TOOLS = new Set(${JSON.stringify(ONYX_MD_DIGEST_TOOLS)});
 const BRIDGE_DIR = path.join(STATE_DIR, "bridge");
 const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
 const BRIDGE_TIMEOUT_MS = { ask_user: 900_000 };
-// ACK FAST-FAIL (240s timeout fix): the browser writes an .ack.json file the
-// moment it PICKS UP the request (before executing the tool). If no ack
-// arrives within this window, no app tab is consuming the run's events
-// (closed / asleep / backgrounded) — fail NOW with the actionable message
-// instead of burning the full per-tool timeout. 25s: generous enough for one
-// reconnect backoff wake in a hidden tab (timers throttle to ≥1min there),
-// instant compared to 240s.
-const BRIDGE_ACK_WINDOW_MS = 25_000;
+// ACK WINDOW (Persistent Execution PRD §6/§7): the browser writes an
+// .ack.json file the moment it PICKS UP the request (before executing the
+// tool). The SSE consumer loop itself is network-promise-driven and KEEPS
+// RUNNING in hidden/backgrounded tabs — but browser timer throttling
+// (≥1/min in intensively-throttled hidden tabs), a reconnect backoff wake
+// (up to 30s), or a memory-saver freeze can each delay the ack write well
+// past the old 25s window, which made bridge tools fail-fast and the model
+// wrap up prematurely (a background auto-stop cause). 120s covers throttle
+// + backoff + processing while still failing fast vs the 240s tool budget
+// when the tab is genuinely closed.
+const BRIDGE_ACK_WINDOW_MS = 120_000;
 
 let ALL_TOOLS = TOOLS;
 
@@ -2929,6 +2985,35 @@ async function runBridgeTool(callId, name, args) {
 }
 
 // ── The agent loop ──────────────────────────────────────────────────────
+/** COMPLETION HEURISTIC (Persistent Execution PRD §9): does this
+ *  no-tool-call text read like a FINAL answer, or like a mid-task narration
+ *  that lost its tool calls? Short blobs, text ending mid-thought, and
+ *  forward-looking promises ("I'll now…", "next step…") look unfinished;
+ *  substantive text without forward promises reads as finished. Used to
+ *  decide whether to CHALLENGE the round before allowing the run to end. */
+function looksLikeFinalAnswer(content) {
+  const t = String(content || "").trim();
+  if (!t) return false;
+  const tail = t.slice(-240);
+  // Forward-looking promises in the closing text = the model intended to
+  // keep working (narration, not a final answer).
+  if (
+    /I('| wi)ll (now )?(continue|proceed|do|run|check|verify|search|open|read|write|create|edit|fetch|install|build)|next step|moving on|let me (now )?(check|run|search|open|read|write|create|edit|try)|one moment|coming up|stay tuned/i.test(
+      tail
+    )
+  ) {
+    return false;
+  }
+  // Ends mid-sentence (trailing connective/punctuation) = truncated thought.
+  if (/[,;:(\-\u2014]$/.test(t)) return false;
+  // Very short non-conclusive text after tool work = suspicious.
+  if (t.length < 80) {
+    return /\b(all done|task complete|that'?s it|done[.!?]|complete[.!?]|finished[.!?])\b/i.test(t);
+  }
+  // Substantive text without forward promises reads as a final answer.
+  return true;
+}
+
 async function resolveRun() {
   const arg = process.argv[2];
   if (arg) {
@@ -3064,12 +3149,27 @@ async function main() {
     await fs.mkdir(BRIDGE_DIR, { recursive: true });
   } catch {}
 
-  // MAX-ROUNDS (PRD TR-3): the cap is higher (30) and, crucially, the LAST
-  // round is a WRAP-UP round — a system note tells the model to answer now
-  // and tools are withheld from the request, so hitting the cap ends the
-  // turn with a real answer instead of the old terminal
-  // "Background run hit the max-rounds cap" error.
-  const maxRounds = state.maxRounds ?? 30;
+  // ROUND BUDGET (Persistent Execution PRD §3): maxRounds is a SOFT budget,
+  // NEVER a termination. The old behavior withheld tools on the final round
+  // and force-ended the turn with a canned "I reached the tool-call limit…"
+  // message — the #1 cause of "the AI stops automatically after a certain
+  // number of rounds". Now, at the boundary the runner emits an
+  // operator-visible round_budget notice, injects a continuation note, and
+  // AUTO-EXTENDS the budget in chunks up to a hard safety ceiling. The turn
+  // ends ONLY on verified completion (no tool calls + the completion check
+  // below), an explicit user Stop, or a genuine provider blocker.
+  const ROUND_BUDGET_DEFAULT = 120;
+  const ROUND_BUDGET_EXTEND_BY = 60;
+  const ROUND_HARD_CEILING = 1200;
+  let roundBudget = Math.max(1, state.maxRounds ?? ROUND_BUDGET_DEFAULT);
+  let budgetNotices = 0;
+  // COMPLETION CHECK (Persistent Execution PRD §9): "the model stopped
+  // calling tools" ≠ "the objective is complete". A no-tool-call response
+  // is CHALLENGED (max 2× per run) when tools already ran and the text
+  // doesn't read like a final answer — the model either resumes tool work
+  // or explicitly confirms completion.
+  let completionChallenges = 0;
+  let sawToolActivity = false;
   // EMPTY-RESPONSE RE-ASKS: some gateways occasionally answer a round with
   // NOTHING (no text, no reasoning, no tool calls) — a transient completion
   // glitch, not a fatal condition. Instead of failing the whole turn with
@@ -3082,13 +3182,30 @@ async function main() {
   // before a task is ever declared failed. The task's lifetime is owned by
   // the run, not by a single crashed attempt.
   let roundCrashRetries = 0;
-  for (let round = 1; round <= maxRounds; round++) {
-    const isFinalRound = round === maxRounds;
-    if (isFinalRound && state.toolsEnabled !== false) {
-      state.messages.push({
-        role: "system",
-        content: "You have used your last available tool round. Provide your final answer to the user now. Do not request any more tools.",
-      });
+  for (let round = 1; ; round++) {
+    // SOFT-BUDGET EXTENSION: crossing the budget boundary does NOT end the
+    // turn — the model KEEPS its tools and is told to finish ONLY if the
+    // original objective is actually met. A retry of the same round number
+    // (transient rewind / crash retry) never re-triggers this: the budget
+    // was already extended past it.
+    if (round > roundBudget) {
+      if (round > ROUND_HARD_CEILING) {
+        const msg =
+          "Safety ceiling reached (" + ROUND_HARD_CEILING + " rounds) — the run was halted to protect resources. This is NOT a completed task; nothing was lost. Ask the agent to continue and it resumes from the persisted state.";
+        await emitEvent({ t: "error", message: msg });
+        await setTerminal("error", msg);
+        return;
+      }
+      roundBudget = round + ROUND_BUDGET_EXTEND_BY - 1;
+      budgetNotices += 1;
+      await emitEvent({ t: "status", kind: "round_budget", round, budget: roundBudget, notice: budgetNotices });
+      if (state.toolsEnabled !== false) {
+        state.messages.push({
+          role: "system",
+          content:
+            "Round-budget checkpoint: you have completed " + (round - 1) + " rounds. Re-read the ORIGINAL user request and check every part of it. If EVERYTHING is done, write your final answer now (no tool calls). If ANY work remains, CONTINUE — call the next tool immediately. The budget has been extended; never abandon an unfinished task early.",
+        });
+      }
     }
     // TOOL OBSERVABILITY (tool-reliability Part B — parity with the fg
     // runtime's model_request_start): the browser-side processor forwards
@@ -3104,7 +3221,7 @@ async function main() {
     }
     let result;
     try {
-      result = await streamRoundEvents(state, round, isFinalRound);
+      result = await streamRoundEvents(state, round, false);
     } catch (e) {
       if (roundCrashRetries < 5) {
         roundCrashRetries += 1;
@@ -3125,11 +3242,12 @@ async function main() {
       await setTerminal("error", result.error);
       return;
     }
+    // A productive round proves the provider window is open — reset the
+    // rate-limit wait ladder (Persistent Execution PRD §8).
+    if (state._rateLimitRetries) state._rateLimitRetries = 0;
     const toolCalls = (result.toolCalls ?? []).filter((tc) => tc && tc.function && tc.function.name);
-    if (!toolCalls.length || isFinalRound) {
-      const content = result.content.trim() || (isFinalRound
-        ? "I reached the tool-call limit after completing the work steps — here is where things stand. Ask me to continue and I'll pick up from the plan."
-        : "");
+    if (!toolCalls.length) {
+      const content = result.content.trim();
       if (!content && !result.reasoning.trim()) {
         // EMPTY RESPONSE — re-ask this round before declaring failure.
         if (emptyRetries < 2) {
@@ -3146,10 +3264,35 @@ async function main() {
         await setTerminal("error", "The model returned an empty response.");
         return;
       }
+      // COMPLETION CHECK (Persistent Execution PRD §9): a finished model
+      // response is NOT necessarily a completed objective. When tools
+      // already ran this turn and the response doesn't read like a final
+      // answer (short narration, mid-thought ending, promised future
+      // work), CHALLENGE it — the model either CONTINUES with tools or
+      // explicitly confirms completion. Max 2 challenges per run; after
+      // that the response is accepted (the model knows best when it is
+      // genuinely done and keeps insisting).
+      if (
+        sawToolActivity &&
+        completionChallenges < 2 &&
+        !looksLikeFinalAnswer(content)
+      ) {
+        completionChallenges += 1;
+        await emitEvent({ t: "status", kind: "completion_check", round, attempt: completionChallenges });
+        state.messages.push({ role: "assistant", content: result.content || "", ...(result.reasoning ? { reasoning: result.reasoning } : {}) });
+        state.messages.push({
+          role: "system",
+          content:
+            "COMPLETION CHECK: your last response contained no tool calls, but the original task may not be finished. Compare the user's ORIGINAL request against what you actually did, item by item. If everything is genuinely complete, reply with your final answer and no tool calls. If ANYTHING is still missing, CONTINUE the work — call the next tool now. Do not describe what you would do; DO it.",
+        });
+        round--; // the challenge re-enters this round number
+        continue;
+      }
       await emitEvent({ t: "done", content });
       await setTerminal("done", content);
       return;
     }
+    sawToolActivity = true;
     emptyRetries = 0; // a productive round resets the empty streak
     // ONE assistant message carrying content + tool_calls (protocol shape).
     // STRICT-COMPAT (LLM HTTP 400 fix): the wire format keeps ONLY fields
@@ -3211,8 +3354,9 @@ async function main() {
     }
     await writeState(state); // persist the conversation per round
   }
-  // Unreachable in the normal path (the final round always ends via done),
-  // kept as a defensive terminal so the run can never hang open.
+  // Unreachable in the normal path (every exit above is an explicit
+  // return: done, verified completion, user-visible blocker, or the safety
+  // ceiling) — kept as a defensive terminal so the run can never hang open.
   await emitEvent({ t: "done", content: "" });
   await setTerminal("done", "");
 }

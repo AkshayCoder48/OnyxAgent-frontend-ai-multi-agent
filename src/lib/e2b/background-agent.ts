@@ -64,11 +64,16 @@ export interface BgEvent {
   /** round_start: the active wire-compat mode label (e.g. "native",
    *  "compact+toolText"). */
   wire?: string;
-  /** status events: "boot" | "first_token" | "retry" | "llm_end" */
+  /** status events: "boot" | "first_token" | "retry" | "llm_end" |
+   *  "round_budget" | "completion_check" (Persistent Execution PRD §3/§9) */
   kind?: string;
   attempt?: number;
   delayMs?: number;
   reason?: string;
+  /** round_budget status: the newly extended round budget. */
+  budget?: number;
+  /** round_budget status: which extension notice this is (1, 2, …). */
+  notice?: number;
   /** Runner wall-clock (Date.now() inside the sandbox) — duration badges
    *  stamp with WHEN THINGS ACTUALLY HAPPENED, not browser-poll time. */
   ts?: number;

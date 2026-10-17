@@ -161,7 +161,52 @@ export interface AgentTurnResult {
     | "no_provider";
 }
 
+// ROUND BUDGET (Persistent Execution PRD §3): MAX_ROUNDS is a SOFT budget
+// per extension window — hitting it NEVER ends the turn. The loop emits a
+// visible notice, injects a continuation note, and extends the budget in
+// ROUND_BUDGET_EXTEND_BY chunks up to the hard safety ceiling. This
+// replaces the old "stopReason: max_rounds" termination, which silently
+// abandoned unfinished tasks after 50 rounds (a top "AI stops
+// automatically" cause).
 const MAX_ROUNDS = 50;
+const ROUND_BUDGET_EXTEND_BY = 50;
+const ROUND_HARD_CEILING = 1000;
+// RATE-LIMIT WAIT LADDER (Persistent Execution PRD §8): 429/529 are
+// transient provider throttling — the turn WAITS (bounded, 5s→120s
+// exponential) and resumes the same round instead of dying mid-task. A
+// productive round resets the ladder; only a provider that throttles
+// through the ENTIRE bounded wait surfaces an honest terminal error.
+const RATE_LIMIT_MAX_ATTEMPTS = 8;
+
+/** COMPLETION HEURISTIC (Persistent Execution PRD §9): does this
+ *  no-tool-call text read like a FINAL answer, or like a mid-task narration
+ *  that lost its tool calls? Short blobs, text ending mid-thought, and
+ *  forward-looking promises ("I'll now…", "next step…") look unfinished;
+ *  substantive text without forward promises reads as finished. Used to
+ *  decide whether to CHALLENGE the round before allowing the turn to end. */
+function looksLikeFinalAnswer(content: string): boolean {
+  const t = String(content || "").trim();
+  if (!t) return false;
+  const tail = t.slice(-240);
+  // Forward-looking promises in the closing text = the model intended to
+  // keep working (narration, not a final answer).
+  if (
+    /I('| wi)ll (now )?(continue|proceed|do|run|check|verify|search|open|read|write|create|edit|fetch|install|build)|next step|moving on|let me (now )?(check|run|search|open|read|write|create|edit|try)|one moment|coming up|stay tuned/i.test(
+      tail,
+    )
+  ) {
+    return false;
+  }
+  // Ends mid-sentence (trailing connective/punctuation) = truncated thought.
+  if (/[,;:(\-\u2014]$/.test(t)) return false;
+  // Very short non-conclusive text after tool work = suspicious.
+  if (t.length < 80) {
+    return /\b(all done|task complete|that'?s it|done[.!?]|complete[.!?]|finished[.!?])\b/i.test(t);
+  }
+  // Substantive text without forward promises reads as a final answer.
+  return true;
+}
+
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
 // ---------------------------------------------------------------------------
@@ -2391,7 +2436,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // (Custom tools + MCP servers were already hot-loaded at step 2.5, BEFORE
   // the tools snapshot — see above. Nothing more to load here.)
 
-  // 4. Agent loop — max MAX_ROUNDS.
+  // 4. Agent loop — soft round budget (auto-extends; hard safety ceiling).
   let round = 0;
   let lastAssistantContent = "";
   let lastAssistantTextBeforeTools: string | undefined;
@@ -2418,6 +2463,10 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // 1s, 2s, 4s, 8s, 16s, 30s, 30s, … (PRD §15 backoff ladder)
     return Math.min(1000 * 2 ** Math.max(0, transientRetriesThisTurn - 1), 30_000);
   };
+  // RATE-LIMIT WAIT LADDER (Persistent Execution PRD §8): bounded 5s→120s
+  // exponential waits for 429/529 — the turn resumes the same round after
+  // each wait; a productive round resets the ladder.
+  let rateLimitRetriesThisTurn = 0;
   // "WORKED {TIME}" PANEL (PRD §§12–22): wall-clock window of this
   // generation — persisted on the final saves so a reload shows the same
   // "Worked 18s" summary (the panel's contents come from the persisted
@@ -2448,7 +2497,14 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // back in `message_saved`.
   const assistantMessageId = nanoid();
 
-  const effectiveMaxRounds = MAX_ROUNDS;
+  // SOFT ROUND BUDGET (Persistent Execution PRD §3): auto-extends at the
+  // boundary (visible notice + continuation note) up to the hard safety
+  // ceiling — the loop condition. Plus completion-challenge state (PRD §9:
+  // a no-tool-call round is verified before the turn may end).
+  let roundBudget = MAX_ROUNDS;
+  let roundBudgetNotices = 0;
+  let completionChallenges = 0;
+  let sawToolActivity = false;
 
   // SKIP-WAIT: stays true while this turn is running; the late-result
   // handlers of backgrounded tools re-checkpoint only while it is (after
@@ -2471,9 +2527,41 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
    *  opts.provider.model). */
   let lastServedModel = opts.provider.model;
 
-  while (round < effectiveMaxRounds) {
+  while (round < ROUND_HARD_CEILING) {
     round += 1;
     roundStartTimes[round] = Date.now();
+    // SOFT-BUDGET EXTENSION (Persistent Execution PRD §3): crossing the
+    // budget boundary NEVER ends the turn — a visible notice is emitted, a
+    // continuation note is injected, and the budget extends by another
+    // window. The model keeps its tools and is told to finish ONLY if the
+    // original objective is actually met. A retry of the same round number
+    // (transient rewind / rate-limit wait / completion challenge) never
+    // re-triggers this: the budget was already extended past it.
+    if (round > roundBudget) {
+      roundBudget = round + ROUND_BUDGET_EXTEND_BY - 1;
+      roundBudgetNotices += 1;
+      logWarn(
+        "agent",
+        `Round budget extended to ${roundBudget} — the task keeps running (Persistent Execution PRD §3)`,
+        { context: { round, model: lastServedModel, tool_calls: allToolCalls.length, notice: roundBudgetNotices } },
+      );
+      emit({
+        type: "rate_limited",
+        data: {
+          retryAfterMs: 1_000,
+          attempt: roundBudgetNotices,
+          reason: `round budget extended to ${roundBudget} — the task keeps running until it's actually done`,
+        },
+        timestamp: nowISO(),
+      });
+      messages.push({
+        role: "system",
+        content:
+          "Round-budget checkpoint: you have completed " +
+          (round - 1) +
+          " rounds. Re-read the ORIGINAL user request and check every part of it. If EVERYTHING is done, write your final answer now (no tool calls). If ANY work remains, CONTINUE — call the next tool immediately. The budget has been extended; never abandon an unfinished task early.",
+      });
+    }
     // Refresh the request-scoped tool set (the database latch may have
     // flipped via this turn's earlier tool calls).
     tools = toWireTools(buildScopedTools()).slice(0, MAX_LLM_TOOLS);
@@ -2551,9 +2639,57 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // inject a JSON error payload into the SSE stream — empty responses,
       // 524s) retry INDEFINITELY with capped exponential backoff. The turn
       // has no wall-clock budget (PRD §9/§19); only an explicit user Stop
-      // ends it. Rate-limit errors are deliberately NOT retried (user
-      // request): 429 fails fast with a clear message — auto-retrying would
-      // keep burning the quota.
+      // ends it.
+      // RATE-LIMIT WAIT (Persistent Execution PRD §8): 429/529 are transient
+      // provider throttling — the turn WAITS (bounded 5s→120s exponential)
+      // and resumes the SAME round instead of dying mid-task. With the
+      // auto-router active the failed candidate is also benched, so the
+      // retry lands on the next-best provider. Only a provider that
+      // throttles through the ENTIRE bounded wait surfaces an honest
+      // terminal error (the old fail-fast was a top "AI stops
+      // automatically" cause — one throttle event killed the whole turn).
+      const isRateLimit =
+        /rate limit reached \(HTTP|HTTP 429|HTTP 529|too many requests|resource_exhausted|quota exceeded/i.test(message);
+      if (isRateLimit && rateLimitRetriesThisTurn < RATE_LIMIT_MAX_ATTEMPTS) {
+        rateLimitRetriesThisTurn += 1;
+        const delayMs = Math.min(5000 * 2 ** (rateLimitRetriesThisTurn - 1), 120_000);
+        console.warn(
+          `[agent] Rate limited on round ${round} — waiting ${Math.round(delayMs / 1000)}s (${rateLimitRetriesThisTurn}/${RATE_LIMIT_MAX_ATTEMPTS}), the turn keeps running`,
+        );
+        logWarn(
+          "agent",
+          `Rate limited — waiting ${Math.round(delayMs / 1000)}s then resuming (${rateLimitRetriesThisTurn}/${RATE_LIMIT_MAX_ATTEMPTS})`,
+          { detail: message, context: { round, model: lastServedModel, retry_in_ms: delayMs } },
+        );
+        emit({
+          type: "rate_limited",
+          data: {
+            retryAfterMs: delayMs,
+            attempt: rateLimitRetriesThisTurn,
+            maxAttempts: RATE_LIMIT_MAX_ATTEMPTS,
+            reason: "provider rate limit — waiting for the window to reopen, then resuming the SAME task (no progress lost)",
+          },
+          timestamp: nowISO(),
+        });
+        // Sleep, but wake early if the user aborts — the loop-top abort
+        // check then ends the turn cleanly.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          if (signal) {
+            if (signal.aborted) {
+              clearTimeout(timer);
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            }, { once: true });
+          }
+        });
+        round -= 1; // retry the same round
+        continue;
+      }
       const isTransientTransport =
         /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal/i.test(message);
       // NOTE: no attempt cap and no round exclusion — even the final round
@@ -2722,6 +2858,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     }
 
     if (roundResult.usage) lastUsage = roundResult.usage;
+    // A productive round proves the provider window is open — reset the
+    // rate-limit wait ladder (Persistent Execution PRD §8).
+    rateLimitRetriesThisTurn = 0;
     // GENUI SENTINEL NORMALIZATION: models sometimes write the WRONG closing
     // marker — `<<<genui>>>` instead of `<<</genui>>>`. Rewrite any open-marker
     // that appears while a block is already open into a proper close marker
@@ -2799,6 +2938,42 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
     // No tool calls → final result.
     if (roundResult.toolCalls.length === 0 || roundResult.aborted) {
+      // COMPLETION CHECK (Persistent Execution PRD §9): a finished model
+      // response is NOT necessarily a completed objective. When tools
+      // already ran this turn and the response doesn't read like a final
+      // answer (short narration, mid-thought ending, promised future
+      // work), CHALLENGE it — the model either CONTINUES with tools or
+      // explicitly confirms completion. Max 2 challenges per turn; after
+      // that the response is accepted (the model keeps insisting it is
+      // done and the challenge would only ping-pong).
+      if (
+        !roundResult.aborted &&
+        sawToolActivity &&
+        completionChallenges < 2 &&
+        !looksLikeFinalAnswer(roundResult.content)
+      ) {
+        completionChallenges += 1;
+        emit({
+          type: "rate_limited",
+          data: {
+            retryAfterMs: 1_000,
+            attempt: completionChallenges,
+            reason: "verifying the task is fully complete before finishing",
+          },
+          timestamp: nowISO(),
+        });
+        // The narrated text stays visible (its parts were already
+        // streamed); the history now carries it so the model answers in
+        // context when confirming or continuing.
+        messages.push({ role: "assistant", content: roundResult.content || "" });
+        messages.push({
+          role: "system",
+          content:
+            "COMPLETION CHECK: your last response contained no tool calls, but the original task may not be finished. Compare the user's ORIGINAL request against what you actually did, item by item. If everything is genuinely complete, reply with your final answer and no tool calls. If ANYTHING is still missing, CONTINUE the work — call the next tool now. Do not describe what you would do; DO it.",
+        });
+        round -= 1; // the challenge re-enters this round number
+        continue;
+      }
       // If the content is empty (e.g. aborted before any text arrived),
       // use a minimal placeholder so the DB row isn't empty.
       const finalContent = roundResult.content || (roundResult.aborted ? "" : "");
@@ -2868,6 +3043,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         stopReason: roundResult.aborted ? "aborted" : "complete",
       };
     }
+
+    sawToolActivity = true;
 
     // Tool calls requested — append the assistant turn to the message list.
     // STRICT-COMPAT (LLM HTTP 400 fix): reasoning_content is withheld by
@@ -3252,12 +3429,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // Loop back for the next round.
   }
 
-  // Hit max rounds — persist whatever content was generated (don't error).
-  // The agent may have produced useful intermediate text or tool results;
-  // surfacing those is better than dropping them on the floor with an error.
-  logWarn("agent", `Stopped: reached max rounds (${effectiveMaxRounds}) — showing the last response`, {
-    context: { model: lastServedModel, rounds: effectiveMaxRounds, tool_calls: allToolCalls.length },
+  // HARD SAFETY CEILING (Persistent Execution PRD §3/§13): the ONLY way
+  // the loop itself runs out — every other exit is an explicit return
+  // (verified completion, user abort, or a surfaced provider blocker).
+  // This is an operator-visible diagnostic, never a fake completion: the
+  // saved message says the task was HALTED by the safety ceiling, and the
+  // error event tells the user how to resume from the persisted checkpoint.
+  const ceilingMsg =
+    "Safety ceiling reached (" + ROUND_HARD_CEILING + " rounds) — the turn was halted to protect resources. This is NOT a completed task; nothing was lost. Send a follow-up message and the agent resumes from the persisted checkpoint.";
+  logWarn("agent", `Safety ceiling reached (${ROUND_HARD_CEILING} rounds) — halting to protect resources (NOT a completed task)`, {
+    context: { model: lastServedModel, rounds: ROUND_HARD_CEILING, tool_calls: allToolCalls.length },
   });
+  emit({ type: "error", data: { message: ceilingMsg }, timestamp: nowISO() });
   const savedMessage = await conversationService.saveAgentCheckpoint(
     conversationId,
     opts.userId,
@@ -3266,7 +3449,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       role: "assistant",
       content:
         lastAssistantContent ||
-        `(reached max rounds (${effectiveMaxRounds}); last content shown above)`,
+        `(safety ceiling of ${ROUND_HARD_CEILING} rounds reached — the task was halted, not completed; send a follow-up to resume)`,
       thinking: lastAssistantThinking || undefined,
       reasoning: lastAssistantReasoning || undefined,
       parts: buildAssistantParts(
@@ -3274,13 +3457,13 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         lastAssistantReasoning || undefined,
         allToolCalls,
         lastAssistantContent ||
-          `(reached max rounds (${effectiveMaxRounds}); last content shown above)`,
+          `(safety ceiling of ${ROUND_HARD_CEILING} rounds reached — the task was halted, not completed; send a follow-up to resume)`,
         lastAssistantTextBeforeTools,
       ),
       toolCalls: allToolCalls,
       modelName: lastServedModel,
       isStreaming: false,
-      generation: generationSummary(false),
+      generation: generationSummary(true),
     },
   );
   emit({

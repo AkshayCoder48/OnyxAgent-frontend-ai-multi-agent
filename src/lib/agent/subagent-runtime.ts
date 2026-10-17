@@ -279,7 +279,11 @@ async function runSubagentLoop(
     const base = config.baseUrl.replace(/\/$/, "");
     const targetUrl = config.noPrefix ? base : `${base}/chat/completions`;
     let fullResponse = "";
-    let maxIterations = 10;
+    // ITERATION CAP (Persistent Execution PRD §3): a SAFETY bound, not a
+    // silent truncation — raised 10 → 25, and an exhausted cap returns an
+    // honest marker instead of an empty string (the orchestrator used to
+    // treat an empty subagent reply as its completed answer).
+    let maxIterations = 25;
     // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
     // bounded per subagent run so a dead provider can't loop forever.
     let gatewayRetries = 0;
@@ -788,6 +792,12 @@ async function runSubagentLoop(
         isStreaming: false,
       });
       break;
+    }
+
+    // Cap exhausted mid-task (tool calls were still flowing) — mark it
+    // honestly so the orchestrator never mistakes this for a real answer.
+    if (maxIterations <= 0 && !fullResponse.trim()) {
+      fullResponse = "(subagent stopped after its round budget — no final answer was produced)";
     }
 
     return fullResponse;

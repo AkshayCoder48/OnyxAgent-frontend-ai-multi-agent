@@ -379,6 +379,14 @@ export const executionHub = {
         mode: "background",
         trigger: "resume",
       });
+      // HONEST ELAPSED (Persistent Execution PRD §12): the resumed
+      // execution's clock starts at the ORIGINAL launch (the persisted
+      // job's startedAt), not at resume time — the sidebar elapsed shows
+      // the run's true age instead of restarting from zero.
+      if (typeof job.startedAt === "number" && job.startedAt > 0) {
+        record.startedAt = job.startedAt;
+        useHubStore.getState().patch(record.id, { startedAt: job.startedAt });
+      }
       // Seed the execution store from Dexie (the checkpointed history).
       try {
         const rows = await conversationService.getMessages(conversationId, userId);

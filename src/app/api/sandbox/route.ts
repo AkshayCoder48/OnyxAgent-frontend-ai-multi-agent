@@ -2211,7 +2211,11 @@ export async function POST(req: NextRequest) {
       // as long as its timeout window allows (1h max on the Hobby plan).
       case "bg_start": {
         const state = (args.state as Record<string, unknown>) ?? {};
-        const maxRounds = (args.maxRounds as number) ?? 30;
+        // ROUND BUDGET (Persistent Execution PRD §3): the default is a SOFT
+        // budget — the runner AUTO-EXTENDS it at the boundary (round_budget
+        // notice + continuation note) up to a hard safety ceiling, so a
+        // long task is never terminated for hitting a round count.
+        const maxRounds = (args.maxRounds as number) ?? 120;
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         // Full window for the background run — resets the timeout countdown.
         try {

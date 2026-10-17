@@ -88,8 +88,12 @@ type Subscriber = (indexed: IndexedTurnEvent) => void;
 
 /** How long a finished job stays retrievable. */
 const FINISHED_TTL_MS = 10 * 60_000;
-/** Hard wall-clock cap on a single turn. */
-const RUNNING_TTL_MS = 12 * 60_000;
+/** Hard wall-clock cap on a single turn. RAISED 12min → 30min (Persistent
+ *  Execution PRD §3): the cap is a resource guard for the in-memory job
+ *  registry, not a task budget — long multi-tool replies were being killed
+ *  mid-work with a misleading "ran too long" error. The 90s idle watchdog
+ *  below remains the REAL stall guard. */
+const RUNNING_TTL_MS = 30 * 60_000;
 /** Finished jobs kept in memory (LRU by finish time). */
 const MAX_FINISHED_JOBS = 20;
 
@@ -430,7 +434,7 @@ function errorDetail(error: unknown): string {
     if (status === "429") {
       return "The AI provider is rate-limiting us for a moment. Try again shortly.";
     }
-    if (status.startsWith("5")) {
+    if (status?.startsWith("5")) {
       return "The AI provider is having a rough minute. Try again shortly.";
     }
   }
@@ -482,7 +486,10 @@ export function startTurnJob(
 /* agent keeps planning while they run.                                */
 /* ------------------------------------------------------------------ */
 
-const MAX_TOOL_ROUNDS = 5;
+// TOOL BUDGET (Persistent Execution PRD §3): raised 5 → 15 — a safety
+// bound on the fence-tool protocol per reply, generous enough that a
+// legitimate multi-step reply is never cut short.
+const MAX_TOOL_ROUNDS = 15;
 /** How long a finished reply stays open waiting for backgrounded tools. */
 const BG_TOOL_CAP_MS = 90_000;
 

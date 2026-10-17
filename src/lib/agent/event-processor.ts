@@ -383,7 +383,18 @@ export class AgentEventProcessor {
     // in the background replayed its terminal events minutes/hours later
     // and the summary showed the entire away-gap as work time.
     const evTs = (wsEvent.data as { ts?: number }).ts;
-    if (typeof evTs === "number" && evTs > 0) this.lastEventTs = evTs;
+    if (typeof evTs === "number" && evTs > 0) {
+      this.lastEventTs = evTs;
+      // RESUMED-RUN BACKDATING (honest durations — Persistent Execution
+      // PRD §12): turnStartedAt was stamped at browser-RECEIVE time
+      // (Date.now() at resume); replayed events carry the sandbox's
+      // ORIGINAL wall clock. Backdate the window start to the earliest
+      // runner stamp so "Worked {time}" reports the REAL work window —
+      // never the away gap, never a clamped 0s.
+      if (this.turnStartedAt !== null && evTs < this.turnStartedAt) {
+        this.turnStartedAt = evTs;
+      }
+    }
 
     const isFromActiveGeneration = (): boolean => {
       if (!eventGenId) return true; // legacy / external event

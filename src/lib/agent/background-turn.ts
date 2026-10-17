@@ -979,6 +979,29 @@ function replayEvent(
           reason: typeof ev.reason === "string" ? ev.reason : undefined,
           ts,
         });
+      } else if (kind === "round_budget") {
+        // ROUND-BUDGET EXTENSION (Persistent Execution PRD §3): the soft
+        // budget auto-extended — a visible "still working" notice, never
+        // a stop and never a fake completion.
+        emit("rate_limited", {
+          retryAfterMs: 1_000,
+          attempt: ev.notice ?? 1,
+          reason:
+            typeof ev.budget === "number"
+              ? `round budget extended to ${ev.budget} — the task keeps running until it's actually done`
+              : "round budget extended — the task keeps running until it's actually done",
+          ts,
+        });
+      } else if (kind === "completion_check") {
+        // COMPLETION VERIFICATION (Persistent Execution PRD §9): the runner
+        // is challenging a no-tool-call response before allowing the run
+        // to end — surfaced so the UI never mistakes this for a stall.
+        emit("rate_limited", {
+          retryAfterMs: 1_000,
+          attempt: ev.attempt ?? 1,
+          reason: "verifying the task is fully complete before finishing",
+          ts,
+        });
       }
       // "boot" and unknown kinds carry no UI state — ignored.
       break;
