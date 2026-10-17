@@ -1,9 +1,10 @@
 "use client";
 
 import { memo, useEffect, useRef } from "react";
-import { FileText, Globe, Link, X } from "lucide-react";
+import { Link, X } from "lucide-react";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
 import type { SourceItem } from "@/lib/chat-sources";
+import { SourceFavicon } from "@/components/chat/source-favicon";
 import { cn } from "@/lib/utils";
 
 function ScoreDot({ score }: { score: number }) {
@@ -40,7 +41,7 @@ function RAGSourceRow({ item, highlighted }: { item: SourceItem; highlighted: bo
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <FileText className="text-foreground/40 h-3.5 w-3.5 shrink-0" />
+            <SourceFavicon url={item.url} kind="rag" />
             <p className="text-foreground truncate text-xs font-medium" title={item.title}>
               {item.title}
             </p>
@@ -81,7 +82,7 @@ function WebSourceRow({ item, highlighted }: { item: SourceItem; highlighted: bo
       )}
     >
       <div className="flex items-start gap-2.5">
-        <Globe className="text-foreground/40 mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <SourceFavicon url={item.url} kind="web" className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <p className="text-foreground truncate text-xs font-medium" title={item.title}>
             {item.title}

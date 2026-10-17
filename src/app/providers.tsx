@@ -8,6 +8,7 @@ import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
 import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
 import { applyPersistedBrand } from "@/lib/brand";
+import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -84,6 +85,10 @@ export function Providers({ children }: ProvidersProps) {
       <ThemeProvider>
         <ColorSchemeInitializer />
         <ExperimentalUiSync />
+        {/* E2B persistency: pre-warms the lifecycle caches + auto-pauses
+            workspace sandboxes (full state: filesystem + RAM) on app exit;
+            the next open auto-resumes them via Sandbox.connect. */}
+        <SandboxLifecycleSync />
         <TooltipProvider>{children}</TooltipProvider>
         <Toaster richColors position="bottom-right" />
         {/* Global error nets — every capture lands in the log store, shown

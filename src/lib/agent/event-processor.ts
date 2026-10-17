@@ -88,6 +88,12 @@ export class AgentEventProcessor {
    *  "Worked 18s" start point. Stamped per generation (a new generation
    * resets it). */
   private turnStartedAt: number | null = null;
+  /** Latest runner wall-clock `ts` seen on ANY event of the current
+   *  generation (background mode stamps every event with the sandbox
+   *  clock). Terminal stamps ("Worked {time}", round ends) prefer it so a
+   *  replayed run reports WHEN the work finished, not when this browser
+   * happened to receive the replay. */
+  private lastEventTs: number | null = null;
 
   // ── STREAMING BUFFERS (render batching — see original comments) ───────
   private textDeltaBuffer = "";
@@ -271,6 +277,7 @@ export class AgentEventProcessor {
     }
     // New generation → new "Worked {time}" window.
     this.turnStartedAt = Date.now();
+    this.lastEventTs = null;
     this.createNewMessage("");
     this.currentMessageGeneration = this.activeGenerationId;
   }
@@ -287,7 +294,12 @@ export class AgentEventProcessor {
     const store = this.store.getState();
     const msg = store.messages.find((m) => m.id === id);
     if (!msg || msg.generation) return; // never overwrite a settled summary
-    const completedAt = Date.now();
+    // HONEST DURATIONS: prefer the latest runner wall-clock stamp (bg
+    // mode) — a run that finished while the app was away must show its
+    // REAL work window, not browser-receive time (the away-gap bug).
+    // Falls back to Date.now() for the in-browser runtime (no runner ts).
+    const completedAt =
+      this.lastEventTs !== null && this.lastEventTs > 0 ? this.lastEventTs : Date.now();
     let startedAt = this.turnStartedAt ?? undefined;
     if (startedAt === undefined) {
       // Fallback: earliest part stamp on the message.
@@ -302,6 +314,7 @@ export class AgentEventProcessor {
       }
     }
     if (startedAt === undefined) startedAt = msg.timestamp instanceof Date ? msg.timestamp.getTime() : completedAt;
+    // Clock-skew guard: the summary window can never be negative.
     const durationMs = Math.max(0, completedAt - startedAt);
     store.updateMessage(id, (m) => ({
       ...m,
@@ -345,6 +358,7 @@ export class AgentEventProcessor {
     this.activeGenerationId = null;
     this.currentMessageGeneration = null;
     this.turnStartedAt = null;
+    this.lastEventTs = null;
     this.store.getState().setPendingQuestions(null);
     this.store.getState().setProcessing(false);
     // Any still-open media_generation confirmation resolves as cancelled
@@ -359,6 +373,17 @@ export class AgentEventProcessor {
   handle = (wsEvent: WSEvent): void => {
     const eventGenId = getGenerationId(wsEvent);
     const activeGenId = this.activeGenerationId;
+
+    // HONEST DURATIONS (bg-run replay fix): track the LATEST runner
+    // wall-clock stamp seen on any event (`ts` rides text/reasoning deltas,
+    // tool_call / tool_result, llm_completed… in background mode). The
+    // generation summary ("Worked {time}") and the round stamps then use
+    // WHEN THE WORK ACTUALLY FINISHED IN THE SANDBOX — not this browser's
+    // receive time. Without it, a run that finished while the app was left
+    // in the background replayed its terminal events minutes/hours later
+    // and the summary showed the entire away-gap as work time.
+    const evTs = (wsEvent.data as { ts?: number }).ts;
+    if (typeof evTs === "number" && evTs > 0) this.lastEventTs = evTs;
 
     const isFromActiveGeneration = (): boolean => {
       if (!eventGenId) return true; // legacy / external event
@@ -812,9 +837,10 @@ export class AgentEventProcessor {
       case "tool_result": {
         if (!isFromActiveGeneration()) break;
         if (this.currentMessageId) {
-          const { tool_call_id, content } = wsEvent.data as {
+          const { tool_call_id, content, ts } = wsEvent.data as {
             tool_call_id: string;
             content: string;
+            ts?: number;
           };
           this.eventSeq += 1;
           if (this.toolOutputBuffer.has(tool_call_id)) {
@@ -830,9 +856,14 @@ export class AgentEventProcessor {
           // §7: the result attaches to ITS tool call's existing part —
           // it never renders as an independent assistant message, and a
           // replayed result only re-writes the same part (idempotent).
+          // HONEST DURATIONS: carry the runner's wall-clock `ts` (bg mode)
+          // as endedAt — the store prefers it over Date.now() so a
+          // replayed run settles each tool card with the time it ACTUALLY
+          // finished in the sandbox, never the browser-return gap.
           this.store.getState().updateToolCallPart(this.currentMessageId, tool_call_id, {
             result: content,
             status: "completed",
+            ...(typeof ts === "number" && ts > 0 ? { endedAt: ts } : {}),
           });
           timelineDebug(`tool_result ${tool_call_id} attached (${String(content).length} chars)`);
         }
@@ -952,10 +983,13 @@ export class AgentEventProcessor {
         if (!isFromActiveGeneration()) break;
         this.store.getState().setRateLimitStatus(null);
         this.flush();
-        this.endActiveRound(this.activeRound);
+        // HONEST DURATIONS: same as `complete` — the runner's last `ts`
+        // (when present) is when the work actually stopped.
+        this.endActiveRound(this.activeRound, this.lastEventTs ?? undefined);
         // "Worked {time} · Failed" — the work done before the failure stays
         // inspectable in the collapsed panel (PRD §22).
         this.stampGeneration({ failed: true });
+        this.lastEventTs = null;
         // IN-APP ERROR LOG: mirror the surfaced chat error into the Logs
         // store so the full trail (LLM body, self-heal steps, retries) is
         // one click away.
@@ -1041,7 +1075,10 @@ export class AgentEventProcessor {
         this.store.getState().setRateLimitStatus(null);
         if (!isFromActiveGeneration()) break;
         this.flush();
-        this.endActiveRound(this.activeRound);
+        // HONEST DURATIONS: end the round at the runner's last wall-clock
+        // stamp when the stream carried one (bg replay) — not at receive
+        // time — so no away-gap leaks into the timeline stamps.
+        this.endActiveRound(this.activeRound, this.lastEventTs ?? undefined);
         // Settled — the whole generation collapses into "Worked {time}".
         this.stampGeneration({});
         this.store.getState().setProcessing(false);
@@ -1049,6 +1086,7 @@ export class AgentEventProcessor {
         this.activeGenerationId = null;
         this.currentMessageGeneration = null;
         this.turnStartedAt = null;
+        this.lastEventTs = null;
         this.opts.onTurnEnd?.("completed");
         break;
       }

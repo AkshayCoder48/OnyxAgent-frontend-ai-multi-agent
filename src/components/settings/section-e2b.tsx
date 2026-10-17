@@ -10,7 +10,11 @@ import {
   Info,
   KeyRound,
   Loader2,
+  Pause,
+  Play,
+  RefreshCw,
   Save,
+  Snowflake,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -36,6 +40,171 @@ import { MoreOptions } from "@/components/settings/more-options";
 // E2B sandbox keys are opaque tokens (e.g. e2b_...); we do a light
 // structural check only.
 const E2B_KEY_RE = /^[A-Za-z0-9_\-]{8,}$/;
+
+/** Human age for a sandbox ("3h 12m"). */
+function ageLabel(ms: number): string {
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h ${mins - h * 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/** Workspace lifecycle panel — the E2B pause/resume persistency surface
+ *  (docs.e2b.dev/sandbox/persistence). Pausing freezes the FULL sandbox
+ *  state (filesystem AND RAM — processes, variables, connections) with no
+ *  automatic deletion; resuming (or the next tool call — Sandbox.connect)
+ *  restores it exactly where it froze. The app also auto-pauses on exit. */
+function WorkspaceLifecycle() {
+  const [key, setKey] = React.useState<string | null>(null);
+  const [items, setItems] = React.useState<
+    Array<{
+      sandboxId: string;
+      state: string;
+      ageMs: number;
+      scope: string | null;
+      conversationId: string | null;
+      scheduled: boolean;
+    }>
+  >([]);
+  const [busy, setBusy] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setBusy(true);
+    try {
+      let apiKey = key;
+      if (!apiKey) {
+        const [{ settingsService }, { useAuthStore }] = await Promise.all([
+          import("@/lib/services"),
+          import("@/stores"),
+        ]);
+        const userId = useAuthStore.getState().user?.id;
+        if (!userId) return;
+        apiKey = await settingsService.getDecryptedSandboxKey(userId);
+        if (!apiKey) return;
+        setKey(apiKey);
+      }
+      const { fetchLifecycleStatus } = await import("@/lib/e2b/lifecycle-client");
+      setItems(await fetchLifecycleStatus(apiKey));
+    } catch {
+      // best-effort — the panel just stays empty
+    } finally {
+      setLoaded(true);
+      setBusy(false);
+    }
+  }, [key]);
+
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function pause(sandboxId: string) {
+    if (!key) return;
+    setBusy(true);
+    try {
+      const { pauseSandbox } = await import("@/lib/e2b/lifecycle-client");
+      const r = await pauseSandbox(key, sandboxId);
+      if (r.ok && r.paused !== false) {
+        toast.success("Workspace paused — full state preserved", {
+          description: "Files, memory and running processes are frozen. The next use resumes it automatically.",
+          icon: <Snowflake className="size-4" />,
+        });
+      } else if (r.reason === "running-commands") {
+        toast.info("Pause skipped — the sandbox is busy", {
+          description: r.detail ?? "A background run is live on this sandbox.",
+        });
+      } else {
+        toast.error(r.error ?? "Pause failed");
+      }
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resume(sandboxId: string) {
+    if (!key) return;
+    setBusy(true);
+    try {
+      const { resumeSandbox } = await import("@/lib/e2b/lifecycle-client");
+      const r = await resumeSandbox(key, sandboxId);
+      if (r.ok) {
+        toast.success("Workspace resumed", {
+          description: "The sandbox picked up exactly where it froze.",
+          icon: <CheckCircle2 className="size-4" />,
+        });
+      } else {
+        toast.error(r.error ?? "Resume failed");
+      }
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium">Workspace lifecycle</p>
+        <Button type="button" variant="ghost" size="icon" className="size-7" onClick={() => void load()} disabled={busy} aria-label="Refresh sandbox states">
+          <RefreshCw className={busy ? "size-3.5 animate-spin" : "size-3.5"} />
+        </Button>
+      </div>
+      <p className="text-muted-foreground text-xs">
+        Sandboxes persist through pause/resume — the full state (filesystem + RAM) is frozen and
+        restored on the next use. The app auto-pauses workspaces when you leave and resumes them
+        when you return.
+      </p>
+      {items.length === 0 ? (
+        <p className="text-muted-foreground py-1 font-mono text-[11px]">
+          {loaded ? "No active sandboxes on this account." : "…"}
+        </p>
+      ) : (
+        <ul className="max-h-96 space-y-1.5 overflow-y-auto pr-1">
+          {items.map((s) => (
+            <li
+              key={s.sandboxId}
+              className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-mono text-[11px]" title={s.sandboxId}>
+                  {s.sandboxId}
+                </p>
+                <p className="text-muted-foreground text-[10px]">
+                  {s.scheduled ? "scheduled task" : s.scope === "separate" ? "per-chat workspace" : "shared workspace"}
+                  {" · "}age {ageLabel(s.ageMs)}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <span
+                  className={
+                    "inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase " +
+                    (s.state === "paused"
+                      ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
+                      : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400")
+                  }
+                >
+                  {s.state === "paused" ? <Snowflake className="size-3" /> : <span className="size-1.5 rounded-full bg-current" />}
+                  {s.state}
+                </span>
+                {s.state === "paused" ? (
+                  <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => void resume(s.sandboxId)} disabled={busy}>
+                    <Play className="size-3" /> Resume
+                  </Button>
+                ) : (
+                  <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => void pause(s.sandboxId)} disabled={busy}>
+                    <Pause className="size-3" /> Pause
+                  </Button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function SectionE2B() {
   const { settings, loading, setE2BKey } = useSettings();
@@ -179,6 +348,9 @@ export function SectionE2B() {
           </Button>
         </div>
       </form>
+
+      {/* ── E2B persistency: pause/resume lifecycle of the workspace sandboxes ── */}
+      {hasStored && <WorkspaceLifecycle />}
 
       {/* ── Advanced: key diagnostics + destructive removal ── */}
       <MoreOptions>

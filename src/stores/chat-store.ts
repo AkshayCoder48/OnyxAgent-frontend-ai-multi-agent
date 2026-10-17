@@ -472,10 +472,25 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
       const messages = [...state.messages];
       // Terminal transitions stamp endedAt (once) — the settled duration
       // badge reads it next to the status mark.
+      // HONEST DURATIONS (bg-run replay fix): when the update carries an
+      // `endedAt` (the runner wall-clock `ts` from the tool_result event),
+      // it WINS over Date.now() — otherwise a replayed run (app left for
+      // background work) stamped the end at BROWSER-RECEIVE time and the
+      // badge showed the full away-gap instead of the real tool duration.
       const isTerminal =
         (update.status === "completed" || update.status === "error") &&
         update.endedAt === undefined;
-      const withEnd = isTerminal ? { ...update, endedAt: Date.now() } : update;
+      const existing = (msg.parts ?? []).find(
+        (p) => p.type === "tool" && p.toolCall && p.toolCall.id === toolCallId,
+      )?.toolCall;
+      const startedAt = existing?.startedAt ?? msg.toolCalls?.find((tc) => tc.id === toolCallId)?.startedAt;
+      let endedAt = isTerminal ? Date.now() : update.endedAt;
+      // Clamp: a replayed/clock-skewed end can never precede the start.
+      if (endedAt !== undefined && startedAt !== undefined && endedAt < startedAt) {
+        endedAt = startedAt;
+      }
+      const withEnd =
+        endedAt !== undefined ? { ...update, endedAt } : update;
       messages[idx] = {
         ...msg,
         parts: msg.parts?.map((p) =>
@@ -515,7 +530,16 @@ function buildMessageActions<S extends { messages: ChatMessage[] }>(
       const isTerminal =
         (update.status === "completed" || update.status === "error") &&
         update.endedAt === undefined;
-      const withEnd = isTerminal ? { ...update, endedAt: Date.now() } : update;
+      // HONEST DURATIONS: a provided `endedAt` (runner wall-clock ts) wins
+      // over Date.now() — replayed runs must not stamp the browser-return
+      // time as the tool's end (the away-gap duration bug). Clamped so a
+      // clock-skewed replay can never end before it started.
+      let endedAt = isTerminal ? Date.now() : update.endedAt;
+      if (endedAt !== undefined && target.toolCall.startedAt !== undefined && endedAt < target.toolCall.startedAt) {
+        endedAt = target.toolCall.startedAt;
+      }
+      const withEnd =
+        endedAt !== undefined ? { ...update, endedAt } : update;
       const newToolCallId =
         typeof withEnd.id === "string" && withEnd.id ? withEnd.id : oldToolCallId;
       const messages = [...state.messages];

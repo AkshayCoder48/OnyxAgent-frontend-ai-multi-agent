@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   Bot,
   Braces,
+  Cloud,
   CloudCog,
   Flower2,
   KeyRound,
@@ -56,6 +57,9 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
       // tab can own the KeyRound glyph without the two reading as one.
       { label: "Env vars", href: ROUTES.SETTINGS_ENV, icon: Braces },
       { label: "API Keys", href: ROUTES.SETTINGS_API_KEYS, icon: KeyRound },
+      // E2B sandbox — the key + the workspace lifecycle (pause/resume
+      // persistency + live sandbox states).
+      { label: "Sandbox (E2B)", href: ROUTES.SETTINGS_E2B, icon: Cloud },
       { label: "Cloud", href: ROUTES.SETTINGS_CLOUD, icon: CloudCog },
       { label: "Integrations", href: ROUTES.SETTINGS_INTEGRATIONS, icon: Plug },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },

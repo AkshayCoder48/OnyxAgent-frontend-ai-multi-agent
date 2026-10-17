@@ -201,6 +201,37 @@ export async function ensureFreshSandbox(
   // Still fresh — no rotation needed.
   if (Date.now() - createdAt < ROTATION_AGE_MS) return;
 
+  // ── BACKGROUND-RUN GUARD (auto-stop fix) ─────────────────────────────
+  // NEVER rotate a sandbox that is running a background agent job — the
+  // rotation kills the sandbox, which killed the in-flight run ~50 min in
+  // ("background work auto-stops after a certain time"). While a job is
+  // live the sandbox is left alone: at the E2B 1h timeout it auto-PAUSES
+  // (full RAM + filesystem preserved — pause/resume persistency) and the
+  // next Sandbox.connect (e.g. the bg_status/bg_wait poll, or the next app
+  // open) auto-resumes it, continuing the run exactly where it froze.
+  // The rotation clock is re-stamped so the next attempt happens after the
+  // guard window, not on every call.
+  const currentId =
+    (typeof window !== "undefined"
+      ? window.localStorage.getItem(sandboxIdStorageKey(t.apiKey, t.conversationId, t.mode))
+      : null) ?? targetE2BClient(t).peekSandboxId();
+  try {
+    const { listJobs } = await import("./background-agent");
+    const activeOnThisSandbox = listJobs().some(
+      (j) => currentId && j.sandboxId === currentId,
+    );
+    if (activeOnThisSandbox) {
+      setStoredCreatedAt(t, Date.now());
+      console.log(
+        "[sandbox-rotation] rotation deferred — a background run is live on this sandbox (it will pause at the E2B timeout and auto-resume, not be killed)",
+      );
+      return;
+    }
+  } catch {
+    // best-effort — proceed with the server-side guard only (the server
+    // checks commands.list() for live processes too).
+  }
+
   // Rotation needed — perform it atomically on the server.
   const rotation = performRotation(t).finally(() => {
     rotationPromises.delete(targetMutexKey(t));
@@ -264,11 +295,17 @@ async function performRotation(t: SandboxTarget): Promise<void> {
       sandboxId?: string;
       restored?: number;
       backedUp?: number;
+      /** "running-commands" — the server SKIPPED the rotation because a
+       *  live process (background run / in-flight exec) is on the sandbox;
+       *  the SAME sandbox id is returned untouched. */
+      skipped?: string;
     };
 
     if (data.sandboxId) {
-      // Update localStorage with the NEW sandboxId (the target's own slot)
-      // so the next E2BClient instance picks it up.
+      const idChanged = data.sandboxId !== currentSandboxId;
+      // Update localStorage with the sandboxId (the target's own slot) so
+      // the next E2BClient instance picks it up. On a SKIPPED rotation this
+      // is a harmless same-value write.
       if (typeof window !== "undefined") {
         try {
           window.localStorage.setItem(idKey, data.sandboxId);
@@ -276,27 +313,41 @@ async function performRotation(t: SandboxTarget): Promise<void> {
           // ignore
         }
       }
-      // BROWSER SESSION CACHE (CloakBrowser integration): the rotation just
-      // replaced the sandbox — the old driver (and its cached boot promise)
-      // is dead. Without this reset the first post-rotation browser action
-      // pays a full command timeout (~90s) against a dead driver before the
-      // reconnect path re-boots it. The restored ~/.onyx/browser/profile
-      // backup keeps cookies + localStorage across the rotation.
-      try {
-        resetBrowserSessionCache();
-      } catch {
-        // best-effort — module init order should never break rotation
+      // Skipped rotation (live background run on the sandbox): the sandbox
+      // is UNTOUCHED — its caches are still valid. Only re-stamp the
+      // rotation clock so the next attempt happens after the guard window.
+      if (data.skipped) {
+        setStoredCreatedAt(t, Date.now());
+        console.log(
+          `[sandbox-rotation] server skipped rotation (${data.skipped}) — a live run keeps this sandbox; it will pause at the E2B timeout and auto-resume instead of being killed`,
+        );
+        return;
       }
-      if (t.mode === "separate" && t.conversationId) {
-        // Precise eviction — only THIS chat's client is dropped (it reloads
-        // its id from its per-chat slot, which we just updated). Every other
-        // chat's client keeps its in-memory id.
-        evictE2BClient(t.apiKey, t.conversationId, "separate");
-      } else {
-        // Shared: ALL shared clients for this apiKey persist to the ONE
-        // legacy localStorage slot, so every one of them must be evicted to
-        // pick up the new id (the legacy behavior — unchanged).
-        evictAllE2BClients();
+      // A REAL rotation happened (id changed or same-id replacement):
+      // the old sandbox is gone. BROWSER SESSION CACHE (CloakBrowser
+      // integration): the old driver (and its cached boot promise) is
+      // dead. Without this reset the first post-rotation browser action
+      // pays a full command timeout (~90s) against a dead driver before
+      // the reconnect path re-boots it. The restored
+      // ~/.onyx/browser/profile backup keeps cookies + localStorage
+      // across the rotation.
+      if (idChanged) {
+        try {
+          resetBrowserSessionCache();
+        } catch {
+          // best-effort — module init order should never break rotation
+        }
+        if (t.mode === "separate" && t.conversationId) {
+          // Precise eviction — only THIS chat's client is dropped (it
+          // reloads its id from its per-chat slot, which we just updated).
+          // Every other chat's client keeps its in-memory id.
+          evictE2BClient(t.apiKey, t.conversationId, "separate");
+        } else {
+          // Shared: ALL shared clients for this apiKey persist to the ONE
+          // legacy localStorage slot, so every one of them must be evicted
+          // to pick up the new id (the legacy behavior — unchanged).
+          evictAllE2BClients();
+        }
       }
       // Record the rotation time so we rotate again after the rotation age.
       setStoredCreatedAt(t, Date.now());

@@ -95,6 +95,17 @@ export interface BgJob {
 export interface BgTurnOptions {
   /** The user's E2B API key (decrypted). */
   e2bApiKey: string;
+  /** The client's CURRENT sandbox id for this (apiKey, conversation, mode)
+   *  — PERSISTENCY (E2B reuse across turns): bg_start reconnects to this
+   *  exact sandbox instead of cold-creating a fresh one, so the run works
+   *  in the SAME workspace (files + installed packages) the conversation
+   *  has been using, and a resumed/next turn picks the same sandbox back
+   *  up via its id. */
+  sandboxId?: string | null;
+  /** Which sandbox slot the run targets — mirrors the tool context's
+   *  sandboxMode so per-chat ("separate") conversations run their
+   *  background turns on THEIR OWN sandbox, not the shared one. */
+  sandboxMode?: "shared" | "separate";
   provider: {
     baseUrl: string;
     apiKey: string | null;
@@ -200,11 +211,26 @@ async function sandboxCall<T>(
   e2bApiKey: string,
   action: string,
   args: Record<string, unknown>,
+  /** Top-level body extras — the reconnect hint (`sandboxId`), the slot
+   *  selector (`sandboxMode`) and the conversation id for getSandbox
+   *  (reuse the same sandbox instance instead of creating a new one). */
+  extra?: {
+    sandboxId?: string | null;
+    sandboxMode?: "shared" | "separate";
+    conversationId?: string | null;
+  },
 ): Promise<T> {
   const res = await fetch("/api/sandbox", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: e2bApiKey, action, args }),
+    body: JSON.stringify({
+      apiKey: e2bApiKey,
+      action,
+      args,
+      ...(extra?.sandboxId ? { sandboxId: extra.sandboxId } : {}),
+      ...(extra?.sandboxMode ? { sandboxMode: extra.sandboxMode } : {}),
+      ...(extra?.conversationId ? { conversationId: extra.conversationId } : {}),
+    }),
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   // The `error` field means TRANSPORT failure only for actions that don't
@@ -255,6 +281,11 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     opts.e2bApiKey,
     "bg_start",
     { state, conversationId: opts.conversationId },
+    {
+      sandboxId: opts.sandboxId ?? undefined,
+      sandboxMode: opts.sandboxMode,
+      conversationId: opts.conversationId,
+    },
   );
   if (!res.sandboxId) {
     throw new Error(res.error ?? "Failed to start the background run");

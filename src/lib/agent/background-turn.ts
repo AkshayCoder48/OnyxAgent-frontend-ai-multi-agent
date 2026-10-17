@@ -801,8 +801,27 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       browserTools = [];
     }
 
+    // PERSISTENCY (E2B sandbox reuse across turns): resolve the client's
+    // CURRENT sandbox for this (apiKey, conversation, mode) so bg_start
+    // reconnects to the exact same workspace the conversation has been
+    // using (files, installed packages, .onyx state) instead of the server
+    // cold-creating a fresh one per run. peekSandboxId() reads the
+    // localStorage-backed slot — no network round trip, no sandbox boot.
+    const sandboxMode = ctx.turn.toolContext?.sandboxMode ?? "shared";
+    let currentSandboxId: string | null = null;
+    try {
+      const { getE2BClient } = await import("@/lib/e2b/client");
+      currentSandboxId =
+        getE2BClient(ctx.e2bApiKey, conversationId, sandboxMode).peekSandboxId() ?? null;
+    } catch {
+      // best-effort — bg_start falls back to the server-side cache/metadata
+      // lookup (still reuses the same instance when the server knows it).
+    }
+
     const job = await launchBackgroundTurn({
       e2bApiKey: ctx.e2bApiKey,
+      ...(currentSandboxId ? { sandboxId: currentSandboxId } : {}),
+      sandboxMode,
       provider: {
         baseUrl: ctx.turn.provider.baseUrl,
         apiKey: ctx.turn.provider.apiKey,

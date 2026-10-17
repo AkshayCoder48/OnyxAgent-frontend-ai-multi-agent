@@ -2,6 +2,7 @@
 
 import { ArrowUpRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { SourceFavicon } from "@/components/chat/source-favicon";
 import type { SourceItem } from "@/lib/chat-sources";
 
 /**
@@ -49,6 +50,7 @@ export function CitationsFooter({
               >
                 {s.index}
               </span>
+              <SourceFavicon url={s.url} kind={s.type} className="h-3 w-3" />
               <span className="text-foreground/80 truncate text-[11.5px] font-medium">{s.title}</span>
               {s.subtitle && (
                 <>

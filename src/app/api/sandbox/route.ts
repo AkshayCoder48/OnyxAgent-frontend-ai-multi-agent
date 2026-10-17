@@ -69,6 +69,26 @@ const ROTATION_AGE_MS = 23 * 60 * 60 * 1000; // 23 hours
 // by sandbox ID); stale ones (>20h) are killed to protect the quota.
 const MAX_SANDBOXES = 3;
 
+// ── E2B PERSISTENCY METADATA (docs.e2b.dev/sandbox/persistence) ─────────────
+// Every Onyx sandbox is TAGGED at creation so it can be found again later
+// via `Sandbox.list({ query: { metadata } })` — the documented way to reuse
+// the SAME sandbox instance across conversation turns, sessions, and
+// devices (when the browser lost its localStorage id). The sandbox itself
+// persists through E2B's pause/resume: onTimeout:"pause" + autoResume
+// freezes the FULL state (filesystem AND RAM — running processes, open
+// connections) and the next Sandbox.connect resumes it in place.
+const ONYX_APP_TAG = "onyx";
+function onyxSandboxMetadata(
+  mode: "shared" | "separate",
+  conversationId: string | null,
+): Record<string, string> {
+  return {
+    "onyx-app": ONYX_APP_TAG,
+    "onyx-scope": mode,
+    "onyx-conversation": mode === "separate" && conversationId ? conversationId : "",
+  };
+}
+
 /** A sandbox this old is demonstrably stale — E2B's 24h hard TTL kills it
  *  within hours no matter what we do, so reclaiming it (quota protection)
  *  can no longer destroy a workspace that would otherwise have survived.
@@ -166,6 +186,20 @@ function evictCacheEntry(
   cache.delete(key);
   void entry.sandbox.kill().catch(() => {});
   return entry;
+}
+
+/** Drop cache entries pointing at a sandbox WITHOUT killing it — used by
+ *  the `pause` action: the paused sandbox is PRESERVED (full state), we
+ *  just release this instance's SDK handle (its websocket dies with the
+ *  pause; the next use reconnects via Sandbox.connect which auto-resumes
+ *  the sandbox in place). */
+function dropCacheEntriesForSandbox(sandboxId: string): void {
+  for (const [key, entry] of [...sharedCache]) {
+    if (entry.sandbox.sandboxId === sandboxId) sharedCache.delete(key);
+  }
+  for (const [key, entry] of [...separateCache]) {
+    if (entry.sandbox.sandboxId === sandboxId) separateCache.delete(key);
+  }
 }
 
 /** Detect "sandbox is dead" errors from the E2B SDK. The SDK throws
@@ -462,6 +496,31 @@ async function restoreBackupFile(
   }
 }
 
+/** Return type of performRotation — `skipped` explains a NO-OP rotation
+ *  (the live sandbox was left untouched; the client re-stamps its rotation
+ *  clock and retries after the blocking condition clears). */
+interface RotationResult {
+  sandbox: Sandbox;
+  backedUp: number;
+  restored: number;
+  skipped?: "running-commands";
+}
+
+/** True when a running sandbox process must BLOCK a rotation (killing the
+ *  sandbox would destroy it):
+ *   - the BACKGROUND AGENT run (`node /home/user/.onyx/bg-agent.mjs …`) —
+ *     killing the sandbox mid-run is exactly the "background work
+ *     auto-stops after ~50 min" bug;
+ *   - any other in-flight SDK command (a foreground exec from another
+ *     tab/client racing this rotation).
+ *  Template service processes (the code-interpreter start command —
+ *  jupyter — run FOREVER) are ignored so they can never block rotation. */
+function isBlockingProcess(c: { cmd?: string; args?: string[] }): boolean {
+  const cmdline = `${c.cmd ?? ""} ${(c.args ?? []).join(" ")}`;
+  if (/jupyter|start\.sh|envd/i.test(cmdline)) return false;
+  return true; // bg-agent.mjs, in-flight execs, anything user-started
+}
+
 /**
  * Perform an atomic sandbox rotation: backup → kill old → create → restore.
  *
@@ -481,14 +540,24 @@ async function restoreBackupFile(
  * loss on every rotation. Stale-sandbox reclaiming stays in
  * createAndCacheSandbox (age-guarded, >20h only).
  *
- * Returns the new sandbox + counts of files backed up and restored.
+ * BG-RUN GUARD (background-work auto-stop fix): if the old sandbox has LIVE
+ * processes (a background agent run, an in-flight exec), the rotation is
+ * SKIPPED — killing the sandbox would kill the run mid-flight. Skipping is
+ * SAFE: sandboxes are created with lifecycle onTimeout:"pause" +
+ * autoResume, so even when the rotation window lapses the sandbox
+ * auto-PAUSES (full RAM + filesystem preserved — E2B's documented
+ * pause/resume persistence) and the next Sandbox.connect auto-resumes it,
+ * continuing the run exactly where it froze.
+ *
+ * Returns the new sandbox + counts of files backed up and restored, or the
+ * LIVE sandbox with skipped:"running-commands" when the guard tripped.
  */
 async function performRotation(
   apiKey: string,
   conversationId: string | null,
   mode: "shared" | "separate",
   clientSandboxId?: string | null,
-): Promise<{ sandbox: Sandbox; backedUp: number; restored: number }> {
+): Promise<RotationResult> {
   const key = cacheKey(apiKey, conversationId, mode);
 
   // 1. Resolve the OLD sandbox: local cache first (warm instance), then the
@@ -505,6 +574,39 @@ async function performRotation(
       oldSandbox = await Sandbox.connect(clientSandboxId, { apiKey });
     } catch {
       // Dead or already gone — nothing to back up.
+    }
+  }
+
+  // 1.5 BG-RUN GUARD — a live process on the old sandbox blocks the
+  //     rotation (see docblock). Re/adopt the live sandbox and return it
+  //     unchanged; the client re-stamps its rotation clock and retries
+  //     after the run finishes.
+  if (oldSandbox) {
+    try {
+      const running = await oldSandbox.commands.list();
+      const blocking = running.filter((c) => isBlockingProcess(c));
+      if (blocking.length > 0) {
+        console.log(
+          `[sandbox] rotation SKIPPED — ${blocking.length} live process(es) on ${oldSandbox.sandboxId} (background run / in-flight exec); the sandbox pauses at the E2B timeout instead and auto-resumes on next use`,
+        );
+        const live = cached?.sandbox && oldSandbox === cached.sandbox ? cached.sandbox : oldSandbox;
+        // Adopt the connect()-resolved live sandbox into this instance's
+        // cache so subsequent calls reuse it instead of cold-creating.
+        const entry: CacheEntry = {
+          sandbox: live,
+          apiKey,
+          createdAt: Date.now(),
+          key,
+          verifiedAliveAt: Date.now(),
+          ...(cached?.agentMdVersion ? { agentMdVersion: cached.agentMdVersion } : {}),
+        };
+        getCache(mode).set(key, entry);
+        return { sandbox: live, backedUp: 0, restored: 0, skipped: "running-commands" };
+      }
+    } catch {
+      // commands.list failed (envd blip) — proceed with the rotation as
+      // before; the client-side guard (sandbox-rotation.ts) still protects
+      // the known background jobs.
     }
   }
 
@@ -629,6 +731,7 @@ async function createAndCacheSandbox(
       ...(templateId ? { template: templateId } : {}),
       timeoutMs: 3_600_000, // 1 hour (E2B Hobby max continuous runtime)
       envs,
+      metadata: onyxSandboxMetadata(mode, conversationId),
       lifecycle: { onTimeout: "pause", autoResume: true },
     });
   } catch (createErr) {
@@ -648,6 +751,7 @@ async function createAndCacheSandbox(
         ...(retryTemplateId ? { template: retryTemplateId } : {}),
         timeoutMs: 3_600_000,
         envs,
+        metadata: onyxSandboxMetadata(mode, conversationId),
         lifecycle: { onTimeout: "pause", autoResume: true },
       });
     } else {
@@ -818,6 +922,55 @@ async function getSandbox(
     } catch {
       // Sandbox is dead or doesn't exist — fall through to create a new one.
     }
+  }
+
+  // 2.5 METADATA LOOKUP (E2B persistency — reuse the same sandbox instance
+  //     across conversation turns / sessions / devices): when the browser
+  //     lost its localStorage id (fresh device, cleared storage, another
+  //     browser), find this (apiKey, scope, conversation)'s PREVIOUS
+  //     sandbox by its creation metadata and reconnect — instead of
+  //     cold-creating an empty workspace. Sandbox.connect auto-RESUMES a
+  //     paused sandbox, so a workspace frozen by the E2B timeout pause
+  //     picks right back up with its full filesystem + RAM state.
+  //     Age-guarded (<20h): older ones are near the 24h hard TTL and are
+  //     the stale-reclaim's territory.
+  try {
+    const paginator = Sandbox.list({
+      apiKey,
+      limit: 20,
+      query: { metadata: onyxSandboxMetadata(mode, conversationId) },
+    });
+    const page = await paginator.nextItems();
+    const now = Date.now();
+    const candidates = page
+      .filter((s) => (s.state as string) !== "closed" && sandboxAgeMs(s, now) < STALE_SANDBOX_KILL_AGE_MS)
+      .sort((a, b) => sandboxAgeMs(b, now) - sandboxAgeMs(a, now)); // newest first
+    // Prefer RUNNING sandboxes (instant reconnect), then paused ones
+    // (auto-resume on connect — full state restored).
+    const running = candidates.find((s) => s.state === "running") ?? candidates[0];
+    if (running) {
+      const sandbox = await Sandbox.connect(running.sandboxId, { apiKey });
+      console.log(`[sandbox] metadata lookup: reconnected to previous ${mode} sandbox ${running.sandboxId} (state=${running.state})`);
+      const entry: CacheEntry = {
+        sandbox,
+        apiKey,
+        createdAt: Date.now(),
+        key,
+        verifiedAliveAt: Date.now(),
+      };
+      try {
+        await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
+        await sandbox.files.remove("/home/user/agent.md");
+        entry.agentMdVersion = AGENT_MD_VERSION;
+      } catch {
+        // best-effort
+      }
+      getCache(mode).set(key, entry);
+      return sandbox;
+    }
+  } catch {
+    // Metadata lookup failed (API blip / SDK list error) — fall through to
+    // a fresh create; the previous sandbox is still findable next time.
   }
 
   // 3. Create a new sandbox.
@@ -1930,6 +2083,124 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
 
+      // ── E2B PERSISTENCY LIFECYCLE (docs.e2b.dev/sandbox/persistence) ──
+      // pause/resume freeze and restore the FULL sandbox state — the
+      // filesystem AND the RAM (running processes, variables, open
+      // connections) — so a workspace survives between sessions with no
+      // automatic deletion until it is explicitly killed. Any later
+      // Sandbox.connect (resume action, bg_status poll, or the next tool
+      // call through getSandbox) auto-resumes it in place.
+
+      case "pause": {
+        const pauseSandboxId = (args.sandboxId as string) ?? clientSandboxId;
+        if (!pauseSandboxId) {
+          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
+        }
+        // Resolve the sandbox first (also auto-resumes a paused one — a
+        // no-op here since we're about to pause it).
+        let sandbox: Sandbox;
+        try {
+          sandbox = await Sandbox.connect(pauseSandboxId, { apiKey });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({ error: `Cannot reach sandbox: ${errMsg}` }, { status: 500 });
+        }
+        // LIVE-RUN GUARD: never pause a sandbox with running processes —
+        // the background agent run (or an in-flight exec) would freeze
+        // mid-flight. (The E2B 1h timeout pause still applies to it
+        // naturally, and bg_wait's reconnect auto-resumes it.)
+        try {
+          const running = await sandbox.commands.list();
+          const blocking = running.filter((c) => isBlockingProcess(c));
+          if (blocking.length > 0) {
+            return NextResponse.json({
+              ok: false,
+              paused: false,
+              reason: "running-commands",
+              detail: `${blocking.length} live process(es) on the sandbox — pause skipped so the background run keeps going`,
+            });
+          }
+        } catch {
+          // best-effort — proceed with the pause attempt
+        }
+        try {
+          // keepMemory: true (the default, explicit here) — the FULL memory
+          // snapshot is persisted, so resume restores running processes and
+          // open connections exactly where they froze.
+          const paused = await Sandbox.pause(pauseSandboxId, { apiKey, keepMemory: true });
+          // Release this instance's handle (the paused sandbox is
+          // preserved server-side; the next connect auto-resumes it).
+          dropCacheEntriesForSandbox(pauseSandboxId);
+          console.log(`[sandbox] paused ${pauseSandboxId} (full state preserved: filesystem + RAM)`);
+          return NextResponse.json({ ok: true, paused, sandboxId: pauseSandboxId });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({ error: `Pause failed: ${errMsg}` }, { status: 500 });
+        }
+      }
+
+      case "resume": {
+        const resumeSandboxId = (args.sandboxId as string) ?? clientSandboxId;
+        if (!resumeSandboxId) {
+          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
+        }
+        try {
+          // Sandbox.connect on a PAUSED sandbox auto-resumes it — the full
+          // memory snapshot is restored in place (processes continue where
+          // they froze).
+          const sandbox = await Sandbox.connect(resumeSandboxId, { apiKey });
+          try {
+            // Fresh 1h window on resume (the timeout countdown resets after
+            // each pause/resume cycle per the E2B lifecycle).
+            await sandbox.setTimeout(3_600_000);
+          } catch {
+            // best-effort
+          }
+          console.log(`[sandbox] resumed ${resumeSandboxId}`);
+          return NextResponse.json({ ok: true, resumed: true, sandboxId: sandbox.sandboxId });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({ error: `Resume failed: ${errMsg}` }, { status: 500 });
+        }
+      }
+
+      case "lifecycle_status": {
+        // List this account's Onyx sandboxes with their lifecycle state
+        // (running | paused) — powers the Settings → E2B lifecycle UI.
+        try {
+          const paginator = Sandbox.list({ apiKey, limit: 20 });
+          const page = await paginator.nextItems();
+          const now = Date.now();
+          const sandboxes = page
+            .filter((s) => (s.state as string) !== "closed")
+            .map((s) => {
+              const m = s.metadata as Record<string, string> | string | null | undefined;
+              let meta: Record<string, string> = {};
+              try {
+                meta = typeof m === "string" ? (JSON.parse(m) as Record<string, string>) : (m ?? {});
+              } catch {
+                meta = {};
+              }
+              return {
+                sandboxId: s.sandboxId,
+                state: s.state as string,
+                startedAt: s.startedAt instanceof Date ? s.startedAt.toISOString() : String(s.startedAt ?? ""),
+                ageMs: sandboxAgeMs(s, now),
+                scope: typeof meta["onyx-scope"] === "string" ? meta["onyx-scope"] : null,
+                conversationId:
+                  typeof meta["onyx-conversation"] === "string" && meta["onyx-conversation"]
+                    ? meta["onyx-conversation"]
+                    : null,
+                scheduled: "onyx-scheduled" in meta,
+              };
+            });
+          return NextResponse.json({ ok: true, sandboxes });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({ error: errMsg }, { status: 500 });
+        }
+      }
+
       // ── BACKGROUND AGENT (E2B-documented pattern) ──────────────────────
       // Sandboxes are SERVER-SIDE VMs: they keep running after the browser
       // disconnects. We run the agent loop as a BACKGROUND COMMAND inside
@@ -2289,8 +2560,12 @@ export async function POST(req: NextRequest) {
         // (ALL files, binary included). Tools don't know it happened; they
         // just see the new sandboxId on the next call.
         //
-        // Returns { sandboxId, backedUp, restored }.
-        const { sandbox, backedUp, restored } = await performRotation(
+        // Returns { sandboxId, backedUp, restored, rotated, skipped? } —
+        // `skipped: "running-commands"` means a live background run (or an
+        // in-flight exec) blocked the rotation and the SAME sandbox was
+        // returned untouched (it auto-pauses at the E2B timeout and
+        // auto-resumes on the next use instead of being killed).
+        const { sandbox, backedUp, restored, skipped } = await performRotation(
           apiKey,
           conversationId,
           sandboxMode,
@@ -2300,7 +2575,8 @@ export async function POST(req: NextRequest) {
           sandboxId: sandbox.sandboxId,
           backedUp,
           restored,
-          rotated: true,
+          rotated: !skipped,
+          ...(skipped ? { skipped } : {}),
         });
       }
 

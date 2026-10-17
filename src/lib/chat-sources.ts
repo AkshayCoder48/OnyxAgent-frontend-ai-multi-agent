@@ -153,3 +153,25 @@ function domainOf(url: string): string {
     return url;
   }
 }
+
+/**
+ * Favicon URL for a web source — the site's real logo shown next to each
+ * citation row (matching how ChatGPT/Claude render source lists).
+ *
+ * Uses Google's public S2 favicon service (no API key, aggressively cached,
+ * serves a generic globe when the domain has no icon — the component's
+ * <img onError> fallback covers the rare network failure too).
+ * Returns null for non-http(s) "urls" (RAG chunks have no domain).
+ */
+export function faviconForUrl(url: string | undefined): string | null {
+  if (!url || typeof url !== "string") return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const host = u.hostname;
+    if (!host) return null;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
+  } catch {
+    return null;
+  }
+}

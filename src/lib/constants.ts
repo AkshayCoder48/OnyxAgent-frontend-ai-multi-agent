@@ -35,6 +35,7 @@ export const ROUTES = {
   SETTINGS_INTEGRATIONS: "/settings/integrations",
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
+  SETTINGS_E2B: "/settings/e2b",
   RAG: "/rag",
   ORGS: "/orgs",
   ORGS_CREATE: "/orgs?create=1",
