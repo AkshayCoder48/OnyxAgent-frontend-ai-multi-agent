@@ -15,9 +15,15 @@ export interface MarkdownContentProps {
   showCursor?: boolean;
   /** True while the message is actively streaming. Keeps the trailing
    *  code block in its plain-line live render (no re-highlight while it
-   *  grows) — the text itself renders PLAIN at full ink (no per-word or
-   *  per-character fade/blur; the typewriter paces the reveal). */
+   *  grows) and activates the WORD-FADE stream: each revealed word is
+   *  wrapped in a span that fades in, the fades chaining word after word
+   *  (the word-typewriter paces the reveal to the fade duration). */
   streaming?: boolean;
+  /** Fade duration (ms) the stream engine chose for the most recent word.
+   *  Drives the per-word fade-in animation while `streaming` — each word
+   *  span bakes this as its animationDuration at mount, so later changes
+   *  never re-time an already-running fade. */
+  fadeMs?: number;
 }
 
 /**
@@ -40,7 +46,7 @@ const MarkdownContentImpl = dynamic(
   },
 );
 
-export function MarkdownContent({ content, onCiteClick, sources, showCursor, streaming }: MarkdownContentProps) {
+export function MarkdownContent({ content, onCiteClick, sources, showCursor, streaming, fadeMs }: MarkdownContentProps) {
   return (
     <MarkdownContentImpl
       content={content}
@@ -48,6 +54,7 @@ export function MarkdownContent({ content, onCiteClick, sources, showCursor, str
       sources={sources}
       showCursor={showCursor}
       streaming={streaming}
+      fadeMs={fadeMs}
     />
   );
 }

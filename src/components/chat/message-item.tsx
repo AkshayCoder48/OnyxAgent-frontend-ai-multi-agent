@@ -8,7 +8,7 @@ import { ToolCallCard } from "./tool-call-card";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
 import { deriveAgentPhase } from "@/lib/agent/timeline";
-import { useTypewriter } from "@/components/assistant-ui/elements/letter-stream";
+import { useWordTypewriter } from "@/components/assistant-ui/elements/letter-stream";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { useFilePreviewStore } from "@/stores";
@@ -230,28 +230,26 @@ function TextBubble({
    *  (reconnect / route change, OnyxAgent stream spec §24). */
   identityKey?: string;
 }) {
-  // SINGLE-LETTER STREAMING (OnyxAgent stream spec): while this bubble
-  // streams, the text is buffered and revealed CHARACTER BY CHARACTER —
-  // one continuous character flow regardless of how the SSE chunks
-  // arrived. Freshly revealed characters render at FULL INK immediately
-  // (NO per-word / per-character blur or fade — the reveal pacing is the
-  // motion). Settled/hydrated messages are a pure pass-through (no timers,
-  // full text immediately — spec §23).
+  // WORD-FADE STREAM (user spec: "every word will stream and fade
+  // synchronously"): while this bubble streams, the text is buffered and
+  // revealed WORD BY WORD — each word fading in over the fade duration,
+  // the next word revealed the moment the previous fade completes, a
+  // seamless cascade whose pace ADAPTS to the AI's streaming speed (a slow
+  // stream gets the full luxurious fade, a fast stream shortens it so the
+  // cascade never lags the live buffer). Settled/hydrated messages are a
+  // pure pass-through (no timers, full text immediately — spec §23).
   //
   // FINISH, DON'T FLUSH (round-end rule): when the stream settles mid-
-  // reveal — the AI stops, the round ends, or the turn's trailing text is
-  // relocated out of the WorkingPanel (which REMOUNTS this bubble as
-  // "settled") — the typewriter seeds from the identity reveal cache and
-  // keeps pacing the remaining backlog out at catch-up speed. The text
-  // that was already streamed but not yet revealed is NEVER dumped at
+  // cascade — the AI stops, the round ends, or the turn's trailing text
+  // is relocated out of the WorkingPanel (which REMOUNTS this bubble as
+  // "settled") — the engine seeds from the identity reveal cache and
+  // keeps cascading the remaining backlog out at catch-up pace. The words
+  // that were already streamed but not yet faded are NEVER dumped at
   // once.
-  //
-  // The markdown variant runs a BATCHED reveal (40ms tick vs the 20ms
-  // default): a markdown re-parse is far heavier than a plain-text render.
-  const { text: revealedText, animating } = useTypewriter(
+  const { text: revealedText, animating, fadeMs } = useWordTypewriter(
     text,
     Boolean(isStreaming),
-    { identityKey, tickMs: 40 },
+    { identityKey },
   );
 
   // STREAM GRACE: keep the streaming render ~620ms past the reveal so the
@@ -341,14 +339,13 @@ function TextBubble({
   // Assistant turns are FRAMELESS (Terra spec) — no bubble, editorial text on
   // the cream canvas with serif-numeral ordered lists.
   //
-  // PLAIN PACED REVEAL (animation state ≠ text state): NO whole-block dim
-  // and NO per-character fade spans exist — the old `.response-live`
+  // WORD-FADE CASCADE: while streaming, every revealed word is wrapped in
+  // a fading span by the markdown renderers (MarkdownContent → .wf); the
+  // message-level entrance fade handles the whole-response fade-in.
+  // NO whole-block dim wrapper exists — the old `.response-live`
   // opacity/blur wrapper leaked into the final state whenever a streaming
-  // flag stuck (the "grey text" bug), and the `.letter-in` per-char
-  // blur/fade was removed per user spec. Revealed text renders at natural
-  // styles (opacity 1, no filter, theme foreground); the typewriter paces
-  // the reveal and the message-level entrance fade handles the
-  // whole-response fade-in.
+  // flag stuck (the "grey text" bug). Revealed text renders at natural
+  // styles (opacity 1, no filter, theme foreground).
   if (segments.length === 0 && !persistedSpec) {
     return (
       <div className="relative w-full max-w-full break-words">
@@ -364,6 +361,7 @@ function TextBubble({
             sources={sources}
             showCursor={showCursor}
             streaming={streamActive}
+            fadeMs={fadeMs}
           />
         </div>
       </div>
@@ -401,6 +399,7 @@ function TextBubble({
                 sources={sources}
                 showCursor={showCursor && isLast}
                 streaming={streamActive && isLast}
+                fadeMs={fadeMs}
               />
             </div>
           );

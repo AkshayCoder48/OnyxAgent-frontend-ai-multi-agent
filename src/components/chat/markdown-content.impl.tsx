@@ -128,27 +128,95 @@ function preprocessCitations(content: string): string {
   return content.replace(/\[(\d{1,3})\](?![\(:])/g, (_, n) => `[[${n}]](#cite-${n})`);
 }
 
-// ── STREAMING TEXT — PLAIN PACED REVEAL ─────────────────────────────────────
-// (Animation state ≠ text state.) The typewriter (useTypewriter in
-// message-item) paces the reveal char-by-char and the markdown renders
-// whatever is revealed as PLAIN TEXT at full ink — NO per-word and NO
-// per-character blur/fade animations (user spec: the reveal pacing itself
-// is the motion; the message-level entrance fade handles the "whole
-// response fades in" feel). The context here only carries the trailing
-// state the CODE BLOCK needs:
+// ── STREAMING TEXT — WORD-FADE CASCADE ──────────────────────────────────────
+// (Animation state ≠ text state.) The word-typewriter (useWordTypewriter in
+// message-item) paces the reveal WORD BY WORD and exposes the fade duration
+// chosen for the latest word. Here, the prose renderers split revealed text
+// into whitespace + per-word spans (.wf): each word span fades in ONCE on
+// mount over that duration, and the engine reveals the next word exactly
+// when the previous fade completes — a seamless word-after-word cascade
+// whose pace follows the AI's streaming speed. The context also carries the
+// trailing state the CODE BLOCK needs:
 //   • CODE BLOCKS — the trailing code block renders plain monospace while
 //     it grows (soft line-flash only, no text fade) and the settled
 //     syntax-highlighted tree once complete — highlighting, colors, copy
-//     and scrolling intact.
+//     and scrolling intact. Code/pre text is never word-wrapped.
 //   • HISTORICAL MESSAGES — `stream.streaming` is false for hydrated
 //     history: zero animation DOM, fully settled render.
 const StreamFreshContext = React.createContext<{
   streaming: boolean;
   lastWord: string;
+  /** Fade duration for the latest word (0 = wrapping disabled). */
+  fadeMs: number;
 }>({
   streaming: false,
   lastWord: "",
+  fadeMs: 0,
 });
+
+/** One streamed word — fades in once on mount over the stream engine's
+ *  fade duration. The duration is baked into the inline style AT MOUNT;
+ *  the memo comparator deliberately ignores `fadeMs` so later pace changes
+ *  never re-time an already-running (or finished) fade — only genuinely
+ *  NEW words animate. Text never changes for a mounted word (the reveal is
+ *  append-only), so the comparator's single check is sound. */
+const FadeWord = React.memo(
+  function FadeWord({ text, fadeMs }: { text: string; fadeMs: number }) {
+    return (
+      <span className="wf" style={{ animationDuration: `${fadeMs}ms` }}>
+        {text}
+      </span>
+    );
+  },
+  (prev, next) => prev.text === next.text,
+);
+
+/** Split a plain string into whitespace text nodes + fading word spans.
+ *  Keys are the word's ordinal WITHIN this string node — the revealed text
+ *  only ever grows by appending complete words, so existing keys stay
+ *  stable across renders and their spans never remount (no re-animation). */
+function wrapStringWords(s: string, fadeMs: number): React.ReactNode {
+  if (!/\S/.test(s)) return s; // pure whitespace — nothing to fade
+  const out: React.ReactNode[] = [];
+  const re = /(\s+)|(\S+)/g;
+  let m: RegExpExecArray | null;
+  let w = 0;
+  while ((m = re.exec(s))) {
+    if (m[1] !== undefined) {
+      out.push(m[1]);
+    } else {
+      out.push(<FadeWord key={`w${w++}`} text={m[2] as string} fadeMs={fadeMs} />);
+    }
+  }
+  return out.length === 1 ? out[0] : out;
+}
+
+/** Recursively wrap every plain string of a prose node tree in fading word
+ *  spans (while streaming). Code/pre subtrees are left untouched — code
+ *  text renders plain. Elements keep their identity via cloneElement, so
+ *  inline formatting (<strong>, links, citation chips) reconciles in place
+ *  and only their words wrap. */
+function wrapStreamWords(node: React.ReactNode, fadeMs: number): React.ReactNode {
+  if (typeof node === "string") return wrapStringWords(node, fadeMs);
+  if (Array.isArray(node)) {
+    let changed = false;
+    const mapped = node.map((child) => {
+      const wrapped = wrapStreamWords(child, fadeMs);
+      if (wrapped !== child) changed = true;
+      return wrapped;
+    });
+    return changed ? mapped : node;
+  }
+  if (React.isValidElement(node)) {
+    if (node.type === "code" || node.type === "pre") return node;
+    const children = (node.props as { children?: React.ReactNode }).children;
+    if (children == null) return node;
+    const wrapped = wrapStreamWords(children, fadeMs);
+    if (wrapped === children) return node;
+    return React.cloneElement(node, undefined, wrapped);
+  }
+  return node;
+}
 
 // Citation sources for THIS message (Beta V1.2). Provided by MarkdownContent
 // per render so the module-scoped `a` override can look up the source title
@@ -184,16 +252,25 @@ function stripCursorMarkers(child: React.ReactNode): React.ReactNode {
   return child;
 }
 
+/** Stream-fade hook for prose containers: while this message streams,
+ *  wrap the children's plain strings in per-word fading spans (.wf);
+ *  settled renders return the children untouched. */
+function useStreamFadeChildren(children: React.ReactNode): React.ReactNode {
+  const { streaming, fadeMs } = React.useContext(StreamFreshContext);
+  if (!streaming || fadeMs <= 0) return children;
+  return wrapStreamWords(children, fadeMs);
+}
+
 /**
- * Paragraph renderer. Streamed text renders PLAIN at full ink — the
- * typewriter in message-item paces the reveal; there are NO per-word or
- * per-character fade/blur spans (the char-stream machinery was removed per
- * user spec). Only the defensive cursor-marker strip remains.
+ * Paragraph renderer. While streaming, every word fades in through the
+ * word-fade cascade (spans mounted here, paced by the engine upstream);
+ * settled renders are plain prose. The defensive cursor-marker strip
+ * remains on both paths.
  */
 function StreamParagraph({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
   return (
     <p className="mb-3 leading-relaxed last:mb-0" {...props}>
-      {stripCursorMarkers(children)}
+      {useStreamFadeChildren(stripCursorMarkers(children))}
     </p>
   );
 }
@@ -367,11 +444,12 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
 }
 
 // ── Text container components. Referenced by the SHARED_COMPONENTS map
-// below; each applies its Terra styling. Streamed text renders PLAIN at
-// full ink (the typewriter paces the reveal — no per-word/per-char
-// animation DOM). ─────────────────────────────────────────────────────
+// below; each applies its Terra styling. While streaming, prose words
+// fade in through the word-fade cascade (useStreamFadeChildren); settled
+// text renders plain. ─────────────────────────────────────────────────────
 
 function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) {
+  const faded = useStreamFadeChildren(children);
   const checkbox = Array.isArray(children)
     ? children.find(
         (c) =>
@@ -381,7 +459,7 @@ function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) 
     : null;
   if (checkbox && React.isValidElement(checkbox)) {
     const isChecked = Boolean((checkbox as React.ReactElement<{ checked?: boolean }>).props?.checked);
-    const remaining = Array.isArray(children) ? children.filter((c) => c !== checkbox) : children;
+    const remaining = Array.isArray(faded) ? faded.filter((c) => c !== checkbox) : faded;
     return (
       <li
         className="flex items-start gap-2 leading-relaxed list-none"
@@ -404,7 +482,7 @@ function ListItem({ children, ...props }: React.ComponentPropsWithoutRef<"li">) 
   }
   return (
     <li className="leading-relaxed" {...props}>
-      {children}
+      {faded}
     </li>
   );
 }
@@ -415,7 +493,7 @@ function Heading1({ children, ...props }: React.ComponentPropsWithoutRef<"h1">) 
       className="font-display mt-4 mb-2 text-xl font-bold tracking-tight first:mt-0"
       {...props}
     >
-      {children}
+      {useStreamFadeChildren(children)}
     </h1>
   );
 }
@@ -426,7 +504,7 @@ function Heading2({ children, ...props }: React.ComponentPropsWithoutRef<"h2">) 
       className="font-display mt-4 mb-2 text-lg font-semibold tracking-tight first:mt-0"
       {...props}
     >
-      {children}
+      {useStreamFadeChildren(children)}
     </h2>
   );
 }
@@ -434,7 +512,7 @@ function Heading2({ children, ...props }: React.ComponentPropsWithoutRef<"h2">) 
 function Heading3({ children, ...props }: React.ComponentPropsWithoutRef<"h3">) {
   return (
     <h3 className="font-display mt-3 mb-2 text-base font-semibold first:mt-0" {...props}>
-      {children}
+      {useStreamFadeChildren(children)}
     </h3>
   );
 }
@@ -445,7 +523,7 @@ function QuoteBlock({ children, ...props }: React.ComponentPropsWithoutRef<"bloc
       className="border-brand/40 text-foreground/75 my-3 border-l-2 pl-4 italic"
       {...props}
     >
-      {children}
+      {useStreamFadeChildren(children)}
     </blockquote>
   );
 }
@@ -456,7 +534,7 @@ function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
       className="border-foreground/10 border-b px-3 py-2 text-left font-mono text-[11px] font-semibold tracking-wider uppercase"
       {...props}
     >
-      {children}
+      {useStreamFadeChildren(children)}
     </th>
   );
 }
@@ -464,17 +542,17 @@ function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
 function TdCell({ children, ...props }: React.ComponentPropsWithoutRef<"td">) {
   return (
     <td className="border-foreground/8 border-b px-3 py-2 last:border-0" {...props}>
-      {children}
+      {useStreamFadeChildren(children)}
     </td>
   );
 }
 
 function DtTerm({ children, ...props }: React.ComponentPropsWithoutRef<"dt">) {
-  return <dt className="font-semibold text-foreground" {...props}>{children}</dt>;
+  return <dt className="font-semibold text-foreground" {...props}>{useStreamFadeChildren(children)}</dt>;
 }
 
 function DdDef({ children, ...props }: React.ComponentPropsWithoutRef<"dd">) {
-  return <dd className="text-foreground/75 ml-4" {...props}>{children}</dd>;
+  return <dd className="text-foreground/75 ml-4" {...props}>{useStreamFadeChildren(children)}</dd>;
 }
 
 /**
@@ -770,6 +848,7 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   sources,
   showCursor,
   streaming,
+  fadeMs,
 }: MarkdownContentProps) {
   // Keep the ref in sync so the shared `a` override can call the latest
   // onCiteClick without forcing a re-creation of the components map.
@@ -791,11 +870,13 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // Trailing-stream state, computed fresh each render and provided via
   // context (no ref mutation, no render lag). The lastWord of the DEFERRED
   // content decides whether the trailing CODE BLOCK is still growing (its
-  // plain-line render) or settled (syntax highlight). Prose carries no
-  // per-char state — text renders plain at full ink.
+  // plain-line render) or settled (syntax highlight). fadeMs drives the
+  // word-fade cascade — each newly mounted word span bakes it as its
+  // animationDuration, so the spans' fades match the engine's pacing.
   const streamState = {
     streaming: !!streaming,
     lastWord: streaming ? lastPlainWord(deferredContent) : "",
+    fadeMs: streaming ? (fadeMs ?? 240) : 0,
   };
 
   // Strip ALL cursor markers from content. The marker may appear as:
@@ -892,12 +973,15 @@ export const MarkdownContent = React.memo(function MarkdownContent({
 }, (prev, next) => {
   // Short-circuit: if the content string AND showCursor are identical, skip
   // re-render. This handles the case where a parent re-rendered but the
-  // `content` prop didn't change (e.g. another message updated).
+  // `content` prop didn't change (e.g. another message updated). fadeMs is
+  // compared too: a pace change with identical content must still flush so
+  // the NEXT mounted word span bakes the new duration.
   return (
     prev.content === next.content &&
     prev.onCiteClick === next.onCiteClick &&
     prev.sources === next.sources &&
     prev.showCursor === next.showCursor &&
-    prev.streaming === next.streaming
+    prev.streaming === next.streaming &&
+    prev.fadeMs === next.fadeMs
   );
 });

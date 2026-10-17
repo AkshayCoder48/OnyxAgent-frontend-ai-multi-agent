@@ -274,3 +274,328 @@ export function LetterStream({
 }) {
   return <span className={cn("whitespace-pre-wrap", className)}>{text}</span>;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORD-FADE STREAM — chained per-word fade synchronized with the AI's
+// streaming speed (user spec: "every word will stream and fade
+// synchronously — each word fades first, and the moment that fade ends the
+// next generated word's fade starts; the pace varies with the AI's
+// streaming speed").
+//
+// Where the letter engine reveals CHARACTERS on a fixed tick, this engine
+// reveals WHOLE WORDS and paces the reveal to the fade duration itself:
+//
+//   • ONE WORD PER FADE — a word is revealed, fades in over `D` ms (the
+//     CSS animation on its span), and the NEXT word reveals exactly when
+//     that fade completes (the next engine step is scheduled `D` ms out).
+//     The result is a seamless cascade: fade → fade → fade, never two
+//     words fading at once (unless the stream outruns the drain, when
+//     words deliberately share a frame at high speed).
+//   • ADAPTIVE `D` — derived from the reveal backlog (how many words the
+//     AI has streamed but are still un-faded). A slow stream (backlog ~1)
+//     gets the full luxurious fade (`maxFadeMs`); a fast stream grows the
+//     backlog and the fade shortens proportionally so the cascade NEVER
+//     lags more than the lag budget behind the live buffer. The animation
+//     speed literally follows the AI's streaming speed.
+//   • SAME LIFECYCLE RULES AS THE LETTER ENGINE — initial hold while live,
+//     finish-don't-flush on settle (the un-faded backlog keeps cascading
+//     at catch-up pace), resume-across-remount via the identity cache
+//     (namespaced `w:` so it never collides with the char cache), instant
+//     pass-through for never-streamed messages, reduced-motion off.
+//   • TOKENIZATION — a token is a word plus its trailing whitespace (the
+//     markdown structure travels with its words); pure-whitespace tokens
+//     are free reveals that never consume a fade slot; unbroken runs
+//     longer than `chunk` chars (URLs, hashes, CJK stretches) are chunked
+//     so one giant token can't stall the cascade.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Split `s` into reveal tokens: `\S+` + trailing whitespace, standalone
+ *  whitespace runs, and long unbroken runs chunked to ≤ `chunk` chars. */
+function tokenizeWords(s: string, chunk: number): string[] {
+  if (!s) return [];
+  const out: string[] = [];
+  const re = /\s+|\S+\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s))) {
+    const tok = m[0];
+    if (tok.trim().length <= chunk) {
+      out.push(tok);
+      continue;
+    }
+    // Giant unbroken run — chunk it; the trailing whitespace rides on the
+    // final piece so separators still land with their word.
+    const ws = /\s*$/.exec(tok)![0];
+    const word = tok.slice(0, tok.length - ws.length);
+    for (let i = 0; i < word.length; i += chunk) {
+      out.push(
+        i + chunk < word.length ? word.slice(i, i + chunk) : word.slice(i) + ws,
+      );
+    }
+  }
+  return out;
+}
+
+interface TokenCache {
+  tokens: string[];
+  /** How many chars of the target `tokens` covers. */
+  covered: number;
+}
+
+/** Incremental retokenize for a GROWN target: every token before the last
+ *  one's start offset is immutable, so only the tail is re-tokenized. */
+function appendTokens(prev: TokenCache, next: string, chunk: number): TokenCache {
+  const last = prev.tokens[prev.tokens.length - 1];
+  const restart = prev.covered - last.length;
+  const head = prev.tokens.slice(0, -1);
+  return {
+    tokens: head.concat(tokenizeWords(next.slice(restart), chunk)),
+    covered: next.length,
+  };
+}
+
+export interface WordTypewriterOptions {
+  /** Hold before the first reveal while live (ms). Default 180. */
+  initialDelayMs?: number;
+  /** Floor for the per-word fade (ms) — fastest cascade. Default 55. */
+  minFadeMs?: number;
+  /** Ceiling for the per-word fade (ms) — relaxed full fade. Default 260. */
+  maxFadeMs?: number;
+  /** Max time the cascade may lag the live buffer while streaming (ms).
+   *  Default 1200. */
+  lagBudgetMs?: number;
+  /** Finishing (post-settle) drain pace: fade floor. Default 45. */
+  finishMinMs?: number;
+  /** Finishing drain pace: fade ceiling. Default 150. */
+  finishMaxMs?: number;
+  /** Finishing drain pace: lag budget. Default 900. */
+  finishLagMs?: number;
+  /** Max chars of one unbroken token before chunking. Default 28. */
+  chunk?: number;
+  /** Live backlog (in words) that triggers a re-attach jump-ahead. Default 32. */
+  jumpTokens?: number;
+  /** Stable identity of the streamed text — seeds the reveal across
+   *  remounts (namespaced from the char-engine cache). */
+  identityKey?: string;
+}
+
+export interface WordTypewriterState {
+  /** The revealed substring — what should render right now. */
+  text: string;
+  /** True while words are still fading in (live or finishing). */
+  animating: boolean;
+  /** Fade duration chosen for the most recently revealed word — feed this
+   *  to the word spans so each fade matches the engine's pacing. */
+  fadeMs: number;
+}
+
+export function useWordTypewriter(
+  target: string,
+  active: boolean,
+  options?: WordTypewriterOptions,
+): WordTypewriterState {
+  const initialDelayMs = options?.initialDelayMs ?? 180;
+  const minFadeMs = options?.minFadeMs ?? 55;
+  const maxFadeMs = options?.maxFadeMs ?? 260;
+  const lagBudgetMs = options?.lagBudgetMs ?? 1200;
+  const finishMinMs = options?.finishMinMs ?? 45;
+  const finishMaxMs = options?.finishMaxMs ?? 150;
+  const finishLagMs = options?.finishLagMs ?? 900;
+  const chunk = options?.chunk ?? 28;
+  const jumpTokens = options?.jumpTokens ?? 32;
+  const identityKey = options?.identityKey;
+
+  const reducedMotion = React.useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    [],
+  );
+  const animate = active && !reducedMotion;
+
+  // ── Mount-time seed: identity cache lookup + token snapshot ───────────
+  // `ever` distinguishes "this identity streamed before" (a relocated
+  // remount must DRAIN, not dump) from a first-time settled render (pure
+  // pass-through).
+  const [seed] = React.useState(() => {
+    const key = identityKey ? `w:${identityKey}` : null;
+    if (!key) return { ever: false, n: 0, chars: 0 };
+    const cached = readCache(key);
+    const toks = tokenizeWords(target, chunk);
+    if (cached === undefined) return { ever: false, n: 0, chars: 0 };
+    const n = Math.max(0, Math.min(cached, toks.length));
+    let chars = 0;
+    for (let i = 0; i < n; i++) chars += toks[i].length;
+    return { ever: true, n, chars: Math.min(chars, target.length) };
+  });
+
+  const [revealChars, setRevealChars] = React.useState<number>(() =>
+    seed.ever ? seed.chars : animate ? 0 : target.length,
+  );
+  const [fadeMs, setFadeMs] = React.useState<number>(maxFadeMs);
+
+  // Refs (written only in effects/timers — React-Compiler safe).
+  const targetRef = React.useRef(target);
+  React.useEffect(() => {
+    targetRef.current = target;
+  }, [target]);
+  const tokRef = React.useRef<TokenCache>({ tokens: [], covered: 0 });
+  const nTokRef = React.useRef(seed.n);
+  const charsRef = React.useRef(seed.chars);
+
+  const everAnimatedRef = React.useRef(animate || seed.ever);
+  const [everAnimated, setEverAnimated] = React.useState(animate || seed.ever);
+
+  // ── The chained-fade engine ────────────────────────────────────────────
+  // A self-rescheduling timeout: each step reveals one fade unit (a word,
+  // with any leading pure-whitespace tokens riding along) and schedules
+  // the next step exactly `D` ms out — when THIS word's fade completes —
+  // so the next word's fade starts the moment the previous one ends.
+  React.useEffect(() => {
+    if (reducedMotion) return;
+    if (active) {
+      if (!everAnimatedRef.current) {
+        everAnimatedRef.current = true;
+        setEverAnimated(true);
+      }
+    }
+    const finishing = !active && everAnimatedRef.current;
+    if (!active && !finishing) return;
+
+    const cacheKey = identityKey ? `w:${identityKey}` : undefined;
+    let stopped = false;
+    let timer: number | undefined;
+    // Cheap poll while live+caught-up: picks a newly arrived word up in
+    // ≤60ms without any target-change plumbing into the timer closure.
+    const idleMs = 60;
+
+    const step = () => {
+      if (stopped) return;
+      const t = targetRef.current;
+
+      // Lazily (re)tokenize — the target only grows while streaming.
+      let tok = tokRef.current;
+      if (tok.covered !== t.length) {
+        tok =
+          t.length < tok.covered || tok.tokens.length === 0
+            ? { tokens: tokenizeWords(t, chunk), covered: t.length }
+            : appendTokens(tok, t, chunk);
+        tokRef.current = tok;
+      }
+      const tokens = tok.tokens;
+      const total = tokens.length;
+
+      // Target replaced (shrank below the reveal) — clamp to full.
+      if (charsRef.current > t.length) {
+        nTokRef.current = total;
+        charsRef.current = t.length;
+        writeCache(cacheKey, total);
+        setRevealChars(t.length);
+        if (!active) stopped = true;
+        else timer = window.setTimeout(step, idleMs);
+        return;
+      }
+
+      let n = nTokRef.current;
+      let backlog = total - n;
+      if (backlog <= 0) {
+        // Caught up. Live → idle-poll for the next word. Finishing → done.
+        if (!active) {
+          stopped = true;
+          return;
+        }
+        timer = window.setTimeout(step, idleMs);
+        return;
+      }
+
+      // Re-attach jump-ahead: a huge LIVE backlog (missed the live stream)
+      // skips ahead instantly — only the tail cascades.
+      if (backlog > jumpTokens && active) {
+        const jumpTo = total - jumpTokens;
+        let c = 0;
+        for (let i = 0; i < jumpTo; i++) c += tokens[i].length;
+        n = jumpTo;
+        nTokRef.current = n;
+        charsRef.current = c;
+        backlog = total - n;
+      }
+
+      // Adaptive fade duration: the whole backlog drains within the lag
+      // budget, clamped between a relaxed full fade and a quick flicker.
+      const budget = active ? lagBudgetMs : finishLagMs;
+      const min = active ? minFadeMs : finishMinMs;
+      const max = active ? maxFadeMs : finishMaxMs;
+      const d = Math.max(min, Math.min(max, Math.round(budget / backlog)));
+
+      // Advance ONE fade unit: pure-whitespace tokens ride along free —
+      // invisible separators never consume a fade slot.
+      let chars = charsRef.current;
+      let k = n;
+      let sawWord = false;
+      while (k < total) {
+        const token = tokens[k];
+        k++;
+        chars += token.length;
+        if (token.trim().length > 0) {
+          sawWord = true;
+          break;
+        }
+      }
+      nTokRef.current = k;
+      charsRef.current = chars;
+      writeCache(cacheKey, k);
+      setRevealChars(chars);
+      setFadeMs(d);
+
+      if (k >= total && !active) {
+        stopped = true;
+        return;
+      }
+      // The chain: the next word reveals exactly when this fade ends.
+      timer = window.setTimeout(step, sawWord ? d : idleMs);
+    };
+
+    // Initial hold while LIVE; a finishing catch-up starts immediately.
+    const hold = window.setTimeout(
+      () => {
+        if (!stopped) step();
+      },
+      active ? initialDelayMs : 0,
+    );
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(hold);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    active,
+    reducedMotion,
+    initialDelayMs,
+    minFadeMs,
+    maxFadeMs,
+    lagBudgetMs,
+    finishMinMs,
+    finishMaxMs,
+    finishLagMs,
+    chunk,
+    jumpTokens,
+    identityKey,
+  ]);
+
+  // ── Never-streamed pass-through (hydrated history) ─────────────────────
+  React.useEffect(() => {
+    if (animate || everAnimatedRef.current) return;
+    setRevealChars((prev) => (prev >= target.length ? prev : target.length));
+  }, [animate, target]);
+
+  const n = Math.min(revealChars, target.length);
+  const text = animate || everAnimated ? target.slice(0, n) : target;
+
+  // Words are still fading in while live, or while a settle catch-up
+  // (including a resumed relocation) drains the backlog.
+  const finishingBacklog = everAnimated && n < target.length;
+  const animating = !reducedMotion && everAnimated && (animate || finishingBacklog);
+
+  return { text, animating, fadeMs };
+}

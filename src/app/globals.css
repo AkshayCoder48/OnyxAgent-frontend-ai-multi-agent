@@ -2864,6 +2864,36 @@ html.theme-transitioning .animate-backdrop {
   margin-bottom: 0;
 }
 
+/* --- WORD-FADE STREAM (chained per-word fade-in): every streamed word is
+ *   wrapped in a .wf span whose one-shot animation fades it in. The fade
+ *   DURATION is baked INLINE at mount (animationDuration) by the stream
+ *   engine and varies with the AI's streaming speed; the engine reveals
+ *   the NEXT word exactly when the current fade completes, producing a
+ *   seamless word-after-word cascade. Opacity does the fading and a
+ *   whisper of blur adds the "materialize" feel — transform is NOT used
+ *   (a no-op on inline spans; inline-block would break line wrapping
+ *   inside long unbroken words). `backwards` fill prevents a first-frame
+ *   flash of full ink; `forwards` holds the settled state. --- */
+@keyframes word-fade-in {
+  from {
+    opacity: 0;
+    filter: blur(1.25px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+.wf {
+  display: inline;
+  animation: word-fade-in 240ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf {
+    animation: none;
+  }
+}
+
 /* --- Inline writing cursor (appended to markdown text during streaming) --- */
 .writing-cursor-inline {
   display: inline-block;
@@ -3469,3 +3499,5 @@ html.theme-transitioning .animate-backdrop {
    PARENT OPACITY RULE: nothing up the tree (message, markdown wrapper,
    stream wrapper, thinking container) carries a persistent opacity/filter
    — a child can never be full-white under a faded parent. */
+
+/* css-rev: word-fade-1 */
