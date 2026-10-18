@@ -1,15 +1,15 @@
 {
-  "version": "2026.10.18-0742",
-  "sha256": "68a937f8bf0887f2f0e96773c4c7898d804a466b99a6143b7908672a21d6d0b5",
-  "count": 56,
-  "generated_at": "2026-10-18T07:42:30.682299+00:00",
+  "version": "2026.10.18-0844",
+  "sha256": "64c481c70446ceccbf02bc1d09dd4f6a029d6f47ededfbcc7e38320ed264d8c6",
+  "count": 55,
+  "generated_at": "2026-10-18T08:44:15.587437+00:00",
   "skills": [
     {
-      "name": "threejs-game",
-      "description": "Complete Three.js game production in one skill \u2014 game direction, gameplay systems, AAA graphics, in-game UI, debug/profiling, QA & release, procedural 3D generation, image generation and audio. The SKILL.md domain map routes to the 9 full domain guides in domains/ and their deep references.",
-      "category": "3D & Games",
-      "files": 69,
-      "bytes": 388934
+      "name": "threejs-game-webdev",
+      "description": "Complete Three.js GAME + WEB development in one skill \u2014 game direction, gameplay systems, AAA graphics, in-game UI, debug/profiling, QA & release, procedural 3D/image/audio generation, PLUS interactive 3D websites: hero sections, product showcases & configurators, scroll-driven scenes, React/Next.js (R3F) integration, web performance and accessibility. The SKILL.md domain map routes to the 10 domain guides in domains/ and their deep references.",
+      "category": "3D, Games & Web",
+      "files": 70,
+      "bytes": 394928
     },
     {
       "name": "agent-browser",
@@ -171,13 +171,6 @@
       "category": "Anthropic Official",
       "files": 28,
       "bytes": 141899
-    },
-    {
-      "name": "claude-api",
-      "description": "Reference for the Claude API / Anthropic SDK \u2014 model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration. TRIGGER \u2014 read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" \u2014 whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) \u2014 never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens). SKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named \u2014 don't Read the file).",
-      "category": "Anthropic Official",
-      "files": 94,
-      "bytes": 1733613
     },
     {
       "name": "discernment-nudge",

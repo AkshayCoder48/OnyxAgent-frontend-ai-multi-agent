@@ -410,7 +410,7 @@ export default function SkillsSettingsPage() {
 
       <SettingsSectionCard
         title="Master skill library (built-in)"
-        description="OnyxAgent ships with a 56-skill master library — design, documents, video, web scraping, Three.js games, mental wellbeing and more. It is attached to every sandbox automatically at startup: nothing to install, the AI just reads the index at /home/user/skills/MASTER-INDEX.md and the skill it needs."
+        description="OnyxAgent ships with a 55-skill master library — design, documents, video, web scraping, Three.js games & web dev, mental wellbeing and more. It is attached to every sandbox automatically at startup: nothing to install, the AI just reads the index at /home/user/skills/MASTER-INDEX.md and the skill it needs."
       >
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm">
           <p className="flex items-center gap-2 font-medium">
@@ -418,9 +418,9 @@ export default function SkillsSettingsPage() {
             Always available — no installation needed
           </p>
           <p className="mt-2 text-xs text-muted-foreground">
-            The full library (56 skills incl. anthropics official skills, just-scrape,
+            The full library (55 skills incl. anthropics official skills, just-scrape,
             ECC, api-anything, silk-design, everything-ai, addhumanity, the merged
-            threejs-game skill and your uploaded collection) is bundled inside the app
+            threejs-game-webdev skill and your uploaded collection) is bundled inside the app
             and extracted to <code>/home/user/skills/</code> on every sandbox start.
             The AI reads <code>MASTER-INDEX.md</code> to pick skills by name.
           </p>

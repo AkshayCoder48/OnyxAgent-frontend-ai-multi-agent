@@ -7,7 +7,7 @@ import { MASTER_SKILLS_ZIP_BASE64 } from "@/lib/agent/master-skills-zip";
  * 2026-10-19: "merge all into a single folder skill or zip attached every
  * time on sandbox startup").
  *
- * The whole library (56 skills + MASTER-INDEX.md) ships as ONE zip baked
+ * The whole library (55 skills + MASTER-INDEX.md) ships as ONE zip baked
  * into the app (src/lib/agent/master-skills-zip.ts — same bundling
  * guarantee as Onyx.md: Vercel serverless only traces static imports, so a
  * runtime fs read would NOT be included). attachMasterSkills writes the

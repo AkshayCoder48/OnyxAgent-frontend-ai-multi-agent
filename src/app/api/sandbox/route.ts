@@ -828,7 +828,7 @@ async function createAndCacheSandbox(
   }
 
   // MASTER SKILL LIBRARY (user request 2026-10-19): attach the whole
-  // 56-skill library zip to EVERY fresh sandbox — extracted over
+  // 55-skill library zip to EVERY fresh sandbox — extracted over
   // /home/user/skills/ with MASTER-INDEX.md at its root. The AI's fixed
   // startup rule (Onyx.md + system prompt) reads that index and picks
   // skills BY NAME. Best-effort: a failed attach logs and continues; the

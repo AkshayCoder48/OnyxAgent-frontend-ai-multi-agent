@@ -4,9 +4,10 @@
 `scripts/build_master_skill.py`. The zip is baked into the app
 (`src/lib/agent/master-skills-zip.ts`) and attached to EVERY E2B
 sandbox at startup — extracted to `/home/user/skills/` with
-`MASTER-INDEX.md` at its root. Sources: anthropics/skills (all),
-scrapegraphai/just-scrape, affaan-m/ecc, api-anything, silk-design,
-everything-ai, addhumanity, threejs-game-skills (9 merged into 1),
-and the user's uploaded Skills.zip. 56 skills total.
+`MASTER-INDEX.md` at its root. Sources: anthropics/skills (all
+official skills except claude-api), scrapegraphai/just-scrape,
+affaan-m/ecc, api-anything, silk-design, everything-ai, addhumanity,
+threejs-game-skills (9 game skills merged into 1 game+web-dev skill),
+and the user's uploaded Skills.zip. 55 skills total.
 
-Version 2026.10.18-0742 · sha256 68a937f8bf0887f2…
+Version 2026.10.18-0844 · sha256 64c481c70446cecc…

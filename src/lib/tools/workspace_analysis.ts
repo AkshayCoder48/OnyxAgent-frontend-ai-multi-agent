@@ -122,7 +122,7 @@ registerTool(
 - files: recursive file listing (paths, sizes, types)
 - key_files: contents of README, package.json, tsconfig, Dockerfiles, .env files
 - skills: the user's app-installed skills
-- master_skill_library: the index of the 56-skill MASTER LIBRARY that ships with OnyxAgent — it is ALREADY in the sandbox at /home/user/skills/ (no install needed): pick skills BY NAME from the index, then read_file /home/user/skills/<name>/SKILL.md before applying one
+- master_skill_library: the index of the 55-skill MASTER LIBRARY that ships with OnyxAgent — it is ALREADY in the sandbox at /home/user/skills/ (no install needed): pick skills BY NAME from the index, then read_file /home/user/skills/<name>/SKILL.md before applying one
 - mcp_market: curated MCPMarket catalog (see manage_mcp action "market" for details)
 - mcp_servers: configured MCP servers
 - available_tools: every tool currently registered

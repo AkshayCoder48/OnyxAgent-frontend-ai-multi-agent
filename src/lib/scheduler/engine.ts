@@ -821,7 +821,7 @@ GenUI reference — is at /home/user/Onyx.md in this sandbox: read_file it
 whenever you need more than the digest above.
 
 ## Master Skill Library (fixed startup rule)
-56 skills ALWAYS available at /home/user/skills/ — nothing to install.
+55 skills ALWAYS available at /home/user/skills/ — nothing to install.
 Read the index (read_file /home/user/skills/MASTER-INDEX.md), pick skills
 BY NAME for the task, then read_file /home/user/skills/<name>/SKILL.md
 before applying one. Never claim a capability is missing before checking
@@ -1055,7 +1055,7 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
     );
 
     // 2. Onyx.md (identity + tool compendium) + the MASTER SKILL LIBRARY
-    //    (the 56-skill zip attached to EVERY sandbox startup — extracted
+    //    (the 55-skill zip attached to EVERY sandbox startup — extracted
     //    to /home/user/skills/ with MASTER-INDEX.md; the fixed startup rule
     //    tells the agent to read both).
     try {

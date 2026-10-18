@@ -587,7 +587,7 @@ describe("analyze_workspace tool contract", () => {
     expect((result.summary as string)).toContain("Files: 6 (1 directories");
     expect((result.summary as string)).toContain("Node.js"); // package.json detected
     const msl = result.master_skill_library as { count: number; path: string; index_path: string };
-    expect(msl.count).toBeGreaterThan(50); // the 56-skill master library
+    expect(msl.count).toBeGreaterThan(50); // the 55-skill master library
     expect(msl.path).toBe("/home/user/skills");
     expect(msl.index_path).toBe("/home/user/skills/MASTER-INDEX.md");
     const keyFiles = result.key_files as Record<string, unknown>;

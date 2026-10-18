@@ -23,7 +23,7 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 const MANAGE_SKILL_DESCRIPTION = `Manage the user's OWN skills (the ones installed via Settings → Skills) — one tool for every skill operation. Skills are SKILL.md instruction files. Pass \`action\` plus the fields that action needs:
 
-- action "list": list the user's installed skills (name, description, active status). No other fields. (The 56-skill MASTER LIBRARY that ships with OnyxAgent is separate — it is ALWAYS available in the sandbox at /home/user/skills/ with its index at /home/user/skills/MASTER-INDEX.md; read those files directly.)
+- action "list": list the user's installed skills (name, description, active status). No other fields. (The 55-skill MASTER LIBRARY that ships with OnyxAgent is separate — it is ALWAYS available in the sandbox at /home/user/skills/ with its index at /home/user/skills/MASTER-INDEX.md; read those files directly.)
 - action "read": read a user-installed skill's full SKILL.md content. Requires \`name\`.
 - action "create": create a new skill (available on the next turn). Requires \`name\`, \`description\`, \`content\` (the full SKILL.md markdown).
 - action "edit": edit an existing skill's content and/or description. Requires \`name\`; \`content\` and \`description\` are optional (omitted fields are kept).
@@ -67,7 +67,7 @@ registerTool(
           ...(skills.length === 0
             ? {
                 message:
-                  "No user-installed skills. The MASTER SKILL LIBRARY (56 skills) ships with OnyxAgent and is always available in the sandbox — read /home/user/skills/MASTER-INDEX.md for the full index.",
+                  "No user-installed skills. The MASTER SKILL LIBRARY (55 skills) ships with OnyxAgent and is always available in the sandbox — read /home/user/skills/MASTER-INDEX.md for the full index.",
               }
             : {}),
         },

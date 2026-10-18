@@ -11,16 +11,19 @@ with ONE master bundle that is attached to EVERY E2B sandbox at startup:
     src/lib/agent/master-skills-zip.ts      <- server-only zip payload (base64)
 
 Sources (first wins on front-matter `name` collisions — MengTo REMOVED per
-user request; the 9 threejs-* skills MERGED into one `threejs-game` skill):
+user request; the 9 threejs-* skills MERGED into one `threejs-game-webdev`
+skill = 9 game domains + 1 authored web-development guide; the anthropics
+`claude-api` skill EXCLUDED per user request — OnyxAgent is provider-agnostic):
 
-    1. anthropics/skills        (ALL 19 official skills)   anthropics_skills/skills/*
+    1. anthropics/skills        (official skills minus claude-api)  anthropics_skills/skills/*
     2. scrapegraphai/just-scrape (just-scrape)             scrapegraphai_just-scrape/skills/just-scrape
     3. affaan-m/ecc             (4 skills)                 ecc/skills/*
     4. goodnight000/api-anything (+ sites/*.md|json refs)  goodnight000_api-anything
     5. bendrape1-byte/silk-design (whole repo, one skill)  bendrape1-byte_silk-design
     6. mitunmanav/everything-ai (one skill)                mitunmanav_everything-ai/skills/everything-ai
     7. olivierlesnicki/addhumanity (10 skills)             olivierlesnicki_addhumanity/skills/*
-    8. majidmanzarpour/threejs-game-skills (9 → 1 merged)  majidmanzarpour_threejs-game-skills/skills/*
+    8. majidmanzarpour/threejs-game-skills (9 → 1 merged + web-dev guide)
+                                                            majidmanzarpour_threejs-game-skills/skills/*
     9. user's uploaded Skills.zip (21 skills)              staged bundle:
                                        public/skill-repos/uploaded-skills/skills/*
 
@@ -241,16 +244,139 @@ def load_skill_from_dir(src_root: str, subpath: str, category: str,
 
 
 # ---------------------------------------------------------------------------
-# threejs merge (9 -> 1)
+# threejs merge (9 -> 1 + authored web-dev guide)
 # ---------------------------------------------------------------------------
 
+# Authored domain guide: the original repo is 100% game-focused; this adds
+# the WEB-DEVELOPMENT half (hero sections, product showcases, scroll scenes,
+# R3F/Next.js integration, web perf/a11y budgets) so the merged skill covers
+# Three.js game + web dev as requested.
+WEB_DEV_GUIDE = '''# Three.js Web Development — interactive 3D on real websites
+
+Use this domain when the deliverable is a WEBSITE or a web FEATURE powered by
+Three.js — not a game: hero sections, product showcases & configurators,
+scroll-driven storytelling, 3D portfolios, data-viz scenes, particle
+backgrounds. For gameplay, loops, and score, use the game domains instead.
+
+## 1. Choose the right integration
+
+- Tiny accent (gradient, glow, blob)? CSS/SVG first — Three.js only when it
+  is genuinely 3D and interactive.
+- One-off hero or product viewer on a plain site → vanilla Three.js module,
+  no framework.
+- React / Next.js site → `@react-three/fiber` (R3F) + `@react-three/drei`.
+- Scroll story → R3F `ScrollControls` or manual scroll mapping + Lenis.
+- Full-site 3D app → architect it like a game (see threejs-game-director)
+  but keep every route code-split.
+
+## 2. Project setups (pick ONE)
+
+### Vanilla Vite + TypeScript
+- `npm create vite@latest` → add `three` + `@types/three`.
+- Core: `WebGLRenderer({ antialias: true, alpha: true })`, `ACESFilmicToneMapping`,
+  `PerspectiveCamera(fov 45)`, resize via ResizeObserver, rAF loop with
+  `clock.getDelta()`.
+- Unmount hygiene: dispose geometries, materials, textures, renderer; cancel rAF.
+
+### Next.js + React Three Fiber
+- App Router: the `<Canvas>` tree is a client component — `"use client"` on
+  every 3D file, `dynamic(() => import(...), { ssr: false })` at the boundary.
+- `<Canvas dpr={[1, 2]} camera={{ fov: 45, position: [...] }}
+  gl={{ antialias: true, alpha: true }}>`.
+- drei workhorses: `Environment` (HDR lighting), `useGLTF` (+ `useGLTF.preload`),
+  `ContactShadows`, `Float`, `Html`, `useScroll`/`ScrollControls`, `PerformanceMonitor`.
+
+## 3. Scroll-driven scenes
+
+- Map scroll progress 0..1 to camera path + scene state; LERP every frame —
+  never snap.
+- R3F: `ScrollControls` + `useScroll()`; vanilla: scroll listener → target
+  value consumed inside the rAF loop.
+- Keep copy/headings as REAL DOM (overlay divs or drei `<Html>`), not in-canvas
+  text — SEO and a11y live in the DOM.
+- Long timelines: GSAP ScrollTrigger or Lenis smoothing; pin sections; scrub
+  (tie animation time to scroll, not to clock).
+
+## 4. Hero sections & backgrounds
+
+- Budget: ≤ 150k triangles, one material per draw call, ≤ 2-3 texture sets.
+- Particle backgrounds: `THREE.Points` + `BufferGeometry` + `ShaderMaterial`;
+  cap counts by device (mobile ≈ 40-60% of desktop), animate in the shader.
+- Pause rendering when the canvas is offscreen (`IntersectionObserver`) and
+  when the tab is hidden (`visibilitychange`).
+- `prefers-reduced-motion`: render ONE static frame — no continuous loop.
+
+## 5. Product showcases & configurators
+
+- GLTF assets, DRACO or meshopt compressed; target ≤ 2MB per model on 4G.
+- Lighting: drei `Environment` preset or a small HDR (polyhaven) — no baked
+  point-light clusters.
+- Hotspots: raycast hover/click + drei `<Html>` anchors for labels.
+- Variant switching: share the geometry, swap material/color instances —
+  never re-load the model per variant.
+- `OrbitControls`: `enablePan={false}`, clamp `minDistance`/`maxDistance`/
+  `minPolarAngle`/`maxPolarAngle` so users cannot get lost.
+
+## 6. Web performance budget (non-negotiable)
+
+- LCP < 2.5s: ship a poster/placeholder; fade the canvas in when assets are
+  ready — the 3D layer must never block first paint.
+- Code-split the 3D chunk (dynamic import); lazy-mount below-the-fold canvases.
+- Cap `dpr` to [1, 2]; antialias only when dpr ≤ 1.5 (mobile GPUs).
+- Compress: DRACO/meshopt for meshes, KTX2/basis for textures.
+- Dispose on route change — leaked WebGL contexts kill an SPA.
+- Test on throttled mid-tier mobile (CPU 4x slowdown); desktop 60fps is not
+  the bar, throttled mobile is.
+
+## 7. Responsive & accessibility
+
+- The canvas fills a CONTAINER div (never the window); ResizeObserver →
+  `camera.aspect` + `renderer.setSize`.
+- Touch targets ≥ 44px; passive listeners for scroll/touch.
+- Fallbacks: poster frame, `prefers-reduced-motion` static frame,
+  `<noscript>` message.
+- Overlay text must still pass WCAG contrast — the 3D behind it is not an
+  excuse; keep overlay UI keyboard-navigable.
+
+## 8. SEO & deployment
+
+- Real DOM carries the content: headings, copy, links are HTML; 3D is the
+  enhancement layer.
+- Static export or Node server both work; models/textures live in `public/`
+  with long-lived cache headers and absolute `/paths`.
+- `og:image` = the poster frame, not a canvas capture.
+
+## 9. Web vs game — route the task
+
+- Score, input loops, physics, enemies, levels → the game domains
+  (start at threejs-gameplay-systems).
+- Marketing site, product page, portfolio, landing → THIS guide.
+- Mixed (playable ad, configurator with mini-game) → this guide for the shell,
+  game domains for the playable core.
+
+## Ship checklist
+
+- [ ] Poster/placeholder + fade-in on ready
+- [ ] 3D chunk code-split; below-fold canvases lazy
+- [ ] dpr capped, DRACO/KTX2 compression on
+- [ ] Rendering paused offscreen + hidden tab
+- [ ] Reduced-motion static frame
+- [ ] Resize + throttled-mobile pass
+- [ ] Everything disposed on unmount
+- [ ] Real-DOM text for SEO; overlays keyboard-navigable
+'''
+
+
 def build_threejs_merged(src_root: str) -> Skill | None:
-    """Merge the 9 threejs-* skills into ONE `threejs-game` skill.
+    """Merge the 9 threejs-* game skills into ONE `threejs-game-webdev` skill
+    covering Three.js GAME + WEB development (10 domains: 9 from the repo +
+    the authored web-development guide).
 
     Layout:
-      threejs-game/SKILL.md                     <- front matter + domain map
-      threejs-game/domains/<orig-name>.md       <- each skill's full body
-      threejs-game/<orig-name>/references|...   <- supporting files preserved
+      threejs-game-webdev/SKILL.md                     <- front matter + domain map
+      threejs-game-webdev/domains/<orig-name>.md       <- each skill's full body
+      threejs-game-webdev/domains/threejs-web-development.md  <- authored web guide
+      threejs-game-webdev/<orig-name>/references|...   <- supporting files preserved
     """
     base = os.path.join(src_root, "majidmanzarpour_threejs-game-skills", "skills")
     if not os.path.isdir(base):
@@ -270,15 +396,17 @@ def build_threejs_merged(src_root: str) -> Skill | None:
     if not domains:
         return None
 
-    name = "threejs-game"
+    name = "threejs-game-webdev"
     description = (
-        "Complete Three.js game production in one skill — game direction, "
-        "gameplay systems, AAA graphics, in-game UI, debug/profiling, QA & "
-        "release, procedural 3D generation, image generation and audio. The "
-        "SKILL.md domain map routes to the 9 full domain guides in domains/ "
-        "and their deep references."
+        "Complete Three.js GAME + WEB development in one skill — game "
+        "direction, gameplay systems, AAA graphics, in-game UI, "
+        "debug/profiling, QA & release, procedural 3D/image/audio generation, "
+        "PLUS interactive 3D websites: hero sections, product showcases & "
+        "configurators, scroll-driven scenes, React/Next.js (R3F) integration, "
+        "web performance and accessibility. The SKILL.md domain map routes to "
+        "the 10 domain guides in domains/ and their deep references."
     )
-    skill = Skill(name, description, "3D & Games")
+    skill = Skill(name, description, "3D, Games & Web")
 
     lines = [
         "---",
@@ -286,14 +414,18 @@ def build_threejs_merged(src_root: str) -> Skill | None:
         f"description: {description}",
         "---",
         "",
-        "# Three.js Game Development — the complete production skill",
+        "# Three.js Game + Web Development — the complete production skill",
         "",
-        "This ONE skill replaces the former nine separate threejs-* skills.",
-        "It covers the full production pipeline for Three.js games. The map",
-        "below lists every domain; read the domain guide you need:",
-        "`read_file skills/threejs-game/domains/<domain>.md`.",
+        "This ONE skill replaces the former nine separate threejs-* skills and",
+        "covers BOTH production lines: browser GAMES (9 domains from the",
+        "original repo) and interactive 3D WEB development (the authored",
+        "web-development guide). The map below lists every domain; read the",
+        "domain guide you need:",
+        "`read_file skills/threejs-game-webdev/domains/<domain>.md`.",
         "",
         "## Domain map",
+        "",
+        "### Games (9 domains)",
         "",
     ]
     for d in domains:
@@ -301,15 +433,32 @@ def build_threejs_merged(src_root: str) -> Skill | None:
         lines.append(f"{d['description'] or ''}".strip())
         lines.append(f"Full guide: `domains/{d['name']}.md` — deep references under `{d['name']}/`.")
         lines.append("")
-    lines.append("## How to use")
-    lines.append("1. Identify the production phase of the task (design → systems → graphics → UI → audio → debug → QA → release).")
-    lines.append("2. Read the matching domain guide (and its references) BEFORE writing code.")
-    lines.append("3. Combine domains as needed — a gameplay task usually needs `threejs-gameplay-systems` + `threejs-debug-profiler`.")
-    lines.append("")
+    lines += [
+        "### Web development (authored)",
+        "",
+        "### threejs-web-development",
+        "Interactive 3D on real websites: hero sections, product showcases & "
+        "configurators, scroll-driven scenes, particle backgrounds, React/"
+        "Next.js (R3F) integration, web performance budgets, responsive "
+        "canvases, accessibility and SEO-safe 3D.",
+        "Full guide: `domains/threejs-web-development.md`.",
+        "",
+        "## How to use",
+        "1. Route the task: GAME (loops, score, physics, levels) → the game "
+        "domains; WEBSITE/WEB FEATURE (landing, product page, portfolio, "
+        "scroll story) → `threejs-web-development`.",
+        "2. Read the matching domain guide (and its references) BEFORE writing code.",
+        "3. Combine domains as needed — a gameplay task usually needs "
+        "`threejs-gameplay-systems` + `threejs-debug-profiler`; a product "
+        "showcase usually needs `threejs-web-development` + "
+        "`threejs-aaa-graphics-builder`.",
+        "",
+    ]
     skill.add("SKILL.md", ("\n".join(lines)).encode("utf-8"))
 
     for d in domains:
         skill.add(f"domains/{d['name']}.md", d["body"].encode("utf-8"))
+    skill.add("domains/threejs-web-development.md", WEB_DEV_GUIDE.encode("utf-8"))
     # Supporting files (references/scripts/agents) under <orig-name>/…
     for entry in sorted(os.listdir(base)):
         entry_full = os.path.join(base, entry)
@@ -400,10 +549,17 @@ def main() -> int:
         taken[skill.name] = label
         skills.append(skill)
 
-    # 1. anthropics/skills — ALL official skills.
+    # 1. anthropics/skills — official skills, EXCLUDING claude-api (user
+    #    request 2026-10-19: remove the Claude API skill — OnyxAgent is
+    #    provider-agnostic and the 94-file Claude API reference bloats the
+    #    startup zip without being usable by the agent).
+    ANTHROPICS_EXCLUDED = {"claude-api"}
     ant_root = os.path.join(src, "anthropics_skills", "skills")
     if os.path.isdir(ant_root):
         for entry in sorted(os.listdir(ant_root)):
+            if entry in ANTHROPICS_EXCLUDED:
+                print(f"  excluded (user request): anthropics/{entry}")
+                continue
             if os.path.isdir(os.path.join(ant_root, entry)):
                 add(load_skill_from_dir(ant_root, entry, "Anthropic Official"),
                     f"anthropics/{entry}")
@@ -463,8 +619,9 @@ def main() -> int:
                 add(load_skill_from_dir(ah_root, entry, "Mental Wellbeing"),
                     f"addhumanity/{entry}")
 
-    # 8. threejs — the 9 merged into ONE.
-    add(build_threejs_merged(src), "threejs-game-skills (merged 9→1)")
+    # 8. threejs — the 9 game skills merged into ONE game+webdev skill
+    #    (9 repo domains + the authored web-development guide).
+    add(build_threejs_merged(src), "threejs-game-skills (merged 9→1 + web-dev guide)")
 
     # 9. uploaded Skills.zip — staged from the persistent build input
     #    (build-inputs/uploaded-skills — the canonical extracted + deduped
@@ -604,9 +761,10 @@ def main() -> int:
             "`scripts/build_master_skill.py`. The zip is baked into the app\n"
             "(`src/lib/agent/master-skills-zip.ts`) and attached to EVERY E2B\n"
             "sandbox at startup — extracted to `/home/user/skills/` with\n"
-            "`MASTER-INDEX.md` at its root. Sources: anthropics/skills (all),\n"
-            "scrapegraphai/just-scrape, affaan-m/ecc, api-anything, silk-design,\n"
-            "everything-ai, addhumanity, threejs-game-skills (9 merged into 1),\n"
+            "`MASTER-INDEX.md` at its root. Sources: anthropics/skills (all\n"
+            "official skills except claude-api), scrapegraphai/just-scrape,\n"
+            "affaan-m/ecc, api-anything, silk-design, everything-ai, addhumanity,\n"
+            "threejs-game-skills (9 game skills merged into 1 game+web-dev skill),\n"
             f"and the user's uploaded Skills.zip. {len(skills)} skills total.\n\n"
             f"Version {version} · sha256 {sha[:16]}…\n"
         )
