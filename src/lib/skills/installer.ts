@@ -29,6 +29,7 @@ import {
   validateSkillMdText,
   ZipFormatError,
   type PlannedSkill,
+  type ZipEntryInfo,
 } from "./zip";
 
 export interface InstalledSkillMeta {
@@ -227,12 +228,39 @@ async function persistPlannedSkill(
   return result;
 }
 
+/** Max recursion depth for archives-of-archives (a bundle of packaged skill
+ *  zips, e.g. `Skills.zip` holding 22 individually zipped skills). Depth 2
+ *  means zip → zip → skills; anything deeper is rejected as hostile. */
+const MAX_NESTED_ZIP_DEPTH = 2;
+
+function skillInstallError(source: string, error: string): SkillInstallItemResult {
+  return {
+    source,
+    ok: false,
+    name: null,
+    description: null,
+    dirPath: null,
+    files: [],
+    error,
+    warnings: [],
+  };
+}
+
+/** Is this (already-validated) entry a nested skill archive at the top level? */
+function isNestedZipEntry(name: string): boolean {
+  return !name.includes("/") && /\.zip$/i.test(name);
+}
+
 /**
  * Install a `.zip` archive that may contain MULTIPLE skill folders
- * (`skill-a/SKILL.md`, `skill-b/SKILL.md`, …) or a single skill at its root.
+ * (`skill-a/SKILL.md`, `skill-b/SKILL.md`, …), a single skill at its root, or
+ * a BUNDLE OF PACKAGED SKILL ARCHIVES (`skill-a.zip`, `skill-b.zip`, … — the
+ * zip-of-zips shape several skill packs ship in).
  *
  * Validation + extraction run through the safe pipeline in `./zip`
- * (bomb-capped, traversal/symlink-proof, entry-at-a-time). Every discovered
+ * (bomb-capped, traversal/symlink-proof, entry-at-a-time). Nested archives
+ * are each pushed through the SAME safe pipeline (their own entry caps and
+ * byte budgets, depth-limited to MAX_NESTED_ZIP_DEPTH). Every discovered
  * skill dir is validated and registered INDEPENDENTLY — one invalid skill
  * produces a per-item error without blocking its siblings. The archive-level
  * failures (corrupt zip, zip-bomb totals, absurd entry counts) reject the
@@ -242,6 +270,7 @@ export async function installSkillZipBundle(
   userId: string,
   zipBytes: Uint8Array,
   opts: SkillInstallOptions & { sourceLabel?: string } = {},
+  depth = 0,
 ): Promise<SkillInstallItemResult[]> {
   const sourceLabel = opts.sourceLabel ?? "archive";
   let parsed;
@@ -284,20 +313,18 @@ export async function installSkillZipBundle(
   // Detection happens on the validated names BEFORE extraction so only the
   // entries that belong to a candidate skill dir are ever inflated.
   const plan = planSkillBundles(parsed.entries.map((e) => e.name));
+
+  // Zip-of-zips: the whole archive is a bundle of packaged skills (e.g.
+  // `Skills.zip` holding `frontend-design.zip`, `zai-ppt-skill.zip`, …).
+  // Recurse into each nested archive through the same safe pipeline.
+  const nestedZipEntries = parsed.entries.filter((e) => !e.isDir && isNestedZipEntry(e.name));
+  if (plan.skills.length === 0 && nestedZipEntries.length > 0 && depth < MAX_NESTED_ZIP_DEPTH) {
+    return await installNestedZipEntries(userId, zipBytes, nestedZipEntries, depth);
+  }
+
   if (plan.skills.length === 0) {
     const reasons = plan.rejected.map((r) => `${r.dir || "(root)"}: ${r.reason}`).join("; ");
-    return [
-      {
-        source: sourceLabel,
-        ok: false,
-        name: null,
-        description: null,
-        dirPath: null,
-        files: [],
-        error: `No skill folder with a SKILL.md was found in this archive. ${reasons || ""}`.trim(),
-        warnings: [],
-      },
-    ];
+    return [skillInstallError(sourceLabel, `No skill folder with a SKILL.md was found in this archive. ${reasons || ""}`.trim())];
   }
 
   // Extract only the entries belonging to planned skills (single pass over
@@ -347,6 +374,16 @@ export async function installSkillZipBundle(
   }
   for (const rej of plan.rejected) {
     if (plan.skills.some((s) => s.dir === rej.dir)) continue; // already surfaced above
+    // Mixed archives: a rejected top-level folder may actually be a packaged
+    // skill archive (skill dirs + `extra-skill.zip` side by side) — recurse.
+    if (depth < MAX_NESTED_ZIP_DEPTH) {
+      const zipEntry = nestedZipEntries.find((e) => e.name === rej.dir);
+      if (zipEntry) {
+        const nested = await installNestedZipEntries(userId, zipBytes, [zipEntry], depth);
+        results.push(...nested);
+        continue;
+      }
+    }
     results.push({
       source: rej.dir || "(root)",
       ok: false,
@@ -357,6 +394,39 @@ export async function installSkillZipBundle(
       error: rej.reason,
       warnings: [],
     });
+  }
+  return results;
+}
+
+/** Extract the given nested `.zip` entries and install each through the full
+ *  safe pipeline (own caps, depth-limited). One broken nested archive never
+ *  blocks its siblings — its error becomes that item's per-item result. */
+async function installNestedZipEntries(
+  userId: string,
+  zipBytes: Uint8Array,
+  entries: ZipEntryInfo[],
+  depth: number,
+): Promise<SkillInstallItemResult[]> {
+  const results: SkillInstallItemResult[] = [];
+  let extracted: Map<string, Uint8Array>;
+  try {
+    extracted = extractZipEntries(zipBytes, entries);
+  } catch (err) {
+    const message = err instanceof ZipFormatError ? err.message : `Failed to extract nested archives: ${err instanceof Error ? err.message : String(err)}`;
+    return entries.map((e) => skillInstallError(e.name, message));
+  }
+  for (const entry of entries) {
+    const bytes = extracted.get(entry.name);
+    if (!bytes) {
+      results.push(skillInstallError(entry.name, `Could not extract the nested archive from the bundle.`));
+      continue;
+    }
+    try {
+      const sub = await installSkillZipBundle(userId, bytes, { sourceLabel: entry.name }, depth + 1);
+      results.push(...sub);
+    } catch (err) {
+      results.push(skillInstallError(entry.name, err instanceof Error ? err.message : String(err)));
+    }
   }
   return results;
 }

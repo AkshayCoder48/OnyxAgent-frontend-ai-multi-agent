@@ -33,6 +33,7 @@ import {
   type LocalScanResult,
   type WorkspaceFile,
 } from "./workspace-snapshot";
+import { summarizeSkillRepositories, summarizeMcpMarket } from "@/lib/skills/catalog-registry";
 
 // ---------------------------------------------------------------------------
 // Types (output shape — kept EXACTLY compatible with the legacy contract).
@@ -49,6 +50,10 @@ interface WorkspaceSummary {
   env_vars: EnvVarInfo[];
   existing_subagents: Array<Record<string, unknown>>;
   memories: Array<Record<string, unknown>>;
+  /** Default skill-repository index (Skills PRD) — metadata-only. */
+  skill_repositories: Array<Record<string, unknown>>;
+  /** Curated MCPMarket catalog summary (id/name/url). */
+  mcp_market: Array<Record<string, unknown>>;
   summary: string;
   errors: string[];
   /** Superset telemetry — never consumed by logic, safe to ignore. */
@@ -61,6 +66,8 @@ const EMPTY_LOCAL: LocalScanResult = {
   env_vars: [],
   existing_subagents: [],
   memories: [],
+  skill_repositories: summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>,
+  mcp_market: summarizeMcpMarket() as unknown as Array<Record<string, unknown>>,
   errors: [],
 };
 
@@ -90,6 +97,8 @@ registerTool(
 - files: recursive file listing (paths, sizes, types)
 - key_files: contents of README, package.json, tsconfig, Dockerfiles, .env files
 - skills: installed ClawHub skills
+- skill_repositories: the DEFAULT SKILL REPOSITORY index (metadata-only — pick relevant skills per task, install with manage_skill install_from_repository, read before applying)
+- mcp_market: curated MCPMarket catalog (see manage_mcp action "market" for details)
 - mcp_servers: configured MCP servers
 - available_tools: every tool currently registered
 - env_vars: configured sandbox env vars (values masked)
@@ -102,7 +111,8 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
 2. Pick the right specialist roles for subagents
 3. Decide disposable vs persistent agents
 4. Avoid duplicating existing subagents
-5. Match coding style/patterns observed in existing files`,
+5. Match coding style/patterns observed in existing files
+6. Match the task against the skill-repository index — metadata-first, never bulk-load skills`,
   {
     type: "object",
     properties: {
@@ -139,6 +149,16 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
     const key_files: KeyFiles = snap.keyFiles ?? {};
     const local = snap.localScan ?? EMPTY_LOCAL;
     const { skills, mcp_servers, env_vars, existing_subagents, memories } = local;
+    // Static registry data is merged here so even a null localScan (no sandbox
+    // key yet) still indexes the skill repositories (PRD: always discoverable).
+    const skill_repositories =
+      local.skill_repositories?.length
+        ? local.skill_repositories
+        : (summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>);
+    const mcp_market =
+      local.mcp_market?.length
+        ? local.mcp_market
+        : (summarizeMcpMarket() as unknown as Array<Record<string, unknown>>);
 
     // ---- Available tools (always fresh — an in-memory registry read) -------
     let available_tools: Array<{ name: string; description: string; category?: string }> = [];
@@ -185,6 +205,8 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
         ? `Detected technologies: ${project_signals.join(", ")}.`
         : `No specific technologies detected from file extensions.`,
       `Skills installed: ${skills.length}.`,
+      `Skill repositories: ${skill_repositories.length} (indexed skills: ${skill_repositories.reduce((n, r) => n + (Number(r.skill_count) || 0), 0)} — manage_skill catalog for details).`,
+      `MCP Market catalog: ${mcp_market.length} servers (manage_mcp market).`,
       `MCP servers: ${mcp_servers.length}.`,
       `Available tools: ${available_tools.length}.`,
       `Env vars configured: ${env_vars.length}.`,
@@ -204,6 +226,8 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
       env_vars,
       existing_subagents,
       memories,
+      skill_repositories,
+      mcp_market,
       summary,
       errors,
       meta: {

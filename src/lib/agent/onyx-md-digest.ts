@@ -20,16 +20,16 @@ export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (64 tota
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
 ### Multi-function tools — one tool, one action parameter
-- manage_todo [create / update / delete / list / clear] — Planning multi-step work. create returns a stable ID like todo_8f42 — quote it later. Statuses: not_planned/in_progress/done/not_done.
+- manage_todo [create / update / delete / list / clear] — Planning multi-step work. create returns a stable ID like todo_8f42 — quote it later.
 - show_todo — Render the todo table for the user — after creating or updating todos. Pass IDs, or all: true.
-- manage_memory [save / search / list / delete] — Persistent facts about the user ("remember that…", preferences, decisions). Survives across conversations.
-- knowledge_base [search / get / save / update / delete / list / file hosting] — Persistent workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps; save_file hosts files + links.
-- manage_skill [list / read / create / edit / delete] — Installed skills (SKILL.md instruction files). read a skill before applying it.
-- manage_mcp [list / create / edit / delete] — MCP server configs (remote HTTP/SSE only — callable via mcp_search_tools; stdio/npm servers in the sandbox: use their CLI there). Find ids with list.
+- manage_memory [save / search / list / delete] — Persistent facts about the user (preferences, decisions). Survives across conversations.
+- knowledge_base [search / get / save / update / delete / list / file hosting] — Persistent workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
+- manage_skill [list / read / create / edit / delete / catalog / browse_repository / install_from_repository] — Skills + repository catalog (6 GitHub repos + MCP Market). Metadata-first: catalog → install → read before applying.
+- manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params)).
-- manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the real value. Tools receive them automatically.
+- manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the value. Tools receive them automatically.
 - manage_chats [list / read] — Recall past conversations ("what did we talk about earlier?"). list → conversation_id → read the transcript.
-- manage_subagent_chat [create / delete / edit_title / pin] — Persistent chat sessions with subagents (auto-creates the subagent). Message them via query_subagent.
+- manage_subagent_chat [create / delete / edit_title / pin] — Persistent chat sessions with subagents (auto-created). Message them via query_subagent.
 - workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
 - ocr_document [(kind auto-detected)] — Extract text from an image OR a PDF. Pass url or base64.
 - move_file [(move or rename)] — Move a file to a new path, or rename in place (same dir + new name = rename).
@@ -50,7 +50,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - send_folder — Deliver a folder as a ZIP download.
 - verify_path — Pre-create/verify dirs + empty files before writing.
 - create_file_chunk — Write/append large files in chunks — for files >200 lines (see Writing Policy).
-- analyze_workspace — Full workspace scan. Run FIRST on every task.
+- analyze_workspace — Full workspace scan (files, skills, skill-repo index, MCPs, env vars, subagents, memories). Run FIRST on every task.
 
 ### Code execution
 - run_python — Python 3: data analysis, calculations, file processing, ML. 60s timeout, live streaming output.
@@ -82,17 +82,17 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Media, charts & time
 - create_chart — Line/bar/pie/area/scatter charts from structured data — renders inline.
-- media_generation — Unified Pollinations AI access: discover live models (with modalities + Pollen pricing), pick/set defaults, check Pollen balance & usage, and generate images, video, audio, 3D…
+- media_generation — Unified Pollinations AI: discover models, set defaults, check balance, generate images, video, audio, 3D, embeddings. Chargeable generations need the user's explicit two-step…
 - preview_image — Show an image inline in the chat (URL or base64).
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
 ### External apps (Composio — 250+ platforms)
-- composio_search_tools — FIRST STEP for external-app tasks: describe the use case plainly; returns matching tool slugs + platforms. Search BEFORE executing.
+- composio_search_tools — FIRST STEP for external-app tasks: describe the use case plainly; returns matching tool slugs + platforms.
 - composio_connect_platform — Get the OAuth link for a platform (slug like slack). Share it and WAIT — you cannot authorize yourself.
-- composio_execute_tool — Execute a discovered tool: toolName + args per its schema. CONNECTION_REQUIRED → share a connect link and wait; never fabricate results.
+- composio_execute_tool — Execute a discovered tool: toolName + args per its schema. CONNECTION_REQUIRED → share a connect link and wait.
 
 ### Scheduled tasks & automation (8 tools)
-- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions (the COMPLETE autonomous job — no user available), schedule {type…
+- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions (COMPLETE autonomous job), schedule {type: once/daily/weekly/monthly/interval/cron…
 - update_scheduled_task — Change name/description/instructions/schedule/enabled by task id. Find ids with list_scheduled_tasks.
 - delete_scheduled_task — Permanently remove a task + its history (its dedicated chat stays as a normal conversation).
 - pause_scheduled_task — Stop executions / resume the schedule.

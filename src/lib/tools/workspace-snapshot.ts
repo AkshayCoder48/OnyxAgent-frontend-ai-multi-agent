@@ -77,6 +77,11 @@ export interface LocalScanResult {
   env_vars: EnvVarInfo[];
   existing_subagents: Array<Record<string, unknown>>;
   memories: Array<Record<string, unknown>>;
+  /** Default skill-repository index (Skills PRD) — static metadata, zero
+   *  round trips. Present even when services are unavailable. */
+  skill_repositories: Array<Record<string, unknown>>;
+  /** Curated MCPMarket catalog summary (id/name/url only). */
+  mcp_market: Array<Record<string, unknown>>;
   errors: string[];
 }
 
@@ -629,6 +634,11 @@ export async function runLocalScans(ctx: ToolContext): Promise<LocalScanResult> 
   const services = await import("@/lib/services").catch(() => null);
   const subagentMod = await import("@/stores/subagent-store").catch(() => null);
 
+  // Static registry data (Skills PRD) — always present, no I/O.
+  const { summarizeSkillRepositories, summarizeMcpMarket } = await import("@/lib/skills/catalog-registry");
+  const skill_repositories = summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>;
+  const mcp_market = summarizeMcpMarket() as unknown as Array<Record<string, unknown>>;
+
   const [skills, mcp_servers, env_vars, existing_subagents, memories] = await Promise.all([
     (async (): Promise<Array<Record<string, unknown>>> => {
       try {
@@ -715,7 +725,7 @@ export async function runLocalScans(ctx: ToolContext): Promise<LocalScanResult> 
     })(),
   ]);
 
-  return { skills, mcp_servers, env_vars, existing_subagents, memories, errors };
+  return { skills, mcp_servers, env_vars, existing_subagents, memories, skill_repositories, mcp_market, errors };
 }
 
 // ---------------------------------------------------------------------------

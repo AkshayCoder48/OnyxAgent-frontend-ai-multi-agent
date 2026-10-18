@@ -557,7 +557,8 @@ describe("analyze_workspace tool contract", () => {
 
     const result = (await tool!.handler({ max_files: 10 }, makeCtx())) as Record<string, unknown>;
 
-    // Legacy keys — all present, exact set plus the new `meta` telemetry.
+    // Legacy keys — all present, exact set plus the `meta` telemetry and the
+    // Skills-PRD registry fields (skill_repositories / mcp_market).
     expect(Object.keys(result).sort()).toEqual(
       [
         "available_tools",
@@ -567,9 +568,11 @@ describe("analyze_workspace tool contract", () => {
         "file_count",
         "files",
         "key_files",
+        "mcp_market",
         "mcp_servers",
         "memories",
         "meta",
+        "skill_repositories",
         "skills",
         "summary",
         "total_size_bytes",

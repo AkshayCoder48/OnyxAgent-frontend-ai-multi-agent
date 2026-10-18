@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Blocks, Loader2, Plus, Power, Trash2 } from "lucide-react";
+import { AlertTriangle, Blocks, ExternalLink, Loader2, Plus, Power, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button, Input, Label } from "@/components/ui";
@@ -10,6 +10,7 @@ import { MoreOptions } from "@/components/settings/more-options";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { mcpService } from "@/lib/services";
+import { MCP_MARKET_SERVERS } from "@/lib/skills/catalog-registry";
 
 type MCPTransport = "sse" | "streamable_http";
 
@@ -205,6 +206,45 @@ export default function McpsSettingsPage() {
             ))}
           </ul>
         )}
+      </SettingsSectionCard>
+
+      <SettingsSectionCard
+        title="MCP Market catalog"
+        description="Curated MCPMarket servers. Open the marketplace page for connection details — or just ask the agent, which runs manage_mcp 'market' and wires them automatically."
+      >
+        <ul className="max-h-72 divide-y divide-border overflow-y-auto scrollbar-thin rounded-xl border border-border">
+          {MCP_MARKET_SERVERS.map((s) => (
+            <li key={s.id} className="flex items-start gap-3 px-4 py-2.5">
+              <Blocks className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">{s.name}</p>
+                <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                  {s.description}
+                </p>
+                {s.hint && (
+                  <p className="mt-1 line-clamp-1 text-[11px] text-muted-foreground/80">
+                    {s.hint}
+                  </p>
+                )}
+              </div>
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                aria-label={`Open ${s.name} on MCPMarket`}
+                title={`${s.name} on MCPMarket`}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Remote HTTP/SSE servers become first-class agent tools; stdio/npx servers run inside
+          the E2B sandbox via an MCP client script. The agent fetches the marketplace page for
+          exact connection details — never guesses them.
+        </p>
       </SettingsSectionCard>
 
       <SettingsSectionCard

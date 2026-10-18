@@ -158,8 +158,11 @@ interface CacheEntry {
  *  from the manual (61 tools).
  *  Version 7 = MCP reality docs — manage_mcp scope clarified (remote
  *  HTTP/SSE only; sandbox-installed stdio servers need their CLI / an
- *  MCP client there) + digest trimmed back under the 8KB cap. */
-const AGENT_MD_VERSION = 7;
+ *  MCP client there) + digest trimmed back under the 8KB cap.
+ *  Version 8 = Skills PRD — manage_skill catalog/browse_repository/
+ *  install_from_repository actions, manage_mcp market action,
+ *  analyze_workspace skill-repository index + metadata-first policy. */
+const AGENT_MD_VERSION = 8;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();

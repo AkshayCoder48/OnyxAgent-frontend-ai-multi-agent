@@ -20,6 +20,7 @@ import { toast } from "sonner";
 
 import { Button, Input } from "@/components/ui";
 import { SectionCard as SettingsSectionCard } from "@/components/settings/settings-section";
+import { SectionSkillRepositories } from "@/components/settings/section-skill-repositories";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { skillService } from "@/lib/services";
@@ -395,6 +396,13 @@ export default function SkillsSettingsPage() {
           </ul>
         )}
       </SettingsSectionCard>
+
+      <SectionSkillRepositories
+        userId={user?.id ?? ""}
+        installedNames={installed.map((s) => s.name)}
+        onInstalled={() => void loadInstalled()}
+        disabled={!opfsAvailable || !e2bAvailable}
+      />
 
       <SettingsSectionCard
         title="Upload a skill"
