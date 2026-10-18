@@ -33,7 +33,14 @@ import {
   type LocalScanResult,
   type WorkspaceFile,
 } from "./workspace-snapshot";
-import { summarizeSkillRepositories, summarizeMcpMarket } from "@/lib/skills/catalog-registry";
+import { summarizeMcpMarket } from "@/lib/skills/catalog-registry";
+import {
+  MASTER_SKILLS,
+  MASTER_SKILLS_COUNT,
+  MASTER_SKILLS_VERSION,
+  MASTER_INDEX_PATH,
+  MASTER_LIBRARY_PATH,
+} from "@/lib/agent/master-skills";
 
 // ---------------------------------------------------------------------------
 // Types (output shape — kept EXACTLY compatible with the legacy contract).
@@ -50,8 +57,16 @@ interface WorkspaceSummary {
   env_vars: EnvVarInfo[];
   existing_subagents: Array<Record<string, unknown>>;
   memories: Array<Record<string, unknown>>;
-  /** Default skill-repository index (Skills PRD) — metadata-only. */
-  skill_repositories: Array<Record<string, unknown>>;
+  /** Master skill library index (name + description per skill) — the
+   * whole library is ALWAYS available in the sandbox at
+   * /home/user/skills/ (no install needed). */
+  master_skill_library: {
+    version: string;
+    count: number;
+    path: string;
+    index_path: string;
+    skills: Array<{ name: string; description: string }>;
+  };
   /** Curated MCPMarket catalog summary (id/name/url). */
   mcp_market: Array<Record<string, unknown>>;
   summary: string;
@@ -66,10 +81,20 @@ const EMPTY_LOCAL: LocalScanResult = {
   env_vars: [],
   existing_subagents: [],
   memories: [],
-  skill_repositories: summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>,
   mcp_market: summarizeMcpMarket() as unknown as Array<Record<string, unknown>>,
   errors: [],
 };
+
+/** The master skill library index — static metadata (no I/O). */
+function masterSkillLibraryIndex() {
+  return {
+    version: MASTER_SKILLS_VERSION,
+    count: MASTER_SKILLS_COUNT,
+    path: MASTER_LIBRARY_PATH,
+    index_path: MASTER_INDEX_PATH,
+    skills: MASTER_SKILLS.map((s) => ({ name: s.name, description: s.description })),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -96,8 +121,8 @@ registerTool(
   `Scan the ENTIRE workspace before starting any task. Returns:
 - files: recursive file listing (paths, sizes, types)
 - key_files: contents of README, package.json, tsconfig, Dockerfiles, .env files
-- skills: installed ClawHub skills
-- skill_repositories: the DEFAULT SKILL REPOSITORY index (metadata-only — pick relevant skills per task, install with manage_skill install_from_repository, read before applying)
+- skills: the user's app-installed skills
+- master_skill_library: the index of the 56-skill MASTER LIBRARY that ships with OnyxAgent — it is ALREADY in the sandbox at /home/user/skills/ (no install needed): pick skills BY NAME from the index, then read_file /home/user/skills/<name>/SKILL.md before applying one
 - mcp_market: curated MCPMarket catalog (see manage_mcp action "market" for details)
 - mcp_servers: configured MCP servers
 - available_tools: every tool currently registered
@@ -112,7 +137,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
 3. Decide disposable vs persistent agents
 4. Avoid duplicating existing subagents
 5. Match coding style/patterns observed in existing files
-6. Match the task against the skill-repository index — metadata-first, never bulk-load skills`,
+6. Match the task against the master skill library index — metadata-first, read only the skills the task needs (never bulk-load)`,
   {
     type: "object",
     properties: {
@@ -149,12 +174,9 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
     const key_files: KeyFiles = snap.keyFiles ?? {};
     const local = snap.localScan ?? EMPTY_LOCAL;
     const { skills, mcp_servers, env_vars, existing_subagents, memories } = local;
-    // Static registry data is merged here so even a null localScan (no sandbox
-    // key yet) still indexes the skill repositories (PRD: always discoverable).
-    const skill_repositories =
-      local.skill_repositories?.length
-        ? local.skill_repositories
-        : (summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>);
+    // The master skill library is STATIC metadata — always included (even
+    // with no sandbox key yet) so skills are always discoverable.
+    const master_skill_library = masterSkillLibraryIndex();
     const mcp_market =
       local.mcp_market?.length
         ? local.mcp_market
@@ -205,7 +227,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
         ? `Detected technologies: ${project_signals.join(", ")}.`
         : `No specific technologies detected from file extensions.`,
       `Skills installed: ${skills.length}.`,
-      `Skill repositories: ${skill_repositories.length} (indexed skills: ${skill_repositories.reduce((n, r) => n + (Number(r.skill_count) || 0), 0)} — manage_skill catalog for details).`,
+      `Master skill library: ${master_skill_library.count} skills ALWAYS available at ${master_skill_library.path} (index: ${master_skill_library.index_path}) — pick by name, read the SKILL.md before applying.`,
       `MCP Market catalog: ${mcp_market.length} servers (manage_mcp market).`,
       `MCP servers: ${mcp_servers.length}.`,
       `Available tools: ${available_tools.length}.`,
@@ -226,7 +248,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
       env_vars,
       existing_subagents,
       memories,
-      skill_repositories,
+      master_skill_library,
       mcp_market,
       summary,
       errors,

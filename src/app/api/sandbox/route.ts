@@ -31,6 +31,8 @@ import { Sandbox } from "@e2b/code-interpreter";
 // section from this file, so the sandbox MUST receive the full document,
 // not a short stub.
 import { ONYX_MD } from "@/lib/agent/onyx-md";
+import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
+import { attachMasterSkills, ensureMasterSkills } from "@/lib/e2b/attach-master-skills";
 // Background agent runner (see src/lib/e2b/bg-agent-script.ts) — the
 // self-contained script executed INSIDE the sandbox as a background command.
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH, BG_RUNS_PREFIX } from "@/lib/e2b/bg-agent-script";
@@ -144,6 +146,10 @@ interface CacheEntry {
    *  whenever Onyx.md meaningfully changes — cached/reconnected sandboxes
    *  then get the updated documentation on their next use. */
   agentMdVersion?: number;
+  /** Which master skill library version this sandbox received (the zip
+   *  attached at startup — see attach-master-skills.ts). Sandboxes adopted
+   *  through reconnect paths are re-attached when this drifts. */
+  masterSkillsVersion?: string;
 }
 
 /** Bump when Onyx.md (→ src/lib/agent/onyx-md.ts) changes meaningfully.
@@ -161,8 +167,13 @@ interface CacheEntry {
  *  MCP client there) + digest trimmed back under the 8KB cap.
  *  Version 8 = Skills PRD — manage_skill catalog/browse_repository/
  *  install_from_repository actions, manage_mcp market action,
- *  analyze_workspace skill-repository index + metadata-first policy. */
-const AGENT_MD_VERSION = 8;
+ *  analyze_workspace skill-repository index + metadata-first policy.
+ *  Version 9 = MASTER SKILL LIBRARY — the skill-repository system is
+ *  REPLACED by one master library zip attached to every sandbox at
+ *  startup (extracted to /home/user/skills/ with MASTER-INDEX.md);
+ *  manage_skill trimmed to list/read/create/edit/delete; the fixed
+ *  read-Onyx.md-and-MASTER-INDEX rule added. */
+const AGENT_MD_VERSION = 9;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
@@ -456,6 +467,26 @@ async function backupAllFilesFromSandbox(
 ): Promise<BackupFile[]> {
   const files: BackupFile[] = [];
 
+  /** Master-library paths that NEVER need a rotation backup: the library
+   *  is static and re-attached (version-gated) to every new sandbox at
+   *  startup — backing up ~700 files / 7MB per rotation would slow it for
+   *  no benefit. USER skills under /home/user/skills/ are still backed up. */
+  const MASTER_LIBRARY_PATHS: ReadonlySet<string> = new Set(
+    MASTER_SKILLS.flatMap((s) => [
+      `/home/user/skills/${s.name}`,
+      `/home/user/skills/${s.name}/`,
+      "/home/user/skills/MASTER-INDEX.md",
+    ]),
+  );
+
+  function isMasterLibraryPath(p: string): boolean {
+    if (MASTER_LIBRARY_PATHS.has(p)) return true;
+    if (!p.startsWith("/home/user/skills/")) return false;
+    const rest = p.slice("/home/user/skills/".length);
+    const head = rest.split("/", 1)[0];
+    return MASTER_SKILLS.some((s) => s.name === head);
+  }
+
   async function walkDir(dirPath: string) {
     let entries;
     try {
@@ -466,6 +497,7 @@ async function backupAllFilesFromSandbox(
     for (const entry of entries) {
       const fname = entry.name ?? entry.path.split("/").pop() ?? "";
       if (ROTATION_SKIP_FILES.has(fname)) continue;
+      if (isMasterLibraryPath(entry.path)) continue; // static — re-attached at startup
       if (isDirType(entry.type as string)) {
         await walkDir(entry.path);
       } else {
@@ -605,6 +637,7 @@ async function performRotation(
           key,
           verifiedAliveAt: Date.now(),
           ...(cached?.agentMdVersion ? { agentMdVersion: cached.agentMdVersion } : {}),
+          ...(cached?.masterSkillsVersion ? { masterSkillsVersion: cached.masterSkillsVersion } : {}),
         };
         getCache(mode).set(key, entry);
         return { sandbox: live, backedUp: 0, restored: 0, skipped: "running-commands" };
@@ -794,6 +827,14 @@ async function createAndCacheSandbox(
     // best-effort — file may already exist or write may fail
   }
 
+  // MASTER SKILL LIBRARY (user request 2026-10-19): attach the whole
+  // 56-skill library zip to EVERY fresh sandbox — extracted over
+  // /home/user/skills/ with MASTER-INDEX.md at its root. The AI's fixed
+  // startup rule (Onyx.md + system prompt) reads that index and picks
+  // skills BY NAME. Best-effort: a failed attach logs and continues; the
+  // version-gate paths in getSandbox retry on the next use.
+  await attachMasterSkills(sandbox);
+
   const key = cacheKey(apiKey, conversationId, mode);
   const entry: CacheEntry = {
     sandbox,
@@ -802,6 +843,7 @@ async function createAndCacheSandbox(
     key,
     verifiedAliveAt: Date.now(),
     agentMdVersion: AGENT_MD_VERSION,
+    masterSkillsVersion: MASTER_SKILLS_VERSION,
   };
   getCache(mode).set(key, entry);
   return sandbox;
@@ -867,6 +909,13 @@ async function getSandbox(
         // best-effort — a dead sandbox falls through the liveness path
       }
     }
+    // MASTER SKILL LIBRARY: re-attach when this cached sandbox predates
+    // the current library version (stamp-checked inside the sandbox — one
+    // tiny file read when already current, no 2MB write).
+    if (cached.masterSkillsVersion !== MASTER_SKILLS_VERSION) {
+      const res = await ensureMasterSkills(cached.sandbox);
+      if (res.attached) cached.masterSkillsVersion = MASTER_SKILLS_VERSION;
+    }
     // ROTATION SAFETY NET: if the cached sandbox is >23h old, rotate it
     // (backup → kill → create → restore) before use. The client-side
     // `ensureFreshSandbox` is the primary trigger; this is a fallback for
@@ -915,7 +964,9 @@ async function getSandbox(
       };
       // Reconnected sandboxes may predate the current Onyx.md — refresh it
       // best-effort (and purge any legacy agent.md) so the AI's docs are
-      // always current.
+      // always current. Same for the master skill library (stamp-checked —
+      // only sandboxes that predate the current library version pay the
+      // write + extract).
       try {
         await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
         await sandbox.files.remove("/home/user/agent.md");
@@ -923,6 +974,8 @@ async function getSandbox(
       } catch {
         // best-effort — the next action will surface dead-sandbox errors
       }
+      const msRes = await ensureMasterSkills(sandbox);
+      if (msRes.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
       return sandbox;
     } catch {
@@ -971,6 +1024,8 @@ async function getSandbox(
       } catch {
         // best-effort
       }
+      const msRes2 = await ensureMasterSkills(sandbox);
+      if (msRes2.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
       return sandbox;
     }

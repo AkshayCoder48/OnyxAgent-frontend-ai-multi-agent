@@ -77,10 +77,8 @@ export interface LocalScanResult {
   env_vars: EnvVarInfo[];
   existing_subagents: Array<Record<string, unknown>>;
   memories: Array<Record<string, unknown>>;
-  /** Default skill-repository index (Skills PRD) — static metadata, zero
-   *  round trips. Present even when services are unavailable. */
-  skill_repositories: Array<Record<string, unknown>>;
-  /** Curated MCPMarket catalog summary (id/name/url only). */
+  /** Curated MCPMarket catalog summary (id/name/url only) — static
+   *  metadata, zero round trips. Present even when services are down. */
   mcp_market: Array<Record<string, unknown>>;
   errors: string[];
 }
@@ -634,9 +632,10 @@ export async function runLocalScans(ctx: ToolContext): Promise<LocalScanResult> 
   const services = await import("@/lib/services").catch(() => null);
   const subagentMod = await import("@/stores/subagent-store").catch(() => null);
 
-  // Static registry data (Skills PRD) — always present, no I/O.
-  const { summarizeSkillRepositories, summarizeMcpMarket } = await import("@/lib/skills/catalog-registry");
-  const skill_repositories = summarizeSkillRepositories() as unknown as Array<Record<string, unknown>>;
+  // Static registry data (MCP Market) — always present, no I/O. (The
+  // master skill library index is served from
+  // src/lib/agent/master-skills.ts directly by analyze_workspace.)
+  const { summarizeMcpMarket } = await import("@/lib/skills/catalog-registry");
   const mcp_market = summarizeMcpMarket() as unknown as Array<Record<string, unknown>>;
 
   const [skills, mcp_servers, env_vars, existing_subagents, memories] = await Promise.all([
@@ -725,7 +724,7 @@ export async function runLocalScans(ctx: ToolContext): Promise<LocalScanResult> 
     })(),
   ]);
 
-  return { skills, mcp_servers, env_vars, existing_subagents, memories, skill_repositories, mcp_market, errors };
+  return { skills, mcp_servers, env_vars, existing_subagents, memories, mcp_market, errors };
 }
 
 // ---------------------------------------------------------------------------

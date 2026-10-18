@@ -114,11 +114,6 @@ function sanitizeSkillName(name: string): string {
   return cleaned || "unnamed-skill";
 }
 
-interface ZipEntry {
-  relPath: string;
-  bytes: Uint8Array;
-}
-
 /** Write one planned skill's files to OPFS + register the Dexie row.
  *  Returns the per-item result. Existing skills are only overwritten via
  *  `skillService.install` AFTER every file write was attempted — a failed

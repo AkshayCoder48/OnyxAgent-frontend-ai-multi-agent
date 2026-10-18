@@ -7,27 +7,27 @@
 // merged into this single `manage_skill` tool with an `action` parameter.
 // Each action preserves the EXACT result shape of the tool it replaced.
 //
-// Skills PRD additions: `catalog` (the default skill repositories + MCP
-// Market index — metadata only), `browse_repository` (per-skill metadata for
-// one repository, live from GitHub when the repo has no static index) and
-// `install_from_repository` (pull ONE relevant skill into the local registry).
+// MASTER SKILL LIBRARY (2026-10-19): the default skill repositories and the
+// catalog / browse_repository / install_from_repository actions were
+// REMOVED — every bundled skill now ships inside the master library that is
+// attached to EVERY E2B sandbox at startup and extracted to
+// /home/user/skills/ (index: /home/user/skills/MASTER-INDEX.md). There is
+// nothing to install for library skills: the agent just read_file's
+// /home/user/skills/<name>/SKILL.md. This tool now manages ONLY the user's
+// OWN app-installed skills (Settings → Skills: uploads, SkillsMP installs,
+// AI-created ones).
 import { registerTool } from "./registry";
 import type { ToolResult } from "@/types";
 import { skillService } from "@/lib/services";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
-import { buildSkillCatalogPayload, SKILL_REPOSITORIES } from "@/lib/skills/catalog-registry";
-import { fetchRepositoryIndex, installSkillFromRepository } from "@/lib/skills/repo-browser";
 
-const MANAGE_SKILL_DESCRIPTION = `Manage the user's skills — one tool for every skill operation. Skills are SKILL.md instruction files the agent can install and consult. Pass \`action\` plus the fields that action needs:
+const MANAGE_SKILL_DESCRIPTION = `Manage the user's OWN skills (the ones installed via Settings → Skills) — one tool for every skill operation. Skills are SKILL.md instruction files. Pass \`action\` plus the fields that action needs:
 
-- action "list": list all installed skills (name, description, active status). No other fields.
-- action "read": read a skill's full SKILL.md content. Requires \`name\`.
+- action "list": list the user's installed skills (name, description, active status). No other fields. (The 56-skill MASTER LIBRARY that ships with OnyxAgent is separate — it is ALWAYS available in the sandbox at /home/user/skills/ with its index at /home/user/skills/MASTER-INDEX.md; read those files directly.)
+- action "read": read a user-installed skill's full SKILL.md content. Requires \`name\`.
 - action "create": create a new skill (available on the next turn). Requires \`name\`, \`description\`, \`content\` (the full SKILL.md markdown).
 - action "edit": edit an existing skill's content and/or description. Requires \`name\`; \`content\` and \`description\` are optional (omitted fields are kept).
-- action "delete": delete a skill by name. Requires \`name\`.
-- action "catalog": the DEFAULT SKILL REPOSITORY index (8 repositories BUNDLED AS LOCAL FILES in this app — installs are offline and instant) + the MCP Market catalog pointer. Metadata only — pick what a task needs, never load everything.
-- action "browse_repository": per-skill metadata (name, description) for ONE repository. Requires \`repository\` (id from catalog). Reads the bundled manifest; only unbundled repos fetch live from GitHub.
-- action "install_from_repository": install ONE skill from a repository into the local registry (then \`read\` it). Requires \`repository\` + \`skill\` (name from the index). Bundled repositories install fully offline.`;
+- action "delete": delete a skill by name. Requires \`name\`.`;
 
 registerTool(
   "manage_skill",
@@ -37,14 +37,12 @@ registerTool(
     properties: {
       action: {
         type: "string",
-        enum: ["list", "read", "create", "edit", "delete", "catalog", "browse_repository", "install_from_repository"],
+        enum: ["list", "read", "create", "edit", "delete"],
         description: "Which skill operation to perform.",
       },
       name: { type: "string", description: "Skill name (snake_case, unique)." },
       description: { type: "string", description: "Short description of the skill (create) or new description (edit)." },
       content: { type: "string", description: "Full SKILL.md markdown content — instructions, examples, etc. (create, or edit to replace)." },
-      repository: { type: "string", description: "Repository id from the catalog (browse_repository / install_from_repository), e.g. \"ecc\", \"addhumanity\", \"threejs-game-skills\", \"mengto-skills\", \"uploaded-skills\"." },
-      skill: { type: "string", description: "Skill name from the repository index (install_from_repository)." },
     },
     required: ["action"],
     additionalProperties: false,
@@ -56,9 +54,6 @@ registerTool(
     // ---- action: list (was list_skills) ----
     if (action === "list") {
       const skills = await skillService.list(ctx.userId);
-      if (skills.length === 0) {
-        return { success: true, output: { skills: [], message: "No skills installed" } };
-      }
       return {
         success: true,
         output: {
@@ -69,6 +64,12 @@ registerTool(
             created_at: s.created_at,
           })),
           total: skills.length,
+          ...(skills.length === 0
+            ? {
+                message:
+                  "No user-installed skills. The MASTER SKILL LIBRARY (56 skills) ships with OnyxAgent and is always available in the sandbox — read /home/user/skills/MASTER-INDEX.md for the full index.",
+              }
+            : {}),
         },
       };
     }
@@ -78,7 +79,11 @@ registerTool(
       if (!name) return { success: false, output: null, error: "name is required for action 'read'" };
       const skill = await skillService.getByName(ctx.userId, name);
       if (!skill) {
-        return { success: false, output: null, error: `Skill '${name}' not found` };
+        return {
+          success: false,
+          output: null,
+          error: `Skill '${name}' not found. Note: master-library skills are read as sandbox files — read_file /home/user/skills/${name}/SKILL.md (see /home/user/skills/MASTER-INDEX.md for the index).`,
+        };
       }
       try {
         const { readTextFile } = await import("@/lib/storage/opfs");
@@ -179,84 +184,6 @@ registerTool(
       await skillService.delete(skill.id);
       bumpWorkspaceVersion("local"); // skill list changed
       return { success: true, output: { deleted: name } };
-    }
-
-    // ---- action: catalog (skill repositories + MCP Market index) ----
-    if (action === "catalog") {
-      const installed = await skillService.list(ctx.userId).catch(() => []);
-      return {
-        success: true,
-        output: {
-          ...buildSkillCatalogPayload(),
-          installed_skills: installed.map((s) => s.name),
-        },
-      };
-    }
-
-    // ---- action: browse_repository (per-skill metadata, one repo) ----
-    if (action === "browse_repository") {
-      const repository = args.repository as string | undefined;
-      if (!repository) {
-        return { success: false, output: null, error: "repository is required for action 'browse_repository' (find ids with action 'catalog')" };
-      }
-      try {
-        const index = await fetchRepositoryIndex(repository);
-        if (index.error && index.skills.length === 0) {
-          return { success: false, output: null, error: index.error };
-        }
-        return {
-          success: true,
-          output: {
-            repository: index.repoId,
-            repository_name: index.repoName,
-            source: index.source,
-            bundled: index.source === "bundled",
-            skill_count: index.skills.length,
-            skills: index.skills.map((s) => ({ name: s.name, description: s.description })),
-            ...(index.error ? { warning: index.error } : {}),
-            hint: "Metadata only. Install the ones a task needs with action 'install_from_repository', then 'read' them.",
-          },
-        };
-      } catch (e) {
-        return {
-          success: false,
-          output: null,
-          error: `Failed to browse repository '${repository}': ${e instanceof Error ? e.message : String(e)}`,
-        };
-      }
-    }
-
-    // ---- action: install_from_repository (pull ONE skill locally) ----
-    if (action === "install_from_repository") {
-      const repository = args.repository as string | undefined;
-      const skill = args.skill as string | undefined;
-      if (!repository || !skill) {
-        return { success: false, output: null, error: "repository and skill are required for action 'install_from_repository' (find skills with action 'browse_repository' or 'catalog')" };
-      }
-      const known = SKILL_REPOSITORIES.some((r) => r.id === repository);
-      if (!known) {
-        return { success: false, output: null, error: `Unknown repository '${repository}'. Use action 'catalog' for the list.` };
-      }
-      try {
-        const meta = await installSkillFromRepository(ctx.userId, repository, skill);
-        bumpWorkspaceVersion("local"); // skill list changed
-        return {
-          success: true,
-          output: {
-            installed: meta.name,
-            description: meta.description,
-            path: `${meta.dirPath}/SKILL.md`,
-            file_count: meta.files.length,
-            next_step: `Read it before applying: manage_skill action "read", name "${meta.name}".`,
-          },
-        };
-      } catch (e) {
-        return {
-          success: false,
-          output: null,
-          error: `Failed to install '${skill}' from '${repository}': ${e instanceof Error ? e.message : String(e)}`,
-        };
-      }
     }
 
     return { success: false, output: null, error: `Unknown action: ${action}` };

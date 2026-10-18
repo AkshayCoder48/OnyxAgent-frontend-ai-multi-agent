@@ -46,6 +46,8 @@
     "capacitor.config.ts",
     "cli/**",
     "mini-services/**",
-    "mock-llm"
+    "mock-llm",
+    "build-inputs",
+    "public/master-skill"
   ]
 }

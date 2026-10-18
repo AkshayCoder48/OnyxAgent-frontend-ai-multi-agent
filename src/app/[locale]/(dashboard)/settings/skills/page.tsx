@@ -20,7 +20,6 @@ import { toast } from "sonner";
 
 import { Button, Input } from "@/components/ui";
 import { SectionCard as SettingsSectionCard } from "@/components/settings/settings-section";
-import { SectionSkillRepositories } from "@/components/settings/section-skill-repositories";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { skillService } from "@/lib/services";
@@ -68,7 +67,19 @@ export default function SkillsSettingsPage() {
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const opfsAvailable = typeof window !== "undefined" && isOPFSAvailable();
+  // OPFS availability — resolved in an effect (hydration-safe: the OLD
+  // `typeof window !== "undefined" && isOPFSAvailable()` branch rendered the
+  // "no OPFS" warning on the server but a loading row on the client —
+  // a guaranteed hydration mismatch). Until `checked` flips, the UI shows
+  // the loading state on BOTH server and client.
+  const [opfsCheck, setOpfsCheck] = useState<{ checked: boolean; available: boolean }>({
+    checked: false,
+    available: false,
+  });
+  const opfsAvailable = opfsCheck.checked && opfsCheck.available;
+  useEffect(() => {
+    setOpfsCheck({ checked: true, available: isOPFSAvailable() });
+  }, []);
 
   // Check if E2B sandbox key is configured — skills require sandbox access for AI to use them.
   const [e2bAvailable, setE2BAvailable] = useState(false);
@@ -334,7 +345,7 @@ export default function SkillsSettingsPage() {
         title="Installed skills"
         description="Skills are contextual capabilities the AI uses automatically when your task matches. Install from the catalog below or upload a SKILL.md / .zip file."
       >
-        {!opfsAvailable && (
+        {opfsCheck.checked && !opfsAvailable && (
           <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
             Your browser doesn&apos;t support OPFS (Origin Private File System),
             so skill installation is disabled. Try Chrome, Edge, or Safari.
@@ -397,12 +408,24 @@ export default function SkillsSettingsPage() {
         )}
       </SettingsSectionCard>
 
-      <SectionSkillRepositories
-        userId={user?.id ?? ""}
-        installedNames={installed.map((s) => s.name)}
-        onInstalled={() => void loadInstalled()}
-        disabled={!opfsAvailable || !e2bAvailable}
-      />
+      <SettingsSectionCard
+        title="Master skill library (built-in)"
+        description="OnyxAgent ships with a 56-skill master library — design, documents, video, web scraping, Three.js games, mental wellbeing and more. It is attached to every sandbox automatically at startup: nothing to install, the AI just reads the index at /home/user/skills/MASTER-INDEX.md and the skill it needs."
+      >
+        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm">
+          <p className="flex items-center gap-2 font-medium">
+            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            Always available — no installation needed
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            The full library (56 skills incl. anthropics official skills, just-scrape,
+            ECC, api-anything, silk-design, everything-ai, addhumanity, the merged
+            threejs-game skill and your uploaded collection) is bundled inside the app
+            and extracted to <code>/home/user/skills/</code> on every sandbox start.
+            The AI reads <code>MASTER-INDEX.md</code> to pick skills by name.
+          </p>
+        </div>
+      </SettingsSectionCard>
 
       <SettingsSectionCard
         title="Upload a skill"

@@ -31,6 +31,7 @@
 
 import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
+import { attachMasterSkills } from "@/lib/e2b/attach-master-skills";
 import { ONYX_MD_DIGEST } from "@/lib/agent/onyx-md-digest";
 import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_RUNS_PREFIX, BG_STATE_PATH } from "@/lib/e2b/bg-agent-script";
@@ -819,6 +820,13 @@ The FULL manual — detailed tool usage, execution policies, the complete
 GenUI reference — is at /home/user/Onyx.md in this sandbox: read_file it
 whenever you need more than the digest above.
 
+## Master Skill Library (fixed startup rule)
+56 skills ALWAYS available at /home/user/skills/ — nothing to install.
+Read the index (read_file /home/user/skills/MASTER-INDEX.md), pick skills
+BY NAME for the task, then read_file /home/user/skills/<name>/SKILL.md
+before applying one. Never claim a capability is missing before checking
+the index.
+
 ## Workspace rules
 - E2B is temporary; the cloud workspace is permanent. Your file changes are
   synced back automatically at the end of this run — write deliverables as
@@ -1046,12 +1054,16 @@ export async function startChatExecution(kv: SchedulerKV, input: ChatExecutionIn
       }),
     );
 
-    // 2. Onyx.md (identity + tool compendium).
+    // 2. Onyx.md (identity + tool compendium) + the MASTER SKILL LIBRARY
+    //    (the 56-skill zip attached to EVERY sandbox startup — extracted
+    //    to /home/user/skills/ with MASTER-INDEX.md; the fixed startup rule
+    //    tells the agent to read both).
     try {
       await sandbox.files.write(`${HOME}/Onyx.md`, ONYX_MD);
     } catch {
       /* best-effort */
     }
+    await attachMasterSkills(sandbox);
 
     // 3. Restore the persistent workspace BEFORE the agent runs.
     await serverRestoreWorkspace(sandbox, kv);
