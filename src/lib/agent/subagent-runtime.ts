@@ -4,7 +4,7 @@ import { nanoid } from "nanoid";
 import { useSubagentStore, type SubagentConfig, type SubagentMessage } from "@/stores/subagent-store";
 import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService } from "@/lib/services";
-import { listTools } from "@/lib/tools/registry";
+import { listTools, getTool } from "@/lib/tools/registry";
 import { filterToolsForRequest } from "@/lib/tools/request-scoping";
 import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import {
@@ -20,6 +20,7 @@ import {
   wireAllowsTools,
 } from "@/lib/agent/wire-compat";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
+import { normalizeToolCall, unknownToolResult } from "@/lib/agent/tool-call-normalize";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import {
@@ -730,7 +731,17 @@ async function runSubagentLoop(
 
         // Execute all tool calls in PARALLEL (same as main runtime)
         await Promise.all(parsedToolCalls.map(async (ptc) => {
-          const tool = allTools.find((t) => t.name === ptc.name);
+          // ANTI-HALLUCINATION: rewrite dotted/namespace/invented names to
+          // the real tool (+ action/operation argument) before lookup —
+          // resolve against the FULL registry, not just this turn's
+          // request-scoped subset (scope is a prompt budget, not a
+          // permission; the digest documents every registered tool).
+          const nc = normalizeToolCall(
+            ptc.name,
+            ptc.args,
+            (n) => allTools.find((t) => t.name === n) ?? getTool(n) ?? undefined,
+          );
+          const tool = allTools.find((t) => t.name === nc.name) ?? (getTool(nc.name) ?? undefined);
           let toolResult: unknown;
           let toolStatus: "completed" | "error" = "completed";
           if (ptc.malformed) {
@@ -753,9 +764,12 @@ async function runSubagentLoop(
                 envVars: subagentEnvVars,
                 onToolOutput: () => {},
               };
-              toolResult = await tool.handler(ptc.args, ctx);
+              toolResult = await tool.handler(nc.args, ctx);
             } else {
-              toolResult = { error: `Unknown tool: ${ptc.name}` };
+              // Corrective payload: suggestions + how-to-call + the
+              // never-invent rule — the model self-corrects in one round
+              // instead of retrying invented names.
+              toolResult = unknownToolResult(ptc.name, listTools());
               toolStatus = "error";
             }
           } catch (e) {
@@ -764,12 +778,15 @@ async function runSubagentLoop(
           }
           }
 
-          // Update tool call card with result
+          // Update tool call card with result (corrected name when a
+          // hallucinated name was rewritten).
           const updatedMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
           if (updatedMsg?.toolCalls) {
             useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
               toolCalls: updatedMsg.toolCalls.map((tc2) =>
-                tc2.id === ptc.id ? { ...tc2, result: toolResult, status: toolStatus } : tc2,
+                tc2.id === ptc.id
+                  ? { ...tc2, name: nc.name, args: nc.args, result: toolResult, status: toolStatus }
+                  : tc2,
               ),
             });
           }
@@ -845,14 +862,23 @@ async function executeToolCallsParallel(
     // Malformed + unrepairable → structured tool error, never executed.
     const malformed = parsed.malformed && !parsed.repaired;
 
-    const tool = allTools.find((t) => t.name === tc.function.name);
+    // ANTI-HALLUCINATION: rewrite dotted/namespace/invented names to the
+    // real tool (+ action/operation argument); resolve against the FULL
+    // registry (request scope is a prompt budget, not a permission).
+    const nc = normalizeToolCall(
+      tc.function.name,
+      toolArgs,
+      (n) => allTools.find((t) => t.name === n) ?? getTool(n) ?? undefined,
+    );
+    const tool = allTools.find((t) => t.name === nc.name) ?? (getTool(nc.name) ?? undefined);
 
-    // Add running tool call card
+    // Add running tool call card (shows the CORRECTED name when a
+    // hallucinated name was rewritten, so the card reflects what ran).
     const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
       toolCalls: [
         ...(currentMsg?.toolCalls ?? []),
-        { id: tc.id, name: tc.function.name, args: toolArgs, status: "running" as const },
+        { id: tc.id, name: nc.name, args: nc.args, status: "running" as const },
       ],
     });
 
@@ -877,9 +903,11 @@ async function executeToolCallsParallel(
           envVars,
           onToolOutput: () => {},
         };
-        toolResult = await tool.handler(toolArgs, ctx);
+        toolResult = await tool.handler(nc.args, ctx);
       } else {
-        toolResult = { error: `Unknown tool: ${tc.function.name}` };
+        // Corrective payload: suggestions + how-to-call + the never-invent
+        // rule — the model self-corrects in one round.
+        toolResult = unknownToolResult(tc.function.name, listTools());
         toolStatus = "error";
       }
     } catch (e) {

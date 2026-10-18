@@ -70,6 +70,11 @@ import {
 } from "@/lib/agent/wire-compat";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError, isAbortLikeError } from "@/lib/agent/stream-guards";
+import {
+  normalizeToolCall,
+  unknownToolResult,
+  type NormalizedToolCall,
+} from "@/lib/agent/tool-call-normalize";
 import { manageContext } from "@/lib/agent/context/context-manager";
 import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
@@ -3146,15 +3151,40 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // shows its result immediately while a slow tool is still running.
     emit({ type: "call_tools_start", timestamp: nowISO() });
 
+    // ANTI-HALLUCINATION NORMALIZATION (user report 2026-10-19): models
+    // sometimes emit dotted tool names ("media_generation.operation",
+    // "manage_skill.list"), namespace prefixes ("functions.web_search") or
+    // pure guesses. Normalize every call BEFORE dispatch: a correctable
+    // name is rewritten to the REAL tool (+ action/operation argument) and
+    // actually EXECUTES; the tool_call event carries the corrected name so
+    // the UI card shows what really ran.
+    const toolCorrections = new Map<string, NormalizedToolCall>();
+    for (const tc of roundResult.toolCalls) {
+      const nc = normalizeToolCall(tc.name, tc.args, (n) => getTool(n));
+      if (nc.correctedFrom) {
+        toolCorrections.set(tc.id, nc);
+        logWarn("agent", `Corrected hallucinated tool name: ${nc.correctionNote}`, {
+          context: { tool: nc.name, called_as: nc.correctedFrom, tool_call_id: tc.id },
+        });
+      }
+    }
+
     // 1) Emit every `tool_call` event up front so cards render together.
     for (const tc of roundResult.toolCalls) {
-      const toolDef = getTool(tc.name);
+      const nc = toolCorrections.get(tc.id);
+      const emitName = nc?.name ?? tc.name;
+      const emitArgs = nc?.args ?? tc.args;
+      const toolDef = getTool(emitName);
       emit({
         type: "tool_call",
         data: {
-          tool_name: tc.name,
-          args: tc.args,
+          tool_name: emitName,
+          args: emitArgs,
           tool_call_id: tc.id,
+          // Corrected-name note (surfaced on the card / logs).
+          ...(nc?.correctedFrom
+            ? { __corrected: `Corrected '${nc.correctedFrom}' → '${nc.name}'${nc.correctionNote ? ` — ${nc.correctionNote}` : ""}` }
+            : {}),
           // Surface unknown-tool errors immediately so the card shows the
           // failure state without waiting for the parallel batch.
           ...(toolDef ? {} : { __error: `Tool '${tc.name}' is not registered` }),
@@ -3174,7 +3204,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     //    completes.
     const resultPromises = roundResult.toolCalls.map(
       async (tc): Promise<void> => {
-        const toolDef = getTool(tc.name);
+        // Corrected (de-hallucinated) name/args — falls back to the call
+        // as-issued when no correction applied.
+        const nc = toolCorrections.get(tc.id);
+        const execName = nc?.name ?? tc.name;
+        const execArgs = nc?.args ?? tc.args;
+        const toolDef = getTool(execName);
 
         // MALFORMED ARGUMENTS (PRD §1/§3): a tool call whose streamed
         // argument JSON was invalid AND unrepairable is NEVER executed.
@@ -3235,13 +3270,19 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         executedToolCallIds.add(tc.id);
 
         if (!toolDef) {
-          const errMsg = `Tool '${tc.name}' is not registered`;
-          const fullResultStr = JSON.stringify({ error: errMsg });
+          // ANTI-HALLUCINATION (user report 2026-10-19): a bare "not
+          // registered" made the model retry variations of the invented
+          // name, wasting whole rounds. The corrective payload lists the
+          // closest REAL tools (+ an exact how-to-call example when the
+          // name matches an action/operation value) so the model
+          // self-corrects in ONE round.
+          const corrective = unknownToolResult(tc.name, listTools());
+          const fullResultStr = JSON.stringify(corrective);
           // Backfill the error onto the persisted part (see the persistence
           // fix in the success path below for rationale).
           for (const part of assistantParts) {
             if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
-              part.toolCall.result = { error: errMsg };
+              part.toolCall.result = corrective;
               part.toolCall.status = "error";
             }
           }
@@ -3258,15 +3299,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           });
           allToolCalls.push({
             id: tc.id,
-            name: tc.name,
-            args: tc.args,
-            result: { error: errMsg },
+            name: execName,
+            args: execArgs,
+            result: corrective,
             status: "error",
+          });
+          logWarn("agent", `Tool '${tc.name}' is not registered — returned corrective result with suggestions`, {
+            context: { tool: tc.name, tool_call_id: tc.id },
           });
           return;
         }
 
-        const effectiveArgs = tc.args;
+        const effectiveArgs = execArgs;
 
         // Build the per-call tool context. We inject an `onToolOutput`
         // callback that streams stdout/stderr chunks back to the UI in real
@@ -3347,6 +3391,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
                 if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
                   part.toolCall.result = real.result;
                   part.toolCall.status = real.status;
+                  // Corrected (de-hallucinated) name — the card shows the
+                  // tool that actually ran.
+                  if (nc?.correctedFrom) part.toolCall.name = execName;
                 }
               }
               const realResultStr =
@@ -3374,7 +3421,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               }
               const entry = {
                 id: tc.id,
-                name: tc.name,
+                name: execName,
                 args: effectiveArgs,
                 result: real.result,
                 status: real.status,
@@ -3425,6 +3472,9 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
             part.toolCall.result = result;
             part.toolCall.status = status;
+            // Corrected (de-hallucinated) name — the card shows the tool
+            // that actually ran.
+            if (nc?.correctedFrom) part.toolCall.name = execName;
           }
         }
 
@@ -3445,7 +3495,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         });
         allToolCalls.push({
           id: tc.id,
-          name: tc.name,
+          name: execName,
           args: effectiveArgs,
           result,
           status,

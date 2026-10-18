@@ -328,12 +328,16 @@ function ModelSelect({
 }) {
   const list = React.useMemo(() => compatibleModels(models, modality), [models, modality]);
   const selected = value ? (list.find((m) => m.name === value) ?? null) : null;
-  const savedMissing = !!value && !selected;
+  // A saved default that is NOT in the live catalogue = a CUSTOM model id
+  // (deliberately entered below) or a stale id — either way it stays usable
+  // as-is; the media tool validates against the live catalogue at
+  // generation time. Rendered with a CUSTOM badge instead of an error.
+  const custom = !!value && !selected;
 
-  if (list.length === 0) {
+  if (list.length === 0 && !custom) {
     return (
       <div className="text-muted-foreground flex h-9 w-full items-center rounded-md border border-dashed px-3 text-xs sm:w-[320px]">
-        No {label.toLowerCase()} model currently available
+        No {label.toLowerCase()} model currently available — enter a custom model ID below
       </div>
     );
   }
@@ -348,20 +352,129 @@ function ModelSelect({
             {isFreeModel(selected) && <MiniBadge tone="emerald">FREE</MiniBadge>}
             {selected.paid_only === true && !isFreeModel(selected) && <MiniBadge tone="amber">PAID ONLY</MiniBadge>}
           </span>
-        ) : savedMissing ? (
-          <span className="truncate text-xs text-amber-600 dark:text-amber-400">
-            Saved default unavailable — pick a replacement
+        ) : custom ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-mono text-xs">{value}</span>
+            <MiniBadge tone="gray">CUSTOM ID</MiniBadge>
           </span>
         ) : (
           <span className="text-muted-foreground text-sm">Pick a model…</span>
         )}
       </SelectTrigger>
       <SelectContent className="max-h-80">
+        {custom && (
+          <SelectItem value={value!} className="py-2">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate font-mono text-xs">{value}</span>
+              <MiniBadge tone="gray">CUSTOM ID</MiniBadge>
+            </span>
+          </SelectItem>
+        )}
         {list.map((m) => (
           <ModelOption key={m.name} model={m} />
         ))}
       </SelectContent>
     </Select>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Custom model ID input — commits a custom model id (any string) as the
+// default for ONE modality. Works for every model type; the id is used
+// as-is and validated against the live catalogue at generation time.
+// ---------------------------------------------------------------------------
+
+function CustomModelIdInput({
+  label,
+  modality,
+  value,
+  inCatalogue,
+}: {
+  label: string;
+  modality: ModalityKey;
+  value: string | undefined;
+  inCatalogue: boolean;
+}) {
+  const [draft, setDraft] = React.useState("");
+  const [applying, setApplying] = React.useState(false);
+  // Show the current id when it is custom; empty when the default comes
+  // from the catalogue (typing here switches that modality to custom).
+  React.useEffect(() => {
+    setDraft(inCatalogue ? "" : (value ?? ""));
+  }, [value, inCatalogue]);
+
+  const apply = async () => {
+    const id = draft.trim();
+    if (!id) return;
+    setApplying(true);
+    try {
+      await usePollinationsStore.getState().setDefaultModel(modality, id);
+      toast.success(`${label} default set to custom model`, {
+        description: `${id} — used as-is; validated against the live catalogue at generation time.`,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save the custom model id.");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const clear = async () => {
+    setApplying(true);
+    try {
+      await usePollinationsStore.getState().setDefaultModel(modality, "");
+      toast.info(`${label} custom model id cleared`, {
+        description: "The default falls back to automatic model selection.",
+      });
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const isCustomActive = !inCatalogue && !!value;
+
+  return (
+    <div className="mt-1.5 flex items-center gap-1.5">
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void apply();
+          }
+        }}
+        placeholder="Custom model ID (optional)"
+        aria-label={`${label} custom model id`}
+        title="Use any model id — e.g. publisher/model — even if it is not in the list above. It is validated at generation time."
+        className="h-8 flex-1 font-mono text-xs"
+        disabled={applying}
+        maxLength={160}
+      />
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-8 px-2.5"
+        disabled={applying || !draft.trim()}
+        onClick={() => void apply()}
+        aria-label={`Save custom model id for ${label}`}
+      >
+        {applying ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+      </Button>
+      {isCustomActive ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="text-muted-foreground hover:text-destructive h-8 px-2.5"
+          disabled={applying}
+          onClick={() => void clear()}
+          aria-label={`Clear custom model id for ${label}`}
+          title="Clear the custom id — falls back to automatic selection"
+        >
+          <XCircle className="size-3.5" />
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -972,6 +1085,7 @@ export function SectionPollinations() {
                 ? "fetched live just now"
                 : `fetched live ${timeAgo(modelsFetchedAt)}`
               : "fetching the live catalogue…"}
+            {" — need one that isn't listed? Enter a custom model ID under any category below; it is used as-is and validated at generation time."}
           </p>
 
           {modelsError && (
@@ -1020,7 +1134,7 @@ export function SectionPollinations() {
                       label={m.label}
                       description={
                         list.length === 0
-                          ? `No ${m.label.toLowerCase()} model currently available.`
+                          ? `No ${m.label.toLowerCase()} model currently available — set a custom ID below.`
                           : m.description
                       }
                       align="start"
@@ -1035,12 +1149,12 @@ export function SectionPollinations() {
                               void usePollinationsStore.getState().setDefaultModel(m.key, id)
                             }
                           />
-                          {savedMissing && (
-                            <p className="mt-1.5 flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
-                              <TriangleAlert className="mt-0.5 size-3 shrink-0" />
-                              Saved default is no longer available — pick a replacement
-                            </p>
-                          )}
+                          <CustomModelIdInput
+                            label={m.label}
+                            modality={m.key}
+                            value={value}
+                            inCatalogue={!savedMissing}
+                          />
                         </div>
                       }
                     />

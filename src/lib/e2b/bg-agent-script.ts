@@ -2947,6 +2947,198 @@ const BRIDGE_ACK_WINDOW_MS = 120_000;
 
 let ALL_TOOLS = TOOLS;
 
+// ── ANTI-HALLUCINATION TOOL-NAME NORMALIZER (user report 2026-10-19) ────
+// Models occasionally emit invented tool-call names: dotted names
+// ("media_generation.operation", "manage_skill.list" — the subtool glued
+// onto the tool NAME), legacy namespace prefixes ("functions.web_search"),
+// or pure guesses. Before dispatch we rewrite correctable calls to the
+// REAL tool (+ the action/operation argument) so they EXECUTE instead of
+// failing; genuinely unknown names get a corrective result with
+// suggestions + an exact how-to-call example so the model self-corrects
+// in ONE round instead of burning tokens on repeated failures.
+// (Plain-JS mirror of src/lib/agent/tool-call-normalize.ts — this file is
+// a String.raw template: no backticks and no dollar-brace interpolation
+// may appear anywhere in this code, including comments.)
+var BG_ACTION_PARAMS = ["action", "operation"];
+var BG_NS_PREFIXES = { functions: true, tools: true, tool: true, onyx: true, onyxagent: true };
+
+function bgSchemaProps(tool) {
+  var p = tool && tool.parameters;
+  if (!p || typeof p !== "object") return null;
+  var props = p.properties;
+  return props && typeof props === "object" ? props : null;
+}
+
+function bgActionParam(tool) {
+  var props = bgSchemaProps(tool);
+  if (!props) return null;
+  for (var i = 0; i < BG_ACTION_PARAMS.length; i++) {
+    var def = props[BG_ACTION_PARAMS[i]];
+    if (def && typeof def === "object" && def.type === "string") return BG_ACTION_PARAMS[i];
+  }
+  return null;
+}
+
+function bgHasTool(name) {
+  for (var i = 0; i < ALL_TOOLS.length; i++) {
+    if (ALL_TOOLS[i].name === name) return ALL_TOOLS[i];
+  }
+  return null;
+}
+
+function bgNormalize(name, args) {
+  var clean = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+  var res = { name: name, args: clean, correctedFrom: null, note: "" };
+  if (!name || typeof name !== "string") return res;
+  if (bgHasTool(name)) return res;
+  // 1. Namespace prefixes: "functions.web_search" → "web_search".
+  var working = name;
+  for (var guard = 0; guard < 4; guard++) {
+    var dot = working.indexOf(".");
+    if (dot <= 0) break;
+    if (!BG_NS_PREFIXES[working.slice(0, dot).toLowerCase()]) break;
+    working = working.slice(dot + 1);
+    if (bgHasTool(working)) {
+      return { name: working, args: clean, correctedFrom: name, note: 'namespaced "' + name + '" -> "' + working + '"' };
+    }
+  }
+  // 2. Dotted subtool: "media_generation.generate_image" → media_generation
+  //    { operation: "generate_image" }. Longest registered prefix wins.
+  var parts = working.split(".");
+  if (parts.length > 1) {
+    for (var i = parts.length - 1; i >= 1; i--) {
+      var prefix = parts.slice(0, i).join(".");
+      var suffix = parts.slice(i).join(".");
+      var tool = bgHasTool(prefix);
+      if (!tool) continue;
+      var param = bgActionParam(tool);
+      if (!param) {
+        return { name: prefix, args: clean, correctedFrom: name, note: '"' + name + '" -> "' + prefix + '" (tool names never contain dots)' };
+      }
+      if (suffix === param) {
+        // The model appended the PARAM NAME ("media_generation.operation")
+        // — route; the tool's own validation lists the valid operations.
+        return {
+          name: prefix,
+          args: clean,
+          correctedFrom: name,
+          note: '"' + name + '" -> "' + prefix + '" — the subtool is the "' + param + '" ARGUMENT',
+        };
+      }
+      // Pass the suffix as the action/operation value; an invalid value
+      // still routes (the tool answers with its exact valid-ops list) but
+      // never overwrites an already-valid value that arrived in the args.
+      var props = bgSchemaProps(tool) || {};
+      var def = props[param];
+      var en = def && Array.isArray(def.enum) ? def.enum : null;
+      var existing = typeof clean[param] === "string" ? clean[param] : null;
+      var value = suffix;
+      if (existing && en && en.indexOf(value) === -1 && en.indexOf(existing) !== -1) value = existing;
+      var merged = Object.assign({}, clean);
+      merged[param] = value;
+      return { name: prefix, args: merged, correctedFrom: name, note: '"' + name + '" -> "' + prefix + '" (' + param + '="' + value + '")' };
+    }
+  }
+  return res;
+}
+
+function bgNormName(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function bgLev(a, b, cap) {
+  if (a === b) return 0;
+  var m = a.length, n = b.length;
+  if (Math.abs(m - n) > cap) return cap + 1;
+  var prev = new Array(n + 1);
+  var cur = new Array(n + 1);
+  for (var j = 0; j <= n; j++) prev[j] = j;
+  for (var i = 1; i <= m; i++) {
+    cur[0] = i;
+    var rowMin = cur[0];
+    for (var j2 = 1; j2 <= n; j2++) {
+      var cost = a.charAt(i - 1) === b.charAt(j2 - 1) ? 0 : 1;
+      cur[j2] = Math.min(prev[j2] + 1, cur[j2 - 1] + 1, prev[j2 - 1] + cost);
+      if (cur[j2] < rowMin) rowMin = cur[j2];
+    }
+    if (rowMin > cap) return cap + 1;
+    var swap = prev; prev = cur; cur = swap;
+  }
+  return prev[n];
+}
+
+function bgSuggest(name) {
+  var needle = bgNormName(name);
+  var out = [];
+  if (!needle) return out;
+  for (var k = 0; k < ALL_TOOLS.length; k++) {
+    var t = ALL_TOOLS[k];
+    if (!t || !t.name) continue;
+    var c = bgNormName(t.name);
+    if (!c) continue;
+    var s = 0;
+    var paramHit = null;
+    // STRONGEST signal: the called name IS an action/operation value of
+    // this tool ("generate_image" → media_generation.operation). param is
+    // ONLY set on this path so how_to_call never embeds a bogus (e.g.
+    // dotted) name as the argument value.
+    var param = bgActionParam(t);
+    if (param) {
+      var props = bgSchemaProps(t) || {};
+      var def = props[param];
+      var en = def && Array.isArray(def.enum) ? def.enum : null;
+      if (en) {
+        for (var e = 0; e < en.length; e++) {
+          if (bgNormName(en[e]) === needle) { s = 95; paramHit = param; break; }
+        }
+      }
+    }
+    if (!s) {
+      var lenDiff = Math.abs(c.length - needle.length);
+      if (c === needle) s = 100;
+      else if (c.indexOf(needle) === 0 || needle.indexOf(c) === 0) s = 85 - lenDiff;
+      else if (c.indexOf(needle) !== -1 || needle.indexOf(c) !== -1) s = 70 - lenDiff;
+      else {
+        var maxDist = Math.max(2, Math.floor(Math.min(c.length, needle.length) / 4));
+        var d = bgLev(needle, c, maxDist);
+        if (d <= maxDist) s = 60 - d * 8;
+      }
+    }
+    if (s > 0) out.push({ name: t.name, score: s, param: paramHit });
+  }
+  out.sort(function (a, b) { return b.score - a.score || (a.name < b.name ? -1 : 1); });
+  return out.slice(0, 5);
+}
+
+function bgUnknownToolResult(name) {
+  var sug = bgSuggest(name);
+  var top = sug.length ? sug[0] : null;
+  var payload = {
+    error:
+      "Tool '" + name + "' does not exist in this session. NEVER invent or predict tool names, parameter names or parameter definitions — call ONLY tools from your ACTIVE tool definitions for this turn.",
+    fix:
+      "Re-issue the call with an exact tool name from your tool definitions" +
+      (top ? " (closest real tool: '" + top.name + "')" : "") +
+      ". Do not retry '" + name + "' — it is not registered.",
+    did_you_mean: sug.map(function (s) { return s.name; }),
+    next_step:
+      "If unsure of the real tool surface, call analyze_workspace — its available_tools field lists every registered tool — or read /home/user/Onyx.md. Never fabricate a tool to work around this error.",
+  };
+  if (top && top.param) {
+    var example = {};
+    example[top.param] = name;
+    payload.how_to_call =
+      top.name + " is ONE tool — the subtool is an ARGUMENT. Call it with arguments " +
+      JSON.stringify(JSON.stringify(example)) +
+      " (pass the remaining parameters alongside '" + top.param + "').";
+  }
+  if (String(name).indexOf(".") !== -1) {
+    payload.name_rule =
+      "Tool names never contain dots. Multi-function tools take ONE name; the subtool (after the dot) is the value of an 'action' or 'operation' argument.";
+  }
+  return payload;
+}
+
 // FULL NATIVE SURFACE: every tool in the TOOLS table — the file-authoring
 // path (write_file, create_file, edit_file + the chunked writer trio),
 // run_terminal / run_python, use_browser — is exposed to the background
@@ -3351,9 +3543,26 @@ async function main() {
     if (!Array.isArray(state._executedToolCallIds)) state._executedToolCallIds = [];
     for (const tc of toolCalls) {
       const fn = tc.function ?? {};
-      const args = tc._args ?? {};
+      // ANTI-HALLUCINATION: correct dotted/namespace/invented names before
+      // dispatch — "media_generation.generate_image" becomes media_generation
+      // {operation:"generate_image"} and EXECUTES. The tool_call event
+      // carries the corrected name (+ corrected_from note) so the UI card
+      // shows what really ran.
+      const rawName = typeof fn.name === "string" && fn.name ? fn.name : "unknown";
+      const nc = bgNormalize(rawName, tc._args ?? {});
+      const args = nc.args;
       const id = tc.id ?? "bg-" + Math.random().toString(36).slice(2, 10);
-      await emitEvent({ t: "tool_call", round, id, name: fn.name ?? "unknown", args });
+      if (nc.correctedFrom) {
+        console.log("[bg] corrected tool call " + nc.note);
+      }
+      await emitEvent({
+        t: "tool_call",
+        round,
+        id,
+        name: nc.name,
+        args,
+        ...(nc.correctedFrom ? { corrected_from: nc.correctedFrom, correction: nc.note } : {}),
+      });
       // MALFORMED ARGS: never execute — resolve to a structured
       // MALFORMED_TOOL_ARGUMENTS tool result through the normal tool-result
       // protocol so the model can re-issue the call. A tool failure is NOT
@@ -3361,20 +3570,20 @@ async function main() {
       if (tc._malformed) {
         const toolResult = malformedArgsResult(tc._rawArgs ?? "");
         const resultStr = cap(JSON.stringify(toolResult), 64 * 1024);
-        await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
+        await emitEvent({ t: "tool_result", round, id, name: nc.name, result: resultStr });
         state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
         continue;
       }
       if (state._executedToolCallIds.includes(id)) continue; // duplicate — already ran
       state._executedToolCallIds.push(id);
-      const tool = ALL_TOOLS.find((x) => x.name === fn.name);
+      const tool = ALL_TOOLS.find((x) => x.name === nc.name);
       let toolResult;
       try {
         toolResult = tool
           ? tool.bridge
-            ? await runBridgeTool(id, fn.name, args)
+            ? await runBridgeTool(id, tool.name, args)
             : await tool.run(args)
-          : { error: "Unknown tool in background mode: " + fn.name };
+          : bgUnknownToolResult(rawName);
       } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
       // Large-payload results (base64 downloads / image previews) get a
       // bigger cap so their cards stay intact; everything else stays at
@@ -3383,7 +3592,7 @@ async function main() {
         toolResult && typeof toolResult === "object" &&
         (toolResult.kind === "file_download" || toolResult.kind === "image_preview" || toolResult.download_url);
       const resultStr = cap(JSON.stringify(toolResult), isLarge ? 6 * 1024 * 1024 : 64 * 1024);
-      await emitEvent({ t: "tool_result", round, id, name: fn.name ?? "unknown", result: resultStr });
+      await emitEvent({ t: "tool_result", round, id, name: nc.name, result: resultStr });
       state.messages.push({ role: "tool", tool_call_id: id, content: resultStr });
     }
     await writeState(state); // persist the conversation per round
