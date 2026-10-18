@@ -217,6 +217,10 @@ async function persistCheckpoint(
   assistantMessageId: string,
   isStreaming: boolean,
   store?: ExecutionChatStore,
+  /** Seq cursor covered by THIS checkpoint — persisted ON the row (same
+   *  Dexie put as the content) so the resume cursor can never lag the
+   *  checkpointed content (the duplicate-text-on-resume fix). */
+  lastSeq?: number,
 ): Promise<void> {
   const messages = store ? store.getState().messages : globalMessagesCompat();
   const msg = messages.find((m) => m.id === assistantMessageId);
@@ -236,7 +240,38 @@ async function persistCheckpoint(
     // message at complete/error; the final (settling) checkpoint persists it.
     generation: msg.generation,
     isStreaming,
+    // ATOMIC CURSOR: rides the SAME row put as the content (see param doc).
+    ...(typeof lastSeq === "number" && Number.isFinite(lastSeq) ? { bgLastSeq: lastSeq } : {}),
   });
+}
+
+/**
+ * REPLAY DEDUPE (the repeated-text fix, pure + unit-tested): given a batch
+ * of bg events arriving from the server, decide which ones this browser may
+ * still apply. Rules:
+ *   • an event carrying a seq at or below the cursor was already consumed —
+ *     re-applying it would DUPLICATE streamed text (text events APPEND);
+ *   • a seq-LESS (v1-legacy) event can never be deduped: on a LIVE run it
+ *     arrived first-hand and is safe; on a RESUME the checkpoint already
+ *     carries its content, so it is dropped (the legacy server path returns
+ *     the whole un-seq'd log on every poll — replaying it was the "same
+ *     first words repeat again and again" loop).
+ */
+export function filterReplayEvents(
+  events: BgEvent[],
+  cursor: number,
+  live: boolean,
+): BgEvent[] {
+  const out: BgEvent[] = [];
+  for (const ev of events) {
+    if (typeof ev.seq === "number") {
+      if (ev.seq <= cursor) continue; // already consumed — never re-append
+    } else if (!live) {
+      continue; // v1-legacy + resume — un-dedupable, already checkpointed
+    }
+    out.push(ev);
+  }
+  return out;
 }
 
 /**
@@ -288,6 +323,13 @@ export async function consumeRun(ctx: {
    *  RunContext.flush — keeps the seq cursor strictly behind the persisted
    *  content, never ahead). */
   flush?: () => void;
+  /** TRUE when this consumer was started by the LIVE launch (the browser
+   *  that started the run, cursor at 0). FALSE on RESUME (reload / app
+   * re-entry) — the store was seeded from the checkpoint and replayed
+   * events must be seq-deduped; seq-LESS (v1-legacy) events can never be
+   * deduped, so on resume they are dropped instead of re-appended forever
+   * (the "same first words repeat again and again" bug). */
+  live?: boolean;
 }): Promise<void> {
   const { e2bApiKey, job } = ctx;
   /** Seq cursor — starts at the persisted lastSeq (resume lands AFTER the
@@ -335,7 +377,12 @@ export async function consumeRun(ctx: {
       } catch {
         // best-effort — the 1ms buffer timer still lands the content
       }
-      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, isStreaming, ctx.store);
+      // ATOMIC CURSOR (duplication fix): the cursor rides the checkpoint's
+      // row put itself — a kill between the Dexie write and the localStorage
+      // mirror below can no longer leave a stale localStorage cursor behind
+      // newer checkpointed content (that gap replayed already-persisted
+      // events onto the seeded message and duplicated the streamed text).
+      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, isStreaming, ctx.store, cursor);
       persistCursor(true);
     } catch {
       // Checkpoint failed — leave the cursor BEHIND so a reload replays
@@ -371,7 +418,12 @@ export async function consumeRun(ctx: {
    *  Returns true when the batch contained a terminal (done/error) event. */
   const processEvents = (events: BgEvent[]): boolean => {
     let finished = false;
-    for (const ev of events) {
+    for (const ev of filterReplayEvents(events, cursor, ctx.live === true)) {
+      // CLIENT-SIDE SEQ DEDUPE (the repeated-text fix, layer 1): the server
+      // promises `seq > afterSeq`, but filterReplayEvents is the LAST line
+      // of defense — any re-delivery (server overlap, a stale segment, the
+      // legacy bg-state.json path that returns the WHOLE log every poll)
+      // is skipped instead of re-appended.
       if (typeof ev.seq === "number" && ev.seq > cursor) cursor = ev.seq;
       if (ev.t === "browser_tool_call") {
         // v3 FULL TOOLSET — the sandbox runner delegated a browser-registry
@@ -424,7 +476,7 @@ export async function consumeRun(ctx: {
    *  failure reported by the run itself — never for transport loss. */
   const finishRun = async (statusError: string | null) => {
     try {
-      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, false, ctx.store);
+      await persistCheckpoint(ctx.conversationId, ctx.userId, job.assistantMessageId, false, ctx.store, cursor);
     } catch {
       // best-effort — the per-batch checkpoint already covers the content
     }
@@ -857,6 +909,9 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
         bridgeAbort,
         store: ctx.store,
         flush: ctx.flush,
+        // LIVE launch: this browser started the run (cursor at 0, every
+        // event arrives first-hand — seq-less legacy events included).
+        live: true,
       });
     })().catch(() => {
       // LAST-RESORT net only: transport failures are handled INSIDE
@@ -1066,6 +1121,24 @@ export async function resumeBackgroundTurn(ctx: {
   const job = getActiveJob(ctx.conversationId);
   if (!job) return null;
 
+  // AUTHORITATIVE RESUME CURSOR (the repeated-text fix, layer 2): the
+  // checkpoint row carries the seq cursor in the SAME Dexie put as its
+  // content — it can never lag the seeded content. The localStorage cursor
+  // is a mirror that a tab-kill could leave STALE (behind the row); taking
+  // the MAX of both starts the replay exactly at the checkpointed content
+  // boundary. The old localStorage-only read replayed already-persisted
+  // events onto the seeded message and duplicated the streamed text (the
+  // "left the app, came back, same words repeat" bug).
+  try {
+    const rowSeq = await conversationService.getCheckpointSeq(job.assistantMessageId);
+    if (rowSeq !== null && rowSeq > (job.lastSeq ?? 0)) {
+      job.lastSeq = rowSeq;
+      updateJobCursor(job.assistantMessageId, rowSeq);
+    }
+  } catch {
+    // best-effort — the localStorage cursor still applies
+  }
+
   const generationId = `bg-${nanoid(10)}`;
   const emit = (type: WSEvent["type"], data: Record<string, unknown>) => {
     ctx.emit({ type, data: { ...data, generation_id: generationId }, timestamp: new Date().toISOString() });
@@ -1092,6 +1165,10 @@ export async function resumeBackgroundTurn(ctx: {
       bridgeAbort,
       store: ctx.store,
       flush: ctx.flush,
+      // RESUME: the store was seeded from the checkpoint — replayed events
+      // are seq-deduped and seq-less legacy events are dropped (they are
+      // already in the checkpoint and can never be deduped).
+      live: false,
     });
   })().catch(() => {
     // best-effort — the next reload resumes again.

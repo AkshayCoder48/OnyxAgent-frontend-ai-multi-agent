@@ -233,6 +233,14 @@ export interface AddMessageInput {
    *  saveAgentCheckpoint). Omitted on the final save. */
   isStreaming?: boolean;
   tokensUsed?: number;
+  /** BG-RUN SEQ CURSOR (replay-idempotency fix): the seq of the last bg
+   *  event whose content is covered by THIS checkpoint. Persisted ON the
+   *  message row — the same Dexie put as the content — so the cursor can
+   *  never lag the checkpointed content (the old two-store scheme — content
+   *  in Dexie, cursor in localStorage — had a kill-window between the two
+   *  writes; a tab death there made the next resume REPLAY events onto
+   *  already-persisted content and duplicate the streamed text). */
+  bgLastSeq?: number;
 }
 
 /**
@@ -541,6 +549,13 @@ export const conversationService = {
       /** Extra (non-indexed) property — marks an interrupted turn after a
        *  refresh. The final save omits it. */
       is_streaming: input.isStreaming ?? true,
+      /** BG-RUN SEQ CURSOR — see AddMessageInput.bgLastSeq. Kept from the
+       *  existing row when the incoming save carries none (foreground final
+       *  saves don't), so a later resume still reads the last bg cursor. */
+      bg_last_seq:
+        typeof input.bgLastSeq === "number" && Number.isFinite(input.bgLastSeq)
+          ? input.bgLastSeq
+          : (existing as { bg_last_seq?: number } | undefined)?.bg_last_seq ?? undefined,
     };
     await db.messages.put(row);
     await bumpConversationTimestamp(conversationId);
@@ -590,6 +605,21 @@ export const conversationService = {
       last_message_at: ts,
     });
     return row as unknown as ConversationMessage;
+  },
+
+  /** Read a checkpoint row's persisted bg-run seq cursor (the last event
+   *  seq whose content the row already contains). Null when the row or the
+   *  field is absent. Used by the background-turn resume path so the replay
+   *  cursor starts exactly at the checkpointed content boundary — never
+   *  behind it (duplication) and never ahead of it (lost output). */
+  async getCheckpointSeq(messageId: string): Promise<number | null> {
+    try {
+      const row = (await db.messages.get(messageId)) as { bg_last_seq?: number } | undefined;
+      const seq = row?.bg_last_seq;
+      return typeof seq === "number" && Number.isFinite(seq) ? seq : null;
+    } catch {
+      return null;
+    }
   },
 
   async deleteMessage(conversationId: string, messageId: string): Promise<void> {

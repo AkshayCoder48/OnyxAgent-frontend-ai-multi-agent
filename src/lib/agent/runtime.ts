@@ -992,6 +992,14 @@ async function streamRound(
   // model (zero quota cost): the 400 self-healing ladder (it FIXES the
   // request, not just re-sends it) and the transient-gateway retry below.
   let response: Response;
+  // ERROR-BODY ACCUMULATOR (single-consumption semantics): the 400 branch
+  // reads the body ONCE — no clone() — and the !ok error branch below REUSES
+  // that text instead of touching the body again. `response.clone()` on a
+  // browser Response is spec-legal before any read, but it tees the body and
+  // any later read of the original runs on a half-consumed tee branch — on
+  // Firefox/undici that surfaces as "Response body object should not be
+  // disturbed or locked". One read, one owner, zero clones.
+  let errorBodyText = "";
   // TRANSIENT GATEWAY RETRY (HTTP 502 fix): 502/503/504 blips get up to 2
   // quick retries inside this loop — see the retry block below.
   let gatewayRetries = 0;
@@ -1017,13 +1025,17 @@ async function streamRound(
       // Prevent browser/proxy from buffering the response.
       cache: "no-store",
     });
+    // Per-response scoping: a stale body text from a previous attempt must
+    // never leak into the next response's error reporting.
+    errorBodyText = "";
 
     // PARAMETER SELF-HEALING: a 400 `unsupported_parameter` names the exact
     // offending field — strip it from the body, remember the ban for this
     // session, and retry immediately (does NOT consume a rate-limit attempt,
     // capped at 5 unique params per round).
     if (response.status === 400) {
-      const errText = await response.clone().text().catch(() => "");
+      const errText = await response.text().catch(() => "");
+      errorBodyText = errText;
       const badParam = parseUnsupportedParam(errText);
       if (badParam && !strippedParams.has(badParam) && body[badParam] !== undefined) {
         strippedParams.add(badParam);
@@ -1148,26 +1160,31 @@ async function streamRound(
 
   if (!response.ok || !response.body) {
     let detail = `Provider returned ${response.status}`;
-    let rawBody = "";
-    try {
-      const text = await response.text();
-      rawBody = text;
-      if (text) {
-        try {
-          const obj = JSON.parse(text);
-          const err = obj.error ?? obj.detail ?? obj.message;
-          if (typeof err === "string") detail = err;
-          else if (err && typeof err === "object") {
-            detail = (err as { message?: string }).message ?? JSON.stringify(err);
-          } else {
-            detail = text.slice(0, 500);
-          }
-        } catch {
-          detail = text.slice(0, 500);
-        }
+    // SINGLE-CONSUMPTION REUSE: a 400 body was already read once by the
+    // self-heal branch — replay that text here instead of touching the
+    // response body a second time (the disturbed-or-locked bug). Only a
+    // response whose body was never read gets read now — exactly once.
+    let rawBody = errorBodyText;
+    if (!rawBody) {
+      try {
+        rawBody = await response.text();
+      } catch {
+        rawBody = "";
       }
-    } catch {
-      // ignore
+    }
+    if (rawBody) {
+      try {
+        const obj = JSON.parse(rawBody);
+        const err = obj.error ?? obj.detail ?? obj.message;
+        if (typeof err === "string") detail = err;
+        else if (err && typeof err === "object") {
+          detail = (err as { message?: string }).message ?? JSON.stringify(err);
+        } else {
+          detail = rawBody.slice(0, 500);
+        }
+      } catch {
+        detail = rawBody.slice(0, 500);
+      }
     }
     // A 404 from an HTML page almost always means the Base URL points at the
     // site root instead of the API root (the app appends /chat/completions).

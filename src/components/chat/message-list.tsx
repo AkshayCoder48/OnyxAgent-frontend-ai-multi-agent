@@ -117,9 +117,74 @@ function hasResearchPart(message: ChatMessage): boolean {
   );
 }
 
+// ── PROGRESSIVE THREAD MOUNT (tap-lag fix) ─────────────────────────────
+// Opening a long conversation used to mount EVERY message in ONE React
+// commit — an 80-message thread measured a 517ms main-thread long task just
+// for the initial paint (markdown parse + syntax highlighting + tool cards;
+// multi-SECOND on low-end mobile), which made every button tap feel frozen
+// right after switching chats. The list now mounts the newest WINDOW
+// instantly and admits older rows above it in idle-time chunks — the
+// expensive parse work is spread across frames the user is already reading,
+// never blocking the first paint or an in-flight tap.
+const MOUNT_WINDOW_INITIAL = 12;
+const MOUNT_CHUNK = 10;
+
+/** requestIdleCallback with a Safari-safe fallback. */
+function scheduleIdle(cb: () => void): () => void {
+  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+    const id = window.requestIdleCallback(cb, { timeout: 400 });
+    return () => window.cancelIdleCallback(id);
+  }
+  const t = setTimeout(cb, 32);
+  return () => clearTimeout(t);
+}
+
+function useProgressiveMount(
+  messages: ChatMessage[],
+): { visibleCount: number; total: number } {
+  const total = messages.length;
+  // Reset keyed on the thread's FIRST message id — a conversation switch (or
+  // clear) changes it, while streaming appends/mutations keep it stable.
+  const firstId = messages[0]?.id ?? "";
+  const [state, setState] = React.useState<{ firstId: string; count: number }>(() => ({
+    firstId,
+    count: MOUNT_WINDOW_INITIAL,
+  }));
+  // RENDER-TIME RESET (React's "adjust state when a prop changes" pattern):
+  // resetting in an effect would let the FIRST commit of a new thread run
+  // with the PREVIOUS thread's mounted count — a switch 80→80 mounted all 80
+  // rows of the new conversation in one blocking commit (the exact jank this
+  // hook exists to remove). The render-time setState re-renders before the
+  // commit, so the new thread's first paint is always just the window.
+  if (state.firstId !== firstId) {
+    setState({ firstId, count: MOUNT_WINDOW_INITIAL });
+  }
+  const mountedCount = state.firstId === firstId ? state.count : MOUNT_WINDOW_INITIAL;
+  // Short threads mount whole — no progressive machinery at all.
+  const visibleCount =
+    total <= MOUNT_WINDOW_INITIAL + MOUNT_CHUNK ? total : Math.min(mountedCount, total);
+  // Admit older rows in idle chunks until the whole thread is mounted.
+  React.useEffect(() => {
+    if (visibleCount >= total) return;
+    return scheduleIdle(() => {
+      setState((s) =>
+        s.firstId !== firstId
+          ? s
+          : { firstId: s.firstId, count: Math.min(s.count + MOUNT_CHUNK, total) },
+      );
+    });
+  }, [visibleCount, total, firstId]);
+  return { visibleCount, total };
+}
+
 export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserMessage }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
   const setQuote = useQuoteStore((s) => s.setQuote);
+  // PROGRESSIVE MOUNT: the newest `visibleCount` rows render fully; older
+  // rows (above the initial viewport) render cheap skeletons until idle
+  // chunks admit them. Keeps the open-a-long-chat commit under a frame.
+  const { visibleCount } = useProgressiveMount(messages);
+  const hiddenCount = messages.length - visibleCount;
 
   // ENTRANCE-ANIMATION GATE (perf PRD): hydrated history must not replay
   // entrance animations — a 100-message thread used to mount with 100
@@ -147,6 +212,11 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
     return null;
   }, [messages]);
 
+  const visibleMessages = React.useMemo(
+    () => messages.slice(hiddenCount),
+    [messages, hiddenCount],
+  );
+
   return (
     <div className="space-y-0">
       {/* QUOTE SELECTION TOOLBAR (assistant-ui "Quote" element): one
@@ -154,9 +224,21 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
           above any text selected inside an assistant message
           ([data-quoteable]). Quoting carries the text into the composer. */}
       <SelectionToolbar onQuote={setQuote} />
-      {messages.map((message, index) => {
+      {hiddenCount > 0 &&
+        // Skeletons for not-yet-admitted historical rows: fixed estimated
+        // height + content-visibility — they cost nothing to keep, and the
+        // idle chunks replace them with real content within a second or two.
+        Array.from({ length: hiddenCount }, (_, i) => (
+          <div
+            key={`skeleton-${messages[i]?.id ?? i}`}
+            className="mb-row-cv"
+            style={{ minHeight: 96 }}
+            aria-hidden="true"
+          />
+        ))}
+      {visibleMessages.map((message, index) => {
         const groupPos = groupPositions.get(message.id);
-        const prev = messages[index - 1];
+        const prev = visibleMessages[index - 1];
         const animate = shouldAnimate(message);
 
         return (

@@ -978,6 +978,38 @@ async function fetchNoTimeout(urlStr, opts) {
         clearConnectTimer();
         nodeRes.on("end", () => { resEnded = true; });
         const webBody = Readable.toWeb(nodeRes);
+        // SINGLE-CONSUMPTION BODY WRAPPER (the "Response body object should
+        // not be disturbed or locked" fix): the previous text()/json()
+        // helpers built a NEW Response over webBody on EVERY call. undici's
+        // Response constructor throws SYNCHRONOUSLY ("Response body object
+        // should not be disturbed or locked") once a previous read disturbed
+        // the stream — and because that throw fires BEFORE any promise
+        // exists, callers' .catch(() => "") never attached. The HTTP-400
+        // path hit exactly that: the self-heal ladder read the body once,
+        // the ladder-exhausted fall-through into the !ok error branch read
+        // it AGAIN on the same response, and the sync throw escaped as a
+        // fatal run error (repeatedly, on every 400 — long conversations
+        // hit it constantly). The body is now read at most ONCE and cached;
+        // every later text()/json() replays the cache; the body getter
+        // degrades to a closed stream after a text() read.
+        // NOTE: this file is a String.raw template — no raw backticks here.
+        let bodyText = null; // null = unread; string = consumed cache
+        let bodyReadFailed = false;
+        const closedBody = new ReadableStream({
+          start(controller) { try { controller.close(); } catch {} },
+        });
+        const readBodyText = async () => {
+          if (bodyText === null) {
+            if (bodyReadFailed) return "";
+            try {
+              bodyText = await new Response(webBody).text();
+            } catch {
+              bodyReadFailed = true;
+              bodyText = "";
+            }
+          }
+          return bodyText;
+        };
         resolve({
           status: nodeRes.statusCode || 0,
           ok: nodeRes.statusCode >= 200 && nodeRes.statusCode < 300,
@@ -988,9 +1020,11 @@ async function fetchNoTimeout(urlStr, opts) {
               return Array.isArray(v) ? v.join(", ") : String(v);
             },
           },
-          body: webBody,
-          text: () => new Response(webBody).text(),
-          json: () => new Response(webBody).json(),
+          get body() {
+            return bodyText === null ? webBody : closedBody;
+          },
+          text: () => readBodyText(),
+          json: async () => JSON.parse(await readBodyText()),
         });
       });
       req.on("error", (e) => { clearConnectTimer(); reject(e); });
