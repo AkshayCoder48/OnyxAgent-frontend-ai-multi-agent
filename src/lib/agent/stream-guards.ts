@@ -16,6 +16,31 @@
  * stop into an explicit, logged, retryable error.
  */
 
+/**
+ * True when the error is a fetch/stream ABORT — either the user pressed
+ * Stop (the execution's AbortController fired) or the body stream was
+ * killed by something else (proxy severed the connection, the browser
+ * suspended the tab).
+ *
+ * CRITICAL: Chrome rejects an aborted body read with a DOMException whose
+ * name is "AbortError" and message "BodyStreamBuffer was aborted" — and
+ * DOMException is NOT `instanceof Error`, so classification must never
+ * depend on the prototype chain. Previously this mismatch let the error
+ * escape classification, surface as a visible
+ * "❌ Error: AbortError: BodyStreamBuffer was aborted" and kill the turn.
+ */
+export function isAbortLikeError(err: unknown): boolean {
+  if (!err) return false;
+  if ((err as { name?: unknown }).name === "AbortError") return true;
+  const raw =
+    err instanceof Error
+      ? err.message
+      : String((err as { message?: unknown }).message ?? err);
+  return /bodystreambuffer was aborted|body stream (was )?aborted|this operation was aborted|the user aborted a request|request was aborted|signal is aborted/i.test(
+    raw,
+  );
+}
+
 /** Extract a human-readable error message from a stream chunk, or null when
  *  the chunk is a normal completion chunk (has choices/usage, no error). */
 export function extractStreamError(chunk: Record<string, unknown>): string | null {

@@ -149,7 +149,7 @@ function registerMetaTools(): void {
 
   registerTool(
     "mcp_search_tools",
-    "Discover tools exposed by the user's connected MCP servers (external integrations — a single server can host hundreds of tools, so they are NOT pre-loaded into your tool list). FIRST STEP whenever a task might need an MCP tool: search with a natural-language description of WHAT you want to do (e.g. 'scrape a webpage', 'query a database', 'post to social media') or a server name. Returns matching tools with their input schemas. Then build the arguments from the schema and call mcp_call_tool. If no servers are connected, the result says so — suggest Settings → MCPs.",
+    "Discover tools exposed by the user's APP-CONFIGURED MCP servers — remote HTTP/SSE endpoints registered in this app (Settings → MCPs / `manage_mcp`). A single server can host hundreds of tools, so they are NOT pre-loaded into your tool list. FIRST STEP whenever a task might need an MCP integration: search with a natural-language description of WHAT you want to do (e.g. 'scrape a webpage', 'query a database', 'post to social media') or a server name. Returns matching tools with their input schemas — build the arguments from the schema and call mcp_call_tool. SCOPE (how MCP really works): this catalog contains ONLY the user's configured remote servers — MCP servers you installed inside the E2B sandbox (npm/stdio packages, `claude mcp add …`) are separate processes there and will NEVER appear in these results; to use one of those, run an MCP client script or the server's CLI inside the sandbox (run_terminal), or register a hosted HTTP/SSE endpoint via `manage_mcp` to make it first-class. Never claim 'MCP servers aren't accessible in this environment' — that only means no app-level server matches the query.",
     {
       type: "object",
       properties: {
@@ -189,7 +189,7 @@ function registerMetaTools(): void {
             servers: [],
             tools: [],
             message:
-              "No MCP servers are connected (or none exposed tools this turn). The user can add servers in Settings → MCPs.",
+              "No MCP servers are connected (or none exposed tools this turn). How MCP works here: (1) a server becomes callable when it is REGISTERED in this app as a remote HTTP/SSE endpoint — create one with the manage_mcp tool (action 'create'), then search again; (2) MCP servers installed inside the E2B sandbox (npm/stdio packages) never appear in this catalog — use them by running an MCP client script or the server's CLI in the sandbox (run_terminal); (3) the needed capability may already exist as a built-in tool (web_search, web_fetch, use_browser, run_terminal …) — prefer it when it fits.",
           },
         };
       }
@@ -240,8 +240,9 @@ function registerMetaTools(): void {
             servers: serversSummary,
             tools: [],
             message:
-              "No matching tools. Try different keywords, or list everything with an empty query. Available servers: " +
-              serversSummary.map((s) => `${s.name} (${s.toolCount} tools)`).join(", "),
+              "No matching tools on the user's app-configured MCP servers. Try different keywords, or list everything with an empty query. Available servers: " +
+              serversSummary.map((s) => `${s.name} (${s.toolCount} tools)`).join(", ") +
+              ". NOTE: this catalog only holds app-registered remote (HTTP/SSE) servers — a tool you installed inside the E2B sandbox (npm/stdio MCP package) will never appear here; either run an MCP client/CLI for it in the sandbox (run_terminal) or register its hosted endpoint with manage_mcp.",
           },
         };
       }
@@ -263,7 +264,7 @@ function registerMetaTools(): void {
 
   registerTool(
     "mcp_call_tool",
-    "Execute a tool on one of the user's connected MCP servers — a tool that was found with mcp_search_tools. Pass the exact server name, tool name and an arguments object built from the tool's inputSchema. Results are returned verbatim; if a tool errors, report the error honestly (never fabricate a result).",
+    "Execute a tool on one of the user's app-configured MCP servers (remote HTTP/SSE endpoints) — a tool that was found with mcp_search_tools. Pass the exact server name, tool name and an arguments object built from the tool's inputSchema. Results are returned verbatim; if a tool errors, report the error honestly (never fabricate a result). This cannot reach MCP servers installed inside the E2B sandbox — those need an MCP client or CLI run in the sandbox itself.",
     {
       type: "object",
       properties: {

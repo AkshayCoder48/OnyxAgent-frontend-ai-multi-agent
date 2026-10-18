@@ -17,6 +17,7 @@ import type { AgentTurnOptions } from "@/lib/agent/runtime";
 import { runAgentTurn } from "@/lib/agent/runtime";
 import type { BackgroundTurnHandle } from "@/lib/agent/background-turn";
 import { AgentEventProcessor } from "@/lib/agent/event-processor";
+import { isAbortLikeError } from "@/lib/agent/stream-guards";
 import {
   listJobs,
   getActiveJob,
@@ -261,6 +262,13 @@ export const executionHub = {
     if (!r) return;
     const final = this.buildOptions(executionId, opts);
     void runAgentTurn(final).catch((err) => {
+      // ABORT ≠ ERROR: the Stop button (or a race between the stop path
+      // and the turn's final await) rejects with an AbortError-shaped
+      // DOMException ("BodyStreamBuffer was aborted") — stopExecution
+      // already finalized the message, so surfacing it as a chat error
+      // was pure noise (the "❌ AbortError" bug). Only real failures
+      // become error events.
+      if (r.abortController?.signal.aborted || isAbortLikeError(err)) return;
       const message = err instanceof Error ? err.message : "Agent turn failed";
       r.processor.handle({ type: "error", data: { message } });
     });

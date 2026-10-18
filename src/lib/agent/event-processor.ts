@@ -94,6 +94,12 @@ export class AgentEventProcessor {
    *  replayed run reports WHEN the work finished, not when this browser
    * happened to receive the replay. */
   private lastEventTs: number | null = null;
+  /** EARLIEST runner wall-clock `ts` seen this generation (sandbox clock).
+   *  Together with `lastEventTs` it forms the TRUE work window — computed
+   *  entirely in the runner's own clock, so browser↔sandbox clock skew can
+   *  never inflate the "Worked {time}" duration (the fake-time bug), and
+   *  replay/away gaps never count as work. */
+  private runnerFirstTs: number | null = null;
 
   // ── STREAMING BUFFERS (render batching — see original comments) ───────
   private textDeltaBuffer = "";
@@ -278,6 +284,7 @@ export class AgentEventProcessor {
     // New generation → new "Worked {time}" window.
     this.turnStartedAt = Date.now();
     this.lastEventTs = null;
+    this.runnerFirstTs = null;
     this.createNewMessage("");
     this.currentMessageGeneration = this.activeGenerationId;
   }
@@ -285,21 +292,64 @@ export class AgentEventProcessor {
   // ── GENERATION SUMMARY ("Worked {time}" panel) ─────────────────────
   /** Stamp `generation` metadata on the current message so the settled
    *  turn collapses into a "Worked {duration}" panel (PRD §§12–22).
-   *  Prefers the processor's wall-clock window; falls back to the part
-   *  stamps (roundStartedAt/tool startedAt) when the turn predates the
-   *  timer (resumed background runs). */
+   *  AUTO-CALCULATED from REAL execution timestamps — never a fabricated
+   *  window:
+   *    · BACKGROUND runs: every event carries the runner's wall clock
+   *      (sandbox `ts`). The window is [earliest known runner stamp →
+   *      latest runner stamp] — a SINGLE clock basis, so browser↔sandbox
+   *      clock skew can never fake the duration, and replay/away gaps
+   *      never count as work. Resumed runs backdate the start with the
+   *      checkpointed part stamps (the same runner clock) so pre-gap work
+   *      time is included.
+   *    · FOREGROUND runs: no runner stamps exist — the browser window
+   *      [turn start → now] IS the true work window. */
   private stampGeneration(outcome: { failed?: boolean; stopped?: boolean }): void {
     const id = this.currentMessageId;
     if (!id) return;
     const store = this.store.getState();
     const msg = store.messages.find((m) => m.id === id);
     if (!msg || msg.generation) return; // never overwrite a settled summary
-    // HONEST DURATIONS: prefer the latest runner wall-clock stamp (bg
-    // mode) — a run that finished while the app was away must show its
-    // REAL work window, not browser-receive time (the away-gap bug).
-    // Falls back to Date.now() for the in-browser runtime (no runner ts).
-    const completedAt =
-      this.lastEventTs !== null && this.lastEventTs > 0 ? this.lastEventTs : Date.now();
+
+    // ── BACKGROUND path: pure runner-clock window. ──
+    if (
+      this.runnerFirstTs !== null &&
+      this.runnerFirstTs > 0 &&
+      this.lastEventTs !== null &&
+      this.lastEventTs > 0
+    ) {
+      let startedAt = this.runnerFirstTs;
+      // Resumed-run backdate: parts persisted BEFORE the away gap carry
+      // the same runner clock — the window must include that work too.
+      for (const p of msg.parts ?? []) {
+        if (
+          p.roundStartedAt !== undefined &&
+          p.roundStartedAt > 0 &&
+          p.roundStartedAt < startedAt
+        ) {
+          startedAt = p.roundStartedAt;
+        }
+        const tcStarted = (p as { toolCall?: { startedAt?: number } }).toolCall?.startedAt;
+        if (tcStarted !== undefined && tcStarted > 0 && tcStarted < startedAt) {
+          startedAt = tcStarted;
+        }
+      }
+      const completedAt = this.lastEventTs;
+      const durationMs = Math.max(0, completedAt - startedAt);
+      store.updateMessage(id, (m) => ({
+        ...m,
+        generation: {
+          startedAt,
+          completedAt,
+          durationMs,
+          ...(outcome.failed ? { failed: true } : {}),
+          ...(outcome.stopped ? { stopped: true } : {}),
+        },
+      }));
+      return;
+    }
+
+    // ── FOREGROUND path: browser wall-clock window. ──
+    const completedAt = Date.now();
     let startedAt = this.turnStartedAt ?? undefined;
     if (startedAt === undefined) {
       // Fallback: earliest part stamp on the message.
@@ -359,6 +409,7 @@ export class AgentEventProcessor {
     this.currentMessageGeneration = null;
     this.turnStartedAt = null;
     this.lastEventTs = null;
+    this.runnerFirstTs = null;
     this.store.getState().setPendingQuestions(null);
     this.store.getState().setProcessing(false);
     // Any still-open media_generation confirmation resolves as cancelled
@@ -384,6 +435,13 @@ export class AgentEventProcessor {
     // and the summary showed the entire away-gap as work time.
     const evTs = (wsEvent.data as { ts?: number }).ts;
     if (typeof evTs === "number" && evTs > 0) {
+      // AUTO-CALCULATED "Worked {time}": remember the EARLIEST runner
+      // stamp too — the generation window is then computed purely in the
+      // runner's clock ([runnerFirstTs → lastEventTs]), immune to
+      // browser↔sandbox skew and to replay delays.
+      if (this.runnerFirstTs === null || evTs < this.runnerFirstTs) {
+        this.runnerFirstTs = evTs;
+      }
       this.lastEventTs = evTs;
       // RESUMED-RUN BACKDATING (honest durations — Persistent Execution
       // PRD §12): turnStartedAt was stamped at browser-RECEIVE time
@@ -1001,6 +1059,7 @@ export class AgentEventProcessor {
         // inspectable in the collapsed panel (PRD §22).
         this.stampGeneration({ failed: true });
         this.lastEventTs = null;
+        this.runnerFirstTs = null;
         // IN-APP ERROR LOG: mirror the surfaced chat error into the Logs
         // store so the full trail (LLM body, self-heal steps, retries) is
         // one click away.
@@ -1098,6 +1157,7 @@ export class AgentEventProcessor {
         this.currentMessageGeneration = null;
         this.turnStartedAt = null;
         this.lastEventTs = null;
+        this.runnerFirstTs = null;
         this.opts.onTurnEnd?.("completed");
         break;
       }

@@ -155,8 +155,11 @@ interface CacheEntry {
  *  Version 4 = cloud workspace persistence tools + policy (49 tools;
  *  since removed from the manual).
  *  Version 6 = workspace-sync tools + persistent-workspace policy removed
- *  from the manual (61 tools). */
-const AGENT_MD_VERSION = 6;
+ *  from the manual (61 tools).
+ *  Version 7 = MCP reality docs — manage_mcp scope clarified (remote
+ *  HTTP/SSE only; sandbox-installed stdio servers need their CLI / an
+ *  MCP client there) + digest trimmed back under the 8KB cap. */
+const AGENT_MD_VERSION = 7;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();

@@ -1030,10 +1030,14 @@ function replayEvent(
     }
     case "done":
       emit("llm_completed", { round, ts });
-      emit("final_result", { output: ev.content ?? "" });
+      // The terminal event carries the runner's wall clock too — the
+      // processor's "Worked {time}" window then ends at the moment the
+      // run ACTUALLY finished in the sandbox, never at browser-receive
+      // time (auto-calculated durations).
+      emit("final_result", { output: ev.content ?? "", ts });
       break;
     case "error":
-      emit("error", { message: ev.message ?? "Background run failed." });
+      emit("error", { message: ev.message ?? "Background run failed.", ts });
       break;
   }
 }

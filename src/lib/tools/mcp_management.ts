@@ -14,7 +14,7 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
 const MANAGE_MCP_DESCRIPTION = `Manage MCP (Model Context Protocol) server configurations — one tool for every MCP operation. Pass \`action\` plus the fields that action needs:
 
 - action "list": list all configured MCP servers (id, name, transport, url, active status). No other fields.
-- action "create": create a new MCP server configuration. Requires \`name\`, \`transport\` (sse | streamable_http — stdio is NOT supported in the browser), \`url\`. Optional: \`headers\` (object), \`is_active\` (default true).
+- action "create": register a REMOTE MCP server (HTTP/SSE endpoint — the ONLY kind the app can call as a first-class tool via mcp_search_tools / mcp_call_tool). Requires \`name\`, \`transport\` (sse | streamable_http — stdio is NOT supported in the browser), \`url\`. Optional: \`headers\` (object), \`is_active\` (default true). After creating, search its tools with mcp_search_tools. Note: MCP servers installed inside the E2B sandbox (npm/stdio packages) CANNOT be registered here — they are separate processes in that VM; use them by running an MCP client script or their CLI inside the sandbox instead.
 - action "edit": edit an existing server's name / transport / url / headers / active status. Requires \`id\` (find it with action "list"); the other fields are optional patches.
 - action "delete": delete an MCP server. Requires \`id\`.`;
 

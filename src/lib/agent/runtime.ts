@@ -69,7 +69,7 @@ import {
   wireAllowsTools,
 } from "@/lib/agent/wire-compat";
 import { logError, logWarn } from "@/lib/client-logger";
-import { extractStreamError } from "@/lib/agent/stream-guards";
+import { extractStreamError, isAbortLikeError } from "@/lib/agent/stream-guards";
 import { manageContext } from "@/lib/agent/context/context-manager";
 import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
@@ -1492,9 +1492,20 @@ async function streamRound(
       if (u) usage = u;
     }
   } catch (err) {
-    if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+    if (signal?.aborted) {
       aborted = true;
       // Partial content is preserved — the caller will save it.
+    } else if (isAbortLikeError(err)) {
+      // The body stream was aborted WITHOUT the user stopping — the
+      // proxy/gateway severed the connection or the browser suspended
+      // the tab. That is a TRANSIENT transport failure, never a terminal
+      // error: normalize it so the main loop's transient-retry path
+      // re-streams this round (previously this surfaced as
+      // "❌ Error: AbortError: BodyStreamBuffer was aborted" and killed
+      // the turn — the AbortError auto-stop bug).
+      throw new Error(
+        "stream aborted by the network/proxy (BodyStreamBuffer was aborted) — auto-retrying",
+      );
     } else {
       // Network blip mid-stream — keep what we have and re-throw so the
       // outer loop can emit an error event.
@@ -2126,8 +2137,16 @@ Available tools for incremental writing:
 Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\` (FIRE-AND-FORGET — it returns the instant the message is delivered, with a \`target_chat_id\`, while the subagent works independently); inspect what a subagent has generated so far — including output it is still streaming — with \`read_chat\` (pass the \`target_chat_id\`; repeat later for more); steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
 
 ### Skills, MCP & dynamic tools
+- Skills (\`manage_skill\`) are contextual instruction files — read a skill before applying it.
 - MCP servers expose their tools ON DEMAND via \`mcp_search_tools\` → \`mcp_call_tool\` (a single server can host hundreds of tools, so they are NOT pre-loaded into your tool list — search first when a task might need one; configure servers with \`manage_mcp\`). Composio integrations work the same way (\`composio_search_tools\` → \`composio_execute_tool\`).
-- Skills (\`manage_skill\`) are contextual instruction files — \`read\` a skill before applying it.
+
+### How MCP ACTUALLY works here (read carefully — wrong assumptions fail tasks)
+MCP (Model Context Protocol) has exactly two halves: a SERVER (a process or HTTP endpoint that exposes tools) and a CLIENT (the thing that connects to it and calls those tools). Your tool list is fixed by THIS app — nothing you install anywhere magically adds functions to it. Concretely:
+1. \`mcp_search_tools\` / \`mcp_call_tool\` reach ONLY the user's app-configured MCP servers — REMOTE servers with an HTTP/SSE URL (Settings → MCPs, managed via \`manage_mcp\`). That catalog is the complete list; it never changes mid-turn.
+2. MCP servers you install or start INSIDE the E2B sandbox (npm stdio servers like \`npx -y @modelcontextprotocol/server-*\`, \`claude mcp add …\`, local processes) are separate processes in that VM. They will NEVER appear in \`mcp_search_tools\` results, and installing them does NOT add tools to your tool list. Do not search the app's MCP catalog for something you installed in the sandbox, and NEVER say "the MCP servers aren't directly accessible as tools in this environment" — that statement is a hallucination about how MCP works.
+3. To USE a stdio/npm MCP server: act as the MCP CLIENT inside the sandbox — write a small Node script using \`@modelcontextprotocol/sdk\` that spawns the server over stdio, lists its tools and calls the one you need, then run it with \`run_terminal\` / \`run_python\`; or use the server's own CLI directly when it has one (often simpler than MCP at that point).
+4. To make a server FIRST-CLASS in your tool list (\`mcp_search_tools\` finds it, \`mcp_call_tool\` runs it): it must be a REMOTE HTTP/SSE endpoint. Add it with \`manage_mcp\` (action "create", transport \`sse\` or \`streamable_http\`) — after that it is callable every turn.
+5. Decision order when the user asks for an MCP tool/capability: (a) \`mcp_search_tools\` — it may already be configured; (b) the server has a hosted HTTP/SSE endpoint → \`manage_mcp\` create, then search + call; (c) it only ships as a stdio/npm package → drive it inside the sandbox via an MCP client script or its CLI; (d) the capability also exists as a built-in tool (web_search, web_fetch, use_browser, run_terminal …) → just use the built-in.
 
 ### When to THINK (reasoning) vs ACT (tools)
 - **Think first** for ambiguous/multi-step/unclear-intent tasks; **act immediately** on clear direct commands.
@@ -2620,6 +2639,27 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         });
       }
     } catch (err) {
+      // USER STOP ≠ ERROR (AbortError fix): the Stop button aborts the
+      // fetch mid-read; Chrome rejects the pending read with
+      // "AbortError: BodyStreamBuffer was aborted" (a DOMException, not
+      // an Error). Previously that escaped every abort check, surfaced as
+      // a visible "❌ Error: AbortError: BodyStreamBuffer was aborted" and
+      // killed the turn. A genuine user stop settles QUIETLY with
+      // stopReason "aborted" — the hub's stop path already finalized the
+      // UI message (markStoppedByUser) before the signal fired.
+      if (signal?.aborted) {
+        turnActive = false;
+        return {
+          conversationId,
+          assistantMessageId,
+          content: lastAssistantContent,
+          thinking: lastAssistantThinking,
+          reasoning: lastAssistantReasoning,
+          toolCalls: allToolCalls,
+          usage: lastUsage,
+          stopReason: "aborted",
+        };
+      }
       const message = err instanceof Error ? err.message : String(err);
       // Router health: the failure benches this candidate for 60s (≥3
       // consecutive failures keep it benched) and the round is retried on
@@ -2691,7 +2731,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         continue;
       }
       const isTransientTransport =
-        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal/i.test(message);
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal|bodystreambuffer|stream aborted|aborterror/i.test(message);
       // NOTE: no attempt cap and no round exclusion — even the final round
       // re-streams after a transport blip (round -= 1 re-enters it).
       if (isTransientTransport) {

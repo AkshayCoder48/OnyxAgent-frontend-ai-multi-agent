@@ -10,8 +10,6 @@ import {
   Info,
   KeyRound,
   Loader2,
-  Pause,
-  Play,
   RefreshCw,
   Save,
   Snowflake,
@@ -50,11 +48,14 @@ function ageLabel(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-/** Workspace lifecycle panel — the E2B pause/resume persistency surface
- *  (docs.e2b.dev/sandbox/persistence). Pausing freezes the FULL sandbox
- *  state (filesystem AND RAM — processes, variables, connections) with no
- *  automatic deletion; resuming (or the next tool call — Sandbox.connect)
- *  restores it exactly where it froze. The app also auto-pauses on exit. */
+/** Workspace lifecycle panel — the E2B pause/resume persistency STATUS
+ *  view (docs.e2b.dev/sandbox/persistence). The lifecycle itself is FULLY
+ *  AUTOMATIC (user directive: no manual controls — ever):
+ *   · leaving the app AUTO-PAUSES every idle workspace (pagehide beacon);
+ *   · a paused sandbox AUTO-RESUMES in place the next time anything needs
+ *     it (any tool call / file op / bg poll reconnects via Sandbox.connect);
+ *   · a live background run is never paused (the live-run guard).
+ *  This panel only SHOWS the state — there is nothing to manage. */
 function WorkspaceLifecycle() {
   const [key, setKey] = React.useState<string | null>(null);
   const [items, setItems] = React.useState<
@@ -99,50 +100,6 @@ function WorkspaceLifecycle() {
     void load();
   }, [load]);
 
-  async function pause(sandboxId: string) {
-    if (!key) return;
-    setBusy(true);
-    try {
-      const { pauseSandbox } = await import("@/lib/e2b/lifecycle-client");
-      const r = await pauseSandbox(key, sandboxId);
-      if (r.ok && r.paused !== false) {
-        toast.success("Workspace paused — full state preserved", {
-          description: "Files, memory and running processes are frozen. The next use resumes it automatically.",
-          icon: <Snowflake className="size-4" />,
-        });
-      } else if (r.reason === "running-commands") {
-        toast.info("Pause skipped — the sandbox is busy", {
-          description: r.detail ?? "A background run is live on this sandbox.",
-        });
-      } else {
-        toast.error(r.error ?? "Pause failed");
-      }
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function resume(sandboxId: string) {
-    if (!key) return;
-    setBusy(true);
-    try {
-      const { resumeSandbox } = await import("@/lib/e2b/lifecycle-client");
-      const r = await resumeSandbox(key, sandboxId);
-      if (r.ok) {
-        toast.success("Workspace resumed", {
-          description: "The sandbox picked up exactly where it froze.",
-          icon: <CheckCircle2 className="size-4" />,
-        });
-      } else {
-        toast.error(r.error ?? "Resume failed");
-      }
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className="space-y-2 rounded-lg border p-3">
       <div className="flex items-center justify-between gap-2">
@@ -152,9 +109,9 @@ function WorkspaceLifecycle() {
         </Button>
       </div>
       <p className="text-muted-foreground text-xs">
-        Sandboxes persist through pause/resume — the full state (filesystem + RAM) is frozen and
-        restored on the next use. The app auto-pauses workspaces when you leave and resumes them
-        when you return.
+        Fully automatic — nothing to manage manually. Workspaces freeze when you leave (the full
+        state — filesystem + RAM — is preserved with no auto-deletion) and resume instantly, exactly
+        where they froze, the next time anything needs them. Live background runs are never paused.
       </p>
       {items.length === 0 ? (
         <p className="text-muted-foreground py-1 font-mono text-[11px]">
@@ -184,19 +141,15 @@ function WorkspaceLifecycle() {
                       ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
                       : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400")
                   }
+                  title={
+                    s.state === "paused"
+                      ? "Frozen (full state preserved) — resumes automatically on next use"
+                      : "Live — auto-pauses when you leave the app"
+                  }
                 >
                   {s.state === "paused" ? <Snowflake className="size-3" /> : <span className="size-1.5 rounded-full bg-current" />}
                   {s.state}
                 </span>
-                {s.state === "paused" ? (
-                  <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => void resume(s.sandboxId)} disabled={busy}>
-                    <Play className="size-3" /> Resume
-                  </Button>
-                ) : (
-                  <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => void pause(s.sandboxId)} disabled={busy}>
-                    <Pause className="size-3" /> Pause
-                  </Button>
-                )}
               </div>
             </li>
           ))}
