@@ -25,9 +25,9 @@ const MANAGE_SKILL_DESCRIPTION = `Manage the user's skills — one tool for ever
 - action "create": create a new skill (available on the next turn). Requires \`name\`, \`description\`, \`content\` (the full SKILL.md markdown).
 - action "edit": edit an existing skill's content and/or description. Requires \`name\`; \`content\` and \`description\` are optional (omitted fields are kept).
 - action "delete": delete a skill by name. Requires \`name\`.
-- action "catalog": the DEFAULT SKILL REPOSITORIES index (6 GitHub repos: skill-collections with per-skill metadata, npm-cli repos with sandbox install/run commands) + the MCP Market catalog (10 servers with marketplace URLs). Metadata only — pick what a task needs, never load everything.
-- action "browse_repository": per-skill metadata (name, description) for ONE repository. Requires \`repository\` (id from catalog). Repositories without a static index are fetched live from GitHub. npm-cli repos return their sandbox usage instead.
-- action "install_from_repository": install ONE skill from a repository into the local registry (then \`read\` it). Requires \`repository\` + \`skill\` (name from the index).`;
+- action "catalog": the DEFAULT SKILL REPOSITORY index (8 repositories BUNDLED AS LOCAL FILES in this app — installs are offline and instant) + the MCP Market catalog pointer. Metadata only — pick what a task needs, never load everything.
+- action "browse_repository": per-skill metadata (name, description) for ONE repository. Requires \`repository\` (id from catalog). Reads the bundled manifest; only unbundled repos fetch live from GitHub.
+- action "install_from_repository": install ONE skill from a repository into the local registry (then \`read\` it). Requires \`repository\` + \`skill\` (name from the index). Bundled repositories install fully offline.`;
 
 registerTool(
   "manage_skill",
@@ -43,7 +43,7 @@ registerTool(
       name: { type: "string", description: "Skill name (snake_case, unique)." },
       description: { type: "string", description: "Short description of the skill (create) or new description (edit)." },
       content: { type: "string", description: "Full SKILL.md markdown content — instructions, examples, etc. (create, or edit to replace)." },
-      repository: { type: "string", description: "Repository id from the catalog (browse_repository / install_from_repository), e.g. \"addhumanity\", \"threejs-game-skills\", \"mengto-skills\"." },
+      repository: { type: "string", description: "Repository id from the catalog (browse_repository / install_from_repository), e.g. \"ecc\", \"addhumanity\", \"threejs-game-skills\", \"mengto-skills\", \"uploaded-skills\"." },
       skill: { type: "string", description: "Skill name from the repository index (install_from_repository)." },
     },
     required: ["action"],
@@ -210,6 +210,7 @@ registerTool(
             repository: index.repoId,
             repository_name: index.repoName,
             source: index.source,
+            bundled: index.source === "bundled",
             skill_count: index.skills.length,
             skills: index.skills.map((s) => ({ name: s.name, description: s.description })),
             ...(index.error ? { warning: index.error } : {}),

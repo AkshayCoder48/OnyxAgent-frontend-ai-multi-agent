@@ -12,13 +12,69 @@ import { mcpService } from "@/lib/services";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { MCP_MARKET_SERVERS } from "@/lib/skills/catalog-registry";
 
+// ---------------------------------------------------------------------------
+// Bundled MCP-Market configs (public/mcp-market/index.json — extracted from
+// each server's marketplace page + GitHub README, bundled AS FILES so the
+// agent never has to web_fetch the marketplace to learn how to connect).
+// ---------------------------------------------------------------------------
+
+interface BundledMcpTool {
+  name: string;
+  description?: string;
+}
+
+interface BundledMcpServer {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+  github?: string;
+  npm?: string;
+  transport: string;
+  stdio?: { command: string; args?: string[] };
+  remote?: { url: string; transport: string; auth?: string };
+  env_required?: Record<string, string>;
+  sandbox?: string;
+  register_hint?: string;
+  note?: string;
+  tools?: BundledMcpTool[];
+}
+
+let bundledMcpCache: BundledMcpServer[] | null = null;
+
+async function loadBundledMcpMarket(): Promise<BundledMcpServer[]> {
+  if (bundledMcpCache) return bundledMcpCache;
+  try {
+    const res = await fetch("/mcp-market/index.json", { headers: { Accept: "application/json" } });
+    if (res.ok) {
+      const json = (await res.json()) as { servers?: BundledMcpServer[] };
+      if (Array.isArray(json?.servers) && json.servers.length > 0) {
+        bundledMcpCache = json.servers;
+        return bundledMcpCache;
+      }
+    }
+  } catch (err) {
+    console.warn("[manage_mcp] bundled market index fetch failed:", err);
+  }
+  // Fallback: the static registry (id/name/url/description only).
+  bundledMcpCache = MCP_MARKET_SERVERS.map((s) => ({
+    id: s.id,
+    name: s.name,
+    url: s.url,
+    description: s.description,
+    transport: "unknown",
+    ...(s.hint ? { note: s.hint } : {}),
+  }));
+  return bundledMcpCache;
+}
+
 const MANAGE_MCP_DESCRIPTION = `Manage MCP (Model Context Protocol) server configurations — one tool for every MCP operation. Pass \`action\` plus the fields that action needs:
 
 - action "list": list all configured MCP servers (id, name, transport, url, active status). No other fields.
 - action "create": register a REMOTE MCP server (HTTP/SSE endpoint — the ONLY kind the app can call as a first-class tool via mcp_search_tools / mcp_call_tool). Requires \`name\`, \`transport\` (sse | streamable_http — stdio is NOT supported in the browser), \`url\`. Optional: \`headers\` (object), \`is_active\` (default true). After creating, search its tools with mcp_search_tools. Note: MCP servers installed inside the E2B sandbox (npm/stdio packages) CANNOT be registered here — they are separate processes in that VM; use them by running an MCP client script or their CLI inside the sandbox instead.
 - action "edit": edit an existing server's name / transport / url / headers / active status. Requires \`id\` (find it with action "list"); the other fields are optional patches.
 - action "delete": delete an MCP server. Requires \`id\`.
-- action "market": the curated MCPMarket catalog (id, name, marketplace URL, description, connection hint). To connect one: web_fetch its marketplace URL for the exact transport/command, then follow the MCP decision order — remote HTTP/SSE endpoint → action "create" here; stdio/npx package → run it inside the E2B sandbox via an MCP client script.`;
+- action "market": the curated MCPMarket catalog WITH FULL BUNDLED CONNECTION CONFIGS (remote URLs, stdio commands, required env, tool lists) — no web_fetch needed. Remote HTTP/SSE servers → register with action "create" here; stdio/npx/uvx servers → run inside the E2B sandbox via an MCP client script.`;
 
 registerTool(
   "manage_mcp",
@@ -125,21 +181,39 @@ registerTool(
       return { success: true, output: { deleted: existing.name, id } };
     }
 
-    // ---- action: market (curated MCPMarket catalog) ----
+    // ---- action: market (bundled MCPMarket configs — real connection data) ----
     if (action === "market") {
+      const servers = await loadBundledMcpMarket();
       return {
         success: true,
         output: {
-          servers: MCP_MARKET_SERVERS.map((s) => ({
+          servers: servers.map((s) => ({
             id: s.id,
             name: s.name,
-            url: s.url,
+            marketplace_url: s.url,
             description: s.description,
-            ...(s.hint ? { hint: s.hint } : {}),
+            ...(s.github ? { github: s.github } : {}),
+            ...(s.npm ? { npm: s.npm } : {}),
+            transport: s.transport,
+            ...(s.remote
+              ? {
+                  remote_url: s.remote.url,
+                  remote_transport: s.remote.transport,
+                  ...(s.remote.auth ? { auth: s.remote.auth } : {}),
+                }
+              : {}),
+            ...(s.stdio ? { stdio_command: [s.stdio.command, ...(s.stdio.args ?? [])].join(" ") } : {}),
+            ...(s.env_required ? { env_required: s.env_required } : {}),
+            ...(s.sandbox ? { sandbox: s.sandbox } : {}),
+            ...(s.register_hint ? { register_hint: s.register_hint } : {}),
+            ...(s.note ? { note: s.note } : {}),
+            ...(s.tools?.length
+              ? { tools: s.tools.map((t) => t.name).slice(0, 50), tool_count: s.tools.length }
+              : {}),
           })),
-          total: MCP_MARKET_SERVERS.length,
+          total: servers.length,
           how_to_connect:
-            "1) web_fetch the marketplace URL for the server's exact transport/command. 2) Remote HTTP/SSE endpoint → manage_mcp action 'create' (then mcp_search_tools). 3) stdio/npx package → run it INSIDE the E2B sandbox: an MCP client script with @modelcontextprotocol/sdk or the server's own CLI, via run_terminal. The marketplace page is the source of truth — never guess connection details.",
+            "Configs are BUNDLED (local files — extracted from each server's marketplace page + GitHub README). Decision order: transport 'remote-http' → register DIRECTLY with manage_mcp action 'create' (transport + url above; complete its auth in the app browser if OAuth). transport 'stdio-npm' / 'stdio-python' / 'plugin' → run INSIDE the E2B sandbox via run_terminal (an MCP client script with @modelcontextprotocol/sdk spawning the stdio command, or the server's own CLI). Never guess connection details — everything needed is in this payload.",
         },
       };
     }

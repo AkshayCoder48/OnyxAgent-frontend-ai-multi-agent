@@ -1,40 +1,34 @@
 "use client";
 
 /**
- * Live skill-repository browsing + installing (Skills PRD).
+ * Bundled-first skill-repository browsing + installing.
  *
  * Backs the `manage_skill` actions `browse_repository` and
- * `install_from_repository` (and the Settings → Skills repositories panel):
+ * `install_from_repository` (and the Settings → Skills repositories panel).
+ *
+ * TRANSPORT ORDER (user request 2026-10-18: "add them as files, not repo
+ * links — downloaded directly"):
+ *
+ *   0. BUNDLED FILES (primary) — the default repositories ship AS LOCAL FILES
+ *      under `public/skill-repos/<id>/` (manifest.json + skills/…, generated
+ *      by scripts/bundle_skill_repos.py). Fetched same-origin: no GitHub API,
+ *      no jsDelivr, no rate limits, works offline. `partial` bundles
+ *      (mengto-skills: 177 SKILL.md bodies without supporting files) fall
+ *      through to the live transports for the missing files only.
+ *   1. jsDelivr (live fallback) — data API listing + per-file CDN reads.
+ *   2. codeload archives (live fallback) — central-directory names only,
+ *      bomb-capped inflation of exactly the requested entries (./zip).
  *
  *   - `fetchRepositoryIndex(repoId)` — METADATA-ONLY index of a repository's
- *     skills. Static registry entries (addhumanity, threejs, silk-design)
- *     return without any network; live entries (mengto-skills) are fetched
- *     from GitHub. Never returns full skill bodies — the PRD's
- *     metadata-first rule.
+ *     skills (never full skill bodies — the PRD's metadata-first rule).
  *   - `installSkillFromRepository(userId, repoId, skill)` — resolves a skill
  *     in the index, downloads its whole folder (SKILL.md + supporting files,
  *     capped), writes it to OPFS under `users/<userId>/skills/<name>/` and
- *     registers it with source "repository".
+ *     registers it with source "bundled-repository" / "repository".
  *
- * TRANSPORT — jsDelivr first, codeload archives as fallback:
- *   - api.github.com is anonymous-rate-limited to 60 req/hour PER EGRESS IP
- *     (every user of a deployed build shares that pool) — unusable in
- *     practice. jsDelivr's data API (`data.jsdelivr.com/v1/packages/gh/…`)
- *     lists every file of a repo with no such token bucket, and its CDN
- *     (`cdn.jsdelivr.net/gh/…`) serves individual files — perfect for the
- *     metadata-first flow (one small JSON listing + a handful of small file
- *     fetches; works even for huge repos like MengTo/Skills — 111 MB archive,
- *     176 skills — that a whole-archive download could never serve).
- *   - When jsDelivr hiccups (repo not cached yet, transient 5xx), we fall
- *     back to downloading the codeload archive and reading ONLY the needed
- *     entries through the same bomb-capped, traversal-proof pipeline as user
- *     uploads (`./zip`): the central directory lists all names WITHOUT
- *     inflating anything, and `extractZipEntries` inflates only the entries
- *     explicitly requested. Archives over the 50 MB safety cap are skipped
- *     by the fallback (the primary path already handles those).
- *
- * All fetches go through the in-app `/api/chat-proxy` GET endpoint (CORS);
- * in-memory 10-minute TTL caches keep repeat browses/installs cheap.
+ * Live fetches go through the in-app `/api/chat-proxy` GET endpoint (CORS);
+ * in-memory caches keep repeat browses/installs cheap (bundled manifests are
+ * build-versioned, so they cache for the whole session).
  */
 
 import {
@@ -56,16 +50,20 @@ import { skillService } from "@/lib/services";
 // Limits & cache.
 // ---------------------------------------------------------------------------
 
+/** Live-transport cache TTL (bundled manifests cache for the session). */
 const CACHE_TTL_MS = 10 * 60 * 1000;
-
 /** Max skills returned from a live listing scan. */
 const MAX_LIVE_SKILLS = 60;
-/** Max files installed per skill. */
+/** Max files installed per skill (live transport). */
 const MAX_INSTALL_FILES = 30;
+/** Max files installed per skill (bundled transport — files already local). */
+const MAX_BUNDLED_INSTALL_FILES = 60;
 /** Max bytes per installed file. */
 const MAX_FILE_BYTES = 256 * 1024;
-/** Max total bytes per installed skill. */
+/** Max total bytes per installed skill (live transport). */
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+/** Max total bytes per installed skill (bundled transport). */
+const MAX_BUNDLED_TOTAL_BYTES = 3 * 1024 * 1024;
 /** Repo archive (fallback transport) download cap — protects the proxy. */
 const MAX_ZIP_BYTES = 20 * 1024 * 1024;
 /** Extensions treated as text (anything else is skipped with a warning). */
@@ -88,7 +86,7 @@ interface RepoArchive {
 interface RepoListing {
   files: RepoFile[];
   /** Which transport produced the listing. */
-  via: "jsdelivr" | "archive";
+  via: "bundled" | "jsdelivr" | "archive";
   /** The archive when the fallback transport loaded one (reused for reads). */
   archive?: RepoArchive;
 }
@@ -97,7 +95,60 @@ const listingCache = new Map<string, { listing: RepoListing; fetchedAt: number }
 const indexCache = new Map<string, { index: RepositoryIndex; fetchedAt: number }>();
 
 // ---------------------------------------------------------------------------
-// Proxy fetch primitives.
+// Transport 0 (primary): BUNDLED FILES — public/skill-repos/<id>/.
+// ---------------------------------------------------------------------------
+
+/** One bundled repository manifest (public/skill-repos/<id>/manifest.json). */
+export interface BundledManifest {
+  id: string;
+  name: string;
+  source_url?: string;
+  bundled_at?: string;
+  /** True when only SOME of each skill's files are bundled (e.g. SKILL.md only). */
+  partial?: boolean;
+  note?: string;
+  skills: Array<RepoSkillMeta & { files?: Array<{ path: string; size: number }> }>;
+}
+
+const bundledManifestCache = new Map<string, BundledManifest | null>();
+
+/**
+ * Fetch a repository's bundled manifest (same-origin static file — the
+ * repositories ship as FILES in this app). Null when the repo isn't bundled
+ * or the fetch fails (→ live transports take over).
+ */
+export async function fetchBundledManifest(repoId: string): Promise<BundledManifest | null> {
+  if (bundledManifestCache.has(repoId)) return bundledManifestCache.get(repoId) ?? null;
+  let manifest: BundledManifest | null = null;
+  try {
+    const res = await fetch(`/skill-repos/${encodeURIComponent(repoId)}/manifest.json`, {
+      headers: { Accept: "application/json" },
+    });
+    if (res.ok) {
+      const json = (await res.json()) as BundledManifest;
+      if (Array.isArray(json?.skills)) manifest = json;
+    }
+  } catch (err) {
+    console.warn(`[repo-browser] bundled manifest fetch failed for ${repoId}:`, err);
+  }
+  // Bundled manifests are build-versioned → cache for the whole session.
+  bundledManifestCache.set(repoId, manifest);
+  return manifest;
+}
+
+/** Same-origin read of ONE bundled file. */
+async function fetchBundledTextFile(repoId: string, dir: string, path: string): Promise<string> {
+  const base = `/skill-repos/${encodeURIComponent(repoId)}/skills/`;
+  const rel = dir ? `${dir.split("/").map(encodeURIComponent).join("/")}/` : "";
+  const res = await fetch(`${base}${rel}${path.split("/").map(encodeURIComponent).join("/")}`, {
+    headers: { Accept: "text/plain, */*" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} (bundled file ${path})`);
+  return res.text();
+}
+
+// ---------------------------------------------------------------------------
+// Proxy fetch primitives (live transports).
 // ---------------------------------------------------------------------------
 
 async function proxyGetBytes(url: string, accept: string): Promise<Uint8Array> {
@@ -117,7 +168,7 @@ async function proxyGetText(url: string, accept: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Transport 1 (primary): jsDelivr — listing + per-file CDN reads.
+// Transport 1 (live fallback): jsDelivr — listing + per-file CDN reads.
 // ---------------------------------------------------------------------------
 
 /** Branches to try, in order (most repos are on main). */
@@ -151,8 +202,8 @@ function jsDelivrFileUrl(repo: SkillRepository, branch: string, path: string): s
 }
 
 // ---------------------------------------------------------------------------
-// Transport 2 (fallback): codeload archive — central-directory names only,
-// then bomb-capped inflation of exactly the entries we ask for.
+// Transport 2 (live fallback): codeload archive — central-directory names
+// only, then bomb-capped inflation of exactly the entries we ask for.
 // ---------------------------------------------------------------------------
 
 async function codeloadArchive(repo: SkillRepository): Promise<RepoArchive> {
@@ -192,8 +243,27 @@ async function fetchRepoListing(repo: SkillRepository): Promise<RepoListing> {
   const cached = listingCache.get(repo.id);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.listing;
 
+  // Transport 0: bundled files (when present) — instant, offline.
+  // PARTIAL bundles (SKILL.md only) do NOT provide a listing here — the live
+  // listing enumerates supporting files, and fetchRepoTextFile serves each
+  // bundled file it knows about while live-fetching the rest.
+  const manifest = await fetchBundledManifest(repo.id);
+  if (manifest && !manifest.partial) {
+    const listing: RepoListing = {
+      via: "bundled",
+      files: manifest.skills.flatMap((s) =>
+        (s.files ?? [{ path: "SKILL.md", size: 0 }]).map((f) => ({
+          path: `${s.dir}${s.dir ? "/" : ""}${f.path}`,
+          size: f.size,
+        })),
+      ),
+    };
+    listingCache.set(repo.id, { listing, fetchedAt: Date.now() });
+    return listing;
+  }
+
   const branches = branchCandidates(repo);
-  // Primary: jsDelivr listing (works for arbitrarily large repos).
+  // Transport 1: jsDelivr listing (works for arbitrarily large repos).
   for (const branch of branches) {
     try {
       const files = await jsDelivrListing(repo, branch);
@@ -210,7 +280,7 @@ async function fetchRepoListing(repo: SkillRepository): Promise<RepoListing> {
     }
   }
 
-  // Fallback: codeload archive, central-directory names only.
+  // Transport 2: codeload archive, central-directory names only.
   const archive = await codeloadArchive(repo);
   const listing: RepoListing = {
     via: "archive",
@@ -221,8 +291,31 @@ async function fetchRepoListing(repo: SkillRepository): Promise<RepoListing> {
   return listing;
 }
 
-/** Read ONE text file from the repository (jsDelivr CDN, archive fallback). */
+/**
+ * Read ONE text file from the repository.
+ * Bundled files first (same-origin); jsDelivr CDN with archive fallback after.
+ */
 async function fetchRepoTextFile(repo: SkillRepository, path: string): Promise<string> {
+  // Bundled read: the path is subpath-relative — the bundle mirrors exactly
+  // that layout under skills/ (dir = subpath-relative dir).
+  const manifest = await fetchBundledManifest(repo.id);
+  if (manifest) {
+    const skill = manifest.skills.find((s) => path.startsWith(`${s.dir}${s.dir ? "/" : ""}`));
+    const bundledFiles = skill?.files;
+    const rel = skill && skill.dir ? path.slice(skill.dir.length + 1) : path;
+    const listed = !bundledFiles || bundledFiles.some((f) => f.path === rel);
+    // Full bundles serve every file; partial bundles serve only the listed
+    // ones (SKILL.md) and defer the rest to the live transports.
+    if (skill && (!manifest.partial || listed)) {
+      try {
+        return await fetchBundledTextFile(repo.id, skill.dir, rel);
+      } catch (err) {
+        console.warn(`[repo-browser] bundled file read failed for ${repo.id}/${path}:`, err);
+        // fall through to the live transports
+      }
+    }
+  }
+
   const listing = await fetchRepoListing(repo);
   // Primary: CDN per-file read (branch only matters when jsDelivr produced
   // the listing; archive reads are branch-independent).
@@ -256,10 +349,10 @@ async function fetchRepoTextFile(repo: SkillRepository, path: string): Promise<s
 export interface RepositoryIndex {
   repoId: string;
   repoName: string;
-  /** "static" (no network) or "github" (live-fetched). */
-  source: "static" | "github";
+  /** "bundled" (local files) | "static" (registry data, no network) | "github" (live-fetched). */
+  source: "bundled" | "static" | "github";
   skills: RepoSkillMeta[];
-  /** Set when a live fetch partially/fully failed — surfaced, never thrown. */
+  /** Set when a fetch partially/fully failed — surfaced, never thrown. */
   error?: string;
 }
 
@@ -277,15 +370,29 @@ function lastDirSegment(dir: string, repoFallback: string): string {
 
 /**
  * Build the metadata index for a repository.
- * Static entries return instantly; live entries scan the repository file
- * listing for SKILL.md files and read each one's front-matter
- * (name/description ONLY — never full skill bodies).
+ * Bundled manifests return instantly (offline); static entries return without
+ * any network; live entries scan the repository file listing for SKILL.md
+ * files and read each one's front-matter (name/description ONLY — never full
+ * skill bodies).
  */
 export async function fetchRepositoryIndex(repoId: string): Promise<RepositoryIndex> {
   const repo = getSkillRepository(repoId);
   if (!repo) {
     return { repoId, repoName: repoId, source: "static", skills: [], error: `Unknown repository '${repoId}'. Use manage_skill catalog for the list.` };
   }
+
+  // Bundled manifest → the index IS the manifest's metadata (offline).
+  const manifest = await fetchBundledManifest(repoId);
+  if (manifest) {
+    return {
+      repoId,
+      repoName: manifest.name || repo.name,
+      source: "bundled",
+      skills: manifest.skills.map((s) => ({ name: s.name, description: s.description, dir: s.dir })),
+      ...(manifest.partial && manifest.note ? { error: manifest.note } : {}),
+    };
+  }
+
   if (repo.kind !== "skill-collection") {
     return {
       repoId,
@@ -405,6 +512,8 @@ function sanitizeRepoSkillName(name: string): string {
  * Install a skill from a repository into the user's local skill registry.
  * `skill` may be a skill NAME from the index ("threejs-game-director") or a
  * subpath-relative directory ("threejs-game-director" / "" for root skills).
+ * Bundled repositories install entirely offline (local files); partial
+ * bundles and unbundled repos use the live transports.
  */
 export async function installSkillFromRepository(
   userId: string,
@@ -419,12 +528,16 @@ export async function installSkillFromRepository(
     );
   }
 
-  // Resolve the skill entry: static index → live index (in that order).
+  // Resolve the skill entry: bundled manifest → static index → live index.
   const wanted = skill.trim().replace(/^\/+|\/+$/g, "");
-  let entry: RepoSkillMeta | undefined = repo.skills.find(
+  const manifest = await fetchBundledManifest(repoId);
+  let entry: RepoSkillMeta | undefined = manifest?.skills.find(
     (s) => s.name === wanted || s.dir === wanted,
   );
   let index: RepositoryIndex | null = null;
+  if (!entry) {
+    entry = repo.skills.find((s) => s.name === wanted || s.dir === wanted);
+  }
   if (!entry) {
     index = await fetchRepositoryIndex(repoId);
     entry = index.skills.find(
@@ -432,13 +545,46 @@ export async function installSkillFromRepository(
     );
   }
   if (!entry) {
-    const available = (index?.skills ?? repo.skills).map((s) => s.name).slice(0, 60);
+    const available = (index?.skills ?? manifest?.skills ?? repo.skills).map((s) => s.name).slice(0, 60);
     throw new Error(
       `Skill '${skill}' not found in '${repo.name}'. Available: ${available.length ? available.join(", ") : "(none — browse the repository)"}.`,
     );
   }
 
-  // Collect the skill's files from the repository listing.
+  // ---- Bundled install (primary): every listed file is local. Only FULL
+  // bundles take this path — partial bundles go through the live flow
+  // (which still serves the bundled SKILL.md offline via fetchRepoTextFile
+  // and live-fetches only the supporting files). ----
+  if (manifest && !manifest.partial) {
+    const bundledEntry = manifest.skills.find((s) => s.name === entry!.name || s.dir === entry!.dir);
+    if (bundledEntry?.files?.length) {
+      const picked = bundledEntry.files
+        .filter((f) => isTextPath(f.path) && (f.size ?? 0) <= MAX_FILE_BYTES)
+        .slice(0, MAX_BUNDLED_INSTALL_FILES);
+      const files: Array<{ rel: string; text: string }> = [];
+      let totalBytes = 0;
+      let missingAll = true;
+      for (const f of picked) {
+        try {
+          const text = await fetchBundledTextFile(repoId, bundledEntry.dir, f.path);
+          missingAll = false;
+          totalBytes += text.length;
+          if (totalBytes > MAX_BUNDLED_TOTAL_BYTES) break;
+          files.push({ rel: f.path, text });
+        } catch (err) {
+          console.warn(`[repo-browser] bundled file read failed: ${f.path}`, err);
+          // A missing file falls back to the live transport below (partial
+          // bundles) — collect what we can.
+        }
+      }
+      if (!missingAll) {
+        return finalizeInstall(userId, repo, entry, files, "bundled-repository");
+      }
+      // All bundled reads failed → fall through to the live transports.
+    }
+  }
+
+  // ---- Live install (fallback): collect the skill's files from the repo. ----
   const listing = await fetchRepoListing(repo);
   const prefix = repo.subpath ? `${repo.subpath.replace(/\/+$/, "")}/` : "";
   const skillDirPrefix = `${prefix}${entry.dir}${entry.dir ? "/" : ""}`;
@@ -476,6 +622,17 @@ export async function installSkillFromRepository(
     }
   }
 
+  return finalizeInstall(userId, repo, entry, files, "repository");
+}
+
+/** Shared tail of both install paths: validate → OPFS → IndexedDB → sandbox. */
+async function finalizeInstall(
+  userId: string,
+  repo: SkillRepository,
+  entry: RepoSkillMeta,
+  files: Array<{ rel: string; text: string }>,
+  source: "bundled-repository" | "repository",
+): Promise<InstalledSkillMeta> {
   // Validate the SKILL.md like every other install path.
   const skillMdFile = files.find((f) => isSkillMdPath(f.rel));
   if (!skillMdFile) throw new Error("The downloaded skill has no SKILL.md content.");
@@ -497,7 +654,7 @@ export async function installSkillFromRepository(
   }
 
   await skillService.install(userId, name, description, dirPath, {
-    source: "repository",
+    source,
     fileCount: files.length,
   });
 
@@ -507,8 +664,9 @@ export async function installSkillFromRepository(
   return { name, description, dirPath, files: files.map((f) => f.rel) };
 }
 
-/** Test/refresh escape hatch — clears the live caches. */
+/** Test/refresh escape hatch — clears the caches. */
 export function resetRepositoryCaches(): void {
   listingCache.clear();
   indexCache.clear();
+  bundledManifestCache.clear();
 }

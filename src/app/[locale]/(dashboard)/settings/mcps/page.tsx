@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Blocks, ExternalLink, Loader2, Plus, Power, Trash2 } from "lucide-react";
+import { AlertTriangle, Blocks, ExternalLink, Globe, Loader2, Plus, Power, Server, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button, Input, Label } from "@/components/ui";
@@ -10,7 +10,22 @@ import { MoreOptions } from "@/components/settings/more-options";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks";
 import { mcpService } from "@/lib/services";
-import { MCP_MARKET_SERVERS } from "@/lib/skills/catalog-registry";
+
+/** One bundled MCP-Market server config (public/mcp-market/index.json). */
+interface BundledMcpServer {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+  github?: string;
+  npm?: string;
+  transport: string;
+  stdio?: { command: string; args?: string[] };
+  remote?: { url: string; transport: string; auth?: string };
+  env_required?: Record<string, string>;
+  tools?: Array<{ name: string; description?: string }>;
+  note?: string;
+}
 
 type MCPTransport = "sse" | "streamable_http";
 
@@ -42,6 +57,36 @@ export default function McpsSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [market, setMarket] = useState<BundledMcpServer[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/mcp-market/index.json", { headers: { Accept: "application/json" } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((json: { servers?: BundledMcpServer[] }) => {
+        if (!cancelled && Array.isArray(json?.servers)) setMarket(json.servers);
+      })
+      .catch(() => {
+        /* bundled index unavailable — panel falls back to the registry copy */
+        import("@/lib/skills/catalog-registry").then(({ MCP_MARKET_SERVERS }) => {
+          if (!cancelled) {
+            setMarket(
+              MCP_MARKET_SERVERS.map((s) => ({
+                id: s.id,
+                name: s.name,
+                url: s.url,
+                description: s.description,
+                transport: "unknown",
+                ...(s.hint ? { note: s.hint } : {}),
+              })),
+            );
+          }
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -210,40 +255,70 @@ export default function McpsSettingsPage() {
 
       <SettingsSectionCard
         title="MCP Market catalog"
-        description="Curated MCPMarket servers. Open the marketplace page for connection details — or just ask the agent, which runs manage_mcp 'market' and wires them automatically."
+        description="Curated MCPMarket servers with BUNDLED CONNECTION CONFIGS (extracted from each server's marketplace page + GitHub README — no live fetch needed). Remote HTTP servers can be registered directly; stdio servers run inside the E2B sandbox. The agent gets the same data via manage_mcp 'market'."
       >
-        <ul className="max-h-72 divide-y divide-border overflow-y-auto scrollbar-thin rounded-xl border border-border">
-          {MCP_MARKET_SERVERS.map((s) => (
-            <li key={s.id} className="flex items-start gap-3 px-4 py-2.5">
-              <Blocks className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{s.name}</p>
-                <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                  {s.description}
-                </p>
-                {s.hint && (
-                  <p className="mt-1 line-clamp-1 text-[11px] text-muted-foreground/80">
-                    {s.hint}
-                  </p>
+        <ul className="max-h-96 divide-y divide-border overflow-y-auto scrollbar-thin rounded-xl border border-border">
+          {(market ?? []).map((s) => {
+            const isRemote = s.transport === "remote-http";
+            const command = s.stdio
+              ? [s.stdio.command, ...(s.stdio.args ?? [])].join(" ")
+              : null;
+            return (
+              <li key={s.id} className="flex items-start gap-3 px-4 py-2.5">
+                {isRemote ? (
+                  <Globe className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <Server className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
                 )}
-              </div>
-              <a
-                href={s.url}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-                aria-label={`Open ${s.name} on MCPMarket`}
-                title={`${s.name} on MCPMarket`}
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-              </a>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-medium">{s.name}</p>
+                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] uppercase">
+                      {s.transport}
+                    </span>
+                    {s.tools?.length ? (
+                      <span className="text-[10px] text-muted-foreground">
+                        {s.tools.length} tools
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                    {s.description}
+                  </p>
+                  {(s.remote?.url || command) && (
+                    <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground/80">
+                      {isRemote && s.remote ? s.remote.url : command}
+                    </p>
+                  )}
+                  {s.note && (
+                    <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground/70">
+                      {s.note}
+                    </p>
+                  )}
+                </div>
+                <a
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={`Open ${s.name} on MCPMarket`}
+                  title={`${s.name} on MCPMarket`}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+              </li>
+            );
+          })}
+          {market === null && (
+            <li className="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading the bundled catalog…
             </li>
-          ))}
+          )}
         </ul>
         <p className="mt-3 text-[11px] text-muted-foreground">
-          Remote HTTP/SSE servers become first-class agent tools; stdio/npx servers run inside
-          the E2B sandbox via an MCP client script. The agent fetches the marketplace page for
-          exact connection details — never guesses them.
+          Configs are bundled as local files (public/mcp-market/index.json). Remote HTTP/SSE
+          servers become first-class agent tools via manage_mcp &apos;create&apos;; stdio/npx/uvx
+          servers run inside the E2B sandbox via an MCP client script.
         </p>
       </SettingsSectionCard>
 

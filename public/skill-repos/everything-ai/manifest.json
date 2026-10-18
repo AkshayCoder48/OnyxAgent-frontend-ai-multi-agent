@@ -1,0 +1,120 @@
+{
+ "id": "everything-ai",
+ "name": "Everything AI",
+ "source_url": "https://github.com/mitunmanav/everything-ai",
+ "bundled_at": "2026-10-18",
+ "partial": false,
+ "skills": [
+  {
+   "name": "everything-ai",
+   "description": "Use when user wants AI to do everything, handle the whole task, complete it end-to-end, figure it out, do the rest, do whatever is needed, or take autonomous ownership without making the user choose expert process options.",
+   "dir": "skills/everything-ai",
+   "files": [
+    {
+     "path": "SKILL.lite.md",
+     "size": 1915
+    },
+    {
+     "path": "SKILL.md",
+     "size": 8467
+    },
+    {
+     "path": "agents/claude.yaml",
+     "size": 68
+    },
+    {
+     "path": "agents/execute-agent.md",
+     "size": 1663
+    },
+    {
+     "path": "agents/openai.yaml",
+     "size": 247
+    },
+    {
+     "path": "agents/plan-agent.md",
+     "size": 1194
+    },
+    {
+     "path": "agents/review-agent.md",
+     "size": 1501
+    },
+    {
+     "path": "agents/scope-agent.md",
+     "size": 1627
+    },
+    {
+     "path": "domains/coding.md",
+     "size": 3503
+    },
+    {
+     "path": "domains/data-analysis.md",
+     "size": 3247
+    },
+    {
+     "path": "domains/finance.md",
+     "size": 3498
+    },
+    {
+     "path": "domains/health.md",
+     "size": 3171
+    },
+    {
+     "path": "domains/learning.md",
+     "size": 3292
+    },
+    {
+     "path": "domains/life.md",
+     "size": 3538
+    },
+    {
+     "path": "domains/personal-productivity.md",
+     "size": 3038
+    },
+    {
+     "path": "domains/research.md",
+     "size": 3598
+    },
+    {
+     "path": "domains/startup.md",
+     "size": 3518
+    },
+    {
+     "path": "domains/writing.md",
+     "size": 3006
+    },
+    {
+     "path": "hooks/context_inject.py",
+     "size": 1054
+    },
+    {
+     "path": "hooks/hooks.json",
+     "size": 561
+    },
+    {
+     "path": "hooks/memory_write.py",
+     "size": 2789
+    },
+    {
+     "path": "references/agent-compatibility.md",
+     "size": 996
+    },
+    {
+     "path": "references/example-trace.json",
+     "size": 1638
+    },
+    {
+     "path": "references/playbook.md",
+     "size": 5732
+    },
+    {
+     "path": "references/prompt-bank.md",
+     "size": 4789
+    },
+    {
+     "path": "references/trace.schema.json",
+     "size": 1642
+    }
+   ]
+  }
+ ]
+}

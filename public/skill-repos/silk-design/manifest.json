@@ -1,0 +1,220 @@
+{
+ "id": "silk-design",
+ "name": "Silk Design",
+ "source_url": "https://github.com/bendrape1-byte/silk-design",
+ "bundled_at": "2026-10-18",
+ "partial": false,
+ "skills": [
+  {
+   "name": "silk-design",
+   "description": ">-",
+   "dir": "",
+   "files": [
+    {
+     "path": "LICENSE",
+     "size": 1066
+    },
+    {
+     "path": "README.md",
+     "size": 3013
+    },
+    {
+     "path": "SKILL.md",
+     "size": 7277
+    },
+    {
+     "path": "assets/AboutCursorTrail.tsx",
+     "size": 4843
+    },
+    {
+     "path": "assets/AboutTextFill.tsx",
+     "size": 2132
+    },
+    {
+     "path": "assets/AuroraBackground.tsx",
+     "size": 1191
+    },
+    {
+     "path": "assets/AutoFillText.tsx",
+     "size": 1813
+    },
+    {
+     "path": "assets/BorderGlow.tsx",
+     "size": 3087
+    },
+    {
+     "path": "assets/ButtonMagnetic.tsx",
+     "size": 2056
+    },
+    {
+     "path": "assets/FooterBrandReveal.tsx",
+     "size": 2781
+    },
+    {
+     "path": "assets/GradientBarsBackground.tsx",
+     "size": 3207
+    },
+    {
+     "path": "assets/HeroVideoScroll.tsx",
+     "size": 4937
+    },
+    {
+     "path": "assets/HoverPattern.tsx",
+     "size": 2608
+    },
+    {
+     "path": "assets/NavbarFullscreen.tsx",
+     "size": 4562
+    },
+    {
+     "path": "assets/NoiseBackground.tsx",
+     "size": 1242
+    },
+    {
+     "path": "assets/PageTransitionSwirl.tsx",
+     "size": 1625
+    },
+    {
+     "path": "assets/ScrollReveal.tsx",
+     "size": 963
+    },
+    {
+     "path": "assets/TextAnimation.tsx",
+     "size": 2566
+    },
+    {
+     "path": "assets/animations.css",
+     "size": 3901
+    },
+    {
+     "path": "assets/foundation.css",
+     "size": 6447
+    },
+    {
+     "path": "assets/masks.css",
+     "size": 1563
+    },
+    {
+     "path": "assets/useButtonClick.ts",
+     "size": 1973
+    },
+    {
+     "path": "assets/utils.ts",
+     "size": 287
+    },
+    {
+     "path": "references/backgrounds.md",
+     "size": 3435
+    },
+    {
+     "path": "references/composition.md",
+     "size": 7596
+    },
+    {
+     "path": "references/design-system.md",
+     "size": 8898
+    },
+    {
+     "path": "references/effects.md",
+     "size": 19493
+    },
+    {
+     "path": "references/templates.md",
+     "size": 14864
+    },
+    {
+     "path": "templates/Reference1/theme.css",
+     "size": 5611
+    },
+    {
+     "path": "templates/Reference10/theme.css",
+     "size": 6455
+    },
+    {
+     "path": "templates/Reference11/theme.css",
+     "size": 6248
+    },
+    {
+     "path": "templates/Reference12/theme.css",
+     "size": 5773
+    },
+    {
+     "path": "templates/Reference13/theme.css",
+     "size": 6246
+    },
+    {
+     "path": "templates/Reference14/theme.css",
+     "size": 6226
+    },
+    {
+     "path": "templates/Reference15/theme.css",
+     "size": 5585
+    },
+    {
+     "path": "templates/Reference16/theme.css",
+     "size": 5659
+    },
+    {
+     "path": "templates/Reference17/theme.css",
+     "size": 6345
+    },
+    {
+     "path": "templates/Reference18/theme.css",
+     "size": 5913
+    },
+    {
+     "path": "templates/Reference19/theme.css",
+     "size": 5765
+    },
+    {
+     "path": "templates/Reference2/theme.css",
+     "size": 5637
+    },
+    {
+     "path": "templates/Reference20/theme.css",
+     "size": 5564
+    },
+    {
+     "path": "templates/Reference21/theme.css",
+     "size": 5882
+    },
+    {
+     "path": "templates/Reference22/theme.css",
+     "size": 6418
+    },
+    {
+     "path": "templates/Reference23/theme.css",
+     "size": 6063
+    },
+    {
+     "path": "templates/Reference3/theme.css",
+     "size": 6226
+    },
+    {
+     "path": "templates/Reference4/theme.css",
+     "size": 5792
+    },
+    {
+     "path": "templates/Reference5/theme.css",
+     "size": 5792
+    },
+    {
+     "path": "templates/Reference6/theme.css",
+     "size": 6157
+    },
+    {
+     "path": "templates/Reference7/theme.css",
+     "size": 6446
+    },
+    {
+     "path": "templates/Reference8/theme.css",
+     "size": 6481
+    },
+    {
+     "path": "templates/Reference9/theme.css",
+     "size": 6216
+    }
+   ]
+  }
+ ]
+}

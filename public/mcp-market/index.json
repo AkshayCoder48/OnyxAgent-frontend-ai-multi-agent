@@ -1,0 +1,448 @@
+{
+ "bundled_at": "2026-10-18",
+ "source": "Extracted from mcpmarket.com listing pages + each server's GitHub README (bundled locally — no live fetch needed).",
+ "servers": [
+  {
+   "id": "chrome-devtools",
+   "name": "Chrome DevTools",
+   "url": "https://mcpmarket.com/server/chrome-devtools-1",
+   "github": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+   "npm": "https://www.npmjs.com/package/chrome-devtools-mcp",
+   "description": "Drive Chrome via CDP: navigate, screenshot, read console + network, capture performance traces.",
+   "transport": "stdio-npm",
+   "stdio": {
+    "command": "npx",
+    "args": [
+     "-y",
+     "chrome-devtools-mcp"
+    ]
+   },
+   "sandbox": "Run inside the E2B sandbox: npx -y chrome-devtools-mcp (needs a Chrome/Chromium in the sandbox, or connect it to a headless Chrome the sandbox starts).",
+   "tools": [
+    {
+     "name": "list_console_messages",
+     "description": "List all console messages for the currently selected page since the last navigation."
+    },
+    {
+     "name": "get_console_message",
+     "description": "Gets a console message by its ID. You can get all messages by calling ${listConsoleMessages.name}."
+    },
+    {
+     "name": "emulate_network",
+     "description": "Emulates network conditions such as throttling or offline mode on the selected page."
+    },
+    {
+     "name": "click",
+     "description": "Clicks on the provided element"
+    },
+    {
+     "name": "hover",
+     "description": "Hover over the provided element"
+    },
+    {
+     "name": "fill",
+     "description": "Type text into a input, text area or select an option from a <select> element."
+    },
+    {
+     "name": "drag",
+     "description": "Drag an element onto another element"
+    },
+    {
+     "name": "fill_form",
+     "description": "Fill out multiple form elements at once"
+    },
+    {
+     "name": "upload_file",
+     "description": "Upload a file through a provided element."
+    },
+    {
+     "name": "press_key",
+     "description": "Press a key or key combination. Use this when other input methods like fill() cannot be used (e.g., keyboard shortcuts, navigation keys, or special key combinations)."
+    },
+    {
+     "name": "list_network_requests",
+     "description": "List all requests for the currently selected page since the last navigation."
+    },
+    {
+     "name": "get_network_request",
+     "description": "Gets a network request by URL. You can get all requests by calling ${listNetworkRequests.name}."
+    },
+    {
+     "name": "list_pages",
+     "description": "Get a list of pages open in the browser."
+    },
+    {
+     "name": "select_page",
+     "description": "Select a page as a context for future tool calls."
+    },
+    {
+     "name": "close_page",
+     "description": "Closes the page by its index. The last open page cannot be closed."
+    },
+    {
+     "name": "new_page",
+     "description": "Creates a new page"
+    },
+    {
+     "name": "navigate_page",
+     "description": "Navigates the currently selected page to a URL."
+    },
+    {
+     "name": "handle_dialog",
+     "description": "If a browser dialog was opened, use this command to handle it"
+    },
+    {
+     "name": "performance_start_trace",
+     "description": "Starts a performance trace recording on the selected page. This can be used to look for performance problems and insights to improve the performance of the page. It will also report Core Web Vital (CWV) scores for the page."
+    },
+    {
+     "name": "performance_stop_trace",
+     "description": "Stops the active performance trace recording on the selected page."
+    },
+    {
+     "name": "performance_analyze_insight",
+     "description": "Provides more detailed information on a specific Performance Insight that was highlighted in the results of a trace recording."
+    },
+    {
+     "name": "take_screenshot",
+     "description": "Take a screenshot of the page or element."
+    },
+    {
+     "name": "take_snapshot",
+     "description": "Take a text snapshot of the currently selected page based on the a11y tree. The snapshot lists page elements along with a unique\nidentifier (uid). Always use the latest snapshot. Prefer taking a snapshot over taking a screenshot."
+    },
+    {
+     "name": "wait_for",
+     "description": "Wait for the specified text to appear on the selected page."
+    }
+   ]
+  },
+  {
+   "id": "serena",
+   "name": "Serena",
+   "url": "https://mcpmarket.com/server/serena",
+   "github": "https://github.com/oraios/serena",
+   "description": "Semantic code intelligence: LSP-powered symbols, references, edits and refactors over codebases.",
+   "transport": "stdio-python",
+   "stdio": {
+    "command": "serena",
+    "args": [
+     "start-mcp-server",
+     "--context",
+     "codex"
+    ]
+   },
+   "sandbox": "Inside the E2B sandbox: install uv, then `uv tool install -p 3.13 serena-agent` and run `serena start-mcp-server --context codex`. IMPORTANT (upstream README): do NOT use marketplace/plugin-manager install commands — they are outdated.",
+   "note": "Project must be on disk (workspace files) for Serena to index it."
+  },
+  {
+   "id": "2ools",
+   "name": "2ools",
+   "url": "https://mcpmarket.com/server/2ools",
+   "github": "https://github.com/2ools/mcp-server",
+   "description": "Build, version, review and export websites, web apps and games from inside chat. Free tool: create_public_preview turns an HTML doc into a viewable URL.",
+   "transport": "remote-http",
+   "remote": {
+    "url": "https://2ools.app/mcp",
+    "transport": "streamable_http",
+    "auth": "OAuth — sign in + Authorize once in a browser. Retrieve https://2ools.app/start non-visually (HTTP fetch, not the in-app browser) and follow its 'For your AI' steps."
+   },
+   "tools": [
+    {
+     "name": "create_public_preview",
+     "description": ""
+    },
+    {
+     "name": "build_from_conversation",
+     "description": ""
+    },
+    {
+     "name": "refine_project",
+     "description": ""
+    },
+    {
+     "name": "get_build",
+     "description": ""
+    },
+    {
+     "name": "cancel_build",
+     "description": ""
+    },
+    {
+     "name": "compare_versions",
+     "description": ""
+    },
+    {
+     "name": "list_build_systems",
+     "description": ""
+    },
+    {
+     "name": "list_projects",
+     "description": ""
+    },
+    {
+     "name": "get_project",
+     "description": ""
+    },
+    {
+     "name": "get_project_context",
+     "description": ""
+    },
+    {
+     "name": "render_project_preview",
+     "description": ""
+    },
+    {
+     "name": "get_project_activity",
+     "description": ""
+    },
+    {
+     "name": "wait_for_project_activity",
+     "description": ""
+    },
+    {
+     "name": "list_approval_requests",
+     "description": ""
+    },
+    {
+     "name": "approve_version",
+     "description": ""
+    },
+    {
+     "name": "reject_version",
+     "description": ""
+    },
+    {
+     "name": "list_project_feedback",
+     "description": ""
+    },
+    {
+     "name": "add_project_feedback",
+     "description": ""
+    },
+    {
+     "name": "resolve_project_feedback",
+     "description": ""
+    },
+    {
+     "name": "list_project_pins",
+     "description": ""
+    },
+    {
+     "name": "add_project_pin",
+     "description": ""
+    },
+    {
+     "name": "remove_project_pin",
+     "description": ""
+    },
+    {
+     "name": "prepare_version_export",
+     "description": ""
+    },
+    {
+     "name": "get_version_share_link",
+     "description": ""
+    },
+    {
+     "name": "create_version_share_link",
+     "description": ""
+    },
+    {
+     "name": "revoke_version_share_link",
+     "description": ""
+    },
+    {
+     "name": "list_artifacts",
+     "description": ""
+    },
+    {
+     "name": "get_artifact",
+     "description": ""
+    },
+    {
+     "name": "prepare_artifact_upload",
+     "description": ""
+    },
+    {
+     "name": "prepare_artifact_download",
+     "description": ""
+    },
+    {
+     "name": "list_artifact_approval_requests",
+     "description": ""
+    },
+    {
+     "name": "approve_artifact_version",
+     "description": ""
+    },
+    {
+     "name": "reject_artifact_version",
+     "description": ""
+    },
+    {
+     "name": "list_project_agents",
+     "description": ""
+    },
+    {
+     "name": "get_agent",
+     "description": ""
+    },
+    {
+     "name": "run_project_agent",
+     "description": ""
+    },
+    {
+     "name": "cancel_agent_run",
+     "description": ""
+    },
+    {
+     "name": "list_work_assignments",
+     "description": ""
+    },
+    {
+     "name": "create_work_assignment",
+     "description": ""
+    },
+    {
+     "name": "claim_work_assignment",
+     "description": ""
+    },
+    {
+     "name": "heartbeat_work_session",
+     "description": ""
+    },
+    {
+     "name": "submit_work_session",
+     "description": ""
+    },
+    {
+     "name": "decide_work_assignment",
+     "description": ""
+    }
+   ],
+   "register_hint": "manage_mcp action 'create' with transport streamable_http, url https://2ools.app/mcp — then complete OAuth in the app browser when the agent opens it."
+  },
+  {
+   "id": "superpowers",
+   "name": "Superpowers",
+   "url": "https://mcpmarket.com/server/superpowers",
+   "github": "https://github.com/obra/superpowers",
+   "npm": "https://www.npmjs.com/package/superpowers",
+   "description": "Extended agent-capabilities toolkit (brainstorming, writing-plans, executing-plans, dispatching-parallel-agents, using-git-worktrees …).",
+   "transport": "plugin",
+   "sandbox": "Distribution is per-harness plugins (Claude Code: /plugin install superpowers@claude-plugins-official; other harnesses per its README). An npm package 'superpowers' also exists — check its usage on npmjs before running it blind.",
+   "note": "NOT an MCP stdio server — it is a skills/hook plugin collection. In the E2B sandbox, read its README and use the CLI/plugin path it documents."
+  },
+  {
+   "id": "tubealfred-youtube",
+   "name": "TubeAlfred YouTube",
+   "url": "https://mcpmarket.com/server/tubealfred-youtube",
+   "github": "https://github.com/tubealfred/mcp",
+   "npm": "https://www.npmjs.com/package/@tubealfred/mcp",
+   "description": "YouTube automation through TubeAlfred (search, playlists, channel actions).",
+   "transport": "stdio-npm",
+   "stdio": {
+    "command": "npx",
+    "args": [
+     "-y",
+     "@tubealfred/mcp"
+    ]
+   },
+   "sandbox": "Run inside the E2B sandbox: npx -y @tubealfred/mcp (an MCP client script with @modelcontextprotocol/sdk spawns it and lists/calls its tools)."
+  },
+  {
+   "id": "chatgpt-redis",
+   "name": "ChatGPT Redis",
+   "url": "https://mcpmarket.com/server/chatgpt-redis",
+   "github": "https://github.com/freebase-cloud/chatgpt-redis-mcp",
+   "description": "Redis-backed memory/context store for conversational agents (memory_query, memory_store, memory_list_tables, memory_annotate_table).",
+   "transport": "remote-http",
+   "remote": {
+    "url": "https://freebase.cloud/api/mcp/YOUR_TOKEN",
+    "transport": "streamable_http",
+    "auth": "Free signup at https://freebase.cloud → Settings → MCP → New Token → copy the token URL (the token IS the path; no auth header)."
+   },
+   "register_hint": "manage_mcp action 'create' with transport streamable_http and the token URL from freebase.cloud."
+  },
+  {
+   "id": "youtube-search-download",
+   "name": "YouTube Search & Download",
+   "url": "https://mcpmarket.com/server/youtube-search-download",
+   "github": "https://github.com/easyhak/youtube-search-mcp",
+   "description": "Search YouTube and download videos/audio programmatically.",
+   "transport": "stdio-python",
+   "stdio": {
+    "command": "uvx",
+    "args": [
+     "youtube-search-mcp"
+    ]
+   },
+   "sandbox": "Inside the E2B sandbox: `uvx youtube-search-mcp` (or pip install youtube-search-mcp then run `youtube-search-mcp`). Needs yt-dlp + a YouTube cookie/header config for some requests."
+  },
+  {
+   "id": "pdf-generator",
+   "name": "PDF Generator",
+   "url": "https://mcpmarket.com/server/pdf-generator-1",
+   "github": "https://github.com/rumblingb/pdf-generator-mcp",
+   "description": "Generate PDF documents from HTML, plain text, or any URL.",
+   "transport": "stdio-python",
+   "stdio": {
+    "command": "python3",
+    "args": [
+     "server.py"
+    ]
+   },
+   "sandbox": "Inside the E2B sandbox: git clone https://github.com/rumblingb/pdf-generator-mcp && cd pdf-generator-mcp && pip install -r requirements.txt && python3 server.py",
+   "tools": [
+    {
+     "name": "pdf_generate_from_html",
+     "description": "Generate PDF from HTML content"
+    },
+    {
+     "name": "pdf_generate_from_text",
+     "description": "Generate PDF from plain text"
+    },
+    {
+     "name": "pdf_generate_from_url",
+     "description": "Fetch a URL and convert to PDF"
+    }
+   ],
+   "note": "Free tier: 50 PDFs/month; hosted/paid tier exists."
+  },
+  {
+   "id": "free-proxy-list",
+   "name": "Free Proxy List",
+   "url": "https://mcpmarket.com/server/free-proxy-list",
+   "github": "https://github.com/hproxy-com/free-proxy-list",
+   "description": "Fetch rotating lists of free proxy servers.",
+   "transport": "remote-http",
+   "remote": {
+    "url": "https://mcp.hproxy.com/mcp",
+    "transport": "streamable_http",
+    "auth": "none"
+   },
+   "register_hint": "manage_mcp action 'create' with transport streamable_http, url https://mcp.hproxy.com/mcp — no auth needed."
+  },
+  {
+   "id": "site-shot",
+   "name": "Site Shot",
+   "url": "https://mcpmarket.com/server/site-shot",
+   "github": "https://github.com/site-shot/site-shot-mcp",
+   "npm": "https://www.npmjs.com/package/site-shot-mcp",
+   "description": "Capture website screenshots on demand.",
+   "transport": "stdio-npm",
+   "stdio": {
+    "command": "npx",
+    "args": [
+     "-y",
+     "site-shot-mcp@1.2.0"
+    ]
+   },
+   "env_required": {
+    "SITESHOT_API_KEY": "Sign up at site-shot.com for the API key"
+   },
+   "sandbox": "Run inside the E2B sandbox: SITESHOT_API_KEY=<key> npx -y site-shot-mcp@1.2.0 (the API key is REQUIRED)."
+  }
+ ]
+}

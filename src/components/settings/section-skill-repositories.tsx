@@ -22,6 +22,7 @@ import {
   ChevronRight,
   ExternalLink,
   FolderGit2,
+  HardDriveDownload,
   Loader2,
   Package,
   TerminalSquare,
@@ -96,7 +97,7 @@ export function SectionSkillRepositories({
   return (
     <SettingsSectionCard
       title="Default skill repositories"
-      description="Curated GitHub skill repositories, indexed automatically for the agent (analyze_workspace / manage_skill catalog). Browse the metadata and install only what a task needs — the agent does the same."
+      description="Curated skill repositories BUNDLED AS LOCAL FILES in this app (no GitHub round-trips — offline, instant installs). Browse the metadata and install only what a task needs; the agent does the same via analyze_workspace / manage_skill."
     >
       <ul className="divide-y divide-border rounded-xl border border-border">
         {SKILL_REPOSITORIES.map((repo) => {
@@ -126,23 +127,38 @@ export function SectionSkillRepositories({
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-medium">{repo.name}</span>
-                    <Badge variant="secondary" className="h-5 px-1.5 text-[10px] font-normal">
-                      {repo.kind === "npm-cli" ? "sandbox CLI" : `${repo.skills.length || "live"} skills`}
-                    </Badge>
+                    {repo.bundled && (
+                      <Badge className="h-5 gap-1 bg-emerald-500/10 px-1.5 text-[10px] font-normal text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400">
+                        <HardDriveDownload className="h-3 w-3" /> bundled files
+                      </Badge>
+                    )}
+                    {repo.sandboxUsage && (
+                      <Badge variant="secondary" className="h-5 px-1.5 text-[10px] font-normal">
+                        sandbox CLI
+                      </Badge>
+                    )}
+                    {repo.kind === "skill-collection" && (
+                      <Badge variant="secondary" className="h-5 px-1.5 text-[10px] font-normal">
+                        {repo.skills.length || (repo.bundled ? "bundled" : "live")}{" "}
+                        {repo.skills.length === 1 ? "skill" : "skills"}
+                      </Badge>
+                    )}
                   </div>
                   <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
                     {repo.description}
                   </p>
                 </div>
-                <a
-                  href={repo.url}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-                  aria-label={`Open ${repo.name} on GitHub`}
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
+                {repo.url && (
+                  <a
+                    href={repo.url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                    aria-label={`Open ${repo.name} on GitHub`}
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
               </div>
 
               {isOpen && repo.kind === "skill-collection" && (
@@ -150,15 +166,19 @@ export function SectionSkillRepositories({
                   {state === undefined || state === "loading" ? (
                     <p className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      {repo.skills.length > 0 ? "Loading index…" : "Fetching skill index from GitHub…"}
+                      {repo.bundled
+                        ? "Loading the bundled index…"
+                        : repo.skills.length > 0
+                          ? "Loading index…"
+                          : "Fetching skill index from GitHub…"}
                     </p>
                   ) : state === "error" ? (
                     <p className="py-2 text-xs text-destructive">
-                      Failed to fetch the skill index (GitHub rate limit or network). Try again in a
-                      minute — the agent-side catalog still lists this repository.
+                      Failed to load the skill index. Try again in a minute — the
+                      agent-side catalog still lists this repository.
                     </p>
                   ) : (
-                    <ul className="space-y-1.5">
+                    <ul className="max-h-96 space-y-1.5 overflow-y-auto scrollbar-thin pr-1">
                       {state.skills.map((skill) => {
                         const key = `${repo.id}/${skill.name}`;
                         const isInstalled = installedSet.has(skill.name);
@@ -206,11 +226,11 @@ export function SectionSkillRepositories({
                 </div>
               )}
 
-              {isOpen && repo.kind === "npm-cli" && repo.sandboxUsage && (
+              {isOpen && repo.sandboxUsage && (
                 <div className="space-y-2 pb-3 pl-9">
                   <p className="text-xs text-muted-foreground">
-                    A CLI tool, not a skill install — the agent runs these inside the E2B sandbox
-                    via <code className="font-mono">run_terminal</code> when a task needs them.
+                    Also a CLI tool — the agent runs these inside the E2B sandbox via{" "}
+                    <code className="font-mono">run_terminal</code> when a task needs them.
                   </p>
                   <div className="rounded-lg border border-border/60 bg-muted/40 p-2.5 font-mono text-[11px] leading-relaxed">
                     <p className="text-muted-foreground"># install (in the sandbox)</p>
@@ -236,11 +256,13 @@ export function SectionSkillRepositories({
         })}
       </ul>
       <p className="mt-3 text-[11px] text-muted-foreground">
-        Also available agent-side: <code className="font-mono">manage_skill</code> actions{" "}
+        All repositories ship as bundled files under{" "}
+        <code className="font-mono">public/skill-repos/</code> — browsing and installing
+        happens offline (same-origin). Also available agent-side:{" "}
+        <code className="font-mono">manage_skill</code> actions{" "}
         <code className="font-mono">catalog</code> /{" "}
         <code className="font-mono">browse_repository</code> /{" "}
-        <code className="font-mono">install_from_repository</code> — the agent reads the same
-        metadata and installs skills on demand.
+        <code className="font-mono">install_from_repository</code>.
       </p>
     </SettingsSectionCard>
   );
