@@ -32,6 +32,7 @@ import "./web_fetch";
 import "./security_audit";
 import "./workflow";
 import "./memory";
+import "./project_memory";
 import "./knowledge_base";
 import "./use_browser";
 import "./counterfactual";

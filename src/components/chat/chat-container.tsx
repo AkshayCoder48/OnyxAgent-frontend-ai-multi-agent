@@ -23,6 +23,13 @@ import { ThinkingIndicator } from "@/components/assistant-ui/elements";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { Hourglass } from "lucide-react";
+// PROJECTS (Task 1-b) — minimal, surgical additions: the project empty state
+// swaps in for the generic one while a project workspace is open, and a
+// conversation the RUNTIME creates mid-turn is claimed for the active
+// project (see handleConversationCreated).
+import { useActiveProject, useProjectsStore } from "@/lib/projects/store";
+import { claimConversationForProject } from "@/components/projects/project-conversations";
+import { ProjectEmptyState } from "@/components/projects/project-empty-state";
 
 // ---------------------------------------------------------------------------
 // LAST-ACTIVE CONVERSATION — a tiny localStorage companion to the in-memory
@@ -227,6 +234,14 @@ export function ChatContainer(
       // back (the "tap new chat → open same chat → blank" bug).
       if (conversationId) {
         runtimeCreatedConvIdRef.current = conversationId;
+        // PROJECTS: a turn started from inside a project workspace (its empty
+        // state / "new chat") created this conversation WITHOUT a project id
+        // (use-chat's creation call has no project notion). Claim it for the
+        // ACTIVE project — best-effort, never blocks the streaming turn.
+        const activeProjectId = useProjectsStore.getState().activeProjectId;
+        if (activeProjectId) {
+          void claimConversationForProject(conversationId, activeProjectId);
+        }
       }
       fetchConversations();
     },
@@ -734,6 +749,10 @@ function ChatUI({
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
+  // PROJECTS: while a project workspace is open, the zero-message screen is
+  // the PROJECT's own empty state (orb + name + goal + suggestions that
+  // populate THIS composer) instead of the generic welcome.
+  const activeProject = useActiveProject();
 
   // PERF (streaming-perf PRD): these two were inline closures recreated on
   // every ChatUI render — i.e. on EVERY store flush while streaming. They
@@ -759,7 +778,11 @@ function ChatUI({
             <ConversationSkeleton />
           ) : messages.length === 0 ? (
             <div className="flex h-full items-center">
-              <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
+              {activeProject ? (
+                <ProjectEmptyState project={activeProject} />
+              ) : (
+                <ChatEmptyState onPick={(prompt) => sendMessage(prompt)} />
+              )}
             </div>
           ) : (
             // Chat switching (PRD §20): the conversation store clears +

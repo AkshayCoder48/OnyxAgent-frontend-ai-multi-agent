@@ -9,6 +9,7 @@ import {
   MoreHorizontal,
   Pencil,
   Archive,
+  Download,
   Trash2,
   Settings,
   LogOut,
@@ -50,6 +51,8 @@ import {
 
 import { useConversations } from "@/hooks/use-conversations";
 import { useAuthStore } from "@/stores/auth-store";
+import { ExportDialog } from "@/components/export/export-dialog";
+import { ProjectSection, useGeneralConversations } from "@/components/projects/project-section";
 import type { Conversation, ID } from "@/types";
 
 export interface ConversationSidebarProps {
@@ -75,7 +78,6 @@ export function ConversationSidebar({
   className,
 }: ConversationSidebarProps) {
   const {
-    conversations,
     isLoading: loading,
     createConversation: create,
     renameConversation: rename,
@@ -85,6 +87,9 @@ export function ConversationSidebar({
     fetchConversations: refetch,
     currentConversationId: activeConversationId,
   } = useConversations();
+  // PROJECTS (PRD §6.4): this list shows GENERAL chats only — project
+  // conversations live in their project's history drawer.
+  const generalConversations = useGeneralConversations();
   // Selector subscriptions — user object + stable logout action only (the
   // old no-selector call re-rendered this sidebar on every auth-store tick).
   const user = useAuthStore((s) => s.user);
@@ -97,15 +102,18 @@ export function ConversationSidebar({
   const [renameValue, setRenameValue] = React.useState("");
   const [renameBusy, setRenameBusy] = React.useState(false);
 
+  // Export dialog state (Task 2-c) — the conversation id being exported.
+  const [exportingId, setExportingId] = React.useState<string | null>(null);
+
   // Delete confirm state
   const [deleting, setDeleting] = React.useState<Conversation | null>(null);
   const [deleteBusy, setDeleteBusy] = React.useState(false);
 
   const filtered = React.useMemo(() => {
-    if (!query.trim()) return conversations;
+    if (!query.trim()) return generalConversations;
     const q = query.toLowerCase();
-    return conversations.filter((c) => (c.title ?? "").toLowerCase().includes(q));
-  }, [conversations, query]);
+    return generalConversations.filter((c) => (c.title ?? "").toLowerCase().includes(q));
+  }, [generalConversations, query]);
 
   async function handleNewChat() {
     try {
@@ -247,7 +255,13 @@ export function ConversationSidebar({
 
       <Separator />
 
-      {/* Conversation list */}
+      {/* PROJECTS (PRD §3.2/§6.4): the collapsible projects area above the
+          general chat history. */}
+      <ProjectSection />
+
+      <Separator />
+
+      {/* Conversation list (general chats only — see useGeneralConversations) */}
       <div
         className={cn(
           "min-h-0 flex-1 overflow-y-auto px-2 py-2",
@@ -364,6 +378,10 @@ export function ConversationSidebar({
                           <Pencil className="size-4" aria-hidden="true" />
                           Rename
                         </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setExportingId(conv.id)}>
+                          <Download className="size-4" aria-hidden="true" />
+                          Export
+                        </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => handleArchive(conv)}>
                           <Archive className="size-4" aria-hidden="true" />
                           {conv.is_archived ? "Unarchive" : "Archive"}
@@ -446,6 +464,15 @@ export function ConversationSidebar({
       >
         Refresh
       </button>
+
+      {/* Export dialog (Task 2-c) */}
+      <ExportDialog
+        conversationId={exportingId}
+        open={exportingId !== null}
+        onOpenChange={(open) => {
+          if (!open) setExportingId(null);
+        }}
+      />
 
       {/* Rename dialog */}
       <Dialog

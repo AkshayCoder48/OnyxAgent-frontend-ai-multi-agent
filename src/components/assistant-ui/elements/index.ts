@@ -13,7 +13,7 @@ export {
   iconSwapInClass,
   monoLabelClass,
 } from "./surfaces";
-export { ToolCall } from "./tool-call";
+export { ToolCall, ApprovalCard } from "./tool-call";
 export { ToolTimeline, type TimelineStep, type TimelineStat } from "./tool-timeline";
 export {
   SimpleToolTimeline,
@@ -41,6 +41,14 @@ export { ThinkingIndicator } from "./thinking-indicator";
 export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";
 export { CompanionCursor } from "./companion-cursor";
 export { Orb, OrbCursor, type OrbProps, type OrbVariant, type LatticeVariant, ORB_TASKS } from "./orb";
+export {
+  PersonalityOrb,
+  useOrbReactionState,
+  useOrbChatVisible,
+  usePrefersReducedMotion,
+  type PersonalityOrbProps,
+} from "./personality-orb";
+export { OrbPersonalitySettings } from "./orb-personality-settings";
 export { InlineCitation, type Source } from "./inline-citation";
 export { DocumentReference, type DocumentAnchor } from "./document-reference";
 export { MemoryChips, type MemoryChip } from "./memory-chips";

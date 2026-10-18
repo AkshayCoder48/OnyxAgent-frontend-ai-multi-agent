@@ -251,7 +251,11 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
           // layout + paint for offscreen rows — long threads only pay for
           // the visible window (+ scroll anchoring). `auto` intrinsic-size
           // lets Chrome remember each row's real height after first paint.
-          <div key={message.renderKey ?? message.id} className="mb-row-cv">
+          //
+          // `msg-<id>` DOM anchor (Task 2-b): the global search dialog + the
+          // project drawer's message hits scroll to + briefly highlight the
+          // exact message via this id (revealMessageAnchor).
+          <div key={message.renderKey ?? message.id} id={`msg-${message.id}`} className="mb-row-cv">
             {isNewDay(prev, message) && (
               <DateSeparator date={new Date(message.timestamp)} />
             )}

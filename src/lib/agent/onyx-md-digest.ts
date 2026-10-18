@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (64 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (65 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -23,8 +23,9 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_todo [create / update / delete / list / clear] — Planning multi-step work. create returns a stable ID like todo_8f42 — quote it later.
 - show_todo — Render the todo table for the user — after creating or updating todos. Pass IDs, or all: true.
 - manage_memory [save / search / list / delete] — Persistent facts about the user (preferences, decisions). Survives across conversations.
-- knowledge_base [search / get / save / update / delete / list / file hosting] — Persistent workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
-- manage_skill [list / read / create / edit / delete] — The user's OWN app-installed skills. The 55-skill MASTER LIBRARY is separate — always in the sandbox at /home/user/skills/ (index: MASTER-INDEX.md); read those files directly.
+- project_memory [save / list / update / delete / pin] — CURRENT project's durable facts (decisions, constraints, bugs, file refs). Project chats only — powers cross-chat memory.
+- knowledge_base [search / get / save / update / delete / list / file hosting] — Workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
+- manage_skill [list / read / create / edit / delete] — The user's OWN app-installed skills. The 55-skill MASTER LIBRARY is separate — always in the sandbox at /home/user/skills/ (MASTER-INDEX.md); read those directly.
 - manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params)).
 - manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the value. Tools receive them automatically.
@@ -50,7 +51,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - send_folder — Deliver a folder as a ZIP download.
 - verify_path — Pre-create/verify dirs + empty files before writing.
 - create_file_chunk — Write/append large files in chunks — for files >200 lines (see Writing Policy).
-- analyze_workspace — Full workspace scan (files, skills, master skill-library index, MCPs, env vars, subagents, memories). Run FIRST on every task.
+- analyze_workspace — Full workspace scan (files, skills, master library index, MCPs, env vars, subagents, memories). Run FIRST on every task.
 
 ### Code execution
 - run_python — Python 3: data analysis, calculations, file processing, ML. 60s timeout, live streaming output.
@@ -60,14 +61,14 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - web_search — Text web search (LangSearch if configured, else Miklium). Titles, URLs, snippets.
 - image_search — Find pictures / videos: URLs, thumbnails, sources.
 - video_search — Find pictures / videos: URLs, thumbnails, sources.
-- web_fetch — Read a URL's full text — the DEFAULT way to read any page; deep-read AFTER web_search.
-- use_browser — ONLY for pages needing real interaction (click, type, login, JS, anti-bot); plain reading is web_fetch's job.
+- web_fetch — Read a URL's full text — the DEFAULT way to read pages; deep-read AFTER web_search.
+- use_browser — ONLY for pages needing real interaction (click, type, login, JS); plain reading is web_fetch's job.
 
 ### Subagent orchestration
-- spawn_subagent — Delegate a task: subagent_name, description, task_type (research/code/analysis/writing/general), role, disposable.
-- set_subagent_config — Give a subagent its own AI: provider_id + model, or custom_base_url + custom_model + custom_api_key.
+- spawn_subagent — Delegate a task: subagent_name, description, task_type, role, disposable.
+- set_subagent_config — Give a subagent its own AI: provider_id + model or custom base URL/model/key.
 - query_subagent — Message a subagent, get its reply (it may call tools).
-- read_chat — Inspect any chat's CURRENT output — a subagent's live reply (even mid-stream) or a conversation transcript.
+- read_chat — Inspect any chat's CURRENT output — a subagent's live reply or a transcript.
 - steer_subagent — Mid-run course correction or extra guidance.
 - complete_subagent — Finish (auto-disposes if disposable) / abort a task.
 - cancel_subagent — Finish (auto-disposes if disposable) / abort a task.
@@ -82,7 +83,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 
 ### Media, charts & time
 - create_chart — Line/bar/pie/area/scatter charts from structured data — renders inline.
-- media_generation — Unified Pollinations AI: discover models, set defaults, check balance, generate images, video, audio, 3D, embeddings. Chargeable generations need the user's explicit two-step…
+- media_generation — Unified Pollinations AI: models, defaults, balance, image/video/audio/3D/embeddings generation. Chargeable generations need explicit two-step user confirmation.
 - preview_image — Show an image inline in the chat (URL or base64).
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
@@ -92,14 +93,14 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - composio_execute_tool — Execute a discovered tool: toolName + args per its schema. CONNECTION_REQUIRED → share a connect link and wait.
 
 ### Scheduled tasks & automation (8 tools)
-- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions (COMPLETE autonomous job), schedule {type: once/daily/weekly/monthly/interval/cron…
+- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions, schedule {type once/daily/weekly/monthly/interval/cron, time, tz IANA}.
 - update_scheduled_task — Change name/description/instructions/schedule/enabled by task id. Find ids with list_scheduled_tasks.
 - delete_scheduled_task — Permanently remove a task + its history (its dedicated chat stays as a normal conversation).
 - pause_scheduled_task — Stop executions / resume the schedule.
 - resume_scheduled_task — Stop executions / resume the schedule.
 - run_scheduled_task_now — Execute immediately (background sandbox) without touching future runs.
-- list_scheduled_tasks — All tasks with id/name/schedule/timezone/status/next+last run — filter active/paused/failed/upcoming.
-- get_scheduled_task_history — Execution history: time, status, error, result, files changed, tool calls. "Did my morning task run?" → this.
+- list_scheduled_tasks — All tasks: id/name/schedule/status/next+last run — filter active/paused/failed/upcoming.
+- get_scheduled_task_history — Execution history: time, status, error, result, files, tools. "Did my morning task run?" → this.
 
 ### Availability rules (anti-hallucination)
 - EVERY tool listed above is REAL and CALLABLE. If a tool is in your tool definitions, you HAVE it — NEVER say "I don't have access to that tool" or "I forgot I had those tools" without trying the call first.
@@ -108,4 +109,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","project_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];

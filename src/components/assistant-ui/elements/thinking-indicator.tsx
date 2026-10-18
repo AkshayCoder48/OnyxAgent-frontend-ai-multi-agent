@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { PersonalityOrb, useOrbChatVisible } from "./personality-orb";
 
 /**
  * ThinkingIndicator — the assistant-ui "Thinking indicator" element
@@ -9,14 +10,19 @@ import { cn } from "@/lib/utils";
  * FADES IN once when it changes, and an optional preformatted elapsed badge.
  *
  * Per the Realtime PRD the status text is STATIC — no phrase cycling, no
- * per-word shimmer/scramble. Liveness is carried by the dot (and the
- * companion), not by animating the words themselves. `showDot` hides the
- * leading dot when a glyph (chevron, orb) already leads the line.
+ * per-word shimmer/scramble. Liveness is carried by the leading glyph (the
+ * personality orb — or the plain pulsing dot when the orb is hidden), not by
+ * animating the words themselves. `showDot` hides the leading dot when a
+ * glyph (chevron, orb) already leads the line; `showOrb` (default on)
+ * replaces the dot with the reactive personality orb while the user's
+ * personality allows orbs in chat — the orb is decorative and complements
+ * (never replaces) the status text (PRD §10.4).
  */
 export function ThinkingIndicator({
   label,
   elapsed,
   showDot = true,
+  showOrb = true,
   className,
   ...props
 }: {
@@ -26,21 +32,35 @@ export function ThinkingIndicator({
   elapsed?: string;
   /** Hide the leading pulsing dot when another glyph leads the line. */
   showDot?: boolean;
+  /**
+   * Lead the line with the personality orb (default). Renders nothing when
+   * the active personality has orbs hidden in chat — the plain dot takes
+   * over, so there is ALWAYS a leading liveness glyph.
+   */
+  showOrb?: boolean;
   className?: string;
 } & Omit<React.ComponentPropsWithoutRef<"div">, "children">) {
+  // Hook runs unconditionally (hooks rules); the prop only gates the result.
+  const chatOrbVisible = useOrbChatVisible();
+  const orbVisible = showOrb && chatOrbVisible;
   return (
     <div
       data-slot="thinking-indicator"
       className={cn("flex h-7 min-w-0 items-center gap-2.5", className)}
       {...props}
     >
-      {/* Pulsing dot — brand primary (omitted when another glyph already
-          leads the line so the two never double up). */}
-      {showDot && (
-        <span
-          aria-hidden
-          className="bg-primary inline-block h-2 w-2 shrink-0 animate-pulse rounded-full motion-reduce:animate-none"
-        />
+      {/* Leading liveness glyph — the reactive personality orb, or the plain
+          pulsing dot when the orb is off. Exactly one leads the line
+          (aria-hidden: the status TEXT is the accessible signal). */}
+      {orbVisible ? (
+        <PersonalityOrb size={16} className="shrink-0" />
+      ) : (
+        showDot && (
+          <span
+            aria-hidden
+            className="bg-primary inline-block h-2 w-2 shrink-0 animate-pulse rounded-full motion-reduce:animate-none"
+          />
+        )
       )}
       {/* STATIC status text — keyed on its own content so a NEW status
           (Thinking → Working) fades in once, then sits still. leading-snug

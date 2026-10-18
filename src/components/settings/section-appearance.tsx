@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { MoreOptions } from "@/components/settings/more-options";
+import { OrbPersonalitySettings } from "@/components/assistant-ui/elements";
 import {
   Select,
   SelectContent,
@@ -211,6 +212,12 @@ export function SectionAppearance() {
           </div>
         </section>
       </MoreOptions>
+
+      {/* Orb personalities (PRD §10 — Feature Two): presets with live
+          mini-orb previews, custom tuning, per-state variant editor. Same
+          panel the /settings/appearance page mounts — one component, one
+          persisted store, every surface in sync. */}
+      <OrbPersonalitySettings />
     </div>
   );
 }

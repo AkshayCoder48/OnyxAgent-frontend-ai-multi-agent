@@ -54,6 +54,13 @@ export interface RequestToolScope {
    * SMALL_MODEL_WINDOW get the tighter ESSENTIAL surface. Optional — absent
    * means "normal" (CORE). */
   modelContextWindow?: number | null;
+  /** PERMISSION FILTER (Task 2-d / PRD §8.2): tool names whose effective
+   *  permission is DENIED for this conversation (global policy + project
+   *  rules). They are dropped from the scope ENTIRELY — denied tools must
+   *  never execute, so they are not offered to the model either. Optional —
+   *  absent = no permission filtering (the enforcement gate still applies
+   *  at execution time for every dispatch site). */
+  deniedTools?: ReadonlySet<string>;
 }
 
 /** Below this resolved window the request carries ESSENTIAL (+ intent
@@ -260,6 +267,10 @@ export function filterToolsForRequest(
 
   return tools.filter((t) => {
     if (!t) return false;
+    // 0. PERMISSION FILTER (Task 2-d): denied tools are never offered —
+    //    takes precedence over every other rule (a denied dynamic tool is
+    //    still denied).
+    if (scope.deniedTools?.has(t.name)) return false;
     // 1. Dynamic tools (custom/MCP) always ship.
     if (!BUILTIN_NAMES.has(t.name)) return true;
     // 2. History/turn latch — never scope out a tool already in use.

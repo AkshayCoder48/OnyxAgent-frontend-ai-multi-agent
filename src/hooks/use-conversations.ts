@@ -4,6 +4,7 @@ import { useCallback, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { conversationService } from "@/lib/services";
+import { touchProjectActivity } from "@/lib/projects/service";
 import { useAuthStore } from "@/stores";
 import { qk } from "@/lib/query-keys";
 import { getErrorMessage, setUrlParam } from "@/lib/utils";
@@ -11,6 +12,28 @@ import { useConversationStore, useChatStore } from "@/stores";
 import type { Conversation } from "@/types";
 
 const PAGE_SIZE = 30;
+
+/** Projects data layer — page size for project/general scoped fetches
+ *  (fetchConversations opts). Larger than the sidebar's shared list because
+ *  scoped calls come straight from the service, not the paged cache. */
+const PROJECT_SCOPED_LIMIT = 200;
+
+/** Scope options for `fetchConversations` (Projects data layer):
+ *  - `projectId: "<id>"` — only that project's conversations,
+ *  - `projectId: null` — only GENERAL chats (project_id falsy),
+ *  - omitted / `undefined` — all conversations (the pre-projects behavior). */
+export interface FetchConversationsOpts {
+  projectId?: string | null;
+  /** Result cap for scoped fetches (default 200). */
+  limit?: number;
+}
+
+/** Options for `createConversation`: `projectId` assigns the new
+ *  conversation to a project (persisted as `project_id`; also bumps the
+ *  project's `last_activity_at`). */
+export interface CreateConversationOpts {
+  projectId?: string;
+}
 
 /**
  * Read the current user id from the auth store. Throws a friendly error if no
@@ -208,7 +231,8 @@ export function useConversations() {
   // is streaming (the live chat store is authoritative then).
   const autoHydratedRef = useRef(false);
 
-  const fetchConversations = useCallback(async () => {
+  const fetchConversations = useCallback(
+    async (opts?: FetchConversationsOpts): Promise<Conversation[]> => {
     // The list query auto-fetches and dedupes; force a fresh pull here to keep
     // the previous explicit-refresh semantics (e.g. after a new conversation
     // is created during an agent turn). Start it FIRST so the verifyInList
@@ -231,16 +255,32 @@ export function useConversations() {
       const target = list.find((c) => c.id === urlId);
       if (target?.mode === "code") {
         window.history.replaceState({}, "", window.location.pathname);
-        return;
+      } else {
+        // `loadConversationMessages` performs the full guarded select+fetch.
+        // It is safe even when the id is already "selected" — the point is
+        // that its MESSAGES were never loaded for this page load.
+        await loadConversationMessages(urlId, { verifyInList: true });
       }
-      // `loadConversationMessages` performs the full guarded select+fetch.
-      // It is safe even when the id is already "selected" — the point is
-      // that its MESSAGES were never loaded for this page load.
-      await loadConversationMessages(urlId, { verifyInList: true });
     } else {
       await listPromise;
     }
-  }, [queryClient, loadConversationMessages]);
+
+    // Projects data layer: an EXPLICIT scope (project id, or null for
+    // general-only) is served straight from the service — the shared
+    // React-Query list is paged at PAGE_SIZE, so filtering it client-side
+    // would under-return for busy projects. Without a scope, return the
+    // shared cached list (existing callers ignore the value anyway).
+    if (opts && opts.projectId !== undefined) {
+      return conversationService.list(getUserId(), {
+        limit: opts.limit ?? PROJECT_SCOPED_LIMIT,
+        includeArchived: true,
+        projectId: opts.projectId,
+      });
+    }
+    return queryClient.getQueryData<Conversation[]>(listKey) ?? [];
+    },
+    [queryClient, loadConversationMessages, getUserId, listKey],
+  );
 
   const loadingMoreRef = useRef(false);
 
@@ -270,12 +310,24 @@ export function useConversations() {
   }, [queryClient, writeCache, getUserId, listKey]);
 
   const createConversation = useCallback(
-    async (title?: string): Promise<Conversation | null> => {
+    async (title?: string, opts?: CreateConversationOpts): Promise<Conversation | null> => {
       setLoading(true);
       setError(null);
       try {
         const userId = getUserId();
-        const newConversation = await conversationService.create(userId, title);
+        const newConversation = await conversationService.create(userId, title, undefined, {
+          projectId: opts?.projectId,
+        });
+        // Projects data layer: a conversation created inside a project
+        // bumps the project's activity clock (best-effort — a concurrently
+        // deleted project must never fail the chat creation).
+        if (opts?.projectId) {
+          try {
+            await touchProjectActivity(opts.projectId);
+          } catch {
+            // opportunistic — ignore
+          }
+        }
         writeCache((prev) => [newConversation, ...prev]);
         return newConversation;
       } catch (err) {

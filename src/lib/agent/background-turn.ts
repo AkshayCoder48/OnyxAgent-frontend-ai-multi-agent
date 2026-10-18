@@ -23,6 +23,11 @@ import {
   collectBridgeableTools,
   handleBrowserToolCall,
 } from "@/lib/agent/browser-tool-bridge";
+import {
+  buildBgPolicySnapshot,
+  computeDeniedToolsForScope,
+  resolveProjectIdForConversation,
+} from "@/lib/agent/approval-gate";
 import { manageContext } from "@/lib/agent/context/context-manager";
 import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { priorToolUseAnnotation } from "@/lib/tools/request-scoping";
@@ -817,6 +822,12 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
     // registry tool that has no native sandbox implementation. The runner
     // exposes these to the LLM as bridged tools executed back here.
     let browserTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [];
+    // PERMISSION SNAPSHOT (Task 2-d) — resolved alongside browserTools above
+    // and threaded into the launch state below (see the PERMISSION SCOPE
+    // comment there). Null when the resolution path failed (the launch then
+    // omits it and the sandbox runner's gate degrades to the argument-aware
+    // defaults — the same fail-open rule the in-browser gate uses).
+    let bgPolicySnapshot: import("@/lib/agent/approval-gate").BgPolicySnapshot | null = null;
     try {
       const { loadDynamicTools } = await import("@/lib/tools/dynamic_tools");
       await loadDynamicTools(ctx.userId);
@@ -844,11 +855,28 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
           for (const tc of m.toolCalls) if (tc?.name) historyToolNames.add(tc.name);
         }
       }
+      // PERMISSION SCOPE (Task 2-d / PRD §8.2 — background parity): resolve
+      // the conversation's project + the user's global approval policy at
+      // launch. (1) DENIED bridged tools are dropped from the exposed
+      // surface (request-scoping's deniedTools filter — a denied tool must
+      // never execute, so it is not offered either). (2) The snapshot rides
+      // the launch state (toolPermissions) so the sandbox runner can gate
+      // its NATIVE tools with the same rules. APPROVAL-REQUIRED bridged
+      // tools are deliberately NOT excluded here — they execute back in
+      // THIS browser via browser-tool-bridge.ts, which runs the FULL
+      // interactive approval gate (card + queue) when a tab is open; when
+      // no tab is open the bridge's ack window produces the honest
+      // "no open app tab" error instead.
+      const projectId = await resolveProjectIdForConversation(conversationId ?? null);
+      const policySnapshot = await buildBgPolicySnapshot(projectId);
+      const deniedTools = await computeDeniedToolsForScope(projectId, policySnapshot);
       browserTools = collectBridgeableTools(BG_NATIVE_TOOL_NAMES, {
         lastUserText: ctx.turn.userMessage,
         usedToolNames: historyToolNames,
         modelContextWindow: resolveModelContext(ctx.turn.provider.model).contextWindow,
+        deniedTools,
       });
+      bgPolicySnapshot = policySnapshot;
     } catch {
       browserTools = [];
     }
@@ -889,6 +917,7 @@ export async function startBackgroundTurn(ctx: RunContext): Promise<BackgroundTu
       conversationId,
       seedTodos,
       browserTools,
+      ...(bgPolicySnapshot ? { toolPermissions: bgPolicySnapshot } : {}),
     });
 
     // 5. Consume the run's event stream until it finishes. The consumer

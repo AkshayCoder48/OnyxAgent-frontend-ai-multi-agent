@@ -3153,6 +3153,85 @@ function bgUnknownToolResult(name) {
 // the client's BG_NATIVE_TOOL_NAMES keeps native names like use_browser
 // from ever being bridged back to the (possibly closed) browser.
 
+// ── PERMISSION SNAPSHOT (Task 2-d / PRD §8.2 — background parity) ──────
+// The browser threads its approval policy in at launch
+// (state.toolPermissions — built by buildBgPolicySnapshot in
+// approval-gate.ts). This is the PLAIN-JS mirror of
+// src/lib/projects/permissions.ts resolvePermission:
+//   effective = strictest(global entry ?? argument-aware default,
+//                         project rule)
+// A project can tighten but never loosen. Native tools CANNOT wait for a
+// human (the browser may be closed): denied → never executes;
+// approval_required → honest unattended fail-fast. BRIDGED tools are NOT
+// gated here — they execute back in the browser, which runs the FULL
+// interactive gate with the authoritative args.
+// (Plain-JS mirror constraints: this file is a String.raw template — no
+// backticks and no dollar-brace interpolation anywhere, including comments.)
+
+var BG_ENV_WRITE_ACTIONS = { add: true, set: true, edit: true, delete: true };
+var BG_ENV_LEGACY_WRITE = {
+  add_env_var: true,
+  set_env_var: true,
+  edit_env_var: true,
+  delete_env_var: true,
+};
+var BG_PERM_RANK = { allowed: 0, approval_required: 1, denied: 2 };
+
+function bgDefaultPermission(name, args) {
+  // Composio execution — external side effects by definition.
+  if (name === "composio_execute_tool") return "approval_required";
+  // Env-var management — write/delete actions only (list/get are reads).
+  if (name === "manage_env_var" || BG_ENV_LEGACY_WRITE[name] || /_env_var$/.test(name)) {
+    if (name === "manage_env_var") {
+      var a = args && typeof args.action === "string" ? args.action : "";
+      return BG_ENV_WRITE_ACTIONS[a] ? "approval_required" : "allowed";
+    }
+    return BG_ENV_LEGACY_WRITE[name] ? "approval_required" : "allowed";
+  }
+  // E2B file/folder deletion — destructive.
+  if (name === "delete_file" || name === "delete_folder") return "approval_required";
+  return "allowed";
+}
+
+function bgIsPermission(v) {
+  return v === "allowed" || v === "approval_required" || v === "denied";
+}
+
+function bgResolvePermission(state, name, args) {
+  var snap = state && state.toolPermissions && typeof state.toolPermissions === "object"
+    ? state.toolPermissions
+    : null;
+  var global = snap && snap.global && typeof snap.global === "object" ? snap.global : {};
+  var perm = bgIsPermission(global[name]) ? global[name] : bgDefaultPermission(name, args);
+  var rules = snap && Array.isArray(snap.projectRules) ? snap.projectRules : [];
+  for (var i = 0; i < rules.length; i++) {
+    var r = rules[i];
+    if (!r || typeof r.resource_id !== "string" || !bgIsPermission(r.permission)) continue;
+    var match =
+      r.resource_id === name ||
+      (r.resource_type === "mcp_tool" && r.resource_id.slice(-1 - name.length) === ":" + name);
+    if (!match) continue;
+    if (BG_PERM_RANK[r.permission] > BG_PERM_RANK[perm]) perm = r.permission;
+  }
+  return perm;
+}
+
+function bgPermissionDeniedMessage(name) {
+  return (
+    "Permission denied: " + name + " is not allowed here. The action was NOT executed. " +
+    "Ask the user to change the project's resource access (Project settings - Resources) " +
+    "or the global approval policy (Settings - Tools) if they want this action to run."
+  );
+}
+
+function bgUnattendedApprovalMessage(name) {
+  return (
+    name + " requires interactive approval, which is not available while the task runs " +
+    "unattended in the background. The action was NOT executed. Ask the user to run this " +
+    "task from the chat so they can approve it."
+  );
+}
+
 async function runBridgeTool(callId, name, args) {
   const token = String(callId || name).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
   const reqPath = path.join(BRIDGE_DIR, token + ".req.json");
@@ -3327,6 +3406,23 @@ async function main() {
       });
     }
     if (bridged.length) ALL_TOOLS = TOOLS.concat(bridged);
+  }
+  // PERMISSION SCOPE (Task 2-d / PRD §8.2): sandbox-NATIVE tools whose
+  // effective permission (args unknown at launch — the same conservative
+  // read the browser's computeDeniedToolsForScope uses) is DENIED are
+  // dropped from the exposed surface entirely — a denied tool must never
+  // execute, so it is not offered to the model either. Argument-aware
+  // denials are still caught by the dispatch-time gate below; BRIDGED tools
+  // are not filtered here (the browser runs their full interactive gate).
+  {
+    const deniedNatives = [];
+    for (const t of ALL_TOOLS) {
+      if (t.bridge) continue;
+      if (bgResolvePermission(state, t.name, null) === "denied") deniedNatives.push(t.name);
+    }
+    if (deniedNatives.length > 0) {
+      ALL_TOOLS = ALL_TOOLS.filter((t) => t.bridge || !deniedNatives.includes(t.name));
+    }
   }
   // (No mode isolation: ALL_TOOLS keeps the FULL native surface — every
   // TOOLS entry plus the bridged browser tools above. The tool surface must
@@ -3578,13 +3674,30 @@ async function main() {
       state._executedToolCallIds.push(id);
       const tool = ALL_TOOLS.find((x) => x.name === nc.name);
       let toolResult;
-      try {
-        toolResult = tool
-          ? tool.bridge
-            ? await runBridgeTool(id, tool.name, args)
-            : await tool.run(args)
-          : bgUnknownToolResult(rawName);
-      } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
+      // PERMISSION GATE (Task 2-d / PRD §8.2) — sandbox-NATIVE calls only
+      // (bridged calls execute back in the browser, which runs the FULL
+      // interactive approval gate with the authoritative args). Native
+      // tools run unattended: denied → never executes; approval_required →
+      // honest fail-fast ("run this task from the chat"), never a silent
+      // skip. Both flow through the normal tool-result protocol so the
+      // model can adapt in one round.
+      const nativePerm = tool && !tool.bridge ? bgResolvePermission(state, nc.name, args) : "allowed";
+      if (nativePerm !== "allowed") {
+        toolResult = {
+          error:
+            nativePerm === "denied"
+              ? bgPermissionDeniedMessage(nc.name)
+              : bgUnattendedApprovalMessage(nc.name),
+        };
+      } else {
+        try {
+          toolResult = tool
+            ? tool.bridge
+              ? await runBridgeTool(id, tool.name, args)
+              : await tool.run(args)
+            : bgUnknownToolResult(rawName);
+        } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
+      }
       // Large-payload results (base64 downloads / image previews) get a
       // bigger cap so their cards stay intact; everything else stays at
       // 64 KB like before.

@@ -1,0 +1,117 @@
+/* PersonalityOrb — reaction overlay + the reduced-motion working-pulse
+   exception. Everything here is transform/opacity only (compositor-cheap,
+   no filters — must stay smooth on low-end Android per PRD §10.4). */
+
+.wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  color: inherit;
+}
+
+/* ── Reduced-motion: the ONE working pulse ─────────────────────────────
+ * `resolveOrb` keeps a single slow, subtle pulse (the S1 centre-out swell
+ * at a ~7s cycle) for the WORKING states when the user prefers reduced
+ * motion — liveness while the agent works is essential status info. The
+ * exception rule itself lives in Orb.module.css (keyed on the global
+ * .orb-essential wrapper class) because BOTH the cell class and the orbCell
+ * keyframes name are hashed by CSS modules and only resolve to their shared
+ * hashed forms inside the Orb module. An earlier version of that rule lived
+ * here as `.essential :global(.cell)` — it NEVER matched (the cells carry
+ * the Orb module's hashed class, not a literal `cell` class) and its
+ * `animation-name: orbCell` referenced a keyframes name that only exists
+ * hashed. This wrapper just documents the contract; personality-orb.tsx
+ * passes the literal "orb-essential" class to <Orb>. */
+
+/* ── One-shot SUCCESS celebration (≤900ms) ──────────────────────────────
+ * A quick bloom: the orb scales up and settles while an ::after ring
+ * expands and fades (the "gather → release" flourish the playful
+ * personality asks for; professional/friendly skip it entirely — the JS in
+ * personality-orb.tsx gates on celebrationEnabled + intensity, and this
+ * CSS gates again on reduced motion). */
+.celebrate {
+  position: relative;
+  display: inline-flex;
+  animation: orbCelebrate 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.celebrate::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  border: 1.5px solid currentColor;
+  opacity: 0;
+  pointer-events: none;
+  animation: orbRing 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes orbCelebrate {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.22);
+  }
+  70% {
+    transform: scale(0.96);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes orbRing {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+/* ── One-shot ERROR reaction (≤900ms) ───────────────────────────────────
+ * Restrained for EVERY personality (PRD §10.3): two tiny 1.5px x-nudges
+ * and a brief dim — a wobble of recovery, never an alarm. Accessible text
+ * beside the orb always explains the actual problem. */
+.errorShake {
+  display: inline-flex;
+  animation: orbError 600ms ease-in-out both;
+}
+
+@keyframes orbError {
+  0%,
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  20% {
+    transform: translateX(-1.5px);
+    opacity: 0.7;
+  }
+  45% {
+    transform: translateX(1.5px);
+    opacity: 0.7;
+  }
+  70% {
+    transform: translateX(-0.75px);
+    opacity: 0.88;
+  }
+}
+
+/* Belt & braces: the JS already skips both overlays under reduced motion;
+ * if one ever slips through (or a future caller renders the class
+ * directly) it must not animate. */
+@media (prefers-reduced-motion: reduce) {
+  .celebrate,
+  .errorShake {
+    animation: none;
+  }
+  .celebrate::after {
+    animation: none;
+    opacity: 0;
+  }
+}

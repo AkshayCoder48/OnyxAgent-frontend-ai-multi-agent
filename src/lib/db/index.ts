@@ -22,6 +22,10 @@ import type {
   ConversationShare,
   ChartSpec,
   Todo,
+  Project,
+  ProjectMemoryItem,
+  ApprovalRequest,
+  MessageSearchRow,
 } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -227,6 +231,9 @@ export interface TodoListRow {
   updated_at: string;
 }
 
+// -- Projects data layer (PRD §3–§9, §14) — rows map 1:1 to the wire types
+//    in `src/types/project.ts`; the v4 tables below store them directly.
+
 // ---------------------------------------------------------------------------
 // Dexie subclass — typed tables for the whole app.
 // ---------------------------------------------------------------------------
@@ -247,6 +254,10 @@ export class AppDatabase extends Dexie {
   skills!: Table<SkillRow, string>;
   chart_specs!: Table<ChartSpecRow, string>;
   todo_lists!: Table<TodoListRow, string>;
+  projects!: Table<Project, string>;
+  project_memories!: Table<ProjectMemoryItem, string>;
+  approval_requests!: Table<ApprovalRequest, string>;
+  message_search_index!: Table<MessageSearchRow, string>;
 
   constructor(name = "agent-chat-app") {
     super(name);
@@ -292,6 +303,23 @@ export class AppDatabase extends Dexie {
     // (stable `todo_XXXX` IDs, 4 statuses, survive page refreshes).
     this.version(3).stores({
       todo_lists: "&conversation_id, updated_at",
+    });
+
+    // Version 4: Projects data layer (PRD §3–§9, §14). Only changed/new
+    // stores are listed — Dexie merges these with the previous versions'
+    // schemas (unlisted stores keep their existing definition).
+    //   - conversations gains a `project_id` index (project membership;
+    //     absent/null = general chats).
+    //   - projects / project_memories / approval_requests / message_search_index
+    //     are NEW tables (row shapes in `src/types/project.ts`).
+    this.version(4).stores({
+      conversations:
+        "&id, user_id, is_archived, is_demo, created_at, updated_at, last_message_at, project_id",
+      projects: "&id, user_id, status, pinned, sort_order, updated_at, last_activity_at",
+      project_memories: "&id, project_id, category, pinned, updated_at",
+      approval_requests: "&id, status, conversation_id, project_id, created_at",
+      message_search_index:
+        "&message_id, conversation_id, project_id, [conversation_id+created_at], updated_at",
     });
   }
 }
@@ -361,6 +389,11 @@ export async function wipeAllData(): Promise<void> {
     d.custom_tools.clear(),
     d.skills.clear(),
     d.chart_specs.clear(),
+    d.todo_lists.clear(),
+    d.projects.clear(),
+    d.project_memories.clear(),
+    d.approval_requests.clear(),
+    d.message_search_index.clear(),
   ]);
 }
 
@@ -388,6 +421,21 @@ export async function wipeUserData(userId: string): Promise<void> {
       await d.chart_specs.where("message_id").anyOf(messageIds).delete();
     }
     await d.conversation_shares.where("conversation_id").anyOf(conversationIds).delete();
+    // Projects data layer (v4): search-index rows and approval requests
+    // that belong to this user's conversations (covers general-chat
+    // approvals whose project_id is null, and indexed messages of both
+    // general and project conversations).
+    await d.message_search_index.where("conversation_id").anyOf(conversationIds).delete();
+    await d.approval_requests.where("conversation_id").anyOf(conversationIds).delete();
+  }
+  // Projects cascade: the user's projects + their memories, approvals and
+  // search-index rows (keyed by project_id, not conversation_id).
+  const projectIds = (await d.projects.where("user_id").equals(userId).primaryKeys()) as string[];
+  if (projectIds.length > 0) {
+    await d.project_memories.where("project_id").anyOf(projectIds).delete();
+    await d.approval_requests.where("project_id").anyOf(projectIds).delete();
+    await d.message_search_index.where("project_id").anyOf(projectIds).delete();
+    await d.projects.where("user_id").equals(userId).delete();
   }
   await d.chat_files.where("user_id").equals(userId).delete();
   await d.user_slash_commands.where("user_id").equals(userId).delete();

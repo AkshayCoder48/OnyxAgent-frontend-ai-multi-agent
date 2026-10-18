@@ -15,9 +15,11 @@ import { useChatSidebarStore } from "@/stores";
 import {
   Archive,
   ArchiveRestore,
+  ArrowRight,
   CalendarClock,
   ChevronLeft,
   ChevronRight,
+  Download,
   LibraryBig,
   MessageSquare,
   MoreVertical,
@@ -26,6 +28,7 @@ import {
   Settings,
   Share2,
   SquarePen,
+  TextSearch,
   Trash2,
 } from "lucide-react";
 import type { Conversation } from "@/types";
@@ -41,6 +44,15 @@ import {
 } from "@/lib/scheduler/chat-sync";
 import { ShareDialog } from "./share-dialog";
 import { RunningExecutionsSection } from "./running-executions";
+import { ExportDialog } from "@/components/export/export-dialog";
+import { ProjectSection, useGeneralConversations } from "@/components/projects/project-section";
+// SEMANTIC SEARCH (Task 2-b) — the "Search all messages" affordance opens the
+// global hybrid-search dialog; delete/rename propagate to the message index.
+import { useGlobalSearchStore } from "@/components/search/global-search-dialog";
+import {
+  removeConversationFromIndex,
+  updateConversationTitleCache,
+} from "@/lib/search/indexer";
 
 /** Window event broadcast when a row menu opens — every OTHER open row menu
  *  closes itself (single-open menus, like native context menus). */
@@ -105,6 +117,7 @@ interface ConversationItemProps {
   onUnarchive: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onShare: (id: string) => void;
+  onExport: (id: string) => void;
 }
 
 const ConversationItem = memo(function ConversationItem({
@@ -117,6 +130,7 @@ const ConversationItem = memo(function ConversationItem({
   onUnarchive,
   onRename,
   onShare,
+  onExport,
 }: ConversationItemProps) {
   const t = useTranslations("chat");
   // PORTAL POP-UP MENU: the old in-row `absolute` popover was clipped by
@@ -158,7 +172,7 @@ const ConversationItem = memo(function ConversationItem({
       return;
     }
     const MENU_W = 176; // w-44
-    const MENU_H = 216; // 4 items ≈ 4×48 + padding
+    const MENU_H = 264; // 5 items ≈ 5×48 + padding
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     let left = rect.right - MENU_W;
@@ -211,12 +225,14 @@ const ConversationItem = memo(function ConversationItem({
     ? [
         { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
         { key: "share", icon: Share2, label: t("share"), run: () => onShare(conversation.id) },
+        { key: "export", icon: Download, label: "Export", run: () => onExport(conversation.id) },
         { key: "restore", icon: ArchiveRestore, label: "Restore", run: () => onUnarchive(conversation.id) },
         { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: () => onDelete(conversation.id) },
       ]
     : [
         { key: "rename", icon: Pencil, label: t("rename"), run: () => setIsEditing(true) },
         { key: "share", icon: Share2, label: t("share"), run: () => onShare(conversation.id) },
+        { key: "export", icon: Download, label: "Export", run: () => onExport(conversation.id) },
         { key: "archive", icon: Archive, label: t("archive"), run: () => onArchive(conversation.id) },
         { key: "delete", icon: Trash2, label: t("delete"), danger: true, run: () => onDelete(conversation.id) },
       ];
@@ -473,7 +489,10 @@ function ConversationList({
   const t = useTranslations("chat");
   const [view, setView] = useState<ConversationView>("active");
   const [shareConversationId, setShareConversationId] = useState<string | null>(null);
+  const [exportConversationId, setExportConversationId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // SEMANTIC SEARCH (Task 2-b): opens the global message-content search dialog.
+  const openGlobalSearch = useGlobalSearchStore((s) => s.openDialog);
 
   // (The `= []` destructuring default already guarantees a stable empty
   // array when the prop is undefined — no per-render fallback allocation,
@@ -516,6 +535,7 @@ function ConversationList({
   // Stable per-row-callbacks (React.memo): every ConversationItem receives
   // the SAME references — the row threads its own conversation.id through.
   const handleShare = useCallback((id: string) => setShareConversationId(id), []);
+  const handleExport = useCallback((id: string) => setExportConversationId(id), []);
 
   const handleNewChat = () => {
     onNewChat();
@@ -552,7 +572,13 @@ function ConversationList({
         onSelect={(id) => handleSelect(id)}
       />
 
-      {/* Search chats */}
+      {/* PROJECTS (PRD §3.2/§6.4): the collapsible projects area above the
+          general chat history. Opening a project closes the enclosing mobile
+          sheet via the shared onNavigate callback. */}
+      <ProjectSection onNavigate={onNavigate} />
+
+      {/* Search chats — the quick TITLE filter stays; the icon button opens
+          the global message-content search (Task 2-b). */}
       <div className="px-3 pb-2">
         <div className="relative">
           <Search className="text-muted-foreground/60 pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2" />
@@ -561,9 +587,18 @@ function ConversationList({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search chats"
-            aria-label="Search chats"
-            className="border-border bg-background placeholder:text-muted-foreground/60 focus:border-primary/40 h-8.5 w-full rounded-lg border pr-3 pl-8 text-[13px] outline-none transition-colors sm:h-9"
+            aria-label="Search chats by title"
+            className="border-border bg-background placeholder:text-muted-foreground/60 focus:border-primary/40 h-8.5 w-full rounded-lg border pr-9 pl-8 text-[13px] outline-none transition-colors sm:h-9"
           />
+          <button
+            type="button"
+            onClick={() => openGlobalSearch("all")}
+            title="Search all messages — Ctrl/Cmd+Shift+F"
+            aria-label="Search all messages"
+            className="text-muted-foreground/60 hover:text-foreground absolute top-1/2 right-1.5 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md transition-colors hover:bg-foreground/5"
+          >
+            <TextSearch className="h-3.5 w-3.5" aria-hidden />
+          </button>
         </div>
       </div>
 
@@ -621,6 +656,18 @@ function ConversationList({
                   ? "Try a different search."
                   : t("startNewChat")}
             </p>
+            {/* Title filter came up empty — offer the message-content search
+                (Task 2-b) as the natural next step. */}
+            {!isArchivedView && q && (
+              <button
+                type="button"
+                onClick={() => openGlobalSearch("all")}
+                className="text-primary hover:text-primary/80 mt-3 inline-flex items-center gap-1 text-xs font-medium transition-colors"
+              >
+                Search message contents
+                <ArrowRight className="h-3 w-3" aria-hidden />
+              </button>
+            )}
           </div>
         ) : (
           <div>
@@ -646,6 +693,7 @@ function ConversationList({
                         onUnarchive={onUnarchive}
                         onRename={onRename}
                         onShare={handleShare}
+                        onExport={handleExport}
                       />
                     ))}
                   </div>
@@ -661,6 +709,15 @@ function ConversationList({
           open={!!shareConversationId}
           onOpenChange={(open) => {
             if (!open) setShareConversationId(null);
+          }}
+        />
+      )}
+      {exportConversationId && (
+        <ExportDialog
+          conversationId={exportConversationId}
+          open={!!exportConversationId}
+          onOpenChange={(open) => {
+            if (!open) setExportConversationId(null);
           }}
         />
       )}
@@ -693,7 +750,6 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     450,
   );
   const {
-    conversations,
     currentConversationId,
     isLoading,
     fetchConversations,
@@ -755,21 +811,41 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
 
   // Legacy OnyxCode ("code") conversations are no longer listed — OnyxCode
   // was removed. Unstamped conversations count as normal agent chats.
-  const agentConversations = useMemo(
-    () => conversations.filter((c) => !c.mode || c.mode === "agent"),
-    [conversations],
+  // PROJECTS (PRD §6.4): the general chat history shows ONLY conversations
+  // with NO project — project chats live in their project's drawer. The
+  // shared useGeneralConversations unions the React-Query cache (patched
+  // instantly by the mutation handlers) with a project-scoped fetch so the
+  // list stays complete when project chats dilute the paged shared cache.
+  const generalConversations = useGeneralConversations();
+
+  // SEMANTIC SEARCH (Task 2-b): delete/rename propagation into the message
+  // search index — best-effort, never blocks the conversation action itself
+  // (searchChats also lazily purges orphans as the safety net).
+  const handleDelete = useCallback(
+    (id: string) => {
+      void deleteConversation(id);
+      void removeConversationFromIndex(id).catch(() => {});
+    },
+    [deleteConversation],
+  );
+  const handleRename = useCallback(
+    (id: string, title: string) => {
+      void renameConversation(id, title);
+      void updateConversationTitleCache(id, title).catch(() => {});
+    },
+    [renameConversation],
   );
 
   const listProps = {
-    conversations: agentConversations,
+    conversations: generalConversations,
     currentConversationId,
     isLoading,
     scheduledChatIds,
     onSelect: selectConversation,
-    onDelete: deleteConversation,
+    onDelete: handleDelete,
     onArchive: archiveConversation,
     onUnarchive: unarchiveConversation,
-    onRename: renameConversation,
+    onRename: handleRename,
     onNewChat: startNewChat,
     onLoadMore: fetchMoreConversations,
   };

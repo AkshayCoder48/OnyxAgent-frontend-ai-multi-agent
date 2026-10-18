@@ -15,16 +15,109 @@
  *
  * If the browser is closed, the runner's side times out with a graceful,
  * actionable error and the turn continues — background autonomy is intact.
+ *
+ * HITL APPROVAL GATE (Task 2-d / PRD §8.2 + §13): every bridged call runs
+ * through the SAME permission gate the in-browser runtime uses
+ * (maybeGateToolCall) BEFORE its handler — bridged tools execute in this
+ * browser, so the full interactive approval (card + queue + params-hash
+ * verification) applies. The wait is capped just inside the runner's bridge
+ * deadline (runBridgeApprovalGate) so a late decision cancels the request
+ * instead of executing an operation the model believes timed out.
  */
 
 import { getTool, listTools, type ToolContext } from "@/lib/tools/registry";
 import { filterToolsForRequest } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools with the registry.
 import { waitForAskUser } from "@/lib/agent/ask-user-wait";
+import {
+  maybeGateToolCall,
+  recordApprovalOutcome,
+  respondToApproval,
+  selectPendingForToolCall,
+  usePendingApprovals,
+  type GateOutcome,
+} from "@/lib/agent/approval-gate";
 import { settingsService } from "@/lib/services";
 import type { WSEvent } from "@/types";
 
 const BRIDGE_DONE_KEY = "onyx-bridge-done";
+
+// ---------------------------------------------------------------------------
+// HITL APPROVAL GATE (Task 2-d / PRD §8.2 + §13) — bridge half
+// ---------------------------------------------------------------------------
+
+/** Mirror of the sandbox runner's bridge budget (bg-agent-script.ts) — kept
+ * here so the gate's wait can settle BEFORE the runner stops polling for the
+ * result. If the user's decision landed after the runner's deadline, the
+ * model would believe the call timed out while the APPROVED action still
+ * executed — the horizon cancels the request honestly instead. */
+const BRIDGE_TIMEOUT_MS: Record<string, number> = { ask_user: 900_000 };
+const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
+/** Safety margin between the gate's horizon and the runner's deadline. */
+const BRIDGE_GATE_SAFETY_MS = 60_000;
+
+/** The approval id the gate opened for one tool call (resolves when the
+ * gate publishes its pending payload; the upsert happens BEFORE the wait). */
+function approvalIdForToolCall(toolCallId: string): Promise<string | null> {
+  const existing = selectPendingForToolCall(usePendingApprovals.getState(), toolCallId);
+  if (existing) return Promise.resolve(existing.approval_id);
+  return new Promise((resolve) => {
+    const unsub = usePendingApprovals.subscribe((s) => {
+      const p = selectPendingForToolCall(s, toolCallId);
+      if (p) {
+        unsub();
+        resolve(p.approval_id);
+      }
+    });
+  });
+}
+
+/**
+ * Gate one bridged tool call. Bridged tools execute in THIS browser, so the
+ * FULL interactive gate applies (approval card + queue + params-hash-bound
+ * decision) even though the LLM loop runs inside the sandbox. The wait is
+ * capped at the bridge budget (see BRIDGE_TIMEOUT_MS): a decision that
+ * hasn't arrived in time cancels the request so the sandbox receives an
+ * honest result inside its own deadline — never an approved-but-unreported
+ * late execution.
+ */
+async function runBridgeApprovalGate(
+  call: Pick<BrowserToolCall, "name" | "args" | "callId" | "conversationId" | "emit" | "signal">,
+): Promise<GateOutcome> {
+  const gate = maybeGateToolCall({
+    toolName: call.name,
+    args: call.args ?? {},
+    toolCallId: call.callId,
+    conversationId: call.conversationId,
+    emit: call.emit,
+    signal: call.signal,
+    source: "bridge",
+  });
+  const timeoutMs = BRIDGE_TIMEOUT_MS[call.name] ?? BRIDGE_DEFAULT_TIMEOUT_MS;
+  const horizonMs = Math.max(30_000, timeoutMs - BRIDGE_GATE_SAFETY_MS);
+  let horizonTimer: ReturnType<typeof setTimeout> | null = null;
+  const horizon = new Promise<"horizon">((resolve) => {
+    horizonTimer = setTimeout(() => resolve("horizon"), horizonMs);
+  });
+  try {
+    const raced = await Promise.race([gate, horizon]);
+    if (raced === "horizon") {
+      // The sandbox is about to give up on this call — wake the gate with a
+      // cancel so it never executes a decision that arrives too late. (If
+      // the gate never opened a request — permission failure path — there is
+      // no id to wake and the gate promise settles on its own.)
+      const approvalId = await Promise.race([
+        approvalIdForToolCall(call.callId),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+      ]);
+      if (approvalId) respondToApproval(approvalId, "cancelled");
+      return await gate;
+    }
+    return raced;
+  } finally {
+    if (horizonTimer !== null) clearTimeout(horizonTimer);
+  }
+}
 
 export interface BrowserToolCall {
   /** Decrypted E2B key (used for the write-back call). */
@@ -210,6 +303,21 @@ export async function handleBrowserToolCall(call: BrowserToolCall): Promise<void
     return;
   }
 
+  // HITL APPROVAL GATE (Task 2-d / PRD §8.2 + §13): bridged tools execute in
+  // THIS browser, so the FULL interactive gate applies — the card + queue
+  // surface the request, the decision is params-hash-verified, and the wait
+  // is capped at the bridge budget (see runBridgeApprovalGate). A blocked
+  // verdict never runs the handler: the honest gate message rides the
+  // normal write-back protocol.
+  const gate = await runBridgeApprovalGate(call);
+  if (gate.verdict !== "allowed") {
+    const message = gate.verdict === "denied" ? gate.reason : gate.result;
+    await writeBack({ ok: false, error: message }).catch(() => {});
+    markBridgeDone(dedupKey);
+    return;
+  }
+  const gateApprovalId = gate.approvalId;
+
   try {
     // ToolContext mirrors what the in-browser runtime builds (runtime.ts
     // toolCtx) so bridged tools behave EXACTLY like foreground tools —
@@ -235,9 +343,17 @@ export async function handleBrowserToolCall(call: BrowserToolCall): Promise<void
     const result = await tool.handler(call.args ?? {}, ctx);
     await writeBack({ ok: true, result: result ?? null });
     markBridgeDone(dedupKey);
+    // APPROVAL OUTCOME (PRD §13.6): when this call passed the gate via an
+    // APPROVAL, record the honest result on the approval row (best-effort).
+    if (gateApprovalId) {
+      void recordApprovalOutcome(gateApprovalId, result ?? null);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await writeBack({ ok: false, error: message }).catch(() => {});
     markBridgeDone(dedupKey);
+    if (gateApprovalId) {
+      void recordApprovalOutcome(gateApprovalId, message, true);
+    }
   }
 }

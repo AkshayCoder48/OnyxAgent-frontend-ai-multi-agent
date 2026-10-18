@@ -100,7 +100,10 @@ export interface ToolCall {
   name: string;
   args: Record<string, unknown>;
   result?: unknown;
-  status: "pending" | "running" | "completed" | "error";
+  /** `awaiting_approval` (Task 2-d / PRD §13): the call is PAUSED at the HITL
+   *  approval gate — an approval card is rendered instead of a result until
+   *  the user decides (then the normal completed/error flow resumes). */
+  status: "pending" | "running" | "awaiting_approval" | "completed" | "error";
   /**
    * Live stdout/stderr chunks streamed from the tool while it's still
    * running. Populated by `tool_output` WSEvents. The UI's
@@ -190,6 +193,8 @@ export interface ChartSpec {
 }
 
 export type WSEventType =
+  | "approval_request"
+  | "project_update"
   | "user_prompt"
   | "user_prompt_processed"
   | "model_request_start"
@@ -338,6 +343,38 @@ export interface AskUserEvent {
   type: "ask_user";
   data: {
     questions: { question: string; options: string[]; allow_custom: boolean }[];
+  };
+}
+
+/** Human-in-the-loop approval gate (PRD §13). Emitted by the execution
+ *  layer when a tool call resolves to `approval_required`: the runtime
+ *  creates an ApprovalRequest row (bound to the EXACT parameters via
+ *  params_hash), emits this event, then WAITS for the user's decision
+ *  (15-minute expiry). The UI renders an approval card from this payload;
+ *  nothing executes until the decision arrives and the params still
+ *  match. */
+export interface ApprovalRequestEvent {
+  type: "approval_request";
+  data: {
+    /** ApprovalRequest.id — the decision references this id. */
+    approval_id: string;
+    tool_name: string;
+    /** Human label, e.g. "Delete file". */
+    operation_type: string;
+    operation_parameters: Record<string, unknown>;
+    risk_note: string | null;
+    expires_at: string | null;
+  };
+}
+
+/** Projects data layer — emitted when a project row changes (created /
+ *  updated / deleted / archived) so project-aware surfaces (sidebar
+ *  section, project chrome, history drawer) can refresh without polling. */
+export interface ProjectUpdateEvent {
+  type: "project_update";
+  data: {
+    project_id: string;
+    kind: "created" | "updated" | "deleted" | "archived";
   };
 }
 

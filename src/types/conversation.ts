@@ -14,6 +14,11 @@ export interface Conversation {
    *  created. Absent or "agent" = normal agent conversations; every new
    *  conversation is agent-mode. */
   mode?: "agent" | "code";
+  /** Owning project id (PRD §14.2). `null`/absent = a GENERAL conversation
+   *  (shown in the general chat history, never in a project's drawer). A
+   *  conversation keeps its project association across navigation and
+   *  refreshes. */
+  project_id?: string | null;
 }
 
 export interface ConversationMessage {

@@ -256,6 +256,13 @@ export interface OrbProps {
   pill?: boolean;
   className?: string;
   style?: CSSProperties;
+  /** false (default true) renders the STATIC lattice — the same resting
+   * frame the reduced-motion query shows (dim dots, bright centre). Used by
+   * PersonalityOrb's reduced-motion resolution; CSS-only, no JS timers. */
+  animate?: boolean;
+  /** Multiplier for the cell cycle duration (`--orb-d`); <1 runs faster.
+   * Defaults to 1 (the variant's tuned duration, unchanged). */
+  durationScale?: number;
 }
 
 export function Orb({
@@ -265,9 +272,21 @@ export function Orb({
   pill,
   className,
   style,
+  animate = true,
+  durationScale = 1,
 }: OrbProps) {
   const text = label ?? ORB_TASKS[variant] + "…";
-  const duration = DURATIONS[variant];
+  const base = DURATIONS[variant];
+  // Scale the cycle only when asked to — a scale of 1 keeps the exact
+  // `--orb-d` behaviour that existed before the prop (unset unless the
+  // variant has a tuned duration). Non-finite/non-positive scales are
+  // treated as 1 so a bad value can never freeze or zero a cycle.
+  const safeScale =
+    typeof durationScale === "number" && Number.isFinite(durationScale) && durationScale > 0
+      ? durationScale
+      : 1;
+  const duration =
+    safeScale === 1 ? base : Math.round((base ?? 2000) * safeScale);
   return (
     <span
       className={styles.root + (className ? " " + className : "")}
@@ -290,7 +309,11 @@ export function Orb({
           } as CSSProperties
         }
       >
-        <span className={styles.lattice} data-variant={variant}>
+        <span
+          className={styles.lattice}
+          data-variant={variant}
+          data-static={animate ? undefined : ""}
+        >
           {latticeCells(variant).map((c) => (
             <span
               key={c.key}

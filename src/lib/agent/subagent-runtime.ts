@@ -21,6 +21,7 @@ import {
 } from "@/lib/agent/wire-compat";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { normalizeToolCall, unknownToolResult } from "@/lib/agent/tool-call-normalize";
+import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import {
@@ -764,7 +765,31 @@ async function runSubagentLoop(
                 envVars: subagentEnvVars,
                 onToolOutput: () => {},
               };
-              toolResult = await tool.handler(nc.args, ctx);
+              // HITL APPROVAL GATE (Task 2-d / PRD §13): same gate as the
+              // foreground runtime. Subagent session ids are not Dexie
+              // conversations → global policy only (project rules can't
+              // apply), and the interactive approval surfaces through the
+              // Settings → Tools approval queue (subagent cards have no
+              // approval renderer).
+              const gate = await maybeGateToolCall({
+                toolName: nc.name,
+                args: nc.args,
+                conversationId: subagentId,
+                emit: () => {},
+                source: "subagent",
+              });
+              if (gate.verdict === "denied") {
+                toolResult = gate.reason;
+                toolStatus = "error";
+              } else if (gate.verdict === "executed") {
+                toolResult = gate.result;
+                toolStatus = gate.status;
+              } else {
+                toolResult = await tool.handler(nc.args, ctx);
+                if (gate.approvalId) {
+                  void recordApprovalOutcome(gate.approvalId, toolResult);
+                }
+              }
             } else {
               // Corrective payload: suggestions + how-to-call + the
               // never-invent rule — the model self-corrects in one round
@@ -903,7 +928,27 @@ async function executeToolCallsParallel(
           envVars,
           onToolOutput: () => {},
         };
-        toolResult = await tool.handler(nc.args, ctx);
+        // HITL APPROVAL GATE (Task 2-d / PRD §13) — same gate as the other
+        // dispatch sites (see the note in the streaming site above).
+        const gate = await maybeGateToolCall({
+          toolName: nc.name,
+          args: nc.args,
+          conversationId: _subagentId,
+          emit: () => {},
+          source: "subagent",
+        });
+        if (gate.verdict === "denied") {
+          toolResult = gate.reason;
+          toolStatus = "error";
+        } else if (gate.verdict === "executed") {
+          toolResult = gate.result;
+          toolStatus = gate.status;
+        } else {
+          toolResult = await tool.handler(nc.args, ctx);
+          if (gate.approvalId) {
+            void recordApprovalOutcome(gate.approvalId, toolResult);
+          }
+        }
       } else {
         // Corrective payload: suggestions + how-to-call + the never-invent
         // rule — the model self-corrects in one round.

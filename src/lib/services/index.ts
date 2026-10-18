@@ -30,6 +30,15 @@ import {
   requireVault,
 } from "@/lib/crypto/vault";
 import { ONYXBASE_LEGACY_BASE_URLS, ONYXBASE_WORKSPACE_ID } from "@/lib/onyxbase/kv-client";
+// SEARCH INDEX (Task 2-b) — every message/conversation persistence site in
+// this service schedules the debounced, fire-and-forget search indexer so
+// ALL writers (foreground, background, subagents) keep the index fresh.
+import {
+  removeConversationFromIndex,
+  removeMessageFromIndex,
+  scheduleSearchIndexing,
+  updateConversationTitleCache,
+} from "@/lib/search/indexer";
 // Lazy-load the E2B sandbox client . The class lives at
 // `@/lib/e2b/client` for back-compat with the existing import paths; it
 // now talks to E2B's REST API instead of the old proxy.
@@ -275,12 +284,26 @@ export interface ServerMessageRowInput {
 export const conversationService = {
   async list(
     userId: string,
-    opts: { includeArchived?: boolean; limit?: number; skip?: number } = {},
+    opts: {
+      includeArchived?: boolean;
+      limit?: number;
+      skip?: number;
+      /** Projects data layer scope: a string = that project's conversations;
+       *  null = GENERAL chats only (project_id falsy); undefined = all
+       *  (the pre-projects behavior every existing caller relies on). */
+      projectId?: string | null;
+    } = {},
   ): Promise<Conversation[]> {
-    const { includeArchived = true, limit = 50, skip = 0 } = opts;
+    const { includeArchived = true, limit = 50, skip = 0, projectId } = opts;
     const collection = db.conversations.where("user_id").equals(userId);
     const all = await collection.toArray();
-    const filtered = includeArchived ? all : all.filter((c) => !c.is_archived);
+    let filtered = includeArchived ? all : all.filter((c) => !c.is_archived);
+    if (projectId !== undefined) {
+      filtered =
+        projectId === null
+          ? filtered.filter((c) => !c.project_id)
+          : filtered.filter((c) => c.project_id === projectId);
+    }
     filtered.sort((a, b) =>
       (b.updated_at ?? "").localeCompare(a.updated_at ?? ""),
     );
@@ -302,7 +325,12 @@ export const conversationService = {
     return row !== undefined;
   },
 
-  async create(userId: string, title?: string, mode?: "agent" | "code"): Promise<Conversation> {
+  async create(
+    userId: string,
+    title?: string,
+    mode?: "agent" | "code",
+    opts: { projectId?: string } = {},
+  ): Promise<Conversation> {
     const id = nanoid();
     const ts = nowISO();
     const row: ConversationRow = {
@@ -317,6 +345,10 @@ export const conversationService = {
       last_message_at: null,
       // OnyxCode Code Mode chats are tagged so the sidebars can filter them.
       ...(mode === "code" ? { mode: "code" as const } : {}),
+      // Projects data layer: conversations created inside a project carry
+      // its id (null/absent = general chat). The association survives
+      // navigation and refreshes (PRD §14.2).
+      ...(opts.projectId ? { project_id: opts.projectId } : {}),
     };
     await db.conversations.add(row);
     return toConversation(row);
@@ -335,6 +367,14 @@ export const conversationService = {
       update.active_knowledge_base_ids = patch.active_knowledge_base_ids;
     }
     await db.conversations.update(id, update);
+    // Renames must propagate into the search index's cached titles.
+    if (patch.title !== undefined) {
+      try {
+        await updateConversationTitleCache(id, patch.title);
+      } catch {
+        // Index title refresh is best-effort — never block a rename.
+      }
+    }
   },
 
   async archive(id: string, archived: boolean): Promise<void> {
@@ -342,6 +382,12 @@ export const conversationService = {
   },
 
   async delete(id: string): Promise<void> {
+    // Search index first — orphan rows must never outlive the conversation.
+    try {
+      await removeConversationFromIndex(id);
+    } catch {
+      // Best-effort: the searcher lazily purges orphans as a safety net.
+    }
     const messageIds = (await db.messages.where("conversation_id").equals(id).primaryKeys()) as string[];
     if (messageIds.length > 0) {
       await db.tool_calls.where("message_id").anyOf(messageIds).delete();
@@ -510,6 +556,8 @@ export const conversationService = {
         .anyOf(input.fileIds)
         .modify({ message_id: id, conversation_id: conversationId });
     }
+    // Search index: debounced fire-and-forget re-index of this conversation.
+    scheduleSearchIndexing(conversationId);
     // Return message — keep thinking/reasoning/parts now that
     // ConversationMessage exposes them.
     return messageRow as unknown as ConversationMessage;
@@ -559,6 +607,9 @@ export const conversationService = {
     };
     await db.messages.put(row);
     await bumpConversationTimestamp(conversationId);
+    // Search index: debounced fire-and-forget re-index (checkpoints save
+    // frequently mid-stream — the 2.5s trailing debounce coalesces them).
+    scheduleSearchIndexing(conversationId);
     // Replace tool-call rows wholesale (checkpoints rewrite the full set).
     await db.tool_calls.where("message_id").equals(messageId).delete();
     if (input.toolCalls && input.toolCalls.length > 0) {
@@ -623,6 +674,11 @@ export const conversationService = {
   },
 
   async deleteMessage(conversationId: string, messageId: string): Promise<void> {
+    try {
+      await removeMessageFromIndex(messageId);
+    } catch {
+      // Best-effort — lazy orphan purge covers rare failures.
+    }
     await db.tool_calls.where("message_id").equals(messageId).delete();
     await db.message_ratings.where("message_id").equals(messageId).delete();
     await db.messages.delete(messageId);
@@ -661,6 +717,13 @@ export const conversationService = {
       .where("conversation_id")
       .equals(conversationId)
       .delete();
+
+    // Search index: the cleared messages' index rows must go too.
+    try {
+      await removeConversationFromIndex(conversationId);
+    } catch {
+      // Best-effort — lazy orphan purge covers rare failures.
+    }
 
     await bumpConversationTimestamp(conversationId);
   },
@@ -748,6 +811,8 @@ export const conversationService = {
       }
     }
     if (toolRows.length > 0) await db.tool_calls.bulkPut(toolRows);
+    // Search index: debounced fire-and-forget re-index of this conversation.
+    scheduleSearchIndexing(conversationId);
     // Conversation bookkeeping — newest message preview + timestamps.
     const last = messages[messages.length - 1]!;
     const ts = nowISO();
@@ -773,6 +838,7 @@ function toConversation(row: {
   last_message_preview?: string | null;
   last_message_at?: string | null;
   mode?: "agent" | "code";
+  project_id?: string | null;
 }): Conversation {
   const {
     id,
@@ -784,6 +850,7 @@ function toConversation(row: {
     is_demo,
     active_knowledge_base_ids,
     mode,
+    project_id,
   } = row;
   return {
     id,
@@ -795,6 +862,7 @@ function toConversation(row: {
     is_demo,
     active_knowledge_base_ids,
     ...(mode ? { mode } : {}),
+    ...(project_id !== undefined && project_id !== null ? { project_id } : {}),
   };
 }
 

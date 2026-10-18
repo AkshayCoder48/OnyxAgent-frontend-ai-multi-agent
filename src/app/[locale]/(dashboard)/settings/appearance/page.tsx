@@ -7,6 +7,7 @@ import { SectionCard } from "@/components/settings/settings-section";
 import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme";
 import { useThemeStore } from "@/stores/theme-store";
+import { OrbPersonalitySettings } from "@/components/assistant-ui/elements";
 import { cn } from "@/lib/utils";
 
 interface ColorScheme {
@@ -345,6 +346,11 @@ export default function AppearanceSettingsPage() {
           Reset to default
         </button>
       </SectionCard>
+
+      {/* Orb personalities (PRD §10 — Feature Two): presets, custom tuning,
+          per-state variant editor. All state persists via the
+          orb-personality store (localStorage). */}
+      <OrbPersonalitySettings />
 
     </div>
   );

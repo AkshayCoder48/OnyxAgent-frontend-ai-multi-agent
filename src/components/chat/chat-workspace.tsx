@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
+import { ExportDialog } from "@/components/export/export-dialog";
 import { FileSidebar } from "@/components/chat/file-sidebar";
 import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
 import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
@@ -16,7 +17,15 @@ import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
 import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
 import { setUrlParam } from "@/lib/utils";
-import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks, LibraryBig } from "lucide-react";
+import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks, LibraryBig, FileDown } from "lucide-react";
+import { useActiveProject } from "@/lib/projects/store";
+import { ProjectChrome } from "@/components/projects/project-chrome";
+import { ProjectHistoryDrawer } from "@/components/projects/project-history-drawer";
+import { useProjectSelectionSync } from "@/components/projects/project-conversations";
+// SEMANTIC SEARCH (Task 2-b) — the global search dialog, mounted ONCE so it
+// is reachable from anywhere in the chat UI (sidebar affordance, Ctrl/Cmd+
+// Shift+F, drawer hits reuse its reveal helper).
+import { GlobalSearchDialog } from "@/components/search/global-search-dialog";
 
 type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | null;
 
@@ -105,6 +114,12 @@ const emptySubscribe = () => () => {};
  */
 export function ChatWorkspace() {
 
+  // PROJECTS (Task 1-b): the two-way selection ↔ project-context invariant
+  // — selecting a project chat opens its project, selecting a general chat
+  // leaves project context, a null selection keeps it (project empty state).
+  useProjectSelectionSync();
+  const activeProject = useActiveProject();
+
   // Files / timeline panels — the user's last right-panel choice, closed by
   // default. The DockedPanel container renders each as a docked column on
   // md+ and a full-height drawer below, so this single state drives both.
@@ -119,6 +134,9 @@ export function ChatWorkspace() {
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
 
+  // Export conversation dialog (PRD §12) — opened from the chat top bar.
+  const [exportOpen, setExportOpen] = useState(false);
+
   // ── LEGACY GUARD ────────────────────────────────────────────────────────
   // OnyxCode (Code Mode) is gone. If the store still points at a legacy
   // "code" conversation (a stale pointer from before the removal), fall
@@ -130,7 +148,9 @@ export function ChatWorkspace() {
     if (curConv?.mode !== "code") return;
     if (conversationsLoading && conversations.length === 0) return; // wait for the list
     const latestAgent = [...conversations]
-      .filter((c) => (!c.mode || c.mode === "agent") && !c.is_archived)
+      .filter(
+        (c) => (!c.mode || c.mode === "agent") && !c.is_archived && !c.project_id,
+      )
       .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
     if (latestAgent) {
       void selectConversation(latestAgent.id);
@@ -324,6 +344,20 @@ export function ChatWorkspace() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
+            {/* Export conversation (PRD §12) — PDF / DOCX / Markdown download
+                of the CURRENT conversation; hidden on a fresh empty chat. */}
+            {currentConversationId && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setExportOpen(true)}
+                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
+                title="Export conversation"
+                aria-label="Export conversation"
+              >
+                <FileDown className="h-4 w-4" />
+              </Button>
+            )}
             {/* Knowledge Base — the workspace's persistent knowledge (AI-saved
                 items + hosted files) as a docked sidebar; the compact sibling
                 of the full /knowledge-base page. */}
@@ -412,6 +446,11 @@ export function ChatWorkspace() {
             </Button>
           </div>
         </div>
+        {/* PROJECT CHROME (PRD §6.2): the persistent project identity bar —
+            icon, name, live activity dot, Chat History / settings / back-to-
+            general — shown only while a project workspace is open. The drawer
+            is a portal dialog, mounted alongside. */}
+        {activeProject && <ProjectChrome project={activeProject} />}
         <div className="min-h-0 flex-1 overflow-hidden">
           <ChatContainer />
         </div>
@@ -495,6 +534,20 @@ export function ChatWorkspace() {
       >
         <LogsViewer />
       </DockedPanel>
+
+      {/* Export conversation dialog (top-bar entry point). */}
+      <ExportDialog
+        conversationId={currentConversationId}
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+      />
+
+      {/* Project chat-history drawer (PRD §6) — a portal dialog; renders
+          nothing while closed. */}
+      {activeProject && <ProjectHistoryDrawer />}
+
+      {/* Global semantic search dialog (Task 2-b, PRD §11). */}
+      <GlobalSearchDialog />
 
       <DockedPanel
         id="timeline-panel"

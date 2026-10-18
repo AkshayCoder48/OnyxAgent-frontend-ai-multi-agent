@@ -141,6 +141,18 @@ export interface BgTurnOptions {
     description: string;
     parameters: Record<string, unknown>;
   }>;
+  /** PERMISSION SNAPSHOT (Task 2-d / PRD §8.2 — background parity): the
+   *  browser's approval policy for SANDBOX-NATIVE tools, computed at launch
+   *  (the sandbox cannot read Dexie). The runner resolves each native call
+   *  against it: denied tools are excluded from its tool surface entirely;
+   *  approval-required tools fail fast with an honest "run this from the
+   *  chat" message (unattended mode cannot wait for a human). Bridged tools
+   *  are NOT governed by this snapshot — they execute back in the browser
+   *  and run the FULL interactive gate there. */
+  toolPermissions?: {
+    global: Record<string, string>;
+    projectRules: Array<{ resource_id: string; resource_type: string; permission: string }>;
+  };
 }
 
 const JOBS_KEY = "onyx-bg-jobs";
@@ -272,6 +284,9 @@ export async function launchBackgroundTurn(opts: BgTurnOptions): Promise<BgJob> 
     // sandbox implementation). The runner exposes these to the LLM as bridged
     // tools executed back in the browser.
     ...(opts.browserTools && opts.browserTools.length > 0 ? { browserTools: opts.browserTools } : {}),
+    // PERMISSION SNAPSHOT (Task 2-d) — the browser's approval policy for
+    // sandbox-native tools (see BgTurnOptions.toolPermissions).
+    ...(opts.toolPermissions ? { toolPermissions: opts.toolPermissions } : {}),
     messages: [
       // PRD §13/§14/§38 — the caller prompt (use-chat buildTurnOptions) has
       // no tool knowledge of its own; the sandbox runner appends the live

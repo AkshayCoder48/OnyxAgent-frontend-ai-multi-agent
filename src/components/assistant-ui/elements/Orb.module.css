@@ -49,6 +49,19 @@
   opacity: 0.28;
 }
 
+/* animate={false} — the static lattice: cells rest at the same frame the
+   reduced-motion query shows (dim dots, bright centre). CSS-only — no JS
+   timers, no play-state juggling. Used by PersonalityOrb's reduced-motion
+   resolution (and safe to combine with the media query below — both set
+   the same resting frame). */
+.lattice[data-static] .cell {
+  animation: none;
+  opacity: 0.35;
+}
+.lattice[data-static] .cell[data-mid] {
+  opacity: 0.85;
+}
+
 /* Centre cell — the static frame under reduced motion. */
 .cell[data-mid] {
   opacity: 0.85;
@@ -113,5 +126,24 @@
   }
   .cell[data-mid] {
     opacity: 0.85;
+  }
+
+  /* Essential-motion exception (PRD §10.4): liveness while the agent WORKS is
+     essential status information, so a wrapper carrying the GLOBAL
+     .orb-essential class (PersonalityOrb, when resolveOrb keeps its slow
+     working pulse under reduced motion) restores the cell animation the rule
+     above freezes — this file is where both `.cell` and the `orbCell`
+     keyframes name resolve to their shared hashed names. duration and
+     iteration-count need !important because the app-wide reduced-motion
+     kill-switch (globals.css) sets them !important on EVERY element; with
+     both sides important, this rule's higher specificity (class + class vs
+     the universal selector) wins. One slow, subtle pulse (~7s) is the entire
+     exception — everything else stays static under reduced motion. */
+  :global(.orb-essential) .cell {
+    animation-name: orbCell;
+    animation-duration: var(--orb-d, 2000ms) !important;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite !important;
+    animation-fill-mode: both;
   }
 }

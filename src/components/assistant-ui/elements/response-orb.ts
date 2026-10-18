@@ -17,15 +17,18 @@
  */
 
 import type { OrbVariant } from "./orb";
+import { ALL_ORB_VARIANTS as ORB_REGISTRY } from "@/lib/orb/personalities";
 
-/** All 25 lattice variants, in registry order. */
-export const ALL_ORB_VARIANTS: readonly OrbVariant[] = [
-  "S1", "S2", "S3", "S4", "S5",
-  "G1", "G2", "G3", "G4", "G5",
-  "C1", "C2", "C3", "C4", "C5",
-  "B1", "B2", "B3", "B4", "B5",
-  "M1", "M2", "M3", "M4", "M5",
-];
+// Single source of truth for the 25-variant registry now lives with the
+// personality model (src/lib/orb/personalities.ts) — re-exported here so
+// every existing consumer of this module keeps working unchanged.
+export { ALL_ORB_VARIANTS } from "@/lib/orb/personalities";
+// The personality-aware orb (PRD §10): consumers that want the orb to react
+// to the app's real states (and the user's chosen personality, respecting
+// its showInChat flag) should render this instead of picking variants. The
+// random per-response selection below is preserved unchanged for the
+// GenUI/orb surfaces that want a surprise variant per response.
+export { PersonalityOrb } from "./personality-orb";
 
 /** The orb chosen for the current (or most recent) AI response. */
 let current: OrbVariant | null = null;
@@ -34,8 +37,8 @@ let current: OrbVariant | null = null;
 export function pickRandomOrb(exclude?: OrbVariant): OrbVariant {
   const pool =
     exclude === undefined
-      ? (ALL_ORB_VARIANTS as readonly OrbVariant[])
-      : ALL_ORB_VARIANTS.filter((v) => v !== exclude);
+      ? (ORB_REGISTRY as readonly OrbVariant[])
+      : ORB_REGISTRY.filter((v) => v !== exclude);
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
 

@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/components/assistant-ui/elements";
+import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
@@ -281,6 +282,14 @@ export const ToolCallCard = React.memo(function ToolCallCard({
   turnId,
 }: ToolCallCardProps) {
   const displayMode = useToolDisplayStore((s) => s.mode);
+  // HITL APPROVAL GATE (Task 2-d / PRD §13.4): while the call is PAUSED at
+  // the approval gate, the card is replaced by the interactive approval card
+  // (real params + risk note + Approve/Reject) — the gate's tool_call event
+  // (status "awaiting_approval") flips a card into this state, and the
+  // subsequent tool_result event flips it back to the normal rendering.
+  if (toolCall.status === "awaiting_approval") {
+    return <ApprovalCard toolCallId={toolCall.id} toolName={toolCall.name} />;
+  }
   if (displayMode === "simple") {
     return <SimpleToolCallCard toolCall={toolCall} turnId={turnId} />;
   }

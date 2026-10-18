@@ -360,6 +360,33 @@ export function useChat(options: UseChatOptions = {}) {
       if (basePrompt.trim()) parts.push(WEB_RESEARCH_DIRECTIVE);
       const systemPrompt = parts.filter(Boolean).join("\n\n");
 
+      // ── PROJECT CONTEXT INJECTION (Task 2-d / PRD §7.1+§7.3) ──────────
+      // For PROJECT conversations ONLY, append the project context package
+      // (name/goal/instructions + budgeted memory + cross-chat retrieval)
+      // built by buildProjectContextPackage. General chats are unchanged.
+      // Best-effort: a retrieval failure must never block the turn. The
+      // projectId hint covers the FIRST turn of a brand-new project chat
+      // (its conversation row is created mid-turn, after this point).
+      let finalSystemPrompt = systemPrompt;
+      try {
+        const { buildProjectContextPackage } = await import(
+          "@/lib/projects/context-package"
+        );
+        const { useProjectsStore } = await import("@/lib/projects/store");
+        const convId = currentConversationIdFromStore ?? conversationId ?? null;
+        const activeProjectId = useProjectsStore.getState().activeProjectId;
+        const contextPackage = await buildProjectContextPackage(
+          convId,
+          message,
+          activeProjectId ? { projectId: activeProjectId } : {},
+        );
+        if (contextPackage) {
+          finalSystemPrompt = `${systemPrompt}\n\n${contextPackage}`;
+        }
+      } catch {
+        // best-effort — the base system prompt still ships
+      }
+
       return {
         userId,
         conversationId: currentConversationIdFromStore ?? conversationId ?? null,
@@ -385,7 +412,7 @@ export function useChat(options: UseChatOptions = {}) {
                 (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
             },
         ...(routerCandidates ? { providerCandidates: routerCandidates } : {}),
-        systemPrompt,
+        systemPrompt: finalSystemPrompt,
         temperature: temperatureRef.current,
         thinkingEffort: thinkingEffortRef.current,
         emit: emit ?? (() => {}),

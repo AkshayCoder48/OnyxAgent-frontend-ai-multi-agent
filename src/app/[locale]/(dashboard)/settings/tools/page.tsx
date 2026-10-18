@@ -30,6 +30,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { SectionCard as SettingsSectionCard } from "@/components/settings/settings-section";
+import { SectionApprovals } from "@/components/settings/section-approvals";
 import { useAuth } from "@/hooks";
 import { customToolService } from "@/lib/services";
 // Side-effect: registers every built-in tool with the central registry.
@@ -309,6 +310,10 @@ export default function ToolsSettingsPage() {
           </SettingsSectionCard>
         </>
       )}
+
+      {/* Task 2-d (PRD §8.2 + §13.5): approval policies + the approval
+          queue — additive mount at the end of the Tools page. */}
+      <SectionApprovals />
 
       <ToolEditor
         open={editorOpen}

@@ -77,6 +77,7 @@ import {
 } from "@/lib/agent/tool-call-normalize";
 import { manageContext } from "@/lib/agent/context/context-manager";
 import { resolveModelContext } from "@/lib/agent/context/model-context";
+import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
 import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
 import {
   classifyRouterError,
@@ -3312,6 +3313,61 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
         const effectiveArgs = execArgs;
 
+        // ── HITL APPROVAL GATE (Task 2-d / PRD §8.2 + §13) ───────────────
+        // Resolve the effective permission (global policy + the
+        // conversation's project rules) BEFORE the handler runs. denied →
+        // corrective tool result, never executes; approval_required → an
+        // ApprovalRequest row + `approval_request` WSEvent + waiting card,
+        // then a real WAIT for the browser's decision (params-hash verified
+        // on approve). allowed → fall through to the normal execution path.
+        const gate = await maybeGateToolCall({
+          toolName: execName,
+          args: effectiveArgs,
+          toolCallId: tc.id,
+          conversationId,
+          emit,
+          signal,
+          source: "chat",
+        });
+        if (gate.verdict !== "allowed") {
+          const gateResult: string =
+            gate.verdict === "denied" ? gate.reason : gate.result;
+          const gateStatus: ToolCall["status"] =
+            gate.verdict === "denied" ? "error" : gate.status;
+          // Same persistence backfill the other error paths use (see the
+          // PERSISTENCE FIX comment in the success path below).
+          for (const part of assistantParts) {
+            if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+              part.toolCall.result = gateResult;
+              part.toolCall.status = gateStatus;
+              if (nc?.correctedFrom) part.toolCall.name = execName;
+            }
+          }
+          emit({
+            type: "tool_result",
+            data: { tool_call_id: tc.id, content: gateResult },
+            timestamp: nowISO(),
+          });
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            name: tc.name,
+            content: gateResult,
+          });
+          allToolCalls.push({
+            id: tc.id,
+            name: execName,
+            args: effectiveArgs,
+            result: gateResult,
+            status: gateStatus,
+          });
+          logWarn("agent", `Tool '${execName}' blocked by the approval gate — returned ${gate.verdict === "denied" ? "permission-denied" : "approval-resolution"} result (not executed)`, {
+            context: { tool: execName, tool_call_id: tc.id },
+          });
+          return;
+        }
+        const gateApprovalId = gate.approvalId;
+
         // Build the per-call tool context. We inject an `onToolOutput`
         // callback that streams stdout/stderr chunks back to the UI in real
         // time as `tool_output` WSEvents. Tools that don't stream simply
@@ -3458,6 +3514,13 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           outcome = await execHandler();
         }
         const { result, status } = outcome;
+
+        // APPROVAL OUTCOME (PRD §13.6 — record the outcome): when this call
+        // passed the gate via an APPROVAL, mark the approval row
+        // completed/failed with an honest summary (best-effort).
+        if (gateApprovalId) {
+          void recordApprovalOutcome(gateApprovalId, result, status === "error");
+        }
 
         // PERSISTENCE FIX (PRD §3/§26 — "Web Search UI persistence" /
         // "UI Rendering Architecture"): the tool PART pushed into

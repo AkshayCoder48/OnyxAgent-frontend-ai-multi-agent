@@ -3,15 +3,20 @@
 import * as React from "react";
 import { Check, Pause, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PersonalityOrb, useOrbChatVisible } from "./personality-orb";
 
 export type AgentState = "working" | "waiting" | "done";
 
 /**
  * AgentStatus — one pill that always answers: what is it doing, and for
- * how long. A rounded pill with a state dot, a label that crossfades when
+ * how long. A rounded pill with a state glyph, a label that crossfades when
  * it changes, an elapsed time while the agent is still going, and a
  * trailing icon (assistant-ui `elements-agent-status` recipe, Terra
  * retheme; the "working" pulse uses terracotta instead of blue).
+ *
+ * The leading glyph is the reactive personality orb while the user's
+ * personality allows orbs in chat (decorative — the label text stays the
+ * accessible status, PRD §10.4); otherwise the original pulsing dot.
  */
 export function AgentStatus({
   state,
@@ -35,6 +40,9 @@ export function AgentStatus({
   className?: string;
 } & Omit<React.ComponentPropsWithoutRef<"div">, "children">) {
   const done = state === "done";
+  // Hook runs unconditionally (hooks rules); the state gates the glyph.
+  const chatOrbVisible = useOrbChatVisible();
+  const orbLeads = chatOrbVisible && !done;
   return (
     <div
       data-slot="agent-status"
@@ -46,6 +54,11 @@ export function AgentStatus({
     >
       {done ? (
         <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-label="Done" />
+      ) : orbLeads ? (
+        // The personality orb, reacting to the live reaction state
+        // ("thinking"/"tool_running" while working; the override-driven
+        // "awaiting_approval" state once Task 2-d wires it for "waiting").
+        <PersonalityOrb size={14} className="shrink-0" />
       ) : (
         <span
           className={cn(

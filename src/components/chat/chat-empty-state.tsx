@@ -3,6 +3,7 @@
 import { ArrowUpRight, Code2, FileSearch, Globe, Sparkles, Wrench, Brain } from "lucide-react";
 
 import { useAuth } from "@/hooks";
+import { PersonalityOrb } from "@/components/assistant-ui/elements";
 
 const PROMPTS = [
   {
@@ -58,6 +59,11 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
        when it fits and scrolls FROM THE TOP when it doesn't. */
     <div className="mx-auto h-full w-full max-w-2xl overflow-y-auto scrollbar-thin px-3 py-4 sm:px-4 sm:py-8">
       <div className="m-auto flex w-full flex-col items-center">
+        {/* The orb's idle presence (PRD §10) — reacts to typing in the
+            composer (user_typing state) and hidden entirely when the
+            personality opts out of chat orbs. Decorative. */}
+        <PersonalityOrb size={44} className="mb-3 sm:mb-4" />
+
         {/* Title — "Welcome to" + decorated OnyxAgent logo text */}
         <h2 className="text-center text-xl font-bold tracking-tight sm:text-2xl md:text-3xl">
           {firstName ? (

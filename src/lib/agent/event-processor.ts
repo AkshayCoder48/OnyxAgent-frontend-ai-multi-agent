@@ -21,6 +21,19 @@ import { useConversationStore, useResearchStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { logError } from "@/lib/client-logger";
 import type { ExecutionChatStore } from "@/stores/chat-store";
+import { usePendingApprovals } from "@/lib/agent/approval-gate";
+
+/** SEMANTIC SEARCH INDEX (Task 2-b) — turn-end hook. Dynamic import keeps
+ *  the indexer out of the streaming hot path's module graph; every failure
+ *  (including a missing conversation id) is swallowed silently. */
+function scheduleSearchIndexingFor(conversationId: string | null): void {
+  if (!conversationId) return;
+  void import("@/lib/search/indexer")
+    .then(({ scheduleSearchIndexing }) => scheduleSearchIndexing(conversationId))
+    .catch(() => {
+      // best-effort only — search falls back to the backfill paths
+    });
+}
 
 /**
  * AgentEventProcessor — the WSEvent → message-state pipeline, extracted from
@@ -806,10 +819,23 @@ export class AgentEventProcessor {
           tool_call_id: string;
           _preemit?: boolean;
           ts?: number;
+          /** Task 2-d (additive): an explicit status for this update — the
+           *  approval gate emits "awaiting_approval" to flip the card from
+           *  running to the approval state without touching any other
+           *  field. Absent → the pre-existing behavior. */
+          status?: string;
         };
         const { tool_name, args, tool_call_id } = data;
         const isPreemit = !!data._preemit;
         const ts = typeof data.ts === "number" ? data.ts : undefined;
+        const explicitStatus =
+          data.status === "pending" ||
+          data.status === "running" ||
+          data.status === "awaiting_approval" ||
+          data.status === "completed" ||
+          data.status === "error"
+            ? data.status
+            : undefined;
         this.eventSeq += 1;
 
         // ── TIMELINE NORMALIZER + DEDUPLICATOR (§2/§6/§17) ─────────────
@@ -863,10 +889,10 @@ export class AgentEventProcessor {
           store.updateToolCallPart(this.currentMessageId, tool_call_id, {
             name: tool_name || existing.toolCall.name,
             args: !isPreemit ? args : (hasStreamingArgs ? existing.toolCall.args : args),
-            status: isPreemit ? "pending" : "running",
+            status: explicitStatus ?? (isPreemit ? "pending" : "running"),
           });
           timelineDebug(
-            `tool_call ${tool_call_id} (${tool_name || "?"}) → updated existing part${isPreemit ? " (pre-emit)" : ""}`,
+            `tool_call ${tool_call_id} (${tool_name || "?"}) → updated existing part${isPreemit ? " (pre-emit)" : ""}${explicitStatus ? ` [status: ${explicitStatus}]` : ""}`,
           );
           break;
         }
@@ -891,7 +917,7 @@ export class AgentEventProcessor {
             id: tool_call_id,
             name: tool_name,
             args,
-            status: isPreemit ? "pending" : "running",
+            status: explicitStatus ?? (isPreemit ? "pending" : "running"),
           },
           this.activeRound,
           ts,
@@ -1084,6 +1110,10 @@ export class AgentEventProcessor {
         this.store.getState().setProcessing(false);
         this.activeGenerationId = null;
         this.currentMessageId = null;
+        // SEMANTIC SEARCH INDEX (Task 2-b): failed turns still checkpointed —
+        // schedule the debounced re-index so the partial work stays
+        // searchable. Fire-and-forget, never blocks anything.
+        scheduleSearchIndexingFor(this.opts.getConversationId());
         this.opts.onTurnEnd?.("failed");
         break;
       }
@@ -1099,6 +1129,46 @@ export class AgentEventProcessor {
             allowCustom: q.allow_custom,
           })),
         );
+        break;
+      }
+
+      case "approval_request": {
+        // HITL APPROVAL GATE (Task 2-d / PRD §13): a gate opened somewhere in
+        // THIS execution (foreground runtime, a subagent, or a bridged
+        // background tool). Route the payload into the live pending-approvals
+        // store so the chat card / queue can render it. NOT generation-guarded
+        // (subagent + bridge approvals legitimately carry no generation id,
+        // and the store upsert is idempotent with the gate's own publish).
+        {
+          const data = wsEvent.data as {
+            approval_id?: string;
+            tool_name?: string;
+            operation_type?: string;
+            operation_parameters?: Record<string, unknown>;
+            risk_note?: string | null;
+            expires_at?: string | null;
+            tool_call_id?: string;
+          };
+          if (data && typeof data.approval_id === "string" && data.approval_id) {
+            usePendingApprovals.getState().upsert({
+              approval_id: data.approval_id,
+              tool_call_id: data.tool_call_id ?? null,
+              tool_name: typeof data.tool_name === "string" ? data.tool_name : "unknown",
+              operation_type:
+                typeof data.operation_type === "string" ? data.operation_type : "Approval required",
+              operation_parameters:
+                data.operation_parameters && typeof data.operation_parameters === "object"
+                  ? data.operation_parameters
+                  : {},
+              risk_note: typeof data.risk_note === "string" ? data.risk_note : null,
+              expires_at: typeof data.expires_at === "string" ? data.expires_at : null,
+              project_id: null,
+              conversation_id: this.opts.getConversationId() ?? "",
+              source: "chat",
+              opened_at: Date.now(),
+            });
+          }
+        }
         break;
       }
 
@@ -1158,6 +1228,11 @@ export class AgentEventProcessor {
         this.turnStartedAt = null;
         this.lastEventTs = null;
         this.runnerFirstTs = null;
+        // SEMANTIC SEARCH INDEX (Task 2-b): the turn's final Dexie saves have
+        // landed (message_saved precedes complete) — schedule the debounced
+        // conversation re-index + best-effort embedding pass. Fire-and-forget
+        // (dynamic import, error-swallowing) — NEVER blocks the UI/stream.
+        scheduleSearchIndexingFor(this.opts.getConversationId());
         this.opts.onTurnEnd?.("completed");
         break;
       }
