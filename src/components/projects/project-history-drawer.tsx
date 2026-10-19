@@ -282,14 +282,17 @@ export function ProjectHistoryDrawer() {
     }
   }
 
-  // Drawer slide: closed sits fully off-screen to the left.
-  const panelX = useTransform(progress, (v) => `${(1 - v) * 100}%`);
+  // Drawer slide: closed sits fully off-screen to the LEFT (the panel is
+  // anchored at the left edge, so it must slide IN from the left — a
+  // positive offset would make it sweep right→left across the content).
+  const panelX = useTransform(progress, (v) => `${(1 - v) * -100}%`);
   const backdropOpacity = useTransform(progress, [0, 1], [0, 0.42]);
-  // The ARROW shares the same progress: as the drawer arrives (0→1) the arrow
-  // rotates from pointing into the drawer (pulling it open) to pointing back
-  // out (push it closed) and settles a touch left. Close reverses both.
-  const arrowRotate = useTransform(progress, [0, 1], [0, -180]);
-  const arrowX = useTransform(progress, [0, 1], [6, 0]);
+  // The ARROW shares the same progress: as the drawer is PULLED in from the
+  // left (0→1) the arrow swings from pointing right (the pull direction) to
+  // pointing left — back out toward the left edge, where the drawer retracts
+  // on close. Close reverses both together.
+  const arrowRotate = useTransform(progress, [0, 1], [180, 0]);
+  const arrowX = useTransform(progress, [0, 1], [-6, 0]);
 
   // Phase machine — ONE animation per intent; re-clicking mid-flight simply
   // retargets the SAME MotionValue (framer-motion cancels the previous
@@ -616,7 +619,11 @@ function DrawerPortalBody({
         tabIndex={-1}
         style={{
           x: panelX,
-          backgroundColor: `color-mix(in srgb, ${accent} 5%, var(--background))`,
+          // NOTE: the app's theme variables are Tailwind v4 `--color-*`
+          // (--color-background, set on <html> by the theme provider +
+          // globals.css :root blocks). A bare `var(--background)` resolves
+          // to nothing → the whole color-mix() is invalid → transparent panel.
+          backgroundColor: `color-mix(in srgb, ${accent} 5%, var(--color-background))`,
           borderColor: accentAlpha(accent, 0.35),
         }}
         className="fixed inset-y-0 left-0 z-[81] flex w-[min(88vw,340px)] flex-col border-r shadow-2xl shadow-foreground/20 outline-none"

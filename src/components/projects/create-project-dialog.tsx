@@ -11,8 +11,12 @@
  *                  retrieval, automatic memory updates + the context budget.
  *   Resources tab— REAL installed resources only (PRD §8.1): built-in tools
  *                  enumerated live from the tool registry, MCP servers, the
- *                  installed skills, Composio connectors, and the terminal /
- *                  browser capabilities — each with an explicit tri-state
+ *                  SKILLS DIRECTORY (the 55-skill master library that ships
+ *                  with every sandbox — the same source `manage_skill`
+ *                  action "list" and Settings → Skills use — plus the
+ *                  user's additionally installed skills), Composio
+ *                  connectors, and the terminal / browser capabilities —
+ *                  each with an explicit tri-state
  *                  (Allowed / Approval required / Denied). Empty categories
  *                  say "None installed" honestly. Explicit non-default
  *                  choices become `ProjectResourceRule`s; everything else
@@ -73,6 +77,7 @@ import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores";
 import { useProviders } from "@/hooks/use-data";
 import { mcpService, skillService } from "@/lib/services";
+import { MASTER_SKILLS } from "@/lib/agent/master-skills";
 import { listTools } from "@/lib/tools/registry";
 import {
   defaultPermissionFor,
@@ -278,7 +283,14 @@ export function CreateProjectDialog({
           hint: `MCP server (${s.transport ?? "stdio"})`,
         }));
 
-        const skillResourceRows: ResourceRow[] = (
+        // SKILLS — the skills DIRECTORY is the default source (user request
+        // 2026-10-19): the 55-skill MASTER LIBRARY bundled with every sandbox
+        // (/home/user/skills — the same list `manage_skill` action "list"
+        // and the Settings → Skills page render) PLUS the user's additionally
+        // installed skills. Library skills have no DB row, so they are
+        // identified BY NAME (stable across sessions); an installed skill
+        // with the same name shadows its library copy.
+        const installedSkillRows: ResourceRow[] = (
           skillRows as Array<{ id: string; name: string; description?: string | null }>
         )
           .filter((s) => (s as { is_active?: boolean }).is_active !== false)
@@ -290,6 +302,23 @@ export function CreateProjectDialog({
             defaultPermission: "allowed",
             hint: s.description ?? undefined,
           }));
+        const installedSkillNames = new Set(
+          installedSkillRows.map((r) => r.label.trim().toLowerCase()),
+        );
+        const masterSkillRows: ResourceRow[] = MASTER_SKILLS.map((s) => ({
+          key: `skill:${s.name}`,
+          resource_type: "skill",
+          resource_id: s.name,
+          label: s.name,
+          defaultPermission: "allowed",
+          hint: s.description,
+        }));
+        const skillResourceRows: ResourceRow[] = [
+          ...masterSkillRows.filter(
+            (m) => !installedSkillNames.has(m.label.trim().toLowerCase()),
+          ),
+          ...installedSkillRows,
+        ];
 
         const connectorRows: ResourceRow[] = (composioToolkits ?? []).map((c) => ({
           key: `connector:${c.toolkit}`,
@@ -468,8 +497,13 @@ export function CreateProjectDialog({
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent
         className={cn(
-          "flex max-h-[88vh] w-[min(94vw,600px)] flex-col gap-0 overflow-hidden p-0",
-          "max-sm:translate-y-0 max-sm:bottom-0 max-sm:top-auto max-sm:w-full max-sm:max-w-full max-sm:rounded-b-none max-sm:rounded-t-2xl",
+          // Centered on ALL viewports (the base dialog positioning) — mobile
+          // previously pinned this to the bottom edge as a sheet, which read
+          // as "stuck to the bottom". dvh-aware max-height keeps it clear of
+          // mobile browser chrome; rounded-2xl restores corners on mobile
+          // (the base only rounds at sm+); max-w-none un-caps the base
+          // max-w-lg (512px) so the intended 600px width applies.
+          "flex max-h-[min(88vh,88dvh)] w-[min(94vw,600px)] max-w-none flex-col gap-0 overflow-hidden rounded-2xl p-0",
         )}
       >
         <DialogHeader className="border-b px-5 pt-4 pb-3 text-left">
@@ -861,14 +895,21 @@ export function CreateProjectDialog({
                     )}
                   </section>
 
-                  {/* Skills */}
+                  {/* Skills — the full skills directory (master library + installed) */}
                   <section className="space-y-1.5">
                     <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      <Sparkles className="h-3.5 w-3.5" aria-hidden /> Installed skills
+                      <Sparkles className="h-3.5 w-3.5" aria-hidden /> Skills directory
+                      <span className="font-mono normal-case tracking-normal">
+                        ({rowCountFor((r) => r.resource_type === "skill")})
+                      </span>
                     </h4>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      The master skill library that ships with every sandbox, plus skills you
+                      installed yourself.
+                    </p>
                     {rowCountFor((r) => r.resource_type === "skill") === 0 ? (
                       <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                        None installed — add skills in Settings → Skills.
+                        No skills available.
                       </p>
                     ) : (
                       <div className="max-h-56 overflow-y-auto rounded-xl border border-border [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-track]:transparent">
