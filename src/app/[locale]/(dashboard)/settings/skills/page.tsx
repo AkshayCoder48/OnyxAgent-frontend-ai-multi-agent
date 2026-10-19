@@ -428,53 +428,8 @@ export default function SkillsSettingsPage() {
       </SettingsSectionCard>
 
       <SettingsSectionCard
-        title="Upload a skill"
-        description="Upload a SKILL.md file or a .zip archive. The skill will be extracted to OPFS and made available to the AI on the next chat turn."
-      >
-        <div className="rounded-xl border border-dashed border-foreground/15 p-8 text-center">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".zip,.md,.markdown"
-            multiple
-            onChange={handleUpload}
-            disabled={uploading || !opfsAvailable || !e2bAvailable}
-            className="hidden"
-            id="skill-upload-input"
-          />
-          <Upload className="mx-auto h-8 w-8 text-muted-foreground mb-3" />
-          <p className="font-medium">
-            {uploading ? "Installing…" : "Drop a .zip or SKILL.md here"}
-          </p>
-          <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
-            The .zip may either contain <code>SKILL.md</code> at its root or a
-            single top-level folder containing <code>SKILL.md</code>. YAML
-            front-matter (<code>name:</code>, <code>description:</code>) is
-            parsed automatically.
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="mt-3"
-            disabled={uploading || !opfsAvailable || !e2bAvailable}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {uploading ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Installing…
-              </>
-            ) : (
-              <>
-                <Plus className="h-4 w-4 mr-1.5" /> Choose file
-              </>
-            )}
-          </Button>
-        </div>
-      </SettingsSectionCard>
-
-      <SettingsSectionCard
-        title="SkillsMP catalog"
-        description="Browse community skills. Click Install to download and extract the skill to your workspace."
+        title="Skill directory (SkillsMP)"
+        description="The live skill directory beyond the built-in library — hundreds of community skills. This is the same directory the AI searches via manage_skill (search_marketplace). Click Install to download and extract a skill to your workspace."
       >
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <Input
@@ -701,6 +656,51 @@ export default function SkillsSettingsPage() {
             )}
           </>
         )}
+      </SettingsSectionCard>
+
+      <SettingsSectionCard
+        title="Upload a skill"
+        description="Upload a SKILL.md file or a .zip archive. The skill will be extracted to OPFS and made available to the AI on the next chat turn."
+      >
+        <div className="rounded-xl border border-dashed border-foreground/15 p-8 text-center">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".zip,.md,.markdown"
+            multiple
+            onChange={handleUpload}
+            disabled={uploading || !opfsAvailable || !e2bAvailable}
+            className="hidden"
+            id="skill-upload-input"
+          />
+          <Upload className="mx-auto h-8 w-8 text-muted-foreground mb-3" />
+          <p className="font-medium">
+            {uploading ? "Installing…" : "Drop a .zip or SKILL.md here"}
+          </p>
+          <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
+            The .zip may either contain <code>SKILL.md</code> at its root or a
+            single top-level folder containing <code>SKILL.md</code>. YAML
+            front-matter (<code>name:</code>, <code>description:</code>) is
+            parsed automatically.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3"
+            disabled={uploading || !opfsAvailable || !e2bAvailable}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {uploading ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Installing…
+              </>
+            ) : (
+              <>
+                <Plus className="h-4 w-4 mr-1.5" /> Choose file
+              </>
+            )}
+          </Button>
+        </div>
       </SettingsSectionCard>
     </div>
   );

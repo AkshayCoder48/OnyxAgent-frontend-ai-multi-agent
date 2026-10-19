@@ -558,7 +558,8 @@ describe("analyze_workspace tool contract", () => {
     const result = (await tool!.handler({ max_files: 10 }, makeCtx())) as Record<string, unknown>;
 
     // Legacy keys — all present, exact set plus the `meta` telemetry, the
-    // master skill library index (master_skill_library) and mcp_market.
+    // master skill library index (master_skill_library), the live skill
+    // directory metadata (skill_marketplace) and mcp_market.
     expect(Object.keys(result).sort()).toEqual(
       [
         "available_tools",
@@ -573,6 +574,7 @@ describe("analyze_workspace tool contract", () => {
         "mcp_servers",
         "memories",
         "meta",
+        "skill_marketplace",
         "skills",
         "summary",
         "total_size_bytes",
@@ -590,6 +592,9 @@ describe("analyze_workspace tool contract", () => {
     expect(msl.count).toBeGreaterThan(50); // the 55-skill master library
     expect(msl.path).toBe("/home/user/skills");
     expect(msl.index_path).toBe("/home/user/skills/MASTER-INDEX.md");
+    const sm = result.skill_marketplace as { id: string; url: string; search_action: string };
+    expect(sm.id).toBe("skillsmp"); // the live skill directory (beyond the library)
+    expect(sm.search_action).toContain("search_marketplace");
     const keyFiles = result.key_files as Record<string, unknown>;
     expect(keyFiles.readme).toBe("# Demo\nHello world");
     expect(keyFiles.package_json).toBe('{"name":"demo"}');

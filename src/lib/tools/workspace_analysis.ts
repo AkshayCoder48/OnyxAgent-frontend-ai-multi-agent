@@ -33,7 +33,7 @@ import {
   type LocalScanResult,
   type WorkspaceFile,
 } from "./workspace-snapshot";
-import { summarizeMcpMarket } from "@/lib/skills/catalog-registry";
+import { summarizeMcpMarket, summarizeSkillMarketplace } from "@/lib/skills/catalog-registry";
 import {
   MASTER_SKILLS,
   MASTER_SKILLS_COUNT,
@@ -67,6 +67,10 @@ interface WorkspaceSummary {
     index_path: string;
     skills: Array<{ name: string; description: string }>;
   };
+  /** The LIVE skill directory beyond the built-in library (SkillsMP — the
+   *  same directory Settings → Skills renders). Metadata-only here; browse
+   *  it live with manage_skill action "search_marketplace". */
+  skill_marketplace: Record<string, unknown>;
   /** Curated MCPMarket catalog summary (id/name/url). */
   mcp_market: Array<Record<string, unknown>>;
   summary: string;
@@ -123,6 +127,7 @@ registerTool(
 - key_files: contents of README, package.json, tsconfig, Dockerfiles, .env files
 - skills: the user's app-installed skills
 - master_skill_library: the index of the 55-skill MASTER LIBRARY that ships with OnyxAgent — it is ALREADY in the sandbox at /home/user/skills/ (no install needed): pick skills BY NAME from the index, then read_file /home/user/skills/<name>/SKILL.md before applying one
+- skill_marketplace: the LIVE skill directory BEYOND the built-in library (SkillsMP — hundreds of skills, the same one Settings → Skills renders). Browse/search it with manage_skill action "search_marketplace"; install with action "install_from_marketplace" (by slug)
 - mcp_market: curated MCPMarket catalog (see manage_mcp action "market" for details)
 - mcp_servers: configured MCP servers
 - available_tools: every tool currently registered
@@ -137,7 +142,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
 3. Decide disposable vs persistent agents
 4. Avoid duplicating existing subagents
 5. Match coding style/patterns observed in existing files
-6. Match the task against the master skill library index — metadata-first, read only the skills the task needs (never bulk-load)`,
+6. Match the task against the master skill library index — metadata-first, read only the skills the task needs (never bulk-load). Missing something? The LIVE skill directory (manage_skill search_marketplace) has hundreds more.`,
   {
     type: "object",
     properties: {
@@ -177,6 +182,10 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
     // The master skill library is STATIC metadata — always included (even
     // with no sandbox key yet) so skills are always discoverable.
     const master_skill_library = masterSkillLibraryIndex();
+    // The LIVE SkillsMP skill directory — static metadata (no I/O) so the
+    // scan never blocks on the network; the agent browses it live with
+    // manage_skill "search_marketplace" when a task needs more skills.
+    const skill_marketplace = summarizeSkillMarketplace() as unknown as Record<string, unknown>;
     const mcp_market =
       local.mcp_market?.length
         ? local.mcp_market
@@ -228,6 +237,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
         : `No specific technologies detected from file extensions.`,
       `Skills installed: ${skills.length}.`,
       `Master skill library: ${master_skill_library.count} skills ALWAYS available at ${master_skill_library.path} (index: ${master_skill_library.index_path}) — pick by name, read the SKILL.md before applying.`,
+      `Skill directory (SkillsMP — LIVE, beyond the library): hundreds of skills at ${summarizeSkillMarketplace().url} — browse/search with manage_skill "search_marketplace".`,
       `MCP Market catalog: ${mcp_market.length} servers (manage_mcp market).`,
       `MCP servers: ${mcp_servers.length}.`,
       `Available tools: ${available_tools.length}.`,
@@ -249,6 +259,7 @@ CRITICAL: Call this BEFORE modifying files or spawning subagents. Use the output
       existing_subagents,
       memories,
       master_skill_library,
+      skill_marketplace,
       mcp_market,
       summary,
       errors,

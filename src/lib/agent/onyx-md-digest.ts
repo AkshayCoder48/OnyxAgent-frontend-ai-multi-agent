@@ -25,7 +25,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_memory [save / search / list / delete] — Persistent facts about the user (preferences, decisions). Survives across conversations.
 - project_memory [save / list / update / delete / pin] — CURRENT project's durable facts (decisions, constraints, bugs, file refs). Project chats only — powers cross-chat memory.
 - knowledge_base [search / get / save / update / delete / list / file hosting] — Workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
-- manage_skill [list / read / create / edit / delete] — The user's OWN app-installed skills. The 55-skill MASTER LIBRARY is separate — always in the sandbox at /home/user/skills/ (MASTER-INDEX.md); read those directly.
+- manage_skill [list / read / create / edit / delete / catalog / search_marketplace / install_from_marketplace] — Skills — list shows ALL (55-skill library + user's); search_marketplace/install_from_marketplace = live SkillsMP directory.
 - manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
 - manage_custom_tool [create / edit / delete] — Build reusable custom tools: http_webhook (POSTs args as JSON) or python_snippet (runs run(**params)).
 - manage_env_var [list / get / add / set / edit / delete] — Sandbox env vars. list shows names only; get returns the value. Tools receive them automatically.

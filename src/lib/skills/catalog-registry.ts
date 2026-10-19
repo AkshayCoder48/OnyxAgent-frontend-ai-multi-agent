@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * MCP-Market catalog.
+ * MCP-Market catalog + the SkillsMP skill-directory metadata.
  *
  * A STATIC, always-available registry of the curated MCPMarket servers
  * with REAL connection configs bundled as local files under
@@ -10,12 +10,55 @@
  * manage_mcp create; stdio/npx/uvx servers run inside the E2B sandbox via
  * an MCP client script.
  *
- * SKILLS no longer live here: the skill-repository system was replaced by
- * the MASTER SKILL LIBRARY (user request 2026-10-19) — every skill ships
- * inside one bundle that is attached to EVERY E2B sandbox at startup and
- * extracted to /home/user/skills/ (index: MASTER-INDEX.md; module:
- * src/lib/agent/master-skills.ts; builder: scripts/build_master_skill.py).
+ * SKILL REPOSITORIES are gone (replaced by the MASTER SKILL LIBRARY, user
+ * request 2026-10-19 — every skill ships inside one bundle attached to
+ * EVERY E2B sandbox at startup and extracted to /home/user/skills/; index:
+ * MASTER-INDEX.md; module: src/lib/agent/master-skills.ts; builder:
+ * scripts/build_master_skill.py). Beyond that built-in library, the LIVE
+ * skill directory the app supports is SkillsMP (skillsmp.com/skills — the
+ * same directory Settings → Skills renders): the agent browses/searches it
+ * with `manage_skill` action `search_marketplace` and installs from it with
+ * action `install_from_marketplace` (user request: list/fetch skills must
+ * default to the skills directory, not a static handful).
  */
+
+// ---------------------------------------------------------------------------
+// The LIVE skill directory beyond the built-in library — SkillsMP.
+// ---------------------------------------------------------------------------
+
+/** Metadata about the SkillsMP skill directory (no I/O — live browse happens
+ *  through manage_skill search_marketplace / the Settings → Skills page). */
+export interface SkillMarketplaceInfo {
+  /** Stable id. */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** The public directory URL (browse it in a browser). */
+  url: string;
+  /** How the agent searches it (the live tool action). */
+  search_action: string;
+  /** How the agent installs from it (the live tool action). */
+  install_action: string;
+  /** Install identifier field (the directory's unique slug). */
+  install_key: string;
+  description: string;
+}
+
+export const SKILL_MARKETPLACE: SkillMarketplaceInfo = {
+  id: "skillsmp",
+  name: "SkillsMP Skill Directory",
+  url: "https://skillsmp.com/skills",
+  search_action: 'manage_skill action "search_marketplace"',
+  install_action: 'manage_skill action "install_from_marketplace"',
+  install_key: "slug",
+  description:
+    "The LIVE skill directory beyond the built-in master library — hundreds of community skills (searchable by keyword, browsable by top stars). Same directory the Settings → Skills page renders. Omit the query to browse the top; install by slug, then read the skill before applying it.",
+};
+
+/** Compact directory summary for `analyze_workspace` (metadata-only). */
+export function summarizeSkillMarketplace(): SkillMarketplaceInfo {
+  return SKILL_MARKETPLACE;
+}
 
 // ---------------------------------------------------------------------------
 // MCP Market catalog (offline fallback — the bundled

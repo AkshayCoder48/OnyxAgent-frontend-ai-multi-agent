@@ -172,8 +172,12 @@ interface CacheEntry {
  *  REPLACED by one master library zip attached to every sandbox at
  *  startup (extracted to /home/user/skills/ with MASTER-INDEX.md);
  *  manage_skill trimmed to list/read/create/edit/delete; the fixed
- *  read-Onyx.md-and-MASTER-INDEX rule added. */
-const AGENT_MD_VERSION = 9;
+ *  read-Onyx.md-and-MASTER-INDEX rule added.
+ *  Version 10 = SKILL DIRECTORY AS THE DEFAULT — manage_skill list shows
+ *  the master library (/home/user/skills, 55) BY DEFAULT + new actions
+ *  catalog / search_marketplace / install_from_marketplace (live SkillsMP
+ *  directory, hundreds of skills); analyze_workspace skill_marketplace. */
+const AGENT_MD_VERSION = 10;
 
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
