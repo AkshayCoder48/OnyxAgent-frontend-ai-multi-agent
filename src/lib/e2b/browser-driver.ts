@@ -30,6 +30,19 @@
  * the source must contain NO backticks and NO ${ } sequences (Python
  * naturally has neither; keep it that way).
  */
+
+/**
+ * Driver version — stamped into /home/user/.onyx/browser/.version when the
+ * driver starts. The session managers (browser-session.ts + the bg-agent's
+ * ensureWsDriver) compare the RUNNING driver's stamp against this constant:
+ * a live driver with a stale stamp is killed and redeployed. Without that
+ * check a per-command Python error (e.g. the active_idx UnboundLocalError)
+ * never kills the daemon, so an already-running buggy driver would keep
+ * failing every command forever even after the source here was fixed.
+ * Bump whenever the Python source changes meaningfully.
+ */
+export const BROWSER_DRIVER_VERSION = "2026.10.20";
+
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
 # profile, Playwright-driven, file-protocol command loop.
@@ -52,6 +65,8 @@ PROFILE = os.path.join(DIR, "profile")
 DOWNLOADS = "/home/user/downloads"
 RECORDINGS = os.path.join(DIR, "recordings")
 READY = os.path.join(DIR, ".ready")
+VERSION_PATH = os.path.join(DIR, ".version")
+DRIVER_VERSION = "${BROWSER_DRIVER_VERSION}"
 LIVE_JSON = os.path.join(DIR, "live.json")
 LIVE_JPG = os.path.join(DIR, "live.jpg")
 for d in (DIR, SHOTS, DOWNLOADS, RECORDINGS):
@@ -659,6 +674,13 @@ def add_popup(p):
 
 
 def active_page():
+    # global is REQUIRED: this function clamps active_idx, and any assignment
+    # to a name makes Python treat it as local for the WHOLE function — the
+    # read in the clamp line then raised "cannot access local variable
+    # 'active_idx' where it is not associated with a value" (UnboundLocal-
+    # Error) on EVERY command, because state_payload() -> active_page() runs
+    # for every handler reply.
+    global active_idx
     ensure_pages()
     if active_idx >= len(pages):
         active_idx = len(pages) - 1
@@ -1633,6 +1655,8 @@ HANDLERS = {
 def main():
     with open(READY, "w") as f:
         f.write("1")
+    with open(VERSION_PATH, "w") as f:
+        f.write(DRIVER_VERSION)
     threading.Thread(target=live_pub_loop, daemon=True).start()
     threading.Thread(target=live_cast_loop, daemon=True).start()
     refresh_live_pages()

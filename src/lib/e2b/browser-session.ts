@@ -21,7 +21,7 @@
  * is the BrowserSessionManager + BrowserActionExecutor plumbing.
  */
 
-import { BROWSER_DRIVER_PY_SOURCE } from "./browser-driver";
+import { BROWSER_DRIVER_PY_SOURCE, BROWSER_DRIVER_VERSION } from "./browser-driver";
 
 // ---------------------------------------------------------------------------
 // Paths (must match browser-driver.ts).
@@ -30,6 +30,7 @@ import { BROWSER_DRIVER_PY_SOURCE } from "./browser-driver";
 const BR_DIR = "/home/user/.onyx/browser";
 const DRIVER_PATH = `${BR_DIR}/driver.py`;
 const READY_PATH = `${BR_DIR}/.ready`;
+const VERSION_PATH = `${BR_DIR}/.version`;
 const CMD_PATH = `${BR_DIR}/cmd.json`;
 const LOG_PATH = `${BR_DIR}/driver.log`;
 
@@ -104,9 +105,23 @@ async function driverAlive(client: BrowserSandboxClient): Promise<boolean> {
 }
 
 /**
+ * True when the RUNNING driver's version stamp matches this build's
+ * BROWSER_DRIVER_PY_SOURCE. A live driver with an old/missing stamp runs
+ * stale code — per-command errors never kill the daemon (the active_idx
+ * UnboundLocalError kept "recoverable"-failing every action forever), so
+ * the caller must kill + redeploy it instead of reusing it.
+ */
+async function driverUpToDate(client: BrowserSandboxClient): Promise<boolean> {
+  const r = await execInSandbox(client, `cat ${VERSION_PATH} 2>/dev/null`, 15);
+  return r.ok && r.output.trim() === BROWSER_DRIVER_VERSION;
+}
+
+/**
  * Install + boot the browser driver in the sandbox. Idempotent + cached:
- * a live driver is left alone; a failed boot drops the cache so the next
- * call retries. `onProgress` receives human narration for the tool UI.
+ * a live driver CURRENT on version is left alone; a live STALE driver (old
+ * code) is killed + redeployed so fixes actually reach running sandboxes;
+ * a failed boot drops the cache so the next call retries. `onProgress`
+ * receives human narration for the tool UI.
  */
 export async function ensureBrowserDriver(
   client: BrowserSandboxClient,
@@ -115,7 +130,22 @@ export async function ensureBrowserDriver(
   if (!bootPromise) {
     bootPromise = (async () => {
       try {
-        if (await driverAlive(client)) return { ok: true };
+        if (await driverAlive(client)) {
+          if (await driverUpToDate(client)) return { ok: true };
+          // Stale driver CODE is running in this sandbox. Kill it so the
+          // redeploy below installs the current source — the persistent
+          // profile (cookies/localStorage) survives the swap.
+          onProgress?.("Updating the sandbox browser driver…");
+          await execInSandbox(
+            client,
+            `pkill -f "[d]river.py"; sleep 1; rm -f ${READY_PATH} ${VERSION_PATH}`,
+            20,
+          );
+        } else {
+          // Not alive — clear any stale stamps from a dead run so the
+          // version check after boot compares against fresh state.
+          await execInSandbox(client, `rm -f ${VERSION_PATH}`, 15);
+        }
         onProgress?.("Preparing the sandbox browser runtime…");
         await execInSandbox(
           client,

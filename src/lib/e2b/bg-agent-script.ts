@@ -43,7 +43,7 @@ import { ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
 // The CloakBrowser browser driver (Python), shared verbatim with the
 // browser-side use_browser tool — interpolated into the runner below so
 // use_browser runs NATIVELY inside the sandbox.
-import { BROWSER_DRIVER_PY_SOURCE } from "@/lib/e2b/browser-driver";
+import { BROWSER_DRIVER_PY_SOURCE, BROWSER_DRIVER_VERSION } from "@/lib/e2b/browser-driver";
 
 export const BG_AGENT_SCRIPT = String.raw`
 // OnyxAgent background runner v2 — STREAMING. Executes INSIDE the E2B sandbox.
@@ -1993,6 +1993,7 @@ async function ocrFetch(url, base64DataUri, filename) {
 // cloakbrowser + playwright; the browser binary downloads on first launch).
 // JSON-encoded so the shebang + imports inside it stay a plain STRING here.
 const BROWSER_DRIVER_PY = ${JSON.stringify(BROWSER_DRIVER_PY_SOURCE)};
+const BROWSER_DRIVER_VERSION = ${JSON.stringify(BROWSER_DRIVER_VERSION)};
 const WS_DIR = path.join(HOME, ".onyx", "browser");
 const WS_INSTALL_TIMEOUT_S = 280;
 
@@ -2012,15 +2013,28 @@ let wsDriverBoot = null;
 /** Install (once) + boot the BROWSER driver (Python/CloakBrowser), and
  *  confirm it is ALIVE. Liveness = .ready marker AND a running driver
  *  process (a stale marker from a crashed driver used to hang every
- *  command). Restarts reuse the installed pip packages — only a FRESH
- *  sandbox pays the runtime install (the browser binary downloads inside
- *  the driver on first launch, with a standard-Chromium fallback). */
+ *  command). A LIVE driver also has to be CURRENT: its .version stamp must
+ *  match BROWSER_DRIVER_VERSION — a stale stamp means old driver code, and
+ *  old code can fail every command forever without dying (the active_idx
+ *  UnboundLocalError did exactly that), so it is killed + redeployed
+ *  (the persistent profile keeps cookies + localStorage). Restarts reuse
+ *  the installed pip packages — only a FRESH sandbox pays the runtime
+ *  install (the browser binary downloads inside the driver on first
+ *  launch, with a standard-Chromium fallback). */
 async function ensureWsDriver() {
   if (!wsDriverBoot) {
     wsDriverBoot = (async () => {
       const readyCmd = 'test -f ' + WS_DIR + '/.ready && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO';
       const alive = await wsExec(readyCmd);
-      if (!alive.err && alive.stdout.trim() === "READY") return { ok: true };
+      if (!alive.err && alive.stdout.trim() === "READY") {
+        const ver = await wsExec('cat ' + WS_DIR + '/.version 2>/dev/null');
+        if (!ver.err && ver.stdout.trim() === String(BROWSER_DRIVER_VERSION)) return { ok: true };
+        // Stale driver CODE — kill it; the deploy below rewrites driver.py
+        // and boots the current source (the persistent profile survives).
+        await wsExec('pkill -f "[d]river.py"; sleep 1; rm -f ' + WS_DIR + '/.ready ' + WS_DIR + '/.version', 20);
+      } else {
+        await wsExec('rm -f ' + WS_DIR + '/.version', 15);
+      }
       await fs.mkdir(path.join(WS_DIR, "shots"), { recursive: true });
       await fs.mkdir(path.join(WS_DIR, "profile"), { recursive: true });
       await fs.mkdir(path.join(HOME, "downloads"), { recursive: true });
