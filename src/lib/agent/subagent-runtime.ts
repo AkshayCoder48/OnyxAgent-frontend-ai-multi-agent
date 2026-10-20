@@ -289,6 +289,14 @@ async function runSubagentLoop(
     // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
     // bounded per subagent run so a dead provider can't loop forever.
     let gatewayRetries = 0;
+    // CONTEXT-OVERFLOW SELF-HEALING (LLM HTTP 400 fix, mirrors the sandbox
+    // runner): a 400 "maximum context length" is a SIZE problem — compact
+    // the subagent history (keep system + most recent messages) and retry
+    // the SAME iteration. Ladder: keep 16 → 8 → 4 trailing messages.
+    let ctxCompactLevel = 0;
+    const ctxOverflowRe =
+      /maximum context length|context_length_exceeded|context length exceeded|too many tokens|context window|reduce the length|shorter context/i;
+    const ctxKeepLadder = [16, 8, 4];
     // BEGIN-OF-RUN RESET ("browser tool isn't available in this mode" fix):
     // a noTools downgrade learned on an earlier turn/session must not strip
     // THIS subagent's tool surface — subagents live and die by their tools.
@@ -372,6 +380,38 @@ async function runSubagentLoop(
           });
           await new Promise((r) => setTimeout(r, delayMs));
           continue;
+        }
+        // CONTEXT-OVERFLOW SELF-HEALING — checked BEFORE param stripping and
+        // the wire-compat ladder: a size problem must not burn shape-fix
+        // steps (none of them shrink anything). Compact + retry same round.
+        if (res.status === 400 && ctxOverflowRe.test(errText)) {
+          const keep = ctxKeepLadder[Math.min(ctxCompactLevel, ctxKeepLadder.length - 1)];
+          if (ctxCompactLevel < ctxKeepLadder.length && apiMessages.length > keep + 1) {
+            ctxCompactLevel += 1;
+            const dropped = apiMessages.length - keep - 1;
+            apiMessages.splice(
+              1,
+              dropped,
+              {
+                role: "system",
+                content:
+                  "CONTEXT NOTE: earlier messages were compacted to fit the model's context window. The system prompt and the most recent work are preserved. Continue from the latest messages — do NOT redo completed work.",
+              } as ChatCompletionMessage,
+            );
+            body.messages = buildWireMessages(apiMessages, wireMode);
+            console.warn(
+              `[subagent] context overflow (HTTP 400) — compacted ${dropped} messages (kept system + last ${keep}), retrying`,
+            );
+            logWarn(
+              "subagent",
+              `Subagent LLM: context overflow (HTTP 400) — compacted ${dropped} messages (kept system + last ${keep}), retrying the same round`,
+              { detail: errText.slice(0, 200), context: { model: config.model, status: 400 } },
+            );
+            continue;
+          }
+          throw new Error(
+            `Context overflow (HTTP 400) — the subagent conversation exceeds this endpoint's maximum context length even after emergency compaction. ${errText.slice(0, 300)}`,
+          );
         }
         // PARAMETER SELF-HEALING: a 400 unsupported_parameter names the
         // offending field — learn the ban, strip it, retry once.

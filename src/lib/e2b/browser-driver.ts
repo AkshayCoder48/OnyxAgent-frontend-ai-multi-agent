@@ -486,6 +486,43 @@ def _reset_browser_state():
     _unpoison_asyncio()
 
 
+def _condense_launch_error(e):
+    """Extract the DIAGNOSTIC line from a Playwright launch failure.
+
+    Playwright's exception text embeds the full chrome launch log: a wall
+    of default flags first, the real stderr after. Transport truncation
+    (chat UI, event slices) used to cut the message right inside the flag
+    dump — the user saw "--dis..." and never the actual cause. Pull the
+    lines that carry the diagnosis (stderr after 'Browser logs:',
+    'Missing X server', 'shared libraries', 'not permitted', ...) to the
+    FRONT so any truncation loses redundant args, not the root cause."""
+    msg = str(e)
+    stderr_lines = []
+    other_lines = []
+    for line in msg.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if s.startswith("<"):  # "<launching>"/"<launched>" chrome arg dump
+            continue
+        is_diag = ("error" in low or "missing" in low or "not permitted" in low
+                   or "failed" in low or "library" in low or "sandbox" in low
+                   or s.startswith("["))
+        if not is_diag:
+            continue
+        # Real browser stderr ("- [pid=…][err] …") is the diagnosis — keep
+        # it ahead of the generic Playwright headline.
+        if s.startswith("-") or s.startswith("["):
+            stderr_lines.append(s)
+        else:
+            other_lines.append(s)
+    keep = stderr_lines + other_lines
+    if not keep:
+        return msg[:300]
+    return " | ".join(keep)[:600]
+
+
 def boot_browser():
     """Launch the persistent-profile browser: CloakBrowser with
     humanize=True first, stock Playwright Chromium as the fallback.
@@ -531,7 +568,7 @@ def boot_browser():
         # failure, but that stop can itself fail (warning path) — unpoison
         # so the fallback below gets a clean thread either way.
         _unpoison_asyncio()
-        boot_error = "cloakbrowser launch failed: %s" % (e,)
+        boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
         log(boot_error)
     # -- attempt 2: stock Playwright Chromium (runtime-agnostic fallback) --
     _unpoison_asyncio()
@@ -546,9 +583,17 @@ def boot_browser():
                 viewport={"width": 1280, "height": 800},
             )
         except Exception:
-            # Missing browser binaries on a fresh sandbox — install once.
+            # Missing browser binaries OR missing SYSTEM LIBRARIES on a
+            # fresh sandbox — install BOTH once and retry. The old
+            # "playwright install chromium" only fetched the binary: on
+            # lean base images (the default code-interpreter template
+            # WITHOUT the custom onyx template's apt layer) the browser
+            # then still failed to exec with "Failed to launch the
+            # browser process" — the missing shared libs (libnss3,
+            # libatk, …) were never installed. --with-deps runs the
+            # distro package install (the sandbox runs as root).
             subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
+                [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
                 capture_output=True, timeout=900,
             )
             context = pw.chromium.launch_persistent_context(

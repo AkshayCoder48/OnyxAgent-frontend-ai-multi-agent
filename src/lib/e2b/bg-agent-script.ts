@@ -762,6 +762,38 @@ function readWithTimeout(reader, ms) {
  *  state.replayReasoning = true when a provider's 400 explicitly demands it
  *  ("reasoning_content ... must be passed back") — then assistant messages
  *  regain reasoning_content for the rest of the run. */
+
+// ── CONTEXT-OVERFLOW SELF-HEALING (LLM HTTP 400 fix) ─────────────────────
+// Endpoints reject oversized requests with 400 ("This endpoint's maximum
+// context length is 262144 tokens. However, you requested about 277886 …").
+// That is a SIZE problem, not a shape problem — no wire-compat ladder step
+// shrinks the request. When detected, the local history is emergency-
+// compacted (system prompt + the most recent work kept, the dropped middle
+// digested into one system note) and the SAME round retried.
+const CONTEXT_OVERFLOW_RE = /maximum context length|context_length_exceeded|context length exceeded|too many tokens|context window|reduce the length|shorter context/i;
+/** Compaction ladder: how many trailing messages each pass keeps. */
+const CTX_KEEP_LADDER = [16, 8, 4];
+
+function compactHistory(state, keep) {
+  const msgs = Array.isArray(state.messages) ? state.messages.slice() : [];
+  if (msgs.length <= keep + 1) return false; // nothing to drop
+  const system = msgs[0] && msgs[0].role === "system" ? [msgs[0]] : [];
+  const rest = system.length ? msgs.slice(1) : msgs;
+  const kept = rest.slice(-keep);
+  const dropped = rest.length - kept.length;
+  state.messages = system.concat(
+    [
+      {
+        role: "system",
+        content:
+          "CONTEXT NOTE: " + dropped + " earlier messages were compacted to fit the model's context window. The original system prompt and the most recent work are preserved. Continue the task from the latest messages — do NOT redo work that already completed.",
+      },
+    ],
+    kept,
+  );
+  return true;
+}
+
 function buildRequestMessages(state) {
   const replay = state.replayReasoning === true;
   const stripped = (Array.isArray(state.messages) ? state.messages : []).map((m) => {
@@ -1397,6 +1429,33 @@ async function streamRoundEvents(state, round, finalRound) {
       // it, remember the ban for the rest of this run, retry immediately
       // (this attempt doesn't count as a failure).
       const detail400 = await res.text().catch(() => "");
+      // CONTEXT-OVERFLOW SELF-HEALING (checked FIRST — a size problem must
+      // not burn wire-compat ladder steps, none of which shrink anything):
+      // compact the local history (keep system + most recent messages) and
+      // retry the SAME round. Ladder: keep 16 → 8 → 4; exhausted → honest
+      // error naming the endpoint's ceiling.
+      if (CONTEXT_OVERFLOW_RE.test(detail400)) {
+        const level = typeof state._ctxCompactLevel === "number" ? state._ctxCompactLevel : 0;
+        if (level < CTX_KEEP_LADDER.length && ladderSteps < MAX_ATTEMPTS) {
+          const keep = CTX_KEEP_LADDER[level];
+          state._ctxCompactLevel = level + 1;
+          if (compactHistory(state, keep)) {
+            ladderSteps += 1;
+            body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
+            emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "context overflow (HTTP 400) — compacted history to system + last " + keep + " messages, retrying the same round" });
+            continue;
+          }
+        }
+        return {
+          content: "",
+          reasoning: "",
+          toolCalls: [],
+          error:
+            "LLM HTTP 400 context overflow — the conversation exceeds this endpoint's maximum context length even after emergency compaction (kept system + the last 4 messages). " +
+            cleanDetail(detail400, 400) +
+            " Start a new conversation, or switch to a model with a larger context window.",
+        };
+      }
       const badParam = parseUnsupportedParam(detail400);
       // TOOL PARAMS (tools / tool_choice) are stripped ONE-SHOT — never
       // recorded into state.paramBans ("browser tool isn't available in this

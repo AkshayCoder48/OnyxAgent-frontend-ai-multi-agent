@@ -35,7 +35,6 @@ import "./memory";
 import "./project_memory";
 import "./knowledge_base";
 import "./use_browser";
-import "./webcmd";
 import "./counterfactual";
 import "./subagents";
 import "./chat_inspect";
