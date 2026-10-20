@@ -162,6 +162,7 @@ export interface AgentTurnResult {
   stopReason:
     | "complete"
     | "max_rounds"
+    | "loop_detected"
     | "aborted"
     | "error"
     | "no_provider";
@@ -195,9 +196,12 @@ function looksLikeFinalAnswer(content: string): boolean {
   if (!t) return false;
   const tail = t.slice(-240);
   // Forward-looking promises in the closing text = the model intended to
-  // keep working (narration, not a final answer).
+  // keep working (narration, not a final answer). The verb list is broad on
+  // purpose (user report 2026-10-21: "…Let me type a request… and send it to
+  // the AI helper." read as a FINAL answer because "type" was missing — the
+  // model narrated forever while the user watched nothing happen).
   if (
-    /I('| wi)ll (now )?(continue|proceed|do|run|check|verify|search|open|read|write|create|edit|fetch|install|build)|next step|moving on|let me (now )?(check|run|search|open|read|write|create|edit|try)|one moment|coming up|stay tuned/i.test(
+    /I('| wi)ll (now )?(continue|proceed|do|run|check|verify|search|open|read|write|create|edit|fetch|install|build|type|ask|send|fill|enter|click|submit|call|use|generate|apply|select|press|scroll|interact|input|start|begin|attempt|retry|launch)|next step|moving on|let me (now )?(check|run|search|open|read|write|create|edit|try|type|ask|send|fill|enter|click|submit|call|use|generate|apply|select|press|interact|input|attempt)|one moment|coming up|stay tuned/i.test(
       tail,
     )
   ) {
@@ -212,6 +216,51 @@ function looksLikeFinalAnswer(content: string): boolean {
   // Substantive text without forward promises reads as a final answer.
   return true;
 }
+
+/* ── REPETITION LOOP GUARD (user report 2026-10-21) ──────────────────────
+ * The agent got stuck narrating the SAME sentence ("I can see the input
+ * field… Let me type a request…") round after round — sometimes without
+ * ever emitting the tool call, sometimes re-issuing the identical failing
+ * call. The round loop alone never ended it (the soft budget auto-extends
+ * and the completion challenge ping-pongs). The guard compares every
+ * round's signature (normalized narration + the exact tool calls) with the
+ * previous round's; identical consecutive rounds escalate: nudge once,
+ * then stop the turn with an honest notice. */
+
+/** Normalize narration for repetition comparison: lowercase, collapse
+ * whitespace, strip edge punctuation — "I can see the field. Let me type…"
+ * and "i can see the field. let me type…" compare equal. */
+function normalizeNarration(text: string): string {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/^[.!?,;:\s]+/, "")
+    .replace(/[.!?,;:\s]+$/, "")
+    .trim();
+}
+
+/** Stable signature of a round's tool calls (name + args, long strings
+ * capped so big payloads still compare equal). */
+function roundToolSignature(
+  toolCalls: Array<{ name: string; args: Record<string, unknown> }>,
+): string {
+  try {
+    return JSON.stringify(
+      toolCalls.map((tc) => [tc.name, tc.args]),
+      (_k, v) => (typeof v === "string" && v.length > 200 ? v.slice(0, 200) : v),
+    );
+  } catch {
+    return String(toolCalls.length);
+  }
+}
+
+/** Appended to the final message when the guard stops the turn. */
+const LOOP_STOP_NOTICE =
+  "_Stopped automatically: the agent repeated the same step without making progress. Send a follow-up message to continue._";
+
+/** Injected once into the message history when repetition is first spotted. */
+const LOOP_NUDGE_MESSAGE =
+  "LOOP DETECTED: your last rounds repeated the exact same narration and tool calls with no progress. DO NOT repeat them. Either (a) take a genuinely DIFFERENT action — a different tool, different arguments, or a different approach to the obstacle — or (b) if the objective cannot be met, stop and clearly explain to the user what blocked you and what you already tried. Repeating the identical step again will end this run.";
 
 const CHAT_PROXY_URL = "/api/chat-proxy";
 
@@ -2549,6 +2598,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   let completionChallenges = 0;
   let sawToolActivity = false;
 
+  // REPETITION LOOP GUARD state (see the guard note at the top): the round
+  // signature (narration + exact tool calls) of the previous round, how many
+  // CONSECUTIVE rounds were identical, how many consecutive rounds carried
+  // the identical NARRATION (tool calls may differ — the model re-narrates
+  // "Let me type…" while shuffling failing calls), and whether the one-time
+  // corrective nudge was already injected.
+  let lastRoundSig: string | null = null;
+  let roundRepeats = 1;
+  let lastNarration = "";
+  let narrationRepeats = 1;
+  let loopNudged = false;
+
   // SKIP-WAIT: stays true while this turn is running; the late-result
   // handlers of backgrounded tools re-checkpoint only while it is (after
   // the turn ends, the final save owns the row).
@@ -2940,6 +3001,24 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     lastAssistantThinking = roundResult.thinking;
     lastAssistantReasoning = roundResult.reasoning;
 
+    // REPETITION LOOP GUARD — update the round/narration repeat counters
+    // (see the guard note at the top). Compared BEFORE any branch so both
+    // the no-tool-call path and the tool-execution path see the same state.
+    {
+      const narration = normalizeNarration(roundResult.content);
+      if (narration && narration === lastNarration) narrationRepeats += 1;
+      else {
+        lastNarration = narration;
+        narrationRepeats = 1;
+      }
+      const roundSig = narration + "|" + roundToolSignature(roundResult.toolCalls);
+      if (roundSig === lastRoundSig) roundRepeats += 1;
+      else {
+        lastRoundSig = roundSig;
+        roundRepeats = 1;
+      }
+    }
+
     // Accumulate parts for this round into assistantParts so the final
     // message has the correct chronological order (text → tool → text →
     // tool → text) across ALL rounds. Without this, buildAssistantParts
@@ -3002,6 +3081,35 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
 
     // No tool calls → final result.
     if (roundResult.toolCalls.length === 0 || roundResult.aborted) {
+      // REPETITION LOOP GUARD — narration stop: the model produced the SAME
+      // no-tool-call narration as the previous round (typically right after
+      // a completion challenge told it to act). Challenging again would only
+      // ping-pong — accept the round, append the honest stop notice, and end
+      // the turn below through the normal final-save path.
+      const loopStopped =
+        !roundResult.aborted && roundRepeats >= 2 && roundResult.content.trim().length > 0;
+      if (loopStopped) {
+        roundResult.content = `${roundResult.content.trim()}\n\n${LOOP_STOP_NOTICE}`;
+        assistantParts.push({
+          id: `p-loop-${Date.now()}-${round}`,
+          type: "text",
+          content: LOOP_STOP_NOTICE,
+          round,
+          roundStartedAt: roundStartTimes[round] ?? Date.now(),
+        });
+        logWarn(
+          "agent",
+          `Repetition loop detected on round ${round} — the model repeated its narration without acting; ending the turn with a notice`,
+          {
+            context: {
+              round,
+              model: lastServedModel,
+              narration_repeats: narrationRepeats,
+              tool_calls: allToolCalls.length,
+            },
+          },
+        );
+      }
       // COMPLETION CHECK (Persistent Execution PRD §9): a finished model
       // response is NOT necessarily a completed objective. When tools
       // already ran this turn and the response doesn't read like a final
@@ -3011,6 +3119,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // that the response is accepted (the model keeps insisting it is
       // done and the challenge would only ping-pong).
       if (
+        !loopStopped &&
         !roundResult.aborted &&
         sawToolActivity &&
         completionChallenges < 2 &&
@@ -3104,11 +3213,92 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         reasoning: roundResult.reasoning,
         toolCalls: allToolCalls,
         usage: lastUsage,
-        stopReason: roundResult.aborted ? "aborted" : "complete",
+        stopReason: roundResult.aborted ? "aborted" : loopStopped ? "loop_detected" : "complete",
       };
     }
 
     sawToolActivity = true;
+
+    // REPETITION LOOP GUARD — hard stop (see the guard note at the top):
+    // FIVE identical full rounds (or SIX identical narrations with tool
+    // calls still shuffling) means the one-time nudge below was ignored.
+    // The duplicate calls of THIS round are NOT executed (executing an
+    // already-failed identical call one more time cannot make progress) —
+    // the turn ends honestly with the notice instead of looping to the
+    // round ceiling.
+    if (roundRepeats >= 5 || narrationRepeats >= 6) {
+      // Drop THIS round's pre-emitted tool parts (phantom completed cards)
+      // — only the rounds that really executed stay in the message.
+      const finalParts = assistantParts.filter(
+        (p) => !(p.type === "tool" && p.round === round),
+      );
+      finalParts.push({
+        id: `p-loop-${Date.now()}-${round}`,
+        type: "text",
+        content: LOOP_STOP_NOTICE,
+        round,
+        roundStartedAt: roundStartTimes[round] ?? Date.now(),
+      });
+      const turnEndTime = Date.now();
+      for (const p of finalParts) {
+        if (p.round !== undefined && p.roundEndedAt === undefined) {
+          const nextRoundStart = roundStartTimes[p.round + 1];
+          p.roundEndedAt = nextRoundStart ?? turnEndTime;
+        }
+      }
+      const finalContent = `${(roundResult.content || lastAssistantContent || "").trim()}\n\n${LOOP_STOP_NOTICE}`.trim();
+      logWarn(
+        "agent",
+        `Repetition loop detected on round ${round} — ${roundRepeats} identical rounds / ${narrationRepeats} identical narrations; ending the turn with a notice (duplicate calls not re-executed)`,
+        {
+          context: {
+            round,
+            model: lastServedModel,
+            round_repeats: roundRepeats,
+            narration_repeats: narrationRepeats,
+            tool_calls: allToolCalls.length,
+          },
+        },
+      );
+      const savedMessage = await conversationService.saveAgentCheckpoint(
+        conversationId,
+        opts.userId,
+        assistantMessageId,
+        {
+          role: "assistant",
+          content: finalContent,
+          thinking: roundResult.thinking || lastAssistantThinking || undefined,
+          reasoning: roundResult.reasoning || lastAssistantReasoning || undefined,
+          parts: finalParts,
+          toolCalls: allToolCalls,
+          modelName: lastServedModel,
+          isStreaming: false,
+          generation: generationSummary(false),
+        },
+      );
+      emit({
+        type: "final_result",
+        data: { output: finalContent, tool_events: allToolCalls },
+        timestamp: nowISO(),
+      });
+      emit({
+        type: "message_saved",
+        data: { message_id: savedMessage.id },
+        timestamp: nowISO(),
+      });
+      emit({ type: "complete", timestamp: nowISO() });
+      turnActive = false;
+      return {
+        conversationId,
+        assistantMessageId: savedMessage.id,
+        content: finalContent,
+        thinking: roundResult.thinking || lastAssistantThinking,
+        reasoning: roundResult.reasoning || lastAssistantReasoning,
+        toolCalls: allToolCalls,
+        usage: lastUsage,
+        stopReason: "loop_detected",
+      };
+    }
 
     // Tool calls requested — append the assistant turn to the message list.
     // STRICT-COMPAT (LLM HTTP 400 fix): reasoning_content is withheld by
@@ -3571,6 +3761,38 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     // next message. But each tool's result was already emitted above as it
     // completed — so the UI shows results progressively.
     await Promise.all(resultPromises);
+
+    // REPETITION LOOP GUARD — the one-time corrective nudge: three identical
+    // full rounds (or four identical narrations) means the model is stuck in
+    // a groove. Tell it ONCE, right after this round's tool results, so the
+    // next round either changes approach or wraps up. If the nudge is
+    // ignored, the hard stop above ends the turn.
+    if (!loopNudged && (roundRepeats >= 3 || narrationRepeats >= 4)) {
+      loopNudged = true;
+      logWarn(
+        "agent",
+        `Repetition detected on round ${round} (${roundRepeats} identical rounds / ${narrationRepeats} identical narrations) — injecting a corrective nudge`,
+        {
+          context: {
+            round,
+            model: lastServedModel,
+            round_repeats: roundRepeats,
+            narration_repeats: narrationRepeats,
+            tool_calls: allToolCalls.length,
+          },
+        },
+      );
+      messages.push({ role: "system", content: LOOP_NUDGE_MESSAGE });
+      emit({
+        type: "rate_limited",
+        data: {
+          retryAfterMs: 1_000,
+          attempt: 1,
+          reason: "repetition detected — the agent was told to change its approach",
+        },
+        timestamp: nowISO(),
+      });
+    }
 
     // ROUND-BOUNDARY CHECKPOINT (PRD §6/§32 — background execution
     // resilience): persist everything accumulated so far under the turn's

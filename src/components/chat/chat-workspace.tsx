@@ -8,6 +8,12 @@ import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
 import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
 import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useChatSidebarStore, useChatStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
@@ -17,7 +23,20 @@ import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
 import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
 import { setUrlParam } from "@/lib/utils";
-import { FolderOpen, Menu, Bot, ListTree, ScrollText, Blocks, LibraryBig, FileDown } from "lucide-react";
+import {
+  AppWindow,
+  Bot,
+  Blocks,
+  Check,
+  EllipsisVertical,
+  FileDown,
+  FolderOpen,
+  LibraryBig,
+  ListTree,
+  Menu,
+  ScrollText,
+} from "lucide-react";
+import { BrowserLivePanel } from "@/components/chat/browser-live-panel";
 import { useActiveProject } from "@/lib/projects/store";
 import { ProjectChrome } from "@/components/projects/project-chrome";
 import { ProjectHistoryDrawer } from "@/components/projects/project-history-drawer";
@@ -27,7 +46,7 @@ import { useProjectSelectionSync } from "@/components/projects/project-conversat
 // Shift+F, drawer hits reuse its reveal helper).
 import { GlobalSearchDialog } from "@/components/search/global-search-dialog";
 
-type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | null;
+type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | "browser" | null;
 
 /* ------------------------------------------------------------------
  * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
@@ -66,6 +85,7 @@ const PANEL_WIDTH_PREFS = {
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
   knowledge: { storageKey: "kb-sidebar-width", defaultWidth: 380 },
+  browser: { storageKey: "browser-live-width", defaultWidth: 460 },
 } as const;
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
@@ -205,6 +225,7 @@ export function ChatWorkspace() {
   const timelineOpen = sidePanel === "timeline" && !subagentOpen;
   const logsOpen = sidePanel === "logs" && !subagentOpen;
   const knowledgeOpen = sidePanel === "knowledge" && !subagentOpen;
+  const browserOpen = sidePanel === "browser" && !subagentOpen;
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
@@ -294,7 +315,9 @@ export function ChatWorkspace() {
             ? timelineOpen
             : panel === "knowledge"
               ? knowledgeOpen
-              : logsOpen;
+              : panel === "browser"
+                ? browserOpen
+                : logsOpen;
     setSidePanel(wasVisible ? null : panel);
   };
 
@@ -344,106 +367,114 @@ export function ChatWorkspace() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {/* Export conversation (PRD §12) — PDF / DOCX / Markdown download
-                of the CURRENT conversation; hidden on a fresh empty chat. */}
-            {currentConversationId && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setExportOpen(true)}
-                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                title="Export conversation"
-                aria-label="Export conversation"
-              >
-                <FileDown className="h-4 w-4" />
-              </Button>
-            )}
-            {/* Knowledge Base — the workspace's persistent knowledge (AI-saved
-                items + hosted files) as a docked sidebar; the compact sibling
-                of the full /knowledge-base page. */}
+            {/* BROWSER TAB (user directive 2026-10-21) — the LIVE view of the
+                sandbox browser (CloakBrowser, headed under Xvfb) as a docked
+                panel. Kept VISIBLE on the header next to the chat name; every
+                other option lives in the ⋮ menu below. */}
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => toggleSidePanel("knowledge")}
-              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-              title="Knowledge Base"
-              aria-label="Toggle knowledge panel"
-              aria-expanded={knowledgeOpen}
-              aria-controls="kb-panel"
+              onClick={() => toggleSidePanel("browser")}
+              className={
+                "animate-press fluid-chip h-8 w-8 p-0 " +
+                (browserOpen
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground hover:text-foreground")
+              }
+              title="Browser (live view)"
+              aria-label="Toggle browser live view"
+              aria-expanded={browserOpen}
+              aria-controls="browser-live-panel"
             >
-              <LibraryBig className="h-4 w-4" />
+              <AppWindow className="h-4 w-4" />
             </Button>
-            {/* Composio Platforms — a docked catalog sidebar that exists ONLY
-                while a Composio key is stored (direct platform connections
-                from chat: search, sort, filter, OAuth connect). */}
-            {composioConnected && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => toggleSidePanel("platforms")}
-                className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-                title="Platforms (Composio)"
-                aria-label="Toggle platforms panel"
-                aria-expanded={platformsOpen}
-                aria-controls="platforms-panel"
-              >
-                <Blocks className="h-4 w-4" />
-              </Button>
-            )}
-            {/* Tool timeline — a DOCKED SIDEBAR (not a popup): the whole
-                working session as a fixed, scrollable, real-time panel on
-                the right. */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleSidePanel("timeline")}
-              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-              title="Tool timeline"
-              aria-label="Show tool timeline"
-              aria-expanded={timelineOpen}
-              aria-controls="timeline-panel"
-            >
-              <ListTree className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={toggleSubagents}
-              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-              title="Subagent chat"
-              aria-label="Toggle subagent panel"
-              aria-expanded={subagentOpen}
-              aria-controls="subagent-panel"
-            >
-              <Bot className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleSidePanel("logs")}
-              className="animate-press fluid-chip hover:text-foreground relative h-8 w-8 p-0 text-muted-foreground"
-              title="Error logs"
-              aria-label="Toggle error logs panel"
-              aria-expanded={logsOpen}
-              aria-controls="logs-panel"
-            >
-              <ScrollText className="h-4 w-4" />
-              {unseenErrors > 0 && (
-                <span className="bg-destructive absolute top-1 right-1 h-2 w-2 rounded-full" aria-hidden />
-              )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleSidePanel("files")}
-              className="animate-press fluid-chip text-muted-foreground hover:text-foreground h-8 w-8 p-0"
-              title="Show files"
-              aria-label="Toggle files panel"
-              aria-expanded={filesOpen}
-              aria-controls="files-panel"
-            >
-              <FolderOpen className="h-4 w-4" />
-            </Button>
+
+            {/* THE ONE HEADER OPTION (user directive 2026-10-21): every other
+                chat-header button collapsed into a single ⋮ control that
+                expands into the full list. Each entry toggles its panel; the
+                open one carries a check so the state is readable in place. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="animate-press fluid-chip text-muted-foreground hover:text-foreground relative h-8 w-8 p-0"
+                  title="Chat options"
+                  aria-label="Open chat options"
+                >
+                  <EllipsisVertical className="h-4 w-4" />
+                  {unseenErrors > 0 && (
+                    <span className="bg-destructive absolute top-1 right-1 h-2 w-2 rounded-full" aria-hidden />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                {/* Export conversation (only with a conversation to export). */}
+                {currentConversationId && (
+                  <DropdownMenuItem
+                    onClick={() => setExportOpen(true)}
+                    className="gap-2.5"
+                  >
+                    <FileDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="flex-1">Export conversation</span>
+                  </DropdownMenuItem>
+                )}
+                {/* Knowledge Base — the workspace's persistent knowledge. */}
+                <DropdownMenuItem
+                  onClick={() => toggleSidePanel("knowledge")}
+                  className="gap-2.5"
+                >
+                  <LibraryBig className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Knowledge Base</span>
+                  {knowledgeOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
+                {/* Composio Platforms — only while a Composio key is stored. */}
+                {composioConnected && (
+                  <DropdownMenuItem
+                    onClick={() => toggleSidePanel("platforms")}
+                    className="gap-2.5"
+                  >
+                    <Blocks className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="flex-1">Platforms</span>
+                    {platformsOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                  </DropdownMenuItem>
+                )}
+                {/* Tool timeline — the whole working session, docked. */}
+                <DropdownMenuItem
+                  onClick={() => toggleSidePanel("timeline")}
+                  className="gap-2.5"
+                >
+                  <ListTree className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Tool timeline</span>
+                  {timelineOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
+                {/* Subagent chat. */}
+                <DropdownMenuItem onClick={toggleSubagents} className="gap-2.5">
+                  <Bot className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Subagent chat</span>
+                  {subagentOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
+                {/* Error logs (unseen-error dot mirrors the menu badge). */}
+                <DropdownMenuItem
+                  onClick={() => toggleSidePanel("logs")}
+                  className="gap-2.5"
+                >
+                  <ScrollText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Error logs</span>
+                  {unseenErrors > 0 ? (
+                    <span className="bg-destructive h-1.5 w-1.5 shrink-0 rounded-full" aria-label={`${unseenErrors} unseen errors`} />
+                  ) : logsOpen ? (
+                    <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  ) : null}
+                </DropdownMenuItem>
+                {/* Files. */}
+                <DropdownMenuItem onClick={() => toggleSidePanel("files")} className="gap-2.5">
+                  <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Files</span>
+                  {filesOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
         {/* PROJECT CHROME (PRD §6.2): the persistent project identity bar —
@@ -475,6 +506,26 @@ export function ChatWorkspace() {
         sheetClassName="w-[88vw] max-w-sm"
       >
         <KnowledgeBasePanel />
+      </DockedPanel>
+
+      {/* BROWSER LIVE VIEW (user directive 2026-10-21) — the real sandbox
+          browser (CloakBrowser, headed under Xvfb) as a docked panel: JPEG
+          screencast of the active tab + live state, streamed from the driver.
+          The use_browser tool itself stays a plain tool call + output in the
+          chat flow — the watching happens here. */}
+      <DockedPanel
+        id="browser-live-panel"
+        label="Browser"
+        open={browserOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="browser-live-width"
+        defaultWidth={460}
+        minWidth={320}
+        maxWidth={900}
+        sheetCloseButton
+        sheetClassName="w-[92vw] sm:max-w-md"
+      >
+        <BrowserLivePanel />
       </DockedPanel>
 
       <DockedPanel

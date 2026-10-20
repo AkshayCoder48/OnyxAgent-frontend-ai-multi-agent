@@ -41,7 +41,7 @@
  * failing every command forever even after the source here was fixed.
  * Bump whenever the Python source changes meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.10.20";
+export const BROWSER_DRIVER_VERSION = "2026.10.21";
 
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
@@ -501,6 +501,59 @@ def _reset_browser_state():
     _unpoison_asyncio()
 
 
+def _display_alive(n):
+    """True when the X socket /tmp/.X11-unix/X<n> exists (a filesystem probe —
+    needs no xset/xdpyinfo binaries)."""
+    try:
+        return os.path.exists(os.path.join("/tmp/.X11-unix", "X%d" % n))
+    except Exception:
+        return False
+
+
+# HEADED MODE (user directive 2026-10-21): the browser must run with
+# headless=False on a real (virtual) display — a headed stealth Chromium is
+# far closer to a desktop user's browser (no headless-mode fingerprints) and
+# renders exactly like the live view the Browser tab shows. Cached on the
+# first boot: None = not probed yet, True = display ready (launch headed),
+# False = no display possible (fall back to headless=True so the tool still
+# works on lean base templates without xvfb).
+HEADED = None
+
+
+def _ensure_display():
+    """Provide an X display for headless=False. An inherited DISPLAY wins;
+    otherwise Xvfb is started on :99 (it ships with the onyx e2b template).
+    Sets DISPLAY in THIS process (Chromium inherits it) and returns whether
+    a display is available."""
+    cur = os.environ.get("DISPLAY") or ""
+    if cur.startswith(":"):
+        try:
+            if _display_alive(int(cur[1:].split(".")[0])):
+                return True
+        except Exception:
+            pass
+    if _display_alive(99):
+        os.environ["DISPLAY"] = ":99"
+        return True
+    try:
+        if shutil.which("Xvfb") is None:
+            log("no Xvfb available — the browser falls back to headless mode")
+            return False
+        subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        for _ in range(30):
+            time.sleep(0.2)
+            if _display_alive(99):
+                os.environ["DISPLAY"] = ":99"
+                log("started Xvfb on :99 — browser runs headed (headless=False)")
+                return True
+    except Exception as e:
+        log("Xvfb start failed: %s" % e)
+    return False
+
+
 def _condense_launch_error(e):
     """Extract the DIAGNOSTIC line from a Playwright launch failure.
 
@@ -552,7 +605,7 @@ def boot_browser():
     - a dead context (sandbox resume) is detected and rebuilt;
     - a total boot failure raises BootFailure -> the driver exits after
       reporting, so the next command boots a FRESH driver."""
-    global context, pw, runtime, boot_error
+    global context, pw, runtime, boot_error, HEADED
     if context is not None:
         if _context_alive():
             return
@@ -560,6 +613,8 @@ def boot_browser():
         _reset_browser_state()
     boot_error = None
     _clear_stale_profile_locks()
+    if HEADED is None:
+        HEADED = _ensure_display()
     # -- attempt 1: CloakBrowser (stealth Chromium, humanized input) ------
     _unpoison_asyncio()
     try:
@@ -567,7 +622,7 @@ def boot_browser():
         context = cb_launch(
             PROFILE,
             humanize=True,
-            headless=True,
+            headless=not HEADED,
             args=LAUNCH_ARGS,
             viewport={"width": 1280, "height": 800},
         )
@@ -593,7 +648,7 @@ def boot_browser():
         try:
             context = pw.chromium.launch_persistent_context(
                 PROFILE,
-                headless=True,
+                headless=not HEADED,
                 args=LAUNCH_ARGS,
                 viewport={"width": 1280, "height": 800},
             )
@@ -613,7 +668,7 @@ def boot_browser():
             )
             context = pw.chromium.launch_persistent_context(
                 PROFILE,
-                headless=True,
+                headless=not HEADED,
                 args=LAUNCH_ARGS,
                 viewport={"width": 1280, "height": 800},
             )
@@ -1333,56 +1388,6 @@ def do_inspect(cmd):
     return out
 
 
-def do_snapshot(cmd):
-    """STRUCTURED PAGE SNAPSHOT (PRD §5) — a machine-readable representation
-    of the current page optimized for agent reasoning: URL + title +
-    viewport, visible text, interactive elements (with refs the agent can
-    target in subsequent actions), ARIA hints and form field state, all in
-    ONE payload. Refs stay compatible with click/type/select targets."""
-    global ref_map
-    p = active_page()
-    limit = max(1, min(160, int(cmd.get("limit") or 80)))
-    flt = str(cmd.get("filter") or "").lower()
-    els = p.evaluate(ELEMENTS_JS)
-    ref_map = {}
-    elements = []
-    for i, el in enumerate(els[:limit]):
-        ref = "e%d" % (i + 1)
-        ref_map[ref] = el["selector"]
-        if flt and flt not in (el.get("text") or "").lower() and flt not in (el.get("selector") or "").lower() and flt not in str(el.get("role") or "").lower():
-            continue
-        row = {
-            "ref": ref,
-            "tag": el.get("tag"),
-            "role": el.get("role"),
-            "text": (el.get("text") or "")[:90] or None,
-            "selector": el.get("selector"),
-        }
-        if el.get("type"):
-            row["type"] = el.get("type")
-        if el.get("name"):
-            row["name"] = el.get("name")
-        if el.get("box"):
-            row["box"] = el.get("box")
-        elements.append(row)
-    try:
-        text = p.evaluate("() => document.body ? document.body.innerText : ''")
-    except Exception:
-        text = ""
-    try:
-        forms = p.evaluate(FORMS_JS) or []
-    except Exception:
-        forms = []
-    return state_payload({
-        "success": True,
-        "action": "snapshot",
-        "text": (text or "")[:6000],
-        "count": len(elements),
-        "elements": elements,
-        "forms": forms,
-    })
-
-
 def do_evaluate(cmd):
     code = str(cmd.get("code") or "").strip()
     if not code:
@@ -1627,7 +1632,6 @@ HANDLERS = {
     "wait": do_wait,
     "screenshot": do_screenshot,
     "screen_record": do_screen_record,
-    "snapshot": do_snapshot,
     "read": do_read,
     "get_page": do_get_page,
     "inspect": do_inspect,
@@ -1678,7 +1682,18 @@ def main():
             action = str(cmd.get("action") or "")
             handler = HANDLERS.get(action)
             if handler is None:
-                result = err_payload("bad_request", "Unknown action: %s" % action, False)
+                # The snapshot action was REMOVED (user directive 2026-10-21:
+                # basic tool call + output only). Models trained on the old
+                # schema still try it — redirect instead of a bare error so
+                # one round self-corrects.
+                if action == "snapshot":
+                    result = err_payload(
+                        "bad_request",
+                        "The snapshot action no longer exists. Use read (page text) plus inspect (interactive elements with refs) instead.",
+                        False,
+                    )
+                else:
+                    result = err_payload("bad_request", "Unknown action: %s" % action, False)
             else:
                 boot_failed = False
                 try:

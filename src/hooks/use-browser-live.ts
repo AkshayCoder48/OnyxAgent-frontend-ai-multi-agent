@@ -71,8 +71,21 @@ function b64ToBytes(b64: string): Uint8Array {
 /**
  * @param enabled true while the browser session is active — the stream only
  * runs while this is true (mounts clean, aborts clean, reconnects on `bye`).
+ * @param conversationId the CURRENT conversation — with the "separate"
+ * sandbox mode the browser runs in that conversation's own sandbox, so the
+ * live view must target the same one (null → the legacy shared sandbox).
+ * @param mode sandbox allocation mode ("shared" | "separate"), matching
+ * what the chat's tool calls use.
  */
-export function useBrowserLive({ enabled }: { enabled: boolean }): BrowserLive {
+export function useBrowserLive({
+  enabled,
+  conversationId = null,
+  mode = "shared",
+}: {
+  enabled: boolean;
+  conversationId?: string | null;
+  mode?: "shared" | "separate";
+}): BrowserLive {
   const [live, setLive] = useState<BrowserLive>(INITIAL);
   // Object URL of the current frame — kept in a ref so a new frame revokes
   // the previous one without an extra render pass.
@@ -109,7 +122,7 @@ export function useBrowserLive({ enabled }: { enabled: boolean }): BrowserLive {
         setLiveSafe({ phase: "error", error: "No sandbox API key available." });
         return;
       }
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = getE2BClient(apiKey, mode === "separate" ? conversationId : null, mode);
       let res: Response;
       try {
         res = await client.browserLiveStream(controller.signal);
@@ -226,7 +239,7 @@ export function useBrowserLive({ enabled }: { enabled: boolean }): BrowserLive {
         frameUrlRef.current = null;
       }
     };
-  }, [enabled]);
+  }, [enabled, conversationId, mode]);
 
   return live;
 }

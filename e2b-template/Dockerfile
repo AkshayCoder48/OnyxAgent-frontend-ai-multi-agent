@@ -3,9 +3,10 @@
 # This template extends the default code-interpreter with:
 #   - CloakBrowser 0.6.1 (stealth Chromium, humanized input) — the PRIMARY
 #     browser engine of the `use_browser` tool (browser-driver.ts boots it
-#     with launch_persistent_context(humanize=True))
+#     with launch_persistent_context(humanize=True, headless=False))
 #   - The CloakBrowser stealth Chromium BINARY (downloaded at build time via
 #     `python3 -m cloakbrowser install` — no per-sandbox ~200MB download)
+#   - Xvfb — the browser runs HEADED (headless=False) on a virtual display
 #   - Playwright (Python + Node.js bindings) + stock Chromium (the fallback
 #     engine when CloakBrowser is unavailable)
 #   - Puppeteer (Node.js)
@@ -33,7 +34,14 @@ FROM e2b/code-interpreter:latest
 # Install browser dependencies (Chrome/Chromium needs these shared libs).
 # Playwright's `playwright install-deps` handles this, but we install them
 # here so they're baked into the template (no per-sandbox install needed).
+# XVFB (headless=False): the browser driver launches Chromium HEADED on a
+# virtual display (user directive 2026-10-21 — no headless-mode
+# fingerprints for the stealth runtime, and the live view renders exactly
+# like a desktop browser). The driver starts `Xvfb :99` itself when the
+# binary is present and falls back to headless when it is not — baking it
+# in means every sandbox of this template runs headed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \

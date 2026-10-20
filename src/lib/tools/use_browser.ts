@@ -27,7 +27,6 @@ const ACTIONS = [
   "scroll",
   "wait",
   "read",
-  "snapshot",
   "screenshot",
   "screen_record",
   "inspect",
@@ -48,7 +47,7 @@ const ACTIONS = [
   "refresh",
 ] as const;
 
-const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads.
+const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads.
 
 WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads. For simply READING a page's text (articles, docs, APIs) use web_fetch instead — it is the default for reading and much faster/cheaper.
 
@@ -61,10 +60,7 @@ Pass \`action\` plus only the fields that action needs:
 - "scroll" (direction?, amount?) — scroll the page (down/up/left/right).
 - "wait" (ms? | selector? | text?) — wait for a moment / element / text.
 - "read" () — compact page summary: URL, title, visible text.
-- "snapshot" (filter?, limit?) — STRUCTURED page snapshot for reasoning: visible text + every interactive element with refs + roles/ARIA + form field state, in one machine-readable payload. The returned "ref" (e.g. "e12") or selector works in subsequent actions.
-- "screenshot" (fullPage?) — capture the current page as an image (returned inline, full page where supported).
-- "screen_record" (operation) — screen recording: operation "start" begins capturing the active tab (keeps recording while you continue working), "stop" finishes and returns the playable video file, "status" reports the current recording state. Recording NEVER starts automatically — only when you explicitly request it.
-- "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors.
+- "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors; the returned "ref" (e.g. "e12") or selector works in subsequent actions.
 - "evaluate" (code) — run JavaScript in the page and get the result.
 - "select" (target, value) — choose an option in a <select> dropdown.
 - "upload" (target, files) — upload WORKSPACE files (paths like "uploads/report.pdf") to a file input.
@@ -200,10 +196,9 @@ registerTool(
     // OPERATION-AWARE TIMEOUTS (PRD §9): the ceiling belongs to the
     // OPERATION, never to the overall task. Recording assembly (stop)
     // installs the video encoder and encodes — it gets the longest budget;
-    // screenshots / snapshots / downloads get the mid budget; everything
-    // else rides the session manager's default (90s) or the first-boot
-    // budget (6 min).
-    const HEAVY_OPS = new Set(["screen_record", "screenshot", "snapshot", "download"]);
+    // screenshots / downloads get the mid budget; everything else rides the
+    // session manager's default (90s) or the first-boot budget (6 min).
+    const HEAVY_OPS = new Set(["screen_record", "screenshot", "download"]);
     const result: BrowserCommandResult = await sendBrowserCommand(sbx.client, cmd, {
       timeoutMs: HEAVY_OPS.has(action) ? 8 * 60_000 : undefined,
       onProgress,

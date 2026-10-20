@@ -1,45 +1,26 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import {
-  Camera,
-  Check,
-  ChevronRight,
-  CirclePlay,
-  Download,
-  Globe,
-  Loader2,
-  X,
-} from "lucide-react";
+import { Check, ChevronRight, Globe, Loader2, X } from "lucide-react";
 import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
-import {
-  chipClass,
-  CollapsePanel,
-  fieldBlockClass,
-  monoLabelClass,
-} from "@/components/assistant-ui/elements";
+import { chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
 import { ToolDurationBadge, ToolLiveElapsed } from "../tool-duration";
-import { LivePageFrame } from "./live-page-frame";
 
 /**
- * use_browser results — the browser presented as a TOOL, not a UI.
- * (Browser-Tool Reliability PRD §1/§2/§8: no dedicated browser panel, no
- * live-viewport surface, no computer-use frame. Every browser action lands
- * as one compact, technical row inside the SAME tool-call rendering the
- * other tools use.)
+ * use_browser results — BASIC TOOL CALL + OUTPUT (user directive
+ * 2026-10-21: "remove the snapshot and keep it basic tool call and output,
+ * no special ui"). The browser is presented exactly like every other tool:
  *
  *  - `BrowserUseGroup` — a run of consecutive use_browser calls as ONE
- *    collapsible tool line ("Use Browser") with a mono operation list:
- *    `→ Navigate example.com ✓ 0.8s`, `→ Snapshot 42 elements ✓ 1.2s`, …
- *    Inside the disclosure (visible once the user enlarges the tool call),
- *    the run's CURRENT PAGE renders as a REAL live preview — a tall
- *    sandboxed <iframe> of the page's URL (interactivity opt-in) — above
- *    the operation list.
- *    Event-driven only (PRD §25): a row appears exactly when the backend
- *    emitted the call — never a faked "Browsing…" state.
- *  - `BrowserResult` — the per-call fallback for a use_browser call
- *    rendered OUTSIDE a group (lone call, other renderers).
+ *    collapsible tool line ("Use Browser") with a plain mono operation list:
+ *    `→ navigate example.com ✓ 0.8s`, `→ click #login ✓ 1.2s`, … Expanding a
+ *    row shows the raw OUTPUT of that call (the page text it read, the value
+ *    it evaluated, the error it hit) — nothing else. No iframe preview, no
+ *    screenshots, no element-ref tables. The LIVE browser view lives in the
+ *    chat header's Browser tab (BrowserLivePanel), not in the chat flow.
+ *  - `BrowserResult` — the per-call fallback for a use_browser call rendered
+ *    OUTSIDE a group (lone call, other renderers). Same basic shape.
  */
 
 /** use_browser result payload (see src/lib/e2b/browser-driver.ts). */
@@ -89,8 +70,7 @@ export function parseBrowserResult(result: unknown): BrowserPayload | null {
 
 /* ── Technical labels ────────────────────────────────────────────────────── */
 
-/** Mono operation verb shown at the start of each row — the PRD §8 shape
- * ("Navigate", "Click", "Snapshot"…), terse and scannable. */
+/** Mono operation verb shown at the start of each row — terse and scannable. */
 const OP_LABELS: Record<string, string> = {
   navigate: "Navigate",
   click: "Click",
@@ -100,6 +80,7 @@ const OP_LABELS: Record<string, string> = {
   wait: "Wait",
   read: "Read",
   get_page: "Read",
+  // Legacy (removed 2026-10-21) — old conversations in history still render.
   snapshot: "Snapshot",
   screenshot: "Screenshot",
   screen_record: "Record",
@@ -130,6 +111,7 @@ const ACTION_LABELS: Record<string, string> = {
   wait: "Waited",
   read: "Read page",
   get_page: "Read page",
+  // Legacy (removed 2026-10-21) — old conversations in history still render.
   snapshot: "Page snapshot",
   screenshot: "Screenshot",
   screen_record: "Screen record",
@@ -198,7 +180,6 @@ function opTarget(args: Record<string, unknown>, action: string): string | null 
     case "click":
     case "select":
     case "upload":
-      return target ? clip(target) : null;
     case "type":
       return target ? clip(target) : null;
     case "press":
@@ -247,9 +228,9 @@ function opResultSummary(action: string, payload: BrowserPayload | null): string
       return typeof payload.text === "string" && payload.text
         ? `${payload.text.length.toLocaleString()} chars`
         : null;
-    case "snapshot":
     case "inspect":
     case "get_elements":
+    case "snapshot": // legacy — removed 2026-10-21, old history still renders
       return typeof count === "number" ? `${count} elements` : null;
     case "screenshot":
       return "captured";
@@ -273,13 +254,29 @@ function opResultSummary(action: string, payload: BrowserPayload | null): string
   }
 }
 
+/** The PLAIN OUTPUT of one call — the raw text the tool returned (read text,
+ * evaluate value, error message). This is the "output" half of the basic
+ * tool-call presentation: no derived UI, just what came back. */
+function opOutput(action: string, payload: BrowserPayload | null, toolCall: ToolCall): string | null {
+  if (payload?.error) return `${payload.error.type} — ${payload.error.message}`;
+  if (toolCall.status === "error" && !payload) return `Action ${action} failed.`;
+  if (!payload) return null;
+  if (action === "evaluate" && payload.value !== undefined) {
+    return typeof payload.value === "string"
+      ? payload.value
+      : (JSON.stringify(payload.value) ?? String(payload.value));
+  }
+  if (typeof payload.text === "string" && payload.text) return payload.text;
+  if (typeof payload.message === "string" && payload.message) return payload.message;
+  return null;
+}
+
 /* ── One operation row ───────────────────────────────────────────────────── */
 
 /**
- * BrowserOpRow — `→ Navigate  example.com  ✓ 0.8s`. Compact, mono,
+ * BrowserOpRow — `→ navigate  example.com  ✓ 0.8s`. Compact, mono,
  * event-driven (the row exists because the backend emitted the call).
- * Click toggles the technical detail block (text excerpt / element refs /
- * evaluate value / the full screenshot / the structured error).
+ * Click toggles the plain output block — the raw result text, nothing more.
  */
 function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
   const [open, setOpen] = useState(false);
@@ -292,27 +289,7 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
   const target = opTarget(args, action);
   const summary = opResultSummary(action, payload);
   const isWaiting = isRunning && action === "wait";
-
-  const errorText = payload?.error
-    ? `${payload.error.type} — ${payload.error.message}`
-    : isError &&
-        toolCall.result &&
-        typeof toolCall.result === "object" &&
-        typeof (toolCall.result as { error?: unknown }).error === "string"
-      ? (toolCall.result as { error: string }).error
-      : null;
-
-  const text = payload && typeof payload.text === "string" ? payload.text : null;
-  const elements =
-    payload && Array.isArray(payload.elements) && payload.elements.length > 0 ? payload.elements : null;
-  const evaluateValue =
-    !isError && action === "evaluate" && payload?.value !== undefined
-      ? typeof payload.value === "string"
-        ? payload.value
-        : (JSON.stringify(payload.value) ?? String(payload.value))
-      : null;
-
-  const hasDetail = Boolean(errorText || text || elements || evaluateValue || payload?.dataUrl || payload?.forms);
+  const output = opOutput(action, payload, toolCall);
 
   return (
     <div className="rounded-md text-xs">
@@ -323,7 +300,6 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
         className={cn(
           "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/40",
           isError && "bg-destructive/[0.04]",
-          hasDetail ? "cursor-pointer" : "cursor-default",
         )}
       >
         {/* Status glyph — the only stateful ornament on the row. */}
@@ -351,23 +327,12 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
           {summary && !isError ? (
             <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground/80">{summary}</span>
           ) : null}
-          {isError && errorText ? (
-            <span className="min-w-0 truncate font-mono text-[10px] text-destructive">{clip(errorText, 60)}</span>
+          {isError && payload?.error ? (
+            <span className="min-w-0 truncate font-mono text-[10px] text-destructive">
+              {clip(payload.error.message, 60)}
+            </span>
           ) : null}
         </span>
-
-        {/* Screenshot thumbnail — the artifact rides IN the row (PRD §4). */}
-        {payload?.dataUrl && action === "screenshot" ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={payload.dataUrl}
-            alt={payload.title ? `Screenshot of ${payload.title}` : "Browser screenshot"}
-            className="h-9 w-14 shrink-0 rounded-sm border border-border object-cover object-top"
-          />
-        ) : null}
-        {action === "screen_record" && payload?.file && !isRunning ? (
-          <CirclePlay className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-        ) : null}
 
         {/* Duration + disclosure chevron. */}
         {isRunning ? (
@@ -375,7 +340,7 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
         ) : (
           <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} />
         )}
-        {hasDetail ? (
+        {output ? (
           <ChevronRight
             className={cn(
               "h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200",
@@ -388,72 +353,22 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
         )}
       </button>
 
-      {/* Technical detail block — expandable, event-driven content only. */}
-      {hasDetail ? (
+      {/* Plain output — the raw text the tool returned. */}
+      {output ? (
         <CollapsePanel open={open}>
-          <div className="space-y-1.5 px-6 pb-1.5 pt-0.5">
+          <div className="px-6 pb-1.5 pt-0.5">
             {payload?.url && action !== "navigate" ? (
               <p className="truncate font-mono text-[10px] text-muted-foreground">{payload.url}</p>
             ) : null}
-            {errorText ? (
-              <p className="font-mono text-[10px] leading-relaxed break-words text-destructive">{errorText}</p>
-            ) : null}
-            {text ? (
-              <p className="line-clamp-4 rounded-md border border-border bg-foreground/[0.02] px-2 py-1.5 text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-                {text.slice(0, 600)}
-                {text.length > 600 ? "…" : ""}
-              </p>
-            ) : null}
-            {elements ? (
-              <div className="max-h-40 space-y-0.5 overflow-y-auto rounded-md border border-border bg-foreground/[0.02] px-2 py-1.5 scrollbar-thin">
-                {elements.slice(0, 50).map((el) => (
-                  <p key={el.ref} className="flex items-baseline gap-2 font-mono text-[10px] leading-relaxed">
-                    <span className="shrink-0 text-primary">{el.ref}</span>
-                    <span className="shrink-0 text-foreground/70">{el.tag}</span>
-                    {el.text ? <span className="min-w-0 truncate text-muted-foreground">{el.text}</span> : null}
-                  </p>
-                ))}
-                {elements.length > 50 ? (
-                  <p className="text-[10px] text-muted-foreground">+{elements.length - 50} more…</p>
-                ) : null}
-              </div>
-            ) : null}
-            {payload?.forms && payload.forms.length > 0 ? (
-              <p className="font-mono text-[10px] text-muted-foreground">
-                {payload.forms.length} form field{payload.forms.length === 1 ? "" : "s"} in snapshot
-              </p>
-            ) : null}
-            {evaluateValue ? (
-              <pre className="max-h-40 overflow-auto rounded-md border border-border bg-foreground/[0.02] px-2 py-1.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-                {evaluateValue.slice(0, 800)}
-              </pre>
-            ) : null}
-            {payload?.dataUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={payload.dataUrl}
-                alt={payload.title ? `Screenshot of ${payload.title}` : "Browser screenshot"}
-                className="w-full rounded-md border border-border"
-              />
-            ) : null}
-            {action === "screen_record" && payload?.file ? (
-              <p className="inline-flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-                <CirclePlay className="h-3 w-3 shrink-0" aria-hidden />
-                <span className="truncate">{payload.file}</span>
-                {typeof payload.durationSec === "number" ? (
-                  <span className="shrink-0">· {payload.durationSec}s</span>
-                ) : null}
-                {typeof payload.sizeBytes === "number" ? (
-                  <span className="shrink-0">· {(payload.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
-                ) : null}
-              </p>
-            ) : null}
-            {action === "download" && payload?.file ? (
-              <p className="inline-flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-                <Download className="h-3 w-3 shrink-0" aria-hidden />
-                <span className="truncate">{payload.file}</span>
-              </p>
-            ) : null}
+            <pre
+              className={cn(
+                "max-h-48 overflow-y-auto rounded-md border border-border bg-foreground/[0.02] px-2 py-1.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap scrollbar-thin",
+                isError ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {output.slice(0, 2000)}
+              {output.length > 2000 ? "\n…" : ""}
+            </pre>
           </div>
         </CollapsePanel>
       ) : null}
@@ -465,11 +380,10 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
 
 /**
  * BrowserUseGroup — a run of consecutive use_browser calls rendered as ONE
- * compact tool-call line ("Use Browser" + status) with the mono operation
- * list behind the disclosure. Auto-expands while the run is active, settles
- * collapsed (PRD §8: "Collapsible after completion"); every click after
- * that is the user's own. Statuses: Running / Waiting / Completed · Ns /
- * Failed (PRD acceptance).
+ * compact tool-call line ("Use Browser" + status) with the plain mono
+ * operation list behind the disclosure. Auto-expands while the run is
+ * active, settles collapsed; every click after that is the user's own.
+ * Statuses: Running / Waiting / Completed · Ns / Failed.
  */
 export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
   const anyActive = toolCalls.some(isCallActive);
@@ -510,35 +424,17 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
     return null;
   }, [toolCalls]);
 
-  // The current page's title — same newest-settled derivation as the URL.
-  const currentTitle = useMemo(() => {
-    for (let i = toolCalls.length - 1; i >= 0; i--) {
-      const p = parseBrowserResult(toolCalls[i]!.result);
-      if (p?.title) return p.title;
-    }
-    return null;
-  }, [toolCalls]);
+  const failed = useMemo(
+    () =>
+      toolCalls.filter((c) => {
+        const p = parseBrowserResult(c.result);
+        return c.status === "error" || p?.success === false;
+      }).length,
+    [toolCalls],
+  );
 
-  // Run stats (PRD §26): operations, screenshots, snapshots, failures.
-  const stats = useMemo(() => {
-    let screenshots = 0;
-    let snapshots = 0;
-    let recordings = 0;
-    let failed = 0;
-    for (const c of toolCalls) {
-      const args = (c.args ?? {}) as Record<string, unknown>;
-      const action = typeof args.action === "string" ? args.action : "";
-      const payload = parseBrowserResult(c.result);
-      if (c.status === "error" || payload?.success === false) failed += 1;
-      if (action === "screenshot") screenshots += 1;
-      if (action === "snapshot") snapshots += 1;
-      if (action === "screen_record" && payload?.file) recordings += 1;
-    }
-    return { operations: toolCalls.length, screenshots, snapshots, recordings, failed };
-  }, [toolCalls]);
-
-  // "Waiting" when the ACTIVE operation is a wait (PRD §20) — explicit and
-  // stateful, never a frontend timeout.
+  // "Waiting" when the ACTIVE operation is a wait — explicit and stateful,
+  // never a frontend timeout.
   const waiting = useMemo(
     () =>
       toolCalls.some((c) => {
@@ -617,48 +513,21 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
         </span>
       </button>
 
-      {/* Operation list — compact mono rows, scrollable when long. The LIVE
-          PAGE PREVIEW rides INSIDE the disclosure (top of the panel): it
-          becomes visible only after the user enlarges the tool call — never
-          always-on in the chat flow. */}
+      {/* Operation list — compact mono rows, scrollable when long. */}
       <CollapsePanel open={expanded}>
         <div className="space-y-0.5 px-1.5 pt-0.5 pb-2 sm:px-2">
-          {currentUrl && /^https?:\/\//i.test(currentUrl) ? (
-            <div className="pb-2">
-              <LivePageFrame
-                url={currentUrl}
-                title={currentTitle}
-                badge="Browser"
-                heightClass="h-[26rem] sm:h-[34rem]"
-                note={
-                  anyActive
-                    ? "run in progress — the preview follows the agent's current page"
-                    : undefined
-                }
-              />
-            </div>
-          ) : null}
           <div className="max-h-96 space-y-0.5 overflow-y-auto pr-0.5 scrollbar-thin">
             {toolCalls.map((call) => (
               <BrowserOpRow key={call.id} toolCall={call} />
             ))}
           </div>
 
-          {/* Run summary (PRD §26) — event-driven counts only. */}
+          {/* Run summary — event-driven counts only. */}
           {!anyActive ? (
             <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-1.5 pt-1 font-mono text-[10px] text-muted-foreground">
-              <span className="tabular-nums">{stats.operations} operations</span>
-              {stats.screenshots > 0 ? (
-                <span className="tabular-nums">· {stats.screenshots} screenshot{stats.screenshots === 1 ? "" : "s"}</span>
-              ) : null}
-              {stats.snapshots > 0 ? (
-                <span className="tabular-nums">· {stats.snapshots} snapshot{stats.snapshots === 1 ? "" : "s"}</span>
-              ) : null}
-              {stats.recordings > 0 ? (
-                <span className="tabular-nums">· {stats.recordings} recording{stats.recordings === 1 ? "" : "s"}</span>
-              ) : null}
-              {stats.failed > 0 ? (
-                <span className="tabular-nums text-destructive">· {stats.failed} failed</span>
+              <span className="tabular-nums">{toolCalls.length} operations</span>
+              {failed > 0 ? (
+                <span className="tabular-nums text-destructive">· {failed} failed</span>
               ) : null}
             </p>
           ) : null}
@@ -677,62 +546,36 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
   const ok = payload.success !== false;
   const action = payload.action ?? "";
   const label = ACTION_LABELS[action] ?? "Browser";
-  const tabs = Array.isArray(payload.tabs) ? payload.tabs : [];
   const text = typeof payload.text === "string" ? payload.text : null;
-  const elements = Array.isArray(payload.elements) ? payload.elements : null;
-  const frameUrl =
-    ok && typeof payload.url === "string" && /^https?:\/\//i.test(payload.url) ? payload.url : null;
+  const value =
+    ok && action === "evaluate" && payload.value !== undefined
+      ? typeof payload.value === "string"
+        ? payload.value
+        : (JSON.stringify(payload.value) ?? String(payload.value))
+      : null;
 
   return (
-    <div className="space-y-2.5 px-1.5 py-1 sm:px-2">
+    <div className="space-y-2 px-1.5 py-1 sm:px-2">
       <div className="flex flex-wrap items-center gap-2">
-        {/* Browser identity — the globe glyph + "Browser", NEVER the
-            generic agent icon or a Composio logo. */}
+        {/* Browser identity — the globe glyph + "Browser". */}
         <span className="inline-flex h-5 items-center gap-1 rounded-full bg-primary/10 px-2 text-[10px] font-semibold tracking-wide text-primary uppercase">
           <Globe className="h-3 w-3" aria-hidden />
           Browser
         </span>
         <span className="text-sm font-semibold text-foreground">{label}</span>
         {payload.url && (
-          <a
-            href={payload.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex min-w-0 items-center gap-1 truncate font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <span className="truncate">{payload.url}</span>
-          </a>
+          <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">
+            {payload.url}
+          </span>
         )}
         {typeof payload.status === "number" && (
           <span className="rounded-full bg-foreground/[0.05] px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
             HTTP {payload.status}
           </span>
         )}
-        {tabs.length > 1 && (
-          <span className="rounded-full bg-foreground/[0.05] px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-            {tabs.length} tabs
-          </span>
-        )}
       </div>
 
-      {payload.title ? (
-        <p className="truncate text-sm font-medium text-foreground/80">{payload.title}</p>
-      ) : null}
-
-      {/* THE LIVE PAGE — the real preview strategy: the page's URL in a
-          tall sandboxed <iframe>, not a text excerpt. The extracted text
-          and element refs stay available below (and in the op rows) as the
-          honest fallback when a site refuses framing. */}
-      {frameUrl ? (
-        <LivePageFrame
-          url={frameUrl}
-          title={payload.title ?? null}
-          badge="Browser"
-          heightClass="h-[26rem] sm:h-[34rem]"
-        />
-      ) : null}
-
-      {/* Error — structured, never silent (PRD §27). */}
+      {/* Error — structured, never silent. */}
       {!ok && payload.error ? (
         <p className="text-xs text-destructive">
           <span className="font-mono">{payload.error.type}</span> — {payload.error.message}
@@ -741,77 +584,32 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
 
       {/* Captured download / recording → the workspace file it landed as. */}
       {ok && action === "download" && payload.file ? (
-        <p className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-          <Download className="h-3.5 w-3.5" aria-hidden />
-          {payload.file}
-        </p>
+        <p className="font-mono text-[11px] text-muted-foreground">{payload.file}</p>
       ) : null}
       {ok && action === "screen_record" && payload.file ? (
-        <p className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-          <CirclePlay className="h-3.5 w-3.5" aria-hidden />
+        <p className="font-mono text-[11px] text-muted-foreground">
           {payload.file}
           {typeof payload.durationSec === "number" ? ` · ${payload.durationSec}s` : ""}
-          {typeof payload.sizeBytes === "number"
-            ? ` · ${(payload.sizeBytes / 1024 / 1024).toFixed(1)} MB`
-            : ""}
         </p>
       ) : null}
+      {ok && action === "screenshot" && payload.path ? (
+        <p className="font-mono text-[11px] text-muted-foreground">{payload.path}</p>
+      ) : null}
 
-      {/* Read / snapshot — the visible text excerpt. */}
+      {/* The plain OUTPUT — page text or evaluate value. */}
       {ok && text ? (
-        <p className="line-clamp-6 rounded-lg border border-border bg-foreground/[0.02] p-2.5 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground">
+        <pre className="max-h-56 overflow-y-auto rounded-lg border border-border bg-foreground/[0.02] p-2.5 text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground scrollbar-thin">
           {text.slice(0, 1500)}
           {text.length > 1500 ? "\n…" : ""}
-        </p>
+        </pre>
       ) : null}
-
-      {/* Snapshot / inspect — a compact element list (refs the AI used). */}
-      {ok && elements && elements.length > 0 ? (
-        <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-foreground/[0.02] p-2 scrollbar-thin">
-          {elements.slice(0, 40).map((el) => (
-            <p key={el.ref} className="flex items-baseline gap-2 font-mono text-[10px] leading-relaxed">
-              <span className="shrink-0 text-primary">{el.ref}</span>
-              <span className="shrink-0 text-foreground/70">{el.tag}</span>
-              {el.text ? <span className="min-w-0 truncate text-muted-foreground">{el.text}</span> : null}
-            </p>
-          ))}
-          {elements.length > 40 ? (
-            <p className="text-[10px] text-muted-foreground">+{elements.length - 40} more…</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* Snapshot form-field state. */}
-      {ok && Array.isArray(payload.forms) && payload.forms.length > 0 ? (
-        <p className={cn(monoLabelClass, "normal-case")}>
-          {payload.forms.length} form field{payload.forms.length === 1 ? "" : "s"} captured
-        </p>
-      ) : null}
-
-      {/* evaluate — the returned value. */}
-      {ok && action === "evaluate" && payload.value !== undefined ? (
-        <pre className={cn(fieldBlockClass, "max-h-40 overflow-auto")}>
-          {typeof payload.value === "string" ? payload.value : JSON.stringify(payload.value, null, 2)}
+      {ok && value ? (
+        <pre className="max-h-40 overflow-y-auto rounded-lg border border-border bg-foreground/[0.02] p-2.5 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground scrollbar-thin">
+          {value.slice(0, 800)}
         </pre>
       ) : null}
 
-      {/* Screenshot — the captured page, inline. */}
-      {payload.dataUrl ? (
-        <figure className="overflow-hidden rounded-lg border border-border">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={payload.dataUrl}
-            alt={payload.title ? `Screenshot of ${payload.title}` : "Browser screenshot"}
-            className="w-full"
-          />
-          <figcaption className="flex items-center gap-1.5 bg-foreground/[0.02] px-2.5 py-1.5 font-mono text-[10px] text-muted-foreground">
-            <Camera className="h-3 w-3" aria-hidden />
-            {payload.path ?? "screenshot.png"}
-          </figcaption>
-        </figure>
-      ) : null}
-
-      {ok && payload.message && !text && !elements && !payload.dataUrl ? (
+      {ok && payload.message && !text ? (
         <p className="text-xs text-muted-foreground">{payload.message}</p>
       ) : null}
     </div>

@@ -2924,7 +2924,7 @@ const TOOLS = [
   // turns keep browsing when the user's tab is closed.
   {
     name: "use_browser",
-    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, screenshots, page snapshots, screen recording, page inspection, forms, uploads and downloads. WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads; for simply READING a page's text use web_fetch instead (it is the default reader, much faster). Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), read (), snapshot (filter?, limit?), screenshot (fullPage?), screen_record (operation: 'start'|'stop'|'status'), inspect (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), back / forward / reload. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
+    description: "Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads. WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads; for simply READING a page's text use web_fetch instead (it is the default reader, much faster). Pass action plus only the fields that action needs: navigate (url), click (target), type (target, text, submit?), press (key), scroll (direction?, amount?), wait (ms?/selector?/text?), read (), screenshot (fullPage?), screen_record (operation: 'start'|'stop'|'status'), inspect (filter?, limit?), evaluate (code), select (target, value), upload (target, files), download (url?/target?), new_tab (url?), switch_tab (tab), close_tab (tab?), back / forward / reload. TARGETING: a target is a selector string ('#id', 'button.primary', 'text=Sign in', 'xpath=//a[3]', 'ref=e12') OR an object ({'role':'button','name':'Sign in'}, {'text':…}, {'label':…}, {'placeholder':…}, {'css':…}, {'xpath':…}, {'ref':'e12'}). The session persists across calls. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes).",
     parameters: {
       type: "object",
       properties: {
@@ -2932,7 +2932,7 @@ const TOOLS = [
           type: "string",
           enum: [
             "navigate", "click", "type", "press", "scroll", "wait", "read",
-            "snapshot", "screenshot", "screen_record", "inspect", "evaluate",
+            "screenshot", "screen_record", "inspect", "evaluate",
             "back", "forward", "reload",
             "get_page", "get_elements", "select", "upload", "download",
             "new_tab", "switch_tab", "close_tab", "go_back", "go_forward", "refresh",
@@ -2952,8 +2952,8 @@ const TOOLS = [
         ms: { type: "number", description: "Milliseconds to wait (wait action, default 1000)." },
         selector: { type: "string", description: "Selector to wait for (wait action)." },
         fullPage: { type: "boolean", description: "Capture the full page (screenshot action)." },
-        filter: { type: "string", description: "Substring filter for snapshot / inspect / get_elements." },
-        limit: { type: "number", description: "Max elements for snapshot / inspect / get_elements (default 60-80)." },
+        filter: { type: "string", description: "Substring filter for inspect / get_elements." },
+        limit: { type: "number", description: "Max elements for inspect / get_elements (default 60-80)." },
         value: { type: "string", description: "Option value to select (select action)." },
         files: { type: "array", items: { type: "string" }, description: "Workspace file paths to upload (upload action)." },
         tab: { description: "Tab index (number) or tab id like 'tab_2' (switch_tab / close_tab)." },
@@ -2973,7 +2973,7 @@ const TOOLS = [
       }
       // First browser boot (binary download) can be slow — generous ceiling.
       // Screenshots / recording assembly can take longer still.
-      const timeoutMs = (action === "screen_record" || action === "screenshot" || action === "snapshot") ? 8 * 60_000 : 6 * 60_000;
+      const timeoutMs = (action === "screen_record" || action === "screenshot") ? 8 * 60_000 : 6 * 60_000;
       const result = await wsSendCommand(cmd, timeoutMs);
       if (result && result.ok === false && typeof result.error === "string") {
         // Old-driver shape — normalize into the structured error envelope.

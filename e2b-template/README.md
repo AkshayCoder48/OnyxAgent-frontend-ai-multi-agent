@@ -3,10 +3,14 @@
 This custom E2B template extends the default `code-interpreter` template with:
 
 - **CloakBrowser 0.6.1** (pinned) — the stealth Chromium engine the `use_browser`
-  tool drives with `launch_persistent_context(humanize=True)` (Playwright
-  drop-in API). **This is the primary browser runtime of the app.**
+  tool drives with `launch_persistent_context(humanize=True, headless=False)`
+  (Playwright drop-in API). **This is the primary browser runtime of the app.**
 - **The CloakBrowser stealth Chromium binary** — downloaded at BUILD time
   (`python3 -m cloakbrowser install`), so no ~200MB download on first use.
+- **Xvfb** — the browser runs **HEADED** (`headless=False`) on a virtual
+  display: no headless-mode fingerprints, and the live Browser tab renders
+  exactly like a desktop browser. The driver starts `Xvfb :99` itself; on
+  templates without xvfb it falls back to headless mode.
 - **Playwright** (Python + Node.js) + stock **Chromium** — the fallback engine
   when CloakBrowser is unavailable (install/launch failure).
 - **Puppeteer** (Node.js alternative)
@@ -61,9 +65,10 @@ template name never breaks sandbox creation — it is opt-in.
 | CloakBrowser stealth Chromium | latest free | The patched Chromium binary (baked in) |
 | Playwright (Python) | latest | Fallback browser engine + CloakBrowser driver API |
 | Playwright (Node.js) | latest | Browser automation (Node.js) |
-| Chromium | latest | Fallback headless browser (baked in) |
+| Chromium | latest | Fallback browser (baked in) |
 | Puppeteer | latest | Node.js browser automation |
-| Browser deps | — | Shared libs (libnss3, libgbm1, etc.) |
+| Xvfb | latest | Virtual display for `headless=False` |
+| Browser deps | — | Shared libs (libnss3, libgbm1, …) |
 | Fonts | — | Liberation, Noto Color Emoji, Noto CJK |
 
 ## Environment variables
@@ -82,4 +87,6 @@ Ask the AI: "Use the browser to open https://example.com and read the page"
 ```
 
 The `use_browser` tool boots instantly (no pip install — packages are already
-in the image) and returns `runtime: "cloakbrowser"` in its result payload.
+in the image), runs the browser HEADED under Xvfb, and returns
+`runtime: "cloakbrowser"` in its result payload. The live view is available
+in the chat header's **Browser** tab.
