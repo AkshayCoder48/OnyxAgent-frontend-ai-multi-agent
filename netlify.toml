@@ -1,0 +1,20 @@
+# Netlify build configuration for OnyxAgent.
+#
+# This file takes precedence over any build settings configured in the
+# Netlify UI, making the deploy deterministic:
+#   - explicit build command (plain `next build`, no extra steps)
+#   - pinned Node.js LTS (Next.js 16 requires Node >= 20.9)
+#   - the official Next.js Runtime plugin (managed by Netlify)
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NPM_FLAGS = "--no-audit --no-fund"
+
+# Netlify Next.js Runtime — required to serve the App Router, server routes,
+# middleware, and ISR on Netlify. Kept unversioned so Netlify manages updates.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
