@@ -19,7 +19,7 @@
 
 import { nanoid } from "nanoid";
 import { logError, logInfo } from "@/lib/client-logger";
-import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type MessageRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
+import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
 import {
   createVault,
   unlockVault,
@@ -242,44 +242,8 @@ export interface AddMessageInput {
    *  saveAgentCheckpoint). Omitted on the final save. */
   isStreaming?: boolean;
   tokensUsed?: number;
-  /** BG-RUN SEQ CURSOR (replay-idempotency fix): the seq of the last bg
-   *  event whose content is covered by THIS checkpoint. Persisted ON the
-   *  message row — the same Dexie put as the content — so the cursor can
-   *  never lag the checkpointed content (the old two-store scheme — content
-   *  in Dexie, cursor in localStorage — had a kill-window between the two
-   *  writes; a tab death there made the next resume REPLAY events onto
-   *  already-persisted content and duplicate the streamed text). */
-  bgLastSeq?: number;
 }
 
-/**
- * A server-appended message (scheduler pull_chat: scheduled-run results)
- * to be persisted into Dexie via
- * `conversationService.appendServerMessages`. The id is the SERVER's id
- * ("smsg_<runId>") and is preserved so re-delivered
- * batches are idempotent.
- */
-export interface ServerMessageRowInput {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  /** ISO timestamp — becomes the row's `created_at`. */
-  createdAt: string;
-  thinking?: string | null;
-  reasoning?: string | null;
-  /** Ordered timeline parts (assistant turns), JSON-persisted in `parts`. */
-  parts?: import("@/types/chat").MessagePart[] | null;
-  /** Flat tool calls (browser ToolCall shape incl. timing) → tool_calls rows. */
-  toolCalls?: Array<{
-    id: string;
-    name: string;
-    args: Record<string, unknown>;
-    result?: unknown;
-    status?: "pending" | "running" | "completed" | "error";
-    startedAt?: number;
-    endedAt?: number;
-  }> | null;
-}
 
 export const conversationService = {
   async list(
@@ -597,13 +561,6 @@ export const conversationService = {
       /** Extra (non-indexed) property — marks an interrupted turn after a
        *  refresh. The final save omits it. */
       is_streaming: input.isStreaming ?? true,
-      /** BG-RUN SEQ CURSOR — see AddMessageInput.bgLastSeq. Kept from the
-       *  existing row when the incoming save carries none (foreground final
-       *  saves don't), so a later resume still reads the last bg cursor. */
-      bg_last_seq:
-        typeof input.bgLastSeq === "number" && Number.isFinite(input.bgLastSeq)
-          ? input.bgLastSeq
-          : (existing as { bg_last_seq?: number } | undefined)?.bg_last_seq ?? undefined,
     };
     await db.messages.put(row);
     await bumpConversationTimestamp(conversationId);
@@ -658,32 +615,14 @@ export const conversationService = {
     return row as unknown as ConversationMessage;
   },
 
-  /** Read a checkpoint row's persisted bg-run seq cursor (the last event
-   *  seq whose content the row already contains). Null when the row or the
-   *  field is absent. Used by the background-turn resume path so the replay
-   *  cursor starts exactly at the checkpointed content boundary — never
-   *  behind it (duplication) and never ahead of it (lost output). */
-  async getCheckpointSeq(messageId: string): Promise<number | null> {
-    try {
-      const row = (await db.messages.get(messageId)) as { bg_last_seq?: number } | undefined;
-      const seq = row?.bg_last_seq;
-      return typeof seq === "number" && Number.isFinite(seq) ? seq : null;
-    } catch {
-      return null;
-    }
-  },
-
-  /** SETTLE ORPHANED STREAMING MESSAGES (user report 2026-10-21: "the state
-   *  is still at same progress even after leaving and recoming to the app"):
-   *  a background job whose localStorage record was lost (cleared storage,
-   *  another device, a crashed tab before the first checkpoint cursor write)
-   *  can never be resumed — but its Dexie row keeps is_streaming=true and the
-   *  conversation renders that frozen partial state FOREVER with no error
-   *  and no way forward. This pass finds every still-streaming assistant
-   *  row in a conversation, marks it settled (is_streaming=false) and
-   *  appends an honest note part telling the user the task was interrupted
-   *  and how to continue. Idempotent — settled rows are skipped. Returns
-   *  the ids that were settled. */
+  /** SETTLE ORPHANED STREAMING MESSAGES: a browser refresh kills an
+   *  in-flight turn mid-stream — its Dexie row keeps is_streaming=true and
+   *  the conversation would render that frozen partial state FOREVER with
+   *  no error and no way forward. This pass finds every still-streaming
+   *  assistant row in a conversation, marks it settled (is_streaming=false)
+   *  and appends an honest note part telling the user the task was
+   *  interrupted and how to continue. Idempotent — settled rows are
+   *  skipped. Returns the ids that were settled. */
   async settleInterruptedMessages(
     conversationId: string,
     note = "This task was interrupted before it finished — its completed work is saved above. Send a message to continue.",
@@ -786,101 +725,6 @@ export const conversationService = {
     }
 
     await bumpConversationTimestamp(conversationId);
-  },
-
-  /**
-   * Ensure a conversation row exists. Server-appended messages (scheduled-run
-   * results) can reference a conversation this browser has
-   * never opened — this creates it with the provided title when missing, and
-   * fills in a missing title on an existing row (chat meta from the server).
-   */
-  async ensureConversation(userId: string, conversationId: string, title?: string): Promise<Conversation> {
-    const existing = await db.conversations.get(conversationId);
-    const ts = nowISO();
-    if (!existing) {
-      const row: ConversationRow = {
-        id: conversationId,
-        user_id: userId,
-        ...(title ? { title } : {}),
-        created_at: ts,
-        updated_at: ts,
-        is_archived: false,
-        is_demo: false,
-        last_message_preview: null,
-        last_message_at: null,
-      };
-      await db.conversations.put(row);
-      return toConversation(row);
-    }
-    if (title && !existing.title) {
-      await db.conversations.update(conversationId, { title, updated_at: ts });
-    }
-    return toConversation(existing);
-  },
-
-  /**
-   * Append SERVER-side messages (scheduled-run results,
-   * pulled via the scheduler's pull_chat) into Dexie. Idempotent: ids are
-   * preserved so re-delivered batches bulkPut over the same rows (server
-   * retries can never duplicate history). Ensures the conversation row
-   * exists (created with `opts.title` when missing) and writes tool-call
-   * rows so getMessages hydrates the rich tool cards.
-   */
-  async appendServerMessages(
-    conversationId: string,
-    userId: string,
-    messages: ServerMessageRowInput[],
-    opts: { title?: string } = {},
-  ): Promise<void> {
-    if (!messages.length) return;
-    await this.ensureConversation(userId, conversationId, opts.title);
-    const rows: MessageRow[] = messages.map((m) => ({
-      id: m.id,
-      conversation_id: conversationId,
-      role: m.role,
-      content: m.content,
-      created_at: m.createdAt,
-      tool_calls: [],
-      files: [],
-      thinking: m.thinking ?? null,
-      reasoning: m.reasoning ?? null,
-      parts: m.parts ?? null,
-    }));
-    await db.messages.bulkPut(rows);
-    // Tool-call rows — getMessages hydrates these from the tool_calls table.
-    const toolRows: ToolCallRow[] = [];
-    for (const m of messages) {
-      for (const tc of m.toolCalls ?? []) {
-        const startedAt = typeof tc.startedAt === "number" ? new Date(tc.startedAt).toISOString() : m.createdAt;
-        const endedAt = typeof tc.endedAt === "number" ? new Date(tc.endedAt).toISOString() : m.createdAt;
-        toolRows.push({
-          id: `${m.id}:${tc.id}`,
-          message_id: m.id,
-          tool_call_id: tc.id,
-          tool_name: tc.name,
-          args: tc.args ?? {},
-          result: typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? null),
-          status: tc.status === "error" ? "failed" : (tc.status ?? "completed"),
-          started_at: startedAt,
-          completed_at: endedAt,
-          duration_ms:
-            typeof tc.startedAt === "number" && typeof tc.endedAt === "number"
-              ? Math.max(0, tc.endedAt - tc.startedAt)
-              : 0,
-        });
-      }
-    }
-    if (toolRows.length > 0) await db.tool_calls.bulkPut(toolRows);
-    // Search index: debounced fire-and-forget re-index of this conversation.
-    scheduleSearchIndexing(conversationId);
-    // Conversation bookkeeping — newest message preview + timestamps.
-    const last = messages[messages.length - 1]!;
-    const ts = nowISO();
-    await db.conversations.update(conversationId, {
-      last_message_preview: previewTextOf(last.content ?? ""),
-      last_message_at: last.createdAt,
-      updated_at: ts,
-    });
   },
 };
 
@@ -1448,8 +1292,7 @@ export interface UserSettings {
   default_thinking_effort?: "low" | "medium" | "high" | string | null;
   /** Whether an OnyxBase API key is stored (encrypted under
    *  `extra.onyxbase_api_key_encrypted`). Powers the OnyxBase cloud
-   *  features: skills cloud backup and the server-side workspace sync
-   *  for scheduled tasks. */
+   *  features: skills cloud backup and durable workspace snapshots. */
   onyxbase_api_key_present?: boolean;
   /** OnyxBase instance base URL (default https://onyxbase-chi.vercel.app),
    *  stored under `extra.onyxbase_base_url`. Values equal to a RETIRED
@@ -1461,8 +1304,7 @@ export interface UserSettings {
   onyxbase_workspace_id?: string;
   /** ISO timestamp of the last successful workspace sync — stored under
    *  `extra.onyxbase_last_synced`. Legacy: stamped by the removed
-   *  agent-side sync tools; scheduled-task syncs run server-side and do
-   *  not update this field. */
+   *  agent-side sync tools; nothing updates this field anymore. */
   onyxbase_last_synced?: string | null;
   /** Whether a Composio API key is stored (encrypted under
    *  `extra.composio_api_key_encrypted`). Powers the external-app
@@ -1892,8 +1734,8 @@ export const settingsService = {
    *  (no schema migration needed — same pattern as SkillsMP).
    *
    *  SECURITY (PRD §5): the key is ONLY ever decrypted transiently to build
-   *  the OnyxBase KV client (skills cloud sync, the scheduled-task server
-   *  sync) or to run the connection test in Settings → Cloud. It never
+   *  the OnyxBase KV client (skills cloud sync) or to run the connection
+   *  test in Settings → Cloud. It never
    *  enters system prompts, tool arguments, E2B, or results. */
   async setOnyxBaseApiKey(userId: string, key: string | null): Promise<void> {
     let row = await db.user_settings.where("user_id").equals(userId).first();

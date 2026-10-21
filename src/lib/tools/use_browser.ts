@@ -10,7 +10,7 @@
 // are no separate browser_navigate / browser_click / … tools.
 //
 // The SAME tool name is implemented natively inside the sandbox runner
-// (bg-agent-script.ts) so background turns get the identical surface.
+// so every execution path gets the identical surface.
 
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";

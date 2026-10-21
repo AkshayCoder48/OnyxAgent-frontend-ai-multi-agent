@@ -33,7 +33,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { db } from "@/lib/db";
 import { setUrlParam } from "@/lib/utils";
 import { touchProjectActivity } from "@/lib/projects/service";
-import { notifyConversationsChanged, CONVERSATIONS_CHANGED_EVENT } from "@/lib/scheduler/chat-sync";
+import { notifyConversationsChanged, CONVERSATIONS_CHANGED_EVENT } from "@/lib/chat-events";
 import { useAuthStore, useChatStore, useConversationStore } from "@/stores";
 import { useConversations } from "@/hooks";
 import type { Conversation } from "@/types";

@@ -23,7 +23,7 @@ import { MASTER_SKILLS_ZIP_BASE64 } from "@/lib/agent/master-skills-zip";
  *   - the cached/reconnect/metadata adoption paths when the sandbox's
  *     skills version predates MASTER_SKILLS_VERSION (version-gated, so a
  *     live sandbox is only re-attached when the library actually changed)
- *   - the scheduler's startChatExecution (dedicated scheduled sandboxes)
+ *   - every sandbox boot ensures the skills directory exists
  *
  * Best-effort by design: a failed attach logs and continues — a sandbox
  * without the library still works, and the next startup retries.

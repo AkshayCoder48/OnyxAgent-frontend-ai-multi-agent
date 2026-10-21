@@ -15,9 +15,7 @@
  *                       prompt advertises a tool the runtime can't execute.
  *
  * Also enforced: the digest size budget (small providers reject fat
- * prompts), the sandbox-native tool-name parity between the bg runner's
- * TOOLS array and BG_NATIVE_TOOL_NAMES, and the idempotent injection
- * helper used by every prompt path.
+ * prompts) and the idempotent injection helper used by every prompt path.
  *
  * If a test here fails after adding/removing/renaming a tool: update the
  * Onyx.md "Tool Compendium" tables, then run
@@ -29,22 +27,8 @@ import "@/lib/tools/index"; // side-effect: registers every built-in tool
 import { listTools } from "@/lib/tools/registry";
 import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "./onyx-md-digest";
 import { TOOL_DIGEST_MARKER, ensureToolDigest, hasToolDigest } from "./tool-digest";
-import { BG_NATIVE_TOOL_NAMES } from "@/lib/e2b/bg-native-tools";
-import { BG_AGENT_SCRIPT } from "@/lib/e2b/bg-agent-script";
 
 const registryNames = (): string[] => listTools().map((t) => t.name);
-
-/** Native sandbox-only tools (in the bg runner's TOOLS array with FULL
- * descriptions + parameter schemas, but NOT registered in the browser
- * registry — they run entirely inside the sandbox). They must not be
- * advertised in the digest (foreground agent turns cannot call them — that
- * would violate the anti-hallucination rules), so they are exempt from the
- * registry and digest parity checks below.
- *
- * use_browser is NOT here: it IS registered in the browser registry (the
- * foreground runtime executes it through the E2B HTTP API), so it must
- * appear in the digest like every other registered tool. */
-const NATIVE_ONLY_TOOLS = new Set<string>([]);
 
 /** Tool names mentioned in digest list lines ("- name — ..."). */
 const digestListedNames = (): string[] =>
@@ -85,30 +69,6 @@ describe("tool digest ⇄ registry parity (PRD §13/§14)", () => {
     expect(ONYX_MD_DIGEST).toMatch(/defined ONLY by your active tool definitions this turn/i);
     // Full manual pointer kept (detailed usage still lives in Onyx.md):
     expect(ONYX_MD_DIGEST).toMatch(/\/home\/user\/Onyx\.md/);
-  });
-});
-
-describe("sandbox runner tool parity (bg-agent)", () => {
-  it("every bg-native tool name is a registered browser tool (or native sandbox-only)", () => {
-    const registered = new Set(registryNames());
-    const phantom = [...BG_NATIVE_TOOL_NAMES].filter(
-      (n) => !registered.has(n) && !NATIVE_ONLY_TOOLS.has(n),
-    );
-    expect(phantom, `BG_NATIVE_TOOL_NAMES lists unregistered tools: ${phantom.join(", ")}`).toEqual([]);
-  });
-
-  it("the bg runner's TOOLS array matches BG_NATIVE_TOOL_NAMES exactly", () => {
-    const scriptTools = [...BG_AGENT_SCRIPT.matchAll(/\n {4}name: "([a-z0-9_]+)",/g)].map((m) => m[1]!);
-    expect(new Set(scriptTools)).toEqual(new Set(BG_NATIVE_TOOL_NAMES));
-    // ...and every REGISTRY-DOCUMENTED script tool is digest-documented (the
-    // runner's slim name-only list relies on the digest for capabilities).
-    // Native sandbox-only tools carry full descriptions inside the script
-    // itself and are exempt (see NATIVE_ONLY_TOOLS).
-    const digestNames = new Set(ONYX_MD_DIGEST_TOOLS);
-    const undocumented = scriptTools.filter(
-      (n) => !digestNames.has(n) && !NATIVE_ONLY_TOOLS.has(n),
-    );
-    expect(undocumented, `bg runner tools missing from the digest: ${undocumented.join(", ")}`).toEqual([]);
   });
 });
 

@@ -16,7 +16,6 @@ import {
   Archive,
   ArchiveRestore,
   ArrowRight,
-  CalendarClock,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -32,16 +31,10 @@ import {
   Trash2,
 } from "lucide-react";
 import type { Conversation } from "@/types";
-import type { SafeScheduledTask } from "@/lib/scheduler/types";
-import { noteSchedulerTasks, schedulerApi } from "@/lib/scheduler/client";
 import {
-  addLinkedChat,
-  CHAT_LINKS_CHANGED_EVENT,
   CONVERSATIONS_CHANGED_EVENT,
-  getLinkedChatIds,
   OPEN_CONVERSATION_EVENT,
-  removeLinkedChat,
-} from "@/lib/scheduler/chat-sync";
+} from "@/lib/chat-events";
 import { ShareDialog } from "./share-dialog";
 import { RunningExecutionsSection } from "./running-executions";
 import { ExportDialog } from "@/components/export/export-dialog";
@@ -103,9 +96,6 @@ function accountInitials(user: { full_name?: string | null; email: string } | nu
 interface ConversationItemProps {
   conversation: Conversation;
   isActive: boolean;
-  /** CHAT-ONLY SCHEDULED TASKS: this conversation is a task's dedicated
-   *  chat → subtle clock badge next to the title. */
-  isScheduled?: boolean;
   // STABLE id-based callbacks (React.memo-friendly): the parent passes the
   // SAME function references for every row — the row's own conversation.id
   // is threaded through at call time, so a memoized row only re-renders
@@ -123,7 +113,6 @@ interface ConversationItemProps {
 const ConversationItem = memo(function ConversationItem({
   conversation,
   isActive,
-  isScheduled = false,
   onSelect,
   onDelete,
   onArchive,
@@ -277,16 +266,6 @@ const ConversationItem = memo(function ConversationItem({
         </div>
       )}
 
-      {/* CHAT-ONLY SCHEDULED TASKS: subtle clock badge on a task's dedicated
-          chat (the link registry below keeps it in sync with the server). */}
-      {isScheduled && (
-        <CalendarClock
-          className="h-3.5 w-3.5 shrink-0 text-foreground/35"
-          role="img"
-          aria-label="Scheduled task"
-        />
-      )}
-
       <div className="relative shrink-0">
         <Button
           ref={menuBtnRef}
@@ -382,86 +361,10 @@ const ConversationItem = memo(function ConversationItem({
 
 type ConversationView = "active" | "archived";
 
-/* ---------------------------------------------------------------------------
- * CHAT-ONLY SCHEDULED TASKS: every task IS a chat — no separate section, no
- * task dashboard. This poller converges the local link registry
- * (localStorage `onyx-chat-links`) with the server's task list so the
- * dedicated chats get the clock badge AND the 45s pull/mirror sync (the
- * registry is what chat-sync keys on). It also discovers chats created
- * server-side (legacy-task migration) or on other devices: once linked, the
- * pull loop merges their server messages in, which creates the local
- * conversation row (ensureConversation) — the chat then shows up in the
- * sidebar like any conversation.
- * ------------------------------------------------------------------------- */
-
-/** The linked-chat id set, reactive to registry changes (window event). */
-function useLinkedChatIds(): Set<string> {
-  const [linked, setLinked] = useState<Set<string>>(() => new Set(getLinkedChatIds()));
-  useEffect(() => {
-    const reread = () => setLinked(new Set(getLinkedChatIds()));
-    reread();
-    window.addEventListener(CHAT_LINKS_CHANGED_EVENT, reread);
-    return () => window.removeEventListener(CHAT_LINKS_CHANGED_EVENT, reread);
-  }, []);
-  return linked;
-}
-
-/** Converge the link registry with the server's task list every 60s while
- *  the sidebar is mounted (silent; failures never touch the registry).
- *  Also feeds the zero-task tick skip (noteSchedulerTasks) — with no
- *  scheduled tasks the heartbeat skips its expensive tick entirely. */
-function useScheduledChatLinks(userId: string | null | undefined): Set<string> {
-  const linked = useLinkedChatIds();
-  useEffect(() => {
-    if (!userId) return;
-    let cancelled = false;
-    const converge = async () => {
-      // VISIBILITY GATE (perf PRD §16): background tabs must not burn
-      // network + Dexie churn on a 60s loop. Skip while hidden; fire one
-      // catch-up converge on return-to-visible if the schedule was missed.
-      if (document.visibilityState !== "visible") return;
-      const res = await schedulerApi(userId, "list");
-      if (cancelled || !res.ok || !Array.isArray(res.tasks)) return;
-      noteSchedulerTasks(res.tasks.length);
-      const serverIds = new Set<string>();
-      for (const task of res.tasks) {
-        const chatId = (task as SafeScheduledTask).chatId;
-        if (chatId) serverIds.add(chatId);
-      }
-      const local = getLinkedChatIds();
-      for (const id of serverIds) {
-        if (!local.includes(id)) addLinkedChat(id);
-      }
-      for (const id of local) {
-        if (!serverIds.has(id)) removeLinkedChat(id);
-      }
-      // addLinkedChat/removeLinkedChat fire CHAT_LINKS_CHANGED_EVENT on
-      // actual changes — the useLinkedChatIds listener re-reads the
-      // registry, which re-renders the badge set.
-    };
-    void converge().catch(() => {});
-    const id = window.setInterval(() => void converge().catch(() => {}), 60_000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void converge().catch(() => {});
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [userId]);
-  return linked;
-}
-
-
 interface ConversationListProps {
   conversations: Conversation[];
   currentConversationId: string | null;
   isLoading: boolean;
-  /** CHAT-ONLY SCHEDULED TASKS: chat ids that are a task's dedicated chat
-   *  (drives the clock badge on the conversation rows). */
-  scheduledChatIds?: Set<string>;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onArchive: (id: string) => void;
@@ -476,7 +379,6 @@ function ConversationList({
   conversations = [],
   currentConversationId,
   isLoading,
-  scheduledChatIds = new Set(),
   onSelect,
   onDelete,
   onArchive,
@@ -686,7 +588,6 @@ function ConversationList({
                         key={conversation.id}
                         conversation={conversation}
                         isActive={conversation.id === currentConversationId}
-                        isScheduled={scheduledChatIds.has(conversation.id)}
                         onSelect={handleSelect}
                         onDelete={onDelete}
                         onArchive={onArchive}
@@ -779,14 +680,8 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     }
   }, [authUserId, fetchConversations]);
 
-  // CHAT-ONLY SCHEDULED TASKS — converge the link registry with the server's
-  // task list (drives the clock badge + the pull/mirror sync; see the
-  // useScheduledChatLinks doc above).
-  const scheduledChatIds = useScheduledChatLinks(authUserId);
-
-  // Conversations changed OUTSIDE React Query (a scheduled-task tool created
-  // the dedicated chat, a server-message merge created/updated a local
-  // conversation) → refetch the list.
+  // Conversations changed OUTSIDE React Query (a tool created a dedicated
+  // chat) → refetch the list.
   useEffect(() => {
     const on = () => {
       void fetchConversations();
@@ -795,8 +690,8 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     return () => window.removeEventListener(CONVERSATIONS_CHANGED_EVENT, on);
   }, [fetchConversations]);
 
-  // In-page conversation switch requests from outside the sidebar (the
-  // scheduled-task tool result cards' "Open chat" action).
+  // In-page conversation switch requests from outside the sidebar (tool
+  // result cards' "Open chat" action).
   useEffect(() => {
     const on = (event: Event) => {
       const chatId = (event as CustomEvent<string>).detail;
@@ -840,7 +735,6 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     conversations: generalConversations,
     currentConversationId,
     isLoading,
-    scheduledChatIds,
     onSelect: selectConversation,
     onDelete: handleDelete,
     onArchive: archiveConversation,
@@ -982,7 +876,7 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
         </div>
 
         {/* Icon rail overlay — expand + new chat only; fades in as the pane
-            fades out (scheduled chats are ordinary conversation rows, they
+            fades out (they are ordinary conversation rows, they
             are simply not listed while collapsed). */}
         <div
           className="conv-sidebar-rail absolute inset-y-0 left-0 z-10 flex w-12 flex-col items-center py-4"

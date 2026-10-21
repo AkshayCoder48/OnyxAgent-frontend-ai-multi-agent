@@ -5,8 +5,7 @@
  * answer CustomEvent.
  *
  * Extracted from runtime.ts so BOTH the in-browser runtime and the
- * background-turn browser-tool bridge can use the exact same mechanism
- * (the background runner calls ask_user as a BRIDGED tool — the handler
+ * subagent dispatch sites can use the exact same mechanism (the handler
  * runs in the browser with this waiter wired to the live chat UI).
  */
 

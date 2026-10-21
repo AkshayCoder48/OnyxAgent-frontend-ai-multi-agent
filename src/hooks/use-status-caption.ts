@@ -116,9 +116,6 @@ function toolCaption(name: string, args: Record<string, unknown> | undefined): s
       return "Updating the plan";
     case "manage_memory":
       return "Saving a memory";
-    case "create_scheduled_task":
-    case "update_scheduled_task":
-      return "Scheduling a task";
     case "composio_execute_tool":
     case "mcp_call_tool":
       return "Running an integration";

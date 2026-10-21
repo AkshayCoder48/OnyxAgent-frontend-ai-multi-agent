@@ -54,7 +54,7 @@ function ageLabel(ms: number): string {
  *   · leaving the app AUTO-PAUSES every idle workspace (pagehide beacon);
  *   · a paused sandbox AUTO-RESUMES in place the next time anything needs
  *     it (any tool call / file op / bg poll reconnects via Sandbox.connect);
- *   · a live background run is never paused (the live-run guard).
+ *   · a sandbox with live processes is never paused (the live-run guard).
  *  This panel only SHOWS the state — there is nothing to manage. */
 function WorkspaceLifecycle() {
   const [key, setKey] = React.useState<string | null>(null);
@@ -65,7 +65,6 @@ function WorkspaceLifecycle() {
       ageMs: number;
       scope: string | null;
       conversationId: string | null;
-      scheduled: boolean;
     }>
   >([]);
   const [busy, setBusy] = React.useState(false);
@@ -111,7 +110,7 @@ function WorkspaceLifecycle() {
       <p className="text-muted-foreground text-xs">
         Fully automatic — nothing to manage manually. Workspaces freeze when you leave (the full
         state — filesystem + RAM — is preserved with no auto-deletion) and resume instantly, exactly
-        where they froze, the next time anything needs them. Live background runs are never paused.
+        where they froze, the next time anything needs them. Sandboxes with live processes are never paused.
       </p>
       {items.length === 0 ? (
         <p className="text-muted-foreground py-1 font-mono text-[11px]">
@@ -129,7 +128,7 @@ function WorkspaceLifecycle() {
                   {s.sandboxId}
                 </p>
                 <p className="text-muted-foreground text-[10px]">
-                  {s.scheduled ? "scheduled task" : s.scope === "separate" ? "per-chat workspace" : "shared workspace"}
+                  {s.scope === "separate" ? "per-chat workspace" : "shared workspace"}
                   {" · "}age {ageLabel(s.ageMs)}
                 </p>
               </div>

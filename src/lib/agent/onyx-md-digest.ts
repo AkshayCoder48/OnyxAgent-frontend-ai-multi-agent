@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (65 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (57 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -92,16 +92,6 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - composio_connect_platform — Get the OAuth link for a platform (slug like slack). Share it and WAIT — you cannot authorize yourself.
 - composio_execute_tool — Execute a discovered tool: toolName + args per its schema. CONNECTION_REQUIRED → share a connect link and wait.
 
-### Scheduled tasks & automation (8 tools)
-- create_scheduled_task — Turn recurring/future intent into automation. Own dedicated chat. Args: name, instructions, schedule {type once/daily/weekly/monthly/interval/cron, time, tz IANA}.
-- update_scheduled_task — Change name/description/instructions/schedule/enabled by task id. Find ids with list_scheduled_tasks.
-- delete_scheduled_task — Permanently remove a task + its history (its dedicated chat stays as a normal conversation).
-- pause_scheduled_task — Stop executions / resume the schedule.
-- resume_scheduled_task — Stop executions / resume the schedule.
-- run_scheduled_task_now — Execute immediately (background sandbox) without touching future runs.
-- list_scheduled_tasks — All tasks: id/name/schedule/status/next+last run — filter active/paused/failed/upcoming.
-- get_scheduled_task_history — Execution history: time, status, error, result, files, tools. "Did my morning task run?" → this.
-
 ### Availability rules (anti-hallucination)
 - EVERY tool listed above is REAL and CALLABLE. If a tool is in your tool definitions, you HAVE it — NEVER say "I don't have access to that tool" or "I forgot I had those tools" without trying the call first.
 - Tool availability is defined ONLY by your active tool definitions this turn — not by your memory, not by this digest alone, not by Onyx.md alone. Dynamic tools (MCP \`mcp_<server>__<tool>\`, custom tools) appear in your definitions when they are active.
@@ -109,4 +99,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","project_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool","create_scheduled_task","update_scheduled_task","delete_scheduled_task","pause_scheduled_task","resume_scheduled_task","run_scheduled_task_now","list_scheduled_tasks","get_scheduled_task_history"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","project_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool"];

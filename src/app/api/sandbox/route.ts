@@ -33,9 +33,6 @@ import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
 import { attachMasterSkills, ensureMasterSkills } from "@/lib/e2b/attach-master-skills";
-// Background agent runner (see src/lib/e2b/bg-agent-script.ts) — the
-// self-contained script executed INSIDE the sandbox as a background command.
-import { BG_AGENT_SCRIPT, BG_SCRIPT_PATH, BG_STATE_PATH, BG_RUNS_PREFIX } from "@/lib/e2b/bg-agent-script";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -353,9 +350,9 @@ function sandboxAgeMs(s: { startedAt?: unknown }, now: number): number {
 
 /**
  * Reclaim STALE sandboxes on E2B for an API key: running sandboxes that are
- * (a) NOT in this instance's local cache, (b) NOT scheduled-task run
- * sandboxes, and (c) OLDER than STALE_SANDBOX_KILL_AGE_MS (20h — E2B's 24h
- * hard TTL kills them within hours anyway). This still protects the account
+ * (a) NOT in this instance's local cache and (b) OLDER than
+ * STALE_SANDBOX_KILL_AGE_MS (20h — E2B's 24h hard TTL kills them within
+ * hours anyway). This still protects the account
  * from the "20/20 sandbox limit reached" error caused by sandboxes leaking
  * from previous sessions / dead serverless instances.
  *
@@ -382,16 +379,12 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
     for (const [, entry] of separateCache) localIds.add(entry.sandbox.sandboxId);
     // STALE-ONLY KILL: local-cache absence alone is NOT evidence of
     // abandonment (serverless cold start = empty cache). Only age makes a
-    // sandbox demonstrably idle-and-doomed. Scheduled-task run sandboxes
-    // (metadata tag "onyx-scheduled", launched by /api/scheduler) are always
-    // spared — they are isolated agent jobs that must survive interactive
-    // rotation and cold starts.
+    // sandbox demonstrably idle-and-doomed.
     const now = Date.now();
     const toKill = page.filter(
       (s) =>
         (s.state as string) !== "closed" &&
         !localIds.has(s.sandboxId) &&
-        !isScheduledSandbox(s) &&
         sandboxAgeMs(s, now) > STALE_SANDBOX_KILL_AGE_MS,
     );
     await Promise.all(
@@ -407,23 +400,6 @@ async function killOrphanedSandboxes(knownApiKey: string): Promise<void> {
   }
 }
 
-/** Scheduled-task run sandboxes are tagged with metadata at creation
- *  (see /api/scheduler engine fireRun) — the interactive single-sandbox
- *  rotation must NEVER kill them. */
-function isScheduledSandbox(s: {
-  sandboxId: string;
-  metadata?: Record<string, string> | { [key: string]: string } | string | null;
-}): boolean {
-  const m = s.metadata as Record<string, string> | string | null | undefined;
-  if (!m) return false;
-  try {
-    const obj = typeof m === "string" ? (JSON.parse(m) as Record<string, string>) : m;
-    return !!obj && typeof obj === "object" && "onyx-scheduled" in obj;
-  } catch {
-    return false;
-  }
-}
-
 /** Detect "sandbox quota reached" errors from the E2B SDK. The SDK throws
  *  when you try to create a sandbox but you've hit the plan's concurrent
  *  sandbox limit (e.g. "20/20" on the free plan). */
@@ -431,9 +407,8 @@ function isQuotaError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   // REGEX HARDENING (user report 2026-10-21): the old pattern also matched
   // ANY bare fraction (\d+/\d+) — a create error like "retry 1/5" was
-  // misread as a quota failure and KILLED EVERY SANDBOX ON THE ACCOUNT,
-  // including sandboxes with live background runs (instant "background work
-  // frozen at the same progress"). Only explicit quota wording counts now.
+  // misread as a quota failure and KILLED EVERY SANDBOX ON THE ACCOUNT.
+  // Only explicit quota wording counts now.
   return /quota|limit reached|concurrent|too many|20\/20|sandbox limit|maximum number of sandboxes/i.test(msg);
 }
 
@@ -452,7 +427,7 @@ async function killAllSandboxesOnAccount(apiKey: string): Promise<number> {
   try {
     const paginator = Sandbox.list({ apiKey, limit: 50 });
     const page = await paginator.nextItems();
-    const running = page.filter((s) => (s.state as string) !== "closed" && !isScheduledSandbox(s));
+    const running = page.filter((s) => (s.state as string) !== "closed");
     await Promise.all(
       running.map((s) =>
         Sandbox.kill(s.sandboxId, { apiKey }).catch(() => {}),
@@ -672,18 +647,14 @@ interface RotationResult {
 }
 
 /** True when a running sandbox process must BLOCK a rotation (killing the
- *  sandbox would destroy it):
- *   - the BACKGROUND AGENT run (`node /home/user/.onyx/bg-agent.mjs …`) —
- *     killing the sandbox mid-run is exactly the "background work
- *     auto-stops after ~50 min" bug;
- *   - any other in-flight SDK command (a foreground exec from another
- *     tab/client racing this rotation).
+ *  sandbox would destroy it) — any in-flight SDK command (an exec from
+ *  another tab/client racing this rotation).
  *  Template service processes (the code-interpreter start command —
  *  jupyter — run FOREVER) are ignored so they can never block rotation. */
 function isBlockingProcess(c: { cmd?: string; args?: string[] }): boolean {
   const cmdline = `${c.cmd ?? ""} ${(c.args ?? []).join(" ")}`;
   if (/jupyter|start\.sh|envd/i.test(cmdline)) return false;
-  return true; // bg-agent.mjs, in-flight execs, anything user-started
+  return true; // in-flight execs, anything user-started
 }
 
 /**
@@ -705,8 +676,8 @@ function isBlockingProcess(c: { cmd?: string; args?: string[] }): boolean {
  * loss on every rotation. Stale-sandbox reclaiming stays in
  * createAndCacheSandbox (age-guarded, >20h only).
  *
- * BG-RUN GUARD (background-work auto-stop fix): if the old sandbox has LIVE
- * processes (a background agent run, an in-flight exec), the rotation is
+ * LIVE-PROCESS GUARD: if the old sandbox has LIVE processes (an in-flight
+ * exec from any tab/client), the rotation is
  * SKIPPED — killing the sandbox would kill the run mid-flight. Skipping is
  * SAFE: sandboxes are created with lifecycle onTimeout:"pause" +
  * autoResume, so even when the rotation window lapses the sandbox
@@ -742,17 +713,17 @@ async function performRotation(
     }
   }
 
-  // 1.5 BG-RUN GUARD — a live process on the old sandbox blocks the
+  // 1.5 LIVE-PROCESS GUARD — a live process on the old sandbox blocks the
   //     rotation (see docblock). Re/adopt the live sandbox and return it
   //     unchanged; the client re-stamps its rotation clock and retries
-  //     after the run finishes.
+  //     after the process finishes.
   if (oldSandbox) {
     try {
       const running = await oldSandbox.commands.list();
       const blocking = running.filter((c) => isBlockingProcess(c));
       if (blocking.length > 0) {
         console.log(
-          `[sandbox] rotation SKIPPED — ${blocking.length} live process(es) on ${oldSandbox.sandboxId} (background run / in-flight exec); the sandbox pauses at the E2B timeout instead and auto-resumes on next use`,
+          `[sandbox] rotation SKIPPED — ${blocking.length} live process(es) on ${oldSandbox.sandboxId} (in-flight exec); the sandbox pauses at the E2B timeout instead and auto-resumes on next use`,
         );
         const live = cached?.sandbox && oldSandbox === cached.sandbox ? cached.sandbox : oldSandbox;
         // Adopt the connect()-resolved live sandbox into this instance's
@@ -770,11 +741,9 @@ async function performRotation(
         return { sandbox: live, backedUp: 0, restored: 0, skipped: "running-commands" };
       }
     } catch {
-      // FAIL-SAFE GUARD (user report 2026-10-21: "background work completely
-      // broken — state frozen at the same progress"): commands.list() failed
-      // (envd blip / connect flakiness) — the old code PROCEEDED with the
-      // rotation in that case, killing sandboxes that could not be inspected,
-      // which killed live background runs mid-flight. Rotation is an
+      // FAIL-SAFE GUARD: commands.list() failed (envd blip / connect
+      // flakiness) — the old code PROCEEDED with the rotation in that case,
+      // killing sandboxes that could not be inspected. Rotation is an
       // OPTIMIZATION (the E2B 24h TTL is the only hard deadline and the
       // sandbox auto-pauses safely at its 1h timeout); skipping when the
       // liveness check is unavailable can never destroy work. The client
@@ -926,15 +895,12 @@ async function createAndCacheSandbox(
       console.log(`[sandbox] using custom template: ${templateId}`);
     }
     //
-    // LIFECYCLE (background-turn critical): onTimeout "pause" + autoResume.
-    // Without this E2B's default KILLS the sandbox when its timeout expires —
-    // including any background agent job running inside it. With it, the
-    // sandbox auto-PAUSES at timeout (full memory + filesystem preserved,
-    // background processes frozen mid-flight) and any later Sandbox.connect
-    // (e.g. the bg_status poll when the user reopens the app) AUTO-RESUMES it,
-    // continuing the job exactly where it froze. Verified live against E2B:
-    // a paused sandbox's background pulse process resumed with a single gap
-    // covering the pause window. (Hobby plan: 1h max continuous runtime; the
+    // LIFECYCLE: onTimeout "pause" + autoResume. Without this E2B's default
+    // KILLS the sandbox when its timeout expires — including any in-flight
+    // command running inside it. With it, the sandbox auto-PAUSES at timeout
+    // (full memory + filesystem preserved, running processes frozen
+    // mid-flight) and any later Sandbox.connect AUTO-RESUMES it, continuing
+    // exactly where it froze. (Hobby plan: 1h max continuous runtime; the
     // limit RESETS after each pause/resume cycle.)
     sandbox = await Sandbox.create({
       apiKey,
@@ -1207,162 +1173,6 @@ async function getSandbox(
   return await createAndCacheSandbox(apiKey, conversationId, mode);
 }
 
-// ── v2 background-run reading helpers ─────────────────────────────────────
-// The runner writes an APPEND-ONLY event log per run
-// (.onyx/runs/<runId>/events.jsonl, one JSON line per event, every event
-// carrying ts + seq) plus a state.json mirror (status/content/error).
-// Both bg_status and bg_wait read through this single snapshot helper.
-
-interface BgRunSnapshot {
-  status: string;
-  events: unknown[];
-  content: string;
-  error: string | null;
-  startedAt: string | null;
-  done: boolean;
-  /** The highest seq in the returned events (cursor for bg_wait). */
-  nextSeq?: number;
-}
-
-/** Resolve the run dir: explicit runId → legacy pointer → null. */
-async function resolveBgRunDir(
-  sandbox: Sandbox,
-  args: Record<string, unknown>,
-): Promise<string | null> {
-  const runId = typeof args.runId === "string" ? args.runId.trim() : "";
-  if (runId) return BG_RUNS_PREFIX + runId;
-  try {
-    const raw = await sandbox.files.read(BG_STATE_PATH);
-    const p = JSON.parse(raw) as {
-      activeRun?: string;
-      runs?: string[];
-      status?: string;
-      events?: unknown[];
-    };
-    // v2 pointer shape.
-    const id = p.activeRun ?? (Array.isArray(p.runs) && p.runs.length ? p.runs[p.runs.length - 1] : null);
-    if (id) return BG_RUNS_PREFIX + id;
-    // v1 shape (the whole state lived in bg-state.json with an events
-    // array) — handled by the caller via the legacy snapshot path.
-    if (Array.isArray(p.events)) return "__legacy__";
-  } catch {
-    // No pointer file — fall through.
-  }
-  return null;
-}
-
-/** Read a run's snapshot (events after the seq cursor + terminal status).
- *  Tolerates partial mid-append lines (the next poll re-reads them).
- *  `fastPath` (bg_wait): read the event log FIRST and return immediately
- *  when new events exist — skips the state.json round-trip while the stream
- *  is active (halves per-poll latency during streaming; the follow-up idle
- *  poll reads state.json for the authoritative terminal status). */
-async function readBackgroundRun(
-  sandbox: Sandbox,
-  args: Record<string, unknown>,
-  afterSeq = 0,
-  fastPath = false,
-): Promise<BgRunSnapshot> {
-  const runDir = await resolveBgRunDir(sandbox, args);
-  if (runDir === "__legacy__") {
-    // v1 run (started by the pre-streaming bundle): the whole state is in
-    // bg-state.json. Return it in the new snapshot shape so old clients
-    // and the new pipeline both understand it.
-    try {
-      const raw = await sandbox.files.read(BG_STATE_PATH);
-      const state = JSON.parse(raw) as {
-        status?: string;
-        events?: Array<{ seq?: number }>;
-        content?: string;
-        error?: string;
-        startedAt?: string;
-      };
-      const events = (state.events ?? []).filter(
-        (ev) => typeof (ev as { seq?: number }).seq !== "number" || (ev as { seq?: number }).seq! > afterSeq,
-      );
-      const status = state.status ?? "running";
-      return {
-        status,
-        events,
-        content: state.content ?? "",
-        error: state.error ?? null,
-        startedAt: state.startedAt ?? null,
-        done: status === "done" || status === "error",
-      };
-    } catch {
-      return { status: "running", events: [], content: "", error: null, startedAt: null, done: false };
-    }
-  }
-  if (!runDir) {
-    return { status: "running", events: [], content: "", error: null, startedAt: null, done: false };
-  }
-  // Read events.jsonl (append-only log) FIRST — during active streaming this
-  // single read is all bg_wait needs (fastPath): each token-level delta is
-  // delivered the moment it lands, without waiting for a state.json read.
-  const events: unknown[] = [];
-  let nextSeq = afterSeq;
-  try {
-    const raw = await sandbox.files.read(runDir + "/events.jsonl");
-    for (const line of raw.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      let ev: { seq?: number };
-      try {
-        ev = JSON.parse(t) as { seq?: number };
-      } catch {
-        continue; // partial mid-append line — the next poll re-reads it
-      }
-      if (typeof ev.seq === "number" && ev.seq > afterSeq) {
-        events.push(ev);
-        if (ev.seq > nextSeq) nextSeq = ev.seq;
-      }
-    }
-  } catch {
-    // events.jsonl not written yet.
-  }
-  if (fastPath && events.length > 0) {
-    return {
-      status: "running",
-      events,
-      content: "",
-      error: null,
-      startedAt: null,
-      done: false,
-      nextSeq,
-    };
-  }
-  // Read state.json (status mirror) — needed for the terminal status when
-  // no new events exist (and always for bg_status).
-  let status = "running";
-  let content = "";
-  let error: string | null = null;
-  let startedAt: string | null = null;
-  try {
-    const raw = await sandbox.files.read(runDir + "/state.json");
-    const st = JSON.parse(raw) as {
-      status?: string;
-      content?: string;
-      error?: string;
-      startedAt?: string;
-    };
-    status = st.status ?? "running";
-    content = st.content ?? "";
-    error = st.error ?? null;
-    startedAt = st.startedAt ?? null;
-  } catch {
-    // state.json not written yet — the run is booting.
-  }
-  return {
-    status,
-    events,
-    content,
-    error,
-    startedAt,
-    done: status === "done" || status === "error",
-    nextSeq,
-  };
-}
-
 interface RequestBody {
   apiKey: string;
   action: string;
@@ -1394,8 +1204,8 @@ function resolveApiKey(clientKey: unknown): string {
 }
 
 // GET — capability probe: does the server have E2B_API_KEY configured?
-// The client uses this to enable sandbox features (background turns, file
-// tools) without the key ever crossing the wire.
+// The client uses this to enable sandbox features (file tools) without the
+// key ever crossing the wire.
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ hasEnvKey: !!process.env.E2B_API_KEY?.trim() });
 }
@@ -2318,8 +2128,8 @@ export async function POST(req: NextRequest) {
       // filesystem AND the RAM (running processes, variables, open
       // connections) — so a workspace survives between sessions with no
       // automatic deletion until it is explicitly killed. Any later
-      // Sandbox.connect (resume action, bg_status poll, or the next tool
-      // call through getSandbox) auto-resumes it in place.
+      // Sandbox.connect (resume action, or the next tool call through
+      // getSandbox) auto-resumes it in place.
 
       case "pause": {
         const pauseSandboxId = (args.sandboxId as string) ?? clientSandboxId;
@@ -2336,9 +2146,8 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Cannot reach sandbox: ${errMsg}` }, { status: 500 });
         }
         // LIVE-RUN GUARD: never pause a sandbox with running processes —
-        // the background agent run (or an in-flight exec) would freeze
-        // mid-flight. (The E2B 1h timeout pause still applies to it
-        // naturally, and bg_wait's reconnect auto-resumes it.)
+        // an in-flight exec would freeze mid-flight. (The E2B 1h timeout
+        // pause still applies to it naturally.)
         try {
           const running = await sandbox.commands.list();
           const blocking = running.filter((c) => isBlockingProcess(c));
@@ -2347,21 +2156,20 @@ export async function POST(req: NextRequest) {
               ok: false,
               paused: false,
               reason: "running-commands",
-              detail: `${blocking.length} live process(es) on the sandbox — pause skipped so the background run keeps going`,
+              detail: `${blocking.length} live process(es) on the sandbox — pause skipped so in-flight work keeps going`,
             });
           }
         } catch {
           // FAIL-SAFE (same class as the rotation guard): the live-process
           // check failed, so we CANNOT prove the sandbox is idle — pausing
-          // blind could freeze a live background run mid-flight (the exact
-          // "left the app, came back, frozen at the same progress" bug). The
-          // pause is an optimization (the E2B 1h timeout pause still applies
+          // blind could freeze an in-flight command mid-flight. The pause
+          // is an optimization (the E2B 1h timeout pause still applies
           // naturally); skipping it when unsure can never destroy work.
           return NextResponse.json({
             ok: false,
             paused: false,
             reason: "guard-unavailable",
-            detail: "Could not verify the sandbox is idle (live-process check failed) — pause skipped so a possible background run keeps going. The E2B timeout pause still applies.",
+            detail: "Could not verify the sandbox is idle (live-process check failed) — pause skipped so possible in-flight work keeps going. The E2B timeout pause still applies.",
           });
         }
         try {
@@ -2432,279 +2240,9 @@ export async function POST(req: NextRequest) {
                   typeof meta["onyx-conversation"] === "string" && meta["onyx-conversation"]
                     ? meta["onyx-conversation"]
                     : null,
-                scheduled: "onyx-scheduled" in meta,
               };
             });
           return NextResponse.json({ ok: true, sandboxes });
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : String(e);
-          return NextResponse.json({ error: errMsg }, { status: 500 });
-        }
-      }
-
-      // ── BACKGROUND AGENT (E2B-documented pattern) ──────────────────────
-      // Sandboxes are SERVER-SIDE VMs: they keep running after the browser
-      // disconnects. We run the agent loop as a BACKGROUND COMMAND inside
-      // the sandbox (`commands.run(..., { background: true })`) writing its
-      // progress to a state file; the browser can close/minimize/leave and
-      // reconnect later ("bg_status" uses Sandbox.connect, which also
-      // auto-resumes a paused sandbox). The job keeps the sandbox busy for
-      // as long as its timeout window allows (1h max on the Hobby plan).
-      case "bg_start": {
-        const state = (args.state as Record<string, unknown>) ?? {};
-        // ROUND BUDGET (Persistent Execution PRD §3): the default is a SOFT
-        // budget — the runner AUTO-EXTENDS it at the boundary (round_budget
-        // notice + continuation note) up to a hard safety ceiling, so a
-        // long task is never terminated for hitting a round count.
-        const maxRounds = (args.maxRounds as number) ?? 120;
-        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
-        // Full window for the background run — resets the timeout countdown.
-        try {
-          await sandbox.setTimeout(3_600_000);
-        } catch {
-          // best-effort — the default 1h window still applies
-        }
-        // Write the runner script (idempotent — same script every time).
-        await sandbox.files.write(BG_SCRIPT_PATH, BG_AGENT_SCRIPT);
-        // v2 STREAMING RUN LAYOUT: each run gets its own directory —
-        //   .onyx/runs/<runId>/state.json   (boot state + status + todos +
-        //                                    conversation, rewritten per round)
-        //   .onyx/runs/<runId>/events.jsonl (APPEND-ONLY event log, O(1)
-        //                                    appends, ts+seq on every event)
-        //   .onyx/bg-state.json             (pointer for crash-recovery +
-        //                                    stale-bundle bg_status)
-        // Concurrent turns can no longer clobber each other's state file.
-        const runId =
-          "run_" + Date.now().toString(36) + "_" +
-          Math.random().toString(36).slice(2, 8);
-        const runDir = BG_RUNS_PREFIX + runId;
-        const initial = {
-          ...state,
-          maxRounds,
-          status: "starting",
-          content: "",
-          startedAt: new Date().toISOString(),
-        };
-        await sandbox.files.write(runDir + "/state.json", JSON.stringify(initial));
-        await sandbox.files.write(runDir + "/events.jsonl", "");
-        await sandbox.files.write(
-          BG_STATE_PATH,
-          JSON.stringify({ activeRun: runId, runs: [runId], status: "starting", startedAt: initial.startedAt }),
-        );
-        // Launch as a BACKGROUND command — returns immediately with a pid;
-        // the process keeps running inside the sandbox after we (and the
-        // browser) disconnect. The runId argument tells the runner which
-        // run dir to execute (crash-relaunch reads the pointer fallback).
-        const handle = await sandbox.commands.run(
-          `node ${BG_SCRIPT_PATH} ${runId} > /home/user/.onyx/bg-agent.log 2>&1`,
-          { background: true, timeoutMs: 0, cwd: DEFAULT_CWD },
-        );
-        return NextResponse.json({
-          sandboxId: sandbox.sandboxId,
-          pid: handle.pid,
-          runId,
-        });
-      }
-
-      case "bg_status": {
-        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
-        if (!bgSandboxId) {
-          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
-        }
-        // Reconnect — works from ANY serverless instance, and auto-resumes
-        // a paused sandbox (per the E2B docs any SDK call wakes it).
-        let sandbox: Sandbox;
-        try {
-          sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : String(e);
-          return NextResponse.json({
-            sandboxId: bgSandboxId,
-            status: "unreachable",
-            error: `Background sandbox unreachable: ${errMsg}`,
-          });
-        }
-        // Activity extends the window while the user watches (per docs the
-        // explicit setTimeout resets the countdown to the new value).
-        try {
-          await sandbox.setTimeout(3_600_000);
-        } catch {
-          // best-effort
-        }
-        const snap = await readBackgroundRun(sandbox, args);
-        return NextResponse.json({
-          sandboxId: bgSandboxId,
-          ...snap,
-        });
-      }
-
-      // ── v2.1 SERVER-PUSH SSE DELIVERY ─────────────────────────────────
-      // bg_wait — STREAMING SSE: the server holds ONE connection open for
-      // the segment, watching the run's events.jsonl (60ms while events
-      // flow, 150ms idle; the fast-path read skips the state.json round
-      // trip until the stream goes idle) and PUSHING each new batch of
-      // token-level events as a data frame the moment it lands. The client
-      // reads the stream incrementally — no per-batch HTTP round trip, so
-      // word-level deltas reach the UI at the server's read cadence
-      // (~60-150ms) instead of a full request-response cycle (~400-800ms).
-      // A ~2.5s keep-alive frame covers idle stretches; the segment cap
-      // (maxWaitMs, default 11s) is far under maxDuration=300.
-      case "bg_wait": {
-        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
-        if (!bgSandboxId) {
-          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
-        }
-        const afterSeq0 = Number(args.afterSeq ?? 0) || 0;
-        const maxWaitMs = Math.min(Math.max(Number(args.maxWaitMs ?? 11_000) || 11_000, 1_000), 25_000);
-        let sandbox: Sandbox;
-        try {
-          sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : String(e);
-          return NextResponse.json({
-            sandboxId: bgSandboxId,
-            status: "unreachable",
-            error: `Background sandbox unreachable: ${errMsg}`,
-            events: [],
-            done: false,
-            afterSeq: afterSeq0,
-          });
-        }
-        try {
-          await sandbox.setTimeout(3_600_000);
-        } catch {
-          // best-effort
-        }
-        // ── v2.1 SERVER-PUSH SSE DELIVERY ─────────────────────────────────
-        // The old long-poll returned ONE JSON snapshot per HTTP request, so
-        // every event batch paid a full browser↔server round trip (~2-4 RTTs
-        // ≈ 400-800ms) — the "paragraph at once" cadence. Now the server
-        // holds ONE streaming connection open and PUSHES each batch of new
-        // events the moment its sandbox read lands:
-        //   - active stream: poll the event log every 60ms
-        //   - idle (thinking/boot/retry): every 150ms + a ~2.5s keep-alive
-        //     frame (empty events) so proxies keep the connection open and
-        //     the client keeps yielding
-        //   - segment cap (maxWaitMs): send a timeout frame + close; the
-        //     client re-opens immediately (one amortized RTT per ~11s)
-        const ACTIVE_POLL_MS = 60;
-        const IDLE_POLL_MS = 150;
-        const HEARTBEAT_MS = 2_500;
-        const encoder = new TextEncoder();
-        let cursor = afterSeq0;
-        const stream = new ReadableStream<Uint8Array>({
-          async start(controller) {
-            let closed = false;
-            const send = (obj: Record<string, unknown>) => {
-              if (closed) return;
-              try {
-                controller.enqueue(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
-              } catch {
-                closed = true;
-              }
-            };
-            const sendUnreachable = (message: string) => {
-              send({
-                sandboxId: bgSandboxId,
-                status: "unreachable",
-                error: message,
-                events: [],
-                done: false,
-                afterSeq: cursor,
-              });
-            };
-            try {
-              const deadline = Date.now() + maxWaitMs;
-              let lastBeat = Date.now();
-              for (;;) {
-                const snap = await readBackgroundRun(sandbox, args, cursor, true);
-                if (snap.events.length > 0) {
-                  send({
-                    sandboxId: bgSandboxId,
-                    ...snap,
-                    afterSeq: snap.nextSeq ?? cursor,
-                  });
-                  if (snap.nextSeq) cursor = snap.nextSeq;
-                  if (snap.done) break;
-                  await new Promise((r) => setTimeout(r, ACTIVE_POLL_MS));
-                  continue;
-                }
-                if (snap.done) {
-                  send({
-                    sandboxId: bgSandboxId,
-                    ...snap,
-                    afterSeq: snap.nextSeq ?? cursor,
-                  });
-                  break;
-                }
-                if (Date.now() >= deadline) {
-                  // Segment cap — clean end; the client re-opens immediately.
-                  send({
-                    sandboxId: bgSandboxId,
-                    ...snap,
-                    afterSeq: snap.nextSeq ?? cursor,
-                    timeout: true,
-                  });
-                  break;
-                }
-                if (Date.now() - lastBeat >= HEARTBEAT_MS) {
-                  lastBeat = Date.now();
-                  // Keep-alive DATA frame (empty events): keeps intermediaries
-                  // from closing the connection AND lets the client's for-await
-                  // yield so it can check its stop flag.
-                  send({
-                    sandboxId: bgSandboxId,
-                    status: snap.status,
-                    events: [],
-                    content: "",
-                    error: null,
-                    startedAt: snap.startedAt,
-                    done: false,
-                    afterSeq: cursor,
-                  });
-                }
-                await new Promise((r) => setTimeout(r, IDLE_POLL_MS));
-              }
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e);
-              sendUnreachable(`bg_wait stream failed: ${errMsg}`);
-            }
-            try {
-              controller.close();
-            } catch {
-              // already closed by the consumer
-            }
-          },
-        });
-        return new Response(stream, {
-          headers: {
-            "Content-Type": "text/event-stream; charset=utf-8",
-            "Cache-Control": "no-cache, no-transform",
-            Connection: "keep-alive",
-            // Disable nginx-style proxy buffering (Vercel honors this too).
-            "X-Accel-Buffering": "no",
-          },
-        });
-      }
-
-      case "bg_stop": {
-        const bgSandboxId = (args.sandboxId as string) ?? clientSandboxId;
-        if (!bgSandboxId) {
-          return NextResponse.json({ error: "Missing sandboxId" }, { status: 400 });
-        }
-        try {
-          const sandbox = await Sandbox.connect(bgSandboxId, { apiKey });
-          const cmds = await sandbox.commands.list();
-          // Kill every running command in this sandbox — the background
-          // agent included. The sandbox itself (and its files) stays.
-          for (const c of cmds) {
-            try {
-              await sandbox.commands.kill(c.pid);
-            } catch {
-              // already exited
-            }
-          }
-          return NextResponse.json({ sandboxId: bgSandboxId, ok: true });
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e);
           return NextResponse.json({ error: errMsg }, { status: 500 });
@@ -2817,7 +2355,7 @@ export async function POST(req: NextRequest) {
         // just see the new sandboxId on the next call.
         //
         // Returns { sandboxId, backedUp, restored, rotated, skipped? } —
-        // `skipped: "running-commands"` means a live background run (or an
+        // `skipped: "running-commands"` means a live process (or an
         // in-flight exec) blocked the rotation and the SAME sandbox was
         // returned untouched (it auto-pauses at the E2B timeout and
         // auto-resumes on the next use instead of being killed).

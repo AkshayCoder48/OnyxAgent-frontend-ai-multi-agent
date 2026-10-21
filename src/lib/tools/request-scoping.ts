@@ -17,13 +17,13 @@
  *   2. A CORE surface ships on every normal turn (context ≥128K models):
  *      the general-assistant toolset — web/research, code/exec, file
  *      authoring, todos, workspace, chats, uploads, memory, media,
- *      subagents and scheduled-task creation.
+ *      subagents and chat management.
  *   3. Small-context models (<128K, incl. the 32K safe-fallback) get the
  *      tighter ESSENTIAL surface instead — the same core minus the
  *      long-tail extras (image/video search, file-management verbs,
  *      preview/ocr, chat management, the full subagent suite) which stay
  *      reachable through intent matching.
- *   4. SITUATIONAL tools (composio suite, scheduled-task MANAGEMENT,
+ *   4. SITUATIONAL tools (composio suite,
  *      env vars, skills, MCP config, security audit, workflow,
  *      counterfactual, custom-tool management, subagent config) ride in
  *      ONLY when the user's intent mentions them — keyword rules below —
@@ -128,7 +128,6 @@ export const CORE_EXTRA_TOOLS: ReadonlySet<string> = new Set([
   "manage_chats",
   "spawn_subagent", "list_subagents", "query_subagent", "steer_subagent",
   "complete_subagent", "cancel_subagent", "manage_subagent_chat",
-  "create_scheduled_task", "list_scheduled_tasks",
 ]);
 
 /** The full CORE surface (ESSENTIAL + extras). (Exported for tests +
@@ -146,15 +145,6 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
  * situational (never shipped without intent/history/dynamic).
  */
 const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
-  {
-    // Scheduled tasks / automation (incl. the management suite).
-    re: /schedul|cron\b|recurring|every\s+(day|week|month|morning|night|hour|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|daily|weekly|monthly|hourly|tomorrow|remind|\btask\b|automation/i,
-    tools: [
-      "create_scheduled_task", "list_scheduled_tasks", "update_scheduled_task",
-      "delete_scheduled_task", "pause_scheduled_task", "resume_scheduled_task",
-      "run_scheduled_task_now", "get_scheduled_task_history",
-    ],
-  },
   {
     // Composio external integrations.
     re: /composio|integrat(e|ion|ions)|gmail|google\s+(sheets?|drive|calendar)|slack\b|notion|linear\b|trello|asana|hubspot|salesforce|zendesk|jira|airtable|discord|telegram|whatsapp|intercom|shopify|stripe|twitter|sendgrid| calendly|zoom\b|dropbox|box\.com/i,

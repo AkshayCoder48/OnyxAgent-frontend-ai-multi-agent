@@ -42,10 +42,8 @@ import {
 
 /**
  * OnyxBase cloud settings — the API key that powers the OnyxBase-backed
- * cloud features: skills cloud backup (Settings → Skills) and the
- * server-side workspace sync for scheduled tasks (each scheduled run
- * restores its workspace from the cloud before it starts and syncs it
- * back after it finishes).
+ * cloud features: skills cloud backup (Settings → Skills) and durable
+ * workspace snapshots.
  *
  * The key is vault-encrypted at rest and NEVER reaches the LLM, the system
  * prompt, tool arguments, or the E2B sandbox.
@@ -190,9 +188,8 @@ export function SectionCloudWorkspace() {
         <AlertDescription>
           The OnyxBase API key connects Onyx to your private OnyxBase KV account. It
           powers the skills cloud backup (every installed skill is pushed to the cloud
-          and can be restored from it — see Skills) and keeps scheduled tasks persistent:
-          each scheduled run restores its workspace from the cloud before it starts and
-          syncs it back after it finishes. Get a free key at{" "}
+          and can be restored from it — see Skills) and durable workspace snapshots.
+          Get a free key at{" "}
           <a
             href="https://onyxbase-chi.vercel.app"
             target="_blank"
@@ -288,8 +285,8 @@ export function SectionCloudWorkspace() {
           </div>
           <p className="mt-1 font-mono text-sm">{settings?.onyxbase_workspace_id ?? "workspace_default"}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Fixed identifier — not a secret. The OnyxBase workspace your skill backups and
-            scheduled-task files sync to.
+            Fixed identifier — not a secret. The OnyxBase workspace your skill backups
+            sync to.
           </p>
         </div>
       </div>
@@ -327,9 +324,8 @@ export function SectionCloudWorkspace() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove OnyxBase API key?</AlertDialogTitle>
             <AlertDialogDescription>
-              Skills cloud backup and scheduled-task workspace sync will stop working
-              until a new key is added. Everything already stored in your OnyxBase
-              account stays there.
+              Skills cloud backup will stop working until a new key is added.
+              Everything already stored in your OnyxBase account stays there.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

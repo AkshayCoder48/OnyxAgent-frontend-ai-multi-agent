@@ -11,17 +11,10 @@ import {
   persistChatSnapshot,
   type ExecutionChatStore,
 } from "@/stores/chat-store";
-import { conversationService } from "@/lib/services";
-import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import type { AgentTurnOptions } from "@/lib/agent/runtime";
 import { runAgentTurn } from "@/lib/agent/runtime";
-import type { BackgroundTurnHandle } from "@/lib/agent/background-turn";
 import { AgentEventProcessor } from "@/lib/agent/event-processor";
 import { isAbortLikeError } from "@/lib/agent/stream-guards";
-import {
-  listJobs,
-  getActiveJob,
-} from "@/lib/e2b/background-agent";
 
 /**
  * ExecutionHub — the module-level agent-execution registry.
@@ -41,7 +34,7 @@ import {
  *   - a HEADLESS chat store (message parts / tool calls / rounds — the exact
  *     shapes the UI renders) that ANY mounted UI can subscribe to,
  *   - an AgentEventProcessor (the old 868-line handleAgentEvent, extracted),
- *   - the turn's abort controller (foreground) / E2B background handle.
+ *   - the turn's abort controller.
  *
  * Cancellation is EXPLICIT ONLY: hub.stopExecution() (the Stop button).
  * Nothing that happens to the React tree ever stops an execution.
@@ -58,18 +51,13 @@ export interface ExecutionSummary {
   status: ExecutionStatus;
   trigger: ExecutionTrigger;
   startedAt: number;
-  /** E2B sandbox (background executions) — surfaced in the running list. */
-  sandboxId?: string;
 }
 
 export interface ExecutionRecord extends ExecutionSummary {
   finishedAt?: number;
   store: ExecutionChatStore;
   processor: AgentEventProcessor;
-  handle: BackgroundTurnHandle | null;
   abortController: AbortController | null;
-  /** bg stop bookkeeping (set after launch so stop works pre-resume). */
-  onStopped?: () => void;
 }
 
 // ── React-subscribable registry (summaries only; records stay private) ──────
@@ -128,9 +116,6 @@ const useHubStore = create<HubState>((set) => ({
 
 // ── Module-level record map (survives every React lifecycle) ────────────────
 const records = new Map<string, ExecutionRecord>();
-/** In-flight resume guards (conversationId → promise) so a mount effect and
- *  the app-level rehydrator can never double-resume the same job. */
-const resuming = new Map<string, Promise<ExecutionRecord | null>>();
 
 function recordToSummary(r: ExecutionRecord): ExecutionSummary {
   return {
@@ -140,7 +125,6 @@ function recordToSummary(r: ExecutionRecord): ExecutionSummary {
     status: r.status,
     trigger: r.trigger,
     startedAt: r.startedAt,
-    sandboxId: r.sandboxId,
   };
 }
 
@@ -223,8 +207,7 @@ export const executionHub = {
       startedAt: Date.now(),
       store,
       processor,
-      handle: null,
-      abortController: opts.mode === "foreground" ? new AbortController() : null,
+      abortController: new AbortController(),
     });
     // Seed: the conversation's current messages (user is viewing it).
     store.getState().replaceAllMessages(useChatStore.getState().messages);
@@ -274,32 +257,6 @@ export const executionHub = {
     });
   },
 
-  // ── RUN (background) ───────────────────────────────────────────────────
-  /** Register the launched background handle (doSend calls this after
-   *  startBackgroundTurn resolves). */
-  registerBackgroundHandle(
-    executionId: string,
-    handle: BackgroundTurnHandle | null,
-    sandboxId?: string,
-  ): void {
-    const r = records.get(executionId);
-    if (!r) return;
-    r.handle = handle;
-    if (sandboxId) {
-      r.sandboxId = sandboxId;
-      useHubStore.getState().patch(executionId, { sandboxId });
-    }
-  },
-
-  /** Mode correction (bg launch failed → foreground fallback). */
-  patchMode(executionId: string, mode: ExecutionMode): void {
-    const r = records.get(executionId);
-    if (!r || r.status !== "running") return;
-    r.mode = mode;
-    if (mode === "foreground" && !r.abortController) r.abortController = new AbortController();
-    useHubStore.getState().patch(executionId, { mode });
-  },
-
   // ── STOP (explicit only — the Stop button) ─────────────────────────────
   stopExecution(executionId: string): void {
     const r = records.get(executionId);
@@ -307,11 +264,6 @@ export const executionHub = {
     r.processor.markStoppedByUser();
     r.abortController?.abort();
     r.abortController = null;
-    if (r.handle) {
-      const handle = r.handle;
-      r.handle = null;
-      void handle.stop();
-    }
     this.finishExecution(executionId, "stopped");
   },
 
@@ -355,153 +307,6 @@ export const executionHub = {
     }, 0);
   },
 
-  // ── RESUME (page reload / app rehydrate) ───────────────────────────────
-  /**
-   * Ensure an execution exists for a conversation with a persisted E2B
-   * background job. Idempotent + race-safe (a guard map prevents the chat
-   * page's mount effect and the app-level rehydrator from double-resuming).
-   * Returns the summary (existing OR resumed), or null when there is no job.
-   */
-  async ensureResumed(
-    conversationId: string,
-    userId: string,
-    e2bApiKey: string,
-  ): Promise<ExecutionSummary | null> {
-    const existing = this.getFor(conversationId);
-    if (existing) return existing;
-    const inflight = resuming.get(conversationId);
-    if (inflight) return inflight.then((r) => (r ? recordToSummary(r) : null));
-    const job = getActiveJob(conversationId);
-    if (!job) return null;
-
-    const promise = (async (): Promise<ExecutionRecord | null> => {
-      // Re-check after the async boundary — a doSend may have created an
-      // execution for this conversation while we were loading.
-      const existing2 = this.getFor(conversationId);
-      if (existing2) {
-        resuming.delete(conversationId);
-        return records.get(existing2.id) ?? null;
-      }
-      const record = this.createExecution({
-        conversationId,
-        mode: "background",
-        trigger: "resume",
-      });
-      // HONEST ELAPSED (Persistent Execution PRD §12): the resumed
-      // execution's clock starts at the ORIGINAL launch (the persisted
-      // job's startedAt), not at resume time — the sidebar elapsed shows
-      // the run's true age instead of restarting from zero.
-      if (typeof job.startedAt === "number" && job.startedAt > 0) {
-        record.startedAt = job.startedAt;
-        useHubStore.getState().patch(record.id, { startedAt: job.startedAt });
-      }
-      // Seed the execution store from Dexie (the checkpointed history).
-      try {
-        const rows = await conversationService.getMessages(conversationId, userId);
-        const seed: ChatMessage[] = [];
-        for (const row of rows) {
-          const chatMsg = conversationMessageToChatMessage({
-            id: row.id,
-            conversation_id: row.conversation_id,
-            role: row.role,
-            content: row.content,
-            created_at: row.created_at,
-            tool_calls: row.tool_calls,
-            user_rating: row.user_rating,
-            rating_count: row.rating_count,
-            files: row.files,
-            thinking: (row as { thinking?: string | null }).thinking,
-            reasoning: (row as { reasoning?: string | null }).reasoning,
-            parts: (row as { parts?: unknown[] | null }).parts as
-              | import("@/types").MessagePart[]
-              | null
-              | undefined,
-          });
-          seed.push(chatMsg);
-        }
-        record.store.getState().replaceAllMessages(seed);
-      } catch {
-        // best-effort — events replay will still populate the message
-      }
-      record.store.getState().setProcessing(true);
-
-      const { resumeBackgroundTurn } = await import("@/lib/agent/background-turn");
-      const attemptResume = () =>
-        resumeBackgroundTurn({
-          e2bApiKey,
-          userId,
-          conversationId,
-          emit: (ev) => record.processor.handle(ev),
-          // Checkpoint coherence: flush the processor's buffered render
-          // deltas before each Dexie checkpoint (see background-turn.ts).
-          flush: () => record.processor.flush(),
-          onFinished: () => {
-            // The consumer's terminal events already routed through the
-            // processor (onTurnEnd). This is the safety net for paths that
-            // end without a terminal event (e.g. unreachable give-up emits
-            // an error event — handled — or a consumer crash).
-            executionHub.finishExecution(record.id, "failed");
-          },
-          store: record.store,
-        }).catch(() => null);
-      // ONE RETRY (app-open connect blips): the sandbox connect (auto-resume
-      // of a paused sandbox) and the key/decrypt resolution can race the
-      // page load — a single delayed retry recovers those without leaving
-      // the user on a silently frozen chat.
-      let handle = await attemptResume();
-      if (!handle) {
-        await new Promise((r) => setTimeout(r, 5_000));
-        if (this.getFor(conversationId)?.id !== record.id) {
-          resuming.delete(conversationId);
-          return record; // superseded — do not fight a newer execution
-        }
-        handle = await attemptResume();
-      }
-      if (handle) {
-        record.handle = handle;
-        record.sandboxId = job.sandboxId;
-        useHubStore.getState().patch(record.id, { sandboxId: job.sandboxId });
-      } else {
-        // HONEST resume failure (user report 2026-10-21: "came back and it
-        // was the same state as where I left, nothing generates"): the job
-        // could not be reconnected (sandbox expired/destroyed or E2B
-        // unreachable). Surface it as a real chat message instead of
-        // silently dropping to a frozen chat — the checkpointed history
-        // below is intact and a new message continues the work.
-        record.processor.handle({
-          type: "error",
-          data: {
-            message:
-              "This background task could not be reconnected — its sandbox is unreachable or has expired. Its last saved state is shown above; send a message to continue the work.",
-          },
-          timestamp: new Date().toISOString(),
-        });
-        this.finishExecution(record.id, "failed");
-      }
-      resuming.delete(conversationId);
-      return record;
-    })();
-    resuming.set(conversationId, promise);
-    return promise.then((r) => (r ? recordToSummary(r) : null));
-  },
-
-  /**
-   * App-mount rehydration: resume EVERY persisted background job (not just
-   * the current conversation) — the browser is the persistence layer for
-   * interactive runs, so all running jobs keep checkpointing to Dexie the
-   * moment the app reopens. Spec §14: refresh must not terminate execution.
-   */
-  async rehydrateAll(userId: string, e2bApiKey: string): Promise<void> {
-    const jobs = listJobs();
-    for (const job of jobs) {
-      if (!job.conversationId) continue;
-      try {
-        await this.ensureResumed(job.conversationId, userId, e2bApiKey);
-      } catch {
-        // best-effort — the per-conversation resume effect retries on view
-      }
-    }
-  },
 };
 
 // ── REACT BINDINGS ─────────────────────────────────────────────────────────

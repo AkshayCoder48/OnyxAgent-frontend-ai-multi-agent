@@ -1,8 +1,5 @@
 import { Header } from "@/components/layout";
 import { AuthGuard } from "@/components/layout/auth-guard";
-import { SchedulerHeartbeat } from "@/components/scheduled/scheduler-heartbeat";
-import { ServerChatSync } from "@/components/chat/server-chat-sync";
-import { ExecutionRehydrator } from "@/components/chat/execution-rehydrator";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -15,18 +12,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           jank during streaming (GenUI PRD §12). dvh tracks the live visual
           viewport, so the chat container is the ONLY scrollable surface. */}
       <div className="flex h-dvh flex-col">
-        {/* Invisible: keeps the server-side scheduler ticking every 60s while
-            the app is open + toasts when tasks fire or finish. Renders null. */}
-        <SchedulerHeartbeat />
-        {/* Invisible: the browser half of the unified chat records — pulls
-            server-appended messages (scheduled-run results) into Dexie/live
-            store every 45s and mirrors the browser's chat state to the server
-            on view-change / execution-finish. Renders null. */}
-        <ServerChatSync />
-        {/* Invisible: on app start, resumes EVERY persisted E2B background
-            job (browser refresh must not terminate backend execution —
-            spec §14). Renders null. */}
-        <ExecutionRehydrator />
         <Header />
         <main
           id="main"

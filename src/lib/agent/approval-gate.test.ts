@@ -2,7 +2,7 @@
  * Approval gate — PURE-LOGIC tests (no Dexie, no window). The verdict matrix
  * of `decideGateAction` is the security core of Task 2-d (PRD §8.2/§13.2):
  * allowed → execute; denied → never executes; approval_required →
- * interactive gate, or an honest fail-fast in unattended mode.
+ * interactive gate.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -11,7 +11,6 @@ import {
   permissionDeniedResult,
   riskNoteFor,
   selectPendingForToolCall,
-  unattendedApprovalResult,
   usePendingApprovals,
   type PendingApproval,
 } from "./approval-gate";
@@ -32,26 +31,10 @@ describe("decideGateAction — the verdict matrix", () => {
     }
   });
 
-  it("approval_required (attended) → request_approval (the interactive wait)", () => {
+  it("approval_required → request_approval (the interactive wait)", () => {
     expect(decideGateAction("approval_required", "manage_env_var")).toEqual({
       kind: "request_approval",
     });
-  });
-
-  it("approval_required (UNATTENDED) → honest fail-fast denial", () => {
-    const action = decideGateAction("approval_required", "delete_file", { unattended: true });
-    expect(action.kind).toBe("deny");
-    if (action.kind === "deny") {
-      expect(action.toolResult).toContain("delete_file");
-      expect(action.toolResult).toContain("interactive approval");
-      expect(action.toolResult).toContain("NOT executed");
-      expect(action.toolResult).toContain("from the chat");
-    }
-  });
-
-  it("the unattended degradation only softens approval_required — denied stays denied", () => {
-    expect(decideGateAction("denied", "run_terminal", { unattended: true }).kind).toBe("deny");
-    expect(decideGateAction("allowed", "run_terminal", { unattended: true }).kind).toBe("execute");
   });
 });
 
@@ -60,12 +43,6 @@ describe("denial result copy", () => {
     const msg = permissionDeniedResult("composio_execute_tool");
     expect(msg).toContain("composio_execute_tool");
     expect(msg).toContain("Settings → Tools");
-  });
-
-  it("unattended copy explains WHERE to run the task instead", () => {
-    const msg = unattendedApprovalResult("delete_folder");
-    expect(msg).toContain("delete_folder");
-    expect(msg).toContain("unattended");
   });
 });
 

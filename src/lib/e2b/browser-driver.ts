@@ -26,14 +26,14 @@
  * credentials, service terms and the existing OnyxAgent safety controls.
  *
  * Packaging constraint: this Python source is exported as a TS template
- * literal AND interpolated into bg-agent-script.ts via JSON.stringify —
+ * literal embedded verbatim —
  * the source must contain NO backticks and NO ${ } sequences (Python
  * naturally has neither; keep it that way).
  */
 
 /**
  * Driver version — stamped into /home/user/.onyx/browser/.version when the
- * driver starts. The session managers (browser-session.ts + the bg-agent's
+ * driver starts. The session managers (browser-session.ts
  * ensureWsDriver) compare the RUNNING driver's stamp against this constant:
  * a live driver with a stale stamp is killed and redeployed. Without that
  * check a per-command Python error (e.g. the active_idx UnboundLocalError)

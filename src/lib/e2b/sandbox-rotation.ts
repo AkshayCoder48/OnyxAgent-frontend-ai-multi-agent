@@ -201,37 +201,6 @@ export async function ensureFreshSandbox(
   // Still fresh — no rotation needed.
   if (Date.now() - createdAt < ROTATION_AGE_MS) return;
 
-  // ── BACKGROUND-RUN GUARD (auto-stop fix) ─────────────────────────────
-  // NEVER rotate a sandbox that is running a background agent job — the
-  // rotation kills the sandbox, which killed the in-flight run ~50 min in
-  // ("background work auto-stops after a certain time"). While a job is
-  // live the sandbox is left alone: at the E2B 1h timeout it auto-PAUSES
-  // (full RAM + filesystem preserved — pause/resume persistency) and the
-  // next Sandbox.connect (e.g. the bg_status/bg_wait poll, or the next app
-  // open) auto-resumes it, continuing the run exactly where it froze.
-  // The rotation clock is re-stamped so the next attempt happens after the
-  // guard window, not on every call.
-  const currentId =
-    (typeof window !== "undefined"
-      ? window.localStorage.getItem(sandboxIdStorageKey(t.apiKey, t.conversationId, t.mode))
-      : null) ?? targetE2BClient(t).peekSandboxId();
-  try {
-    const { listJobs } = await import("./background-agent");
-    const activeOnThisSandbox = listJobs().some(
-      (j) => currentId && j.sandboxId === currentId,
-    );
-    if (activeOnThisSandbox) {
-      setStoredCreatedAt(t, Date.now());
-      console.log(
-        "[sandbox-rotation] rotation deferred — a background run is live on this sandbox (it will pause at the E2B timeout and auto-resume, not be killed)",
-      );
-      return;
-    }
-  } catch {
-    // best-effort — proceed with the server-side guard only (the server
-    // checks commands.list() for live processes too).
-  }
-
   // Rotation needed — perform it atomically on the server.
   const rotation = performRotation(t).finally(() => {
     rotationPromises.delete(targetMutexKey(t));

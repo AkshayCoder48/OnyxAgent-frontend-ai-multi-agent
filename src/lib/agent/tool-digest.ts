@@ -6,15 +6,10 @@
  * surface without having to read /home/user/Onyx.md first:
  *
  *   - interactive turns ............ runtime.ts (inside toolKnowledgeBase)
- *   - scheduled chat executions .... scheduler/engine.ts (startChatExecution
- *                                   + buildScheduledSystemPrompt fallback)
- *   - subagents .................... agent/subagent-runtime.ts
- *   - interactive background runs .. e2b/background-agent.ts (the sandbox
- *                                   runner reads the prompt from state)
+ *   - subagent turns ............... subagent-runtime.ts
  *
- * Injection is idempotent (marker-based) so layered paths (e.g. a scheduled
- * prompt that already contains the digest flowing into startChatExecution)
- * never duplicate the block. Client- and server-safe: pure string helpers.
+ * Injection is idempotent (marker-based) so layered prompts that already
+ * contain the digest never duplicate the block. Client- and server-safe: pure string helpers.
  */
 
 import { ONYX_MD_DIGEST } from "./onyx-md-digest";

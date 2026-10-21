@@ -8,7 +8,7 @@
 // rides this single `knowledge_base` tool with an `action` parameter —
 // the same one-tool-per-domain convention as manage_memory etc.
 //
-// SECURITY MODEL (mirrors scheduled_tasks): the OnyxBase API key is
+// SECURITY MODEL: the OnyxBase API key is
 // resolved from the encrypted vault HERE, at execution time. It is never
 // part of any tool schema, argument, prompt, or result.
 

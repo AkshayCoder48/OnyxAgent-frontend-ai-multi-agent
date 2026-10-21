@@ -9,14 +9,6 @@
  *
  *   - foreground runtime (runtime.ts per-tool execute loop)
  *   - both subagent dispatch sites (subagent-runtime.ts)
- *   - the bridged-tool path of background turns (browser-tool-bridge.ts —
- *     bridged tools execute IN THIS BROWSER, so the full interactive wait
- *     applies even though the LLM loop runs inside the E2B sandbox)
- *
- * Sandbox-NATIVE background tools cannot wait for a human (the browser may
- * be closed) — for those, the browser threads a POLICY SNAPSHOT into the
- * sandbox at launch (`buildBgPolicySnapshot` below → state.toolPermissions)
- * and the plain-JS runner resolves + fail-fasts inside bg-agent-script.ts.
  *
  * The wait mechanism copies ask-user-wait.ts exactly: the gate emits the
  * `approval_request` WSEvent (payload from the ApprovalRequest row it just
@@ -34,9 +26,7 @@ import { create } from "zustand";
 import type { ResourcePermission } from "@/types";
 import type { WSEvent } from "@/types";
 import { db } from "@/lib/db";
-import { getProject } from "@/lib/projects/service";
 import {
-  loadGlobalPolicy,
   resolvePermission,
   resolveToolPermission,
   type GlobalPolicyEntries,
@@ -47,7 +37,6 @@ import {
   resolveApproval,
   completeApproval,
 } from "@/lib/projects/approvals";
-import { listTools } from "@/lib/tools/registry";
 import { setOrbOverrideState } from "@/stores/orb-personality-store";
 import { logWarn } from "@/lib/client-logger";
 
@@ -74,14 +63,14 @@ export function respondToApproval(
 }
 
 // ---------------------------------------------------------------------------
-// Pending-approvals store — the live bridge between gates and the UI cards
+// Pending-approvals store — the live link between gates and the UI cards
 // ---------------------------------------------------------------------------
 
 /** What a waiting approval card needs (mirrors ApprovalRequestEvent + the
  *  tool_call_id correlation so the chat card can find ITS approval). */
 export interface PendingApproval {
   approval_id: string;
-  /** The tool_call card this approval belongs to (chat + bridged bg calls). */
+  /** The tool_call card this approval belongs to. */
   tool_call_id?: string | null;
   tool_name: string;
   operation_type: string;
@@ -91,7 +80,7 @@ export interface PendingApproval {
   project_id: string | null;
   conversation_id: string;
   /** Where the gated call came from — cards render differently per source. */
-  source: "chat" | "subagent" | "bridge";
+  source: "chat" | "subagent";
   /** Epoch ms when the store entry landed (UI ordering). */
   opened_at: number;
 }
@@ -105,7 +94,7 @@ interface PendingApprovalsState {
 
 /** Live pending approvals — populated by the gate AND (idempotently) by the
  *  event-processor's approval_request case. Not persisted: a reload kills
- *  the waiting gate anyway (except bg-bridge replays, which re-open it). */
+ *  the waiting gate anyway). */
 export const usePendingApprovals = create<PendingApprovalsState>()((set) => ({
   byId: {},
   upsert: (payload) =>
@@ -196,15 +185,6 @@ export function permissionDeniedResult(toolName: string): string {
   );
 }
 
-/** The honest fail-fast result for approval-required tools in unattended mode. */
-export function unattendedApprovalResult(toolName: string): string {
-  return (
-    `${toolName} requires interactive approval, which is not available while the task runs ` +
-    "unattended in the background. The action was NOT executed. Ask the user to run this " +
-    "task from the chat so they can approve it."
-  );
-}
-
 export type GateAction =
   | { kind: "execute" }
   | { kind: "deny"; toolResult: string }
@@ -216,22 +196,15 @@ export type GateAction =
  *   allowed           → execute
  *   denied            → deny with the corrective string (PRD §8.2 — a denied
  *                       tool must NEVER execute)
- *   approval_required → interactive gate; in UNATTENDED mode (no human can
- *                       click) it degrades to an honest fail-fast denial
- *                       (PRD §8.2 — background tasks obey the same rules).
+ *   approval_required → interactive gate (the human-in-the-loop wait).
  */
 export function decideGateAction(
   permission: ResourcePermission,
   toolName: string,
-  opts: { unattended?: boolean } = {},
 ): GateAction {
   if (permission === "allowed") return { kind: "execute" };
   if (permission === "denied") {
     return { kind: "deny", toolResult: permissionDeniedResult(toolName) };
-  }
-  // approval_required
-  if (opts.unattended) {
-    return { kind: "deny", toolResult: unattendedApprovalResult(toolName) };
   }
   return { kind: "request_approval" };
 }
@@ -271,10 +244,8 @@ export interface GateInput {
   projectId?: string | null;
   emit: (event: WSEvent) => void;
   signal?: AbortSignal;
-  /** True only for callers that can NEVER show an interactive card. */
-  unattended?: boolean;
   /** Where the call came from (card copy / queue labels). */
-  source?: "chat" | "subagent" | "bridge";
+  source?: "chat" | "subagent";
 }
 
 export type GateOutcome =
@@ -307,7 +278,7 @@ export async function maybeGateToolCall(input: GateInput): Promise<GateOutcome> 
     permission = resolvePermission(input.toolName, input.args, {});
   }
 
-  const action = decideGateAction(permission, input.toolName, { unattended: input.unattended });
+  const action = decideGateAction(permission, input.toolName);
   if (action.kind === "execute") return { verdict: "allowed" };
   if (action.kind === "deny") {
     return { verdict: "denied", reason: action.toolResult };
@@ -548,82 +519,6 @@ export async function recordApprovalOutcome(
   } catch {
     // best-effort — the queue shows the row as approved without a summary
   }
-}
-
-// ---------------------------------------------------------------------------
-// Background-launch policy snapshot (sandbox-native tools)
-// ---------------------------------------------------------------------------
-
-/** The policy snapshot threaded into the sandbox at launch. Compact on
- *  purpose (it rides the bg_start state JSON). */
-export interface BgPolicySnapshot {
-  /** Explicit user policy entries (Record<toolName, permission>). */
-  global: Record<string, ResourcePermission>;
-  /** The conversation's project rules (raw — the runner matches them). */
-  projectRules: Array<{
-    resource_id: string;
-    resource_type: string;
-    permission: ResourcePermission;
-  }>;
-}
-
-/**
- * Build the policy snapshot for a background launch. The plain-JS runner
- * (bg-agent-script.ts) mirrors the browser resolver: effective =
- * strictest(global ?? argument-aware default, project rule).
- */
-export async function buildBgPolicySnapshot(
-  projectId: string | null,
-): Promise<BgPolicySnapshot> {
-  const { useAuthStore } = await import("@/stores");
-  const userId = useAuthStore.getState().user?.id;
-  let global: Record<string, ResourcePermission> = {};
-  if (userId) {
-    try {
-      global = await loadGlobalPolicy(userId);
-    } catch {
-      global = {};
-    }
-  }
-  let projectRules: BgPolicySnapshot["projectRules"] = [];
-  if (projectId) {
-    try {
-      const project = await getProject(projectId);
-      projectRules = (project?.resources ?? []).map((r) => ({
-        resource_id: r.resource_id,
-        resource_type: r.resource_type,
-        permission: r.permission,
-      }));
-    } catch {
-      projectRules = [];
-    }
-  }
-  return { global, projectRules };
-}
-
-/**
- * Registry tool names whose effective permission (global + project, args
- * unknown at launch) is DENIED — these are filtered out of the BRIDGED tool
- * scope so the sandbox model never sees them. (Argument-aware denials are
- * still caught by the full gate when the call actually executes here.)
- */
-export async function computeDeniedToolsForScope(
-  projectId: string | null,
-  snapshot?: BgPolicySnapshot,
-): Promise<Set<string>> {
-  const snap = snapshot ?? (await buildBgPolicySnapshot(projectId));
-  const project = snapshot
-    ? ({ id: projectId ?? "", resources: snap.projectRules.map((r) => ({ ...r, updated_at: "" })) })
-    : undefined;
-  const denied = new Set<string>();
-  for (const tool of listTools()) {
-    const permission = resolvePermission(tool.name, null, {
-      globalPolicy: snap.global,
-      ...(project ? { project } : {}),
-    });
-    if (permission === "denied") denied.add(tool.name);
-  }
-  return denied;
 }
 
 /** Exported for the settings UI (one write surface for the global policy). */

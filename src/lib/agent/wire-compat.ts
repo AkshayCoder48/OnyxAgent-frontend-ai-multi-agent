@@ -43,7 +43,7 @@
  *
  * Used by the in-browser runtime (streamRound), subagent-runtime and the
  * chat-title naming call. The E2B background runner inlines its own copy
- * (bg-agent-script.ts must stay self-contained).
+ *.
  */
 
 import { getLearnedParamBans } from "@/lib/agent/param-policy";

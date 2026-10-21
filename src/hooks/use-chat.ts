@@ -5,7 +5,6 @@ import { nanoid } from "nanoid";
 import type { AgentTurnOptions } from "@/lib/agent/runtime";
 import { respondToAskUser } from "@/lib/agent/runtime";
 import { aiProviderService, conversationService, settingsService } from "@/lib/services";
-import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { stripUploadTags } from "@/lib/uploads/registry";
 import { useChatStore, useAuthStore } from "@/stores";
 import type {
@@ -16,13 +15,11 @@ import type {
 } from "@/types";
 import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
-import { useBackgroundRunStore } from "@/stores/background-run-store";
-import { startBackgroundTurn } from "@/lib/agent/background-turn";
 import {
   AUTO_ROUTER_PROVIDER_ID,
   type RouterCandidate,
 } from "@/lib/auto-router";
-import { notifyConversationsChanged } from "@/lib/scheduler/chat-sync";
+import { notifyConversationsChanged } from "@/lib/chat-events";
 import {
   executionHub,
   useExecutionById,
@@ -88,49 +85,11 @@ Follow Onyx AI conventions:
  *     changes and settings navigation — only the explicit Stop button
  *     cancels one.
  *   - This hook SUBSCRIBES to the execution for the conversation the user
- *     is viewing (creating executions on send, resuming persisted E2B jobs
- *     on mount). Unmounting merely unsubscribes the UI.
+ *     is viewing (creating executions on send). Unmounting merely
+ *     unsubscribes the UI.
  *   - `messages` is the merged view: the live execution's store when one
  *     exists, otherwise the global chat store (DB-painted history).
  */
-/** Is this provider base URL reachable only from the user's own machine
- *  (or their private network)? Background turns execute inside E2B sandboxes
- *  — REMOTE VMs that cannot reach localhost / loopback / LAN addresses.
- *  A local gateway provider (e.g. an OpenAI-compatible server running on
- *  the user's machine) must therefore run its turns in the BROWSER, which
- *  CAN reach it. */
-function isLocalProviderUrl(baseUrl: string | undefined | null): boolean {
-  if (!baseUrl) return false;
-  try {
-    const { hostname } = new URL(baseUrl);
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "0.0.0.0" ||
-      hostname === "[::1]" ||
-      hostname === "::1"
-    ) {
-      return true;
-    }
-    // RFC-1918 private ranges (10.x, 172.16–31.x, 192.168.x) + mDNS-style
-    // hostnames — all unreachable from a cloud VM.
-    if (/^10\./.test(hostname)) return true;
-    if (/^192\.168\./.test(hostname)) return true;
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return true;
-    if (
-      hostname.endsWith(".local") ||
-      hostname.endsWith(".lan") ||
-      hostname.endsWith(".home") ||
-      hostname.endsWith(".internal")
-    ) {
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 export function useChat(options: UseChatOptions = {}) {
   const { conversationId, onConversationCreated } = options;
   // SELECTOR-BASED SUBSCRIPTIONS (render isolation): the previous
@@ -459,10 +418,9 @@ export function useChat(options: UseChatOptions = {}) {
       // loop keeps running no matter where the user navigates. This hook
       // merely subscribes (already done via execSummary above).
       let convId = currentConversationIdFromStore ?? conversationId ?? null;
-      const wantBackground = useBackgroundRunStore.getState().enabled;
       const execution: ExecutionRecord = executionHub.createExecution({
         conversationId: convId,
-        mode: wantBackground ? "background" : "foreground",
+        mode: "foreground",
         // New-chat turns: the runtime creates the conversation mid-turn —
         // notify the host (sidebar refresh) alongside the hub's re-key.
         onConversationCreated,
@@ -550,9 +508,8 @@ export function useChat(options: UseChatOptions = {}) {
       // GEM VISIBILITY: `model_request_start` fires FIRST and creates the
       // streaming assistant placeholder immediately, so the OnyxAgent gem
       // header + shimmering "Thinking" indicator are visible from the very
-      // first moment. Both the background and foreground main-call paths
-      // re-run this event with the same round/generation — the placeholder
-      // is reused, never duplicated.
+      // first moment. The runtime re-runs this event with the same
+      // round/generation — the placeholder is reused, never duplicated.
       execution.processor.handle({
         type: "model_request_start",
         data: { round: 1, generation_id: turnGenerationId },
@@ -582,70 +539,9 @@ export function useChat(options: UseChatOptions = {}) {
         notifyConversationsChanged();
       }
 
-      // ── BACKGROUND RUN (E2B) ──────────────────────────────────────────
-      // When enabled AND an E2B key is configured, the turn executes INSIDE
-      // the sandbox as a background command — it keeps working after the
-      // browser closes, stops, minimizes, or the user navigates anywhere in
-      // the app; on return we re-subscribe and the missed events are already
-      // in the execution store. Falls back to the in-browser runtime when
-      // the launch fails or no key.
-      if (useBackgroundRunStore.getState().enabled) {
-        let e2bKey: string | null = null;
-        try {
-          e2bKey = await getEffectiveE2BKey(userId);
-        } catch {
-          e2bKey = null;
-        }
-        // LOCAL-PROVIDER GUARD: the background agent loop runs INSIDE the E2B
-        // sandbox (a remote VM) — a provider only reachable from THIS machine
-        // (localhost / loopback / LAN base URL) can never be contacted from
-        // there, and the turn would burn its whole self-heal retry budget on
-        // network AggregateErrors. Such turns run in the BROWSER instead (it
-        // reaches the local provider directly).
-        let providerIsLocal = false;
-        try {
-          const rows = await aiProviderService.list(userId, true);
-          providerIsLocal = rows.some((p) => isLocalProviderUrl(p.base_url));
-        } catch {
-          // provider resolution failure → let the normal path surface it
-        }
-        if (e2bKey && !providerIsLocal) {
-          const handle = await startBackgroundTurn({
-            turn: opts,
-            e2bApiKey: e2bKey,
-            userId,
-            conversationId: opts.conversationId,
-            emit: execution.processor.handle,
-            // Checkpoint coherence: land the processor's buffered render
-            // deltas before each Dexie checkpoint so the persisted seq
-            // cursor never runs ahead of the persisted content (an abrupt
-            // reload would otherwise skip the last buffered token).
-            flush: () => execution.processor.flush(),
-            onFinished: () => {
-              // Last-resort safety net — the terminal events (done/error)
-              // route through the processor and finish the execution with
-              // the correct status. If none arrived, close it out.
-              executionHub.finishExecution(execution.id, "failed");
-            },
-            store: execution.store,
-          });
-          if (handle) {
-            executionHub.registerBackgroundHandle(
-              execution.id,
-              handle,
-              (handle as { sandboxId?: string }).sandboxId,
-            );
-            return; // the background job owns this turn now
-          }
-          // Launch failed — fall through to the in-browser runtime.
-          executionHub.patchMode(execution.id, "foreground");
-        }
-      }
-
       // Foreground: the fetch lives in the browser page, owned by the hub.
       // It survives route changes/chat switches (nothing aborts it); it ends
-      // on completion or explicit Stop. (Browser refresh closes fg turns —
-      // background mode is the durable path and is on by default.)
+      // on completion or explicit Stop. (Browser refresh closes fg turns.)
       executionHub.runForeground(execution.id, opts);
     },
     [buildTurnOptions, conversationId, currentConversationIdFromStore, onConversationCreated],
@@ -847,15 +743,16 @@ export function useChat(options: UseChatOptions = {}) {
     }
   }, [conversationId, currentConversationIdFromStore]);
 
-  // ── RESUME (reload / re-entry into a conversation with a live E2B job) ──
-  // Idempotent: the hub guards against double-resume; if an execution is
-  // already registered for the conversation we simply re-subscribe (the
-  // execSummary above). Navigating away NEVER stops it.
+  // ── ORPHANED-TURN SETTLE (reload / re-entry) ────────────────────────────
+  // Idempotent: if an execution is already registered for the conversation
+  // we simply re-subscribe (the execSummary above). Navigating away NEVER
+  // stops it.
   //
-  // NOT gated on useBackgroundRunStore.enabled (user report 2026-10-21):
-  // the toggle governs STARTING new background turns — existing persisted
-  // jobs must ALWAYS drain, or a user who ever flipped the toggle off sees
-  // every old background conversation frozen at its last progress forever.
+  // A browser refresh kills any in-flight turn mid-stream; settle orphaned
+  // still-streaming assistant rows so the conversation shows an honest
+  // "interrupted" note instead of freezing at the same progress forever.
+  // Skipped while a turn is actively processing (the live execution owns
+  // those rows).
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     if (!turnId) return;
@@ -863,21 +760,6 @@ export function useChat(options: UseChatOptions = {}) {
     void (async () => {
       const userId = useAuthStore.getState().user?.id;
       if (!userId) return;
-      let e2bKey: string | null = null;
-      try {
-        e2bKey = await getEffectiveE2BKey(userId);
-      } catch {
-        e2bKey = null;
-      }
-      if (e2bKey) {
-        const summary = await executionHub.ensureResumed(turnId, userId, e2bKey).catch(() => null);
-        if (summary) return; // resumed (or resume in flight) — nothing to settle
-      }
-      // NO RESUMABLE JOB (no E2B key, no job record — e.g. cleared storage or
-      // another device): settle any orphaned still-streaming assistant rows
-      // so the conversation shows an honest "interrupted" note instead of
-      // freezing at the same progress forever. Skipped while a turn is
-      // actively processing (the live execution owns those rows).
       if (useChatStore.getState().isStreaming) return;
       if (executionHub.getFor(turnId)) return;
       try {

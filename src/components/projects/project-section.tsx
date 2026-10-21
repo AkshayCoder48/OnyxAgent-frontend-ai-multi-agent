@@ -87,7 +87,7 @@ import { cn } from "@/lib/utils";
 import { useAuthStore, useConversationStore } from "@/stores";
 import { useConversations } from "@/hooks";
 import { conversationService } from "@/lib/services";
-import { CONVERSATIONS_CHANGED_EVENT } from "@/lib/scheduler/chat-sync";
+import { CONVERSATIONS_CHANGED_EVENT } from "@/lib/chat-events";
 import type { Conversation, Project } from "@/types";
 import {
   useProjectsStore,

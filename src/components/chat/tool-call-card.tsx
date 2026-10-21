@@ -52,7 +52,6 @@ import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
 import { WebPageResult } from "./tool-results/web-page";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { MediaGenerationResult, mediaOperationLabel } from "./tool-results/media-generation";
-import { ScheduledTaskResult, isScheduledTaskTool } from "./tool-results/scheduled-task";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import { useAuthStore } from "@/stores/auth-store";
 import { isComposioToolName, useComposioBranding } from "@/lib/composio/branding";
@@ -477,9 +476,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // memory chips. ONE presentation for the whole tool — the internal op
   // never appears as a separate tool.
   const isKnowledgeBase = toolCall.name === "knowledge_base";
-  // Scheduled-task tools get their glass cards in BOTH modes too — the task
-  // confirmation/list/history is content the user acts on, never chrome.
-  const isSched = isScheduledTaskTool(toolCall.name);
 
   return (
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
@@ -592,7 +588,6 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
       )}
       {isKnowledgeBase && isCompleted && <KnowledgeBaseResult toolCall={toolCall} />}
       {chartSpec && <ChartMessage spec={chartSpec} />}
-      {isSched && <ScheduledTaskResult toolCall={toolCall} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {/* inspect_image (Runtime PRD §54/§111) — the analyzed image + the
           vision description render inline; content, not chrome. */}
@@ -644,8 +639,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // the REAL app logo + name, resolved dynamically from Composio metadata.
   const isComposio = isComposioToolName(toolCall.name);
   const branding = useComposioBranding(useAuthStore.getState().user?.id, toolCall);
-  // Scheduled-task tools — same rule: the card is the payload.
-  const isSched = isScheduledTaskTool(toolCall.name);
   // DDG search tools — detect and auto-expand
   const isDDGWebSearch = toolCall.name === "web_search" && toolCall.status === "completed";
   const isDDGImageSearch = toolCall.name === "image_search" && toolCall.status === "completed";
@@ -656,7 +649,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(
     toolCall.name === "ask_user" ||
       (isRunPython && toolCall.status === "completed") ||
-      isSched ||
       // media_generation — the generated media / balance card is the
       // payload; expand the disclosure when it lands.
       (toolCall.name === "media_generation" && toolCall.status === "completed") ||
@@ -1243,11 +1235,6 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // the tool's command/args so the user can see exactly what's
             // executing (e.g. the shell command for `run_terminal`).
             <RunningToolPanel toolCall={toolCall} turnId={turnId ?? undefined} />
-          ) : isSched ? (
-            // Scheduled-task tools → their own glass cards (creation
-            // confirmation, task lists, run history, slim status cards).
-            // Rendered for ALL statuses (running handled above).
-            <ScheduledTaskResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isWebSessionResult && webSessionResultSpec ? (
             <WebSessionResult data={webSessionResultSpec} />
           ) : toolCall.status === "completed" && isBrowserResult ? (

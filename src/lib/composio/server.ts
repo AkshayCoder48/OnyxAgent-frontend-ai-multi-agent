@@ -1,7 +1,7 @@
 // ============================================================================
 // Server-side helpers for the /api/composio/* routes.
 //
-// Auth model (mirrors /api/scheduler/tasks — the removed Telegram flow):
+// Auth model (the removed Telegram flow):
 // this app is backendless; the Composio API key lives AES-GCM-encrypted in
 // the user's browser vault (Dexie `user_settings.extra.composio_api_key_
 // encrypted`). The browser decrypts it transiently and sends it with every

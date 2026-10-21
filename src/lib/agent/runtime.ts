@@ -656,7 +656,7 @@ export function resolveToolCallAccumulatorKey(
     // the existing id-less entry with the same name instead of allocating
     // a stray slot — the stray left the real entry id-less, so the
     // executor minted a synthetic id the provider later rejected on
-    // replay. (Parity: bg-agent-script.ts resolveAccKey.)
+    // replay.
     if (tc.name) {
       const byName = entries.find((e) => !e.id && e.name === tc.name);
       if (byName) return byName.key;
@@ -2292,15 +2292,6 @@ ${ONYX_MD_DIGEST}
 
 ## Onyx.md — the full operating manual
 Detailed tool usage, execution policies and the complete GenUI reference: \`read_file\` /home/user/Onyx.md when you need more than the TOOL DIGEST above.
-
-## SCHEDULED TASKS & AUTOMATION POLICY
-AUTONOMOUS SCHEDULED TASKS are full agent jobs that run on a server-side schedule with the browser closed. Every task owns ONE DEDICATED CHAT (its executions, tool calls and results land there — no separate dashboard).
-- ANY recurring or future intent ("every morning at 8 AM…", "tomorrow at 5 PM…") → CREATE a task with \`create_scheduled_task\` now — never just promise to do it later.
-- The \`instructions\` are executed VERBATIM by an autonomous agent with no user available: make them complete and self-contained (what to do, which files to write with exact paths). Preserve the user's original wording's intent — never reduce it to a stub.
-- Schedule types: once / daily / weekly / monthly / interval (≥60s) / cron — full argument formats in the tool schema. Timezone is ALWAYS IANA — default to the user's local timezone; only use another when they explicitly name it.
-- Convert natural language faithfully ("every weekday at 8:30 AM" → weekly, weekdays 1-5, 08:30). Ask a clarifying question ONLY when the time is genuinely un-inferable.
-- Manage by id: \`list_scheduled_tasks\` first, then update / pause / resume / run-now / delete / history (see TOOL DIGEST).
-- Scheduled runs execute with the persistent workspace restored before and synced after each run. The run's files land in the SAME workspace the user sees.
 
 ## Generative UI (GenUI)
 GenUI lets you render rich interactive UI components — cards, tables, charts, games, calculators, educational widgets — directly in the chat by emitting a \`<<<genui>>>...<<</genui>>>\` block with a JSON spec. **No tool calls needed** — just emit the spec as text and it renders live.

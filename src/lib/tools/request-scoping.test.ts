@@ -49,7 +49,6 @@ describe("filterToolsForRequest — surfaces", () => {
     // integrations without the user naming them.
     for (const n of DISCOVERY_TOOLS) expect(got.has(n)).toBe(true);
     // Genuinely situational tools are still NOT shipped without intent.
-    expect(got.has("update_scheduled_task")).toBe(false);
     expect(got.has("manage_env_var")).toBe(false);
     expect(got.has("workflow")).toBe(false);
   });
@@ -74,17 +73,6 @@ describe("filterToolsForRequest — surfaces", () => {
 });
 
 describe("filterToolsForRequest — intent routing", () => {
-  it("scheduling intent pulls the scheduled-task suite in (even on small models)", () => {
-    const got = new Set(nameOf(filterToolsForRequest(listTools(), {
-      lastUserText: "pause my daily task and check the history",
-      modelContextWindow: 32_000,
-    })));
-    expect(got.has("pause_scheduled_task")).toBe(true);
-    expect(got.has("update_scheduled_task")).toBe(true);
-    expect(got.has("get_scheduled_task_history")).toBe(true);
-    expect(got.has("create_scheduled_task")).toBe(true);
-  });
-
   it("integration intent pulls the composio suite in", () => {
     const got = new Set(nameOf(filterToolsForRequest(listTools(), {
       lastUserText: "send a slack message via composio",
