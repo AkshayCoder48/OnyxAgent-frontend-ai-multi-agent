@@ -29,6 +29,10 @@ export interface BgEvent {
     | "reasoning_delta"
     | "tool_call"
     | "tool_call_delta"
+    /** LIVE native-tool output (run_terminal / run_python stdout+stderr
+     *  chunks streamed WHILE the command executes — kills the silent
+     *  2-minute gap between tool_call and tool_result on long commands). */
+    | "tool_output"
     | "tool_result"
     | "browser_tool_call"
     | "status"
@@ -46,6 +50,8 @@ export interface BgEvent {
   id?: string;
   name?: string;
   args?: Record<string, unknown>;
+  /** tool_output: which stream the chunk belongs to ("stdout" | "stderr"). */
+  stream?: "stdout" | "stderr";
   /** tool_call_delta fragments — flattened {index, id?, name?, arguments?} */
   tool_calls?: Array<{
     index: number;

@@ -25,6 +25,7 @@
  */
 
 import { useEffect } from "react";
+import { listJobs } from "./background-agent";
 
 /** Module cache for the pagehide beacon: (decrypted key, known sandbox ids).
  *  Refreshed on mount + on visibility regain (the key decrypt is async and
@@ -136,17 +137,21 @@ export async function fetchLifecycleStatus(apiKey: string): Promise<LifecycleSan
 }
 
 /** Sandbox ids that have a LIVE background agent job (never pause these).
- *  Mirrored into a synchronous module cache — the pagehide handler runs
- *  during unload and cannot await an import. Refreshed by
- *  SandboxLifecycleSync while the app is visible. */
+ *  listJobs() is SYNCHRONOUS (a localStorage read) and statically imported,
+ *  so the pagehide handler can re-read it at unload time — the previous
+ *  dynamic-import mirror went STALE for every job started in the CURRENT
+ *  session (a `storage` event never fires in the tab that wrote it, and the
+ *  visibilitychange handler skips the hidden transition), so the beacon
+ *  PAUSED the sandbox of a just-started background run at every app close.
+ *  The mirror is kept only as a belt-and-braces fallback. */
 let activeJobIdsCache = new Set<string>();
 
 function refreshActiveJobsMirror(): void {
-  import("./background-agent")
-    .then(({ listJobs }) => {
-      activeJobIdsCache = new Set(listJobs().map((j) => j.sandboxId));
-    })
-    .catch(() => {});
+  try {
+    activeJobIdsCache = new Set(listJobs().map((j) => j.sandboxId));
+  } catch {
+    // best-effort — the pagehide path re-reads synchronously anyway
+  }
 }
 
 /**
@@ -163,6 +168,16 @@ export function installSandboxAutoPause(): () => void {
   const onPageHide = () => {
     try {
       if (!cachedKey) return; // key not pre-warmed — skip (timeout pause still applies)
+      // FRESH READ AT UNLOAD TIME (the stale-mirror fix): a background job
+      // started in THIS session was never announced to us (storage events
+      // don't fire in the writing tab), so re-read the job list synchronously
+      // right here — pausing a sandbox with a live run froze the run and was
+      // the "came back, same progress forever" bug.
+      try {
+        activeJobIdsCache = new Set(listJobs().map((j) => j.sandboxId));
+      } catch {
+        // keep the mirror — better to skip one pause than freeze a run
+      }
       const targets = knownSandboxIds().filter((id) => !activeJobIdsCache.has(id));
       for (const sandboxId of targets) {
         const body = JSON.stringify({
@@ -186,9 +201,42 @@ export function installSandboxAutoPause(): () => void {
   return () => window.removeEventListener("pagehide", onPageHide);
 }
 
+/** KEEPALIVE CADENCE — resets every known sandbox's E2B timeout window
+ *  while the app is open. Without it the 1h Hobby-plan window expires on
+ *  ACTIVE sessions too, E2B auto-pauses the sandbox (onTimeout: "pause"),
+ *  and the user's next `ls -la` pays a full auto-resume (tens of seconds)
+ *  before the first byte — the "basic commands take minutes" report. Only
+ *  fires while the document is VISIBLE (a hidden tab must not hold sandboxes
+ *  awake); paused-at-timeout remains the closed-app behavior. */
+const KEEPALIVE_INTERVAL_MS = 4 * 60 * 1000;
+
+async function keepaliveKnownSandboxes(): Promise<void> {
+  if (!cachedKey) return;
+  if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+  for (const sandboxId of knownSandboxIds()) {
+    try {
+      // Fire-and-forget POST — the server connect + setTimeout resets the
+      // E2B 1h window (see the keepalive action). Errors are silently
+      // ignored: a dead sandbox heals on its next real use.
+      await fetch("/api/sandbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: cachedKey,
+          action: "keepalive",
+          sandboxId,
+        }),
+      });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 /**
  * SandboxLifecycleSync — mount ONCE (app providers). Pre-warms the
- * lifecycle caches while visible and installs the pagehide auto-pause.
+ * lifecycle caches while visible, installs the pagehide auto-pause, and
+ * runs the keepalive loop that keeps interactive sandboxes from pausing.
  */
 export function SandboxLifecycleSync(): null {
   useEffect(() => {
@@ -203,9 +251,14 @@ export function SandboxLifecycleSync(): null {
     const uninstall = installSandboxAutoPause();
     // Also refresh when a bg job starts/stops (job writes touch localStorage).
     window.addEventListener("storage", refresh);
+    // KEEPALIVE LOOP (visible sessions only — see keepaliveKnownSandboxes).
+    const keepaliveTimer = setInterval(() => {
+      void keepaliveKnownSandboxes();
+    }, KEEPALIVE_INTERVAL_MS);
     return () => {
       document.removeEventListener("visibilitychange", refresh);
       window.removeEventListener("storage", refresh);
+      clearInterval(keepaliveTimer);
       uninstall();
     };
   }, []);

@@ -50,7 +50,7 @@ export const BG_AGENT_SCRIPT = String.raw`
 // Started as: node bg-agent.mjs <runId>
 //
 import fs from "node:fs/promises";
-import { exec } from "node:child_process";
+import { exec, spawn } from "node:child_process";
 import path from "node:path";
 import http from "node:http";
 import https from "node:https";
@@ -2258,6 +2258,43 @@ async function wsSendCommand(cmd, timeoutMs) {
 }
 
 // ── Sandbox-side tool implementations ──────────────────────────────────
+
+// LIVE TOOL-OUTPUT STREAMING (the "bg AI stops answering for ~2 minutes
+// and gets stuck" fix): the dispatch loop sets ACTIVE_TOOL_CALL around every
+// native tool.run, and streaming tools (run_terminal / run_python) push
+// stdout/stderr chunks through emitToolOutputChunk. Chunks are emitted as
+// tool_output events — the SAME WSEvent the foreground runtime's
+// onToolOutput callback produces — so a 120s command shows live progress
+// in the tool card instead of a silent gap between tool_call and
+// tool_result. Buffer + 200ms flush keeps events.jsonl line-count sane on
+// chatty commands (the browser-side server pushes batches at 60-150ms
+// anyway, so this is visually real-time).
+var ACTIVE_TOOL_CALL = null;
+var TOOL_OUTPUT_BUF = { stdout: "", stderr: "", timer: null };
+function flushToolOutput() {
+  if (!ACTIVE_TOOL_CALL) {
+    TOOL_OUTPUT_BUF.stdout = "";
+    TOOL_OUTPUT_BUF.stderr = "";
+    return;
+  }
+  var out = TOOL_OUTPUT_BUF.stdout;
+  var err = TOOL_OUTPUT_BUF.stderr;
+  TOOL_OUTPUT_BUF.stdout = "";
+  TOOL_OUTPUT_BUF.stderr = "";
+  if (out) emitEvent({ t: "tool_output", id: ACTIVE_TOOL_CALL.id, content: out, stream: "stdout" });
+  if (err) emitEvent({ t: "tool_output", id: ACTIVE_TOOL_CALL.id, content: err, stream: "stderr" });
+}
+function emitToolOutputChunk(stream, text) {
+  if (!ACTIVE_TOOL_CALL || !text) return;
+  TOOL_OUTPUT_BUF[stream] = (TOOL_OUTPUT_BUF[stream] || "") + String(text);
+  if (!TOOL_OUTPUT_BUF.timer) {
+    TOOL_OUTPUT_BUF.timer = setTimeout(function () {
+      TOOL_OUTPUT_BUF.timer = null;
+      flushToolOutput();
+    }, 200);
+  }
+}
+
 const TOOLS = [
   {
     name: "read_file",
@@ -2377,22 +2414,60 @@ const TOOLS = [
   },
   {
     name: "run_terminal",
-    description: "Run a shell command in the sandbox (bash). 120s timeout, 256KB output cap.",
+    description: "Run a shell command in the sandbox (bash). 120s timeout, 256KB output cap. Output streams live to the user WHILE the command runs. Non-interactive: stdin is closed (EOF) — commands that ask for input get an immediate EOF, so never write commands that wait for prompts.",
     parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
     run: (args) =>
       new Promise((resolve) => {
-        exec(String(args.command ?? ""), { cwd: HOME, timeout: 120_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        // STDIN EOF GUARD (the silent 2-minute hang): stdin is /dev/null, so
+        // commands that wait for interactive input (a bare "cat", npm/yarn
+        // install prompts, sudo asks) receive an immediate EOF instead of
+        // burning the whole 120s budget in silence. exec() left the stdin
+        // pipe open forever — an unattended runner can never answer a
+        // prompt, so EOF-on-stdin is the correct unattended semantics.
+        // LIVE OUTPUT: chunks stream to the browser as tool_output events
+        // while the command runs (see ACTIVE_TOOL_CALL above).
+        const child = spawn("bash", ["-c", String(args.command ?? "")], {
+          cwd: HOME,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        let timedOut = false;
+        const limit = 512 * 1024;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          try { child.kill("SIGKILL"); } catch {}
+        }, 120_000);
+        child.stdout.on("data", (d) => {
+          const s = String(d);
+          emitToolOutputChunk("stdout", s);
+          if (stdout.length < limit) stdout += s.slice(0, limit - stdout.length);
+        });
+        child.stderr.on("data", (d) => {
+          const s = String(d);
+          emitToolOutputChunk("stderr", s);
+          if (stderr.length < limit) stderr += s.slice(0, limit - stderr.length);
+        });
+        child.on("error", (e) => {
+          clearTimeout(timer);
+          flushToolOutput();
+          resolve({ exit_code: -1, stdout: cap(stdout, 256 * 1024), stderr: cap("spawn failed: " + friendlyErr(e), 256 * 1024) });
+        });
+        child.on("close", (code, signal) => {
+          clearTimeout(timer);
+          flushToolOutput();
+          const note = timedOut ? "\n(command timed out after 120s — killed; split long work into shorter commands or run it detached with nohup)" : "";
           resolve({
-            exit_code: err && err.code ? (typeof err.code === "number" ? err.code : 1) : 0,
-            stdout: cap(String(stdout ?? ""), 256 * 1024),
-            stderr: cap(String(stderr ?? err?.message ?? ""), 256 * 1024),
+            exit_code: timedOut ? 124 : typeof code === "number" ? code : signal ? 1 : 0,
+            stdout: cap(stdout, 256 * 1024),
+            stderr: cap(String(stderr) + note, 256 * 1024),
           });
         });
       }),
   },
   {
     name: "run_python",
-    description: "Run Python 3 code (60s timeout).",
+    description: "Run Python 3 code (60s timeout). Output streams live to the user WHILE it runs.",
     parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
     run: (args) =>
       new Promise((resolve) => {
@@ -2400,13 +2475,46 @@ const TOOLS = [
         fs.mkdir(path.dirname(file), { recursive: true })
           .then(() => fs.writeFile(file, String(args.code ?? "")))
           .then(() => {
-            exec("python3 " + file, { cwd: HOME, timeout: 60_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-              resolve({
-                exit_code: err && err.code ? (typeof err.code === "number" ? err.code : 1) : 0,
-                stdout: cap(String(stdout ?? ""), 256 * 1024),
-                stderr: cap(String(stderr ?? err?.message ?? ""), 256 * 1024),
-              });
+            // Same streaming + stdin-EOF semantics as run_terminal (see
+            // there) — live tool_output chunks, no interactive hangs.
+            const child = spawn("python3", [file], {
+              cwd: HOME,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            let stdout = "";
+            let stderr = "";
+            let timedOut = false;
+            const limit = 512 * 1024;
+            const timer = setTimeout(() => {
+              timedOut = true;
+              try { child.kill("SIGKILL"); } catch {}
+            }, 60_000);
+            child.stdout.on("data", (d) => {
+              const s = String(d);
+              emitToolOutputChunk("stdout", s);
+              if (stdout.length < limit) stdout += s.slice(0, limit - stdout.length);
+            });
+            child.stderr.on("data", (d) => {
+              const s = String(d);
+              emitToolOutputChunk("stderr", s);
+              if (stderr.length < limit) stderr += s.slice(0, limit - stderr.length);
+            });
+            child.on("error", (e) => {
+              clearTimeout(timer);
+              flushToolOutput();
               fs.rm(file, { force: true }).catch(() => {});
+              resolve({ exit_code: -1, stdout: cap(stdout, 256 * 1024), stderr: cap("spawn failed: " + friendlyErr(e), 256 * 1024) });
+            });
+            child.on("close", (code, signal) => {
+              clearTimeout(timer);
+              flushToolOutput();
+              fs.rm(file, { force: true }).catch(() => {});
+              const note = timedOut ? "\n(python timed out after 60s — killed)" : "";
+              resolve({
+                exit_code: timedOut ? 124 : typeof code === "number" ? code : signal ? 1 : 0,
+                stdout: cap(stdout, 256 * 1024),
+                stderr: cap(String(stderr) + note, 256 * 1024),
+              });
             });
           })
           .catch((e) => resolve({ error: "Failed to prepare python run: " + (e && e.message ? e.message : String(e)) }));
@@ -3169,19 +3277,21 @@ const DIGEST_TOOLS = new Set(${JSON.stringify(ONYX_MD_DIGEST_TOOLS)});
 // browser is connected the tool fails gracefully with an actionable error
 // and the turn continues with the sandbox-native tools.
 const BRIDGE_DIR = path.join(STATE_DIR, "bridge");
-const BRIDGE_DEFAULT_TIMEOUT_MS = 240_000;
+const BRIDGE_DEFAULT_TIMEOUT_MS = 480_000;
 const BRIDGE_TIMEOUT_MS = { ask_user: 900_000 };
 // ACK WINDOW (Persistent Execution PRD §6/§7): the browser writes an
 // .ack.json file the moment it PICKS UP the request (before executing the
 // tool). The SSE consumer loop itself is network-promise-driven and KEEPS
 // RUNNING in hidden/backgrounded tabs — but browser timer throttling
 // (≥1/min in intensively-throttled hidden tabs), a reconnect backoff wake
-// (up to 30s), or a memory-saver freeze can each delay the ack write well
-// past the old 25s window, which made bridge tools fail-fast and the model
-// wrap up prematurely (a background auto-stop cause). 120s covers throttle
-// + backoff + processing while still failing fast vs the 240s tool budget
-// when the tab is genuinely closed.
-const BRIDGE_ACK_WINDOW_MS = 120_000;
+// (up to 30s), a paused-sandbox auto-resume on the ack write's own
+// /api/sandbox round trip, or a memory-saver freeze can each delay the ack
+// well past the old window — which made bridge tools fail-fast at EXACTLY
+// 2 minutes (the "bg AI stops answering and stuck" report: every bridged
+// call died at the ack deadline and the model wrapped up prematurely).
+// 240s covers throttle + backoff + auto-resume while still failing fast
+// vs the 480s tool budget when the tab is genuinely closed.
+const BRIDGE_ACK_WINDOW_MS = 240_000;
 
 let ALL_TOOLS = TOOLS;
 
@@ -3929,12 +4039,28 @@ async function main() {
         };
       } else {
         try {
+          // LIVE TOOL-OUTPUT STREAMING CONTEXT: run_terminal / run_python read
+          // ACTIVE_TOOL_CALL to attribute their streamed chunks to this call
+          // id (see the helpers above the TOOLS array). Cleared + flushed in
+          // the finally — a late timer flush after the context cleared is a
+          // no-op by design.
+          if (tool && !tool.bridge) ACTIVE_TOOL_CALL = { id: id, name: nc.name };
           toolResult = tool
             ? tool.bridge
               ? await runBridgeTool(id, tool.name, args)
               : await tool.run(args)
             : bgUnknownToolResult(rawName);
         } catch (e) { toolResult = { error: "Tool failed: " + friendlyErr(e) }; }
+        finally {
+          // Cancel any pending flush timer FIRST: a late fire during the NEXT
+          // tool's run would attribute this call's tail chunks to that call.
+          if (TOOL_OUTPUT_BUF.timer) {
+            clearTimeout(TOOL_OUTPUT_BUF.timer);
+            TOOL_OUTPUT_BUF.timer = null;
+          }
+          flushToolOutput();
+          ACTIVE_TOOL_CALL = null;
+        }
       }
       // Large-payload results (base64 downloads / image previews) get a
       // bigger cap so their cards stay intact; everything else stays at

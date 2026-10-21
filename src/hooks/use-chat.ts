@@ -851,10 +851,14 @@ export function useChat(options: UseChatOptions = {}) {
   // Idempotent: the hub guards against double-resume; if an execution is
   // already registered for the conversation we simply re-subscribe (the
   // execSummary above). Navigating away NEVER stops it.
+  //
+  // NOT gated on useBackgroundRunStore.enabled (user report 2026-10-21):
+  // the toggle governs STARTING new background turns — existing persisted
+  // jobs must ALWAYS drain, or a user who ever flipped the toggle off sees
+  // every old background conversation frozen at its last progress forever.
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     if (!turnId) return;
-    if (!useBackgroundRunStore.getState().enabled) return;
     if (executionHub.getFor(turnId)) return;
     void (async () => {
       const userId = useAuthStore.getState().user?.id;
@@ -863,10 +867,57 @@ export function useChat(options: UseChatOptions = {}) {
       try {
         e2bKey = await getEffectiveE2BKey(userId);
       } catch {
-        return;
+        e2bKey = null;
       }
-      if (!e2bKey) return;
-      await executionHub.ensureResumed(turnId, userId, e2bKey).catch(() => null);
+      if (e2bKey) {
+        const summary = await executionHub.ensureResumed(turnId, userId, e2bKey).catch(() => null);
+        if (summary) return; // resumed (or resume in flight) — nothing to settle
+      }
+      // NO RESUMABLE JOB (no E2B key, no job record — e.g. cleared storage or
+      // another device): settle any orphaned still-streaming assistant rows
+      // so the conversation shows an honest "interrupted" note instead of
+      // freezing at the same progress forever. Skipped while a turn is
+      // actively processing (the live execution owns those rows).
+      if (useChatStore.getState().isStreaming) return;
+      if (executionHub.getFor(turnId)) return;
+      try {
+        const settledIds = await conversationService.settleInterruptedMessages(turnId);
+        if (settledIds.length > 0) {
+          // Reflect the settled rows in the loaded UI: re-read the
+          // conversation so the note part renders immediately.
+          const refreshed = await conversationService.getMessages(turnId, userId);
+          const { conversationMessageToChatMessage } = await import("@/lib/conversation-to-chat");
+          const msgs = refreshed.map((row) =>
+            conversationMessageToChatMessage({
+              id: row.id,
+              conversation_id: row.conversation_id,
+              role: row.role,
+              content: row.content,
+              created_at: row.created_at,
+              tool_calls: row.tool_calls,
+              user_rating: row.user_rating,
+              rating_count: row.rating_count,
+              files: row.files,
+              thinking: (row as { thinking?: string | null }).thinking,
+              reasoning: (row as { reasoning?: string | null }).reasoning,
+              parts: (row as { parts?: unknown[] | null }).parts as
+                | import("@/types").MessagePart[]
+                | null
+                | undefined,
+            }),
+          );
+          // Only swap the UI when the user is still viewing this conversation
+          // and no execution started meanwhile.
+          if (
+            !executionHub.getFor(turnId) &&
+            (useConversationStore.getState().currentConversationId ?? null) === turnId
+          ) {
+            useChatStore.setState({ messages: msgs });
+          }
+        }
+      } catch {
+        // best-effort — the rows settle on the next load instead
+      }
     })();
   }, [currentConversationIdFromStore, conversationId]);
 

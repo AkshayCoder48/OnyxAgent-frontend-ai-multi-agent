@@ -179,6 +179,39 @@ interface CacheEntry {
  *  directory, hundreds of skills); analyze_workspace skill_marketplace. */
 const AGENT_MD_VERSION = 10;
 
+/** Where a sandbox records the Onyx.md version it carries (same stamping
+ *  pattern as the master-skills version). Cold-start reconnects read this
+ *  ~40-byte file instead of blindly rewriting the 44KB Onyx.md on every
+ *  serverless instance cold start — that write (plus the agent.md remove)
+ *  was paid on EVERY basic command (`ls -la`, `cat …`) whenever the request
+ *  landed on a fresh Vercel instance, adding seconds of latency each time. */
+const ONYX_MD_STAMP_PATH = "/home/user/.onyx/onyx-md-version";
+
+/** Refresh Onyx.md ONLY when the sandbox's stamp is missing or outdated.
+ *  Returns true when the document is current (either it already was, or the
+ *  refresh succeeded). Cheap steady-state: one tiny file read. */
+async function ensureOnyxMdCurrent(sandbox: Sandbox): Promise<boolean> {
+  try {
+    const stamped = await sandbox.files.read(ONYX_MD_STAMP_PATH, { format: "text" });
+    if (stamped.trim() === String(AGENT_MD_VERSION)) return true;
+  } catch {
+    // No stamp yet (pre-stamping sandbox or fresh state) — fall through and
+    // (re)write the document + stamp. This is the one-time cost path.
+  }
+  try {
+    await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
+    await sandbox.files.write(ONYX_MD_STAMP_PATH, String(AGENT_MD_VERSION));
+    try {
+      await sandbox.files.remove("/home/user/agent.md");
+    } catch {
+      // legacy agent.md already gone
+    }
+    return true;
+  } catch {
+    return false; // best-effort — the next adoption retries
+  }
+}
+
 const sharedCache = new Map<string, CacheEntry>();
 const separateCache = new Map<string, CacheEntry>();
 
@@ -396,7 +429,12 @@ function isScheduledSandbox(s: {
  *  sandbox limit (e.g. "20/20" on the free plan). */
 function isQuotaError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /quota|limit reached|concurrent|too many|maximum|20\/20|\d+\/\d+/i.test(msg);
+  // REGEX HARDENING (user report 2026-10-21): the old pattern also matched
+  // ANY bare fraction (\d+/\d+) — a create error like "retry 1/5" was
+  // misread as a quota failure and KILLED EVERY SANDBOX ON THE ACCOUNT,
+  // including sandboxes with live background runs (instant "background work
+  // frozen at the same progress"). Only explicit quota wording counts now.
+  return /quota|limit reached|concurrent|too many|20\/20|sandbox limit|maximum number of sandboxes/i.test(msg);
 }
 
 /**
@@ -538,6 +576,91 @@ async function restoreBackupFile(
   }
 }
 
+/** Where the rotation archive is staged inside the sandbox. */
+const ROTATION_TAR_PATH = "/tmp/onyx-rotation-backup.tgz";
+
+/** tar --exclude flags mirroring the per-file skip rules (volatile shell
+ *  state + the static master skill library — the latter is re-attached
+ *  version-gated to every fresh sandbox, so shipping ~700 files / 7MB per
+ *  rotation is pure waste). */
+function rotationTarExcludeArgs(): string[] {
+  const args: string[] = [];
+  for (const f of ROTATION_SKIP_FILES) args.push(`--exclude=./${f}`);
+  args.push("--exclude=./skills/MASTER-INDEX.md");
+  for (const s of MASTER_SKILLS) args.push(`--exclude=./skills/${s.name}`);
+  return args;
+}
+
+/** FAST ROTATION BACKUP (the "rotation takes 2-5 minutes" fix): ONE tar
+ *  command inside the old sandbox + ONE byte read, instead of a recursive
+ *  per-directory `files.list` + per-file `files.read` walk (each an SDK
+ *  round trip — hundreds of round trips ≈ minutes for a real workspace,
+ *  and the rotation runs synchronously in front of a user-visible tool
+ *  call). Binary-safe (raw tgz bytes), gz-compressed (smaller than the sum
+ *  of files), same skip semantics as the per-file walk. Returns null when
+ *  tar is unavailable or fails — the caller falls back to the per-file
+ *  walk (identical semantics, just slower). */
+async function backupSandboxViaTar(
+  sandbox: Sandbox,
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; files: number } | null> {
+  try {
+    const cmd = [
+      "cd /home/user",
+      `rm -f ${ROTATION_TAR_PATH}`,
+      `tar -czf ${ROTATION_TAR_PATH} ${rotationTarExcludeArgs().join(" ")} .`,
+      `tar -tzf ${ROTATION_TAR_PATH} | wc -l`,
+    ].join(" && ");
+    const res = await sandbox.commands.run(cmd, { timeoutMs: 180_000 });
+    const files = Number(String(res.stdout ?? "").trim().split(/\s+/).pop() ?? "0");
+    if (res.exitCode !== 0 || !Number.isFinite(files) || files <= 0) {
+      console.warn(
+        `[sandbox] rotation tar backup unavailable (exit ${res.exitCode}) — falling back to per-file backup: ${String(res.stderr ?? "").slice(0, 160)}`,
+      );
+      return null;
+    }
+    const bytes = await sandbox.files.read(ROTATION_TAR_PATH, { format: "bytes" });
+    await sandbox.commands.run(`rm -f ${ROTATION_TAR_PATH}`).catch(() => {});
+    // Standalone ArrayBuffer-backed view (BlobPart-safe — same pattern as
+    // attach-master-skills' zipBytes).
+    return { bytes: new Uint8Array(bytes), files };
+  } catch (err) {
+    console.warn(
+      `[sandbox] rotation tar backup threw — falling back to per-file backup:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
+/** Restore a tar backup: ONE byte write + ONE extract command (vs one
+ *  `files.write` per file). Extracts with cwd=/home/user so the archived
+ *  ./relative paths land exactly where the per-file restore put them. */
+async function restoreSandboxViaTar(
+  sandbox: Sandbox,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<boolean> {
+  try {
+    await sandbox.files.write(ROTATION_TAR_PATH, new Blob([bytes]));
+    const res = await sandbox.commands.run(
+      `cd /home/user && tar -xzf ${ROTATION_TAR_PATH} && rm -f ${ROTATION_TAR_PATH}`,
+      { timeoutMs: 180_000 },
+    );
+    if (res.exitCode !== 0) {
+      console.warn(
+        `[sandbox] rotation tar restore failed (exit ${res.exitCode}): ${String(res.stderr ?? "").slice(0, 160)}`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(
+      `[sandbox] rotation tar restore threw:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+}
+
 /** Return type of performRotation — `skipped` explains a NO-OP rotation
  *  (the live sandbox was left untouched; the client re-stamps its rotation
  *  clock and retries after the blocking condition clears). */
@@ -647,23 +770,54 @@ async function performRotation(
         return { sandbox: live, backedUp: 0, restored: 0, skipped: "running-commands" };
       }
     } catch {
-      // commands.list failed (envd blip) — proceed with the rotation as
-      // before; the client-side guard (sandbox-rotation.ts) still protects
-      // the known background jobs.
+      // FAIL-SAFE GUARD (user report 2026-10-21: "background work completely
+      // broken — state frozen at the same progress"): commands.list() failed
+      // (envd blip / connect flakiness) — the old code PROCEEDED with the
+      // rotation in that case, killing sandboxes that could not be inspected,
+      // which killed live background runs mid-flight. Rotation is an
+      // OPTIMIZATION (the E2B 24h TTL is the only hard deadline and the
+      // sandbox auto-pauses safely at its 1h timeout); skipping when the
+      // liveness check is unavailable can never destroy work. The client
+      // re-stamps its rotation clock and retries later.
+      console.warn(
+        `[sandbox] rotation SKIPPED — live-process guard unavailable (commands.list failed) on ${oldSandbox.sandboxId}; the sandbox is left untouched`,
+      );
+      const live = cached?.sandbox && oldSandbox === cached.sandbox ? cached.sandbox : oldSandbox;
+      const guardEntry: CacheEntry = {
+        sandbox: live,
+        apiKey,
+        createdAt: Date.now(),
+        key,
+        verifiedAliveAt: Date.now(),
+        ...(cached?.agentMdVersion ? { agentMdVersion: cached.agentMdVersion } : {}),
+        ...(cached?.masterSkillsVersion ? { masterSkillsVersion: cached.masterSkillsVersion } : {}),
+      };
+      getCache(mode).set(key, guardEntry);
+      return { sandbox: live, backedUp: 0, restored: 0, skipped: "running-commands" };
     }
   }
 
   // 2. Back up ALL files (binary-safe) from the old sandbox before touching
-  //    anything. Best-effort — a failed backup logs and continues with an
-  //    empty one rather than killing a live workspace we couldn't read.
+  //    anything. TAR FAST PATH first (one command + one byte read); the
+  //    per-file walk stays as the fallback for sandboxes without tar.
+  //    Best-effort — a failed backup logs and continues with an empty one
+  //    rather than killing a live workspace we couldn't read.
   let backupFiles: BackupFile[] = [];
+  let backupTar: { bytes: Uint8Array<ArrayBuffer>; files: number } | null = null;
   if (oldSandbox) {
-    try {
-      backupFiles = await backupAllFilesFromSandbox(oldSandbox);
-      console.log(`[sandbox] rotation: backed up ${backupFiles.length} files from ${oldSandbox.sandboxId}`);
-    } catch (err) {
-      // best-effort — if backup fails, continue with empty backup
-      console.warn(`[sandbox] rotation: backup failed:`, err instanceof Error ? err.message : String(err));
+    backupTar = await backupSandboxViaTar(oldSandbox);
+    if (backupTar) {
+      console.log(
+        `[sandbox] rotation: tar-backed up ${backupTar.files} entries (${Math.round(backupTar.bytes.byteLength / 1024)}KB gz) from ${oldSandbox.sandboxId}`,
+      );
+    } else {
+      try {
+        backupFiles = await backupAllFilesFromSandbox(oldSandbox);
+        console.log(`[sandbox] rotation: backed up ${backupFiles.length} files from ${oldSandbox.sandboxId}`);
+      } catch (err) {
+        // best-effort — if backup fails, continue with empty backup
+        console.warn(`[sandbox] rotation: backup failed:`, err instanceof Error ? err.message : String(err));
+      }
     }
   }
 
@@ -680,16 +834,29 @@ async function performRotation(
   //    its stale-reclaim is age-guarded and cannot touch live sandboxes).
   const sandbox = await createAndCacheSandbox(apiKey, conversationId, mode);
 
-  // 5. Restore the backup (if any) to the new sandbox — binary-safe writes.
+  // 5. Restore the backup (if any) to the new sandbox — tar fast path first,
+  //    per-file fallback otherwise.
   let restored = 0;
-  if (backupFiles.length > 0) {
+  if (backupTar) {
+    const ok = await restoreSandboxViaTar(sandbox, backupTar.bytes);
+    restored = ok ? backupTar.files : 0;
+    console.log(
+      `[sandbox] rotation: ${ok ? "tar-restored" : "tar-restore FAILED"} ${restored} entries to ${sandbox.sandboxId}`,
+    );
+    if (!ok && backupFiles.length === 0) {
+      // tar restore failed and there is no per-file fallback payload — try a
+      // direct per-file restore of nothing is impossible; log honestly.
+      console.warn(`[sandbox] rotation: no fallback payload available after tar-restore failure`);
+    }
+  }
+  if (!backupTar && backupFiles.length > 0) {
     for (const f of backupFiles) {
       if (await restoreBackupFile(sandbox, f)) restored++;
     }
     console.log(`[sandbox] rotation: restored ${restored}/${backupFiles.length} files to ${sandbox.sandboxId}`);
   }
 
-  return { sandbox, backedUp: backupFiles.length, restored };
+  return { sandbox, backedUp: backupTar ? backupTar.files : backupFiles.length, restored };
 }
 
 /** Create a fresh sandbox and cache it. Used by getSandbox() and the
@@ -827,6 +994,12 @@ async function createAndCacheSandbox(
   // and produces broken markers/JS.
   try {
     await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
+    // Version STAMP (the "every basic command is slow" fix): sandboxes
+    // record which Onyx.md they carry so the cold-start reconnect path can
+    // skip the 44KB rewrite with a ~40-byte read instead (it used to rewrite
+    // the full document on EVERY serverless-cold-instance reconnect —
+    // seconds of pure overhead per `ls -la`).
+    await sandbox.files.write(ONYX_MD_STAMP_PATH, String(AGENT_MD_VERSION));
   } catch {
     // best-effort — file may already exist or write may fail
   }
@@ -967,17 +1140,14 @@ async function getSandbox(
         verifiedAliveAt: Date.now(), // trust it's alive
       };
       // Reconnected sandboxes may predate the current Onyx.md — refresh it
-      // best-effort (and purge any legacy agent.md) so the AI's docs are
-      // always current. Same for the master skill library (stamp-checked —
-      // only sandboxes that predate the current library version pay the
-      // write + extract).
-      try {
-        await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
-        await sandbox.files.remove("/home/user/agent.md");
-        entry.agentMdVersion = AGENT_MD_VERSION;
-      } catch {
-        // best-effort — the next action will surface dead-sandbox errors
-      }
+      // ONLY when the sandbox's own version stamp says so (a ~40-byte read;
+      // the old unconditional 44KB write + agent.md remove on every cold
+      // reconnect added seconds to every basic command on a fresh serverless
+      // instance). Same for the master skill library (stamp-checked — only
+      // sandboxes that predate the current library version pay the write +
+      // extract).
+      const mdCurrent = await ensureOnyxMdCurrent(sandbox);
+      if (mdCurrent) entry.agentMdVersion = AGENT_MD_VERSION;
       const msRes = await ensureMasterSkills(sandbox);
       if (msRes.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
@@ -1021,13 +1191,8 @@ async function getSandbox(
         key,
         verifiedAliveAt: Date.now(),
       };
-      try {
-        await sandbox.files.write("/home/user/Onyx.md", ONYX_MD);
-        await sandbox.files.remove("/home/user/agent.md");
-        entry.agentMdVersion = AGENT_MD_VERSION;
-      } catch {
-        // best-effort
-      }
+      const mdCurrent2 = await ensureOnyxMdCurrent(sandbox);
+      if (mdCurrent2) entry.agentMdVersion = AGENT_MD_VERSION;
       const msRes2 = await ensureMasterSkills(sandbox);
       if (msRes2.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
@@ -2186,7 +2351,18 @@ export async function POST(req: NextRequest) {
             });
           }
         } catch {
-          // best-effort — proceed with the pause attempt
+          // FAIL-SAFE (same class as the rotation guard): the live-process
+          // check failed, so we CANNOT prove the sandbox is idle — pausing
+          // blind could freeze a live background run mid-flight (the exact
+          // "left the app, came back, frozen at the same progress" bug). The
+          // pause is an optimization (the E2B 1h timeout pause still applies
+          // naturally); skipping it when unsure can never destroy work.
+          return NextResponse.json({
+            ok: false,
+            paused: false,
+            reason: "guard-unavailable",
+            detail: "Could not verify the sandbox is idle (live-process check failed) — pause skipped so a possible background run keeps going. The E2B timeout pause still applies.",
+          });
         }
         try {
           // keepMemory: true (the default, explicit here) — the FULL memory
@@ -2536,10 +2712,21 @@ export async function POST(req: NextRequest) {
       }
 
       case "keepalive": {
-        // Keepalive ping — just touches the sandbox to reset the inactivity
-        // timer. Returns the sandbox ID + a timestamp so the client can
-        // verify it's still alive.
+        // Keepalive ping — touches the sandbox to reset the inactivity
+        // timer AND (critically) extends the E2B 1h timeout window via an
+        // explicit setTimeout. Without the setTimeout a mere ping does NOT
+        // push the pause deadline out, so an interactive session's sandbox
+        // still auto-paused at the 1h mark — and the user's next `ls -la`
+        // paid a full auto-resume (tens of seconds) before the first byte
+        // (the "basic commands take 2-5 minutes" report).
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // Reset the 1h window (per the E2B lifecycle the explicit setTimeout
+        // restarts the countdown; the limit resets after each cycle).
+        try {
+          await sandbox.setTimeout(3_600_000);
+        } catch {
+          // best-effort — the liveness touch below still helps
+        }
         // Touch the sandbox by listing /home/user (cheap operation).
         const alive = await isAlive(sandbox);
         if (!alive) {

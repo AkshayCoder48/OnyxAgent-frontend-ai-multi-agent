@@ -8,11 +8,17 @@
 // whose consumer keeps replaying sandbox events into the conversation's
 // Dexie records — regardless of which page the user lands on. Never throws;
 // renders null.
+//
+// NOT gated on useBackgroundRunStore.enabled (user report 2026-10-21: "the
+// state is still at same progress even after leaving and recoming to the
+// app"): the toggle governs STARTING new background turns — existing
+// persisted jobs must ALWAYS drain, or a user who ever flipped the toggle
+// off sees every old background conversation frozen at its last progress
+// forever with no error and no way forward.
 // ============================================================================
 
 import { useEffect } from "react";
 import { useAuth } from "@/hooks";
-import { useBackgroundRunStore } from "@/stores/background-run-store";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { executionHub } from "@/lib/agent/execution-hub";
 
@@ -22,7 +28,6 @@ export function ExecutionRehydrator() {
 
   useEffect(() => {
     if (!userId) return;
-    if (!useBackgroundRunStore.getState().enabled) return;
     let cancelled = false;
     void (async () => {
       let e2bKey: string | null = null;

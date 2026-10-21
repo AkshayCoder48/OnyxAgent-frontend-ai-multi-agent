@@ -97,18 +97,27 @@ const SEGMENT_WATCHDOG_MS = 60_000;
  *  self-heal without bothering the user. */
 const RECONNECT_NOTICE_MS = 30_000;
 /** Hard limit (PRD §23): after this long without ANY transport, swap the
- *  banner to the reassuring “your job is still running” notice. NEVER a
+ *  banner to the reassuring "your job is still running" notice. NEVER a
  *  fatal error — reconnecting continues silently for as long as the job
- *  lives (the E2B run is unaffected server-side). */
-const TRANSPORT_NOTICE_MS = 10 * 60_000;
+ *  lives (the E2B run is unaffected server-side). 3 minutes: below the
+ *  5-minute give-up so the reassurance lands while the sandbox is still
+ *  being given the benefit of the doubt. */
+const TRANSPORT_NOTICE_MS = 3 * 60_000;
 /** GIVE-UP WATCHDOG (user report 2026-10-21: "came back, nothing generates,
  *  same state as where I left"): when the sandbox itself stays UNREACHABLE
  *  (no stream frames AND the bg_status probe cannot connect) for this long,
  *  the run is dead in practice (sandbox destroyed / E2B region outage) —
  *  end it honestly instead of spinning forever. Reachability resets the
  *  clock (a paused sandbox auto-resuming, a slow-but-alive run, or events
- *  draining through the REST fallback all prove liveness). */
-const TRANSPORT_GIVEUP_MS = 15 * 60_000;
+ *  draining through the REST fallback all prove liveness).
+ *
+ *  5 MINUTES (was 15): the slowest legitimate recovery — a PAUSED sandbox's
+ *  Sandbox.connect auto-resume — lands in tens of seconds; five minutes of
+ *  continuous unreachability across BOTH channels (SSE + REST probe) means
+ *  the sandbox is genuinely gone. The old 15-minute window was itself a
+ *  bug report ("stuck at the same progress forever") — the user never saw
+ *  the honest error because they gave up long before it fired. */
+const TRANSPORT_GIVEUP_MS = 5 * 60_000;
 
 export interface BackgroundTurnHandle {
   /** Stop the background job + the consumer. */
@@ -1043,6 +1052,22 @@ function replayEvent(
         emit("tool_call_delta", { tool_calls: ev.tool_calls, ts });
       }
       break;
+    case "tool_output": {
+      // LIVE NATIVE-TOOL OUTPUT (the "bg AI stops answering for ~2 minutes"
+      // fix): the sandbox runner streams run_terminal / run_python stdout +
+      // stderr chunks WHILE the command executes, so a long command shows
+      // progress instead of a silent 120s gap between tool_call and
+      // tool_result. Maps 1:1 onto the same tool_output WSEvent the
+      // foreground runtime's onToolOutput callback emits — the processor
+      // appends it to the existing tool card in real time.
+      emit("tool_output", {
+        tool_call_id: ev.id ?? "unknown",
+        content: ev.content ?? "",
+        type: ev.stream === "stderr" ? "stderr" : "stdout",
+        ts,
+      });
+      break;
+    }
     case "tool_call": {
       const preemit = (ev as { _preemit?: boolean })._preemit === true;
       emit("tool_call", {
