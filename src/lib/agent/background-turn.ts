@@ -101,6 +101,14 @@ const RECONNECT_NOTICE_MS = 30_000;
  *  fatal error — reconnecting continues silently for as long as the job
  *  lives (the E2B run is unaffected server-side). */
 const TRANSPORT_NOTICE_MS = 10 * 60_000;
+/** GIVE-UP WATCHDOG (user report 2026-10-21: "came back, nothing generates,
+ *  same state as where I left"): when the sandbox itself stays UNREACHABLE
+ *  (no stream frames AND the bg_status probe cannot connect) for this long,
+ *  the run is dead in practice (sandbox destroyed / E2B region outage) —
+ *  end it honestly instead of spinning forever. Reachability resets the
+ *  clock (a paused sandbox auto-resuming, a slow-but-alive run, or events
+ *  draining through the REST fallback all prove liveness). */
+const TRANSPORT_GIVEUP_MS = 15 * 60_000;
 
 export interface BackgroundTurnHandle {
   /** Stop the background job + the consumer. */
@@ -714,6 +722,24 @@ export async function consumeRun(ctx: {
         const outageMs = Date.now() - failedSince;
         if (outageMs >= TRANSPORT_NOTICE_MS) showNotice(2);
         else if (outageMs >= RECONNECT_NOTICE_MS) showNotice(1);
+        // GIVE-UP WATCHDOG (TRANSPORT_GIVEUP_MS): the sandbox itself has been
+        // unreachable for the whole window — no frames, no REST probe, no
+        // fallback events. The run cannot still be alive in any observable
+        // way; end it honestly (checkpointed progress is already in Dexie)
+        // instead of reconnect-spining forever over a dead sandbox.
+        if (outageMs >= TRANSPORT_GIVEUP_MS) {
+          console.warn(
+            "[background-turn] sandbox unreachable for " +
+              Math.round(outageMs / 60000) +
+              "m — giving up honestly (checkpointed progress is saved)",
+          );
+          await finishRun(
+            "The background sandbox stayed unreachable for " +
+              Math.round(outageMs / 60000) +
+              " minutes — the task was stopped so it cannot keep spinning. Everything it completed is saved below; send a message to continue the work.",
+          );
+          return;
+        }
       }
 
       // Wakeable backoff sleep — visibilitychange→visible short-circuits it

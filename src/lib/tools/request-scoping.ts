@@ -72,9 +72,30 @@ const SMALL_MODEL_WINDOW = 128_000;
 // Tool surfaces.
 // ---------------------------------------------------------------------------
 
-/** The every-turn surface (26 tools) — what a small-context model always
+/** DISCOVERY surface (user report 2026-10-21: "the AI never uses skills /
+ * MCPs / Composio / connectors unless told") — the capability-discovery
+ * meta-tools ride on EVERY turn (both surfaces). They are tiny (~7
+ * definitions) and they are HOW the agent learns what integrations exist:
+ * without them in the request the model cannot even look for connected
+ * capabilities, which is exactly "needs to be told to use them". The
+ * search-first pattern keeps the payload bounded no matter how many
+ * servers/actions are actually connected. */
+export const DISCOVERY_TOOLS: ReadonlySet<string> = new Set([
+  // NOTE: mcp_search_tools / mcp_call_tool are intentionally NOT here —
+  // they are not digest-listed built-ins, so the filter's rule 1 (anything
+  // outside the built-in digest always ships) already guarantees they ride
+  // on EVERY request regardless of surface or intent.
+  "composio_search_tools", // discover connected Composio actions
+  "composio_execute_tool", // execute a discovered Composio action
+  "composio_connect_platform", // hand the user an OAuth link
+  "manage_skill", // list/read installed + library skills
+  "manage_mcp", // MCP server configuration (list/market)
+]);
+
+/** The every-turn surface — what a small-context model always
  * sees: answer, research, browse, code, author files, todos, workspace,
- * uploads, memory, media. (Exported for tests + diagnostics.) */
+ * uploads, memory, media + the capability-DISCOVERY meta-tools.
+ * (Exported for tests + diagnostics.) */
 export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   // Conversation & time
   "ask_user", "current_datetime",
@@ -93,6 +114,8 @@ export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   "manage_memory", "knowledge_base",
   // Media generation (Pollinations)
   "media_generation",
+  // Capability discovery (always on — see DISCOVERY_TOOLS)
+  ...DISCOVERY_TOOLS,
 ]);
 
 /** CORE extras — shipped on normal-context turns, intent-matched on small

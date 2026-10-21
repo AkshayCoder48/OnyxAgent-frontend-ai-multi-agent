@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   ESSENTIAL_TOOLS,
   CORE_TOOLS,
+  DISCOVERY_TOOLS,
   filterToolsForRequest,
   priorToolUseAnnotation,
   usedToolNamesFromHistory,
@@ -42,8 +43,12 @@ describe("filterToolsForRequest — surfaces", () => {
     })));
     // Every CORE tool is present.
     for (const n of CORE_TOOLS) expect(got.has(n)).toBe(true);
-    // Situational tools are NOT shipped without intent.
-    expect(got.has("composio_search_tools")).toBe(false);
+    // CAPABILITY DISCOVERY (user report 2026-10-21: "the AI never uses
+    // skills / connectors / composio unless told"): the discovery meta-tools
+    // ride on EVERY turn — the agent must be able to look for connected
+    // integrations without the user naming them.
+    for (const n of DISCOVERY_TOOLS) expect(got.has(n)).toBe(true);
+    // Genuinely situational tools are still NOT shipped without intent.
     expect(got.has("update_scheduled_task")).toBe(false);
     expect(got.has("manage_env_var")).toBe(false);
     expect(got.has("workflow")).toBe(false);
@@ -55,6 +60,8 @@ describe("filterToolsForRequest — surfaces", () => {
       modelContextWindow: 32_000,
     })));
     for (const n of ESSENTIAL_TOOLS) expect(got.has(n)).toBe(true);
+    // Discovery ships even on small models — autonomy is not a luxury.
+    for (const n of DISCOVERY_TOOLS) expect(got.has(n)).toBe(true);
     // CORE extras are scoped out on small models without intent…
     expect(got.has("image_search")).toBe(false);
     expect(got.has("spawn_subagent")).toBe(false);

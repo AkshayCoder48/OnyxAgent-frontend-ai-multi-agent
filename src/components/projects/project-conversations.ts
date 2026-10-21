@@ -63,17 +63,42 @@ export function resetToNewChatState(): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Conversations whose project claim is IN FLIGHT (selected → claimed race
+ * guard, PRD §4.4 / user report 2026-10-21: "after sending a message the
+ * project header goes away"). The runtime creates a new conversation with NO
+ * project_id; the claim writes it a moment later. In between, the selection
+ * sync reads the row, sees no project_id and CLOSED the project workspace —
+ * so the user's new chat popped out of its project (the "must use the project
+ * sidebar" workaround). While a claim is pending the sync leaves the project
+ * context alone; the claim's completion is what settles it.
+ */
+const pendingProjectClaims = new Set<string>();
+
+/** Register a claim as in-flight (SYNCHRONOUSLY — before any await). */
+export function beginProjectClaim(conversationId: string): void {
+  pendingProjectClaims.add(conversationId);
+}
+
+/** True while the conversation's project claim is still in flight. */
+export function isProjectClaimPending(conversationId: string): boolean {
+  return pendingProjectClaims.has(conversationId);
+}
+
+/**
  * Assign a freshly runtime-created conversation to a project. Only claims
  * rows that do not already belong to a project (never re-associates), stamps
  * the project's activity clock, and fires the conversations-changed event so
  * every list (shared cache, general list, project drawer) converges on the
  * claimed row. Best-effort: a failure is logged, never thrown — the user's
- * message is already streaming at this point.
+ * message is already streaming at this point. On failure the pending latch
+ * is released and the selection sync re-evaluates (a genuinely general chat
+ * then leaves the project context as before).
  */
 export async function claimConversationForProject(
   conversationId: string,
   projectId: string,
 ): Promise<void> {
+  beginProjectClaim(conversationId);
   try {
     const row = await db.conversations.get(conversationId);
     if (!row || row.project_id) return; // gone, or already claimed
@@ -90,6 +115,20 @@ export async function claimConversationForProject(
     notifyConversationsChanged();
   } catch (err) {
     console.warn("[projects] failed to claim conversation for project:", err);
+    // The claim failed — the chat stays GENERAL. If the user is still
+    // looking at it, settle the project context now (the selection sync
+    // skipped it while the claim was pending).
+    try {
+      const store = useProjectsStore.getState();
+      const selected = useConversationStore.getState().currentConversationId;
+      if (selected === conversationId && store.activeProjectId !== null) {
+        store.closeProject();
+      }
+    } catch {
+      // best-effort
+    }
+  } finally {
+    pendingProjectClaims.delete(conversationId);
   }
 }
 
@@ -138,7 +177,12 @@ export function useProjectSelectionSync(): void {
             store.openProject(row.project_id);
           }
         } else {
-          // A general conversation can never be open under project context.
+          // A general conversation can never be open under project context —
+          // EXCEPT while its project claim is still in flight (the runtime
+          // just created it inside a project workspace; project_id lands
+          // within moments). Closing here is what made the project header
+          // vanish after the first message (PRD §4.4 race).
+          if (isProjectClaimPending(currentConversationId)) return;
           if (store.activeProjectId !== null) {
             store.closeProject();
           }

@@ -426,32 +426,57 @@ export const executionHub = {
       record.store.getState().setProcessing(true);
 
       const { resumeBackgroundTurn } = await import("@/lib/agent/background-turn");
-      const handle = await resumeBackgroundTurn({
-        e2bApiKey,
-        userId,
-        conversationId,
-        emit: (ev) => record.processor.handle(ev),
-        // Checkpoint coherence: flush the processor's buffered render
-        // deltas before each Dexie checkpoint (see background-turn.ts).
-        flush: () => record.processor.flush(),
-        onFinished: () => {
-          // The consumer's terminal events already routed through the
-          // processor (onTurnEnd). This is the safety net for paths that
-          // end without a terminal event (e.g. unreachable give-up emits
-          // an error event — handled — or a consumer crash).
-          executionHub.finishExecution(record.id, "failed");
-        },
-        store: record.store,
-      }).catch(() => null);
+      const attemptResume = () =>
+        resumeBackgroundTurn({
+          e2bApiKey,
+          userId,
+          conversationId,
+          emit: (ev) => record.processor.handle(ev),
+          // Checkpoint coherence: flush the processor's buffered render
+          // deltas before each Dexie checkpoint (see background-turn.ts).
+          flush: () => record.processor.flush(),
+          onFinished: () => {
+            // The consumer's terminal events already routed through the
+            // processor (onTurnEnd). This is the safety net for paths that
+            // end without a terminal event (e.g. unreachable give-up emits
+            // an error event — handled — or a consumer crash).
+            executionHub.finishExecution(record.id, "failed");
+          },
+          store: record.store,
+        }).catch(() => null);
+      // ONE RETRY (app-open connect blips): the sandbox connect (auto-resume
+      // of a paused sandbox) and the key/decrypt resolution can race the
+      // page load — a single delayed retry recovers those without leaving
+      // the user on a silently frozen chat.
+      let handle = await attemptResume();
+      if (!handle) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        if (this.getFor(conversationId)?.id !== record.id) {
+          resuming.delete(conversationId);
+          return record; // superseded — do not fight a newer execution
+        }
+        handle = await attemptResume();
+      }
       if (handle) {
         record.handle = handle;
         record.sandboxId = job.sandboxId;
         useHubStore.getState().patch(record.id, { sandboxId: job.sandboxId });
       } else {
-        // Nothing resumable (job gone / sandbox expired) — drop the
-        // placeholder execution cleanly.
-        record.store.getState().setProcessing(false);
-        this.finishExecution(record.id, "stopped");
+        // HONEST resume failure (user report 2026-10-21: "came back and it
+        // was the same state as where I left, nothing generates"): the job
+        // could not be reconnected (sandbox expired/destroyed or E2B
+        // unreachable). Surface it as a real chat message instead of
+        // silently dropping to a frozen chat — the checkpointed history
+        // below is intact and a new message continues the work.
+        record.processor.handle({
+          type: "error",
+          data: {
+            message:
+              "This background task could not be reconnected — its sandbox is unreachable or has expired. Its last saved state is shown above; send a message to continue the work.",
+          },
+          timestamp: new Date().toISOString(),
+        });
+        this.finishExecution(record.id, "failed");
       }
       resuming.delete(conversationId);
       return record;

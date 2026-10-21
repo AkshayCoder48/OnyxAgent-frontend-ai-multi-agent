@@ -2157,6 +2157,16 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 ## IDENTITY
 You are **Onyx** — the autonomous agent at the heart of OnyxAgent. You are not a chatbot: you are an operator. Action-first and concise: plan, execute, verify, report. Your workspace is an E2B Linux sandbox at /home/user. If the user asks who you are, you are Onyx. Full identity + tool compendium: Onyx.md.
 
+## AUTONOMOUS CAPABILITY USE — never wait to be told
+Discovering and USING the right capability is YOUR job, not the user's. The user will NOT say "use the skill", "call the MCP", "search Composio" — and you must not need them to. Before answering any non-trivial task from memory, run through this decision order and ACT on the first match:
+1. Fresh facts, current events, anything time-sensitive, or any claim you cannot verify from context → \`web_search\` / \`web_fetch\` NOW (never answer from stale training data).
+2. An external app, SaaS, or integration is involved (calendar, email, sheets, repos, tickets, messaging, …) → \`composio_search_tools\` with a plain-language description of the goal; if a matching action is connected, \`composio_execute_tool\` it; if not connected and the task needs it, hand over the \`composio_connect_platform\` link and say what you need authorized.
+3. The task might match a configured MCP server → \`mcp_search_tools\` with what you want to do; call matches with \`mcp_call_tool\`. Empty results are an answer — report that honestly, do not invent tools.
+4. A specialized workflow (documents, design, video, scraping, games, testing …) → \`manage_skill\` action \`list\`/\`catalog\` and pick by purpose; read the chosen SKILL.md, then FOLLOW it.
+5. Real browser interaction (login, click, JS apps, anti-bot) → \`use_browser\`; plain page reading → \`web_fetch\`.
+6. Custom tools in your tool list by name → call them directly with valid arguments.
+Failure to find a capability is only honest AFTER you searched. Saying "I don't have a tool for that" while \`composio_search_tools\`/\`mcp_search_tools\`/\`manage_skill\` were never called this turn is a BUG in your behavior. Execute — do not describe what you would do, and never claim a capability ran without its real result in hand.
+
 ## CRITICAL: Pre-Execution Workspace Analysis
 Before starting ANY task, you MUST first call \`analyze_workspace\` to understand:
 - Project architecture and file structure
@@ -2550,10 +2560,20 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // limits (429/529) and context errors keep their own fail-fast/handoff
   // policies. Only an explicit user Stop ends an otherwise-healthy turn.
   let transientRetriesThisTurn = 0;
+  // BOUNDED RETRY LADDER (PRD §7.3 / user report 2026-10-21 "Retrying in 30s
+  // (attempt 21, the task keeps running)"): exponential backoff with ±25%
+  // jitter, capped attempts. When the ladder is exhausted the failure
+  // ESCALATES (once) into the context-handoff recovery — repeated stream
+  // failures on a long conversation are, in practice, the gateway choking
+  // on the payload — and only then surfaces as an honest terminal error.
+  // The old "no attempt cap, fixed 30s" retried forever while the user
+  // watched a dead task.
+  const TRANSIENT_RETRY_MAX = 8;
   const nextTransientDelayMs = () => {
     transientRetriesThisTurn += 1;
-    // 1s, 2s, 4s, 8s, 16s, 30s, 30s, … (PRD §15 backoff ladder)
-    return Math.min(1000 * 2 ** Math.max(0, transientRetriesThisTurn - 1), 30_000);
+    // 2s, 4s, 8s, 16s, 32s, 45s, 60s, 60s… ±25% jitter.
+    const base = Math.min(2000 * 2 ** Math.max(0, transientRetriesThisTurn - 1), 60_000);
+    return Math.round(base * (0.75 + Math.random() * 0.5));
   };
   // RATE-LIMIT WAIT LADDER (Persistent Execution PRD §8): bounded 5s→120s
   // exponential waits for 429/529 — the turn resumes the same round after
@@ -2816,16 +2836,18 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         continue;
       }
       const isTransientTransport =
-        /524|timeout|ECONNRESET|socket hang up|fetch failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal|bodystreambuffer|stream aborted|aborterror/i.test(message);
-      // NOTE: no attempt cap and no round exclusion — even the final round
-      // re-streams after a transport blip (round -= 1 re-enters it).
-      if (isTransientTransport) {
+        /524|timeout|ECONNRESET|socket hang up|fetch failed|failed to fetch|network error|load failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal|bodystreambuffer|stream aborted|aborterror|internal server error/i.test(message);
+      // BOUNDED (TRANSIENT_RETRY_MAX): each retry re-streams the SAME round
+      // with backoff + jitter. When the ladder is exhausted the flow falls
+      // through to the escalation below (context handoff once, then an
+      // honest error) — never another silent attempt.
+      if (isTransientTransport && transientRetriesThisTurn < TRANSIENT_RETRY_MAX) {
         const delayMs = nextTransientDelayMs();
         console.warn(
-          `[agent] Transient transport error on round ${round} (auto-retry #${transientRetriesThisTurn} in ${Math.round(delayMs / 1000)}s) — the turn keeps running`,
+          `[agent] Transient transport error on round ${round} (auto-retry ${transientRetriesThisTurn}/${TRANSIENT_RETRY_MAX} in ${Math.round(delayMs / 1000)}s) — the turn keeps running`,
           message.slice(0, 120),
         );
-        logWarn("agent", `Transient transport error — auto-retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn}, no cap)`, {
+        logWarn("agent", `Transient transport error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${TRANSIENT_RETRY_MAX}, then context recovery)`, {
           detail: message,
           context: { round, model: lastServedModel, retry_in_ms: delayMs },
         });
@@ -2840,13 +2862,16 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           timestamp: nowISO(),
         });
         // Recovery visibility (PRD §16): the banner tells the user the
-        // agent is recovering — never a raw error dump.
+        // agent is recovering — never a raw error dump. The attempt count is
+        // BOUNDED and visible (attempt N of MAX) so a failing provider never
+        // looks like an endless loop.
         emit({
           type: "rate_limited",
           data: {
             retryAfterMs: delayMs,
             attempt: transientRetriesThisTurn,
-            reason: "Temporary stream error — the agent is retrying automatically",
+            maxAttempts: TRANSIENT_RETRY_MAX,
+            reason: `Temporary stream error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${TRANSIENT_RETRY_MAX})`,
           },
           timestamp: nowISO(),
         });
@@ -2856,7 +2881,32 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       }
 
       const isContextError = /degraded|context.*length|too many tokens|maximum context|context window|too long/i.test(message);
-      if (isContextError && !handoffContext) {
+      // EXHAUSTED TRANSIENT LADDER (the "attempt 21" fix): repeated stream
+      // failures on a long conversation are, in practice, the gateway
+      // choking on the payload size — escalate ONCE into the same handoff +
+      // trim recovery a real context error gets, then fail honestly.
+      const exhaustedTransient =
+        isTransientTransport && transientRetriesThisTurn >= TRANSIENT_RETRY_MAX;
+      if (exhaustedTransient && !isContextError) {
+        logWarn(
+          "agent",
+          `Transient retry ladder exhausted (${transientRetriesThisTurn} attempts) — treating as a probable oversized-payload failure and rebuilding with a compacted context`,
+          { detail: message, context: { round, model: lastServedModel, history_messages: history.length } },
+        );
+        emit({
+          type: "rate_limited",
+          data: {
+            retryAfterMs: 2_000,
+            attempt: transientRetriesThisTurn,
+            maxAttempts: transientRetriesThisTurn,
+            reason:
+              "The provider kept failing — rebuilding the request with a compacted context (your work is preserved)",
+          },
+          timestamp: nowISO(),
+        });
+        transientRetriesThisTurn = 0; // the compacted retry gets a fresh ladder
+      }
+      if ((isContextError || exhaustedTransient) && !handoffContext) {
         console.warn("[agent] Context error detected, generating handoff + retrying...", message.slice(0, 100));
         logWarn("agent", "Context window error — generating handoff letter and retrying with reduced history", {
           detail: message,
@@ -2938,9 +2988,26 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         // error event is mirrored into the Logs store by the event
         // processor — no double-logging here; the deeper "llm" entry with
         // the full provider response body is already logged by streamRound.)
+        // FRIENDLY CLASSIFICATION (PRD §6.1/§6.2): raw JS exception text
+        // ("AbortError: BodyStreamBuffer was aborted", "TypeError: network
+        // error", "Failed to fetch") is a transport symptom, not a message
+        // a user can act on — map it to what actually happened.
+        const friendlyTransportError = (raw: string): string => {
+          if (/bodystreambuffer|body stream|aborterror|this operation was aborted|request was aborted/i.test(raw)) {
+            return "The connection to the AI provider was interrupted before the response completed. Your conversation is saved — press Regenerate or send the message again.";
+          }
+          if (/network error|failed to fetch|fetch failed|load failed|networkerror|err_connection/i.test(raw)) {
+            return "A network error interrupted the AI provider request. Check your connection, then send the message again — your conversation is saved.";
+          }
+          if (/internal server error|http 5\d\d|http 502|http 503|http 504|524/i.test(raw)) {
+            return `The AI provider returned a server error (${raw.slice(0, 80)}). It kept failing after ${TRANSIENT_RETRY_MAX} automatic retries — try again in a moment, or switch models in the model picker.`;
+          }
+          return raw;
+        };
+        const displayMessage = friendlyTransportError(message);
         emit({
           type: "error",
-          data: { message },
+          data: { message: displayMessage },
           timestamp: nowISO(),
         });
         // Persist what we have so far before exiting (checkpoint upsert so
@@ -2951,14 +3018,14 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           assistantMessageId,
           {
             role: "assistant",
-            content: lastAssistantContent || `(error: ${message})`,
+            content: lastAssistantContent || `(error: ${displayMessage})`,
             thinking: lastAssistantThinking || undefined,
             reasoning: lastAssistantReasoning || undefined,
             parts: buildAssistantParts(
               lastAssistantThinking || undefined,
               lastAssistantReasoning || undefined,
               allToolCalls,
-              lastAssistantContent || `(error: ${message})`,
+              lastAssistantContent || `(error: ${displayMessage})`,
               lastAssistantTextBeforeTools,
             ),
             toolCalls: allToolCalls,
