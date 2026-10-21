@@ -223,6 +223,11 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
     re: /list (my )?chats|other (chat|conversation)s?|new chat|open (a |the )?chat|conversations? list/i,
     tools: ["manage_chats"],
   },
+  {
+    // Scheduled tasks (sandbox cron).
+    re: /\bschedul(e|ed|ing)\b|\bcron\b|recurring|run (it |this )?(later|tonight|overnight|every)|(nightly|hourly|daily|weekly|monthly)\b|every (day|hour|minute|week|morning|evening|night)|at midnight|in the (morning|evening)|background job/i,
+    tools: ["schedule_agent_task", "list_scheduled_tasks", "remove_scheduled_task"],
+  },
 ];
 
 // ---------------------------------------------------------------------------

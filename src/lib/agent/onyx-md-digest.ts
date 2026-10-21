@@ -15,7 +15,7 @@
 // Onyx.md compendium, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (57 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every registered tool (60 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -56,6 +56,11 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 ### Code execution
 - run_python — Python 3: data analysis, calculations, file processing, ML. 60s timeout, live streaming output.
 - run_terminal — Shell with |, &&, ;, >: git, npm/pip, grep, system queries. 120s timeout, 256 KB cap.
+
+### Scheduled tasks (sandbox cron)
+- schedule_agent_task — Cron-schedule a workspace script (create_file it first): cron_expression ("/30 ", "0 8 ", @hourly) + script_name. Output appends to /home/user/cron_output.log.
+- list_scheduled_tasks — Show the crontab entries + the cron_output.log tail — check what ran and what it produced.
+- remove_scheduled_task — Remove one script's entries (script_name) or clear the whole crontab (all: true).
 
 ### Web & search
 - web_search — Text web search (LangSearch if configured, else Miklium). Titles, URLs, snippets.
@@ -99,4 +104,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
 
 /** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","project_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["manage_todo","show_todo","manage_memory","project_memory","knowledge_base","manage_skill","manage_mcp","manage_custom_tool","manage_env_var","manage_chats","manage_subagent_chat","workflow","ocr_document","move_file","list_folder","read_file","read_uploaded_file","list_uploaded_files","read_file_section","create_file","write_file","edit_file","delete_file","delete_folder","create_folder","send_file","send_folder","verify_path","create_file_chunk","analyze_workspace","run_python","run_terminal","schedule_agent_task","list_scheduled_tasks","remove_scheduled_task","web_search","image_search","video_search","web_fetch","use_browser","spawn_subagent","set_subagent_config","query_subagent","read_chat","steer_subagent","complete_subagent","cancel_subagent","list_subagents","create_custom_tool","search_documents","ask_user","counterfactual","security_audit","create_chart","media_generation","preview_image","current_datetime","composio_search_tools","composio_connect_platform","composio_execute_tool"];

@@ -238,6 +238,32 @@ export interface TodoListRow {
 // Dexie subclass — typed tables for the whole app.
 // ---------------------------------------------------------------------------
 
+/** Detached sandbox-agent run (the "close and resume" architecture): the
+ *  orchestration loop runs INSIDE the E2B sandbox as a nohup Python process,
+ *  so it survives the browser closing. One row per started run; the row is
+ *  the client's durable pointer to (sandboxId, run state, seed size) — the
+ *  sync-on-return path uses it to know which history entries are NEW and
+ *  which results were already written back into the conversation. */
+export interface DetachedRunRow {
+  id: string;
+  user_id: string;
+  conversation_id: string;
+  sandbox_id: string;
+  status: "starting" | "running" | "completed" | "failed" | "stopped" | "synced";
+  prompt: string;
+  /** Number of seed messages written into the run config — everything in
+   *  chat_history.json at index >= seed_count is NEW output to sync. */
+  seed_count: number;
+  provider_model: string;
+  chat_url: string;
+  started_at: number;
+  updated_at: number;
+  finished_at?: number | null;
+  error?: string | null;
+  /** Dexie message id of the synced assistant result (dedupe guard). */
+  result_message_id?: string | null;
+}
+
 export class AppDatabase extends Dexie {
   users!: Table<UserRow, string>;
   conversations!: Table<ConversationRow, string>;
@@ -258,6 +284,7 @@ export class AppDatabase extends Dexie {
   project_memories!: Table<ProjectMemoryItem, string>;
   approval_requests!: Table<ApprovalRequest, string>;
   message_search_index!: Table<MessageSearchRow, string>;
+  detached_runs!: Table<DetachedRunRow, string>;
 
   constructor(name = "agent-chat-app") {
     super(name);
@@ -320,6 +347,13 @@ export class AppDatabase extends Dexie {
       approval_requests: "&id, status, conversation_id, project_id, created_at",
       message_search_index:
         "&message_id, conversation_id, project_id, [conversation_id+created_at], updated_at",
+    });
+
+    // Version 5: detached sandbox-agent runs ("close and resume"). One row
+    // per headless-agent start; keyed by run id with per-conversation /
+    // per-user lookups for the sync-on-return path.
+    this.version(5).stores({
+      detached_runs: "&id, user_id, conversation_id, status, updated_at",
     });
   }
 }

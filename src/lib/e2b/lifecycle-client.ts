@@ -21,6 +21,7 @@
  */
 
 import { useEffect } from "react";
+import { detachedActiveIds } from "@/lib/agent/detached-active";
 
 /** Module cache for the pagehide beacon: (decrypted key, known sandbox ids).
  *  Refreshed on mount + on visibility regain (the key decrypt is async and
@@ -134,6 +135,14 @@ export async function fetchLifecycleStatus(apiKey: string): Promise<LifecycleSan
  * Pause every known workspace sandbox on pagehide — the E2B persistency
  * save. Runs ONCE per document lifetime; idempotent.
  *
+ * EXCEPT detached-agent sandboxes: a sandbox flagged with a LIVE headless
+ * run (onyx-detached-active:<id>) must NOT be paused on app close — the
+ * run is supposed to keep executing while the user is away (the "close and
+ * resume" architecture). Those sandboxes keep burning their 24h timeout
+ * window instead, which is exactly the intended behavior. The server-side
+ * pause action carries an independent runner-process guard for the same
+ * case.
+ *
  * sendBeacon carries the pause POST through the unload (a normal fetch
  * would be cancelled); the JSON body parses fine because the route reads
  * the raw body with req.json() regardless of content-type.
@@ -144,7 +153,9 @@ export function installSandboxAutoPause(): () => void {
   const onPageHide = () => {
     try {
       if (!cachedKey) return; // key not pre-warmed — skip (timeout pause still applies)
+      const skip = detachedActiveIds();
       for (const sandboxId of knownSandboxIds()) {
+        if (skip.has(sandboxId)) continue; // live detached run — leave it running
         const body = JSON.stringify({
           apiKey: cachedKey,
           action: "pause",
@@ -154,7 +165,7 @@ export function installSandboxAutoPause(): () => void {
         try {
           navigator.sendBeacon("/api/sandbox", new Blob([body], { type: "text/plain" }));
         } catch {
-          // best-effort — the E2B 1h timeout pause is the fallback
+          // best-effort — the E2B timeout pause is the fallback
         }
       }
     } catch {

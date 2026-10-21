@@ -2,13 +2,14 @@
 
 import { memo, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, ChevronDown, Cpu, FlaskConical, Search, Settings2, Sliders } from "lucide-react";
+import { Check, ChevronDown, Cpu, FlaskConical, Search, Server, Settings2, Sliders } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
 import { useConversationStore, useChatStore, useAuthStore } from "@/stores";
 import { useToolDisplayStore, type ToolDisplayMode } from "@/stores/tool-display-store";
 import { useExperimentalStore } from "@/stores/experimental-store";
+import { useDetachedRunStore } from "@/stores/detached-run-store";
 import { useProviders } from "@/hooks/use-data";
 import {
   AUTO_ROUTER_LABEL,
@@ -684,6 +685,8 @@ function SettingsPanel({
     <div className="space-y-6">
       <ToolDisplayToggle />
 
+      <DetachedRunToggle />
+
       <ExperimentalSection />
 
       <div className="space-y-2.5">
@@ -876,5 +879,55 @@ function ToolDisplayToggle() {
         {TOOL_DISPLAY_OPTIONS.find((o) => o.value === mode)?.hint}
       </p>
     </div>
+  );
+}
+
+/** DETACHED SANDBOX RUNS ("close and resume") — when ON, the next send
+ *  hands the turn to the sandbox-resident headless agent instead of the
+ *  in-browser loop: press send, close the app, come back later to the
+ *  finished tool outputs + reasoning. The run executes inside the E2B
+ *  sandbox (up to 24h) and a status strip above the input tracks it.
+ *  Persisted per browser, default OFF (the normal in-app agent stays the
+ *  default experience). */
+function DetachedRunToggle() {
+  const enabled = useDetachedRunStore((s) => s.detachedMode);
+  const setEnabled = useDetachedRunStore((s) => s.setDetachedMode);
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label="Sandbox runs (close and resume)"
+      onClick={() => setEnabled(!enabled)}
+      className={cn(
+        "flex w-full items-center gap-3 rounded-lg border p-2.5 text-left transition-colors",
+        enabled
+          ? "border-primary/40 bg-primary/[0.06]"
+          : "border-foreground/12 hover:border-foreground/25",
+      )}
+    >
+      <span
+        className={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+          enabled ? "bg-primary" : "bg-foreground/20",
+        )}
+      >
+        <span
+          className={cn(
+            "absolute h-4 w-4 rounded-full bg-background shadow transition-transform",
+            enabled ? "translate-x-4" : "translate-x-0.5",
+          )}
+        />
+      </span>
+      <span className="min-w-0">
+        <span className="text-foreground/80 inline-flex items-center gap-1.5 text-[12px] leading-tight">
+          <Server className="h-3 w-3" aria-hidden />
+          Sandbox runs
+        </span>
+        <span className="text-foreground/50 block text-[11px] leading-tight">
+          Run the agent inside the E2B sandbox — send, close the app, return to finished work (24h).
+        </span>
+      </span>
+    </button>
   );
 }

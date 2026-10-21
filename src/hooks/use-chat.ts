@@ -15,6 +15,7 @@ import type {
 } from "@/types";
 import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
+import { useDetachedRunStore } from "@/stores/detached-run-store";
 import {
   AUTO_ROUTER_PROVIDER_ID,
   type RouterCandidate,
@@ -380,6 +381,96 @@ export function useChat(options: UseChatOptions = {}) {
     [conversationId, currentConversationIdFromStore],
   );
 
+  /**
+   * DETACHED SANDBOX TURN ("close and resume") — the sandbox-resident
+   * variant of doSend's tail. Instead of running the in-browser agent
+   * loop (which dies with the tab), this persists the user message, hands
+   * the prompt + history + provider config to the headless runner inside
+   * the E2B sandbox (nohup-detached, survives the app closing), and settles
+   * the execution immediately. The DetachedRunStrip above the input polls
+   * the run and syncs the finished work back as an assistant message.
+   */
+  const runDetachedTurn = useCallback(
+    async (
+      userId: string,
+      convId: string,
+      execution: ExecutionRecord,
+      opts: AgentTurnOptions,
+      fileIds?: string[],
+    ) => {
+      const { startDetachedRun } = await import("@/lib/agent/detached-run");
+      const failTurn = (message: string) => {
+        execution.processor.handle({ type: "error", data: { message } });
+        executionHub.finishExecution(execution.id, "failed");
+      };
+
+      // ONE detached run per sandbox at a time — a second would overwrite
+      // the run config + collide on chat_history.json.
+      const active = useDetachedRunStore.getState().runs[convId];
+      if (active && (active.status === "running" || active.status === "starting")) {
+        failTurn(
+          "A sandbox run is already active in this chat — wait for it to finish or stop it from the background strip above the input, then send again.",
+        );
+        return;
+      }
+
+      const provider = opts.provider;
+      if (!provider?.apiKey || !provider.baseUrl) {
+        failTurn(
+          "The selected AI provider has no API key / base URL — sandbox runs need both (the runner calls the gateway from inside the sandbox).",
+        );
+        return;
+      }
+
+      // Load the history BEFORE persisting the new user row, so the seed
+      // never duplicates the prompt we are about to append.
+      let history: Array<{ role: string; content: string }> = [];
+      try {
+        const rows = await conversationService.getMessages(convId, userId);
+        history = rows.map((r) => ({ role: r.role, content: r.content }));
+      } catch {
+        // empty seed (first message) — fine
+      }
+
+      try {
+        await conversationService.addMessage(convId, userId, {
+          role: "user",
+          content: opts.userMessage,
+          fileIds,
+        });
+      } catch (err) {
+        console.warn("[useChat] detached: failed to persist the user message", err);
+      }
+
+      // Chat URL — resolved exactly like runtime.ts (noPrefix providers
+      // point at the full URL; everyone else gets /chat/completions).
+      const base = (provider.baseUrl || "").replace(/\/+$/, "");
+      const chatUrl = provider.noPrefix ? base : `${base}/chat/completions`;
+
+      const started = await startDetachedRun({
+        userId,
+        conversationId: convId,
+        prompt: opts.userMessage,
+        systemPrompt: opts.systemPrompt ?? "",
+        chatUrl,
+        apiKey: provider.apiKey,
+        model: provider.model,
+        temperature: opts.temperature ?? null,
+        history,
+      });
+
+      if (!started.ok) {
+        failTurn(`Sandbox run failed to start: ${started.error ?? "unknown error"}`);
+        return;
+      }
+
+      // The turn is now the sandbox's problem — settle the in-app execution
+      // so the composer frees up (the strip tracks the live run).
+      executionHub.finishExecution(execution.id, "completed");
+    },
+    [],
+  );
+
   const doSend = useCallback(
     async (content: string, fileIds?: string[], files?: ChatMessageFile[]) => {
       const userId = useAuthStore.getState().user?.id;
@@ -496,24 +587,18 @@ export function useChat(options: UseChatOptions = {}) {
       const turnGenerationId = nanoid();
       opts.generationId = turnGenerationId;
 
-      // ── FIRST MESSAGE = INSTANT FALLBACK TITLE ─────────────────────────
-      // Chat name generation (the old PRD §12 dedicated naming call) was
-      // REMOVED per user request: the extra AI call doubled request volume
-      // on every new chat, burned rate-limited providers, and was itself a
-      // frequent HTTP 400 source (strict gateways reject the naming prompt).
-      // The title is now the first 60 chars of the user's message, applied
-      // instantly — zero extra API calls, the main agent call starts
-      // immediately.
-      //
-      // GEM VISIBILITY: `model_request_start` fires FIRST and creates the
-      // streaming assistant placeholder immediately, so the OnyxAgent gem
-      // header + shimmering "Thinking" indicator are visible from the very
-      // first moment. The runtime re-runs this event with the same
-      // round/generation — the placeholder is reused, never duplicated.
-      execution.processor.handle({
-        type: "model_request_start",
-        data: { round: 1, generation_id: turnGenerationId },
-      });
+      // ── DETACHED SANDBOX RUN MODE ("close and resume") ────────────────
+      // When the toggle is on, the turn is handed to the headless runner
+      // INSIDE the E2B sandbox — the user can close the app immediately.
+      // No streaming placeholder is created (nothing streams in-app); the
+      // DetachedRunStrip owns the live status instead.
+      const detachedMode = useDetachedRunStore.getState().detachedMode;
+      if (!detachedMode) {
+        execution.processor.handle({
+          type: "model_request_start",
+          data: { round: 1, generation_id: turnGenerationId },
+        });
+      }
       if (!convId) {
         const conv = await conversationService.create(userId, "");
         convId = conv.id;
@@ -539,12 +624,17 @@ export function useChat(options: UseChatOptions = {}) {
         notifyConversationsChanged();
       }
 
+      if (detachedMode) {
+        await runDetachedTurn(userId, convId!, execution, opts, fileIds);
+        return;
+      }
+
       // Foreground: the fetch lives in the browser page, owned by the hub.
       // It survives route changes/chat switches (nothing aborts it); it ends
       // on completion or explicit Stop. (Browser refresh closes fg turns.)
       executionHub.runForeground(execution.id, opts);
     },
-    [buildTurnOptions, conversationId, currentConversationIdFromStore, onConversationCreated],
+    [buildTurnOptions, conversationId, currentConversationIdFromStore, onConversationCreated, runDetachedTurn],
   );
 
   // ── HONEST TURN-START FAILURE (the eternal "Thinking" fix) ─────────────

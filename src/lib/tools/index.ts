@@ -44,5 +44,6 @@ import "./ocr";
 import "./composio_tools";
 import "./uploaded_files";
 import "./media_generation";
+import "./sandbox_schedule";
 
 export {};

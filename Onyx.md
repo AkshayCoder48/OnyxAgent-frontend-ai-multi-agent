@@ -73,6 +73,18 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 | **run_python** | Python 3: data analysis, calculations, file processing, ML. 60s timeout, live streaming output. |
 | **run_terminal** | Shell with `\|`, `&&`, `;`, `>`: git, npm/pip, grep, system queries. 120s timeout, 256 KB cap. |
 
+### Scheduled tasks (sandbox cron)
+
+The E2B sandbox stays alive up to 24h — its Linux cron daemon runs your scripts on a schedule, even while the user's app is closed.
+
+| Tool | Use |
+|---|---|
+| **schedule_agent_task** | Cron-schedule a workspace script (`create_file` it first): `cron_expression` (`"*/30 * * * *"`, `"0 8 * * *"`, `@hourly`) + `script_name`. Output appends to `/home/user/cron_output.log`. |
+| **list_scheduled_tasks** | Show the crontab entries + the `cron_output.log` tail — check what ran and what it produced. |
+| **remove_scheduled_task** | Remove one script's entries (`script_name`) or clear the whole crontab (`all: true`). |
+
+Scheduled scripts that append `sched-…`-id todos to `/home/user/todos.json` surface them in the chat's todo panel on the next sync.
+
 ### Web & search
 
 | Tool | Use |

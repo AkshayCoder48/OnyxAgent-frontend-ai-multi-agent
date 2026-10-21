@@ -250,10 +250,13 @@ describe("Dexie v3 → v4 upgrade", () => {
     await legacy.table("todo_lists").add({ conversation_id: "c-legacy", todos: [], updated_at: NOW });
     await legacy.close();
 
-    // Open with the REAL class — the v3 → v4 upgrade runs here.
+    // Open with the REAL class — the v3 → v4 (→ v5) upgrade runs here.
     const app = new AppDatabase(NAME);
     await app.open();
-    expect(app.verno).toBe(4);
+    // v4 added the project tables; v5 added detached_runs (sandbox-agent
+    // "close and resume") — both additive, so a legacy v3 database upgrades
+    // straight through to the current version.
+    expect(app.verno).toBe(5);
 
     // Existing data survived the upgrade.
     expect((await app.conversations.get("c-legacy"))?.title).toBe("Chat c-legacy");

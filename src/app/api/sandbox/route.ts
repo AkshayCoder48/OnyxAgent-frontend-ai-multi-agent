@@ -33,6 +33,22 @@ import { Sandbox } from "@e2b/code-interpreter";
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
 import { attachMasterSkills, ensureMasterSkills } from "@/lib/e2b/attach-master-skills";
+// HEADLESS SANDBOX AGENT ("close and resume"): the detached Python
+// orchestration loop + its protocol file paths. See
+// src/lib/e2b/headless-agent.ts for the full architecture notes.
+import {
+  HEADLESS_RUNNER_PY,
+  HEADLESS_RUNNER_VERSION,
+  RUNNER_PATH,
+  AGENT_DIR,
+  RUN_CONFIG_PATH,
+  RUNNER_VERSION_PATH,
+  CHAT_HISTORY_PATH,
+  AGENT_STATUS_PATH,
+  BACKGROUND_LOG_PATH,
+  SANDBOX_TODOS_PATH,
+  RUNNER_PGREP_PATTERN,
+} from "@/lib/e2b/headless-agent";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,6 +56,13 @@ export const maxDuration = 300;
 
 const DEFAULT_CWD = "/home/user";
 const SANDBOX_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — files persist for a full day
+// PERSISTENT-AGENT TIMEOUT: 24h (E2B's documented max) so a detached
+// headless-agent run keeps working long after the user closes the app. If
+// the account's tier rejects the 24h window the create falls back to 1h
+// (with onTimeout:"pause" + autoResume, even that never loses state — the
+// sandbox freezes at the limit and the next connect resumes in place).
+const SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const SANDBOX_TIMEOUT_FALLBACK_MS = 60 * 60 * 1000;
 // ROTATION: E2B sandboxes have a 24h hard TTL. We rotate at 23h to avoid
 // hitting the limit (backup → kill → create → restore). The client-side
 // `ensureFreshSandbox` in `src/lib/e2b/sandbox-rotation.ts` is the primary
@@ -862,6 +885,43 @@ function sanitizeEnvs(raw: unknown): Record<string, string> | undefined {
   return count > 0 ? out : undefined;
 }
 
+/**
+ * Deploy the headless-agent runner into a sandbox (version-stamped — a
+ * matching stamp skips the rewrite, same pattern as the Onyx.md stamp and
+ * the browser driver). Returns true when the script was (re)written.
+ */
+async function deployHeadlessRunner(sandbox: Sandbox): Promise<boolean> {
+  try {
+    let current: string | null = null;
+    try {
+      current = await sandbox.files.read(RUNNER_VERSION_PATH, { format: "text" });
+    } catch {
+      // not deployed yet
+    }
+    if (current && current.trim() === String(HEADLESS_RUNNER_VERSION)) {
+      return false;
+    }
+    await sandbox.files.makeDir(AGENT_DIR).catch(() => {});
+    await sandbox.files.write(RUNNER_PATH, HEADLESS_RUNNER_PY);
+    await sandbox.files.write(RUNNER_VERSION_PATH, String(HEADLESS_RUNNER_VERSION));
+    console.log(`[sandbox] deployed headless runner v${HEADLESS_RUNNER_VERSION} to ${RUNNER_PATH}`);
+    return true;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to deploy the headless agent runner: ${errMsg}`);
+  }
+}
+
+/** Read + JSON-parse a small protocol file (null when absent/invalid). */
+async function readJsonFile(sandbox: Sandbox, path: string): Promise<unknown> {
+  try {
+    const text = await sandbox.files.read(path, { format: "text" });
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
@@ -875,6 +935,31 @@ async function createAndCacheSandbox(
   await killOrphanedSandboxes(apiKey);
 
   await enforceLimit();
+
+  // Create with the 24h persistent-agent window; fall back to 1h when the
+  // account's tier rejects the larger window (the lifecycle pause/resume
+  // still preserves everything either way).
+  const createSandbox = async (timeoutMs: number): Promise<Sandbox> => {
+    const templateId = process.env.E2B_TEMPLATE_ID?.trim() || undefined;
+    if (templateId) {
+      console.log(`[sandbox] using custom template: ${templateId}`);
+    }
+    //
+    // LIFECYCLE: onTimeout "pause" + autoResume. Without this E2B's default
+    // KILLS the sandbox when its timeout expires — including any in-flight
+    // command running inside it. With it, the sandbox auto-PAUSES at timeout
+    // (full memory + filesystem preserved, running processes frozen
+    // mid-flight — a detached headless-agent run included) and any later
+    // Sandbox.connect AUTO-RESUMES it, continuing exactly where it froze.
+    return await Sandbox.create({
+      apiKey,
+      ...(templateId ? { template: templateId } : {}),
+      timeoutMs,
+      envs,
+      metadata: onyxSandboxMetadata(mode, conversationId),
+      lifecycle: { onTimeout: "pause", autoResume: true },
+    });
+  };
 
   let sandbox: Sandbox;
   try {
@@ -890,26 +975,7 @@ async function createAndCacheSandbox(
     // code-interpreter template, and the browser runtime self-installs on
     // first use (browser-session.ts). Never hardcode the name: a missing
     // template on the E2B account would break ALL sandbox creation.
-    const templateId = process.env.E2B_TEMPLATE_ID?.trim() || undefined;
-    if (templateId) {
-      console.log(`[sandbox] using custom template: ${templateId}`);
-    }
-    //
-    // LIFECYCLE: onTimeout "pause" + autoResume. Without this E2B's default
-    // KILLS the sandbox when its timeout expires — including any in-flight
-    // command running inside it. With it, the sandbox auto-PAUSES at timeout
-    // (full memory + filesystem preserved, running processes frozen
-    // mid-flight) and any later Sandbox.connect AUTO-RESUMES it, continuing
-    // exactly where it froze. (Hobby plan: 1h max continuous runtime; the
-    // limit RESETS after each pause/resume cycle.)
-    sandbox = await Sandbox.create({
-      apiKey,
-      ...(templateId ? { template: templateId } : {}),
-      timeoutMs: 3_600_000, // 1 hour (E2B Hobby max continuous runtime)
-      envs,
-      metadata: onyxSandboxMetadata(mode, conversationId),
-      lifecycle: { onTimeout: "pause", autoResume: true },
-    });
+    sandbox = await createSandbox(SANDBOX_TIMEOUT_MS);
   } catch (createErr) {
     // QUOTA RECOVERY: kill ALL sandboxes on the account and retry.
     // The shared-sandbox architecture means we only ever need ONE sandbox
@@ -921,17 +987,24 @@ async function createAndCacheSandbox(
       sharedCache.clear();
       separateCache.clear();
       // Retry the create — should succeed now that the account has 0 sandboxes.
-      const retryTemplateId = process.env.E2B_TEMPLATE_ID?.trim() || undefined;
-      sandbox = await Sandbox.create({
-        apiKey,
-        ...(retryTemplateId ? { template: retryTemplateId } : {}),
-        timeoutMs: 3_600_000,
-        envs,
-        metadata: onyxSandboxMetadata(mode, conversationId),
-        lifecycle: { onTimeout: "pause", autoResume: true },
-      });
+      sandbox = await createSandbox(SANDBOX_TIMEOUT_MS).catch(() =>
+        createSandbox(SANDBOX_TIMEOUT_FALLBACK_MS),
+      );
     } else {
-      throw createErr;
+      // Tier may cap the timeout window (e.g. 1h max continuous runtime) —
+      // retry once with the fallback before surfacing the error.
+      try {
+        sandbox = await createSandbox(SANDBOX_TIMEOUT_FALLBACK_MS);
+      } catch (fallbackErr) {
+        if (isQuotaError(fallbackErr)) {
+          await killAllSandboxesOnAccount(apiKey);
+          sharedCache.clear();
+          separateCache.clear();
+          sandbox = await createSandbox(SANDBOX_TIMEOUT_FALLBACK_MS);
+        } else {
+          throw fallbackErr;
+        }
+      }
     }
   }
 
@@ -2145,8 +2218,29 @@ export async function POST(req: NextRequest) {
           const errMsg = e instanceof Error ? e.message : String(e);
           return NextResponse.json({ error: `Cannot reach sandbox: ${errMsg}` }, { status: 500 });
         }
+        // DETACHED-AGENT GUARD: never pause a sandbox with a live headless
+        // agent — the whole point of the detached run is that it keeps
+        // working while the user's app is closed. (Second line of defense;
+        // the client's pagehide handler already skips flagged sandboxes.)
+        try {
+          const probe = await sandbox.commands.run(
+            `pgrep -f "${RUNNER_PGREP_PATTERN}" >/dev/null 2>&1 && echo RUNNER || echo IDLE`,
+            { timeoutMs: 10_000 },
+          );
+          if ((probe.stdout ?? "").includes("RUNNER")) {
+            return NextResponse.json({
+              ok: false,
+              paused: false,
+              reason: "agent-running",
+              detail:
+                "A detached background agent run is executing in this sandbox — pause skipped so it keeps working while the app is closed.",
+            });
+          }
+        } catch {
+          // fall through to the general live-process guard below
+        }
         // LIVE-RUN GUARD: never pause a sandbox with running processes —
-        // an in-flight exec would freeze mid-flight. (The E2B 1h timeout
+        // an in-flight exec would freeze mid-flight. (The E2B timeout
         // pause still applies to it naturally.)
         try {
           const running = await sandbox.commands.list();
@@ -2199,9 +2293,15 @@ export async function POST(req: NextRequest) {
           // they froze).
           const sandbox = await Sandbox.connect(resumeSandboxId, { apiKey });
           try {
-            // Fresh 1h window on resume (the timeout countdown resets after
-            // each pause/resume cycle per the E2B lifecycle).
-            await sandbox.setTimeout(3_600_000);
+            // Fresh window on resume (the timeout countdown resets after
+            // each pause/resume cycle per the E2B lifecycle). Try the 24h
+            // persistent-agent window first; tiers that cap lower take the
+            // 1h fallback — with pause+autoResume neither loses state.
+            try {
+              await sandbox.setTimeout(SANDBOX_TIMEOUT_MS);
+            } catch {
+              await sandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS).catch(() => {});
+            }
           } catch {
             // best-effort
           }
@@ -2258,12 +2358,17 @@ export async function POST(req: NextRequest) {
         // paid a full auto-resume (tens of seconds) before the first byte
         // (the "basic commands take 2-5 minutes" report).
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
-        // Reset the 1h window (per the E2B lifecycle the explicit setTimeout
-        // restarts the countdown; the limit resets after each cycle).
+        // Reset the timeout window (per the E2B lifecycle the explicit
+        // setTimeout restarts the countdown; the limit resets after each
+        // cycle). 24h persistent-agent window with a 1h tier fallback.
         try {
-          await sandbox.setTimeout(3_600_000);
+          await sandbox.setTimeout(SANDBOX_TIMEOUT_MS);
         } catch {
-          // best-effort — the liveness touch below still helps
+          try {
+            await sandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS);
+          } catch {
+            // best-effort — the liveness touch below still helps
+          }
         }
         // Touch the sandbox by listing /home/user (cheap operation).
         const alive = await isAlive(sandbox);
@@ -2285,6 +2390,151 @@ export async function POST(req: NextRequest) {
           sandboxId: sandbox.sandboxId,
           timestamp: Date.now(),
         });
+      }
+
+      // ── DETACHED SANDBOX AGENT ("close and resume") ──────────────────────
+      // The orchestration loop runs INSIDE the sandbox as a nohup-detached
+      // Python process (headless_runner.py). The browser only starts it and
+      // syncs the results from chat_history.json / agent_status.json when
+      // the user returns — closing the app does NOT stop the run (the E2B
+      // sandbox keeps executing for up to 24h on E2B's cloud).
+
+      case "agent_deploy": {
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        await deployHeadlessRunner(sandbox);
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          deployed: true,
+          version: HEADLESS_RUNNER_VERSION,
+        });
+      }
+
+      case "agent_start": {
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // Config arrives as a pre-serialized JSON string (the client builds
+        // it; the server never re-shapes it — one source of truth).
+        const configRaw = typeof args.config === "string" ? args.config : JSON.stringify(args.config ?? null);
+        let config: Record<string, unknown>;
+        try {
+          config = JSON.parse(configRaw) as Record<string, unknown>;
+        } catch {
+          return NextResponse.json({ error: "Run config is not valid JSON" }, { status: 400 });
+        }
+        if (!config || typeof config.prompt !== "string" || !config.prompt.trim()) {
+          return NextResponse.json({ error: "Run config is missing the prompt" }, { status: 400 });
+        }
+        if (typeof config.chat_url !== "string" || !/^https?:\/\//.test(config.chat_url)) {
+          return NextResponse.json({ error: "Run config is missing a valid chat_url" }, { status: 400 });
+        }
+        // Deploy (version-stamped, cheap when current) BEFORE launching.
+        await deployHeadlessRunner(sandbox);
+        try {
+          await sandbox.files.write(RUN_CONFIG_PATH, configRaw);
+          // The config carries the provider API key — keep it private to
+          // the sandbox user.
+          await sandbox.commands.run(`chmod 600 ${RUN_CONFIG_PATH}`).catch(() => {});
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ error: `Failed to write the run config: ${errMsg}` }, { status: 500 });
+        }
+        // Initial status so the very first poll (before Python even boots)
+        // sees an honest "starting".
+        try {
+          const starting = {
+            status: "starting",
+            stage: "starting",
+            run_id: typeof config.run_id === "string" ? config.run_id : "",
+            last_update: Date.now(),
+            started_at: Date.now(),
+            finished_at: null,
+            error: null,
+          };
+          await sandbox.files.write(AGENT_STATUS_PATH, JSON.stringify(starting, null, 2));
+        } catch {
+          // best-effort — the runner overwrites this within a second
+        }
+        try {
+          // DETACHED LAUNCH: nohup + & — the command returns immediately
+          // while the runner keeps executing inside the sandbox (proven by
+          // the sandbox browser driver, browser-session.ts).
+          const result = await sandbox.commands.run(
+            `nohup python3 ${RUNNER_PATH} > ${BACKGROUND_LOG_PATH} 2>&1 & echo started`,
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          const started = (result.stdout ?? "").includes("started") && (result.exitCode ?? 0) === 0;
+          console.log(`[sandbox] headless agent launched (sandbox=${sandbox.sandboxId}, started=${started})`);
+          return NextResponse.json({ sandboxId: sandbox.sandboxId, started });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ error: `Failed to launch the runner: ${errMsg}` }, { status: 500 });
+        }
+      }
+
+      case "agent_status": {
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const includeHistory = args.include_history === true;
+        const status = await readJsonFile(sandbox, AGENT_STATUS_PATH);
+        const history = includeHistory
+          ? ((await readJsonFile(sandbox, CHAT_HISTORY_PATH)) as unknown[] | null)
+          : null;
+        const sandboxTodos = await readJsonFile(sandbox, SANDBOX_TODOS_PATH);
+        // Log tail (bounded) for the live strip.
+        let logTail: string | null = null;
+        try {
+          const tail = await sandbox.commands.run(
+            `tail -c 4096 ${BACKGROUND_LOG_PATH} 2>/dev/null || true`,
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          logTail = (tail.stdout ?? "").trim() || null;
+        } catch {
+          // best-effort
+        }
+        // Runner liveness (bracket pattern never matches the probe itself).
+        let runnerAlive = false;
+        try {
+          const probe = await sandbox.commands.run(
+            `pgrep -f "${RUNNER_PGREP_PATTERN}" >/dev/null 2>&1 && echo 1 || echo 0`,
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          runnerAlive = (probe.stdout ?? "").trim() === "1";
+        } catch {
+          // best-effort
+        }
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          status,
+          history: Array.isArray(history) ? history : null,
+          logTail,
+          sandboxTodos: Array.isArray(sandboxTodos) ? sandboxTodos : null,
+          runnerAlive,
+        });
+      }
+
+      case "agent_stop": {
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        try {
+          await sandbox.commands.run(`pkill -f "${RUNNER_PGREP_PATTERN}" 2>/dev/null; echo done`, {
+            cwd: DEFAULT_CWD,
+            timeoutMs: 15_000,
+          });
+        } catch {
+          // best-effort — the runner may already be gone
+        }
+        // Record the stop so a later sync doesn't wait on "running" forever.
+        try {
+          const stopped = {
+            status: "stopped",
+            stage: "stopped",
+            last_update: Date.now(),
+            finished_at: Date.now(),
+            error: null,
+          };
+          await sandbox.files.write(AGENT_STATUS_PATH, JSON.stringify(stopped, null, 2));
+        } catch {
+          // best-effort
+        }
+        console.log(`[sandbox] headless agent stopped (sandbox=${sandbox.sandboxId})`);
+        return NextResponse.json({ sandboxId: sandbox.sandboxId, ok: true });
       }
 
       case "backup_files": {

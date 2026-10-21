@@ -43,6 +43,52 @@ export interface E2BExecResult {
   duration_ms: number;
 }
 
+// ── Detached sandbox agent ("close and resume") response shapes ────────────
+
+/** One entry of the sandbox-resident chat history (OpenAI wire format —
+ *  assistant tool_calls + tool role results). Written by headless_runner.py
+ *  to /home/user/chat_history.json. */
+export interface SandboxHistoryMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_calls?: Array<{
+    id: string;
+    type?: string;
+    function: { name: string; arguments?: string };
+  }>;
+  tool_call_id?: string;
+  name?: string;
+}
+
+/** Live runner status (agent_status.json inside the sandbox). */
+export interface SandboxAgentStatus {
+  status: "starting" | "running" | "completed" | "failed" | "stopped";
+  stage?: string;
+  round?: number;
+  total_rounds?: number;
+  current_tool?: string | null;
+  run_id?: string;
+  last_update?: number;
+  started_at?: number;
+  finished_at?: number | null;
+  error?: string | null;
+  prompt_preview?: string | null;
+}
+
+/** Response of the `agent_status` action. */
+export interface AgentStatusResponse {
+  sandboxId: string;
+  status: SandboxAgentStatus | null;
+  /** Full chat history — only when requested (includeHistory: true). */
+  history: SandboxHistoryMessage[] | null;
+  /** Tail of background.log (runner stdout/stderr), ~4KB. */
+  logTail: string | null;
+  /** /home/user/todos.json contents (agent + scheduled-task todos). */
+  sandboxTodos: unknown[] | null;
+  /** pgrep liveness of the runner process. */
+  runnerAlive: boolean;
+}
+
 export interface StreamMessage {
   type: "stdout" | "stderr" | "result" | "prompt";
   data?: string;
@@ -694,6 +740,44 @@ export class E2BClient {
       path,
     });
     return r.stdout ?? "(no matches)";
+  }
+
+  // ---------------------------------------------------------------
+  // Detached sandbox agent ("close and resume") — the orchestration
+  // loop runs INSIDE the sandbox as a nohup Python process. These
+  // methods deploy/start/inspect/stop it through the server route.
+  // ---------------------------------------------------------------
+
+  /** Ensure the sandbox carries the current headless_runner.py (version-
+   *  stamped deploy; cheap no-op when the version matches). */
+  async agentDeploy(): Promise<{ sandboxId: string; version: number }> {
+    return await this.call<{ sandboxId: string; version: number }>("agent_deploy");
+  }
+
+  /** Write the run config + launch the detached runner (nohup … &). The
+   *  command returns immediately; the agent keeps working after the app
+   *  closes. `config` is the JSON run-config (prompt, LLM endpoint/key,
+   *  seed messages, limits) — sent as a pre-serialized string so the server
+   *  never re-shapes it. */
+  async agentStart(config: unknown): Promise<{ sandboxId: string; started: boolean }> {
+    return await this.call<{ sandboxId: string; started: boolean }>("agent_start", {
+      config: typeof config === "string" ? config : JSON.stringify(config),
+    });
+  }
+
+  /** Read the runner's live state. Light by default (status + log tail);
+   *  pass includeHistory for the full chat_history.json (sync path). */
+  async agentStatus(opts?: {
+    includeHistory?: boolean;
+  }): Promise<AgentStatusResponse> {
+    return await this.call<AgentStatusResponse>("agent_status", {
+      include_history: opts?.includeHistory === true,
+    });
+  }
+
+  /** Kill the detached runner process (user Stop). */
+  async agentStop(): Promise<{ sandboxId: string; ok: boolean }> {
+    return await this.call<{ sandboxId: string; ok: boolean }>("agent_stop");
   }
 
   // ---------------------------------------------------------------
