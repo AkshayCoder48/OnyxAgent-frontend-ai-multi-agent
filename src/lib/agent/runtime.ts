@@ -2837,17 +2837,34 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       }
       const isTransientTransport =
         /524|timeout|ECONNRESET|socket hang up|fetch failed|failed to fetch|network error|load failed|network|empty response|provider stream error|stream was cut|json parse|idle timeout|terminated|connection reset|abnormal|bodystreambuffer|stream aborted|aborterror|internal server error/i.test(message);
+      // CONNECT-LEVEL FAST-FAIL (user report 2026-10-21 "stuck at thinking,
+      // never generates"): `TypeError: network error` / `Failed to fetch`
+      // thrown by fetch() BEFORE any response exists means the provider host
+      // is unreachable outright (dead route, blocked network, DNS) — long
+      // backoff waits gain nothing (the host is not "warming up"), and the
+      // old full ladder (8 attempts, up to 60s waits ≈ 4 minutes of silent
+      // "Thinking") felt like an infinite hang. Connect-class failures use a
+      // FAST ladder — 5 attempts, delays capped at 15s (≈30s total) — and on
+      // exhaustion skip the oversized-payload escalation (a connect failure
+      // is NOT a context problem) and surface the honest error directly.
+      const isConnectLevelFailure =
+        /^(?:TypeError:\s*)?(?:network error|failed to fetch|load failed|NetworkError when attempting to fetch resource\.)/i.test(
+          message.trim(),
+        );
+      const transientCeiling = isConnectLevelFailure ? 5 : TRANSIENT_RETRY_MAX;
       // BOUNDED (TRANSIENT_RETRY_MAX): each retry re-streams the SAME round
       // with backoff + jitter. When the ladder is exhausted the flow falls
       // through to the escalation below (context handoff once, then an
       // honest error) — never another silent attempt.
-      if (isTransientTransport && transientRetriesThisTurn < TRANSIENT_RETRY_MAX) {
-        const delayMs = nextTransientDelayMs();
+      if (isTransientTransport && transientRetriesThisTurn < transientCeiling) {
+        const delayMs = isConnectLevelFailure
+          ? Math.round(Math.min(1000 * 2 ** Math.max(0, transientRetriesThisTurn), 15_000) * (0.75 + Math.random() * 0.5))
+          : nextTransientDelayMs();
         console.warn(
-          `[agent] Transient transport error on round ${round} (auto-retry ${transientRetriesThisTurn}/${TRANSIENT_RETRY_MAX} in ${Math.round(delayMs / 1000)}s) — the turn keeps running`,
+          `[agent] Transient transport error on round ${round} (auto-retry ${transientRetriesThisTurn}/${transientCeiling} in ${Math.round(delayMs / 1000)}s) — the turn keeps running`,
           message.slice(0, 120),
         );
-        logWarn("agent", `Transient transport error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${TRANSIENT_RETRY_MAX}, then context recovery)`, {
+        logWarn("agent", `Transient transport error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${transientCeiling}, then ${isConnectLevelFailure ? "an honest connection error" : "context recovery"})`, {
           detail: message,
           context: { round, model: lastServedModel, retry_in_ms: delayMs },
         });
@@ -2870,8 +2887,8 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           data: {
             retryAfterMs: delayMs,
             attempt: transientRetriesThisTurn,
-            maxAttempts: TRANSIENT_RETRY_MAX,
-            reason: `Temporary stream error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${TRANSIENT_RETRY_MAX})`,
+            maxAttempts: transientCeiling,
+            reason: `Temporary stream error — retrying in ${Math.round(delayMs / 1000)}s (attempt ${transientRetriesThisTurn} of ${transientCeiling})`,
           },
           timestamp: nowISO(),
         });
@@ -2885,8 +2902,13 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       // failures on a long conversation are, in practice, the gateway
       // choking on the payload size — escalate ONCE into the same handoff +
       // trim recovery a real context error gets, then fail honestly.
+      // EXCEPT connect-level failures: an unreachable host is NOT a payload
+      // problem — compacting would burn one more doomed request and delay
+      // the honest error the user is already waiting for.
       const exhaustedTransient =
-        isTransientTransport && transientRetriesThisTurn >= TRANSIENT_RETRY_MAX;
+        isTransientTransport &&
+        !isConnectLevelFailure &&
+        transientRetriesThisTurn >= TRANSIENT_RETRY_MAX;
       if (exhaustedTransient && !isContextError) {
         logWarn(
           "agent",

@@ -446,7 +446,10 @@ export class AgentEventProcessor {
     // receive time. Without it, a run that finished while the app was left
     // in the background replayed its terminal events minutes/hours later
     // and the summary showed the entire away-gap as work time.
-    const evTs = (wsEvent.data as { ts?: number }).ts;
+    // GUARDED READ: data-less events (e.g. a bare `complete`) are legal —
+    // an unguarded `.ts` here crashed the whole handle() with "Cannot read
+    // properties of undefined (reading 'ts')" (seen 2026-10-21).
+    const evTs = (wsEvent.data as { ts?: number } | undefined)?.ts;
     if (typeof evTs === "number" && evTs > 0) {
       // AUTO-CALCULATED "Worked {time}": remember the EARLIEST runner
       // stamp too — the generation window is then computed purely in the

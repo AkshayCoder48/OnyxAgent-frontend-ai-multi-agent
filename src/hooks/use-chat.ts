@@ -429,6 +429,24 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
+      // ── /image — DIRECT IMAGE GENERATION (no text-LLM round-trip) ──────
+      // `/image <prompt>` (alias `/img`) bypasses the agent runtime entirely:
+      // the prompt goes straight to the Pollinations image endpoint through
+      // the same two-step confirmation + /api/pollinations/generate choke-
+      // point the media_generation tool uses. Nothing is sent to the chat
+      // model, so it works even when no text provider is reachable.
+      const imageMatch = content.match(/^\/(?:image|img)\s+([\s\S]+?)\s*$/i);
+      if (imageMatch) {
+        const { runDirectImageTurn } = await import("@/lib/agent/direct-image-turn");
+        await runDirectImageTurn({
+          userId,
+          prompt: imageMatch[1]!,
+          conversationId: currentConversationIdFromStore ?? conversationId ?? null,
+          onConversationCreated,
+        });
+        return;
+      }
+
       // TAG NORMALIZATION (File Persistence PRD §29): a regenerate-after-
       // refresh re-sends a message whose content may still carry the hidden
       // upload tags. Strip them up front — the fresh tags are appended below
@@ -633,6 +651,45 @@ export function useChat(options: UseChatOptions = {}) {
     [buildTurnOptions, conversationId, currentConversationIdFromStore, onConversationCreated],
   );
 
+  // ── HONEST TURN-START FAILURE (the eternal "Thinking" fix) ─────────────
+  // ANY exception between createExecution (processing=true → the Thinking
+  // spinner starts) and the turn actually running used to reject this async
+  // function unhandled — the execution stayed "running" forever and the UI
+  // spun eternally (user report 2026-10-21 "stuck at thinking, never
+  // generates", with OperationError from getDecryptedApiKey in the global
+  // log at the same timestamps). Every step below can throw (vault decrypt,
+  // settings load, sandbox mirror, provider resolution) — the wrapper turns
+  // any of those into a VISIBLE chat error and finishes the execution, so
+  // the spinner always stops and the user always learns what to fix.
+  const doSendGuarded = useCallback(
+    async (content: string, fileIds?: string[], files?: ChatMessageFile[]) => {
+      try {
+        await doSend(content, fileIds, files);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("[useChat] turn failed to start:", err);
+        // The execution created inside doSend may still be running — find
+        // the active one for this conversation and settle it honestly.
+        const execId = activeExecIdRef.current;
+        const record = execId ? executionHub.processorFor(execId) : null;
+        if (record) {
+          record.handle({
+            type: "error",
+            data: {
+              message: `The message could not be sent: ${message}`,
+            },
+          });
+        } else {
+          // No execution (failed before createExecution) — surface a toast
+          // so the failure is never silent.
+          const { toast } = await import("sonner");
+          toast.error(`The message could not be sent: ${message}`);
+        }
+      }
+    },
+    [doSend],
+  );
+
   const sendChatMessage = useCallback(
     (content: string, fileIds?: string[], files?: ChatMessageFile[]) => {
       // Queue when the agent is busy. The queue is surfaced above the input
@@ -644,9 +701,9 @@ export function useChat(options: UseChatOptions = {}) {
         setQueuedMessages([...messageQueueRef.current]);
         return;
       }
-      void doSend(content, fileIds, files);
+      void doSendGuarded(content, fileIds, files);
     },
-    [isProcessing, doSend],
+    [isProcessing, doSendGuarded],
   );
 
   const cancelQueued = useCallback((id: string) => {
@@ -706,10 +763,11 @@ export function useChat(options: UseChatOptions = {}) {
         }
       })();
 
-      // 3. Re-run the turn with the original prompt.
-      void doSend(userMsg.content, userMsg.fileIds, userMsg.files);
+      // 3. Re-run the turn with the original prompt (guarded — a start
+      // failure surfaces as a chat error instead of a stuck spinner).
+      void doSendGuarded(userMsg.content, userMsg.fileIds, userMsg.files);
     },
-    [isProcessing, getMergedMessages, conversationId, doSend],
+    [isProcessing, getMergedMessages, conversationId, doSendGuarded],
   );
 
   /**
@@ -754,10 +812,11 @@ export function useChat(options: UseChatOptions = {}) {
       })();
 
       // 3. Send the edited text as a fresh turn (doSend re-attaches the
-      //    upload tags from the original file set).
-      void doSend(trimmed, userMsg.fileIds, userMsg.files);
+      //    upload tags from the original file set; guarded — a start
+      //    failure surfaces as a chat error instead of a stuck spinner).
+      void doSendGuarded(trimmed, userMsg.fileIds, userMsg.files);
     },
-    [isProcessing, getMergedMessages, conversationId, doSend],
+    [isProcessing, getMergedMessages, conversationId, doSendGuarded],
   );
 
   const sendAskUserResponses = useCallback((answers: AskUserAnswer[]) => {
@@ -851,10 +910,10 @@ export function useChat(options: UseChatOptions = {}) {
       const next = messageQueueRef.current.shift();
       setQueuedMessages([...messageQueueRef.current]);
       if (next) {
-        setTimeout(() => void doSend(next.content, next.fileIds, next.files), 100);
+        setTimeout(() => void doSendGuarded(next.content, next.fileIds, next.files), 100);
       }
     }
-  }, [isProcessing, doSend]);
+  }, [isProcessing, doSendGuarded]);
 
   // NOTE: there is deliberately NO unmount abort. The execution is owned by
   // the module-level hub — unmounting this hook only unsubscribes the UI.

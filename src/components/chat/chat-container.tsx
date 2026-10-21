@@ -653,8 +653,15 @@ export function ChatContainer(
         document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [currentConversationId, clearMessages, handleRegenerate, onOpenSettings]);
+    // `/image <prompt>` — DIRECT image generation (user request 2026-10-21:
+    // "add /image that directly triggers image gen, not call the text api").
+    // The prompt rides back through sendMessage as a marked /image line so
+    // use-chat's intercept owns the handling (one code path for palette
+    // runs, pasted shorthand, and queued messages).
+    generateImage: (prompt: string) => {
+      void sendMessage(`/image ${prompt}`);
+    },
+  }), [currentConversationId, clearMessages, handleRegenerate, onOpenSettings, sendMessage]);
 
   return (
     <ChatUI

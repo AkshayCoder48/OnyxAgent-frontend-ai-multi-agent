@@ -767,13 +767,70 @@ function readWithTimeout(reader, ms) {
 // Endpoints reject oversized requests with 400 ("This endpoint's maximum
 // context length is 262144 tokens. However, you requested about 277886 …").
 // That is a SIZE problem, not a shape problem — no wire-compat ladder step
-// shrinks the request. When detected, the local history is emergency-
-// compacted (system prompt + the most recent work kept, the dropped middle
-// digested into one system note) and the SAME round retried.
+// shrinks the request. TWO layers now:
+//   1. PROACTIVE (ensureContextFits, before EVERY request): a chars-based
+//      token estimate keeps the payload under the known budget, so the 400
+//      never fires in the first place. The budget defaults to a SAFE 128k
+//      tokens and is re-learned from the provider's own error text
+//      ("maximum context length is N") after any overflow.
+//   2. REACTIVE (the 400 branch in streamRoundEvents): emergency compaction
+//      (system + most recent messages, the dropped middle digested into one
+//      system note) and a retry of the SAME round.
+// The old one-way ratchet (state._ctxCompactLevel 16→8→4, never reset) is
+// GONE: at round 87 of a long run it was permanently exhausted, a fresh
+// overflow fell through to the non-streaming fallback, and the run died with
+// the raw provider 400 — the exact "round 87, 182 messages, 277886 tokens"
+// failure. Compaction is now driven by actual payload SIZE, so it can always
+// fire again after the conversation grows back.
 const CONTEXT_OVERFLOW_RE = /maximum context length|context_length_exceeded|context length exceeded|too many tokens|context window|reduce the length|shorter context/i;
-/** Compaction ladder: how many trailing messages each pass keeps. */
-const CTX_KEEP_LADDER = [16, 8, 4];
+/** Pull the endpoint's real token ceiling out of a provider 400 so the
+ *  proactive fitter can use the TRUE number (not the safe default). */
+function parseContextLimit(text) {
+  if (!text) return null;
+  const m = String(text).match(/maximum context length is (\d+)/i) || String(text).match(/context (?:window|length)[^.]{0,40}?(\d{5,7})\s*tokens/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n >= 8000 ? n : null;
+}
+/** Safe default when the provider has never told us its ceiling: 128k tokens.
+ *  Over-trimming a 256k model slightly is harmless; under-trimming it kills
+ *  the run with a 400. Re-learned per run via parseContextLimit. */
+const CTX_DEFAULT_LIMIT = 128_000;
+/** Output reserve subtracted from the ceiling before budgeting input. */
+const CTX_OUTPUT_RESERVE = 16_000;
+/** Chars-per-token estimate for mixed English/code/tool-JSON payloads. */
+const CTX_CHARS_PER_TOKEN = 3.5;
+/** Single-message char cap during emergency compaction (a monster tool
+ *  result can overflow a request alone, no matter how few messages ride
+ *  along). Head + tail are kept — the middle is where the bloat lives. */
+const CTX_MSG_CHAR_CAP = 32_000;
 
+/** Rough token estimate of the request payload (messages + tools JSON). */
+function estimateRequestTokens(state, toolsJson) {
+  let chars = 0;
+  const msgs = Array.isArray(state.messages) ? state.messages : [];
+  for (const m of msgs) {
+    if (!m || typeof m !== "object") continue;
+    chars += typeof m.content === "string" ? m.content.length : 200;
+    if (m.reasoning && typeof m.reasoning === "string") chars += m.reasoning.length;
+    if (Array.isArray(m.tool_calls)) chars += 400;
+  }
+  if (typeof toolsJson === "string") chars += toolsJson.length;
+  else if (Array.isArray(state.tools)) chars += state.tools.length * 800;
+  return Math.ceil(chars / CTX_CHARS_PER_TOKEN);
+}
+
+/** Truncate one oversized message content (head + tail + honest note). */
+function capMessageContent(content) {
+  if (typeof content !== "string" || content.length <= CTX_MSG_CHAR_CAP) return content;
+  const head = content.slice(0, 12_000);
+  const tail = content.slice(-12_000);
+  return head + "\n\n[… " + (content.length - 24_000) + " chars truncated by the context manager to fit the model's window …]\n\n" + tail;
+}
+
+/** Compaction: keep the system prompt + the most recent "keep" messages,
+ *  digest the dropped middle into one system note, and CAP every kept
+ *  message's content (a single huge tool result overflows alone). */
 function compactHistory(state, keep) {
   const msgs = Array.isArray(state.messages) ? state.messages.slice() : [];
   if (msgs.length <= keep + 1) return false; // nothing to drop
@@ -781,6 +838,11 @@ function compactHistory(state, keep) {
   const rest = system.length ? msgs.slice(1) : msgs;
   const kept = rest.slice(-keep);
   const dropped = rest.length - kept.length;
+  const capped = kept.map((m) => {
+    if (!m || typeof m !== "object" || m.role === "system") return m;
+    const cappedContent = capMessageContent(m.content);
+    return cappedContent === m.content ? m : Object.assign({}, m, { content: cappedContent });
+  });
   state.messages = system.concat(
     [
       {
@@ -789,9 +851,49 @@ function compactHistory(state, keep) {
           "CONTEXT NOTE: " + dropped + " earlier messages were compacted to fit the model's context window. The original system prompt and the most recent work are preserved. Continue the task from the latest messages — do NOT redo work that already completed.",
       },
     ],
-    kept,
+    capped,
   );
   return true;
+}
+
+/** PROACTIVE context fitting — called before EVERY request build. If the
+ *  estimated input exceeds the budget, compact (system + last N, halving N
+ *  until it fits or N bottoms out at 4) BEFORE the provider ever sees the
+ *  payload. Returns a short human reason when compaction ran (for the status
+ *  event), or "" when nothing was needed. */
+function ensureContextFits(state, toolsJson) {
+  const limit = typeof state._ctxTokenLimit === "number" && state._ctxTokenLimit > 8000
+    ? state._ctxTokenLimit
+    : CTX_DEFAULT_LIMIT;
+  const budget = Math.max(16_000, limit - CTX_OUTPUT_RESERVE);
+  let est = estimateRequestTokens(state, toolsJson);
+  if (est <= budget) return "";
+  const msgs = Array.isArray(state.messages) ? state.messages : [];
+  let keep = Math.max(8, Math.min(32, Math.floor(msgs.length / 2)));
+  let reason = "";
+  let guard = 0;
+  while (est > budget && guard < 16) {
+    guard += 1;
+    if (!compactHistory(state, keep)) {
+      // Nothing left to drop — try squeezing the giant survivors instead.
+      const before = estimateRequestTokens(state, toolsJson);
+      const squeezed = state.messages.map((m) =>
+        m && typeof m === "object" && m.role !== "system"
+          ? Object.assign({}, m, { content: capMessageContent(m.content) })
+          : m,
+      );
+      state.messages = squeezed;
+      const after = estimateRequestTokens(state, toolsJson);
+      if (after >= before) break; // squeezing gained nothing — stop
+      est = after;
+      keep = Math.max(4, Math.floor(keep / 2));
+      continue;
+    }
+    est = estimateRequestTokens(state, toolsJson);
+    reason = "context manager: compacted history to ~" + Math.min(keep, state.messages.length - 2) + " recent messages to fit the model's " + Math.round(budget / 1000) + "k-token window";
+    keep = Math.max(4, Math.floor(keep / 2));
+  }
+  return reason;
 }
 
 function buildRequestMessages(state) {
@@ -1168,6 +1270,15 @@ async function streamRoundEvents(state, round, finalRound) {
   if (finalRound !== true && state.wireCompat && state.wireCompat.noTools) {
     state.wireCompat.noTools = false;
   }
+  // PROACTIVE CONTEXT FITTING (the "277886 tokens > 262144" fix): estimate
+  // the payload BEFORE the request and compact when it would overflow, so
+  // the provider never sees an oversized request in the first place. Runs on
+  // EVERY round (the conversation grows as tools return results). The status
+  // event makes the compaction visible in the run panel — never silent.
+  const ctxFitReason = ensureContextFits(state, state.toolsEnabled === false ? "" : JSON.stringify(ALL_TOOLS));
+  if (ctxFitReason) {
+    emitEvent({ t: "status", kind: "retry", round, attempt: 0, delayMs: 0, reason: ctxFitReason });
+  }
   const body = {
     model: p.model,
     // WIRE SAFETY: the history is sanitized — every assistant tool_calls
@@ -1382,19 +1493,34 @@ async function streamRoundEvents(state, round, finalRound) {
   //   • TRANSIENT/TRANSPORT (network, dead wire, premature stream cut,
   //     provider stream error — including gateways that answer with a JSON
   //     error payload injected INTO the SSE stream — and 5xx/408): retried
-  //     INDEFINITELY with capped exponential backoff (2s→30s). The TASK owns
-  //     its lifetime (PRD §9/§19): no wall-clock cap, no attempt cap — a
-  //     transport blip never terminates the run. Only an explicit user Stop
-  //     ends it. When partial content already streamed, the round is
-  //     REWOUND in the UI first (round_retry event) so the re-stream can
-  //     never duplicate content.
+  //     with capped exponential backoff (2s→30s), now BOUNDED at 8 attempts
+  //     per round (user report 2026-10-21 "stuck at thinking forever, never
+  //     generates": a permanently dead provider — unreachable host, a free
+  //     community route that streams reasoning then cuts — spun this ladder
+  //     FOREVER while the UI showed Thinking; parity with the foreground
+  //     runtime's bounded TRANSIENT_RETRY_MAX). When the ladder exhausts, the
+  //     run ends HONESTLY: everything completed is saved; the error names the
+  //     last transport failure and the next step (retry / switch model).
+  //     When partial content already streamed, the round is REWOUND in the
+  //     UI first (round_retry event) so the re-stream can never duplicate
+  //     content.
   let ladderSteps = 0;      // counted 400 self-heal continues (capped)
   let transientAttempt = 0; // transient failures since this round started
+  const TRANSIENT_MAX = 8;
+  const transientExhausted = () => transientAttempt >= TRANSIENT_MAX;
   const nextTransientDelay = () => {
     transientAttempt += 1;
     // 2s, 4s, 8s, 16s, 30s, 30s, … (PRD §15 backoff ladder)
     return Math.min(2000 * transientAttempt, 30_000);
   };
+  const transientExhaustedError = (why) => ({
+    content: "",
+    reasoning: "",
+    toolCalls: [],
+    error:
+      "The AI provider kept failing after " + TRANSIENT_MAX + " automatic retries (" + why + "). " +
+      "Everything completed so far is saved — send a message to continue, or switch model/provider in the model picker.",
+  });
   for (let attempt = 1; ; attempt++) {
     let res = null;
     let fetchErr = null;
@@ -1431,18 +1557,31 @@ async function streamRoundEvents(state, round, finalRound) {
       const detail400 = await res.text().catch(() => "");
       // CONTEXT-OVERFLOW SELF-HEALING (checked FIRST — a size problem must
       // not burn wire-compat ladder steps, none of which shrink anything):
-      // compact the local history (keep system + most recent messages) and
-      // retry the SAME round. Ladder: keep 16 → 8 → 4; exhausted → honest
-      // error naming the endpoint's ceiling.
+      // learn the endpoint's TRUE token ceiling from the error text, then
+      // compact the local history and retry the SAME round. SIZE-DRIVEN, not
+      // a ratchet — if compaction actually changes the payload it can fire
+      // again on the next overflow after the conversation grows back.
       if (CONTEXT_OVERFLOW_RE.test(detail400)) {
-        const level = typeof state._ctxCompactLevel === "number" ? state._ctxCompactLevel : 0;
-        if (level < CTX_KEEP_LADDER.length && ladderSteps < MAX_ATTEMPTS) {
-          const keep = CTX_KEEP_LADDER[level];
-          state._ctxCompactLevel = level + 1;
-          if (compactHistory(state, keep)) {
+        const learned = parseContextLimit(detail400);
+        if (learned) state._ctxTokenLimit = learned;
+        if (ladderSteps < MAX_ATTEMPTS) {
+          const before = Array.isArray(state.messages) ? state.messages.length : 0;
+          const sizeBefore = estimateRequestTokens(state, JSON.stringify(body.tools ?? []));
+          const compacted = compactHistory(state, Math.max(6, Math.min(16, Math.floor(before / 2))));
+          if (!compacted) {
+            // Too few messages to drop — squeeze the giant survivors instead
+            // (a single monster tool result can overflow alone).
+            state.messages = state.messages.map((m) =>
+              m && typeof m === "object" && m.role !== "system"
+                ? Object.assign({}, m, { content: capMessageContent(m.content) })
+                : m,
+            );
+          }
+          const sizeAfter = estimateRequestTokens(state, JSON.stringify(body.tools ?? []));
+          if (sizeAfter < sizeBefore) {
             ladderSteps += 1;
             body.messages = sanitizeToolCallHistory(buildRequestMessages(state));
-            emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "context overflow (HTTP 400) — compacted history to system + last " + keep + " messages, retrying the same round" });
+            emitEvent({ t: "status", kind: "retry", round, attempt, delayMs: 0, reason: "context overflow (HTTP 400) — compacted history from " + before + " to " + (Array.isArray(state.messages) ? state.messages.length : 0) + " messages, retrying the same round" });
             continue;
           }
         }
@@ -1451,7 +1590,7 @@ async function streamRoundEvents(state, round, finalRound) {
           reasoning: "",
           toolCalls: [],
           error:
-            "LLM HTTP 400 context overflow — the conversation exceeds this endpoint's maximum context length even after emergency compaction (kept system + the last 4 messages). " +
+            "LLM HTTP 400 context overflow — the conversation exceeds this endpoint's maximum context length even after emergency compaction (kept system + the most recent messages, every survivor length-capped). " +
             cleanDetail(detail400, 400) +
             " Start a new conversation, or switch to a model with a larger context window.",
         };
@@ -1534,10 +1673,11 @@ async function streamRoundEvents(state, round, finalRound) {
         const detailRl = await res.text().catch(() => "");
         return { content: "", reasoning: "", toolCalls: [], error: "Rate limit persisted through " + RATE_LIMIT_MAX_ATTEMPTS + " spaced waits (HTTP " + res.status + ") — the provider kept throttling for the entire window. The run stopped without losing progress; re-send it once the provider recovers. " + cleanDetail(detailRl, res.status) };
       }
-      // Transient 5xx / 408 retry INDEFINITELY with capped backoff (a
+      // Transient 5xx / 408 retry with capped backoff (a
       // gateway hiccup is transport, not task failure — PRD §15/§16).
       const retryable = res.status >= 500 || res.status === 408;
       if (retryable) {
+        if (transientExhausted()) return transientExhaustedError("HTTP " + res.status);
         const delay = nextTransientDelay();
         emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "HTTP " + res.status });
         await sleep(delay);
@@ -1545,7 +1685,25 @@ async function streamRoundEvents(state, round, finalRound) {
       }
       const detail = await res.text().catch(() => "");
       // 4xx on stream:true → MAY be "streaming not supported" — one
-      // non-streaming fallback attempt before giving up.
+      // non-streaming fallback attempt before giving up. EXCEPT a context
+      // overflow: a SIZE error is identical without streaming (the old flow
+      // routed it here once the compaction ratchet was exhausted — the
+      // non-streaming retry burned another oversized request and surfaced
+      // the raw provider 400). Learn the ceiling and fail honestly instead.
+      if (CONTEXT_OVERFLOW_RE.test(detail)) {
+        const learned = parseContextLimit(detail);
+        if (learned) state._ctxTokenLimit = learned;
+        return {
+          content: "",
+          reasoning: "",
+          toolCalls: [],
+          error:
+            "LLM HTTP " + res.status + " context overflow — the conversation exceeds this endpoint's maximum context length" +
+            (learned ? " (" + learned + " tokens)" : "") +
+            ". " + cleanDetail(detail, res.status) +
+            " Start a new conversation, or switch to a model with a larger context window." + requestShapeHint(state, round, body),
+        };
+      }
       if (res.status < 500 && res.status !== 408) {
         return await nonStreamFallback(state, round, feedDeltas, finishStream);
       }
@@ -1553,7 +1711,8 @@ async function streamRoundEvents(state, round, finalRound) {
     }
     if (!res || !res.body) {
       if (fetchErr) {
-        // Pure network failure — TRANSIENT, retried indefinitely (PRD §15).
+        // Pure network failure — TRANSIENT, bounded ladder.
+        if (transientExhausted()) return transientExhaustedError("network: " + fetchErr);
         const delay = nextTransientDelay();
         emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "network: " + fetchErr });
         await sleep(delay);
@@ -1573,6 +1732,7 @@ async function streamRoundEvents(state, round, finalRound) {
         // A body that CLAIMS application/json but fails to parse (gateway
         // glitch / HTML error page) is TRANSIENT — rewind nothing (nothing
         // streamed) and retry (PRD §13: malformed payloads never kill the run).
+        if (transientExhausted()) return transientExhaustedError("unparseable provider response");
         const delay = nextTransientDelay();
         emitEvent({ t: "status", kind: "retry", round, attempt: transientAttempt, delayMs: delay, reason: "LLM JSON parse failed: " + (e && e.message ? e.message : String(e)) });
         await sleep(delay);
@@ -1681,12 +1841,14 @@ async function streamRoundEvents(state, round, finalRound) {
       // TRANSIENT STREAM FAILURE → REWIND + RETRY (PRD §13-§16): network
       // drops, dead wires, premature cuts and provider stream errors (the
       // "json error injected into SSE stream" gateway glitch class) are
-      // TRANSPORT failures, not agent errors — they must never terminate
-      // the run. Everything the failed attempt already streamed is rewound
-      // in the UI FIRST (round_retry event → the browser processor drops
-      // its buffered deltas and rewinds the flushed parts), then the SAME
-      // round re-streams from scratch. Indefinite: backoff 2s→30s cap;
-      // the explicit user Stop stays the only authority that ends the task.
+      // TRANSPORT failures, not agent errors. Everything the failed attempt
+      // already streamed is rewound in the UI FIRST (round_retry event → the
+      // browser processor drops its buffered deltas and rewinds the flushed
+      // parts), then the SAME round re-streams from scratch. BOUNDED at
+      // TRANSIENT_MAX attempts (2s→30s cap): a provider that keeps dying
+      // surfaces an honest saved-state error instead of spinning "Thinking"
+      // forever (user report 2026-10-21).
+      if (transientExhausted()) return transientExhaustedError(streamError);
       const hadPartial = Boolean(content || reasoning || toolAcc.size > 0);
       if (hadPartial) {
         emitEvent({ t: "round_retry", round });
@@ -1715,6 +1877,9 @@ async function nonStreamFallback(state, round, feedDeltas, finishStream) {
   const p = state.provider;
   let url = String(p.baseUrl ?? "").replace(/\/+$/, "");
   if (!p.noPrefix && !url.endsWith("/chat/completions")) url += "/chat/completions";
+  // PROACTIVE CONTEXT FITTING here too — the non-streaming retry ships the
+  // same payload the streaming request carried.
+  ensureContextFits(state, state.toolsEnabled === false ? "" : JSON.stringify(ALL_TOOLS));
   const nb = { model: p.model, messages: sanitizeToolCallHistory(buildRequestMessages(state)), temperature: p.temperature ?? 0.7 };
   const dp = Array.isArray(p.disabledParams) ? p.disabledParams : [];
   if (dp.includes("temperature") || state.paramBans.includes("temperature")) delete nb.temperature;

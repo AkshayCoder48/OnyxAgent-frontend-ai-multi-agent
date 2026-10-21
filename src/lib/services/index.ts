@@ -1196,7 +1196,28 @@ export const aiProviderService = {
     const row = await db.ai_providers.get(id);
     if (!row) throw new Error("Provider not found");
     if (!row.api_key_encrypted) return "";
-    return vaultDecrypt(row.api_key_encrypted);
+    try {
+      return await vaultDecrypt(row.api_key_encrypted);
+    } catch (err) {
+      // HONEST KEY-DECRYPT FAILURE (the OperationError fix): a raw WebCrypto
+      // "OperationError" used to escape here — the caller's turn then died
+      // with an unhandled rejection while the UI kept spinning "Thinking"
+      // (user report 2026-10-21, OperationError at getDecryptedApiKey in the
+      // global error log). The ciphertext is undecryptable when the vault key
+      // changed (re-registered account / cleared storage re-keyed the vault)
+      // — no amount of retrying helps. Surface an actionable message naming
+      // the provider so the user knows exactly what to re-enter, and never
+      // let the raw DOMException leak.
+      if (err instanceof Error && /vault is locked/i.test(err.message)) {
+        throw new Error(
+          `The key vault is locked — unlock with your passphrase, then send the message again.`,
+        );
+      }
+      throw new Error(
+        `The saved API key for "${row.name}" could not be decrypted (your vault key changed after this key was saved). ` +
+          `Re-enter the key for this provider in Settings → AI Providers, then try again.`,
+      );
+    }
   },
 
   /**

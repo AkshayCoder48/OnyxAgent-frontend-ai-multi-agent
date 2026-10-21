@@ -29,6 +29,10 @@ export interface SlashCommand {
   action: SlashCommandAction;
   /** Marks user-defined entries so the UI can label/edit them differently. */
   source?: "builtin" | "custom";
+  /** True when the command consumes the rest of the input line as its
+   *  argument (e.g. `/image a red dragon` → args "a red dragon"). The
+   *  palette passes the remainder via SlashCommandContext.args. */
+  takesArgs?: boolean;
 }
 
 export interface SlashCommandContext {
@@ -38,9 +42,34 @@ export interface SlashCommandContext {
   regenerateLast: () => void;
   /** Open the model picker / chat settings panel. */
   openSettings: () => void;
+  /** The remainder of the input line after an argument-taking command
+   *  (present only when the palette ran a takesArgs command). */
+  args?: string;
+  /** DIRECT IMAGE GENERATION (`/image <prompt>`): routes the prompt straight
+   *  to the Pollinations image endpoint — NO text-model round-trip, no agent
+   *  runtime. Wired from <ChatContainer> to use-chat's /image intercept. */
+  generateImage?: (prompt: string) => void;
 }
 
 export const BUILTIN_COMMANDS: SlashCommand[] = [
+  {
+    name: "image",
+    description:
+      "Generate an image directly from a prompt (no text-model call): /image a red dragon on a cliff",
+    aliases: ["img"],
+    takesArgs: true,
+    action: {
+      kind: "client",
+      run: (ctx) => {
+        const prompt = (ctx.args ?? "").trim();
+        if (!prompt) {
+          return; // empty args → the palette falls back to a hint (see ChatInput)
+        }
+        ctx.generateImage?.(prompt);
+      },
+    },
+    source: "builtin",
+  },
   {
     name: "clear",
     description: "Clear the current chat (does not delete the conversation).",

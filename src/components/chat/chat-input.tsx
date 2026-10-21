@@ -136,9 +136,40 @@ export const ChatInput = memo(function ChatInput({
     requestAnimationFrame(() => requestAnimationFrame(() => setSendPulse(true)));
   }, []);
 
+  /** Extract the argument text after an argument-taking command token
+   *  (`/image a red dragon` → "a red dragon"). Matches the command's name or
+   *  one of its aliases as the first token of the current input. */
+  const argsForCommand = useCallback(
+    (cmd: SlashCommand, raw: string): string => {
+      const tokens = raw.replace(/^\/+/, "").trim();
+      const first = tokens.split(/\s+/)[0]?.toLowerCase() ?? "";
+      const isMatch = [cmd.name, ...(cmd.aliases ?? [])].some(
+        (s) => first === s.toLowerCase(),
+      );
+      if (!isMatch) return "";
+      return tokens.slice(first.length).trim();
+    },
+    [],
+  );
+
   const runSlashCommand = useCallback(
     (cmd: SlashCommand) => {
       if (cmd.action.kind === "client") {
+        // ARGUMENT-TAKING COMMANDS (e.g. /image): the remainder of the input
+        // line rides along as ctx.args. With NO argument the palette shows a
+        // hint instead of running blind (the user just typed "/image").
+        if (cmd.takesArgs) {
+          const args = argsForCommand(cmd, message);
+          if (!args) {
+            toast.info(
+              `Add a prompt after the command — e.g. /${cmd.name} a red dragon on a cliff at sunset`,
+            );
+            return;
+          }
+          cmd.action.run({ ...slashContext!, args });
+          setMessage("");
+          return;
+        }
         cmd.action.run(slashContext!);
         setMessage("");
         return;
@@ -150,7 +181,7 @@ export const ChatInput = memo(function ChatInput({
       setAttachedFiles([]);
       pulseComposer();
     },
-    [attachedFiles, onSend, slashContext, pulseComposer],
+    [attachedFiles, onSend, slashContext, pulseComposer, argsForCommand, message],
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -162,6 +193,21 @@ export const ChatInput = memo(function ChatInput({
     const trimmed = message.trim();
     if (!trimmed && attachedFiles.length === 0) return;
     if (disabled) return;
+
+    // `/image <prompt>` typed WITHOUT picking from the palette (paste +
+    // Enter, or the palette filtered out) still routes through the direct
+    // generator — doSend's /image intercept owns the handling.
+    const imageShorthand = trimmed.match(/^\/(?:image|img)\s+([\s\S]+)$/i);
+    if (imageShorthand) {
+      const fileIds = attachedFiles.length > 0 ? attachedFiles.map((f) => f.id) : undefined;
+      const files = attachedFiles.length > 0 ? attachedFiles : undefined;
+      onSend(trimmed, fileIds, files);
+      setMessage("");
+      setAttachedFiles([]);
+      clearQuote();
+      pulseComposer();
+      return;
+    }
 
     // A quoted reply carries the quoted assistant text as a markdown
     // blockquote prefix — the user bubble renders it as a styled quote

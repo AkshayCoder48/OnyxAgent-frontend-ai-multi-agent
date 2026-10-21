@@ -100,6 +100,17 @@ export function installGlobalErrorCapture() {
   if (installed || typeof window === "undefined") return;
   installed = true;
 
+  // ABORT-NOISE FILTER (user report 2026-10-21): pressing Stop (or a
+  // remounted component aborting its own fetch) rejects the pending read
+  // with "AbortError: BodyStreamBuffer was aborted" / "The user aborted a
+  // request" — that is a DELIBERATE user action, not an app failure, yet it
+  // poured into the Logs panel as [global] ERROR entries dozens of times a
+  // day. Aborts are skipped entirely; everything else still logs.
+  const isAbortNoise = (msg: string): boolean =>
+    /bodystreambuffer|aborterror|this operation was aborted|the user aborted a request|request was aborted|signal is aborted without reason/i.test(
+      msg,
+    );
+
   window.addEventListener("error", (event) => {
     // Resource load failure (img/script/link never fired onload): a plain
     // Event whose target is the element, not the window.
@@ -133,6 +144,7 @@ export function installGlobalErrorCapture() {
       return;
     }
     const errEvent = event as ErrorEvent;
+    if (isAbortNoise(errEvent.message || "")) return;
     logError("global", errEvent.message || "Uncaught exception", {
       detail:
         errEvent.error instanceof Error
@@ -153,6 +165,7 @@ export function installGlobalErrorCapture() {
         : typeof reason === "string"
           ? reason
           : "Unhandled promise rejection";
+    if (isAbortNoise(message)) return;
     logError("global", message, {
       detail: reason instanceof Error ? reason.stack ?? reason.message : reason,
     });
