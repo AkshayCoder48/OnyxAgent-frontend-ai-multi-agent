@@ -730,8 +730,16 @@ export class E2BClient {
     } finally {
       reader.releaseLock();
     }
-    // If we exit the loop without a result event, emit one.
-    yield { type: "result", exit_code: 0 };
+    // The stream ended WITHOUT a result event — the serverless function was
+    // killed mid-execution (Netlify caps synchronous functions at seconds)
+    // or the connection dropped. This is a FAILURE, never a fake success:
+    // fabricating exit_code 0 here used to mask killed long-running
+    // commands (e.g. the browser runtime install) as "completed".
+    yield {
+      type: "stderr",
+      data: "The command stream ended without a result (the connection was closed or the server function timed out).",
+    };
+    yield { type: "result", exit_code: -1 };
   }
 
   async searchFiles(query: string, path = "/home/user"): Promise<string> {

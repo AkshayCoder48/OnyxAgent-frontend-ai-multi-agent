@@ -7,9 +7,21 @@
  * file protocol:
  *
  *   write /home/user/.onyx/browser/driver.py   (the Python driver source)
- *   pip install cloakbrowser playwright         (runtime + fallback)
- *   nohup python3 driver.py                     (detached daemon)
+ *   write /home/user/.onyx/browser/boot.sh     (installer + launcher)
+ *   nohup bash boot.sh &                       (DETACHED: pip install + daemon)
+ *   poll .boot-failed / .ready with short commands until up
  *   cmd.json → res-<id>.json round-trip per action
+ *
+ * WHY THE BOOT IS DETACHED: the pip install of the runtime needs minutes,
+ * but the /api/sandbox route runs as a serverless function (Netlify) that
+ * is hard-killed after seconds. A blocking install through exec_stream
+ * dies mid-flight, the SSE stream closes WITHOUT a result event, and the
+ * failure surfaced as a confusing "browser_startup_failed — Failed to
+ * install the browser runtime in the sandbox" with no detail. The
+ * sandbox VM itself keeps running for hours regardless of any HTTP
+ * request — so boot.sh runs there under nohup (the same proven pattern
+ * the driver daemon uses) and the client only POLLS with short-lived
+ * commands until the boot reports ready or failed.
  *
  * RECONNECTION (PRD §28): a dead driver (crash / sandbox hiccup) is
  * detected on command timeout — the manager re-boots it (the persistent
@@ -32,12 +44,18 @@ const DRIVER_PATH = `${BR_DIR}/driver.py`;
 const READY_PATH = `${BR_DIR}/.ready`;
 const VERSION_PATH = `${BR_DIR}/.version`;
 const CMD_PATH = `${BR_DIR}/cmd.json`;
-const LOG_PATH = `${BR_DIR}/driver.log`;
+// driver.log (the daemon's own log) is written by boot.sh's redirect — no
+// client-side reference needed anymore.
+const BOOT_SH_PATH = `${BR_DIR}/boot.sh`;
+const BOOT_LOG_PATH = `${BR_DIR}/boot.log`;
+const INSTALL_LOG_PATH = `${BR_DIR}/boot-install.log`;
+const BOOT_FAIL_PATH = `${BR_DIR}/.boot-failed`;
 
 /** First boot downloads the browser binary (~200 MB) — generous ceiling. */
 const FIRST_BOOT_TIMEOUT_MS = 6 * 60_000;
-/** pip install ceiling (cached wheels make repeats fast). */
-const INSTALL_TIMEOUT_S = 280;
+/** Detached-boot polling ceiling (cold pip install can take minutes;
+ *  each poll is a short request, the install itself runs in the sandbox). */
+const BOOT_POLL_TIMEOUT_MS = 6 * 60_000;
 /** Usual per-action ceiling. */
 const DEFAULT_ACTION_TIMEOUT_MS = 90_000;
 
@@ -116,6 +134,89 @@ async function driverUpToDate(client: BrowserSandboxClient): Promise<boolean> {
   return r.ok && r.output.trim() === BROWSER_DRIVER_VERSION;
 }
 
+// ---------------------------------------------------------------------------
+// Detached boot script (runs INSIDE the sandbox under nohup).
+// ---------------------------------------------------------------------------
+
+/**
+ * boot.sh — the sandbox-side installer + daemon launcher. Runs detached
+ * (`nohup bash boot.sh > boot.log 2>&1 &`) so it survives the HTTP request
+ * that spawned it and any serverless function timeout behind that request.
+ *
+ * Contract with the polling client (see ensureBrowserDriver):
+ *   .boot-failed  — FATAL: written with the pip log tail when the runtime
+ *                   could not be installed; the client surfaces it verbatim.
+ *   .ready        — SUCCESS: written by driver.py when its command loop is
+ *                   up (the driver itself is launched by this script).
+ *   boot.log      — human-readable progress lines the client narrates live.
+ *
+ * Install ladder (first success wins): plain pip → --break-system-packages
+ * (PEP 668 externally-managed environments) → --user --break-system-packages
+ * (read-only system site-packages) → --user. No `| tail` on the pip calls —
+ * a pipe would mask pip's exit code; success is verified with an import
+ * probe instead.
+ */
+const BOOT_SH_SOURCE = `#!/bin/bash
+# Onyx sandbox browser boot — DETACHED installer + daemon launcher.
+cd "$(dirname "$0")" || exit 1
+
+log() { echo "[boot \$(date +%H:%M:%S)] \$*"; }
+
+# Resolve pip: prefer plain pip, fall back to python3 -m pip (same python).
+PIP="pip"
+command -v pip >/dev/null 2>&1 || PIP="python3 -m pip"
+
+# One boot at a time: a still-running earlier boot (e.g. the client timed
+# out waiting and retried) owns this sandbox — let it finish; the client's
+# poll sees the same .ready either way.
+if [ -f .boot-lock ] && kill -0 "\$(cat .boot-lock 2>/dev/null)" 2>/dev/null; then
+  log "another boot is already running (pid \$(cat .boot-lock)) — exiting"
+  exit 0
+fi
+echo \$\$ > .boot-lock
+
+log "checking the browser runtime…"
+if python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+  log "browser runtime already installed"
+else
+  log "installing the browser runtime (first run — can take a few minutes)…"
+  ok=0
+  for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
+    log "pip install \${flags:-default}: cloakbrowser==0.6.1 playwright"
+    if \$PIP install --quiet \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
+      if python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+        ok=1
+        log "browser runtime installed"
+        break
+      fi
+    fi
+  done
+  if [ "\$ok" != "1" ]; then
+    {
+      echo "pip could not install cloakbrowser==0.6.1 + playwright."
+      echo "---- last 40 lines of boot-install.log ----"
+      tail -n 40 boot-install.log 2>/dev/null
+    } > .boot-failed
+    log "FATAL: browser runtime install failed (details in .boot-failed)"
+    exit 1
+  fi
+fi
+
+log "starting the browser driver…"
+rm -f .ready
+nohup python3 driver.py > driver.log 2>&1 &
+log "driver launched (pid \$!)"
+`;
+
+/** One short-lived sandbox command that answers the whole boot state:
+ *  the failure marker (+ its contents), READY, or the latest progress line. */
+const BOOT_POLL_CMD = [
+  `if [ -f ${BOOT_FAIL_PATH} ]; then echo "BOOT_FAILED"`,
+  `sed -n '1,60p' ${BOOT_FAIL_PATH}`,
+  `elif test -f ${READY_PATH} && pgrep -f "[d]river.py" >/dev/null 2>&1; then echo "READY"`,
+  `else tail -n 1 ${BOOT_LOG_PATH} 2>/dev/null; true; fi`,
+].join("; ");
+
 /**
  * Install + boot the browser driver in the sandbox. Idempotent + cached:
  * a live driver CURRENT on version is left alone; a live STALE driver (old
@@ -153,61 +254,60 @@ export async function ensureBrowserDriver(
           20,
         );
         await client.writeFile(DRIVER_PATH, BROWSER_DRIVER_PY_SOURCE);
-        await execInSandbox(client, `rm -f ${READY_PATH}`, 15);
-        // Runtime deps: cloakbrowser (primary, humanize=True) + playwright
-        // (the standard-Chromium fallback). Both pip packages are small;
-        // the browser BINARY downloads on first launch inside the driver.
-        // cloakbrowser is PINNED (==0.6.1): the pinned major was verified
-        // against the live PyPI API (launch_persistent_context(user_data_dir,
-        // humanize=…, headless=…, args=…, viewport=…) — Playwright-drop-in).
-        // Bump deliberately after verifying a new release's API surface.
-        // NOTE: no pipes on the pip calls — `| tail` would mask pip's exit
-        // code; success is verified with an import probe instead.
-        const PIP_PKGS = "cloakbrowser==0.6.1 playwright";
-        const pkgsOk = () =>
-          execInSandbox(
-            client,
-            `python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo YES || echo NO`,
-            30,
-          ).then((r) => r.output.trim() === "YES");
-        onProgress?.("Installing the browser runtime (first run only)…");
-        if (!(await pkgsOk())) {
-          let inst = await execInSandbox(
-            client,
-            `pip install --quiet ${PIP_PKGS}`,
-            INSTALL_TIMEOUT_S,
-          );
-          if (!inst.ok || !(await pkgsOk())) {
-            // Externally-managed environments need --break-system-packages.
-            inst = await execInSandbox(
-              client,
-              `pip install --quiet --break-system-packages ${PIP_PKGS}`,
-              INSTALL_TIMEOUT_S,
-            );
-          }
-          if (!(await pkgsOk())) {
-            return {
-              ok: false,
-              error: `Failed to install the browser runtime in the sandbox: ${(inst.error || inst.output).slice(-300)}`,
-            };
-          }
-        }
-        onProgress?.("Starting the browser…");
+        await client.writeFile(BOOT_SH_PATH, BOOT_SH_SOURCE);
+        // Clear the last boot's markers so the polls below read fresh state.
         await execInSandbox(
           client,
-          `cd ${BR_DIR} && nohup python3 driver.py > driver.log 2>&1 & echo started`,
+          `rm -f ${READY_PATH} ${BOOT_FAIL_PATH} ${BOOT_LOG_PATH}`,
+          15,
+        );
+
+        // DETACHED BOOT (the fix for browser_startup_failed on serverless):
+        // launch boot.sh under nohup INSIDE the sandbox — the sandbox VM
+        // outlives any HTTP request, so the minutes-long pip install can
+        // actually finish. The client only polls (short requests) below.
+        onProgress?.("Installing the browser runtime (first run only — up to a few minutes)…");
+        const launched = await execInSandbox(
+          client,
+          `cd ${BR_DIR} && nohup bash boot.sh > ${BOOT_LOG_PATH} 2>&1 & echo booting`,
           20,
         );
-        // Poll for the .ready marker (the daemon loop, not the browser boot).
-        const deadline = Date.now() + 45_000;
-        while (Date.now() < deadline) {
-          if (await driverAlive(client)) return { ok: true };
-          await new Promise((r) => setTimeout(r, 800));
+        if (!launched.output.includes("booting")) {
+          return {
+            ok: false,
+            error: `Could not launch the sandbox browser boot: ${(launched.error || launched.output).slice(-200)}`,
+          };
         }
-        const log = await client.readFile(LOG_PATH).catch(() => "");
+
+        const deadline = Date.now() + BOOT_POLL_TIMEOUT_MS;
+        let lastProgress = "";
+        while (Date.now() < deadline) {
+          const poll = await execInSandbox(client, BOOT_POLL_CMD, 30).catch(() => null);
+          const out = (poll?.output ?? "").trim();
+          if (out.startsWith("BOOT_FAILED")) {
+            const detail = out.slice("BOOT_FAILED".length).trim();
+            return {
+              ok: false,
+              error: `Failed to install the browser runtime in the sandbox: ${detail.slice(-400) || "the installer exited without detail (boot-install.log in ~/.onyx/browser has the full log)."}`,
+            };
+          }
+          if (out === "READY") return { ok: true };
+          // Narrate live progress (e.g. "[boot 12:03:11] pip install …")
+          // so a cold install shows real movement instead of a spinner.
+          if (out && out !== lastProgress) {
+            lastProgress = out;
+            onProgress?.(out);
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        const [bootLog, installLog] = await Promise.all([
+          client.readFile(BOOT_LOG_PATH).catch(() => ""),
+          client.readFile(INSTALL_LOG_PATH).catch(() => ""),
+        ]);
+        const tail = `${bootLog ? ` Boot log: ${bootLog.slice(-300)}` : ""}${installLog ? ` Install log: ${installLog.slice(-300)}` : ""}`;
         return {
           ok: false,
-          error: `The sandbox browser driver did not start in time.${log ? ` Driver log: ${log.slice(-300)}` : ""}`,
+          error: `The sandbox browser runtime did not finish booting in time.${tail || " No boot output was captured."}`,
         };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
