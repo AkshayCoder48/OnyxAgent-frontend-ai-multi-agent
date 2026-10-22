@@ -1081,12 +1081,28 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         isError && "rounded-lg",
       )}
     >
-      <button
-        type="button"
+      {/* NOT a native <button>: the running branch nests interactive
+          children (SkipWaitButton renders a real <button>, the raw-toggle
+          span) and HTML forbids button-in-button — that exact nesting threw
+          the React hydration error. A div with role="button" + keyboard
+          activation keeps full a11y while allowing nested interactives
+          (same pattern as the raw-toggle span below). */}
+      <div
+        role="button"
+        tabIndex={0}
         aria-expanded={expanded}
         onClick={toggleExpanded}
+        onKeyDown={(e) => {
+          // Nested interactive elements own their keys — activating them
+          // must never ALSO toggle the disclosure.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleExpanded();
+          }
+        }}
         className={cn(
-          "flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40",
+          "flex min-h-7 w-full cursor-pointer select-none items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
           isError && "bg-destructive/[0.05] hover:bg-destructive/10",
         )}
       >
@@ -1188,7 +1204,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             </>
           )}
         </span>
-      </button>
+      </div>
 
       {/* INLINE TODO PLAN (show_todo): the todo list UI renders directly in
           the MAIN RESPONSE — always visible beneath the tool bar, never

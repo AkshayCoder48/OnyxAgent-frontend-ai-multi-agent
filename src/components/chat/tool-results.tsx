@@ -7,7 +7,6 @@
 import * as React from "react";
 import { CheckCircle2, XCircle, Download, FileText, Terminal, Search, BarChart3, MessageCircleQuestion, Globe, ImageIcon, Video, ExternalLink, Eye, ThumbsUp, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { LinkPreview } from "@/components/assistant-ui/elements";
 import { cn } from "@/lib/utils";
 
@@ -183,9 +182,12 @@ export function FileDownloadResult({ result }: ResultProps) {
           {f.mime_type} · {f.size != null ? `${(f.size / 1024).toFixed(1)} KB` : ""}
         </div>
       </div>
-      <Button variant="ghost" size="sm" className="shrink-0">
+      {/* NOT a <Button>: a native <button> inside an <a> is invalid HTML
+          (same hydration-error family as button-in-button) — the whole card
+          is already the download link, so this is a purely visual affordance. */}
+      <span className="text-muted-foreground bg-foreground/[0.04] inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md">
         <Download className="h-3.5 w-3.5" />
-      </Button>
+      </span>
     </a>
   );
 }

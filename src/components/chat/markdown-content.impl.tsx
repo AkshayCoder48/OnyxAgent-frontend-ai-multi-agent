@@ -792,36 +792,97 @@ function mdElement(text: string): React.ReactNode {
   return el;
 }
 
+/** Raw-prose bound: when the live tail since the last BLANK-line boundary
+ *  grows past this many chars (one long paragraph, or a long list — list
+ *  items are separated by single newlines, never blank lines), creep the
+ *  split forward along line breaks so the re-parsed tail stays bounded.
+ *  Without this, a raw-text answer with no blank lines re-parsed the ENTIRE
+ *  document on every reveal tick — quadratic in answer length, the
+ *  "streams slower and slower, then completely sticks" bug's CPU half. */
+const RAW_TAIL_MAX = 1200;
+/** Minimum tail the creep keeps — avoids re-freezing the prefix on every
+ *  single line (the prefix would churn the parse cache per line for
+ *  nothing). The boundary only advances once ~this much new text landed. */
+const RAW_TAIL_MIN = 240;
+
 /** Split streamed markdown at the last SAFE block boundary: the last
  *  blank line that is NOT inside a fenced code block (a fence can contain
  *  blank lines — splitting there would break the code block mid-stream).
- *  Returns null when the content is too short to benefit. */
+ *
+ *  RAW-PROSE FALLBACK: when no blank-line boundary exists (or the tail
+ *  since the last one exceeds RAW_TAIL_MAX), split at the newest line
+ *  break outside any fence instead. The transient seam — the line being
+ *  typed renders as its own paragraph until the real boundary settles —
+ *  is the price of keeping the per-tick parse bounded; it self-corrects
+ *  on the next blank line and on the settled full re-parse. Returns null
+ *  when the content is too short to benefit. */
 function splitStablePrefix(content: string): { prefix: string; tail: string } | null {
   if (content.length < 160) return null;
   const lines = content.split("\n");
   let fence: string | null = null;
   let pos = 0;
   let lastBoundary = -1;
+  // Line-break offsets OUTSIDE any fence (candidate raw-prose boundaries),
+  // newest last. A break is safe only AFTER a line that neither opened nor
+  // sat inside a fence — splitting elsewhere would shatter a code block.
+  const lineBreaks: number[] = [];
   // The LAST line is excluded as a boundary host — the tail must keep at
   // least the final line to re-parse (an empty tail is useless work).
   for (let i = 0; i < lines.length - 1; i++) {
     const line = lines[i]!;
     const trimmed = line.trim();
+    let openedFence = false;
     if (fence === null) {
       const open = /^(\`{3,}|~{3,})/.exec(trimmed);
       if (open) {
         fence = open[1]!;
-      } else if (trimmed === "" && i > 0 && i < lines.length - 2) {
+        openedFence = true;
+      }
+    } else if (trimmed.startsWith(fence)) {
+      fence = null; // closing fence line — the break after it is safe
+    }
+    const lineEnd = pos + line.length + 1; // offset just past this line's \n
+    if (fence === null && !openedFence) {
+      if (trimmed === "" && i > 0 && i < lines.length - 2) {
         // Blank line outside any fence — a completed block boundary.
         lastBoundary = pos;
       }
-    } else if (trimmed.startsWith(fence)) {
-      fence = null;
+      lineBreaks.push(lineEnd);
     }
-    pos += line.length + 1;
+    pos = lineEnd;
   }
-  if (lastBoundary < 80) return null; // prefix too small to be worth caching
-  return { prefix: content.slice(0, lastBoundary), tail: content.slice(lastBoundary) };
+  // Primary: the last blank-line boundary (invisible split — paragraphs
+  // break there anyway).
+  if (lastBoundary >= 80) {
+    if (content.length - lastBoundary <= RAW_TAIL_MAX) {
+      return { prefix: content.slice(0, lastBoundary), tail: content.slice(lastBoundary) };
+    }
+    // Tail since the blank boundary has outgrown the bound — creep forward
+    // along safe line breaks (long paragraph / list still streaming).
+    const creep = newestBreakWithinBound(lineBreaks, lastBoundary, content.length);
+    if (creep > lastBoundary) {
+      return { prefix: content.slice(0, creep), tail: content.slice(creep) };
+    }
+    return { prefix: content.slice(0, lastBoundary), tail: content.slice(lastBoundary) };
+  }
+  // No blank-line boundary at all (raw single paragraph / list) — bound
+  // the tail by the newest safe line break once there is enough of one.
+  const fallback = newestBreakWithinBound(lineBreaks, 0, content.length);
+  if (fallback >= 80) {
+    return { prefix: content.slice(0, fallback), tail: content.slice(fallback) };
+  }
+  return null; // prefix too small to be worth caching
+}
+
+/** Newest line-break offset (after `min`) whose tail keeps at least
+ *  RAW_TAIL_MIN chars — the boundary the raw-prose creep freezes at. */
+function newestBreakWithinBound(breaks: number[], min: number, len: number): number {
+  let pick = -1;
+  for (const b of breaks) {
+    if (b <= min || len - b < RAW_TAIL_MIN) continue;
+    if (b > pick) pick = b;
+  }
+  return pick;
 }
 
 // Stable empty array for the sources context default (avoids a new [] per

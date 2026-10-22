@@ -2869,19 +2869,26 @@ html.theme-transitioning .animate-backdrop {
  *   DURATION is baked INLINE at mount (animationDuration) by the stream
  *   engine and varies with the AI's streaming speed; the engine reveals
  *   the NEXT word exactly when the current fade completes, producing a
- *   seamless word-after-word cascade. Opacity does the fading and a
- *   whisper of blur adds the "materialize" feel — transform is NOT used
- *   (a no-op on inline spans; inline-block would break line wrapping
- *   inside long unbroken words). `backwards` fill prevents a first-frame
- *   flash of full ink; `forwards` holds the settled state. --- */
+ *   seamless word-after-word cascade. OPACITY ONLY — the original keyframes
+ *   also blurred (1.25px→0): an animated filter() on text CANNOT be
+ *   composited, so every fading word forced a blurred re-raster of its
+ *   area on every animation frame, and the fill-mode's retained blur(0)
+ *   kept each settled word on its own render surface forever — the
+ *   paragraph's paint fragmented into hundreds of per-span passes as the
+ *   answer grew. That was the "raw text streams slower and slower, then
+ *   completely sticks" bug: the paint storm starved the main thread, the
+ *   SSE reader stopped draining, and the gateway eventually severed the
+ *   idle connection (the turn then rewound to a bare Thinking indicator).
+ *   Opacity fades entirely on the compositor — transform is NOT used
+ *   either (a no-op on inline spans; inline-block would break line
+ *   wrapping inside long unbroken words). `backwards` fill prevents a
+ *   first-frame flash of full ink; `forwards` holds the settled state. --- */
 @keyframes word-fade-in {
   from {
     opacity: 0;
-    filter: blur(1.25px);
   }
   to {
     opacity: 1;
-    filter: blur(0);
   }
 }
 .wf {
