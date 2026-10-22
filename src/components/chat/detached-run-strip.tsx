@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores";
-import { useDetachedRunStore } from "@/stores/detached-run-store";
+import { useDetachedRunStore, type DetachedRunView } from "@/stores/detached-run-store";
 import {
   pollDetachedRunStatus,
   stopDetachedRun,
@@ -91,14 +91,33 @@ export function DetachedRunStrip({ conversationId }: { conversationId: string | 
         if (!res) return;
         setLogTail(res.logTail);
         const st = res.status;
-        useDetachedRunStore.getState().patchRun(conversationId, {
-          stage: st?.stage,
-          round: st?.round,
-          totalRounds: st?.total_rounds,
-          currentTool: st?.current_tool ?? null,
-          error: st?.error ?? null,
-        });
+        // Patch only the fields the poll actually observed — an undefined
+        // field in a blind spread would WIPE the current stage (e.g. the
+        // "starting" the boot-grace path just set) and degrade the label.
+        const patch: Partial<DetachedRunView> = {};
+        if (st?.stage !== undefined) patch.stage = st.stage;
+        if (st?.round !== undefined) patch.round = st.round;
+        if (st?.total_rounds !== undefined) patch.totalRounds = st.total_rounds;
+        if (st?.current_tool !== undefined) patch.currentTool = st.current_tool;
+        if (st?.error !== undefined) patch.error = st.error;
+        if (Object.keys(patch).length > 0) {
+          useDetachedRunStore.getState().patchRun(conversationId, patch);
+        }
         if (st && (st.status === "completed" || st.status === "failed" || st.status === "stopped")) {
+          setSyncing(true);
+          try {
+            await syncDetachedRun(uid, conversationId);
+          } finally {
+            setSyncing(false);
+          }
+        } else if (!st && !res.runnerAlive) {
+          // No status file + no live runner (or no sandbox resolvable at
+          // all — res.noSandbox): do NOT read this as "the run failed" —
+          // the reload may simply be racing the pagehide beacon's
+          // server-side deploy. syncDetachedRun owns this decision through
+          // its boot grace (and fires the agent_ensure recovery); it keeps
+          // the run starting while the grace holds and honestly settles it
+          // once the grace expires.
           setSyncing(true);
           try {
             await syncDetachedRun(uid, conversationId);

@@ -78,6 +78,11 @@ export interface SandboxAgentStatus {
 /** Response of the `agent_status` action. */
 export interface AgentStatusResponse {
   sandboxId: string;
+  /** True when NO sandbox could be resolved for this poll (the poll never
+   *  creates one — a pagehide handoff beacon may still be deploying into
+   *  the real sandbox). Callers must treat this as "keep waiting", never
+   *  as "the run failed". */
+  noSandbox?: boolean;
   status: SandboxAgentStatus | null;
   /** Full chat history — only when requested (includeHistory: true). */
   history: SandboxHistoryMessage[] | null;
@@ -786,6 +791,56 @@ export class E2BClient {
   /** Kill the detached runner process (user Stop). */
   async agentStop(): Promise<{ sandboxId: string; ok: boolean }> {
     return await this.call<{ sandboxId: string; ok: boolean }>("agent_stop");
+  }
+
+  /** RECOVERY: ensure a handed-off run (by run_id) actually has a live
+   *  runner — relaunching it from the sandbox's persisted run.json when the
+   *  pagehide beacon died before the launch (serverless timeout). Never
+   *  double-launches: run_id-guarded + staleness-fenced server-side. */
+  async agentEnsure(
+    runId: string,
+  ): Promise<{
+    ensured: boolean;
+    reason?: string;
+    already?: string;
+    launched?: boolean;
+    sandboxId?: string;
+  }> {
+    return await this.call<{
+      ensured: boolean;
+      reason?: string;
+      already?: string;
+      launched?: boolean;
+      sandboxId?: string;
+    }>("agent_ensure", { run_id: runId });
+  }
+
+  /** Force-adopt a sandbox id (handoff-run discovery): point this client —
+  *  and its persisted localStorage slot — at a sandbox the beacon created
+   * server-side (the page died before it could save the id). */
+  adoptSandboxId(sandboxId: string): void {
+    if (!sandboxId || sandboxId === this.sandboxId) return;
+    this.sandboxId = sandboxId;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(this.sandboxIdKey(), sandboxId);
+      } catch {
+        // private mode — the in-memory id still helps this session
+      }
+    }
+  }
+
+  /** Rollback for a wrong adoption (candidate sandbox turned out not to
+   *  host the run we were looking for) — drop the adopted id everywhere. */
+  clearSandboxId(): void {
+    this.sandboxId = null;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(this.sandboxIdKey());
+      } catch {
+        // ignore
+      }
+    }
   }
 
   // ---------------------------------------------------------------

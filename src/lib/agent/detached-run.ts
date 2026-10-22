@@ -39,6 +39,28 @@ import { notifyConversationsChanged } from "@/lib/chat-events";
 import type { TurnHandoffMeta } from "@/lib/agent/turn-handoff";
 
 // ---------------------------------------------------------------------------
+// BOOT GRACE (the "everything auto-cancels after refreshing" fix)
+// ---------------------------------------------------------------------------
+
+/** How long a young "running" row with NO status file and NO live runner
+ *  is treated as still-starting instead of failed. The reload's first
+ *  agent_status poll used to race the pagehide beacon's server-side work
+ *  (connect + deploy + launch = up to ~20s on a warm sandbox, and the
+ *  beacon can even be KILLED by the serverless timeout before launching
+ *  when a paused sandbox's auto-resume exceeds the window) — reading
+ *  "no status + no runner" as failed auto-cancelled live runs. The grace
+ *  keeps the run alive while the recovery below finishes the job; only a
+ *  run that is STILL verifiably nothing after this window fails. */
+export const HANDOFF_GRACE_MS = 150_000;
+
+/** agent_ensure retry throttle — the recovery action is idempotent, but
+ *  there is no reason to hammer it on every 5s poll tick. */
+const ENSURE_RETRY_MS = 20_000;
+
+const ensureAttempts = new Map<string, number>();
+const adoptionAttempts = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
 // Run config (what gets written to /home/user/.onyx/agent/run.json)
 // ---------------------------------------------------------------------------
 
@@ -521,6 +543,118 @@ export interface SyncDetachedRunResult {
  *  synced assistant message. */
 const syncingConversations = new Set<string>();
 
+// ---------------------------------------------------------------------------
+// Handoff recovery (agent_ensure relaunch + beacon-sandbox adoption)
+// ---------------------------------------------------------------------------
+
+/** Discover the sandbox id a pagehide handoff beacon created server-side —
+ *  the page died before it could save the id, so the client slot is empty
+ *  and every poll reports noSandbox. Matches the account's Onyx shared-scope
+ *  sandboxes created around the handoff time; the caller validates the
+ *  candidate really hosts OUR run (via agent_ensure's run_id check) before
+ *  keeping the adoption. */
+async function discoverBeaconSandbox(
+  e2bKey: string,
+  handoffStartedAt: number,
+): Promise<string | null> {
+  try {
+    const res = await fetch("/api/sandbox", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: e2bKey, action: "lifecycle_status" }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      sandboxes?: Array<{
+        sandboxId: string;
+        state: string;
+        startedAt: string;
+        scope: string | null;
+      }>;
+    };
+    const candidates = (data.sandboxes ?? [])
+      .filter((s) => s.scope === "shared" && s.state !== "closed")
+      .filter((s) => {
+        const started = Date.parse(s.startedAt);
+        // The handoff fired at ~handoffStartedAt; the beacon's sandbox was
+        // created within seconds of it. A 2-minute back-margin covers clock
+        // skew; the 10-minute forward cap excludes ancient sandboxes.
+        return (
+          Number.isFinite(started) &&
+          started >= handoffStartedAt - 120_000 &&
+          started <= handoffStartedAt + 10 * 60_000
+        );
+      })
+      .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+    return candidates[0]?.sandboxId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** RECOVERY for a handed-off run whose runner is not (yet) verifiably
+ *  alive: ensure the beacon actually launched it — relaunching from the
+ *  sandbox's persisted run.json when the beacon was killed by the
+ *  serverless timeout (agent_ensure), and adopting the beacon-created
+ *  sandbox first when the client slot never learned its id. Best-effort
+ *  and throttled; the caller keeps the row inside its grace window either
+ *  way, so a transient failure here just retries on a later poll tick. */
+async function ensureHandoffRunner(
+  conversationId: string,
+  row: DetachedRunRow,
+  e2bKey: string,
+): Promise<void> {
+  const lastEnsure = ensureAttempts.get(row.id) ?? 0;
+  const ensureDue = Date.now() - lastEnsure >= ENSURE_RETRY_MS;
+  try {
+    const client = getE2BClient(e2bKey, null, "shared");
+
+    // (a) Null-slot handoff: the beacon created a sandbox server-side the
+    //     dead page never learned the id of — discover + adopt it, then
+    //     validate it really hosts OUR run before keeping the adoption.
+    if (row.handoff && !row.sandbox_id) {
+      const lastAdoption = adoptionAttempts.get(row.id) ?? 0;
+      if (Date.now() - lastAdoption >= 30_000) {
+        adoptionAttempts.set(row.id, Date.now());
+        const candidate = await discoverBeaconSandbox(e2bKey, row.started_at);
+        if (candidate && ensureDue) {
+          client.adoptSandboxId(candidate);
+          const probe = await client.agentEnsure(row.id).catch(() => null);
+          if (probe && probe.reason === "no-matching-run") {
+            // Wrong sandbox — it does not host our run. Roll back.
+            client.clearSandboxId();
+          } else {
+            // Adoption confirmed — persist it on the row + store view so
+            // reloads never have to rediscover it, and keep the sandbox
+            // exempt from the pagehide auto-pause while the run lives.
+            await saveRunRow({ ...row, sandbox_id: candidate, updated_at: Date.now() }).catch(() => {});
+            useDetachedRunStore.getState().patchRun(conversationId, { sandboxId: candidate });
+            markDetachedActive(candidate);
+            ensureAttempts.set(row.id, Date.now());
+            return; // the adoption probe above already ensured the runner
+          }
+        }
+      }
+    }
+
+    // (b) Ensure the runner is actually launched (idempotent; a fresh
+    //     "starting" status server-side means the beacon is still working
+    //     and this is a no-op).
+    if (ensureDue) {
+      ensureAttempts.set(row.id, Date.now());
+      const res = await client.agentEnsure(row.id).catch(() => null);
+      // agent_ensure resolved a sandbox we did not know yet — persist it.
+      const resolvedId = res?.sandboxId ?? null;
+      if (resolvedId && !row.sandbox_id) {
+        await saveRunRow({ ...row, sandbox_id: resolvedId, updated_at: Date.now() }).catch(() => {});
+        useDetachedRunStore.getState().patchRun(conversationId, { sandboxId: resolvedId });
+        markDetachedActive(resolvedId);
+      }
+    }
+  } catch {
+    // best-effort — throttled retries on later poll ticks
+  }
+}
+
 /**
  * SYNC-ON-RETURN (the "come back to finished work" path). Call on
  * conversation load, window focus, or when the strip's poll observes a
@@ -599,6 +733,56 @@ async function syncDetachedRunInner(
       currentTool: status.status?.current_tool ?? null,
     });
     return { skipped: false, running: true, synced: false, status: status.status };
+  }
+
+  // ── BOOT GRACE (the "everything auto-cancels after refreshing" fix) ──
+  // NO status file + NO live runner on a YOUNG row is the signature of the
+  // reload racing the pagehide beacon's server-side work — or of a beacon
+  // that was killed by the serverless timeout before the nohup launch
+  // (e.g. a paused sandbox whose auto-resume exceeded the function window),
+  // or of an empty client slot that simply cannot see the beacon's sandbox
+  // yet (status.noSandbox). NONE of those mean the run failed. Fire the
+  // recovery (agent_ensure relaunch + beacon-sandbox adoption), re-poll
+  // once, and keep the run "starting" until HANDOFF_GRACE_MS elapses.
+  // Only after the grace is a still-verifiably-nothing run honestly failed.
+  // (A status file that SAYS failed/completed/stopped always wins — the
+  // runner itself reported; that path never enters the grace.)
+  if (
+    runnerStatus === null &&
+    row.status === "running" &&
+    Date.now() - Math.max(row.started_at, row.updated_at ?? 0) < HANDOFF_GRACE_MS
+  ) {
+    await ensureHandoffRunner(conversationId, row, e2bKey);
+    // Re-poll once the recovery had its chance (ensure may have just
+    // relaunched the runner, or adopted the sandbox it lives in).
+    try {
+      const client = getE2BClient(e2bKey, null, "shared");
+      const recheck = await client.agentStatus({ includeHistory: true });
+      const recheckStatus = recheck.status?.status ?? null;
+      if (
+        recheckStatus === "running" ||
+        recheckStatus === "starting" ||
+        (!recheckStatus && recheck.runnerAlive)
+      ) {
+        useDetachedRunStore.getState().patchRun(conversationId, {
+          status: "running",
+          stage: recheck.status?.stage,
+          round: recheck.status?.round,
+          totalRounds: recheck.status?.total_rounds,
+          currentTool: recheck.status?.current_tool ?? null,
+        });
+        return { skipped: false, running: true, synced: false, status: recheck.status };
+      }
+    } catch {
+      // best-effort — the grace hold below still applies
+    }
+    // Nothing verifiable YET — hold the run as starting (the strip keeps
+    // polling; the throttled recovery retries on later ticks).
+    useDetachedRunStore.getState().patchRun(conversationId, {
+      status: "running",
+      stage: "starting",
+    });
+    return { skipped: false, running: true, synced: false };
   }
 
   // Terminal (completed / failed / stopped, or dead with history present).

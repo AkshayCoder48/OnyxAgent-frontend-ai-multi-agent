@@ -321,6 +321,73 @@ function lookupCached(
   return entry;
 }
 
+/**
+ * Resolve a sandbox WITHOUT ever creating one — for read-only agent
+ * flows (agent_status polls, agent_stop, agent_ensure). Creating here was
+ * the "everything auto-cancels after refreshing" amplifier: a status poll
+ * with an empty/stale client slot minted a VIRGIN sandbox whose missing
+ * agent_status.json read as "the run failed", instantly settling a live
+ * handoff run as failed. This resolver instead returns null (an honest
+ * "nothing to talk to yet") so the caller can keep waiting — the pagehide
+ * handoff beacon may still be deploying into the real sandbox.
+ *
+ * Never kills anything either: an unreachable cached sandbox might be
+ * PAUSED (E2B timeout pause freezes envd) — connect auto-resumes it, kill
+ * would destroy it.
+ */
+async function resolveExistingSandbox(
+  apiKey: string,
+  conversationId: string | null,
+  mode: "shared" | "separate",
+  clientSandboxId?: string | null,
+): Promise<Sandbox | null> {
+  const key = cacheKey(apiKey, conversationId, mode);
+  const cached = lookupCached(apiKey, conversationId, mode);
+  if (cached) {
+    if (cached.verifiedAliveAt && Date.now() - cached.verifiedAliveAt < 120_000) {
+      return cached.sandbox;
+    }
+    if (await isAlive(cached.sandbox)) {
+      cached.verifiedAliveAt = Date.now();
+      return cached.sandbox;
+    }
+    // Unreachable — DEAD or PAUSED. Reconnect by id (auto-resumes a paused
+    // one); only a genuinely dead sandbox falls through (entry dropped
+    // WITHOUT killing — the client's next creating call decides its fate).
+    try {
+      const resumed = await Sandbox.connect(cached.sandbox.sandboxId, { apiKey });
+      const resumedEntry: CacheEntry = {
+        ...cached,
+        sandbox: resumed,
+        verifiedAliveAt: Date.now(),
+      };
+      getCache(mode).set(key, resumedEntry);
+      return resumed;
+    } catch {
+      getCache(mode).delete(key);
+    }
+  }
+  if (clientSandboxId) {
+    try {
+      const sandbox = await Sandbox.connect(clientSandboxId, { apiKey });
+      const entry: CacheEntry = {
+        sandbox,
+        apiKey,
+        createdAt: Date.now(),
+        key,
+        verifiedAliveAt: Date.now(),
+      };
+      const mdCurrent = await ensureOnyxMdCurrent(sandbox);
+      if (mdCurrent) entry.agentMdVersion = AGENT_MD_VERSION;
+      getCache(mode).set(key, entry);
+      return sandbox;
+    } catch {
+      return null; // dead or never existed — DO NOT create
+    }
+  }
+  return null;
+}
+
 async function enforceLimit(): Promise<void> {
   const all = [
     ...sharedCache.entries(),
@@ -1207,8 +1274,26 @@ async function getSandbox(
       cached.verifiedAliveAt = Date.now();
       return cached.sandbox;
     }
-    // Dead — evict and fall through.
-    evictCacheEntry(mode, key);
+    // NOT VERIFIABLY ALIVE — but "unreachable envd" cannot distinguish DEAD
+    // from PAUSED (an E2B timeout-pause freezes envd; the SDK handle's
+    // websocket dies with it). Killing here would DESTROY a paused sandbox
+    // (with the user's whole workspace + any detached-agent state) instead
+    // of auto-resuming it. So: reconnect by id FIRST — connect auto-resumes
+    // a paused sandbox in place; only when connect also fails is the
+    // sandbox truly dead (evict + fall through to create).
+    try {
+      const resumed = await Sandbox.connect(cached.sandbox.sandboxId, { apiKey });
+      const resumedEntry: CacheEntry = {
+        ...cached,
+        sandbox: resumed,
+        verifiedAliveAt: Date.now(),
+      };
+      getCache(mode).set(key, resumedEntry);
+      return resumed;
+    } catch {
+      // Dead — evict and fall through.
+      evictCacheEntry(mode, key);
+    }
   }
 
   // 2. If the client provided a sandbox ID, try to reconnect to it.
@@ -2544,24 +2629,21 @@ export async function POST(req: NextRequest) {
         if (typeof config.chat_url !== "string" || !/^https?:\/\//.test(config.chat_url)) {
           return NextResponse.json({ error: "Run config is missing a valid chat_url" }, { status: 400 });
         }
-        // Deploy (version-stamped, cheap when current) BEFORE launching.
-        await deployHeadlessRunner(sandbox);
-        try {
-          await sandbox.files.write(RUN_CONFIG_PATH, configRaw);
-          // The config carries the provider API key — keep it private to
-          // the sandbox user.
-          await sandbox.commands.run(`chmod 600 ${RUN_CONFIG_PATH}`).catch(() => {});
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          return NextResponse.json({ error: `Failed to write the run config: ${errMsg}` }, { status: 500 });
-        }
-        // Initial status so the very first poll (before Python even boots)
-        // sees an honest "starting".
+        // ── EARLY DURABLE WRITES (the refresh-race fix) ──────────────────
+        // The pagehide beacon fires this and the page immediately reloads;
+        // the returning mount-sync's first agent_status poll used to beat
+        // these writes (they sat AFTER deploy) and read "no status + no
+        // runner" as "the run failed" — the everything-auto-cancels bug.
+        // The starting status + run config now land BEFORE the (slower)
+        // deploy so any poll that can see the sandbox at all already sees
+        // an honest "starting"; the run config also makes a killed beacon
+        // recoverable (agent_ensure relaunches from it).
+        const runId = typeof config.run_id === "string" ? config.run_id : "";
         try {
           const starting = {
             status: "starting",
             stage: "starting",
-            run_id: typeof config.run_id === "string" ? config.run_id : "",
+            run_id: runId,
             last_update: Date.now(),
             started_at: Date.now(),
             finished_at: null,
@@ -2571,6 +2653,17 @@ export async function POST(req: NextRequest) {
         } catch {
           // best-effort — the runner overwrites this within a second
         }
+        try {
+          await sandbox.files.write(RUN_CONFIG_PATH, configRaw);
+          // The config carries the provider API key — keep it private to
+          // the sandbox user.
+          await sandbox.commands.run(`chmod 600 ${RUN_CONFIG_PATH}`).catch(() => {});
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ error: `Failed to write the run config: ${errMsg}` }, { status: 500 });
+        }
+        // Deploy (version-stamped, cheap when current) BEFORE launching.
+        await deployHeadlessRunner(sandbox);
         try {
           // DETACHED LAUNCH: nohup + & — the command returns immediately
           // while the runner keeps executing inside the sandbox (proven by
@@ -2588,8 +2681,109 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      case "agent_ensure": {
+        // RECOVERY for a handoff whose pagehide beacon died before the
+        // runner launched (serverless function killed mid-deploy — e.g. a
+        // paused sandbox whose auto-resume exceeded the function window).
+        // The beacon writes run.json + a starting status BEFORE deploying,
+        // so this action can finish the job: relaunch the runner FROM the
+        // persisted run config, run_id-guarded and staleness-fenced so a
+        // beacon that is merely still deploying is never double-launched.
+        const ensureRunId = typeof args.run_id === "string" ? args.run_id : "";
+        if (!ensureRunId) {
+          return NextResponse.json({ error: "Missing run_id" }, { status: 400 });
+        }
+        const ensureSandbox = await resolveExistingSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        if (!ensureSandbox) {
+          return NextResponse.json({ ensured: false, reason: "sandbox-unreachable", sandboxId: "" });
+        }
+        const runCfg = (await readJsonFile(ensureSandbox, RUN_CONFIG_PATH)) as { run_id?: string } | null;
+        if (!runCfg || runCfg.run_id !== ensureRunId) {
+          // No matching run config — either a NEWER run took over this
+          // sandbox (never stomp it) or the beacon died before writing it
+          // (nothing to relaunch from — honest failure after the grace).
+          return NextResponse.json({ ensured: false, reason: "no-matching-run", sandboxId: ensureSandbox.sandboxId });
+        }
+        // Runner already alive → nothing to do.
+        let ensureAlive = false;
+        try {
+          const probe = await ensureSandbox.commands.run(
+            `pgrep -f "${RUNNER_PGREP_PATTERN}" >/dev/null 2>&1 && echo 1 || echo 0`,
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          ensureAlive = (probe.stdout ?? "").trim() === "1";
+        } catch {
+          // best-effort — treat as not alive, the staleness fence decides
+        }
+        if (ensureAlive) {
+          return NextResponse.json({ ensured: true, already: "running", sandboxId: ensureSandbox.sandboxId });
+        }
+        const ensureState = (await readJsonFile(ensureSandbox, AGENT_STATUS_PATH)) as {
+          status?: string;
+          last_update?: number;
+        } | null;
+        const ensureStatus = ensureState?.status;
+        if (ensureStatus === "completed" || ensureStatus === "failed" || ensureStatus === "stopped") {
+          return NextResponse.json({ ensured: true, already: ensureStatus, sandboxId: ensureSandbox.sandboxId });
+        }
+        // STALENESS FENCE: a fresh "starting" status means the beacon (or a
+        // just-booted runner) is still in flight — relaunching now would
+        // double-run the turn. Only a status untouched for 45s (>> the 10s
+        // serverless window — the beacon can no longer be alive) plus a
+        // dead runner is genuinely a run that never started.
+        const ensureLastUpdate = typeof ensureState?.last_update === "number" ? ensureState.last_update : 0;
+        if (ensureStatus && Date.now() - ensureLastUpdate < 45_000) {
+          return NextResponse.json({ ensured: true, already: "starting", sandboxId: ensureSandbox.sandboxId });
+        }
+        // Relaunch: fresh starting status → (re)deploy → nohup launch.
+        try {
+          try {
+            await ensureSandbox.setTimeout(SANDBOX_TIMEOUT_MS);
+          } catch {
+            await ensureSandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS).catch(() => {});
+          }
+          const starting = {
+            status: "starting",
+            stage: "starting",
+            run_id: ensureRunId,
+            last_update: Date.now(),
+            started_at: Date.now(),
+            finished_at: null,
+            error: null,
+          };
+          await ensureSandbox.files.write(AGENT_STATUS_PATH, JSON.stringify(starting, null, 2));
+          await deployHeadlessRunner(ensureSandbox);
+          const result = await ensureSandbox.commands.run(
+            `nohup python3 ${RUNNER_PATH} > ${BACKGROUND_LOG_PATH} 2>&1 & echo started`,
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          const launched = (result.stdout ?? "").includes("started") && (result.exitCode ?? 0) === 0;
+          console.log(`[sandbox] agent_ensure relaunched run ${ensureRunId} (sandbox=${ensureSandbox.sandboxId}, launched=${launched})`);
+          return NextResponse.json({ ensured: true, launched, sandboxId: ensureSandbox.sandboxId });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ ensured: false, reason: `relaunch-failed: ${errMsg}`, sandboxId: ensureSandbox.sandboxId });
+        }
+      }
+
       case "agent_status": {
-        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // NON-CREATING: a status poll must never mint a fresh sandbox — a
+        // virgin sandbox has no agent_status.json and reads as "failed",
+        // which instantly auto-cancelled live handoff runs (the refresh
+        // bug). When nothing is resolvable we return noSandbox so the
+        // caller keeps waiting inside its grace window instead.
+        const sandbox = await resolveExistingSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        if (!sandbox) {
+          return NextResponse.json({
+            sandboxId: "",
+            noSandbox: true,
+            status: null,
+            history: null,
+            logTail: null,
+            sandboxTodos: null,
+            runnerAlive: false,
+          });
+        }
         const includeHistory = args.include_history === true;
         const status = await readJsonFile(sandbox, AGENT_STATUS_PATH);
         const history = includeHistory
@@ -2629,7 +2823,13 @@ export async function POST(req: NextRequest) {
       }
 
       case "agent_stop": {
-        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // NON-CREATING (see agent_status): stopping must never mint a fresh
+        // sandbox just to write a stopped marker into it. Unreachable →
+        // honest ok:false; the client settles its local run row regardless.
+        const sandbox = await resolveExistingSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        if (!sandbox) {
+          return NextResponse.json({ sandboxId: "", ok: false, unreachable: true });
+        }
         try {
           await sandbox.commands.run(`pkill -f "${RUNNER_PGREP_PATTERN}" 2>/dev/null; echo done`, {
             cwd: DEFAULT_CWD,
