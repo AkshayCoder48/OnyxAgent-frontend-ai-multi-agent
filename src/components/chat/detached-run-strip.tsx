@@ -79,7 +79,10 @@ export function DetachedRunStrip({ conversationId }: { conversationId: string | 
     const uid = useAuthStore.getState().user?.id;
     if (!uid) return;
     const r = useDetachedRunStore.getState().runs[conversationId];
-    if (!r || !r.sandboxId) return;
+    // NOTE: no sandboxId requirement — pagehide handoff runs may carry ""
+    // (the beacon resolves/creates the sandbox server-side); the poll goes
+    // through the shared E2B client which resolves the sandbox itself.
+    if (!r) return;
     tickingRef.current = true;
     try {
       const isLive = r.status === "running" || r.status === "starting";

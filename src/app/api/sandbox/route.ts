@@ -740,7 +740,57 @@ async function performRotation(
   //     rotation (see docblock). Re/adopt the live sandbox and return it
   //     unchanged; the client re-stamps its rotation clock and retries
   //     after the process finishes.
+  //
+  //     DETACHED-RUNNER + CRON GUARD: commands.list() only sees E2B-tracked
+  //     execs — a nohup'd headless runner (started via `commands.run('nohup
+  //     … &')`, whose wrapper already exited) and the cron daemon are
+  //     INVISIBLE to it. Probing both explicitly: rotation kills the
+  //     sandbox, which would kill an active background run / every
+  //     installed schedule.
   if (oldSandbox) {
+    try {
+      const bgProbe = await oldSandbox.commands.run(
+        `pgrep -f "${RUNNER_PGREP_PATTERN}" >/dev/null 2>&1 && echo RUNNER; crontab -l 2>/dev/null | grep -q '/home/user' && echo CRON; true`,
+        { timeoutMs: 10_000 },
+      );
+      const bgOut = bgProbe.stdout ?? "";
+      if (bgOut.includes("RUNNER") || bgOut.includes("CRON")) {
+        console.log(
+          `[sandbox] rotation SKIPPED — ${bgOut.includes("RUNNER") ? "detached agent run" : "cron schedules"} active on ${oldSandbox.sandboxId}; the sandbox pauses at the E2B timeout instead and auto-resumes on next use`,
+        );
+        const liveBg = cached?.sandbox && oldSandbox === cached.sandbox ? cached.sandbox : oldSandbox;
+        const bgEntry: CacheEntry = {
+          sandbox: liveBg,
+          apiKey,
+          createdAt: Date.now(),
+          key,
+          verifiedAliveAt: Date.now(),
+          ...(cached?.agentMdVersion ? { agentMdVersion: cached.agentMdVersion } : {}),
+          ...(cached?.masterSkillsVersion ? { masterSkillsVersion: cached.masterSkillsVersion } : {}),
+        };
+        getCache(mode).set(key, bgEntry);
+        return { sandbox: liveBg, backedUp: 0, restored: 0, skipped: "running-commands" };
+      }
+    } catch {
+      // FAIL-SAFE: the background-work probe failed — we cannot prove the
+      // sandbox is idle, and rotation destroys state. Skip (same contract
+      // as the live-process guard below).
+      console.warn(
+        `[sandbox] rotation SKIPPED — background-work probe unavailable on ${oldSandbox.sandboxId}; the sandbox is left untouched`,
+      );
+      const liveProbeFail = cached?.sandbox && oldSandbox === cached.sandbox ? cached.sandbox : oldSandbox;
+      const probeFailEntry: CacheEntry = {
+        sandbox: liveProbeFail,
+        apiKey,
+        createdAt: Date.now(),
+        key,
+        verifiedAliveAt: Date.now(),
+        ...(cached?.agentMdVersion ? { agentMdVersion: cached.agentMdVersion } : {}),
+        ...(cached?.masterSkillsVersion ? { masterSkillsVersion: cached.masterSkillsVersion } : {}),
+      };
+      getCache(mode).set(key, probeFailEntry);
+      return { sandbox: liveProbeFail, backedUp: 0, restored: 0, skipped: "running-commands" };
+    }
     try {
       const running = await oldSandbox.commands.list();
       const blocking = running.filter((c) => isBlockingProcess(c));
@@ -2239,6 +2289,64 @@ export async function POST(req: NextRequest) {
         } catch {
           // fall through to the general live-process guard below
         }
+        // STARTING-RUN GUARD: the pagehide turn-handoff beacon writes
+        // run.json + a "starting" status BEFORE the Python runner boots —
+        // pgrep cannot see it yet, and the pause beacon (fired by the same
+        // unload) would freeze the run at birth. Skip while the status file
+        // says starting/running or the run config is fresh (<3 minutes).
+        try {
+          const agentState = (await readJsonFile(sandbox, AGENT_STATUS_PATH)) as {
+            status?: string;
+          } | null;
+          const runState = agentState?.status;
+          if (runState === "starting" || runState === "running") {
+            return NextResponse.json({
+              ok: false,
+              paused: false,
+              reason: "agent-starting",
+              detail:
+                "A sandbox agent run is starting/running in this sandbox — pause skipped so it can keep working while the app is closed.",
+            });
+          }
+          const ageProbe = await sandbox.commands.run(
+            `test -f ${RUN_CONFIG_PATH} && echo $(( $(date +%s) - $(stat -c %Y ${RUN_CONFIG_PATH} 2>/dev/null || echo 0) )) || echo NONE`,
+            { timeoutMs: 10_000 },
+          );
+          const ageSeconds = parseInt((ageProbe.stdout ?? "").trim() || "NaN", 10);
+          if (!Number.isNaN(ageSeconds) && ageSeconds >= 0 && ageSeconds < 180) {
+            return NextResponse.json({
+              ok: false,
+              paused: false,
+              reason: "run-config-fresh",
+              detail:
+                "A sandbox agent run was just handed off to this sandbox (config <3min old) — pause skipped so it can start.",
+            });
+          }
+        } catch {
+          // fall through — the status probe is best-effort
+        }
+        // CRON GUARD: scheduled tasks (crontab entries written by
+        // schedule_agent_task) must keep firing while the app is closed —
+        // pausing the sandbox would freeze the cron daemon and silently kill
+        // every schedule. Skip pause whenever Onyx-managed cron entries exist.
+        try {
+          const cronProbe = await sandbox.commands.run(
+            `crontab -l 2>/dev/null | grep -c '/home/user' || true`,
+            { timeoutMs: 10_000 },
+          );
+          const cronEntries = parseInt((cronProbe.stdout ?? "0").trim() || "0", 10);
+          if (cronEntries > 0) {
+            return NextResponse.json({
+              ok: false,
+              paused: false,
+              reason: "cron-scheduled",
+              detail:
+                `${cronEntries} scheduled task entry(ies) are installed in this sandbox — pause skipped so the cron daemon keeps firing while the app is closed (sandbox runs up to its 24h window).`,
+            });
+          }
+        } catch {
+          // fall through — the cron probe is best-effort
+        }
         // LIVE-RUN GUARD: never pause a sandbox with running processes —
         // an in-flight exec would freeze mid-flight. (The E2B timeout
         // pause still applies to it naturally.)
@@ -2411,6 +2519,16 @@ export async function POST(req: NextRequest) {
 
       case "agent_start": {
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        // 24H WINDOW FROM RUN START — without this the run inherits whatever
+        // window remained (a sandbox created hours ago, or a 1h tier cap)
+        // and E2B auto-pauses it mid-run while the user is away (the "came
+        // back and it was paused" report, 2026-10-22). The E2B lifecycle
+        // resets the countdown on each explicit setTimeout.
+        try {
+          await sandbox.setTimeout(SANDBOX_TIMEOUT_MS);
+        } catch {
+          await sandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS).catch(() => {});
+        }
         // Config arrives as a pre-serialized JSON string (the client builds
         // it; the server never re-shapes it — one source of truth).
         const configRaw = typeof args.config === "string" ? args.config : JSON.stringify(args.config ?? null);

@@ -262,6 +262,11 @@ export interface DetachedRunRow {
   error?: string | null;
   /** Dexie message id of the synced assistant result (dedupe guard). */
   result_message_id?: string | null;
+  /** True when this run was created by the pagehide turn-handoff (an
+   *  in-flight foreground turn moved into the sandbox on app close) rather
+   *  than an explicit "Sandbox runs" send. Only affects the honest-failure
+   *  copy shown when no result was produced. */
+  handoff?: boolean;
 }
 
 export class AppDatabase extends Dexie {

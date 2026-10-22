@@ -36,6 +36,7 @@ import type { MessagePart, ToolCall } from "@/types/chat";
 import { clearDetachedActive, markDetachedActive } from "@/lib/agent/detached-active";
 import { useDetachedRunStore } from "@/stores/detached-run-store";
 import { notifyConversationsChanged } from "@/lib/chat-events";
+import type { TurnHandoffMeta } from "@/lib/agent/turn-handoff";
 
 // ---------------------------------------------------------------------------
 // Run config (what gets written to /home/user/.onyx/agent/run.json)
@@ -296,6 +297,56 @@ async function saveRunRow(row: DetachedRunRow): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Hydrate a pagehide turn-handoff (the automatic "close and resume" path)
+// ---------------------------------------------------------------------------
+
+/** Materialize a handed-off turn into the durable run row + the live store
+ *  view so the strip re-attaches and syncDetachedRun can settle it. The
+ *  pagehide path could only write localStorage (IndexedDB is unreliable
+ *  during unload) — this runs on RETURN, where async is safe. Idempotent:
+ *  a row/view already carrying the meta's runId is left untouched. */
+export async function hydrateHandoffRun(
+  userId: string,
+  conversationId: string,
+  meta: TurnHandoffMeta,
+): Promise<void> {
+  const now = Date.now();
+  try {
+    const existing = await getDetachedRunForConversation(userId, conversationId);
+    if (!existing || existing.id !== meta.runId) {
+      await saveRunRow({
+        id: meta.runId,
+        user_id: userId,
+        conversation_id: conversationId,
+        sandbox_id: meta.sandboxId ?? "",
+        status: "running",
+        prompt: meta.promptPreview,
+        seed_count: meta.seedCount,
+        provider_model: meta.model,
+        chat_url: meta.chatUrl,
+        started_at: meta.startedAt,
+        updated_at: now,
+        handoff: true,
+      });
+    }
+  } catch {
+    // best-effort — the sync path retries the hydration below
+  }
+  const store = useDetachedRunStore.getState();
+  const view = store.runs[conversationId];
+  if (!view || view.runId !== meta.runId) {
+    store.setRun(conversationId, {
+      runId: meta.runId,
+      sandboxId: meta.sandboxId ?? "",
+      status: "running",
+      stage: "starting",
+      startedAt: meta.startedAt,
+    });
+  }
+  if (meta.sandboxId) markDetachedActive(meta.sandboxId);
+}
+
+// ---------------------------------------------------------------------------
 // Start / poll / stop / sync
 // ---------------------------------------------------------------------------
 
@@ -403,10 +454,12 @@ export async function startDetachedRun(
   }
 }
 
-/** Light status poll (no history) for the live strip. */
+/** Light status poll (no history) for the live strip. The sandbox is
+ *  resolved through the shared E2B client (its localStorage slot / server
+ *  cache) — the sandboxId argument is kept for call-site symmetry only. */
 export async function pollDetachedRunStatus(
   userId: string,
-  sandboxId: string,
+  _sandboxId: string,
 ): Promise<AgentStatusResponse | null> {
   try {
     const e2bKey = await getEffectiveE2BKey(userId);
@@ -442,6 +495,12 @@ export async function stopDetachedRun(
     await saveRunRow({ ...row, status: "stopped", finished_at: now, updated_at: now });
   }
   clearDetachedActive(view.sandboxId);
+  try {
+    const { clearTurnHandoffMeta } = await import("@/lib/agent/turn-handoff");
+    clearTurnHandoffMeta(conversationId);
+  } catch {
+    // best-effort
+  }
   return true;
 }
 
@@ -456,6 +515,12 @@ export interface SyncDetachedRunResult {
   error?: string;
 }
 
+/** In-flight sync guard — the strip's poll tick, the visibility burst and
+ *  the return-path hydration can all fire syncDetachedRun concurrently for
+ *  one conversation; without this guard two of them would double-write the
+ *  synced assistant message. */
+const syncingConversations = new Set<string>();
+
 /**
  * SYNC-ON-RETURN (the "come back to finished work" path). Call on
  * conversation load, window focus, or when the strip's poll observes a
@@ -469,6 +534,22 @@ export async function syncDetachedRun(
   userId: string,
   conversationId: string,
 ): Promise<SyncDetachedRunResult> {
+  // One sync per conversation at a time (see syncingConversations above).
+  if (syncingConversations.has(conversationId)) {
+    return { skipped: true, running: false, synced: false };
+  }
+  syncingConversations.add(conversationId);
+  try {
+    return await syncDetachedRunInner(userId, conversationId);
+  } finally {
+    syncingConversations.delete(conversationId);
+  }
+}
+
+async function syncDetachedRunInner(
+  userId: string,
+  conversationId: string,
+): Promise<SyncDetachedRunResult> {
   const row = await getDetachedRunForConversation(userId, conversationId);
   if (!row) return { skipped: true, running: false, synced: false };
   if (row.status === "synced" || row.result_message_id) {
@@ -477,6 +558,14 @@ export async function syncDetachedRun(
 
   const e2bKey = await getEffectiveE2BKey(userId);
   if (!e2bKey) {
+    // The key vanished between sessions — surface an actionable failed view
+    // (the strip's check button retries after the key is re-added) instead
+    // of an endless "starting" spinner. The durable row is left untouched
+    // so the real sync still runs once the key is back.
+    useDetachedRunStore.getState().patchRun(conversationId, {
+      status: "failed",
+      error: "E2B key unavailable — re-add it in Settings → E2B, then press check to sync this run.",
+    });
     return {
       skipped: false,
       running: false,
@@ -541,7 +630,13 @@ export async function syncDetachedRun(
   let parts = converted.parts;
   if (finalStatus === "failed" && !hasAssistantText) {
     const errText = status.status?.error ?? "The detached run failed before producing a reply.";
-    content = `The background run failed: ${errText}`;
+    // A handed-off turn whose beacon never actually started the runner (or
+    // whose sandbox could not be reached) gets its own honest copy — the
+    // user's mental model is "I closed the app", not "a background run
+    // failed".
+    content = row.handoff
+      ? "The app closed before the sandbox could take over this turn — no background result was produced. The work that finished in-chat is preserved above; send a message to continue."
+      : `The background run failed: ${errText}`;
     parts = [{ id: `part_${nanoid(8)}`, type: "text", content }];
   } else if (finalStatus === "stopped") {
     // A stopped run keeps its completed tool work; the closing text explains
@@ -603,7 +698,8 @@ export async function syncDetachedRun(
     // best-effort — todos are a nice-to-have on top of the message
   }
 
-  // Settle: row synced, store cleared, sandbox allowed to auto-pause again.
+  // Settle: row synced, store cleared, sandbox allowed to auto-pause again,
+  // and the pagehide handoff meta (when present) consumed.
   await saveRunRow({
     ...row,
     status: "synced",
@@ -613,6 +709,12 @@ export async function syncDetachedRun(
   });
   clearDetachedActive(row.sandbox_id);
   useDetachedRunStore.getState().clearRun(conversationId);
+  try {
+    const { clearTurnHandoffMeta } = await import("@/lib/agent/turn-handoff");
+    clearTurnHandoffMeta(conversationId);
+  } catch {
+    // best-effort — a stale meta only triggers one redundant hydrate
+  }
 
   return { skipped: false, running: false, synced: true, status: status.status };
 }

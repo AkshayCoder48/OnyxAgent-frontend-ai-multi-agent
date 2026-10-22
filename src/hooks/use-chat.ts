@@ -29,6 +29,12 @@ import {
   useExecutionChatValue,
   type ExecutionRecord,
 } from "@/lib/agent/execution-hub";
+import {
+  readTurnHandoffMeta,
+  registerTurnHandoff,
+  pruneFinishedTurnHandoffs,
+  TURN_HANDOFF_NOTE,
+} from "@/lib/agent/turn-handoff";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -629,6 +635,28 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
+      // ── AUTOMATIC CLOSE-HANDOFF REGISTRATION ──────────────────────────
+      // If the app closes while this foreground turn is running, the
+      // pagehide handler in turn-handoff.ts hands the turn to the sandbox
+      // headless runner (sendBeacon agent_start) — "send, close, come back
+      // to finished work" with NO toggle required. The snapshot is pure
+      // in-memory state; pagehide builds the run config from it + the
+      // execution store synchronously.
+      const fgProvider = opts.provider;
+      const fgBase = (fgProvider.baseUrl || "").replace(/\/+$/, "");
+      registerTurnHandoff({
+        executionId: execution.id,
+        conversationId: convId,
+        userId,
+        prompt: opts.userMessage,
+        systemPrompt: opts.systemPrompt ?? "",
+        chatUrl: fgProvider.noPrefix ? fgBase : `${fgBase}/chat/completions`,
+        apiKey: fgProvider.apiKey,
+        model: fgProvider.model,
+        temperature: opts.temperature ?? null,
+        startedAt: Date.now(),
+      });
+
       // Foreground: the fetch lives in the browser page, owned by the hub.
       // It survives route changes/chat switches (nothing aborts it); it ends
       // on completion or explicit Stop. (Browser refresh closes fg turns.)
@@ -839,10 +867,11 @@ export function useChat(options: UseChatOptions = {}) {
   // stops it.
   //
   // A browser refresh kills any in-flight turn mid-stream; settle orphaned
-  // still-streaming assistant rows so the conversation shows an honest
-  // "interrupted" note instead of freezing at the same progress forever.
-  // Skipped while a turn is actively processing (the live execution owns
-  // those rows).
+  // still-streaming assistant rows so the conversation shows an honest note
+  // instead of freezing at the same progress forever — UNLESS the turn was
+  // HANDED OFF to the sandbox on close (turn-handoff.ts): then the runner
+  // owns it, the placeholder settles with a "moved to the sandbox" note,
+  // and the finished work syncs back through the detached-run path.
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     if (!turnId) return;
@@ -852,11 +881,8 @@ export function useChat(options: UseChatOptions = {}) {
       if (!userId) return;
       if (useChatStore.getState().isStreaming) return;
       if (executionHub.getFor(turnId)) return;
-      try {
-        const settledIds = await conversationService.settleInterruptedMessages(turnId);
-        if (settledIds.length > 0) {
-          // Reflect the settled rows in the loaded UI: re-read the
-          // conversation so the note part renders immediately.
+      const refreshRows = async () => {
+        try {
           const refreshed = await conversationService.getMessages(turnId, userId);
           const { conversationMessageToChatMessage } = await import("@/lib/conversation-to-chat");
           const msgs = refreshed.map((row) =>
@@ -878,20 +904,50 @@ export function useChat(options: UseChatOptions = {}) {
                 | undefined,
             }),
           );
-          // Only swap the UI when the user is still viewing this conversation
-          // and no execution started meanwhile.
           if (
             !executionHub.getFor(turnId) &&
             (useConversationStore.getState().currentConversationId ?? null) === turnId
           ) {
             useChatStore.setState({ messages: msgs });
           }
+        } catch {
+          // best-effort — rows refresh on the next load instead
+        }
+      };
+      try {
+        // HANDOFF FIRST: a pending turn-handoff meta means the closing app
+        // moved this turn into the sandbox — it is NOT "interrupted".
+        const meta = readTurnHandoffMeta(turnId);
+        if (meta) {
+          await conversationService.settleInterruptedMessages(turnId, TURN_HANDOFF_NOTE);
+          await refreshRows();
+          const { hydrateHandoffRun, syncDetachedRun } = await import(
+            "@/lib/agent/detached-run"
+          );
+          await hydrateHandoffRun(userId, turnId, meta);
+          // If the run already finished while the user was away this lands
+          // the result immediately; otherwise the strip keeps polling.
+          const res = await syncDetachedRun(userId, turnId);
+          if (res.error) {
+            console.warn("[useChat] handoff sync failed:", res.error);
+          }
+          return;
+        }
+        const settledIds = await conversationService.settleInterruptedMessages(turnId);
+        if (settledIds.length > 0) {
+          await refreshRows();
         }
       } catch {
         // best-effort — the rows settle on the next load instead
       }
     })();
   }, [currentConversationIdFromStore, conversationId]);
+
+  // Prune spent handoff snapshots (drops the provider key from memory as
+  // soon as the turn it belonged to is no longer running).
+  useEffect(() => {
+    if (!isProcessing) pruneFinishedTurnHandoffs();
+  }, [isProcessing]);
 
   /**
    * Local-only todo action controls (unchanged).

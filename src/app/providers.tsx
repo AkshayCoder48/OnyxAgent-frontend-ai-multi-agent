@@ -9,6 +9,7 @@ import { TooltipProvider } from "@/components/ui";
 import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
 import { applyPersistedBrand } from "@/lib/brand";
 import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
+import { TurnHandoffController } from "@/lib/agent/turn-handoff";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -85,6 +86,12 @@ export function Providers({ children }: ProvidersProps) {
       <ThemeProvider>
         <ColorSchemeInitializer />
         <ExperimentalUiSync />
+        {/* AUTOMATIC CLOSE-HANDOFF — mounts STRICTLY ABOVE SandboxLifecycleSync:
+            its pagehide listener must run FIRST so a handed-off turn's
+            sandbox is flagged detached-active before the auto-pause handler
+            scans. "Send, close the app, come back to finished work" with no
+            toggle required. */}
+        <TurnHandoffController />
         {/* E2B persistency: pre-warms the lifecycle caches + auto-pauses
             workspace sandboxes (full state: filesystem + RAM) on app exit;
             the next open auto-resumes them via Sandbox.connect. */}

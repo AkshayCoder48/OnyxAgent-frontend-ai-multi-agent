@@ -887,8 +887,10 @@ function ToolDisplayToggle() {
  *  in-browser loop: press send, close the app, come back later to the
  *  finished tool outputs + reasoning. The run executes inside the E2B
  *  sandbox (up to 24h) and a status strip above the input tracks it.
- *  Persisted per browser, default OFF (the normal in-app agent stays the
- *  default experience). */
+ *  Persisted per browser, default OFF — closing the app mid-reply now
+ *  ALWAYS hands the in-flight turn to the sandbox automatically (see
+ *  turn-handoff.ts), so this toggle only forces the whole turn there from
+ *  the start. */
 function DetachedRunToggle() {
   const enabled = useDetachedRunStore((s) => s.detachedMode);
   const setEnabled = useDetachedRunStore((s) => s.setDetachedMode);
@@ -925,7 +927,7 @@ function DetachedRunToggle() {
           Sandbox runs
         </span>
         <span className="text-foreground/50 block text-[11px] leading-tight">
-          Run the agent inside the E2B sandbox — send, close the app, return to finished work (24h).
+          Whole turns run in the E2B sandbox — no streaming, then full results (24h). Closing the app mid-reply hands the turn over automatically either way.
         </span>
       </span>
     </button>

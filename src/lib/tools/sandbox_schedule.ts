@@ -211,6 +211,12 @@ registerTool(
       };
     }
 
+    // 4) Extend the sandbox window to the full 24h NOW — scheduled tasks
+    //    must keep firing while the app is closed, and the pagehide
+    //    auto-pause is skipped for cron sandboxes (server-side cron guard).
+    //    The keepalive action resets the E2B timeout countdown explicitly.
+    void client.keepalive();
+
     bumpWorkspaceVersion();
     return {
       ok: true,
@@ -220,7 +226,7 @@ registerTool(
       cron_line: buildCronLine(cronExpression, scriptName),
       daemon: verdict.daemon,
       log: CRON_LOG,
-      note: "Scheduled tasks run while the sandbox is alive (up to 24h; they resume with the sandbox). Check results with list_scheduled_tasks.",
+      note: "Scheduled tasks run while the sandbox is alive (up to 24h; the sandbox is never auto-paused while schedules are installed — it pauses safely at the 24h limit and auto-resumes on your next visit). Check results with list_scheduled_tasks.",
     };
   },
   true, // requires_approval — modifies the sandbox's system scheduler
