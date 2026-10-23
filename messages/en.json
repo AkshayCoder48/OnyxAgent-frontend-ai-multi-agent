@@ -33,6 +33,7 @@
   "nav": {
     "dashboard": "Dashboard",
     "chat": "Chat",
+    "business": "Business",
     "settings": "Settings",
     "knowledge": "Knowledge",
     "knowledgeBase": "Knowledge Base",

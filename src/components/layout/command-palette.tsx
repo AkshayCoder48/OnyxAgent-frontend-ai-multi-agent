@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Command } from "cmdk";
 import {
+  Briefcase,
   ArrowRight,
   BookOpen,
   Database,
@@ -134,6 +135,7 @@ export function CommandPalette() {
             onSelect={() => go(ROUTES.DASHBOARD)}
           />
           <PaletteItem icon={MessageSquare} label={t("chat")} onSelect={() => go(ROUTES.CHAT)} />
+          <PaletteItem icon={Briefcase} label={t("business")} onSelect={() => go(ROUTES.BUSINESS)} />
           <PaletteItem icon={UserCircle} label={t("profile")} onSelect={() => go(ROUTES.PROFILE)} />
           <PaletteItem icon={Settings} label={t("settings")} onSelect={() => go(ROUTES.SETTINGS)} />
           <PaletteItem

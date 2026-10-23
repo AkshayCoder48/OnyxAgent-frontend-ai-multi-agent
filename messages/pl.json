@@ -33,6 +33,7 @@
   "nav": {
     "dashboard": "Panel",
     "chat": "Czat",
+    "business": "Biznes",
     "settings": "Ustawienia",
     "knowledge": "Wiedza",
     "knowledgeBase": "Baza wiedzy",

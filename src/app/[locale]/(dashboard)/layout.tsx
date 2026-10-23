@@ -16,7 +16,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <main
           id="main"
           tabIndex={-1}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         >
           {children}
         </main>
