@@ -1,0 +1,13 @@
+# Netlify build configuration for OnyxAgent.
+#
+# NOTE: This file intentionally contains ONLY build-environment settings.
+# Build command, publish directory, and the Next.js runtime plugin remain
+# managed by the Netlify UI (currently: `bun run build` → `.next`).
+#
+# Secrets scanning: POLLINATIONS_CLIENT_ID is a *publishable* Pollinations
+# App Key (pk_…), i.e. a public OAuth client identifier — not a secret.
+# Its value legitimately appears in the Turbopack build cache during
+# `next build`, so we omit it from Netlify's secrets scan.
+
+[build.environment]
+  SECRETS_SCAN_OMIT_KEYS = "POLLINATIONS_CLIENT_ID"
