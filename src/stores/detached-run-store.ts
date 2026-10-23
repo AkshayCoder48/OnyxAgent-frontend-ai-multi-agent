@@ -42,33 +42,47 @@ interface DetachedRunState {
  *
  * Durable state of record is the Dexie `detached_runs` table; this store is
  * the fast, subscribeable mirror (persisted to localStorage for re-entry).
+ *
+ * SINGLETON GUARD (same fix as the auth store): the pagehide turn-handoff
+ * (app-level chunk) writes the run view HERE while the DetachedRunStrip
+ * (route chunk) subscribes — two module copies would mean the strip never
+ * sees the handed-off run until a reload. One instance on globalThis.
  */
-export const useDetachedRunStore = create<DetachedRunState>()(
-  persist(
-    (set) => ({
-      detachedMode: false,
-      setDetachedMode: (enabled) => set({ detachedMode: enabled }),
-      toggleDetachedMode: () => set((s) => ({ detachedMode: !s.detachedMode })),
-      runs: {},
-      setRun: (conversationId, run) =>
-        set((s) => ({ runs: { ...s.runs, [conversationId]: run } })),
-      patchRun: (conversationId, patch) =>
-        set((s) => {
-          const cur = s.runs[conversationId];
-          if (!cur) return s;
-          return { runs: { ...s.runs, [conversationId]: { ...cur, ...patch } } };
-        }),
-      clearRun: (conversationId) =>
-        set((s) => {
-          if (!s.runs[conversationId]) return s;
-          const runs = { ...s.runs };
-          delete runs[conversationId];
-          return { runs };
-        }),
-    }),
-    {
-      name: "onyx:detached-run-store",
-      partialize: (s) => ({ detachedMode: s.detachedMode, runs: s.runs }),
-    },
-  ),
-);
+function createDetachedRunStore() {
+  return create<DetachedRunState>()(
+    persist(
+      (set) => ({
+        detachedMode: false,
+        setDetachedMode: (enabled) => set({ detachedMode: enabled }),
+        toggleDetachedMode: () => set((s) => ({ detachedMode: !s.detachedMode })),
+        runs: {},
+        setRun: (conversationId, run) =>
+          set((s) => ({ runs: { ...s.runs, [conversationId]: run } })),
+        patchRun: (conversationId, patch) =>
+          set((s) => {
+            const cur = s.runs[conversationId];
+            if (!cur) return s;
+            return { runs: { ...s.runs, [conversationId]: { ...cur, ...patch } } };
+          }),
+        clearRun: (conversationId) =>
+          set((s) => {
+            if (!s.runs[conversationId]) return s;
+            const runs = { ...s.runs };
+            delete runs[conversationId];
+            return { runs };
+          }),
+      }),
+      {
+        name: "onyx:detached-run-store",
+        partialize: (s) => ({ detachedMode: s.detachedMode, runs: s.runs }),
+      },
+    ),
+  );
+}
+
+export const useDetachedRunStore: ReturnType<typeof createDetachedRunStore> = (() => {
+  const scope = globalThis as typeof globalThis & {
+    __onyxDetachedRunStoreSingleton?: ReturnType<typeof createDetachedRunStore>;
+  };
+  return (scope.__onyxDetachedRunStoreSingleton ??= createDetachedRunStore());
+})();

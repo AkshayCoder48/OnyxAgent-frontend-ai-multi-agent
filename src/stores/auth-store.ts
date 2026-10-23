@@ -185,7 +185,21 @@ function makeDefaultUser(): User {
   };
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+/**
+ * SINGLETON GUARD (the "E2B key never saves" / "everything auto-cancels on
+ * refresh" fix): the bundler (Turbopack dev per-route chunks — and any
+ * production chunk-graph edge case) can load MORE THAN ONE copy of this
+ * module into the same page. The second copy's store never sees init() —
+ * its user stays the transient "local-user" with authResolved=false — and
+ * every useAuthScope()-gated write on that route then silently passed a
+ * null userId (Settings → E2B key save died with Dexie "Invalid key
+ * provided", so the key NEVER persisted, so the pagehide turn-handoff
+ * prewarm read no key and the close-handoff never fired: every running
+ * turn died on refresh as "interrupted"). Anchoring the store instance on
+ * globalThis makes every module copy share ONE store.
+ */
+function createAuthStore() {
+  return create<AuthState>((set) => ({
   // Non-auth mode: set the default user synchronously so components
   // that depend on user.id (like the file sidebar) work immediately
   // without waiting for the async init() to complete.
@@ -419,4 +433,14 @@ export const useAuthStore = create<AuthState>((set) => ({
       authResolved: true,
     });
   },
-}));
+  }));
+}
+
+/** The ONE auth store, shared across every module copy (see the singleton
+ *  guard note above). */
+export const useAuthStore: ReturnType<typeof createAuthStore> = (() => {
+  const scope = globalThis as typeof globalThis & {
+    __onyxAuthStoreSingleton?: ReturnType<typeof createAuthStore>;
+  };
+  return (scope.__onyxAuthStoreSingleton ??= createAuthStore());
+})();

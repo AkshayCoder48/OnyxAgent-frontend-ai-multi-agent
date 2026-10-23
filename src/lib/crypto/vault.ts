@@ -28,8 +28,19 @@ const SALT_BYTES = 16;
 const IV_BYTES = 12; // AES-GCM standard nonce length.
 const CHECK_STRING = "vault-ok:v1";
 
-// In-memory vault holder. Cleared by `setVault(null)` on logout.
-let _vaultKey: CryptoKey | null = null;
+// In-memory vault holder. Anchored on globalThis (module-instance
+// singleton): the bundler can load MORE THAN ONE copy of this module (route
+// chunks), and a second copy's null key made every vaultEncrypt on that
+// route throw "Vault is locked" even though the app instance had unlocked
+// it (the "E2B key never saves" bug). One holder on globalThis shares the
+// unlocked key across every copy. Cleared by `setVault(null)` on logout.
+interface VaultHolder {
+  key: CryptoKey | null;
+}
+const _vaultScope = globalThis as typeof globalThis & {
+  __onyxVaultHolder?: VaultHolder;
+};
+const _vault: VaultHolder = (_vaultScope.__onyxVaultHolder ??= { key: null });
 
 // ---------------------------------------------------------------------------
 // Unicode-safe base64 helpers.
@@ -182,7 +193,7 @@ export async function createVault(passphrase: string): Promise<VaultCreated> {
   const salt = randomBytes(SALT_BYTES);
   const key = await deriveVaultKey(passphrase, salt);
   const check = await encryptString(key, CHECK_STRING);
-  _vaultKey = key;
+  _vault.key = key;
   await persistToSession(key);
   return { salt: bytesToBase64(salt), check, key };
 }
@@ -209,7 +220,7 @@ export async function unlockVault(
   if (decrypted !== CHECK_STRING) {
     throw new Error("Wrong passphrase");
   }
-  _vaultKey = key;
+  _vault.key = key;
   await persistToSession(key);
   return key;
 }
@@ -218,7 +229,7 @@ const SESSION_KEY = "__vault_key_jwk__";
 
 /** Set / clear the in-memory vault key. `null` wipes it (logout). */
 export function setVault(v: CryptoKey | null): void {
-  _vaultKey = v;
+  _vault.key = v;
   if (v === null) {
     try {
       sessionStorage.removeItem(SESSION_KEY);
@@ -231,12 +242,12 @@ export function setVault(v: CryptoKey | null): void {
 
 /** Read the in-memory vault key. Returns null if locked. */
 export function getVault(): CryptoKey | null {
-  return _vaultKey;
+  return _vault.key;
 }
 
 /** True iff a vault key is resident in memory. */
 export function isVaultUnlocked(): boolean {
-  return _vaultKey !== null;
+  return _vault.key !== null;
 }
 
 /**
@@ -261,7 +272,7 @@ async function persistToSession(key: CryptoKey): Promise<void> {
  * (same tab — fast), then localStorage (persistent across tabs/reloads).
  */
 export async function restoreVaultFromSession(): Promise<CryptoKey | null> {
-  if (_vaultKey) return _vaultKey;
+  if (_vault.key) return _vault.key;
   try {
     let raw = sessionStorage.getItem(SESSION_KEY);
     if (!raw) {
@@ -277,7 +288,7 @@ export async function restoreVaultFromSession(): Promise<CryptoKey | null> {
       true,
       ["encrypt", "decrypt"],
     );
-    _vaultKey = key;
+    _vault.key = key;
     return key;
   } catch {
     try {
@@ -294,10 +305,10 @@ export async function restoreVaultFromSession(): Promise<CryptoKey | null> {
  * consistent across the codebase.
  */
 export function requireVault(): CryptoKey {
-  if (!_vaultKey) {
+  if (!_vault.key) {
     throw new Error("Vault is locked — please unlock with your passphrase");
   }
-  return _vaultKey;
+  return _vault.key;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,9 +316,14 @@ export function requireVault(): CryptoKey {
 // ---------------------------------------------------------------------------
 
 export async function vaultEncrypt(plaintext: string): Promise<string> {
+  // SELF-HEALING UNLOCK (the dual-module-instance hardening): when this
+  // copy's holder is empty (a fresh route chunk that missed the app-level
+  // unlock), restore from sessionStorage/localStorage before failing.
+  if (!_vault.key) await restoreVaultFromSession().catch(() => null);
   return encryptString(requireVault(), plaintext);
 }
 
 export async function vaultDecrypt(ciphertextB64: string): Promise<string> {
+  if (!_vault.key) await restoreVaultFromSession().catch(() => null);
   return decryptString(requireVault(), ciphertextB64);
 }

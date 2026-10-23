@@ -10,9 +10,30 @@ import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
 import { applyPersistedBrand } from "@/lib/brand";
 import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
 import { TurnHandoffController } from "@/lib/agent/turn-handoff";
+import { useAuthStore } from "@/stores/auth-store";
 
 interface ProvidersProps {
   children: ReactNode;
+}
+
+/**
+ * AUTH BOOTSTRAP ON EVERY PAGE (the "key saved under the wrong user" fix).
+ * The auth store's init() — which resolves the REAL user id (last-user-id →
+ * Dexie users row) and unlocks the vault — used to run only where a useAuth
+ * consumer happened to mount (chat page, some settings sections). A direct
+ * load / refresh of Settings → E2B mounted none of them, so the store kept
+ * the transient "local-user" with authResolved=false: the saved E2B key
+ * landed on a phantom user row (or died on Dexie "Invalid key provided"),
+ * the handoff prewarm then read the wrong user — no key → no pagehide
+ * handoff → every running turn auto-cancelled on refresh. Mounting init()
+ * here (the root providers wrap EVERY route) resolves the user everywhere
+ * before any save can happen.
+ */
+function AuthInitializer() {
+  useEffect(() => {
+    void useAuthStore.getState().init();
+  }, []);
+  return null;
 }
 
 /** Apply saved color scheme on app mount so it persists across refreshes. */
@@ -86,6 +107,8 @@ export function Providers({ children }: ProvidersProps) {
       <ThemeProvider>
         <ColorSchemeInitializer />
         <ExperimentalUiSync />
+        {/* Auth bootstrap FIRST (see AuthInitializer note above). */}
+        <AuthInitializer />
         {/* AUTOMATIC CLOSE-HANDOFF — mounts STRICTLY ABOVE SandboxLifecycleSync:
             its pagehide listener must run FIRST so a handed-off turn's
             sandbox is flagged detached-active before the auto-pause handler

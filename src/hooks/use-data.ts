@@ -82,7 +82,15 @@ export function useSettings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: detailKey }),
   });
   const setE2BKeyM = useMutation({
-    mutationFn: async (key: string | null) => settingsService.setSandboxKey(userId!, key),
+    mutationFn: async (key: string | null) => {
+      // RESILIENT USER RESOLUTION (the "E2B key never saves" fix): the
+      // closure userId can be stale (auth unresolved at the last render) —
+      // read the live store as a fallback before giving up.
+      const effectiveUserId =
+        userId ?? useAuthStore.getState().user?.id ?? undefined;
+      if (!effectiveUserId) throw new Error("No user resolved — cannot save the key");
+      return settingsService.setSandboxKey(effectiveUserId, key);
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: detailKey }),
   });
   const setOnyxBaseKeyM = useMutation({

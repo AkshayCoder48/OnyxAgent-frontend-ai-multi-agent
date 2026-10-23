@@ -150,11 +150,16 @@ async function driverUpToDate(client: BrowserSandboxClient): Promise<boolean> {
  *                   up (the driver itself is launched by this script).
  *   boot.log      — human-readable progress lines the client narrates live.
  *
- * Install ladder (first success wins): plain pip → --break-system-packages
- * (PEP 668 externally-managed environments) → --user --break-system-packages
- * (read-only system site-packages) → --user. No `| tail` on the pip calls —
- * a pipe would mask pip's exit code; success is verified with an import
- * probe instead.
+ * Install ladder (first success wins). CRITICAL: pip and the import probe
+ * MUST target the SAME interpreter — on the E2B code-interpreter template
+ * a bare `pip` can install into a different Python than `python3` (the
+ * kernel venv vs the system interpreter), so the install "succeeded" while
+ * `python3 -c "import cloakbrowser"` failed on every ladder attempt (the
+ * recurring browser_startup_failed). `python3 -m pip` is therefore the
+ * PRIMARY resolver — bare pip is only a last resort. No `| tail` on the
+ * pip calls — a pipe would mask pip's exit code; success is verified with
+ * the import probe instead, and probe failures log the actual ImportError
+ * so boot-install.log always says WHY.
  */
 const BOOT_SH_SOURCE = `#!/bin/bash
 # Onyx sandbox browser boot — DETACHED installer + daemon launcher.
@@ -162,9 +167,21 @@ cd "$(dirname "$0")" || exit 1
 
 log() { echo "[boot \$(date +%H:%M:%S)] \$*"; }
 
-# Resolve pip: prefer plain pip, fall back to python3 -m pip (same python).
-PIP="pip"
-command -v pip >/dev/null 2>&1 || PIP="python3 -m pip"
+# Resolve the interpreter FIRST — every pip call AND the probe use it.
+PY="python3"
+command -v python3 >/dev/null 2>&1 || PY="python3.12"
+command -v "\$PY" >/dev/null 2>&1 || PY="python"
+log "interpreter: \$PY (\$(\$PY -V 2>&1)) at \$(command -v \$PY)"
+
+# pip MODULE of THAT interpreter (never a bare pip binary first — it can
+# target a different site-packages than \$PY reads).
+if ! "\$PY" -m pip --version >/dev/null 2>&1; then
+  log "\$PY -m pip unavailable — falling back to pip3/pip"
+  PIP="pip3"
+  command -v pip3 >/dev/null 2>&1 || PIP="pip"
+else
+  PIP="\$PY -m pip"
+fi
 
 # One boot at a time: a still-running earlier boot (e.g. the client timed
 # out waiting and retried) owns this sandbox — let it finish; the client's
@@ -176,24 +193,31 @@ fi
 echo \$\$ > .boot-lock
 
 log "checking the browser runtime…"
-if python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
   log "browser runtime already installed"
 else
   log "installing the browser runtime (first run — can take a few minutes)…"
   ok=0
   for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
-    log "pip install \${flags:-default}: cloakbrowser==0.6.1 playwright"
-    if \$PIP install --quiet \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
-      if python3 -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+    log "\$PIP install \${flags:-default}: cloakbrowser==0.6.1 playwright"
+    if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
+      log "pip exited 0 (\${flags:-default}) — verifying the import…"
+      if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
         ok=1
-        log "browser runtime installed"
+        log "browser runtime installed and importable"
         break
+      else
+        log "import probe FAILED after a successful pip run — interpreter mismatch (see boot-install.log)"
       fi
+    else
+      log "pip run failed (\${flags:-default}) — trying the next variant"
     fi
   done
   if [ "\$ok" != "1" ]; then
     {
-      echo "pip could not install cloakbrowser==0.6.1 + playwright."
+      echo "pip could not install cloakbrowser==0.6.1 + playwright into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
+      echo "---- probe error ----"
+      "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
       echo "---- last 40 lines of boot-install.log ----"
       tail -n 40 boot-install.log 2>/dev/null
     } > .boot-failed
@@ -204,7 +228,7 @@ fi
 
 log "starting the browser driver…"
 rm -f .ready
-nohup python3 driver.py > driver.log 2>&1 &
+nohup "\$PY" driver.py > driver.log 2>&1 &
 log "driver launched (pid \$!)"
 `;
 

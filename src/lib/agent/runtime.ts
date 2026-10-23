@@ -178,6 +178,11 @@ export interface AgentTurnResult {
 const MAX_ROUNDS = 50;
 const ROUND_BUDGET_EXTEND_BY = 50;
 const ROUND_HARD_CEILING = 1000;
+/** STREAM IDLE TIMEOUT: no SSE chunk for this long → the read is abandoned
+ *  as a transient transport error (see parseSSEStream). Generous enough for
+ *  slow-thinking providers that pause before the first token; short enough
+ *  that a dead gateway can't stick the UI "Writing" for minutes on end. */
+const STREAM_IDLE_TIMEOUT_MS = 120_000;
 // RATE-LIMIT WAIT LADDER (Persistent Execution PRD §8): 429/529 are
 // transient provider throttling — the turn WAITS (bounded, 5s→120s
 // exponential) and resumes the same round instead of dying mid-task. A
@@ -437,6 +442,35 @@ export async function* parseSSEStream(
    *  FIRST few are logged in detail — a storm of them still counts. */
   let malformed = 0;
 
+  // STREAM IDLE TIMEOUT (the "completely sticks for 1-2 minutes" fix): a
+  // gateway/proxy that accepts the request and then goes SILENT used to
+  // hang reader.read() FOREVER — the UI streamed, slowed, stuck with a
+  // live "Writing" indicator and nothing else happened until the user
+  // reloaded (losing the turn). Now: no chunk for STREAM_IDLE_TIMEOUT_MS
+  // → cancel the body + throw an "idle timeout" transport error, which
+  // the transient-retry classifier already routes into the bounded
+  // rewind-and-retry ladder (the round re-streams; content never
+  // duplicates).
+  const readWithIdleTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `idle timeout — the provider stream sent nothing for ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s`,
+              ),
+            ),
+          STREAM_IDLE_TIMEOUT_MS,
+        );
+      });
+      return await Promise.race([reader.read(), timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
   /** Parse ONE complete SSE block → zero or more parsed JSON payloads. */
   const parseBlock = (rawEvent: string): Array<Record<string, unknown>> => {
     const out: Array<Record<string, unknown>> = [];
@@ -476,7 +510,21 @@ export async function* parseSSEStream(
   try {
     while (true) {
       if (signal?.aborted) return;
-      const { done, value } = await reader.read();
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await readWithIdleTimeout();
+      } catch (idleErr) {
+        // Abandon the dead body (cancels the download; releaseLock alone
+        // cannot run with a read pending) — the idle-timeout error then
+        // flows into the caller's transient-retry ladder.
+        try {
+          await reader.cancel();
+        } catch {
+          // already errored/closed — nothing to cancel
+        }
+        throw idleErr;
+      }
+      const { done, value } = readResult;
       if (done) break;
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       // SSE events are separated by a blank line.
@@ -961,6 +1009,15 @@ async function streamRound(
     roundNumber?: number;
     /** Shared reasoning-replay decision (see ReasoningReplayState). */
     reasoningReplay?: ReasoningReplayState;
+    /** STREAMING CHECKPOINT HOOK (the "partial content vanishes on refresh"
+     *  fix): called as the round's text/thinking/reasoning accumulates so
+     *  the caller can persist a throttled is_streaming checkpoint — a
+     *  refresh mid-stream then always finds a settle-able assistant row. */
+    onStreamProgress?: (state: {
+      content: string;
+      thinking: string;
+      reasoning: string;
+    }) => void;
   },
 ): Promise<RoundResult> {
   const {
@@ -973,6 +1030,7 @@ async function streamRound(
     signal,
     roundNumber,
     reasoningReplay,
+    onStreamProgress,
   } = opts;
 
   // Target URL — strip trailing slash. If the provider has `no_prefix` set,
@@ -1370,8 +1428,10 @@ async function streamRound(
       if (se && !streamError) streamError = se; // remember; keep streaming in case content still arrives
       const delta = extractDelta(chunk);
       if (delta) {
+        let progressDirty = false;
         if (delta.text) {
           content += delta.text;
+          progressDirty = true;
           if (fenceMode) {
             // Inside a ```tool_call block — swallow the text; the block is
             // parsed into tool calls after the stream ends.
@@ -1476,6 +1536,7 @@ async function streamRound(
         }
         if (delta.thinking) {
           thinking += delta.thinking;
+          progressDirty = true;
           emit({
             type: "thinking_delta",
             data: { index: roundIndex, content: delta.thinking },
@@ -1484,11 +1545,22 @@ async function streamRound(
         }
         if (delta.reasoning) {
           reasoning += delta.reasoning;
+          progressDirty = true;
           emit({
             type: "reasoning_delta",
             data: { index: roundIndex, content: delta.reasoning },
             timestamp: nowISO(),
           });
+        }
+        // STREAMING CHECKPOINT HOOK: report the accumulated state so the
+        // caller's throttled saver can persist an is_streaming row (the
+        // "partial content vanishes on refresh" fix — see the runtime loop).
+        if (progressDirty && onStreamProgress) {
+          try {
+            onStreamProgress({ content, thinking, reasoning });
+          } catch {
+            // non-fatal — checkpointing must never break the stream
+          }
         }
         if (delta.toolCalls) {
           // Capture text that came before the first tool call. This lets
@@ -2642,6 +2714,49 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
    *  opts.provider.model). */
   let lastServedModel = opts.provider.model;
 
+  // ── STREAMING CHECKPOINT (the "partial content vanishes on refresh" fix) ──
+  // A pure text stream used to persist NOTHING until the final save — a
+  // refresh mid-stream left no assistant row in Dexie, so the orphaned-settle
+  // pass on reload had nothing to settle and the partial content silently
+  // vanished ("everything auto cancels / gets deleted after refreshing").
+  // This throttled saver checkpoints the accumulating content as an
+  // is_streaming row every 2.5s while the stream is live; the reload then
+  // settles it with the handoff/interrupted note and the work survives.
+  let lastStreamCheckpointAt = 0;
+  let streamCheckpointChain: Promise<void> = Promise.resolve();
+  const onStreamProgress = (
+    state: { content: string; thinking: string; reasoning: string },
+  ): void => {
+    if (!turnActive || !conversationId) return;
+    const now = Date.now();
+    if (now - lastStreamCheckpointAt < 2_500) return;
+    lastStreamCheckpointAt = now;
+    // Serialize checkpoints (each waits for the previous) — a slow write
+    // never stacks; the newest state always wins.
+    streamCheckpointChain = streamCheckpointChain
+      .then(async () => {
+        if (!turnActive) return;
+        try {
+          await conversationService.saveAgentCheckpoint(
+            conversationId,
+            opts.userId,
+            assistantMessageId,
+            {
+              content: state.content,
+              thinking: state.thinking || undefined,
+              reasoning: state.reasoning || undefined,
+              toolCalls: allToolCalls,
+              modelName: lastServedModel,
+              isStreaming: true,
+            },
+          );
+        } catch {
+          // non-fatal — the next tick or the final save retries
+        }
+      })
+      .catch(() => undefined);
+  };
+
   while (round < ROUND_HARD_CEILING) {
     round += 1;
     roundStartTimes[round] = Date.now();
@@ -2725,6 +2840,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         signal,
         roundNumber: round,
         reasoningReplay,
+        onStreamProgress,
       });
       // Router health: a completed round is a success — reset the error
       // streak + record the round latency (the routing tie-break).
@@ -2947,6 +3063,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             signal,
             roundNumber: round,
             reasoningReplay,
+            onStreamProgress,
           });
           if (routerCandidates && previousRouterKey) {
             reportResult(previousRouterKey, {
