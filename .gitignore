@@ -40,7 +40,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-local-*
+# root-level local-* scratch files only (a bare "local-*" also swallowed
+# src/lib/tasks/local-driver.ts — the background-task local orchestrator)
+/local-*
 .claude
 .z-ai-config
 *.log
