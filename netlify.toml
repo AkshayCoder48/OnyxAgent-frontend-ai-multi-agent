@@ -5,6 +5,11 @@
 #   - explicit build command (plain `next build`, no extra steps)
 #   - pinned Node.js LTS (Next.js 16 requires Node >= 20.9)
 #   - the official Next.js Runtime plugin (managed by Netlify)
+#
+# Secrets scanning: POLLINATIONS_CLIENT_ID is a *publishable* Pollinations
+# App Key (pk_…), i.e. a public OAuth client identifier — not a secret.
+# Its value legitimately appears in the Turbopack build cache during
+# `next build`, so we omit it from Netlify's secrets scan.
 
 [build]
   command = "npm run build"
@@ -13,6 +18,7 @@
 [build.environment]
   NODE_VERSION = "22"
   NPM_FLAGS = "--no-audit --no-fund"
+  SECRETS_SCAN_OMIT_KEYS = "POLLINATIONS_CLIENT_ID"
 
 # Netlify Next.js Runtime — required to serve the App Router, server routes,
 # middleware, and ISR on Netlify. Kept unversioned so Netlify manages updates.
