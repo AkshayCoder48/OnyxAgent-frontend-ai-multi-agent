@@ -40,7 +40,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-/** Cloud key shapes: tr_trigger_… (environment) / tr_pat_… (personal access). */
+/** Cloud key shapes: tr_prod_sk_/tr_dev_sk_… (environment secret keys),
+ * tr_trigger_… (environment), tr_pat_… (personal access). */
 const CLOUD_KEY_RE = /^tr_[A-Za-z0-9_\-]{16,}$/;
 /** Trigger.dev task id (slug) shape. */
 const TASK_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
@@ -155,7 +156,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
   if (!apiKey || !CLOUD_KEY_RE.test(apiKey)) {
     return bad(
-      "apiKey must be a trigger.dev key — tr_trigger_… (environment) or tr_pat_… (personal access), from cloud.trigger.dev",
+      "apiKey must be a trigger.dev key — tr_prod_sk_… / tr_dev_sk_… (environment secret keys) or tr_pat_… (personal access), from cloud.trigger.dev → API keys",
     );
   }
   const taskSlug = normalizeTaskSlug(body.taskSlug);

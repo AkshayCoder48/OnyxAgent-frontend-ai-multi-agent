@@ -6,10 +6,11 @@
 // deployed worker protocol through the public cloud REST API —
 // https://api.trigger.dev — with NO self-hosting:
 //
-//   · verifyCloudKey     GET  /api/v3/projects           (connect + re-test)
-//   · triggerCloudTaskRun POST /api/v1/runs               (kick agent-run)
+//   · verifyCloudKey     GET  /api/v1/projects            (PAT snapshot)
+//                          GET  /api/v1/runs?perPage=1    (secret-key probe)
+//   · triggerCloudTaskRun POST /api/v1/tasks/:id/trigger  (kick agent-run)
 //   · fetchCloudRunState GET  /api/v3/runs/:id            (self-heal)
-//   · cancelCloudRunById POST /api/v3/runs/:id/cancel     (cancel)
+//   · cancelCloudRunById POST /api/v2/runs/:id/cancel     (cancel)
 //
 // CREDENTIAL DISCIPLINE (mirrors keyring.ts):
 //   · the API key + minted WORKER_TOKEN are sealed with AES-256-GCM into
@@ -132,7 +133,7 @@ export function maskSecret(key: string): string {
 // Config store — TaskCloudConfig singleton + in-memory cache.
 // ---------------------------------------------------------------------------
 
-/** Environment of a trigger.dev project (from GET /api/v3/projects). */
+/** Environment of a trigger.dev project (from GET /api/v1/projects — PAT). */
 export interface CloudEnvironmentInfo {
   id: string;
   name: string;
@@ -149,8 +150,9 @@ export interface CloudProjectInfo {
   environments: CloudEnvironmentInfo[];
 }
 
-/** Verification snapshot. `partial` = environment key (can trigger runs but
- * cannot list projects through the management API). */
+/** Verification snapshot. `partial` = project secret key (tr_prod_sk_… /
+ * tr_dev_sk_… / tr_trigger_… — can trigger + read runs but cannot list
+ * projects through the PAT-only management API). */
 export interface CloudAccountSnapshot {
   partial: boolean;
   note?: string;
@@ -460,14 +462,17 @@ export type VerifyCloudKeyResult =
   | { ok: false; status: number; error: string };
 
 /**
- * Verify a key against api.trigger.dev (GET /api/v1/projects — the platform
- * listing used by the v3 management SDK; clean JSON auth errors).
+ * Verify a key against api.trigger.dev.
  *
- * Cascade: environment keys (tr_trigger_…) are PAT-only-rejected on the
- * projects listing while still being able to trigger runs — so for those the
- * key is validated against GET /api/v3/runs/:id instead (auth runs before
- * the run lookup, so anything other than 401/403 proves the key is live) and
- * accepted with a `partial` snapshot.
+ * Cascade (empirically validated against the live cloud API):
+ *   1. GET /api/v1/projects — the platform listing used by the management
+ *      SDK. PAT-only: project secret keys (tr_prod_sk_… / tr_dev_sk_… /
+ *      tr_trigger_…) are answered with 401 "Invalid or Missing PAT".
+ *      When it succeeds the key gets a FULL snapshot (projects/orgs/envs).
+ *   2. Secret keys fall through to GET /api/v1/runs?perPage=1 — the runs
+ *      listing every environment secret key CAN read (401 = the key itself
+ *      is bad, 403 = valid but too restricted to orchestrate with, 200 =
+ *      live). Accepted with a `partial` snapshot.
  */
 export async function verifyCloudKey(apiKey: string): Promise<VerifyCloudKeyResult> {
   try {
@@ -500,41 +505,40 @@ export async function verifyCloudKey(apiKey: string): Promise<VerifyCloudKeyResu
     return { ok: true, account: { partial: false, projects } };
   } catch (err) {
     if (err instanceof CloudApiError && (err.status === 401 || err.status === 403)) {
-      if (apiKey.startsWith("tr_trigger_")) {
-        // Environment keys cannot list projects — validate the KEY itself
-        // against a run read (auth precedes the lookup: a 401/403 means the
-        // key is bad; a 404 means it authenticated fine).
-        try {
-          await cloudRequest(apiKey, "/api/v3/runs/000000000000000000000000");
-        } catch (probeErr) {
-          if (
-            probeErr instanceof CloudApiError &&
-            (probeErr.status === 401 || probeErr.status === 403)
-          ) {
-            return {
-              ok: false,
-              status: probeErr.status,
-              error:
-                "api.trigger.dev rejected the key — check that it is valid, not expired, and belongs to your project's environment.",
-            };
-          }
-          // 404 / anything else — the key authenticated; accept as partial.
-        }
+      // Secret keys (tr_prod_sk_ / tr_dev_sk_ / tr_trigger_ / legacy tr_…)
+      // cannot list projects — the listing is PAT-only. Validate the KEY
+      // itself against the runs listing every environment key can read:
+      //   401 → the key is invalid/expired · 403 → too restricted ·
+      //   200 → live, accept as partial.
+      try {
+        await cloudRequest(apiKey, "/api/v1/runs?perPage=1");
         return {
           ok: true,
           account: {
             partial: true,
-            note: "Environment key — it can trigger runs, but project details are not visible through the management API.",
+            note: "Secret key verified — it can trigger and read runs. Project details are only visible to personal access tokens, so run links default to the dashboard root.",
             projects: [],
           },
         };
+      } catch (probeErr) {
+        if (probeErr instanceof CloudApiError && probeErr.status === 401) {
+          return {
+            ok: false,
+            status: 401,
+            error:
+              "api.trigger.dev rejected the key — check that it is valid, not expired, and copied in full from cloud.trigger.dev (API keys page).",
+          };
+        }
+        if (probeErr instanceof CloudApiError && probeErr.status === 403) {
+          return {
+            ok: false,
+            status: 403,
+            error:
+              "The key authenticated but lacks the access this app needs — use a key with the Operator or No-restrictions preset (cloud.trigger.dev → API keys).",
+          };
+        }
+        throw probeErr;
       }
-      return {
-        ok: false,
-        status: err.status,
-        error:
-          "api.trigger.dev rejected the key — check that it is valid, not expired, and has access to your projects.",
-      };
     }
     if (err instanceof CloudApiError && err.status === 429) {
       return { ok: false, status: 429, error: "Rate limited by api.trigger.dev — try again in a moment." };
@@ -543,30 +547,21 @@ export async function verifyCloudKey(apiKey: string): Promise<VerifyCloudKeyResu
   }
 }
 
-/** Trigger a task run on the cloud (POST /api/v1/runs — the same endpoint
- * the v3 SDK's tasks.trigger uses) → the cloud run id. */
+/** Trigger a task run on the cloud (POST /api/v1/tasks/:id/trigger — the
+ * documented trigger endpoint; returns { id, isCached }) → the cloud run id.
+ * NOTE: the cloud accepts ANY task identifier here — an undeployed task
+ * simply sits in PENDING_VERSION, so a 200 is not proof the worker is live
+ * (the setup checklist covers deploying it). */
 export async function triggerCloudTaskRun(
   config: Pick<CloudConfig, "apiKey" | "taskSlug">,
   payload: unknown,
 ): Promise<string> {
-  let run: unknown;
-  try {
-    run = await cloudRequest(config.apiKey, "/api/v1/runs", {
-      method: "POST",
-      body: { task: config.taskSlug, payload },
-    });
-  } catch (err) {
-    // Their gateway answers invalid keys on this endpoint with an opaque
-    // 405 "Unexpected Server Error" — translate to something actionable.
-    if (err instanceof CloudApiError && err.status === 405) {
-      throw new CloudApiError(
-        err.status,
-        "api.trigger.dev rejected the trigger request — check that the key is valid and the worker task is deployed",
-      );
-    }
-    throw err;
-  }
-  const id = field((run as { id?: unknown })?.id);
+  const run = (await cloudRequest(
+    config.apiKey,
+    `/api/v1/tasks/${encodeURIComponent(config.taskSlug)}/trigger`,
+    { method: "POST", body: { payload } },
+  )) as { id?: unknown };
+  const id = field(run?.id);
   if (!id) throw new CloudApiError(0, "api.trigger.dev returned no run id");
   return id;
 }
@@ -590,26 +585,40 @@ export async function fetchCloudRunState(
     return null;
   }
   if (!run || typeof run !== "object") return null;
-  const raw = String(
-    (run as { status?: unknown }).status ?? "",
-  ).toLowerCase();
-  if (raw === "completed" || raw === "complete") return { status: "completed" };
-  if (raw === "canceled" || raw === "cancelled") return { status: "cancelled" };
-  if (raw === "failed") return { status: "failed" };
-  if (raw === "timed_out" || raw === "timeout") {
+  const r = run as {
+    status?: unknown;
+    isFailed?: unknown;
+    isCancelled?: unknown;
+    isSuccess?: unknown;
+  };
+  const raw = String(r.status ?? "").toLowerCase();
+  // isCancelled outranks isFailed — the cloud marks CANCELED runs with BOTH
+  // flags true (verified live), and "cancelled" is the honest user-facing
+  // outcome for a deliberate cancel.
+  if (r.isCancelled === true || raw === "canceled" || raw === "cancelled") {
+    return { status: "cancelled" };
+  }
+  if (r.isSuccess === true || raw === "completed" || raw === "complete" || raw === "success") {
+    return { status: "completed" };
+  }
+  if (r.isFailed === true || raw === "failed") return { status: "failed" };
+  if (raw === "timed_out" || raw === "timeout" || raw === "expired") {
     return { status: "failed", error: "the run timed out on Trigger.dev Cloud" };
   }
+  // QUEUED / EXECUTING / WAITING / DELAYED / PENDING_VERSION /
+  // WAITING_FOR_DEPLOY / CANCELLING … — still in flight.
   return { status: "live" };
 }
 
-/** Cancel a cloud run (POST /api/v3/runs/:id/cancel). 404/409 are fine —
- * the run already reached a terminal state. Best-effort by contract. */
+/** Cancel a cloud run (POST /api/v2/runs/:id/cancel — the documented cancel
+ * endpoint; 200 → { id }). 404/409 are fine — the run already reached a
+ * terminal state. Best-effort by contract. */
 export async function cancelCloudRunById(
   config: Pick<CloudConfig, "apiKey">,
   cloudRunId: string,
 ): Promise<void> {
   try {
-    await cloudRequest(config.apiKey, `/api/v3/runs/${encodeURIComponent(cloudRunId)}/cancel`, {
+    await cloudRequest(config.apiKey, `/api/v2/runs/${encodeURIComponent(cloudRunId)}/cancel`, {
       method: "POST",
     });
   } catch (err) {

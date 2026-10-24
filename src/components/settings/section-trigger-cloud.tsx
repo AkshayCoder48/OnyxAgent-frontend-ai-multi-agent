@@ -4,8 +4,9 @@
 // Settings → Cloud Tasks — the Trigger.dev CLOUD orchestrator panel
 // (Background Task Execution Framework, third execution mode).
 //
-// Connect an api.trigger.dev key (verified live against
-// GET /api/v3/projects) and background tasks execute durably on
+// Connect an api.trigger.dev key (verified live against the cloud REST API
+// — GET /api/v1/projects for personal access tokens, falling back to the
+// secret-key probe GET /api/v1/runs) and background tasks execute durably on
 // trigger.dev Cloud — NO self-hosting. The panel covers:
 //
 //   · live orchestration-mode badge (local / self-hosted / cloud),
@@ -68,7 +69,8 @@ import type { CloudAccountSnapshot } from "@/hooks/use-cloud-orchestrator";
 // Validation (mirrors the server's /api/tasks/cloud checks).
 // ---------------------------------------------------------------------------
 
-/** tr_trigger_… (environment) / tr_pat_… (personal access). */
+/** tr_prod_sk_/tr_dev_sk_… (environment secret keys), tr_trigger_…
+ * (environment), tr_pat_… (personal access). */
 const CLOUD_KEY_RE = /^tr_[A-Za-z0-9_\-]{16,}$/;
 const TASK_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
@@ -178,7 +180,7 @@ function AccountSnapshot({ account }: { account: CloudAccountSnapshot | null }) 
   if (account.partial) {
     return (
       <p className="text-muted-foreground text-xs leading-relaxed">
-        {account.note ?? "Environment key connected — project details are not visible through the management API."}
+        {account.note ?? "Secret key connected — project details are only visible to personal access tokens."}
       </p>
     );
   }
@@ -353,7 +355,7 @@ export function SectionTriggerCloud() {
     }
     if (!CLOUD_KEY_RE.test(trimmed)) {
       toast.error("Key format looks invalid", {
-        description: "Expected tr_trigger_… (environment) or tr_pat_… (personal access).",
+        description: "Expected a trigger.dev key — tr_prod_sk_… / tr_dev_sk_… (environment secret keys) or tr_pat_… (personal access).",
         icon: <XCircle className="size-4" />,
       });
       return;
@@ -374,7 +376,7 @@ export function SectionTriggerCloud() {
       const account = result.cloud.account;
       toast.success("Connected to Trigger.dev Cloud", {
         description: account?.partial
-          ? "Environment key verified — background tasks now dispatch to the cloud."
+          ? "Secret key verified — background tasks now dispatch to the cloud."
           : (account?.projects.length ?? 0) > 0
             ? `Verified — ${account!.projects.length} project${account!.projects.length === 1 ? "" : "s"} visible to this key.`
             : "Key verified — background tasks now dispatch to the cloud.",
@@ -498,7 +500,7 @@ export function SectionTriggerCloud() {
         description={
           connected
             ? undefined
-            : "Get a key with runs:write access — a project environment key (tr_trigger_…) from your project's settings, or a personal access token (tr_pat_…)."
+            : "Get a key from cloud.trigger.dev → API keys — a project environment secret key (tr_prod_sk_… / tr_dev_sk_…) or a personal access token (tr_pat_…)."
         }
         action={
           connected ? (
@@ -524,7 +526,7 @@ export function SectionTriggerCloud() {
                   type={showKey ? "text" : "password"}
                   value={key}
                   onChange={(e) => setKey(e.target.value)}
-                  placeholder="tr_trigger_… or tr_pat_…"
+                  placeholder="tr_prod_sk_… · tr_dev_sk_… · tr_pat_…"
                   className="pr-10 pl-9 font-mono"
                   autoComplete="off"
                   spellCheck={false}
