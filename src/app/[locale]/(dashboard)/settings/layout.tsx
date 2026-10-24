@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   Bot,
   Braces,
+  CalendarClock,
   Cloud,
   CloudCog,
   Flower2,
@@ -61,6 +62,8 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
       // persistency + live sandbox states).
       { label: "Sandbox (E2B)", href: ROUTES.SETTINGS_E2B, icon: Cloud },
       { label: "Cloud", href: ROUTES.SETTINGS_CLOUD, icon: CloudCog },
+      // Cron background tasks (Background Task Execution Framework FR-2.1).
+      { label: "Schedules", href: ROUTES.SETTINGS_SCHEDULES, icon: CalendarClock },
       { label: "Integrations", href: ROUTES.SETTINGS_INTEGRATIONS, icon: Plug },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },
     ],

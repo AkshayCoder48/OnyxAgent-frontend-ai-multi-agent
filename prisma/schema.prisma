@@ -30,3 +30,89 @@ model Post {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ============================================================================
+// Background Task Execution Framework (PRD: Background Task Execution
+// Framework for OnyxAgent). Server-core tables owned by task 3-a.
+//
+// DURABILITY MODEL: every phase transition is persisted so a crashed
+// orchestrator (serverless instance death) never loses a run — the next
+// status poll re-adopts stale locks (local-driver adoptStaleRuns) or the
+// Trigger.dev worker claims queued rows (worker route).
+// ============================================================================
+
+/** One background task execution (agent_run / scheduled_business /
+ *  terminal_command). JSON-stringified protocol fields (payload/config/
+ *  progress/chunks) keep the row self-contained + append-only friendly. */
+model TaskRun {
+  id              String         @id @default(cuid())
+  taskId          String
+  userId          String
+  type            String
+  status          String         @default("queued")
+  phase           String         @default("claim")
+  orchestrator    String         @default("local")
+  title           String?
+  prompt          String
+  config          String         @default("{}")
+  payload         String         @default("{\"version\":1,\"conversation\":{\"id\":null,\"title\":null,\"messages\":[]},\"files\":[]}")
+  progress        String         @default("{}")
+  chunks          String         @default("[]")
+  chunkSeq        Int            @default(0)
+  sandboxId       String?
+  conversationId  String?
+  scheduleId      String?
+  taskTokenHash   String?
+  clientSyncState String         @default("pending")
+  lockHolder      String?
+  lockedAt        DateTime?
+  error           String?
+  attempts        Int            @default(0)
+  startedAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  finishedAt      DateTime?
+  externalRunId   String?
+  artifacts       TaskArtifact[]
+  schedule        TaskSchedule?  @relation(fields: [scheduleId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, phase])
+}
+
+/** FR-2.1 cron schedule. nextRunAt is the sweep cursor: the atomic
+ *  claim (updateMany where nextRunAt = same value) prevents double-fire
+ *  across concurrent sweeps (local loop / sweep-on-read / worker). */
+model TaskSchedule {
+  id        String    @id @default(cuid())
+  name      String
+  cronExpr  String
+  timezone  String    @default("UTC")
+  taskType  String    @default("scheduled_business")
+  prompt    String
+  config    String    @default("{}")
+  active    Boolean   @default(true)
+  runCount  Int       @default(0)
+  lastRunAt DateTime?
+  nextRunAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  runs      TaskRun[]
+}
+
+/** FR-4.2 collected artifact (final message / changed file / terminal
+ *  report). Content is inlined (utf8 or base64) with size caps enforced by
+ *  the driver; the client extracts to Dexie/OPFS on sync-back. */
+model TaskArtifact {
+  id        String   @id @default(cuid())
+  runId     String
+  run       TaskRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  kind      String
+  name      String
+  path      String?
+  mimeType  String   @default("text/plain")
+  content   String   @default("")
+  encoding  String   @default("utf8")
+  size      Int      @default(0)
+  truncated Boolean  @default(false)
+  createdAt DateTime @default(now())
+}

@@ -7,3 +7,9 @@ export { useConversationShares } from "./use-conversation-shares";
 export { useSlashCommands, isBuiltinEnabled, BUILTIN_COMMAND_LIST } from "./use-slash-commands";
 export { useDictation } from "./use-dictation";
 export { statusCaptionFor } from "./use-status-caption";
+export {
+  useBackgroundTasks,
+  useBackgroundTask,
+  useTaskSchedules,
+  useTriggerBackgroundTask,
+} from "./use-background-tasks";

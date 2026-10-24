@@ -82,6 +82,15 @@ export const qk = {
     /** USER-SCOPED — matches use-data.ts useSkills + section-skills.tsx. */
     list: (userId?: string) => ["skills", userId ?? "anon"] as const,
   },
+  tasks: {
+    all: () => ["tasks"] as const,
+    /** USER-SCOPED list of background task runs (use-background-tasks.ts). */
+    list: (userId?: string) => ["tasks", "list", userId ?? "anon"] as const,
+    /** Single run view with accumulated FR-3.2 progress chunks. */
+    detail: (runId: string) => ["tasks", "run", runId] as const,
+    /** FR-2.1 cron schedules (Settings → Schedules pane). */
+    schedules: () => ["tasks", "schedules"] as const,
+  },
   admin: {
     stats: () => ["admin", "stats"] as const,
     events: () => ["admin", "events"] as const,

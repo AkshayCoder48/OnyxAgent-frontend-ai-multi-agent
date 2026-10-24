@@ -37,6 +37,7 @@ export const ROUTES = {
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
   SETTINGS_E2B: "/settings/e2b",
+  SETTINGS_SCHEDULES: "/settings/schedules",
   RAG: "/rag",
   ORGS: "/orgs",
   ORGS_CREATE: "/orgs?create=1",

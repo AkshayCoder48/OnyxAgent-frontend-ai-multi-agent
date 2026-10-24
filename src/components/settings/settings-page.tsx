@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import {
   ArrowLeft,
   Bot,
+  CalendarClock,
   Cloud,
   CloudCog,
   Flower2,
@@ -73,6 +74,10 @@ const SectionAppearance = dynamic(
   () => import("./section-appearance").then((m) => m.SectionAppearance),
   { ssr: false, loading: SectionSkeleton },
 );
+const SectionSchedules = dynamic(
+  () => import("./section-schedules").then((m) => m.SectionSchedules),
+  { ssr: false, loading: SectionSkeleton },
+);
 
 export type SettingsSectionId =
   | "providers"
@@ -83,6 +88,7 @@ export type SettingsSectionId =
   | "cloud"
   | "tools"
   | "skills"
+  | "schedules"
   | "appearance";
 
 interface SettingsPageProps {
@@ -172,6 +178,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: "Cloud Workspace",
         description: "OnyxBase persistent workspace sync",
         icon: CloudCog,
+      },
+      {
+        id: "schedules",
+        label: "Schedules",
+        description: "Cron background tasks",
+        icon: CalendarClock,
       },
       {
         id: "appearance",
@@ -326,6 +338,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
             {active === "cloud" && <SectionCloudWorkspace />}
             {active === "tools" && <SectionCustomTools />}
             {active === "skills" && <SectionSkills />}
+            {active === "schedules" && <SectionSchedules />}
             {active === "appearance" && <SectionAppearance />}
           </div>
         </main>

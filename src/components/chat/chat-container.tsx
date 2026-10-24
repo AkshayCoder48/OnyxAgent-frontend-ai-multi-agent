@@ -7,6 +7,7 @@ import { ChatControls } from "./chat-controls";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
 import { DetachedRunStrip } from "./detached-run-strip";
+import { BackgroundTasksStrip } from "./background-tasks-strip";
 import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
@@ -863,6 +864,9 @@ function ChatUI({
           {/* Detached sandbox run status ("close and resume") — live card
               whenever this conversation has a running/unsynced run. */}
           <DetachedRunStrip conversationId={conversationId ?? null} />
+          {/* Durable background tasks (Epic 3) — global run strip above the
+              composer; renders null while there is nothing to show. */}
+          <BackgroundTasksStrip />
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}

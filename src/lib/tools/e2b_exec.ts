@@ -2,6 +2,7 @@
 
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
+import { triggerBackgroundTask } from "@/lib/tasks/client";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // E2B Python sandbox — modules available in the code-interpreter template.
@@ -99,7 +100,7 @@ registerTool(
 
 registerTool(
   "run_terminal",
-  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second timeout, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed.",
+  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second timeout, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed. For jobs that would exceed the 120-second budget, pass background=true to run the command as a durable background task instead (up to 30 minutes, survives tab close) — the tool returns a run_id immediately, the output and any files it writes come back as artifacts (track it in the background tasks strip; poll with the background_task tool).",
   {
     type: "object",
     properties: {
@@ -107,6 +108,12 @@ registerTool(
       cwd: {
         type: "string",
         description: "Working directory (relative to workspace root). Defaults to root.",
+      },
+      background: {
+        type: "boolean",
+        default: false,
+        description:
+          "Run as a durable background task instead (up to 30 minutes, survives tab close). Use for long-running commands; returns a run_id — track it in the background strip or poll with the background_task tool.",
       },
     },
     required: ["command"],
@@ -117,6 +124,35 @@ registerTool(
     const cwd = (args.cwd as string) ?? "/home/user";
     if (!command || !command.trim()) {
       return { error: "No command provided" };
+    }
+    // ── BACKGROUND MODE (FR-3.3) ────────────────────────────────────────
+    // Instead of the local exec_stream path (120s budget), hand the command
+    // to the background task orchestrator: it runs to completion inside an
+    // isolated sandbox (up to 30 min) and the output/files sync back as
+    // artifacts. No shared-sandbox allocation is needed for this path.
+    if (args.background === true) {
+      if (!ctx.userId) {
+        return { error: "No user context — cannot start a background terminal task." };
+      }
+      try {
+        const res = await triggerBackgroundTask({
+          userId: ctx.userId,
+          conversationId: ctx.conversationId ?? null,
+          type: "terminal_command",
+          prompt: `Terminal: ${command.slice(0, 200)}`,
+          title: `Terminal: ${command.slice(0, 60)}`,
+          config: { command, cwd },
+          includeWorkspace: false,
+          sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
+        });
+        return {
+          background: true,
+          run_id: res.runId,
+          note: "Command is running in the background sandbox (up to 30 min). Track it in the background strip; the result syncs back as artifacts.",
+        };
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+      }
     }
     const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) {

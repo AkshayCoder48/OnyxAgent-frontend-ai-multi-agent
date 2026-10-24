@@ -30,8 +30,9 @@
 // ============================================================================
 
 /** Bump when the runner script below changes — the deploy path rewrites the
- *  file into the sandbox whenever the stamp mismatches. */
-export const HEADLESS_RUNNER_VERSION = 1;
+ *  file into the sandbox whenever the stamp mismatches. v2: FR-1.3 api_key_pool
+ *  rotation (429/401 → advance to the next key in the pool, up to 3 rotations). */
+export const HEADLESS_RUNNER_VERSION = 2;
 
 export const RUNNER_PATH = "/home/user/headless_runner.py";
 export const AGENT_DIR = "/home/user/.onyx/agent";
@@ -73,7 +74,7 @@ HISTORY_PATH = HOME + "/chat_history.json"
 STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
 
-RUNNER_VERSION = 1
+RUNNER_VERSION = 2
 MAX_ROUNDS_DEFAULT = 24
 TOOL_TIMEOUT_DEFAULT = 300
 TOOL_TIMEOUT_MAX = 900
@@ -401,11 +402,20 @@ class LlmError(Exception):
         super(LlmError, self).__init__(message)
         self.http_status = http_status
 
+# FR-1.3 rotational key pool: index of the key currently in use (module-global
+# so it survives across rounds within one run). Advanced by
+# llm_chat_with_retries on 429 (and 401 with a multi-key pool).
+KEY_INDEX = 0
+
 def llm_chat(cfg, messages, use_tools):
     url = str(cfg.get("chat_url") or "")
     if not url:
         raise LlmError("run config is missing chat_url")
     api_key = str(cfg.get("api_key") or "")
+    pool_raw = cfg.get("api_key_pool")
+    api_keys = [str(k) for k in pool_raw if str(k)] if isinstance(pool_raw, list) else []
+    if api_keys:
+        api_key = api_keys[KEY_INDEX % len(api_keys)]
     model = str(cfg.get("model") or "")
 
     body = {
@@ -457,9 +467,16 @@ def llm_chat(cfg, messages, use_tools):
 def llm_chat_with_retries(cfg, messages, use_tools):
     """Retry transient failures (429/5xx/network) with backoff. A 400 while
     tools are enabled triggers ONE tools-off retry (strict gateways / models
-    without function support degrade to a text-only run)."""
+    without function support degrade to a text-only run). A 429 (or a 401
+    with a multi-key pool) rotates to the NEXT key in api_key_pool — up to 3
+    total rotations, 5s apart — before falling through to the transient
+    retry accounting."""
+    global KEY_INDEX
     delay = 3.0
     last_error = None
+    pool_raw = cfg.get("api_key_pool")
+    api_keys = [str(k) for k in pool_raw if str(k)] if isinstance(pool_raw, list) else []
+    rotations = 0
     for attempt in range(1, LLM_RETRIES + 1):
         try:
             return llm_chat(cfg, messages, use_tools)
@@ -468,6 +485,17 @@ def llm_chat_with_retries(cfg, messages, use_tools):
             if exc.http_status == 400 and use_tools:
                 log("gateway rejected the tools payload — degrading to a text-only run")
                 return llm_chat(cfg, messages, False)
+            if (
+                api_keys
+                and rotations < 3
+                and attempt < LLM_RETRIES
+                and (exc.http_status == 429 or (exc.http_status == 401 and len(api_keys) > 1))
+            ):
+                rotations += 1
+                KEY_INDEX += 1
+                log("rotating api key (index %d)" % (KEY_INDEX % len(api_keys)))
+                time.sleep(5.0)
+                continue
             transient = exc.http_status is None or exc.http_status in (408, 409, 429, 500, 502, 503, 504) or exc.http_status >= 500
             if not transient or attempt == LLM_RETRIES:
                 raise

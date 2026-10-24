@@ -297,6 +297,34 @@ export interface DetachedRunRow {
   handoff?: boolean;
 }
 
+/** Background Task Execution Framework (Task 3-c, PRD §4) — the client's
+ *  durable mirror of every background task run triggered from THIS browser.
+ *  Keyed by the server runId. The `task_token` is the client-minted secret
+ *  (PRD §4.2) and lives ONLY here — it is never synced anywhere else; the
+ *  server stores just its sha256. `cursor` is the last consumed chunk seq
+ *  (FR-3.2 chunked polling) and `sync_state` drives the artifact sync-back
+ *  state machine (PRD §4.1: pending → synced | conflicted). */
+export interface BackgroundTaskRow {
+  id: string;            // = server runId
+  task_id: string;
+  user_id: string;
+  type: string;          // BackgroundTaskType
+  status: string;        // TaskRunStatus
+  title: string | null;
+  prompt: string;
+  conversation_id: string | null;
+  schedule_id: string | null;
+  orchestrator: string;
+  task_token: string;    // client-side secret (NOT synced anywhere else)
+  cursor: number;        // last chunk seq consumed
+  artifact_ids: string[];// extracted artifact ids
+  sync_state: string;    // ClientSyncState
+  started_at: number;
+  updated_at: number;
+  finished_at: number | null;
+  error: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Business Mode rows (v6) — shapes are OWNED by `@/lib/business/types`
 // (the shared contract module); this file only wires the Dexie tables.
@@ -323,6 +351,8 @@ export class AppDatabase extends Dexie {
   approval_requests!: Table<ApprovalRequest, string>;
   message_search_index!: Table<MessageSearchRow, string>;
   detached_runs!: Table<DetachedRunRow, string>;
+  // -- Background Task Execution Framework (v7) ------------------------------
+  background_tasks!: Table<BackgroundTaskRow, string>;
   // -- Business Mode (v6) ----------------------------------------------------
   businesses!: Table<BusinessRow, string>;
   business_agents!: Table<BusinessAgentRow, string>;
@@ -421,6 +451,15 @@ export class AppDatabase extends Dexie {
       business_events: "&id, business_id, task_id, agent_id, event_type, created_at",
       decision_records: "&id, business_id, task_id, created_at",
     });
+
+    // Version 7: Background Task Execution Framework (Task 3-c). One NEW
+    // table — the client's durable mirror of background task runs
+    // (BackgroundTaskRow): keyed by the server runId, indexed by user /
+    // status / updated_at for the tasks strip + sync-back sweeps. The
+    // client-minted task_token lives only here (PRD §4.2).
+    this.version(7).stores({
+      background_tasks: "&id, user_id, status, updated_at",
+    });
   }
 }
 
@@ -505,6 +544,8 @@ export async function wipeAllData(): Promise<void> {
     d.agent_messages.clear(),
     d.business_events.clear(),
     d.decision_records.clear(),
+    // Background Task Execution Framework (v7)
+    d.background_tasks.clear(),
   ]);
 }
 
@@ -574,6 +615,9 @@ export async function wipeUserData(userId: string): Promise<void> {
   await d.mcp_servers.where("user_id").equals(userId).delete();
   await d.custom_tools.where("user_id").equals(userId).delete();
   await d.skills.where("user_id").equals(userId).delete();
+  // Background Task Execution Framework (v7): the user's task mirror rows
+  // (incl. task tokens) must never outlive the account.
+  await d.background_tasks.where("user_id").equals(userId).delete();
   await d.conversations.where("user_id").equals(userId).delete();
   await d.users.delete(userId);
 }
