@@ -2,12 +2,10 @@
 // Background Task Execution Framework — GET /api/tasks/status (FR-3.1).
 //
 //   ?runId=<id>&cursor=<lastSeq>   single run (TaskStatusResponse):
-//       · sweep-on-read housekeeping FIRST — adoptStaleRuns() (local mode
-//         only; single indexed query when nothing is stale) + the throttled
-//         schedule touch() + CLOUD self-heal (healStaleCloudRuns settles
-//         runs the cloud worker never reported terminal for), so a
-//         poll-driven session keeps runs alive, schedules firing and cloud
-//         rows truthful even with the loop dead.
+//       · sweep-on-read housekeeping FIRST — the throttled schedule touch()
+//         + CLOUD sync (syncCloudRunIntoRow pulls run metadata — progress +
+//         chunk ring — and settles terminal runs from the cloud output), so
+//         a poll-driven session keeps runs truthful and schedules firing.
 //       · chunks: only seq > cursor (cursor defaults -1), each content
 //         truncated to 4000 chars ON READ (the row stores 16k for
 //         artifact-grade consumers).
@@ -20,7 +18,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { TaskRun } from "@prisma/client";
 import { prisma } from "@/lib/tasks/prisma";
-import { adoptStaleRuns } from "@/lib/tasks/local-driver";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
 import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
 import { healStaleCloudRuns } from "@/lib/tasks/trigger-cloud";
@@ -117,9 +114,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const userId = params.get("userId")?.trim();
     if (!userId) return bad("userId is required with list=1");
     const mode = await getOrchestrationMode();
-    touch(); // throttled sweep-on-read (self-gates to arm-only in worker modes)
+    touch(); // throttled sweep-on-read (fires due schedules → cloud runs)
     startSchedulerLoop(); // idempotent — revives the loop after a restart
-    // Cloud self-heal: fire-and-forget, throttled internally (settled rows
+    // Cloud sync: fire-and-forget, throttled internally (settled rows
     // surface on the next poll — eventual consistency is fine for lists).
     if (mode === "cloud") void healStaleCloudRuns().catch(() => {});
     // Schedule-fired runs carry the synthetic "scheduled" user id (no
@@ -154,30 +151,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const runId = params.get("runId")?.trim();
   if (!runId) return bad("runId is required (or list=1&userId=)");
 
-  // Sweep-on-read housekeeping: adopt orphaned local runs (local mode only —
-  // a single indexed query when nothing is stale) + fire due schedules
-  // (throttled) + settle stale cloud rows from their cloud run state +
-  // ensure the loop exists after a process restart.
+  // Sweep-on-read housekeeping: fire due schedules (throttled) + sync the
+  // cloud run (progress + chunks + terminal settle) + ensure the loop
+  // exists after a process restart.
   const mode = await getOrchestrationMode();
-  if (mode === "local") {
-    await adoptStaleRuns();
-  }
   touch();
   startSchedulerLoop();
 
   let row = await prisma.taskRun.findUnique({ where: { id: runId } });
   if (!row) return bad("run not found", 404);
 
-  // Cloud self-heal (awaited — a user watching a stuck run sees it settled
-  // on THIS response): stale non-terminal cloud rows are checked against
-  // api.trigger.dev and settled when the cloud run already ended.
-  if (
-    mode === "cloud" &&
-    row.orchestrator === "cloud" &&
-    (row.status === "queued" || row.status === "running")
-  ) {
-    const healed = await healStaleCloudRuns(runId).catch(() => false);
-    if (healed) {
+  // Cloud sync (awaited — a user watching a run sees its live progress and
+  // terminal settle on THIS response).
+  if (mode === "cloud" && row.orchestrator === "cloud" && row.externalRunId) {
+    const synced = await healStaleCloudRuns(runId).catch(() => false);
+    if (synced) {
       row = (await prisma.taskRun.findUnique({ where: { id: runId } })) ?? row;
     }
   }

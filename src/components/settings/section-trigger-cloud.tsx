@@ -1,34 +1,32 @@
 "use client";
 
 // ============================================================================
-// Settings → Cloud Tasks — the Trigger.dev CLOUD orchestrator panel
-// (Background Task Execution Framework, third execution mode).
+// Settings → Cloud Tasks — the Trigger.dev Cloud panel (zero-setup).
 //
-// Connect an api.trigger.dev key (verified live against the cloud REST API
-// — GET /api/v1/projects for personal access tokens, falling back to the
-// secret-key probe GET /api/v1/runs) and background tasks execute durably on
-// trigger.dev Cloud — NO self-hosting. The panel covers:
+// ONE clean card, four states — a key is the ENTIRE setup (no self-hosting,
+// no local mode, no worker wiring):
 //
-//   · live orchestration-mode badge (local / self-hosted / cloud),
-//   · the cloud API key input (verify + connect, retest, disconnect),
-//   · the verification snapshot (projects / environments),
-//   · the kicked task id (agent-run by default),
-//   · the deployed-worker setup checklist (deploy command, cloud project
-//     env vars incl. the minted WORKER_TOKEN with copy buttons),
-//   · recent cloud-orchestrated runs with dashboard links.
+//   · not connected                → paste an environment secret key + Connect
+//   · connected + live             → active on the cloud (masked key,
+//                                    project/org, verified, test/disconnect,
+//                                    runs link)
+//   · connected + deploying        → the one-time worker deploy, with a live
+//                                    log tail (auto-polled every 5s)
+//   · connected + undeployed       → one-click "Deploy worker"
 //
-// SECURITY: the key is stored server-side (AES-256-GCM, SQLite) and only its
-// masked form is ever displayed. The WORKER_TOKEN shown here is the
-// operator's own shared secret for wiring the deployed cloud worker.
+// The key is verified live against api.trigger.dev before anything is stored,
+// sealed AES-256-GCM (server-side, or vault-sealed in this browser on
+// read-only serverless deployments) and only ever shown masked.
 // ============================================================================
 
 import * as React from "react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
+import { useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   CheckCircle2,
   Cloud,
-  Copy,
   ExternalLink,
   Eye,
   EyeOff,
@@ -36,16 +34,13 @@ import {
   Loader2,
   RefreshCw,
   Rocket,
-  Save,
   Trash2,
   XCircle,
-  Zap,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -58,258 +53,83 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-import { SettingsRow, SettingsSection } from "./settings-section";
-import { MoreOptions } from "./more-options";
-import { useAuth, useCloudOrchestrator, useCopyToClipboard } from "@/hooks";
-import { listTaskRuns } from "@/lib/tasks/client";
-import type { TaskStatusRun } from "@/lib/tasks/protocol";
-import type { CloudAccountSnapshot } from "@/hooks/use-cloud-orchestrator";
+import { SettingsSection } from "./settings-section";
+import { useCloudOrchestrator, type CloudOrchestratorStatus } from "@/hooks";
+import { qk } from "@/lib/query-keys";
 
 // ---------------------------------------------------------------------------
-// Validation (mirrors the server's /api/tasks/cloud checks).
+// Constants / small helpers.
 // ---------------------------------------------------------------------------
 
-/** tr_prod_sk_/tr_dev_sk_… (environment secret keys), tr_trigger_…
- * (environment), tr_pat_… (personal access). */
+/** tr_prod_sk_/tr_dev_sk_… (environment secret keys), tr_trigger_/tr_pat_…
+ *  (other accepted shapes). Mirrors the server's /api/tasks/cloud check. */
 const CLOUD_KEY_RE = /^tr_[A-Za-z0-9_\-]{16,}$/;
-const TASK_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const GET_KEY_URL = "https://cloud.trigger.dev/settings/api-keys";
 
-// ---------------------------------------------------------------------------
-// Small presentational helpers.
-// ---------------------------------------------------------------------------
+/** Last few deploy log lines — mono, scrollable, never contains the key. */
+function DeployTail({ tail }: { tail: string[] }) {
+  if (tail.length === 0) return null;
+  return (
+    <pre className="bg-muted/60 scrollbar-thin max-h-24 overflow-y-auto rounded-md border px-3 py-2 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap">
+      {tail.slice(-6).join("\n")}
+    </pre>
+  );
+}
 
-function ModePill({ mode }: { mode: "local" | "selfhosted" | "cloud" }) {
-  if (mode === "cloud") {
+/** Card-header status pill for the connected states. */
+function StatusPill({ state }: { state: "active" | "deploying" | "attention" }) {
+  if (state === "active") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[10px] font-medium uppercase text-emerald-600 dark:text-emerald-400">
-        <Cloud className="size-3" />
-        trigger.dev cloud
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 font-mono text-[10px] font-medium tracking-wide text-emerald-600 uppercase dark:text-emerald-400">
+        <CheckCircle2 className="size-3" />
+        active
       </span>
     );
   }
-  if (mode === "selfhosted") {
+  if (state === "deploying") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-0.5 font-mono text-[10px] font-medium uppercase text-amber-600 dark:text-amber-400">
-        self-hosted
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2.5 py-1 font-mono text-[10px] font-medium tracking-wide text-sky-600 uppercase dark:text-sky-400">
+        <Loader2 className="size-3 animate-spin" />
+        deploying
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-2.5 py-0.5 font-mono text-[10px] font-medium uppercase text-sky-600 dark:text-sky-400">
-      local
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-medium tracking-wide text-amber-600 uppercase dark:text-amber-400">
+      <AlertTriangle className="size-3" />
+      needs deploy
     </span>
   );
 }
 
-function RunStatusPill({ status }: { status: TaskStatusRun["status"] }) {
-  const cls =
-    status === "completed"
-      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-      : status === "failed"
-        ? "bg-destructive/10 text-destructive"
-        : status === "cancelled"
-          ? "bg-foreground/[0.06] text-muted-foreground"
-          : status === "running"
-            ? "bg-sky-500/10 text-sky-600 dark:text-sky-400"
-            : "bg-amber-500/10 text-amber-600 dark:text-amber-400";
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[10px] uppercase ${cls}`}>
-      {status}
-    </span>
-  );
-}
-
-/** A copyable config line (mono value + copy button; secret adds show/hide). */
-function CopyLine({
-  label,
-  value,
-  secret = false,
-  placeholder = "not set",
-}: {
-  label: string;
-  value: string | null;
-  secret?: boolean;
-  placeholder?: string;
-}) {
-  const { copy, copied } = useCopyToClipboard();
-  const [show, setShow] = React.useState(!secret);
-  const display = !value ? placeholder : show ? value : "•".repeat(Math.min(value.length, 28));
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2">
-      <div className="min-w-0">
-        <p className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
-        <p className="truncate font-mono text-xs" title={value ?? undefined}>
-          {display}
-        </p>
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
-        {secret && value && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-7"
-            onClick={() => setShow((v) => !v)}
-            aria-label={show ? `Hide ${label}` : `Show ${label}`}
-          >
-            {show ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-          </Button>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          disabled={!value}
-          onClick={() => void copy(value ?? "")}
-          aria-label={`Copy ${label}`}
-        >
-          {copied ? <CheckCircle2 className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Verification snapshot — projects / environments the key can see.
-// ---------------------------------------------------------------------------
-
-function AccountSnapshot({ account }: { account: CloudAccountSnapshot | null }) {
-  if (!account) return null;
-  if (account.partial) {
-    return (
-      <p className="text-muted-foreground text-xs leading-relaxed">
-        {account.note ?? "Secret key connected — project details are only visible to personal access tokens."}
-      </p>
+/** "tr_••••••••UmzU · onyxgpt-Fgbo · Onyx" — the connection identity line. */
+function ConnectionLine({ cloud }: { cloud: CloudOrchestratorStatus["cloud"] | null }) {
+  if (!cloud) return null;
+  const project = cloud.account?.projects?.[0] ?? null;
+  const parts: React.ReactNode[] = [];
+  if (cloud.maskedKey) {
+    parts.push(
+      <span key="key" className="font-mono">
+        {cloud.maskedKey}
+      </span>,
     );
   }
-  if (account.projects.length === 0) {
-    return <p className="text-muted-foreground text-xs">No projects visible to this key.</p>;
+  if (project) {
+    parts.push(project.orgName ? `${project.name} · ${project.orgName}` : project.name);
+  } else if (cloud.account?.note) {
+    parts.push(cloud.account.note);
   }
+  if (cloud.keySource === "env") parts.push("supplied via the TRIGGER_CLOUD_KEY env var");
+  if (parts.length === 0) return null;
   return (
-    <ul className="scrollbar-thin max-h-56 space-y-1.5 overflow-y-auto pr-1">
-      {account.projects.slice(0, 8).map((p) => (
-        <li key={p.id} className="rounded-md border px-2.5 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate text-xs font-medium">{p.name}</p>
-            {p.orgName && (
-              <span className="text-muted-foreground truncate font-mono text-[10px]">{p.orgName}</span>
-            )}
-          </div>
-          {p.environments.length > 0 && (
-            <p className="text-muted-foreground mt-1 font-mono text-[10px]">
-              {p.environments.map((e) => e.slug || e.name).join(" · ")}
-            </p>
-          )}
-        </li>
+    <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+      {parts.map((part, i) => (
+        <React.Fragment key={i}>
+          {i > 0 && " · "}
+          {part}
+        </React.Fragment>
       ))}
-    </ul>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Recent cloud-orchestrated runs (with dashboard links).
-// ---------------------------------------------------------------------------
-
-function RecentCloudRuns({ dashboardBase }: { dashboardBase: string | null }) {
-  const { user } = useAuth();
-  const [runs, setRuns] = React.useState<TaskStatusRun[] | null>(null);
-  const [busy, setBusy] = React.useState(false);
-
-  const load = React.useCallback(async () => {
-    if (!user?.id) return;
-    setBusy(true);
-    try {
-      const all = await listTaskRuns(user.id);
-      setRuns(all.filter((r) => r.orchestrator !== "local").slice(0, 6));
-    } catch {
-      setRuns([]);
-    } finally {
-      setBusy(false);
-    }
-  }, [user?.id]);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  // Light auto-refresh while any shown run is live.
-  const hasLive = runs?.some((r) => r.status === "queued" || r.status === "running") ?? false;
-  React.useEffect(() => {
-    if (!hasLive) return;
-    const t = setInterval(() => void load(), 10_000);
-    return () => clearInterval(t);
-  }, [hasLive, load]);
-
-  const linkFor = (run: TaskStatusRun): string | null => {
-    if (!run.cloudRunId) return null;
-    return dashboardBase && dashboardBase !== "https://cloud.trigger.dev"
-      ? `${dashboardBase}/runs/${run.cloudRunId}`
-      : "https://cloud.trigger.dev";
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-muted-foreground text-xs">
-          The latest background tasks dispatched to trigger.dev.
-        </p>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          onClick={() => void load()}
-          disabled={busy}
-          aria-label="Refresh cloud runs"
-        >
-          <RefreshCw className={busy ? "size-3.5 animate-spin" : "size-3.5"} />
-        </Button>
-      </div>
-      {runs === null ? (
-        <p className="text-muted-foreground py-1 font-mono text-[11px]">…</p>
-      ) : runs.length === 0 ? (
-        <p className="text-muted-foreground py-1 text-xs">
-          No cloud runs yet — start a background task (or fire a schedule) and it will appear here.
-        </p>
-      ) : (
-        <ul className="scrollbar-thin max-h-72 space-y-1.5 overflow-y-auto pr-1">
-          {runs.map((run) => {
-            const href = linkFor(run);
-            return (
-              <li
-                key={run.runId}
-                className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <RunStatusPill status={run.status} />
-                    <p className="truncate text-xs font-medium">
-                      {run.title ?? run.prompt.slice(0, 60)}
-                    </p>
-                  </div>
-                  <p className="text-muted-foreground mt-1 text-[10px]">
-                    started {formatDistanceToNow(new Date(run.startedAt), { addSuffix: true })}
-                  </p>
-                </div>
-                {href && (
-                  <a
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 font-mono text-[10px] transition-colors"
-                    aria-label="Open the run on cloud.trigger.dev"
-                  >
-                    cloud <ExternalLink className="size-3" />
-                  </a>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
+    </p>
   );
 }
 
@@ -325,67 +145,70 @@ export function SectionTriggerCloud() {
     isConnecting,
     refresh,
     isRetesting,
-    setTaskSlug,
-    isSavingSlug,
     disconnect,
     isDisconnecting,
+    deployWorker,
   } = useCloudOrchestrator();
+  const qc = useQueryClient();
 
   const [key, setKey] = React.useState("");
   const [showKey, setShowKey] = React.useState(false);
-  const [slug, setSlug] = React.useState("");
-  const [slugDirty, setSlugDirty] = React.useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = React.useState(false);
 
   const cloud = status?.cloud ?? null;
+  const bootstrap = status?.bootstrap ?? null;
   const connected = !!cloud?.configured;
-  const mode = status?.mode ?? "local";
+  const envSourced = cloud?.keySource === "env";
+  const deploy = bootstrap?.deploy ?? null;
+  const deployRunning = deploy?.state === "running";
+  const deployFailed = deploy?.state === "failed";
+  const live = bootstrap?.liveness === "live";
 
-  // Keep the slug input seeded from the server (until the user edits it).
+  // While the one-time worker deploy is in flight, poll the status every 5s
+  // so the progress + log tail stream in without user action. The interval
+  // dies the moment the deploy leaves the "running" state.
   React.useEffect(() => {
-    if (cloud?.taskSlug && !slugDirty) setSlug(cloud.taskSlug);
-  }, [cloud?.taskSlug, slugDirty]);
+    if (!deployRunning) return;
+    const t = setInterval(() => {
+      void qc.invalidateQueries({ queryKey: qk.tasks.cloudConfig() });
+    }, 5_000);
+    return () => clearInterval(t);
+  }, [deployRunning, qc]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   async function handleConnect(e: React.FormEvent) {
     e.preventDefault();
     const trimmed = key.trim();
     if (!trimmed) {
-      toast.error("Enter your trigger.dev API key first");
+      toast.error("Enter your Trigger.dev key first");
       return;
     }
     if (!CLOUD_KEY_RE.test(trimmed)) {
       toast.error("Key format looks invalid", {
-        description: "Expected a trigger.dev key — tr_prod_sk_… / tr_dev_sk_… (environment secret keys) or tr_pat_… (personal access).",
+        description:
+          "Expected an environment secret key — tr_prod_sk_… or tr_dev_sk_… from cloud.trigger.dev → API keys.",
         icon: <XCircle className="size-4" />,
       });
       return;
     }
-    const slugTrimmed = slug.trim();
-    if (slugTrimmed && !TASK_SLUG_RE.test(slugTrimmed)) {
-      toast.error("Task id looks invalid", {
-        description: "Letters, digits, dots, underscores and hyphens (max 64 chars).",
-      });
-      return;
-    }
     try {
-      const result = await connect({
-        apiKey: trimmed,
-        ...(slugTrimmed && slugTrimmed !== "agent-run" ? { taskSlug: slugTrimmed } : {}),
-      });
+      const result = await connect({ apiKey: trimmed });
       setKey("");
-      const account = result.cloud.account;
+      setShowKey(false);
+      const liveness = result.bootstrap?.liveness;
       toast.success(
         result.cloud.ephemeral
           ? "Connected to Trigger.dev Cloud (session mode)"
-          : "Connected to Trigger.dev Cloud",
+          : liveness === "live"
+            ? "Connected — active on Trigger.dev Cloud"
+            : "Connected — deploying the cloud worker",
         {
           description: result.cloud.ephemeral
             ? "This deployment has a read-only filesystem, so the key is stored encrypted in THIS browser and re-applied automatically."
-            : account?.partial
-              ? "Secret key verified — background tasks now dispatch to the cloud."
-              : (account?.projects.length ?? 0) > 0
-                ? `Verified — ${account!.projects.length} project${account!.projects.length === 1 ? "" : "s"} visible to this key.`
-                : "Key verified — background tasks now dispatch to the cloud.",
+            : liveness === "live"
+              ? "Background tasks now run durably on your Trigger.dev project."
+              : "The worker deploys once to your project (about 2 minutes); the settings page tracks the progress.",
           icon: <CheckCircle2 className="size-4" />,
         },
       );
@@ -400,7 +223,7 @@ export function SectionTriggerCloud() {
   async function handleRetest() {
     try {
       await refresh();
-      toast.success("Key verified", {
+      toast.success("Connection verified", {
         description: "The stored key still works against api.trigger.dev.",
         icon: <CheckCircle2 className="size-4" />,
       });
@@ -412,20 +235,15 @@ export function SectionTriggerCloud() {
     }
   }
 
-  async function handleSaveSlug() {
-    const trimmed = slug.trim();
-    if (!TASK_SLUG_RE.test(trimmed)) {
-      toast.error("Task id looks invalid", {
-        description: "Letters, digits, dots, underscores and hyphens (max 64 chars).",
-      });
-      return;
-    }
+  async function handleDeploy() {
     try {
-      await setTaskSlug(trimmed);
-      setSlugDirty(false);
-      toast.success("Task id saved", { description: `The app now kicks "${trimmed}".` });
+      await deployWorker();
+      toast.success("Deploy started", {
+        description: "The worker deploys to your Trigger.dev project — about 2 minutes, one time only.",
+        icon: <Rocket className="size-4" />,
+      });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save the task id");
+      toast.error(err instanceof Error ? err.message : "Failed to start the deploy");
     }
   }
 
@@ -433,15 +251,16 @@ export function SectionTriggerCloud() {
     setConfirmDisconnect(false);
     try {
       await disconnect();
-      setSlug("");
-      setSlugDirty(false);
       toast.success("Disconnected", {
-        description: "Back to the local orchestrator — background tasks run in this app's server.",
+        description:
+          "Background tasks stop dispatching to the cloud until you connect a key again. Runs already executing on trigger.dev keep running to completion.",
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to disconnect");
     }
   }
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   if (isLoading && !status) {
     return (
@@ -451,298 +270,205 @@ export function SectionTriggerCloud() {
     );
   }
 
-  const envSourced = cloud?.keySource === "env";
+  const pill = deployRunning ? "deploying" : live ? "active" : "attention";
 
   return (
     <div className="space-y-6">
-      {/* ── What this is ─────────────────────────────────────────────────── */}
-      <Alert>
-        <Zap className="size-4" />
-        <AlertTitle>Trigger.dev Cloud orchestration</AlertTitle>
-        <AlertDescription>
-          Connect a{" "}
-          <a
-            href="https://cloud.trigger.dev"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-foreground inline-flex items-center gap-0.5 underline underline-offset-4"
-          >
-            trigger.dev Cloud <ExternalLink className="size-3" />
-          </a>{" "}
-          API key and background tasks (agent runs, terminal commands, cron schedules) execute
-          durably on trigger.dev&apos;s infrastructure — no self-hosting required. The key is
-          verified live against api.trigger.dev and stored encrypted (AES-256-GCM) — sealed on
-          this app&apos;s server, or in this browser when the deployment is serverless — and never
-          shown again after saving.
-        </AlertDescription>
-      </Alert>
-
-      {/* ── Session-mode note (serverless deployments) ───────────────────── */}
-      {connected && cloud?.ephemeral && (
-        <Alert>
-          <Cloud className="size-4" />
-          <AlertTitle>Session mode — serverless deployment</AlertTitle>
-          <AlertDescription>
-            This deployment&apos;s server has a read-only filesystem, so the encrypted key lives in
-            THIS browser and is re-applied automatically on every visit (no reconnect needed).
-            Run history and the task queue are per-server-session here; use a persistent
-            deployment (sandbox / local server) for durable server-side history.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* ── Mode ─────────────────────────────────────────────────────────── */}
       <SettingsSection
-        title="Orchestration mode"
-        description="Who executes background tasks right now."
-      >
-        <SettingsRow
-          label="Active orchestrator"
-          description={
-            mode === "cloud"
-              ? "Trigger.dev Cloud — every new background task is kicked to the deployed agent-run task on api.trigger.dev the moment it's created; a deployed worker's poll loop is the backstop."
-              : mode === "selfhosted"
-                ? "Self-hosted Trigger.dev (TRIGGER_DEV_URL + TRIGGER_DEV_TOKEN env vars) — it takes priority over a cloud key."
-                : "Local — the in-process driver executes tasks in this app's own server. Connect a cloud key below to switch."
-          }
-          control={<ModePill mode={mode} />}
-        />
-        {mode === "selfhosted" && connected && (
-          <SettingsRow
-            label="Cloud key stored"
-            description="A cloud key is connected, but the self-hosted env config takes priority. Disconnect the env vars to activate cloud mode."
-            control={<Badge variant="outline">standby</Badge>}
-          />
-        )}
-      </SettingsSection>
-
-      {/* ── Connection ───────────────────────────────────────────────────── */}
-      <SettingsSection
-        title={connected ? "Cloud connection" : "Connect a key"}
+        title="Trigger.dev Cloud"
         description={
           connected
             ? undefined
-            : "Get a key from cloud.trigger.dev → API keys — a project environment secret key (tr_prod_sk_… / tr_dev_sk_…) or a personal access token (tr_pat_…)."
+            : "Run your chat agent, sub-agents, projects and businesses durably on your own Trigger.dev Cloud — no self-hosting, no setup."
         }
-        action={
-          connected ? (
-            <div className="flex flex-wrap items-center gap-2">
-              {cloud?.maskedKey && (
-                <Badge variant="secondary" className="gap-1 font-mono">
-                  <CheckCircle2 className="size-3 text-emerald-500" />
-                  {cloud.maskedKey}
-                </Badge>
-              )}
-            </div>
-          ) : undefined
-        }
+        action={connected ? <StatusPill state={pill} /> : undefined}
       >
-        {!connected ? (
-          <form onSubmit={handleConnect} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="trigger-cloud-key">Trigger.dev API key</Label>
-              <div className="relative">
-                <KeyRound className="text-muted-foreground absolute left-3 top-1/2 size-4 -translate-y-1/2" />
-                <Input
-                  id="trigger-cloud-key"
-                  type={showKey ? "text" : "password"}
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                  placeholder="tr_prod_sk_… · tr_dev_sk_… · tr_pat_…"
-                  className="pr-10 pl-9 font-mono"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute top-1/2 right-1 size-7 -translate-y-1/2"
-                  onClick={() => setShowKey((v) => !v)}
-                  aria-label={showKey ? "Hide key" : "Show key"}
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </Button>
-              </div>
-              <p className="text-muted-foreground text-xs">
-                Verified against api.trigger.dev before anything is stored. Encrypted at rest —
-                only its masked form is ever shown afterwards.
-              </p>
-            </div>
+        <div className="space-y-4">
+          {/* ── Session-mode notice (serverless deployments, connected only) ── */}
+          {connected && cloud?.ephemeral && (
+            <Alert>
+              <Cloud className="size-4" />
+              <AlertTitle>Session mode — serverless deployment</AlertTitle>
+              <AlertDescription>
+                This deployment&apos;s server has a read-only filesystem, so the connection is
+                re-applied from this browser automatically — no reconnect needed.
+              </AlertDescription>
+            </Alert>
+          )}
 
-            <MoreOptions label="Advanced — custom task id">
-              <div className="space-y-1.5 rounded-lg border p-3">
-                <Label htmlFor="trigger-cloud-slug">Worker task id</Label>
-                <Input
-                  id="trigger-cloud-slug"
-                  value={slug}
-                  onChange={(e) => {
-                    setSlug(e.target.value);
-                    setSlugDirty(true);
-                  }}
-                  placeholder="agent-run"
-                  className="font-mono"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p className="text-muted-foreground text-xs">
-                  Only change this if you renamed the worker&apos;s agent-run task in
-                  trigger-worker/. Default: <span className="font-mono">agent-run</span>.
-                </p>
-              </div>
-            </MoreOptions>
-
-            <Button type="submit" disabled={isConnecting || !key.trim()}>
-              {isConnecting ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Rocket className="size-4" />
-              )}
-              Verify &amp; connect
-            </Button>
-          </form>
-        ) : (
-          <div className="space-y-4">
-            <SettingsRow
-              label="API key"
-              description={
-                cloud?.verifiedAt
-                  ? `Verified ${formatDistanceToNow(new Date(cloud.verifiedAt), { addSuffix: true })}${envSourced ? " · supplied via the TRIGGER_CLOUD_KEY env var" : ""}.`
-                  : envSourced
-                    ? "Supplied via the TRIGGER_CLOUD_KEY env var — manage it in the server environment."
-                    : undefined
-              }
-              control={
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={handleRetest} disabled={isRetesting}>
-                    {isRetesting ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                    Test connection
-                  </Button>
-                  {!envSourced && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => setConfirmDisconnect(true)}
-                      disabled={isDisconnecting}
-                    >
-                      <Trash2 className="size-3.5" />
-                      Disconnect
-                    </Button>
-                  )}
-                </div>
-              }
-            />
-
-            {!envSourced && (
-              <SettingsRow
-                label="Worker task id"
-                description="The deployed task the app kicks for every background run."
-                align="start"
-                control={
-                  <div className="flex items-center gap-2">
+          {/* ── State 1 · Not connected — paste a key, that's the setup ───── */}
+          {!connected && (
+            <form onSubmit={handleConnect} className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="trigger-cloud-key">API key</Label>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <div className="relative min-w-0 flex-1">
+                    <KeyRound className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
                     <Input
-                      value={slug}
-                      onChange={(e) => {
-                        setSlug(e.target.value);
-                        setSlugDirty(true);
-                      }}
-                      placeholder="agent-run"
-                      className="w-44 font-mono"
-                      aria-label="Worker task id"
+                      id="trigger-cloud-key"
+                      type={showKey ? "text" : "password"}
+                      value={key}
+                      onChange={(e) => setKey(e.target.value)}
+                      placeholder="tr_prod_sk_… · tr_dev_sk_…"
+                      className="pr-10 pl-9 font-mono"
                       autoComplete="off"
                       spellCheck={false}
                     />
                     <Button
                       type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={handleSaveSlug}
-                      disabled={isSavingSlug || !slugDirty || !slug.trim()}
+                      variant="ghost"
+                      size="icon"
+                      className="absolute top-1/2 right-1 size-7 -translate-y-1/2"
+                      onClick={() => setShowKey((v) => !v)}
+                      aria-label={showKey ? "Hide key" : "Show key"}
                     >
-                      {isSavingSlug ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-                      Save
+                      {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                     </Button>
                   </div>
-                }
-              />
-            )}
-
-            <div className="space-y-1.5">
-              <p className="text-sm font-medium">Account</p>
-              <AccountSnapshot account={cloud?.account ?? null} />
-            </div>
-          </div>
-        )}
-      </SettingsSection>
-
-      {/* ── Worker setup checklist (connected only) ─────────────────────── */}
-      {connected && (
-        <SettingsSection
-          title="Cloud worker setup"
-          description="One-time wiring so trigger.dev Cloud can execute and report back."
-        >
-          <ol className="space-y-4">
-            <li className="space-y-1.5">
-              <p className="text-sm font-medium">
-                <span className="text-muted-foreground mr-1.5 font-mono text-xs">1.</span>
-                Deploy the worker from this repo to trigger.dev Cloud
-              </p>
-              <pre className="bg-muted/60 scrollbar-thin overflow-x-auto rounded-md border px-3 py-2 font-mono text-[11px]">
-                cd trigger-worker{"\n"}npx trigger.dev@latest deploy
-              </pre>
-              <p className="text-muted-foreground text-xs">
-                The CLI asks for a trigger.dev access token on first use; see{" "}
-                <span className="font-mono">trigger-worker/README.md</span>.
-              </p>
-            </li>
-            <li className="space-y-1.5">
-              <p className="text-sm font-medium">
-                <span className="text-muted-foreground mr-1.5 font-mono text-xs">2.</span>
-                Set these environment variables on the cloud project
-              </p>
-              <div className="space-y-1.5">
-                <CopyLine label="APP_URL" value={status?.appUrl ?? null} />
-                <CopyLine label="WORKER_TOKEN" value={cloud?.workerToken ?? null} secret />
-                <CopyLine
-                  label="E2B_API_KEY"
-                  value={null}
-                  placeholder="your E2B key (Settings → Sandbox (E2B))"
-                />
-              </div>
-              {cloud?.workerTokenSource === "env" && (
-                <p className="text-muted-foreground text-xs">
-                  WORKER_TOKEN comes from this server&apos;s env var — the cloud project must use
-                  the same value.
+                  <Button type="submit" className="shrink-0" disabled={isConnecting || !key.trim()}>
+                    {isConnecting ? <Loader2 className="animate-spin" /> : <Rocket />}
+                    Connect
+                  </Button>
+                </div>
+                <p className="text-muted-foreground text-xs leading-relaxed">
+                  Paste an environment secret key (tr_prod_sk_… / tr_dev_sk_…) —{" "}
+                  <a
+                    href={GET_KEY_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-foreground inline-flex items-center gap-0.5 underline underline-offset-4"
+                  >
+                    get one at cloud.trigger.dev → API keys
+                    <ExternalLink className="size-3" />
+                  </a>
+                  . Verified live before anything is stored; encrypted at rest and only ever shown
+                  masked afterwards.
                 </p>
-              )}
-            </li>
-            <li className="space-y-1.5">
-              <p className="text-sm font-medium">
-                <span className="text-muted-foreground mr-1.5 font-mono text-xs">3.</span>
-                Done — schedules fire from the cloud too
-              </p>
-              <p className="text-muted-foreground text-xs leading-relaxed">
-                Once deployed, the worker&apos;s <span className="font-mono">sweep-schedules</span>{" "}
-                and <span className="font-mono">poll-claims</span> crons keep everything running
-                even while this app is closed. Manually-triggered tasks are kicked instantly over
-                the cloud API the moment you start them.
-              </p>
-            </li>
-          </ol>
-        </SettingsSection>
-      )}
+              </div>
+            </form>
+          )}
 
-      {/* ── Recent cloud runs (connected only) ───────────────────────────── */}
-      {connected && (
-        <SettingsSection
-          title="Recent cloud runs"
-          description="Live status of the background tasks dispatched to trigger.dev."
-        >
-          <RecentCloudRuns dashboardBase={cloud?.dashboardBase ?? null} />
-        </SettingsSection>
-      )}
+          {/* ── State 2 · Connected + deploying (one-time worker deploy) ──── */}
+          {connected && deployRunning && (
+            <div className="space-y-3">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-sky-500/10">
+                  <Loader2 className="size-4 animate-spin text-sky-600 dark:text-sky-400" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm leading-snug font-medium">Deploying the cloud worker…</p>
+                  <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+                    About 2 minutes, one time only — the deployment then lives on your Trigger.dev
+                    project. This page tracks the progress automatically.
+                  </p>
+                  <ConnectionLine cloud={cloud} />
+                </div>
+              </div>
+              <DeployTail tail={deploy?.tail ?? []} />
+            </div>
+          )}
+
+          {/* ── State 3 · Connected + live — active on the cloud ──────────── */}
+          {connected && !deployRunning && live && (
+            <div className="space-y-4">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/10">
+                  <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm leading-snug font-medium">
+                    Active — running on Trigger.dev Cloud
+                  </p>
+                  <ConnectionLine cloud={cloud} />
+                  {cloud?.verifiedAt && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Verified{" "}
+                      {formatDistanceToNow(new Date(cloud.verifiedAt), { addSuffix: true })}
+                      {bootstrap?.probedAt
+                        ? ` · worker checked ${formatDistanceToNow(new Date(bootstrap.probedAt), { addSuffix: true })}`
+                        : ""}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRetest}
+                  disabled={isRetesting}
+                >
+                  {isRetesting ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-3.5" />
+                  )}
+                  Test connection
+                </Button>
+                {!envSourced && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setConfirmDisconnect(true)}
+                    disabled={isDisconnecting}
+                  >
+                    {isDisconnecting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="size-3.5" />
+                    )}
+                    Disconnect
+                  </Button>
+                )}
+                {cloud?.dashboardBase && (
+                  <Button type="button" variant="ghost" size="sm" asChild>
+                    <a
+                      href={`${cloud.dashboardBase}/runs`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Runs on cloud.trigger.dev
+                      <ExternalLink className="size-3.5" />
+                    </a>
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── State 4 · Connected + undeployed/unknown/failed ───────────── */}
+          {connected && !deployRunning && !live && (
+            <div className="space-y-3">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10">
+                  <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm leading-snug font-medium">
+                    The cloud worker needs a one-time deploy to your Trigger.dev project.
+                  </p>
+                  <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+                    {deployFailed
+                      ? "The last deploy attempt failed — check the log below and try again."
+                      : "The key works, but the agent-run task isn't deployed on the project yet. One deploy and every background task after runs on the cloud."}
+                  </p>
+                  <ConnectionLine cloud={cloud} />
+                </div>
+              </div>
+              <div>
+                <Button type="button" size="sm" onClick={handleDeploy}>
+                  <Rocket />
+                  Deploy worker
+                </Button>
+              </div>
+              <DeployTail tail={deploy?.tail ?? []} />
+            </div>
+          )}
+        </div>
+      </SettingsSection>
 
       {/* ── Disconnect confirmation ──────────────────────────────────────── */}
       <AlertDialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
@@ -750,9 +476,9 @@ export function SectionTriggerCloud() {
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect Trigger.dev Cloud?</AlertDialogTitle>
             <AlertDialogDescription>
-              The encrypted key will be deleted from this app&apos;s server and background tasks
-              go back to the local orchestrator. Runs already executing on trigger.dev keep
-              running to completion.
+              The encrypted key will be removed and background tasks stop dispatching to the cloud
+              until you connect a key again. Runs already executing on trigger.dev keep running to
+              completion.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

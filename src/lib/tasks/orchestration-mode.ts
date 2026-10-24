@@ -1,26 +1,12 @@
 // ============================================================================
-// Background Task Execution Framework — orchestration mode switch.
+// Background Task Execution Framework — orchestration mode.
 //
-// Lives in its own module (not cron-scheduler / local-driver) because BOTH
-// need it and they import each other — a shared definition there would be a
-// dependency cycle.
-//
-// THREE modes, resolved in priority order:
-//
-//   1. "selfhosted" — TRIGGER_DEV_URL + TRIGGER_DEV_TOKEN env vars point at a
-//      SELF-HOSTED Trigger.dev v3 instance. The deployed worker owns
-//      execution: the trigger route leaves runs "queued", the local scheduler
-//      loop only ARMS nextRunAt, and the worker polls
-//      POST /api/tasks/worker {action:"claim"|"sweep"}.
-//
-//   2. "cloud" — the operator connected Trigger.dev CLOUD (api.trigger.dev)
-//      via Settings → Cloud Tasks (a verified key stored in TaskCloudConfig)
-//      — no self-hosting needed. Same worker protocol, PLUS the app kicks
-//      the deployed `agent-run` task directly through the cloud REST API for
-//      zero-queue-latency dispatch, and self-heals stuck runs from cloud
-//      run state (see trigger-cloud.ts).
-//
-//   3. "local" (default) — the in-process local driver owns execution.
+// ONE execution mode: "cloud" — the operator connected a Trigger.dev Cloud
+// key (Settings → Cloud) and every background task executes durably on
+// their own trigger.dev Cloud project (the deployed agent-run task).
+// Without a connected key the app has NO background execution (the trigger
+// route answers with actionable guidance) — self-hosting and the in-process
+// local driver were removed by design.
 //
 // Resolution is ASYNC (cloud config lives in SQLite) with a short-lived
 // in-memory cache so hot paths (every status poll, every scheduler tick)
@@ -30,15 +16,10 @@
 
 import { getCloudConfig } from "./trigger-cloud";
 
-export type OrchestrationMode = "local" | "selfhosted" | "cloud";
-
-/** True when a SELF-HOSTED Trigger.dev worker owns execution (env-configured;
- *  takes priority over the cloud key so explicit server config always wins). */
-export function isSelfHostedMode(): boolean {
-  return Boolean(
-    process.env.TRIGGER_DEV_URL?.trim() && process.env.TRIGGER_DEV_TOKEN?.trim(),
-  );
-}
+/** Legacy DB values still present on historical rows ("local", "triggerdev"
+ *  from the removed modes) — reported as the frozen protocol's
+ *  "triggerdev" union member; new rows are always "cloud". */
+export type OrchestrationMode = "off" | "cloud";
 
 /** Cache lifetime — the mode only changes when the operator connects or
  *  disconnects a key (which also invalidates explicitly), so 30s is generous. */
@@ -55,14 +36,11 @@ const g = globalThis as unknown as ModeGlobal;
  * one SQLite read per TTL window.
  */
 export async function getOrchestrationMode(): Promise<OrchestrationMode> {
-  // Env-configured self-hosting always wins — explicit server config.
-  if (isSelfHostedMode()) return "selfhosted";
-
   const cached = g.__onyxOrchestrationMode;
   if (cached && Date.now() - cached.at < MODE_CACHE_TTL_MS) return cached.mode;
 
   const cloud = await getCloudConfig();
-  const mode: OrchestrationMode = cloud ? "cloud" : "local";
+  const mode: OrchestrationMode = cloud ? "cloud" : "off";
   g.__onyxOrchestrationMode = { mode, at: Date.now() };
   return mode;
 }

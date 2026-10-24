@@ -1,34 +1,43 @@
 // ============================================================================
 // Background Task Execution Framework — /api/tasks/cloud (Trigger.dev CLOUD).
 //
-// The Settings → Cloud Tasks backend:
+// The Settings → Cloud backend. The ONLY execution mode: connect a
+// trigger.dev Cloud key and every background task (chat agent runs,
+// sub-agent chains, scheduled business tasks, terminal commands) runs
+// durably on the operator's own cloud project — zero setup beyond the key:
 //
 //   GET    → mode + connection status (masked key, verification snapshot,
-//            task slug, effective WORKER_TOKEN for the setup checklist,
-//            dashboard base, appUrl). NEVER returns the API key itself.
-//   POST   { apiKey, taskSlug? }  → verify against api.trigger.dev, then
-//            persist (AES-256-GCM). Mints a WORKER_TOKEN when neither the
-//            env var nor a previous token exists, so the operator can wire
-//            the deployed cloud worker without editing .env.
+//            dashboard base) + WORKER BOOTSTRAP state (liveness probe of the
+//            deployed agent-run task; auto-deploy progress when a deploy is
+//            in flight). NEVER returns the API key itself.
+//   POST   { apiKey }             → verify against api.trigger.dev
+//                                   (whoami), persist (AES-256-GCM), probe
+//                                   the worker and AUTO-DEPLOY it to the
+//                                   operator's project when missing.
+//   POST   { action:"retest" }    → re-verify the stored key + liveness.
+//   POST   { action:"deploy" }    → (re)deploy the bundled worker now.
 //   PATCH  { taskSlug }           → change the task id the app kicks.
-//   DELETE → disconnect (back to the local orchestrator).
+//   DELETE → disconnect.
 //
-// Body-logging discipline mirrors /api/tasks/trigger: keys and tokens are
-// NEVER logged — only statuses and masked forms.
+// Body-logging discipline mirrors /api/tasks/trigger: keys are NEVER logged
+// — only statuses and masked forms.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
 import {
+  autoDeployWorker,
   clearCloudConfig,
   cloudApiBase,
   cloudDashboardBase,
   getCloudConfig,
-  getEffectiveWorkerToken,
+  getWorkerBootstrapState,
   invalidateCloudConfigCache,
   maskSecret,
+  probeWorkerLiveness,
   refreshCloudAccount,
   saveCloudConfig,
   updateCloudTaskSlug,
   verifyCloudKey,
+  type WorkerBootstrapState,
 } from "@/lib/tasks/trigger-cloud";
 import {
   getOrchestrationMode,
@@ -59,11 +68,14 @@ function normalizeTaskSlug(value: unknown): string | null {
 }
 
 /** Shared status payload (GET + POST responses). */
-async function statusPayload(request: NextRequest): Promise<Record<string, unknown>> {
-  const [mode, config, workerToken] = await Promise.all([
+async function statusPayload(
+  request: NextRequest,
+  bootstrap?: WorkerBootstrapState,
+): Promise<Record<string, unknown>> {
+  const [mode, config, state] = await Promise.all([
     getOrchestrationMode(),
     getCloudConfig(),
-    getEffectiveWorkerToken(),
+    bootstrap ? Promise.resolve(bootstrap) : getWorkerBootstrapState().catch(() => null),
   ]);
   const appUrl =
     process.env.APP_URL?.trim() || new URL(request.url).origin.replace(/\/+$/, "");
@@ -71,7 +83,6 @@ async function statusPayload(request: NextRequest): Promise<Record<string, unkno
   return {
     ok: true,
     mode,
-    selfHosted: mode === "selfhosted",
     appUrl,
     cloud: config
       ? {
@@ -86,10 +97,6 @@ async function statusPayload(request: NextRequest): Promise<Record<string, unkno
           // the config lives in process memory — the browser mirror is the
           // durable store and re-applies the key after each cold start.
           ephemeral: config.ephemeral === true,
-          // The operator's own worker token — needed to wire the deployed
-          // cloud project (setup checklist). Not the API key.
-          workerToken: workerToken.token,
-          workerTokenSource: workerToken.source,
           apiBase: cloudApiBase(),
         }
       : {
@@ -101,15 +108,14 @@ async function statusPayload(request: NextRequest): Promise<Record<string, unkno
           verifiedAt: null as string | null,
           dashboardBase: null as string | null,
           ephemeral: false,
-          workerToken: workerToken.token,
-          workerTokenSource: workerToken.source,
           apiBase: cloudApiBase(),
         },
+    ...(state ? { bootstrap: state } : {}),
   };
 }
 
 // ---------------------------------------------------------------------------
-// GET — connection status.
+// GET — connection status (+ cached worker bootstrap state).
 // ---------------------------------------------------------------------------
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -117,29 +123,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// POST — verify + connect.
+// POST — verify + connect (+ auto-bootstrap the worker), retest, deploy.
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  let body: { action?: unknown; apiKey?: unknown; taskSlug?: unknown; workerToken?: unknown };
+  let body: { action?: unknown; apiKey?: unknown; taskSlug?: unknown };
   try {
     body = (await request.json()) as {
       action?: unknown;
       apiKey?: unknown;
       taskSlug?: unknown;
-      workerToken?: unknown;
     };
   } catch {
     return bad("invalid JSON body");
   }
-
-  // The browser mirror's WORKER_TOKEN (reconnect path) — re-used instead of
-  // re-minting so the deployed-worker setup checklist stays stable across
-  // serverless cold starts. Shape-guarded; empty/invalid → ignored.
-  const mirrorWorkerToken =
-    typeof body.workerToken === "string" && /^[A-Za-z0-9_\-]{16,128}$/.test(body.workerToken.trim())
-      ? body.workerToken.trim()
-      : undefined;
 
   // ── action:"retest" — re-verify the STORED key against api.trigger.dev
   // (refreshes the account snapshot + verifiedAt; the key never leaves the
@@ -163,8 +160,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       return bad(`verified, but refreshing the snapshot failed: ${message.slice(0, 200)}`, 500);
     }
     invalidateOrchestrationModeCache();
-    const payload = await statusPayload(request);
+    const bootstrap = await getWorkerBootstrapState({ skipCache: true }).catch(() => null);
+    const payload = await statusPayload(request, bootstrap ?? undefined);
     return NextResponse.json({ ...payload, verified: true });
+  }
+
+  // ── action:"deploy" — (re)deploy the bundled worker to the operator's
+  // project now (from Settings; requires a writable server filesystem).
+  if (body.action === "deploy") {
+    const config = await getCloudConfig();
+    if (!config) {
+      return bad("not connected — connect a key first", 409);
+    }
+    const deploy = await autoDeployWorker(config);
+    const bootstrap = await getWorkerBootstrapState().catch(() => null);
+    const payload = await statusPayload(request, bootstrap ?? undefined);
+    return NextResponse.json({ ...payload, deploy });
   }
 
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
@@ -187,11 +198,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // 2) Persist (seals the key; mints a WORKER_TOKEN when none exists).
-  //    On a read-only filesystem (serverless) this degrades to process
-  //    memory (persisted:false) — still a SUCCESSFUL connect.
+  // 2) Persist (seals the key). On a read-only filesystem (serverless) this
+  //    degrades to process memory (persisted:false) — still a SUCCESSFUL
+  //    connect.
   try {
-    await saveCloudConfig({ apiKey, taskSlug, account: verified.account, workerToken: mirrorWorkerToken });
+    await saveCloudConfig({ apiKey, taskSlug, account: verified.account });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
@@ -201,10 +212,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   invalidateOrchestrationModeCache();
-  startSchedulerLoop(); // re-arm the loop under the new mode
-  const status = await statusPayload(request);
+  startSchedulerLoop(); // re-arm the schedule loop under the new mode
+
+  // 3) Bootstrap: probe the deployed worker; auto-deploy it when missing
+  //    (writable server filesystems only — deployments persist server-side
+  //    on the cloud, so serverless instances ride the existing deployment).
+  let bootstrap: WorkerBootstrapState | null = null;
+  try {
+    const config = await getCloudConfig();
+    if (config) {
+      const liveness = await probeWorkerLiveness(config, { skipCache: true });
+      if (liveness === "undeployed" || liveness === "unknown") {
+        await autoDeployWorker(config);
+      }
+      bootstrap = await getWorkerBootstrapState().catch(() => null);
+    }
+  } catch (err) {
+    console.warn(
+      `[tasks] worker bootstrap check failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const status = await statusPayload(request, bootstrap ?? undefined);
   console.log(
-    status.cloud.ephemeral
+    status.cloud && typeof status.cloud === "object" && (status.cloud as { ephemeral?: boolean }).ephemeral
       ? `[tasks] Trigger.dev Cloud connected in SESSION mode (read-only filesystem — key lives in the operator's browser) (${maskSecret(apiKey)}, task "${taskSlug}")`
       : `[tasks] Trigger.dev Cloud connected (${maskSecret(apiKey)}, task "${taskSlug}") — background tasks now dispatch to the cloud`,
   );
@@ -257,7 +288,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
     }
     invalidateCloudConfigCache();
     invalidateOrchestrationModeCache();
-    console.log("[tasks] Trigger.dev Cloud disconnected — back to the local orchestrator");
+    console.log("[tasks] Trigger.dev Cloud disconnected");
   }
   return NextResponse.json(await statusPayload(request));
 }

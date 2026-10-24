@@ -1,39 +1,36 @@
 // ============================================================================
-// Background Task Execution Framework — Trigger.dev CLOUD orchestrator.
+// Background Task Execution Framework — Trigger.dev CLOUD orchestrator
+// (DIRECT execution).
 //
-// The third execution mode (orchestration-mode.ts): the operator connects a
-// trigger.dev Cloud key (Settings → Cloud Tasks) and the app drives the SAME
-// deployed worker protocol through the public cloud REST API —
-// https://api.trigger.dev — with NO self-hosting:
+// The ONLY execution mode: the operator connects a trigger.dev Cloud key
+// (Settings → Cloud) and every background task (chat agent runs, sub-agent
+// chains, scheduled business tasks, terminal commands) executes durably on
+// their own trigger.dev Cloud project — no self-hosting, no local mode, no
+// worker callbacks.
 //
-//   · verifyCloudKey     GET  /api/v1/projects            (PAT snapshot)
-//                          GET  /api/v1/runs?perPage=1    (secret-key probe)
-//   · triggerCloudTaskRun POST /api/v1/tasks/:id/trigger  (kick agent-run)
-//   · fetchCloudRunState GET  /api/v3/runs/:id            (self-heal)
-//   · cancelCloudRunById POST /api/v2/runs/:id/cancel     (cancel)
+// Bootstrapping is AUTOMATIC: on connect the app verifies the key
+// (GET /api/v1/whoami), and the bundled worker (trigger-worker/) is deployed
+// to the operator's cloud project with the key itself
+// (`trigger.dev deploy --authorization` accepts environment secret keys —
+// TRIGGER_ACCESS_TOKEN). Deployments persist server-side on the cloud, so
+// the app only ever needs the key at runtime.
 //
-// CREDENTIAL DISCIPLINE (mirrors keyring.ts):
-//   · the API key + minted WORKER_TOKEN are sealed with AES-256-GCM into
-//     TaskCloudConfig (SQLite); plaintext lives ONLY in process memory
-//     (short-lived config cache below),
-//   · NEVER logged — log run ids + statuses only,
-//   · the master key comes from TASKS_CLOUD_MASTER_KEY (env) or the machine
-//     key file db/cloud-config.key (generated once, 32 random bytes hex).
+// Per-run protocol (NO callbacks — the app pulls everything):
+//   · dispatch → POST /api/v1/tasks/agent-run/trigger (full run + credentials)
+//   · progress → GET /api/v3/runs/:id → run.metadata.onyx (phase/progress/
+//     chunk ring) — synced into the TaskRun row by syncCloudRunIntoRow
+//   · result   → the finished run's OUTPUT (status/error/artifacts)
+//   · cancel   → POST /api/v2/runs/:id/cancel
 //
-// DISPATCH (kickCloudRun): the app atomically claims the queued TaskRun
-// (lockHolder "triggerdev:cloud-kick:<id>"), builds the same
-// WorkerClaimedRun the worker route would return, and triggers the deployed
-// `agent-run` task directly on the cloud — zero queue latency. On API
-// failure the claim is RELEASED back to queued so the deployed worker's
-// poll-claims cron (every minute) remains the backstop dispatcher.
-//
-// SELF-HEAL (healStaleCloudRuns): a cloud run that exhausted its retries
-// before reporting would otherwise sit "running" forever — when a row goes
-// stale (>2 min untouched) its cloud state is fetched and terminal outcomes
-// are settled locally; a queued row that was NEVER claimed (>10 min) fails
-// with an actionable "deploy the worker" error.
+// CREDENTIAL DISCIPLINE: the API key is sealed with AES-256-GCM into
+// TaskCloudConfig (SQLite); plaintext lives ONLY in process memory
+// (short-lived config cache). NEVER logged — run ids and statuses only.
+// Per-run credentials (E2B key, LLM key pool, task token) ride in the
+// trigger payload — scoped to the operator's own cloud project — and die
+// with the run.
 // ============================================================================
 
+import { spawn } from "node:child_process";
 import {
   createCipheriv,
   createDecipheriv,
@@ -41,20 +38,28 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TaskRun } from "@prisma/client";
+import type { TaskPayloadFile, TaskRunProgress } from "./protocol";
+import type { BackgroundTaskType, CloudAgentRunPayload, CloudRunMetadata, CloudRunOutput } from "./protocol";
+import { TASK_CLOUD_PAYLOAD_MAX_BYTES } from "./protocol";
 import { prisma } from "./prisma";
 import { keyring } from "./keyring";
-import { clampTimeoutMs } from "./local-driver";
-import { parseConfig, parsePayload } from "./run-store";
-import type {
-  BackgroundTaskType,
-  WorkerClaimedRun,
-} from "./protocol";
+import {
+  appendChunksToRun,
+  mergeProgressIntoRun,
+  parseConfig,
+  parsePayload,
+  type PendingChunk,
+} from "./run-store";
+
+const clampTimeoutMsLocal = (ms: unknown): number => {
+  const raw = typeof ms === "number" && Number.isFinite(ms) ? ms : 30 * 60 * 1000;
+  return Math.min(Math.max(Math.round(raw), 60_000), 30 * 60 * 1000);
+};
 
 // ---------------------------------------------------------------------------
-// AES-256-GCM sealing — master key from env or the machine key file.
+// Secret sealing (AES-256-GCM) — master key from env or the machine key file.
 // ---------------------------------------------------------------------------
 
 const MASTER_KEY_ENV = "TASKS_CLOUD_MASTER_KEY";
@@ -85,14 +90,10 @@ function getMasterKey(): Buffer {
     // First use — generate + persist the machine key (0600-ish on Linux).
     key = randomBytes(32);
     try {
-      mkdirSync(join(process.cwd(), "db"), { recursive: true });
       writeFileSync(MACHINE_KEY_FILE, `${key.toString("hex")}\n`, { mode: 0o600 });
-    } catch (err) {
-      // Read-only fs → fall back to an ephemeral process key (a restart
-      // invalidates the sealed config; the operator re-connects the key).
-      console.warn(
-        `[tasks] could not persist the cloud master key file: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      // Read-only fs → ephemeral process key (a restart invalidates the
+      // sealed config; the operator re-connects the key).
     }
   }
   gKey.__onyxCloudMasterKey = key;
@@ -133,26 +134,18 @@ export function maskSecret(key: string): string {
 // Config store — TaskCloudConfig singleton + in-memory cache.
 // ---------------------------------------------------------------------------
 
-/** Environment of a trigger.dev project (from GET /api/v1/projects — PAT). */
-export interface CloudEnvironmentInfo {
-  id: string;
-  name: string;
-  slug: string;
-}
-
-/** Project entry of the verification snapshot. */
+/** Project entry of the verification snapshot (whoami-derived). */
 export interface CloudProjectInfo {
   id: string;
   name: string;
   externalRef: string;
   orgSlug: string | null;
   orgName: string | null;
-  environments: CloudEnvironmentInfo[];
+  environments: Array<{ id: string; name: string; slug: string }>;
 }
 
-/** Verification snapshot. `partial` = project secret key (tr_prod_sk_… /
- * tr_dev_sk_… / tr_trigger_… — can trigger + read runs but cannot list
- * projects through the PAT-only management API). */
+/** Verification snapshot. `partial` = the key could not reveal project
+ *  details (PAT-shaped keys) — run links then default to the dashboard. */
 export interface CloudAccountSnapshot {
   partial: boolean;
   note?: string;
@@ -166,9 +159,6 @@ export interface CloudConfig {
   maskedKey: string;
   taskSlug: string;
   account: CloudAccountSnapshot | null;
-  /** Effective WORKER_TOKEN (env wins over the minted stored one). */
-  workerToken: string;
-  workerTokenSource: "env" | "generated" | "none";
   verifiedAt: string | null;
   /** True when the server filesystem is read-only (serverless — Netlify etc.)
    *  and the config could NOT be sealed to SQLite. The config lives in
@@ -230,22 +220,13 @@ export async function getCloudConfig(): Promise<CloudConfig | null> {
       const row = await prisma.taskCloudConfig.findUnique({ where: { id: CONFIG_ROW_ID } });
       if (row) {
         const apiKey = openSecret(row.encryptedKey);
-        const storedWorkerToken = openSecret(row.encryptedWorkerToken) || "";
-        const envWorkerToken = process.env.WORKER_TOKEN?.trim() || "";
         if (apiKey) {
-          const workerToken = envWorkerToken || storedWorkerToken;
           config = {
             keySource: "settings",
             apiKey,
             maskedKey: row.maskedKey,
             taskSlug: row.taskSlug || DEFAULT_TASK_SLUG,
             account: parseAccountJson(row.accountJson),
-            workerToken,
-            workerTokenSource: envWorkerToken
-              ? "env"
-              : storedWorkerToken
-                ? "generated"
-                : "none",
             verifiedAt: row.verifiedAt.toISOString(),
           };
         }
@@ -267,15 +248,12 @@ export async function getCloudConfig(): Promise<CloudConfig | null> {
   if (!config) {
     const envKey = process.env.TRIGGER_CLOUD_KEY?.trim();
     if (envKey) {
-      const envWorkerToken = process.env.WORKER_TOKEN?.trim() || "";
       config = {
         keySource: "env",
         apiKey: envKey,
         maskedKey: maskSecret(envKey),
         taskSlug: process.env.TRIGGER_CLOUD_TASK_SLUG?.trim() || DEFAULT_TASK_SLUG,
         account: null,
-        workerToken: envWorkerToken,
-        workerTokenSource: envWorkerToken ? "env" : "none",
         verifiedAt: null,
       };
     }
@@ -291,6 +269,12 @@ export function invalidateCloudConfigCache(): void {
   gCfg.__onyxOrchestrationMode = null; // mode flips with the config
 }
 
+export interface SaveCloudConfigInput {
+  apiKey: string;
+  taskSlug?: string;
+  account?: CloudAccountSnapshot | null;
+}
+
 export interface SaveCloudConfigResult {
   config: CloudConfig;
   /** False when the SQLite seal failed (read-only serverless filesystem) and
@@ -300,39 +284,24 @@ export interface SaveCloudConfigResult {
 }
 
 /**
- * Persist a VERIFIED key (the caller verifies first — verifyCloudKey). Mints
- * a WORKER_TOKEN when neither the env var, the caller's mirror token, nor a
- * previous token exists, so the operator can wire the deployed cloud worker
- * without touching .env. On a read-only filesystem (serverless) the config
- * degrades to process memory (`persisted: false`) instead of failing the
- * connect — the browser keeps the durable, vault-sealed mirror.
- * Returns the resolved config; never logs the key or token.
+ * Persist a VERIFIED key (the caller verifies first — verifyCloudKey). On a
+ * read-only filesystem (serverless) the config degrades to process memory
+ * (`persisted: false`) instead of failing the connect — the browser keeps
+ * the durable, vault-sealed mirror. Returns the resolved config; never logs
+ * the key.
  */
 export async function saveCloudConfig(
   input: SaveCloudConfigInput,
 ): Promise<SaveCloudConfigResult> {
   const common = {
     maskedKey: maskSecret(input.apiKey),
-    taskSlug: input.taskSlug,
-    account: input.account,
+    taskSlug: input.taskSlug ?? DEFAULT_TASK_SLUG,
+    account: input.account ?? null,
     verifiedAt: new Date().toISOString(),
   };
 
   try {
-    const existing = await prisma.taskCloudConfig.findUnique({
-      where: { id: CONFIG_ROW_ID },
-    });
-
-    let mintedToken: string | null = null;
-    if (!process.env.WORKER_TOKEN?.trim()) {
-      mintedToken =
-        (existing ? openSecret(existing.encryptedWorkerToken) : null) ||
-        input.workerToken?.trim() ||
-        randomBytes(24).toString("hex");
-    }
-
     const sealedKey = sealSecret(input.apiKey);
-    const sealedToken = sealSecret(mintedToken ?? "");
     const rowCommon = {
       maskedKey: common.maskedKey,
       taskSlug: common.taskSlug,
@@ -342,10 +311,14 @@ export async function saveCloudConfig(
 
     await prisma.taskCloudConfig.upsert({
       where: { id: CONFIG_ROW_ID },
-      create: { id: CONFIG_ROW_ID, encryptedKey: sealedKey, encryptedWorkerToken: sealedToken, ...rowCommon },
+      create: {
+        id: CONFIG_ROW_ID,
+        encryptedKey: sealedKey,
+        encryptedWorkerToken: sealSecret(""), // legacy column — unused
+        ...rowCommon,
+      },
       update: {
         encryptedKey: sealedKey,
-        ...(mintedToken ? { encryptedWorkerToken: sealedToken } : {}),
         ...rowCommon,
       },
     });
@@ -368,8 +341,6 @@ export async function saveCloudConfig(
       maskedKey: common.maskedKey,
       taskSlug: common.taskSlug,
       account: common.account,
-      workerToken: process.env.WORKER_TOKEN?.trim() || input.workerToken?.trim() || randomBytes(24).toString("hex"),
-      workerTokenSource: process.env.WORKER_TOKEN?.trim() ? "env" : "generated",
       verifiedAt: common.verifiedAt,
       ephemeral: true,
     };
@@ -416,9 +387,9 @@ export async function refreshCloudAccount(account: CloudAccountSnapshot): Promis
   invalidateCloudConfigCache();
 }
 
-/** Disconnect — delete the stored config (back to local mode). Always
- *  succeeds client-side: on a read-only filesystem there is nothing to
- *  delete and the memory config is simply dropped. */
+/** Disconnect — delete the stored config. Always succeeds client-side: on a
+ *  read-only filesystem there is nothing to delete and the memory config is
+ *  simply dropped. */
 export async function clearCloudConfig(): Promise<void> {
   try {
     await prisma.taskCloudConfig.deleteMany({ where: { id: CONFIG_ROW_ID } });
@@ -429,21 +400,7 @@ export async function clearCloudConfig(): Promise<void> {
   invalidateCloudConfigCache();
 }
 
-/** Effective WORKER_TOKEN (env > minted) — for the worker route + the
- * Settings setup checklist. Null when neither exists. */
-export async function getEffectiveWorkerToken(): Promise<{
-  token: string | null;
-  source: "env" | "generated" | "none";
-}> {
-  const envToken = process.env.WORKER_TOKEN?.trim();
-  if (envToken) return { token: envToken, source: "env" };
-  const config = await getCloudConfig();
-  if (config?.workerToken) return { token: config.workerToken, source: config.workerTokenSource };
-  return { token: null, source: "none" };
-}
-
-/** Dashboard base for run links (best-effort — falls back to the app root
- * when the snapshot lacks org/project/env slugs). */
+/** Dashboard base for run links (from the whoami snapshot). */
 export function cloudDashboardBase(account: CloudAccountSnapshot | null): string {
   const p = account?.projects?.[0];
   const env = p?.environments?.[0];
@@ -494,7 +451,7 @@ function field(value: unknown, fallback = ""): string {
 async function cloudRequest(
   apiKey: string,
   path: string,
-  init?: { method?: string; body?: unknown },
+  init?: { method?: string; body?: unknown; timeoutMs?: number },
 ): Promise<unknown> {
   let res: Response;
   try {
@@ -506,7 +463,7 @@ async function cloudRequest(
         accept: "application/json",
       },
       body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(init?.timeoutMs ?? REQUEST_TIMEOUT_MS),
       cache: "no-store",
     });
   } catch (err) {
@@ -548,104 +505,107 @@ export type VerifyCloudKeyResult =
   | { ok: false; status: number; error: string };
 
 /**
- * Verify a key against api.trigger.dev.
- *
- * Cascade (empirically validated against the live cloud API):
- *   1. GET /api/v1/projects — the platform listing used by the management
- *      SDK. PAT-only: project secret keys (tr_prod_sk_… / tr_dev_sk_… /
- *      tr_trigger_…) are answered with 401 "Invalid or Missing PAT".
- *      When it succeeds the key gets a FULL snapshot (projects/orgs/envs).
- *   2. Secret keys fall through to GET /api/v1/runs?perPage=1 — the runs
- *      listing every environment secret key CAN read (401 = the key itself
- *      is bad, 403 = valid but too restricted to orchestrate with, 200 =
- *      live). Accepted with a `partial` snapshot.
+ * Verify a key against api.trigger.dev via GET /api/v1/whoami — the
+ * environment-keyed identity endpoint. For environment secret keys
+ * (tr_prod_sk_ / tr_dev_sk_ / tr_trigger_ / …) it returns the full
+ * environment + project + organization snapshot (including the project
+ * externalRef used for the automatic worker deploy + dashboard links).
+ * PAT-shaped keys (tr_pat_) answer a different shape and degrade to a
+ * `partial` snapshot (project details are only enumerable via the
+ * PAT-only /api/v1/projects listing — not needed to orchestrate runs).
  */
 export async function verifyCloudKey(apiKey: string): Promise<VerifyCloudKeyResult> {
+  let data: unknown;
   try {
-    const data = await cloudRequest(apiKey, "/api/v1/projects");
-    const list = Array.isArray(data)
-      ? data
-      : Array.isArray((data as { data?: unknown[] }).data)
-        ? ((data as { data: unknown[] }).data)
-        : [];
-    const projects: CloudProjectInfo[] = [];
-    for (const raw of list) {
-      if (!raw || typeof raw !== "object") continue;
-      const p = raw as Record<string, unknown>;
-      const org = (p.organization && typeof p.organization === "object"
-        ? p.organization
-        : {}) as Record<string, unknown>;
-      const envs = Array.isArray(p.environments) ? p.environments : [];
-      projects.push({
-        id: field(p.id),
-        name: field(p.name, "project"),
-        externalRef: field(p.externalRef),
-        orgSlug: typeof org.slug === "string" ? org.slug : null,
-        orgName: typeof org.name === "string" ? org.name : null,
-        environments: envs
-          .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
-          .map((e) => ({ id: field(e.id), name: field(e.name), slug: field(e.slug) }))
-          .filter((e) => e.id),
-      });
-    }
-    return { ok: true, account: { partial: false, projects } };
+    data = await cloudRequest(apiKey, "/api/v1/whoami");
   } catch (err) {
-    if (err instanceof CloudApiError && (err.status === 401 || err.status === 403)) {
-      // Secret keys (tr_prod_sk_ / tr_dev_sk_ / tr_trigger_ / legacy tr_…)
-      // cannot list projects — the listing is PAT-only. Validate the KEY
-      // itself against the runs listing every environment key can read:
-      //   401 → the key is invalid/expired · 403 → too restricted ·
-      //   200 → live, accept as partial.
-      try {
-        await cloudRequest(apiKey, "/api/v1/runs?perPage=1");
-        return {
-          ok: true,
-          account: {
-            partial: true,
-            note: "Secret key verified — it can trigger and read runs. Project details are only visible to personal access tokens, so run links default to the dashboard root.",
-            projects: [],
-          },
-        };
-      } catch (probeErr) {
-        if (probeErr instanceof CloudApiError && probeErr.status === 401) {
-          return {
-            ok: false,
-            status: 401,
-            error:
-              "api.trigger.dev rejected the key — check that it is valid, not expired, and copied in full from cloud.trigger.dev (API keys page).",
-          };
-        }
-        if (probeErr instanceof CloudApiError && probeErr.status === 403) {
-          return {
-            ok: false,
-            status: 403,
-            error:
-              "The key authenticated but lacks the access this app needs — use a key with the Operator or No-restrictions preset (cloud.trigger.dev → API keys).",
-          };
-        }
-        throw probeErr;
-      }
+    if (err instanceof CloudApiError && err.status === 401) {
+      return {
+        ok: false,
+        status: 401,
+        error:
+          "api.trigger.dev rejected the key — check that it is valid, not expired, and copied in full from cloud.trigger.dev (API keys page).",
+      };
+    }
+    if (err instanceof CloudApiError && err.status === 403) {
+      return {
+        ok: false,
+        status: 403,
+        error:
+          "The key authenticated but lacks the access this app needs — use an environment secret key (tr_prod_sk_… / tr_dev_sk_…) with the Operator or No-restrictions preset (cloud.trigger.dev → API keys).",
+      };
     }
     if (err instanceof CloudApiError && err.status === 429) {
       return { ok: false, status: 429, error: "Rate limited by api.trigger.dev — try again in a moment." };
     }
     return { ok: false, status: 0, error: errorMessage(err) };
   }
+
+  if (!data || typeof data !== "object") {
+    return { ok: false, status: 0, error: "api.trigger.dev returned an unexpected whoami response" };
+  }
+  const w = data as Record<string, unknown>;
+  const project = (w.project && typeof w.project === "object" ? w.project : {}) as Record<string, unknown>;
+  const org =
+    (w.organization && typeof w.organization === "object" ? w.organization : {}) as Record<string, unknown>;
+
+  if (field(project.externalRef)) {
+    // Environment secret key — full snapshot.
+    return {
+      ok: true,
+      account: {
+        partial: false,
+        projects: [
+          {
+            id: field(project.id),
+            name: field(project.name, "project"),
+            externalRef: field(project.externalRef),
+            orgSlug: field(org.slug) || null,
+            orgName: field(org.title) || null,
+            environments: [
+              {
+                id: field(w.id),
+                name: field(w.type, "environment"),
+                slug: field(w.slug, "prod"),
+              },
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  // PAT-shaped key — accept with a partial snapshot (orchestration works;
+  // project detail links default to the dashboard root).
+  return {
+    ok: true,
+    account: {
+      partial: true,
+      note: "Key verified. Project details are only visible to environment secret keys — run links default to the dashboard root.",
+      projects: [],
+    },
+  };
 }
 
-/** Trigger a task run on the cloud (POST /api/v1/tasks/:id/trigger — the
- * documented trigger endpoint; returns { id, isCached }) → the cloud run id.
- * NOTE: the cloud accepts ANY task identifier here — an undeployed task
- * simply sits in PENDING_VERSION, so a 200 is not proof the worker is live
- * (the setup checklist covers deploying it). */
+// ---------------------------------------------------------------------------
+// Run dispatch + state (direct cloud execution).
+// ---------------------------------------------------------------------------
+
+/** Trigger the deployed agent-run task (POST /api/v1/tasks/:id/trigger)
+ * with the FULL direct-execution payload → the cloud run id. */
 export async function triggerCloudTaskRun(
   config: Pick<CloudConfig, "apiKey" | "taskSlug">,
   payload: unknown,
+  options?: { tags?: string[] },
 ): Promise<string> {
   const run = (await cloudRequest(
     config.apiKey,
     `/api/v1/tasks/${encodeURIComponent(config.taskSlug)}/trigger`,
-    { method: "POST", body: { payload } },
+    {
+      method: "POST",
+      body: { payload, ...(options?.tags ? { options: { tags: options.tags } } : {}) },
+      timeoutMs: 20_000,
+    },
   )) as { id?: unknown };
   const id = field(run?.id);
   if (!id) throw new CloudApiError(0, "api.trigger.dev returned no run id");
@@ -658,12 +618,24 @@ export type CloudRunState =
   | { status: "failed"; error?: string }
   | { status: "live" };
 
-/** Fetch a cloud run's state (GET /api/v3/runs/:id), normalized. Returns
- * null when the state can't be determined (network/parse error, 404). */
-export async function fetchCloudRunState(
+/** A raw /api/v3/runs/:id object — status + metadata + output + error. */
+export interface CloudRunView {
+  state: CloudRunState;
+  /** The task's `onyx` metadata blob (progress + chunk ring), when present. */
+  metadata: CloudRunMetadata | null;
+  /** The task's return value (terminal runs only). */
+  output: CloudRunOutput | null;
+  /** Cloud error message for failed runs. */
+  error: string | null;
+  version: string | null;
+}
+
+/** Fetch a cloud run (GET /api/v3/runs/:id) and normalize it into the view
+ * the sync path consumes. Null when the run can't be read. */
+export async function fetchCloudRunView(
   config: Pick<CloudConfig, "apiKey">,
   cloudRunId: string,
-): Promise<CloudRunState | null> {
+): Promise<CloudRunView | null> {
   let run: unknown;
   try {
     run = await cloudRequest(config.apiKey, `/api/v3/runs/${encodeURIComponent(cloudRunId)}`);
@@ -676,24 +648,70 @@ export async function fetchCloudRunState(
     isFailed?: unknown;
     isCancelled?: unknown;
     isSuccess?: unknown;
+    error?: { message?: unknown } | null;
+    metadata?: Record<string, unknown> | null;
+    output?: Record<string, unknown> | null;
+    version?: unknown;
   };
-  const raw = String(r.status ?? "").toLowerCase();
+
   // isCancelled outranks isFailed — the cloud marks CANCELED runs with BOTH
   // flags true (verified live), and "cancelled" is the honest user-facing
   // outcome for a deliberate cancel.
+  const raw = String(r.status ?? "").toLowerCase();
+  let state: CloudRunState;
   if (r.isCancelled === true || raw === "canceled" || raw === "cancelled") {
-    return { status: "cancelled" };
+    state = { status: "cancelled" };
+  } else if (r.isSuccess === true || raw === "completed" || raw === "complete" || raw === "success") {
+    state = { status: "completed" };
+  } else if (r.isFailed === true || raw === "failed") {
+    state = {
+      status: "failed",
+      error: field(r.error?.message) || undefined,
+    };
+  } else if (raw === "timed_out" || raw === "timeout" || raw === "expired") {
+    state = { status: "failed", error: "the run timed out on Trigger.dev Cloud" };
+  } else {
+    // QUEUED / EXECUTING / WAITING / DELAYED / PENDING_VERSION /
+    // WAITING_FOR_DEPLOY / CANCELLING … — still in flight.
+    state = { status: "live" };
   }
-  if (r.isSuccess === true || raw === "completed" || raw === "complete" || raw === "success") {
-    return { status: "completed" };
+
+  const metaRaw = r.metadata?.["onyx"];
+  let metadata: CloudRunMetadata | null = null;
+  if (metaRaw && typeof metaRaw === "object") {
+    const m = metaRaw as Partial<CloudRunMetadata>;
+    if (m && typeof m === "object" && m.progress && typeof m.progress === "object") {
+      metadata = {
+        phase: m.phase ?? "init",
+        progress: m.progress as TaskRunProgress,
+        chunkSeq: typeof m.chunkSeq === "number" ? m.chunkSeq : 0,
+        chunks: Array.isArray(m.chunks) ? m.chunks : [],
+        updatedAt: typeof m.updatedAt === "number" ? m.updatedAt : Date.now(),
+      };
+    }
   }
-  if (r.isFailed === true || raw === "failed") return { status: "failed" };
-  if (raw === "timed_out" || raw === "timeout" || raw === "expired") {
-    return { status: "failed", error: "the run timed out on Trigger.dev Cloud" };
+
+  let output: CloudRunOutput | null = null;
+  if (r.output && typeof r.output === "object" && Array.isArray((r.output as { artifacts?: unknown }).artifacts)) {
+    output = r.output as unknown as CloudRunOutput;
   }
-  // QUEUED / EXECUTING / WAITING / DELAYED / PENDING_VERSION /
-  // WAITING_FOR_DEPLOY / CANCELLING … — still in flight.
-  return { status: "live" };
+
+  return {
+    state,
+    metadata,
+    output,
+    error: field(r.error?.message) || null,
+    version: field(r.version) || null,
+  };
+}
+
+/** Back-compat shim: just the terminal/live state of a cloud run. */
+export async function fetchCloudRunState(
+  config: Pick<CloudConfig, "apiKey">,
+  cloudRunId: string,
+): Promise<CloudRunState | null> {
+  const view = await fetchCloudRunView(config, cloudRunId);
+  return view?.state ?? null;
 }
 
 /** Cancel a cloud run (POST /api/v2/runs/:id/cancel — the documented cancel
@@ -714,33 +732,61 @@ export async function cancelCloudRunById(
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch — kick a queued TaskRun to the cloud agent-run task.
+// Dispatch — send a queued TaskRun directly to the cloud agent-run task.
 // ---------------------------------------------------------------------------
 
-const CLOUD_KICK_PREFIX = "triggerdev:cloud-kick";
-
-export type CloudKickResult =
+export type CloudDispatchResult =
   | { ok: true; cloudRunId: string }
   | { ok: false; error: string };
 
+/** Clamp the serialized cloud trigger payload under the REST ceiling by
+ * dropping payload FILES largest-first (names stay honest — the run simply
+ * starts with the newest/smallest subset). Conversation text is tiny and
+ * always kept. */
+function clampCloudPayload(payload: CloudAgentRunPayload): CloudAgentRunPayload {
+  let files: TaskPayloadFile[] = [...payload.run.payload.files];
+  while (true) {
+    const candidate: CloudAgentRunPayload = {
+      ...payload,
+      run: { ...payload.run, payload: { ...payload.run.payload, files } },
+    };
+    if (JSON.stringify(candidate).length <= TASK_CLOUD_PAYLOAD_MAX_BYTES || files.length === 0) {
+      return candidate;
+    }
+    // Drop the largest file (decoded size, then content length as tiebreak).
+    let largestIdx = 0;
+    for (let i = 1; i < files.length; i++) {
+      const a = files[i]!;
+      const b = files[largestIdx]!;
+      if (a.size > b.size || (a.size === b.size && a.content.length > b.content.length)) {
+        largestIdx = i;
+      }
+    }
+    files = files.filter((_, i) => i !== largestIdx);
+  }
+}
+
 /**
- * Zero-latency cloud dispatch: atomically claim the queued run (the same CAS
- * the worker route uses), rebuild the WorkerClaimedRun in-process, and
- * trigger the deployed `agent-run` task on api.trigger.dev. The resulting
- * cloud run id is persisted to TaskRun.externalRunId.
+ * Direct cloud dispatch: atomically claim the queued run (CAS on status
+ * "queued" — the double-dispatch fence), build the full direct-execution
+ * payload from the row + keyring entry, and POST it to the deployed
+ * agent-run task. The resulting cloud run id is persisted to
+ * TaskRun.externalRunId.
  *
- * On failure the claim is RELEASED (running → queued) so the deployed
- * worker's poll-claims cron stays the backstop dispatcher — the run is
- * never stranded in a half-claimed state.
+ * On failure the run FAILS with the cloud error — there is no backstop
+ * dispatcher anymore (the deployed worker IS the executor); the message is
+ * surfaced to the client.
  */
-export async function kickCloudRun(
+export async function dispatchCloudRun(
   runId: string,
   fallbackAppUrl: string,
-): Promise<CloudKickResult> {
+): Promise<CloudDispatchResult> {
   const config = await getCloudConfig();
-  if (!config) return { ok: false, error: "cloud mode is not configured" };
+  if (!config) {
+    return { ok: false, error: "Trigger.dev Cloud is not connected — add your API key in Settings → Cloud." };
+  }
 
-  const lockHolder = `${CLOUD_KICK_PREFIX}:${randomUUID().slice(0, 8)}`;
+  const lockHolder = `cloud-dispatch:${randomUUID().slice(0, 8)}`;
   const claim = await prisma.taskRun.updateMany({
     where: { id: runId, status: "queued" },
     data: {
@@ -751,177 +797,508 @@ export async function kickCloudRun(
     },
   });
   if (claim.count === 0) {
-    return { ok: false, error: "run was already claimed by another orchestrator" };
+    return { ok: false, error: "run was already claimed by another dispatcher" };
   }
 
   const row = await prisma.taskRun.findUnique({ where: { id: runId } });
   if (!row) return { ok: false, error: "run row disappeared before dispatch" };
 
-  const appUrl = (process.env.APP_URL?.trim() || fallbackAppUrl).replace(/\/+$/, "");
+  const entry = keyring.get(runId);
   const runConfig = parseConfig(row.config);
-  const claimed: WorkerClaimedRun = {
-    runId: row.id,
-    type: row.type as BackgroundTaskType,
-    prompt: row.prompt,
-    config: runConfig,
-    payload: parsePayload(row.payload),
-    appUrl,
-    startedAt: row.startedAt.toISOString(),
-    timeoutMs: clampTimeoutMs(runConfig.timeoutMs),
+
+  // Resolve the app origin the sandbox runner can reach for the keyless LLM
+  // bridge fallback (APP_URL wins — behind proxies the request origin can
+  // be an internal address).
+  const appUrl = (process.env.APP_URL?.trim() || fallbackAppUrl).replace(/\/+$/, "");
+
+  // LLM endpoint resolution (mirrors runner-config.ts):
+  //   · pinned provider gateway (config.chatUrl) — bearer = first pool key,
+  //   · otherwise the app's keyless bridge (/api/tasks/llm) — bearer = the
+  //     task token (pool keys are NOT rotated against the bridge).
+  const usingBridge = !runConfig.chatUrl?.trim();
+  const chatUrl = usingBridge ? `${appUrl}/api/tasks/llm` : runConfig.chatUrl!.trim();
+  const pool = entry?.keyPool ?? [];
+  const chatToken = usingBridge ? (entry?.taskToken ?? "") : (pool[0] ?? entry?.taskToken ?? "");
+
+  // E2B key: explicit per-run key, else the server env.
+  const explicitE2b = entry?.e2bApiKey?.trim() && entry.e2bApiKey !== "USE_SERVER_ENV"
+    ? entry.e2bApiKey
+    : "";
+  const e2bApiKey = explicitE2b || process.env.E2B_API_KEY?.trim() || "";
+
+  const fullPayload: CloudAgentRunPayload = {
+    run: {
+      runId: row.id,
+      type: row.type as BackgroundTaskType,
+      prompt: row.prompt,
+      config: runConfig,
+      payload: parsePayload(row.payload),
+      startedAt: row.startedAt.toISOString(),
+      timeoutMs: clampTimeoutMsLocal(runConfig.timeoutMs),
+    },
+    credentials: {
+      e2bApiKey,
+      chatUrl,
+      chatToken,
+      keyPool: usingBridge ? [] : pool,
+    },
   };
+  const cloudPayload = clampCloudPayload(fullPayload);
 
   try {
-    const cloudRunId = await triggerCloudTaskRun(config, { run: claimed });
+    const cloudRunId = await triggerCloudTaskRun(config, cloudPayload, {
+      tags: [`run:${row.id}`],
+    });
     await prisma.taskRun
       .update({ where: { id: runId }, data: { externalRunId: cloudRunId } })
       .catch(() => {
-        // best-effort persistence — the cloud run is already executing and
-        // reports back over the worker protocol regardless.
+        // best-effort persistence — the status sync reconciles from the
+        // cloud run state regardless.
       });
     console.log(
-      `[tasks] run ${runId} kicked to Trigger.dev Cloud via task "${config.taskSlug}"`,
+      `[tasks] run ${runId} dispatched to Trigger.dev Cloud via task "${config.taskSlug}" (${cloudRunId})`,
     );
     return { ok: true, cloudRunId };
   } catch (err) {
-    const message = errorMessage(err).slice(0, 300);
+    const message = errorMessage(err).slice(0, 400);
     await prisma.taskRun
       .updateMany({
         where: { id: runId, status: "running", lockHolder },
-        data: { status: "queued", lockHolder: null, lockedAt: null },
+        data: {
+          status: "failed",
+          phase: "finalize",
+          error: `Trigger.dev Cloud dispatch failed: ${message}`,
+          finishedAt: new Date(),
+          lockHolder: null,
+          lockedAt: null,
+        },
       })
       .catch(() => {
-        // release failure — the 60s lock-staleness fence lets poll-claims
-        // re-claim it anyway (same fence poll-claims relies on).
+        // settle failure — the status sync still reconciles from the cloud.
       });
-    console.warn(`[tasks] cloud kick failed for run ${runId}: ${message}`);
+    keyring.drop(runId);
+    console.warn(`[tasks] cloud dispatch failed for run ${runId}: ${message}`);
     return { ok: false, error: message };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Self-heal — settle cloud rows the worker never reported terminal for.
+// Status sync — pull run metadata (progress + chunks) and terminal output
+// into the TaskRun row. Called by the status routes on every poll.
 // ---------------------------------------------------------------------------
 
-/** Row must be untouched this long before its cloud state is checked. */
-const HEAL_STALE_MS = 120_000;
-/** Per-run cloud-state check backoff. */
-const HEAL_CHECK_INTERVAL_MS = 30_000;
-/** A queued row this old was never claimed — fail with guidance. */
-const HEAL_QUEUED_GIVEUP_MS = 10 * 60_000;
-/** Stale rows healed per batch sweep. */
-const HEAL_BATCH = 3;
+/** Progress column marker for the last synced WORKER chunk seq (worker seq
+ * space — distinct from the row's local chunkSeq assignment space). */
+const CLOUD_CHUNK_SEQ_KEY = "cloudChunkSeq";
 
-const gHeal = globalThis as unknown as {
-  __onyxCloudHealChecked?: Map<string, number>;
-  __onyxCloudHealSweepAt?: number;
-};
-
-function healChecked(): Map<string, number> {
-  if (!gHeal.__onyxCloudHealChecked) gHeal.__onyxCloudHealChecked = new Map();
-  if (gHeal.__onyxCloudHealChecked.size > 256) gHeal.__onyxCloudHealChecked.clear();
-  return gHeal.__onyxCloudHealChecked;
-}
-
-async function healRow(config: CloudConfig, row: TaskRun, now: number): Promise<boolean> {
-  // Queued + never claimed for 10 min → the worker isn't deployed / can't
-  // authenticate. Fail with an actionable message (purely local — no API call).
-  if (row.status === "queued") {
-    if (now - row.startedAt.getTime() < HEAL_QUEUED_GIVEUP_MS) return false;
-    const settled = await prisma.taskRun.updateMany({
-      where: { id: row.id, status: "queued" },
-      data: {
-        status: "failed",
-        phase: "finalize",
-        error:
-          "Never claimed by the Trigger.dev Cloud worker — deploy trigger-worker/ (Settings → Cloud Tasks has the checklist) and verify APP_URL + WORKER_TOKEN on the cloud project.",
-        finishedAt: new Date(),
-        lockHolder: null,
-      },
-    });
-    keyring.drop(row.id);
-    return settled.count > 0;
-  }
-
-  // Running + a known cloud run id → ask the cloud for the truth.
-  if (row.status !== "running" || !row.externalRunId) return false;
-  const last = healChecked().get(row.id) ?? 0;
-  if (now - last < HEAL_CHECK_INTERVAL_MS) return false;
-  healChecked().set(row.id, now);
-
-  const state = await fetchCloudRunState(config, row.externalRunId).catch(() => null);
-  if (!state || state.status === "live") return false;
-
-  const data =
-    state.status === "completed"
-      ? { status: "completed", error: null }
-      : state.status === "cancelled"
-        ? { status: "cancelled", error: null }
-        : {
-            status: "failed",
-            error: state.error ?? "the run ended on Trigger.dev Cloud without reporting back",
-          };
-  const settled = await prisma.taskRun.updateMany({
-    where: { id: row.id, status: "running" },
-    data: { ...data, phase: "done", finishedAt: new Date(), lockHolder: null },
-  });
-  keyring.drop(row.id);
-  if (settled.count > 0) {
-    console.log(`[tasks] run ${row.id} self-healed from cloud state: ${data.status}`);
-  }
-  return settled.count > 0;
+/** Map a TaskPhase from the cloud metadata phase (worker phases ⊂ TaskPhase). */
+function metadataPhaseToTaskPhase(phase: CloudRunMetadata["phase"]): string {
+  return phase; // same vocabulary as the local driver phases
 }
 
 /**
- * Sweep-on-read healer. With `scopeRunId` it checks exactly that run (used
- * by the single-run status view — no global throttle so a user watching a
- * stuck run gets it settled on the next poll); without it, a throttled batch
- * over stale cloud rows (list view). Returns true when anything settled.
+ * Sync one cloud-orchestrated run from its cloud state:
+ *   · live runs — merge metadata progress + append new chunks (worker ring
+ *     seq > last synced marker),
+ *   · terminal runs — settle the row (status/phase/finishedAt/error) and
+ *     persist the output artifacts as TaskArtifact rows (idempotent on
+ *     re-sync via the terminal-status CAS).
+ * Returns true when the row changed.
+ */
+export async function syncCloudRunIntoRow(runId: string): Promise<boolean> {
+  const config = await getCloudConfig();
+  if (!config) return false;
+  const row = await prisma.taskRun.findUnique({ where: { id: runId } });
+  if (!row || row.orchestrator !== "cloud") return false;
+  if (["completed", "failed", "cancelled"].includes(row.status)) return false;
+  if (!row.externalRunId) return false;
+
+  const view = await fetchCloudRunView(config, row.externalRunId).catch(() => null);
+  if (!view) return false;
+
+  let changed = false;
+
+  // ── Live progress (metadata) ────────────────────────────────────────────
+  if (view.metadata) {
+    const meta = view.metadata;
+    const prevProgress = (() => {
+      try {
+        return JSON.parse(row.progress || "{}") as Record<string, unknown>;
+      } catch {
+        return {} as Record<string, unknown>;
+      }
+    })();
+    const lastSyncedWorkerSeq = typeof prevProgress[CLOUD_CHUNK_SEQ_KEY] === "number"
+      ? (prevProgress[CLOUD_CHUNK_SEQ_KEY] as number)
+      : 0;
+
+    const newChunks: PendingChunk[] = meta.chunks
+      .filter((c) => typeof c?.seq === "number" && c.seq > lastSyncedWorkerSeq)
+      .map((c) => ({
+        kind: c.kind,
+        ...(typeof c.round === "number" ? { round: c.round } : {}),
+        ...(c.name ? { name: c.name } : {}),
+        content: String(c.content ?? ""),
+        ts: typeof c.ts === "number" ? c.ts : Date.now(),
+      }));
+    if (newChunks.length > 0) {
+      await appendChunksToRun(runId, newChunks);
+      changed = true;
+    }
+
+    const { [CLOUD_CHUNK_SEQ_KEY]: _dropped, ...progressPatch } = meta.progress as unknown as Record<string, unknown>;
+    const patch: Partial<TaskRunProgress> & Record<string, unknown> = {
+      ...progressPatch,
+      ...(meta.chunkSeq > lastSyncedWorkerSeq
+        ? { [CLOUD_CHUNK_SEQ_KEY]: meta.chunkSeq }
+        : {}),
+    };
+    await mergeProgressIntoRun(runId, patch as Partial<TaskRunProgress>);
+    if (meta.chunkSeq > lastSyncedWorkerSeq || newChunks.length > 0) changed = true;
+
+    const phase = metadataPhaseToTaskPhase(meta.phase);
+    const sandboxId = row.sandboxId ?? (view.output?.sandboxId ?? null);
+    await prisma.taskRun
+      .updateMany({
+        where: { id: runId, status: { in: ["queued", "running"] } },
+        data: { ...(phase !== row.phase ? { phase } : {}), ...(sandboxId ? { sandboxId } : {}) },
+      })
+      .catch(() => undefined);
+    if (phase !== row.phase) changed = true;
+  }
+
+  // ── Terminal settle (output artifacts) ──────────────────────────────────
+  if (view.state.status !== "live") {
+    const output = view.output;
+    const error =
+      view.state.status === "failed"
+        ? (view.state.error ?? output?.error ?? view.error ?? "the run failed on Trigger.dev Cloud")
+        : null;
+
+    const settled = await prisma.taskRun.updateMany({
+      where: { id: runId, status: { in: ["queued", "running"] } },
+      data: {
+        status: view.state.status,
+        phase: "done",
+        error,
+        finishedAt: new Date(),
+        lockHolder: null,
+        lockedAt: null,
+        ...(output?.sandboxId ? { sandboxId: output.sandboxId } : {}),
+      },
+    });
+
+    if (settled.count > 0) {
+      changed = true;
+      keyring.drop(runId);
+      // Persist output artifacts exactly once (guarded by the terminal CAS
+      // above — only the settler writes them).
+      const artifacts = output?.artifacts ?? [];
+      if (artifacts.length > 0) {
+        await prisma.taskArtifact
+          .createMany({
+            data: artifacts.map((a) => ({
+              runId,
+              kind: a.kind,
+              name: a.name.slice(0, 200),
+              path: a.path ?? null,
+              mimeType: a.mimeType ?? "text/plain",
+              content: a.content,
+              encoding: a.encoding ?? "utf8",
+              size: a.content.length,
+              truncated: a.truncated === true,
+            })),
+          })
+          .catch((err) => {
+            console.warn(
+              `[tasks] artifact persist failed for ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+      }
+      console.log(`[tasks] run ${runId} settled from cloud state: ${view.state.status}`);
+    }
+    return changed;
+  }
+
+  return changed;
+}
+
+/** Row must be untouched this long before the unscoped batch sweep touches
+ * it (the scoped single-run sync has no throttle — a watching user gets
+ * freshness on every poll). */
+const SYNC_BATCH_INTERVAL_MS = 30_000;
+/** Stale rows synced per batch sweep. */
+const SYNC_BATCH = 3;
+
+const gSync = globalThis as unknown as { __onyxCloudSyncSweepAt?: number };
+
+/**
+ * Sweep-on-read sync (list view): throttled batch over non-terminal cloud
+ * rows. With `scopeRunId` it syncs exactly that run with no throttle.
+ * Returns true when anything changed.
  */
 export async function healStaleCloudRuns(scopeRunId?: string): Promise<boolean> {
   const config = await getCloudConfig();
   if (!config) return false;
-  const now = Date.now();
 
   if (scopeRunId) {
-    const row = await prisma.taskRun.findUnique({ where: { id: scopeRunId } });
-    if (!row || row.orchestrator !== "cloud") return false;
-    if (
-      (row.status === "queued" || row.status === "running") &&
-      now - row.updatedAt.getTime() > HEAL_STALE_MS
-    ) {
-      try {
-        return await healRow(config, row, now);
-      } catch {
-        return false;
-      }
+    try {
+      return await syncCloudRunIntoRow(scopeRunId);
+    } catch {
+      return false;
     }
-    return false;
   }
 
-  if (now - (gHeal.__onyxCloudHealSweepAt ?? 0) < HEAL_CHECK_INTERVAL_MS) return false;
-  gHeal.__onyxCloudHealSweepAt = now;
+  const now = Date.now();
+  if (now - (gSync.__onyxCloudSyncSweepAt ?? 0) < SYNC_BATCH_INTERVAL_MS) return false;
+  gSync.__onyxCloudSyncSweepAt = now;
 
   try {
-    const staleBefore = new Date(now - HEAL_STALE_MS);
     const rows = await prisma.taskRun.findMany({
       where: {
         orchestrator: "cloud",
         status: { in: ["queued", "running"] },
-        updatedAt: { lt: staleBefore },
+        externalRunId: { not: null },
       },
       orderBy: { updatedAt: "asc" },
-      take: HEAL_BATCH,
+      take: SYNC_BATCH,
     });
-    let settled = false;
+    let changed = false;
     for (const row of rows) {
       try {
-        settled = (await healRow(config, row, now)) || settled;
+        changed = (await syncCloudRunIntoRow(row.id)) || changed;
       } catch {
         // one bad row must not abort the batch
       }
     }
-    return settled;
+    return changed;
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Worker bootstrap — liveness probe + automatic deploy on connect.
+// ---------------------------------------------------------------------------
+
+export type WorkerLiveness = "live" | "deploying" | "undeployed" | "unknown";
+
+export interface WorkerBootstrapState {
+  liveness: WorkerLiveness;
+  /** ISO timestamp of the last liveness probe. */
+  probedAt: string | null;
+  /** Deploy subprocess state (when an auto-deploy was started). */
+  deploy: {
+    state: "running" | "succeeded" | "failed" | "unavailable";
+    startedAt: string | null;
+    finishedAt: string | null;
+    /** Last log lines (deploy only — never contains the key). */
+    tail: string[];
+  } | null;
+}
+
+const WORKER_DIR = join(process.cwd(), "trigger-worker");
+const DEPLOY_STATE_FILE = join(process.cwd(), "db", "cloud-worker-deploy.json");
+
+const gBoot = globalThis as unknown as {
+  __onyxWorkerLiveness?: { value: WorkerLiveness; at: number } | null;
+  __onyxWorkerDeploy?: NonNullable<WorkerBootstrapState["deploy"]> | null;
+};
+
+/** Probe the deployed worker's liveness: trigger the `health` task and wait
+ * briefly for it to execute. COMPLETED → live; PENDING_VERSION /
+ * WAITING_FOR_DEPLOY → undeployed (no live deployment with the task);
+ * anything else → unknown. Cached ~60s per process. */
+export async function probeWorkerLiveness(
+  config?: Pick<CloudConfig, "apiKey">,
+  opts?: { skipCache?: boolean },
+): Promise<WorkerLiveness> {
+  const cached = gBoot.__onyxWorkerLiveness;
+  if (!opts?.skipCache && cached && Date.now() - cached.at < 60_000) {
+    return cached.value;
+  }
+  const cfg = config ?? (await getCloudConfig());
+  if (!cfg) return "unknown";
+
+  const setCache = (value: WorkerLiveness) => {
+    gBoot.__onyxWorkerLiveness = { value, at: Date.now() };
+    return value;
+  };
+
+  try {
+    const runId = await triggerCloudTaskRun({ ...cfg, taskSlug: "health" }, {});
+    // Poll briefly — the health task completes in ~1-3s.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const view = await fetchCloudRunView(cfg, runId).catch(() => null);
+      if (!view) continue;
+      if (view.state.status === "completed") return setCache("live");
+      if (view.state.status === "failed") return setCache("live"); // deployed but the probe failed — still deployed
+      if (view.state.status === "live") {
+        const raw = await cloudRequest(cfg.apiKey, `/api/v3/runs/${encodeURIComponent(runId)}`)
+          .then((r) => (r as { status?: string }).status ?? "")
+          .catch(() => "");
+        if (raw === "PENDING_VERSION" || raw === "WAITING_FOR_DEPLOY") {
+          return setCache("undeployed");
+        }
+      }
+    }
+    // Still executing after the window — a deployment exists (undeployed
+    // runs resolve to PENDING_VERSION immediately, which we check above).
+    return setCache("unknown");
+  } catch {
+    return setCache("unknown");
+  }
+}
+
+/** Load (or initialize) the deploy-subprocess state. */
+function loadDeployState(): NonNullable<WorkerBootstrapState["deploy"]> {
+  if (gBoot.__onyxWorkerDeploy) return gBoot.__onyxWorkerDeploy;
+  try {
+    const raw = readFileSync(DEPLOY_STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw) as NonNullable<WorkerBootstrapState["deploy"]>;
+    if (parsed && typeof parsed === "object" && parsed.state) return parsed;
+  } catch {
+    /* no state file yet */
+  }
+  return { state: "unavailable", startedAt: null, finishedAt: null, tail: [] };
+}
+
+function saveDeployState(state: NonNullable<WorkerBootstrapState["deploy"]>): void {
+  gBoot.__onyxWorkerDeploy = state;
+  try {
+    writeFileSync(DEPLOY_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch {
+    // read-only fs — process memory only
+  }
+}
+
+/**
+ * Automatically deploy the bundled worker (trigger-worker/) to the
+ * operator's cloud project using their own key. Requires a writable
+ * filesystem + node/npx (the sandbox / local dev / any long-lived server);
+ * serverless deployments are read-only by design and skip this — the cloud
+ * deployment persists server-side and only needs re-deploying when the
+ * worker code changes, which happens from a checkout anyway.
+ */
+export async function autoDeployWorker(config: CloudConfig): Promise<WorkerBootstrapState["deploy"]> {
+  const state = loadDeployState();
+  if (state.state === "running") return state; // already in flight
+
+  // Writability gate (serverless skip).
+  try {
+    const { accessSync, constants } = await import("node:fs");
+    accessSync(WORKER_DIR, constants.W_OK);
+  } catch {
+    const unavailable: NonNullable<WorkerBootstrapState["deploy"]> = {
+      state: "unavailable",
+      startedAt: null,
+      finishedAt: null,
+      tail: ["Auto-deploy skipped — this server has a read-only filesystem. Deployments persist on trigger.dev Cloud; re-deploy from a local checkout when the worker changes."],
+    };
+    saveDeployState(unavailable);
+    return unavailable;
+  }
+
+  const account = config.account?.projects?.[0];
+  const projectRef = account?.externalRef || process.env.TRIGGER_PROJECT_REF?.trim();
+  if (!projectRef) {
+    const failed: NonNullable<WorkerBootstrapState["deploy"]> = {
+      state: "failed",
+      startedAt: null,
+      finishedAt: new Date().toISOString(),
+      tail: ["Cannot resolve the cloud project ref — re-connect the key (whoami did not return project details)."],
+    };
+    saveDeployState(failed);
+    return failed;
+  }
+
+  const started: NonNullable<WorkerBootstrapState["deploy"]> = {
+    state: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    tail: [`deploying worker to project ${projectRef}…`],
+  };
+  saveDeployState(started);
+  gBoot.__onyxWorkerLiveness = null;
+
+  const logLines: string[] = [];
+  const pushLog = (line: string) => {
+    logLines.push(line.replace(/tr_[A-Za-z0-9_]+/g, "tr_•••••")); // never log keys
+    if (logLines.length > 40) logLines.shift();
+  };
+
+  try {
+    const child = spawn(
+      "npx",
+      ["--yes", "trigger.dev@latest", "deploy", "--env", "prod", "--plain", "--skip-update-check"],
+      {
+        cwd: WORKER_DIR,
+        env: {
+          ...process.env,
+          TRIGGER_ACCESS_TOKEN: config.apiKey,
+          TRIGGER_PROJECT_REF: projectRef,
+          npm_config_yes: "true",
+        },
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.stdout?.on("data", (d) => {
+      for (const line of d.toString().split("\n")) {
+        const trimmed = line.replace(/\u001b\[[0-9;]*[a-zA-Z]/g, "").trim();
+        if (trimmed) pushLog(trimmed);
+      }
+    });
+    child.stderr?.on("data", (d) => {
+      for (const line of d.toString().split("\n")) {
+        const trimmed = line.replace(/\u001b\[[0-9;]*[a-zA-Z]/g, "").trim();
+        if (trimmed && !trimmed.startsWith("npm warn")) pushLog(trimmed);
+      }
+    });
+    child.on("error", (err) => {
+      saveDeployState({
+        state: "failed",
+        startedAt: started.startedAt,
+        finishedAt: new Date().toISOString(),
+        tail: [...logLines, `spawn failed: ${err.message}`].slice(-40),
+      });
+    });
+    child.on("close", (code) => {
+      const ok = code === 0;
+      saveDeployState({
+        state: ok ? "succeeded" : "failed",
+        startedAt: started.startedAt,
+        finishedAt: new Date().toISOString(),
+        tail: [...logLines, ok ? "deployment completed" : `deploy exited with code ${code}`].slice(-40),
+      });
+      gBoot.__onyxWorkerLiveness = null;
+    });
+    return started;
+  } catch (err) {
+    const failed: NonNullable<WorkerBootstrapState["deploy"]> = {
+      state: "failed",
+      startedAt: started.startedAt,
+      finishedAt: new Date().toISOString(),
+      tail: [...logLines, errorMessage(err)].slice(-40),
+    };
+    saveDeployState(failed);
+    return failed;
+  }
+}
+
+/** Current bootstrap state (liveness + deploy subprocess) for the UI. */
+export async function getWorkerBootstrapState(
+  opts?: { skipCache?: boolean },
+): Promise<WorkerBootstrapState> {
+  const config = await getCloudConfig();
+  if (!config) {
+    return { liveness: "unknown", probedAt: null, deploy: null };
+  }
+  const liveness = await probeWorkerLiveness(config, opts);
+  return {
+    liveness,
+    probedAt: new Date().toISOString(),
+    deploy: loadDeployState(),
+  };
 }

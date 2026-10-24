@@ -1,24 +1,22 @@
 // ============================================================================
-// Background Task Execution Framework — worker-side E2B sandbox driver.
+// OnyxAgent cloud worker — E2B sandbox driver (direct cloud execution).
 //
 // The sandbox execution core shared by the agent-run task: creates the task
-// sandbox (PRD §4.2 — hard 30-minute window), mounts the serialized client
-// workspace (FR-4.1 .onyxagent_files.json manifest + verification), launches
-// the headless runner or a terminal command, polls their file-based status
-// protocol, and collects artifacts (FR-2.3) for the report call.
-//
-// Mirrors the app's local driver (src/lib/tasks/local-driver.ts) so both
-// orchestrators behave identically against the same runner protocol.
+// sandbox (PRD §4.2 — hard 30-minute window) with the run's OWN E2B key
+// (payload.credentials.e2bApiKey — no server env), mounts the serialized
+// client workspace (FR-4.1 .onyxagent_files.json manifest + verification),
+// launches the headless runner or a terminal command, polls their
+// file-based status protocol, and collects artifacts (FR-2.3) for the run
+// output. Mirrors the app's local driver semantics.
 // ============================================================================
 
 import { Sandbox } from "@e2b/code-interpreter";
 import type {
+  AgentRunPayload,
+  CloudArtifact,
   OnyxAgentFilesManifest,
   TaskPayload,
   TaskPayloadFile,
-  TaskRunProgress,
-  WorkerArtifactInput,
-  WorkerClaimedRun,
 } from "./protocol.js";
 import {
   MANIFEST_PATH,
@@ -26,7 +24,7 @@ import {
   TASK_PAYLOAD_BUDGET,
 } from "./protocol.js";
 import { HEADLESS_RUNNER_PY } from "./runner-source.js";
-import { clampMaxRounds, type WorkerLlmConfig } from "./env.js";
+import { clampMaxRounds } from "./util.js";
 
 /** Sandbox workspace root (matches the app's chat sandbox layout). */
 const HOME = "/home/user";
@@ -42,11 +40,18 @@ export interface MountReport {
 // Sandbox lifecycle
 // ---------------------------------------------------------------------------
 
-/** Create a dedicated task sandbox with the PRD §4.2 hard window. */
-export async function createTaskSandbox(run: WorkerClaimedRun): Promise<Sandbox> {
-  const apiKey = process.env.E2B_API_KEY?.trim();
+/** Create a dedicated task sandbox with the PRD §4.2 hard window. The E2B
+ *  key ALWAYS comes from the run payload (the app resolved it from the
+ *  triggering client's vault or its server env). */
+export async function createTaskSandbox(
+  run: AgentRunPayload["run"],
+  e2bApiKey: string,
+): Promise<Sandbox> {
+  const apiKey = e2bApiKey.trim();
   if (!apiKey) {
-    throw new Error("Missing required env var E2B_API_KEY — set it on the Trigger.dev project");
+    throw new Error(
+      "No E2B sandbox key available for this run — add one in Settings → Sandboxes (or set E2B_API_KEY on the app server) and retry.",
+    );
   }
   const timeoutMs = Math.min(
     Number.isFinite(run.timeoutMs) ? run.timeoutMs : 30 * 60 * 1000,
@@ -126,9 +131,9 @@ async function writeManifest(
 /** Mount the payload workspace + write the manifest. Returns the manifest. */
 export async function mountPayload(
   sandbox: Sandbox,
-  run: WorkerClaimedRun,
+  run: AgentRunPayload["run"],
 ): Promise<OnyxAgentFilesManifest> {
-  const files = (run.payload as TaskPayload)?.files ?? [];
+  const files = ((run.payload as TaskPayload)?.files ?? []) as TaskPayloadFile[];
   for (const file of files) {
     const target = sandboxPath(file.path);
     if (file.encoding === "base64") {
@@ -199,24 +204,26 @@ interface HistoryEntry {
   }>;
 }
 
-/** Launch the headless agent runner (mirrors the app's agent_start). */
+/** Launch the headless agent runner (mirrors the app's agent_start). The
+ *  LLM endpoint + credentials ride in the run payload — resolved by the app
+ *  (user provider gateway + rotational key pool, or the app's own bridge). */
 export async function startAgentRunner(
   sandbox: Sandbox,
-  run: WorkerClaimedRun,
-  llm: WorkerLlmConfig,
+  run: AgentRunPayload["run"],
+  credentials: AgentRunPayload["credentials"],
 ): Promise<void> {
   // 1. Runner source (stdlib-only Python, runner v2 — key-pool rotation).
   await sandbox.files.write(`${HOME}/headless_runner.py`, HEADLESS_RUNNER_PY);
 
-  // 2. Run config — credentials live ONLY here (chmod 600) and in the
-  //    worker's memory (PRD §4.2 credential sandboxing).
+  // 2. Run config — credentials live ONLY here (chmod 600) and die with
+  //    the sandbox (PRD §4.2 credential sandboxing).
   const runConfig = {
     run_id: run.runId,
-    conversation_id: null,
+    conversation_id: run.payload.conversation.id,
     prompt: run.prompt,
-    chat_url: llm.url,
-    api_key: llm.token,
-    api_key_pool: llm.pool,
+    chat_url: credentials.chatUrl,
+    api_key: credentials.chatToken,
+    api_key_pool: credentials.keyPool,
     model: run.config.model ?? "",
     system_prompt: run.config.systemPrompt ?? "",
     seed_messages: run.payload.conversation.messages,
@@ -258,7 +265,7 @@ export async function startAgentRunner(
 /** Launch a terminal command with output/exit-code capture (FR-3.3). */
 export async function startTerminalCommand(
   sandbox: Sandbox,
-  run: WorkerClaimedRun,
+  run: AgentRunPayload["run"],
 ): Promise<void> {
   const command = run.config.command?.trim();
   if (!command) throw new Error("terminal_command run is missing config.command");
@@ -361,12 +368,12 @@ function guessMime(path: string): string {
  */
 export async function collectArtifacts(
   sandbox: Sandbox,
-  run: WorkerClaimedRun,
+  run: AgentRunPayload["run"],
   manifest: OnyxAgentFilesManifest,
-): Promise<WorkerArtifactInput[]> {
-  const artifacts: WorkerArtifactInput[] = [];
+): Promise<CloudArtifact[]> {
+  const artifacts: CloudArtifact[] = [];
   let totalBytes = 0;
-  const pushCapped = (input: WorkerArtifactInput, size: number) => {
+  const pushCapped = (input: CloudArtifact, size: number) => {
     if (artifacts.length >= TASK_PAYLOAD_BUDGET.maxArtifacts) return;
     if (totalBytes + size > TASK_PAYLOAD_BUDGET.maxTotalArtifactBytes) return;
     artifacts.push(input);

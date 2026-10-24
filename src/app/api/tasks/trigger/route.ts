@@ -4,10 +4,10 @@
 // Entry point of every background task: validate the client's
 // TaskTriggerRequest against the protocol budgets, persist the TaskRun (task
 // token stored ONLY as sha256), stash the run's secrets in the in-memory
-// keyring (PRD §4.2), then dispatch — in-process local driver by default,
-// kicked straight to Trigger.dev Cloud when a cloud key is connected
-// (Settings → Cloud Tasks), or left queued for a self-hosted Trigger.dev
-// worker when that mode is configured.
+// keyring (PRD §4.2), then dispatch DIRECTLY to the operator's Trigger.dev
+// Cloud project (the deployed agent-run task) — chat agent runs, sub-agent
+// chains, scheduled business tasks and terminal commands all execute
+// durably on the cloud. No local driver, no self-hosting.
 //
 // Body-logging discipline mirrors /api/chat-proxy: request payloads (which
 // carry keys + tokens) are NEVER logged.
@@ -15,10 +15,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { keyring, sha256Hex } from "@/lib/tasks/keyring";
-import { startLocalRun, clampTimeoutMs } from "@/lib/tasks/local-driver";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
 import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
-import { kickCloudRun } from "@/lib/tasks/trigger-cloud";
+import { dispatchCloudRun } from "@/lib/tasks/trigger-cloud";
+import { clampTimeoutMs } from "@/lib/tasks/run-store";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -45,8 +45,8 @@ interface NormalizedTrigger {
   payload: TaskPayload;
 }
 
-function bad(detail: string): NextResponse {
-  return NextResponse.json({ ok: false, error: detail }, { status: 400 });
+function bad(detail: string, status = 400): NextResponse {
+  return NextResponse.json({ ok: false, error: detail }, { status });
 }
 
 /** Validate + normalize the trigger body. Returns a 400 detail on failure. */
@@ -172,10 +172,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const checked = validate(body);
   if ("error" in checked) return bad(checked.error);
-  const { req, keyPool, config, payload } = checked.value;
+  const { req, keyPool, config } = checked.value;
 
   try {
     const mode = await getOrchestrationMode();
+    if (mode !== "cloud") {
+      return bad(
+        "Background tasks run on Trigger.dev Cloud — connect your API key in Settings → Cloud to activate (it takes a key and nothing else).",
+        409,
+      );
+    }
+
     const tokenHash = sha256Hex(req.taskToken);
     const run = await prisma.taskRun.create({
       data: {
@@ -184,19 +191,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         type: req.type,
         status: "queued",
         phase: "claim",
-        orchestrator: mode === "cloud" ? "cloud" : mode === "selfhosted" ? "triggerdev" : "local",
+        orchestrator: "cloud",
         title: req.title ? req.title.slice(0, 200) : null,
         prompt: req.prompt,
         config: JSON.stringify(config),
-        payload: JSON.stringify(payload),
+        payload: JSON.stringify(checked.value.payload),
         taskTokenHash: tokenHash,
         conversationId: req.conversationId ?? null,
         scheduleId: req.scheduleId ?? null,
       },
     });
 
-    // Keyring BEFORE dispatch — the driver reads it on the first tick. The
-    // plaintext token/keys live in memory only (PRD §4.2).
+    // Keyring BEFORE dispatch — dispatchCloudRun reads it to build the
+    // cloud payload. The plaintext token/keys live in memory only (PRD §4.2).
     keyring.set(run.id, {
       taskToken: req.taskToken,
       keyPool,
@@ -210,38 +217,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // Sweep-on-read: fire due schedules opportunistically (throttled), then
     // dispatch the run itself.
     touch();
-
-    if (mode === "selfhosted") {
-      // Self-hosted worker owns execution — leave the row queued; the loop
-      // only arms.
-      startSchedulerLoop();
-      const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "triggerdev" };
-      return NextResponse.json(res);
-    }
-
-    if (mode === "cloud") {
-      // Trigger.dev CLOUD — kick the deployed agent-run task directly over
-      // the cloud REST API (zero queue latency). On failure kickCloudRun
-      // releases the claim and the row stays queued for the deployed
-      // worker's poll-claims cron (backstop dispatcher).
-      startSchedulerLoop();
-      const fallbackAppUrl = new URL(request.url).origin;
-      const kick = await kickCloudRun(run.id, fallbackAppUrl).catch((err) => ({
-        ok: false as const,
-        error: err instanceof Error ? err.message : String(err),
-      }));
-      if (!kick.ok) {
-        console.warn(
-          `[tasks] run ${run.id} left queued — cloud kick failed: ${kick.error.slice(0, 200)}`,
-        );
-      }
-      const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "triggerdev" };
-      return NextResponse.json(res);
-    }
-
-    startLocalRun(run.id);
     startSchedulerLoop();
-    const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "local" };
+
+    const fallbackAppUrl = new URL(request.url).origin;
+    const dispatch = await dispatchCloudRun(run.id, fallbackAppUrl).catch((err) => ({
+      ok: false as const,
+      error: err instanceof Error ? err.message : String(err),
+    }));
+    if (!dispatch.ok) {
+      console.warn(
+        `[tasks] run ${run.id} failed cloud dispatch: ${dispatch.error.slice(0, 200)}`,
+      );
+    }
+    const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "triggerdev" };
     return NextResponse.json(res);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

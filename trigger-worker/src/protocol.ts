@@ -1,15 +1,15 @@
 // ============================================================================
-// Mirrored from src/lib/tasks/protocol.ts — keep in sync.
+// OnyxAgent cloud worker — direct-execution protocol (v2).
 //
-// The Trigger.dev worker is a SEPARATE deployable package and cannot import
-// from the app's src/ tree, so the subset of the frozen contract it needs is
-// copied here verbatim. Any change to the app's protocol.ts MUST be mirrored
-// in this file (and vice versa) — the claim/report HTTP protocol between the
-// app and the worker is only as good as this copy.
+// Mirrored from the app's src/lib/tasks/protocol.ts — keep in sync. The
+// worker is a SEPARATE deployable package and cannot import from the app's
+// src/ tree, so the subset of the frozen contract it needs is copied here.
 //
-// Deliberately NOT mirrored: the cron helpers (validateCron/nextCronRun/
-// describeCron) and the client/schedule/cancel/sync types — the worker never
-// uses them.
+// v2 — DIRECT CLOUD EXECUTION: no claim/report HTTP protocol, no APP_URL,
+// no WORKER_TOKEN. The app POSTs the entire run (spec + credentials) to
+// POST /api/v1/tasks/agent-run/trigger and reads progress from run
+// metadata + the final result from the run output. Everything the run
+// needs rides in the payload; nothing calls back.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -17,8 +17,8 @@
 // ---------------------------------------------------------------------------
 
 /**
- * - `agent_run` — an asynchronous subagent chain (full headless tool-loop)
- *   executing inside an isolated sandbox.
+ * - `agent_run` — an asynchronous chat-agent / sub-agent chain (full
+ *   headless tool-loop) executing inside an isolated E2B sandbox.
  * - `scheduled_business` — a scheduled multi-agent business task fired by a
  *   TaskSchedule row (cron).
  * - `terminal_command` — a single long-running terminal command that would
@@ -42,8 +42,10 @@ export const TASK_HARD_MAX_ROUNDS = 48;
 // ---------------------------------------------------------------------------
 
 export const TASK_PAYLOAD_BUDGET = {
-  /** Total serialized payload ceiling. */
+  /** Total serialized payload ceiling (client → app). */
   maxBytes: 8 * 1024 * 1024,
+  /** Cloud trigger payload ceiling (app → trigger.dev REST). */
+  maxCloudBytes: 1_500_000,
   /** Max files mounted per task. */
   maxFiles: 200,
   /** Per-file ceiling (bytes, pre-encoding). */
@@ -60,8 +62,10 @@ export const TASK_PAYLOAD_BUDGET = {
   maxArtifacts: 60,
   /** Max artifact size (bytes) — larger files are listed but truncated. */
   maxArtifactBytes: 2 * 1024 * 1024,
-  /** Max total artifact bytes per run. */
+  /** Max total artifact bytes collected in the sandbox. */
   maxTotalArtifactBytes: 10 * 1024 * 1024,
+  /** Max total artifact bytes in the RUN OUTPUT (cloud-safe clamp). */
+  maxOutputArtifactBytes: 1_200_000,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -126,31 +130,8 @@ export interface TaskRunConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Status polling (FR-3.1) + chunked progress blocks (FR-3.2)
+// Progress (run metadata — the app polls GET /api/v3/runs/:id)
 // ---------------------------------------------------------------------------
-
-export type TaskPhase =
-  | "claim"
-  | "init"
-  | "mount"
-  | "verify"
-  | "start"
-  | "monitor"
-  | "finalize"
-  | "done";
-
-export interface TaskStatusChunk {
-  /** Monotonic sequence number — clients poll with `cursor = lastSeq`.
-   *  (Server-assigned: the worker sends chunks WITHOUT seq.) */
-  seq: number;
-  kind: "round" | "text" | "tool_call" | "tool_result" | "log" | "error";
-  /** Agent round the chunk belongs to (0 for pre-loop events). */
-  round?: number;
-  /** Tool name for tool_call/tool_result chunks. */
-  name?: string;
-  content: string;
-  ts: number;
-}
 
 export interface TaskRunProgress {
   round: number;
@@ -166,6 +147,29 @@ export interface TaskRunProgress {
   };
   logTail?: string;
   lastUpdate: number;
+}
+
+/** One progress chunk. `seq` is assigned by the worker (monotonic per run);
+ *  the app persists chunks with its own per-run sequence as before. */
+export interface TaskStatusChunk {
+  seq: number;
+  kind: "round" | "text" | "tool_call" | "tool_result" | "log" | "error";
+  round?: number;
+  name?: string;
+  content: string;
+  ts: number;
+}
+
+/** The single metadata blob the task refreshes each poll (kept well under
+ *  the 256KB metadata ceiling — ring holds the newest chunks only). */
+export interface RunMetadataState {
+  phase: "init" | "mount" | "verify" | "start" | "monitor" | "finalize" | "done";
+  progress: TaskRunProgress;
+  /** Monotonic chunk counter — the app tracks the last seq it stored. */
+  chunkSeq: number;
+  /** Newest chunks (ring, newest last). */
+  chunks: TaskStatusChunk[];
+  updatedAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,47 +208,46 @@ export const TASK_ARTIFACT_EXCLUDES: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Worker protocol (Trigger.dev worker ↔ app; authenticated by WORKER_TOKEN)
+// Direct cloud execution — trigger payload + run output (v2)
 // ---------------------------------------------------------------------------
 
-export interface WorkerClaimRequest {
-  token: string;
-  /** Max runs to claim in one tick. */
-  limit: number;
+/** Everything one agent-run needs, POSTed by the app to
+ *  POST /api/v1/tasks/agent-run/trigger. */
+export interface AgentRunPayload {
+  run: {
+    /** The app's TaskRun id (NOT the cloud run id). */
+    runId: string;
+    type: BackgroundTaskType;
+    prompt: string;
+    config: TaskRunConfig;
+    payload: TaskPayload;
+    /** ISO timestamp — the app's run start (drives the execution window). */
+    startedAt: string;
+    /** Execution window ms (already clamped by the app). */
+    timeoutMs: number;
+  };
+  credentials: {
+    /** E2B API key for this run (app-resolved; no server env required). */
+    e2bApiKey: string;
+    /** Resolved OpenAI-compatible chat endpoint for the sandbox runner. */
+    chatUrl: string;
+    /** Bearer for chatUrl (first pool key, or the task token for the app bridge). */
+    chatToken: string;
+    /** FR-1.3 rotational provider key pool (runner rotates on 429/401). */
+    keyPool: string[];
+  };
 }
 
-export interface WorkerClaimedRun {
+/** The task's return value — the app reads it from the finished cloud run. */
+export interface AgentRunOutput {
   runId: string;
-  type: BackgroundTaskType;
-  prompt: string;
-  config: TaskRunConfig;
-  payload: TaskPayload;
-  /** Absolute app origin — the worker calls back over HTTP. */
-  appUrl: string;
-  startedAt: string;
-  timeoutMs: number;
-}
-
-export interface WorkerClaimResponse {
-  ok: true;
-  runs: WorkerClaimedRun[];
-}
-
-export interface WorkerReportRequest {
-  token: string;
-  runId: string;
-  phase?: TaskPhase;
-  progress?: Partial<TaskRunProgress>;
-  /** Chunks WITHOUT seq — the server assigns the monotonic sequence. */
-  chunks?: TaskStatusChunk[];
-  sandboxId?: string;
+  status: "completed" | "failed";
   error?: string;
-  /** Terminal outcome — driver is done with the run. */
-  status?: "completed" | "failed" | "cancelled";
-  artifacts?: WorkerArtifactInput[];
+  sandboxId?: string;
+  artifacts: CloudArtifact[];
 }
 
-export interface WorkerArtifactInput {
+export interface CloudArtifact {
   kind: "message" | "file" | "report" | "attachment";
   name: string;
   path?: string;
@@ -252,13 +255,4 @@ export interface WorkerArtifactInput {
   content: string;
   encoding?: "utf8" | "base64";
   truncated?: boolean;
-}
-
-export interface WorkerReportResponse {
-  ok: true;
-}
-
-export interface WorkerSweepResponse {
-  ok: true;
-  fired: number;
 }

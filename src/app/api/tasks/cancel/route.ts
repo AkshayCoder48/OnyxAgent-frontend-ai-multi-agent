@@ -5,9 +5,9 @@
 // TaskRun.taskTokenHash — the plaintext never touches the server disk), then:
 //   · atomically moves queued/running → cancelled (never clobbers terminal
 //     states),
-//   · best-effort kills the run's sandbox (local-orchestrated runs only),
 //   · best-effort cancels the backing run on Trigger.dev Cloud (cloud
-//     runs carry a cloud run id in TaskRun.externalRunId),
+//     runs carry a cloud run id in TaskRun.externalRunId; the deployed
+//     worker's E2B sandbox dies with its run),
 //   · drops the in-memory keyring entry (credentials die with the run).
 //
 // Body-logging discipline mirrors /api/chat-proxy: tokens are never logged.
@@ -15,7 +15,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { keyring, sha256Hex, tokensEqual } from "@/lib/tasks/keyring";
-import { killSandboxForRun } from "@/lib/tasks/local-driver";
 import { cancelCloudRunById, getCloudConfig } from "@/lib/tasks/trigger-cloud";
 
 export const runtime = "nodejs";
@@ -65,20 +64,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     data: { status: "cancelled", finishedAt: new Date() },
   });
 
-  // Free the execution substrate when this process owns it. Local runs:
-  // kill the sandbox. Cloud runs: cancel the backing run on api.trigger.dev
-  // (the deployed worker's sandbox dies with its run). Best-effort by
-  // contract — never fails the response.
-  if (cancelled.count > 0) {
-    if (row.orchestrator === "local" && row.sandboxId) {
-      await killSandboxForRun(runId);
-    } else if (row.orchestrator === "cloud" && row.externalRunId) {
-      const cloud = await getCloudConfig();
-      if (cloud) {
-        await cancelCloudRunById(cloud, row.externalRunId).catch(() => {
-          // best-effort — the row is already cancelled locally
-        });
-      }
+  // Free the execution substrate when this process owns it. Cloud runs:
+  // cancel the backing run on api.trigger.dev (the deployed worker's
+  // sandbox dies with its run). Best-effort by contract — never fails the
+  // response.
+  if (cancelled.count > 0 && row.externalRunId) {
+    const cloud = await getCloudConfig();
+    if (cloud) {
+      await cancelCloudRunById(cloud, row.externalRunId).catch(() => {
+        // best-effort — the row is already cancelled locally
+      });
     }
   }
 

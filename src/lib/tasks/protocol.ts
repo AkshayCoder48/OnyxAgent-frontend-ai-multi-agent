@@ -7,22 +7,23 @@
 // task lib (src/lib/tasks/client.ts etc.), the API routes
 // (src/app/api/tasks/**), and mirrored (by copy) in the Trigger.dev worker
 // package (trigger-worker/src/protocol.ts). Any change here MUST be mirrored
-// in the worker copy and docs/BACKGROUND_TASKS.md.
+// in the worker copy.
 //
-// Topology (PRD §2.2):
+// Topology (direct cloud execution):
 //   Browser (Dexie/OPFS) ── POST /api/tasks/trigger ──▶ TaskRun (SQLite)
-//        ▲                                                │ claim
-//        │ poll /api/tasks/status (chunked, FR-3.2)       ▼
-//   TanStack Query ◀──────────────────── Local driver (in-process) OR
-//                                             Trigger.dev worker (durable)
-//                                                  │ E2B SDK
-//                                                  ▼
-//                                     E2B sandbox (30-min cap, PRD §4.2)
-//                                     headless runner / terminal command
-//                                                  │ artifacts
-//                                                  ▼
-//                                     task_artifacts (SQLite) ──▶ client
-//                                     extraction → Dexie/OPFS sync-back
+//        ▲                                                  │ direct dispatch
+//        │ poll /api/tasks/status (chunked, FR-3.2)         ▼
+//   TanStack Query ◀──── run metadata + output ◀──── trigger.dev Cloud
+//                                                        (deployed agent-run
+//                                                         task, auto-bootstrapped)
+//                                                              │ E2B SDK
+//                                                              ▼
+//                                             E2B sandbox (30-min cap, PRD §4.2)
+//                                             headless runner / terminal command
+//                                                              │ run OUTPUT
+//                                                              ▼
+//                                             task_artifacts (SQLite) ──▶ client
+//                                             extraction → Dexie/OPFS sync-back
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -347,46 +348,20 @@ export const TASK_ARTIFACT_EXCLUDES: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Worker protocol (Trigger.dev worker ↔ app; authenticated by WORKER_TOKEN)
+// Cloud direct execution (app → trigger.dev Cloud → deployed agent-run task)
+//
+// The app POSTs the ENTIRE run (spec + credentials) to
+// POST /api/v1/tasks/agent-run/trigger and never receives callbacks:
+//   · live progress → run METADATA (`onyx` blob, GET /api/v3/runs/:id),
+//   · final result  → run OUTPUT (status / error / artifacts).
+// Mirrored in trigger-worker/src/protocol.ts — keep in sync.
 // ---------------------------------------------------------------------------
 
-export interface WorkerClaimRequest {
-  token: string;
-  /** Max runs to claim in one tick. */
-  limit: number;
-}
+/** Ceiling for the serialized app → cloud trigger payload (REST-safe). */
+export const TASK_CLOUD_PAYLOAD_MAX_BYTES = 1_500_000;
 
-export interface WorkerClaimedRun {
-  runId: string;
-  type: BackgroundTaskType;
-  prompt: string;
-  config: TaskRunConfig;
-  payload: TaskPayload;
-  /** Absolute app origin — the worker calls back over HTTP. */
-  appUrl: string;
-  startedAt: string;
-  timeoutMs: number;
-}
-
-export interface WorkerClaimResponse {
-  ok: true;
-  runs: WorkerClaimedRun[];
-}
-
-export interface WorkerReportRequest {
-  token: string;
-  runId: string;
-  phase?: TaskPhase;
-  progress?: Partial<TaskRunProgress>;
-  chunks?: TaskStatusChunk[];
-  sandboxId?: string;
-  error?: string;
-  /** Terminal outcome — driver is done with the run. */
-  status?: "completed" | "failed" | "cancelled";
-  artifacts?: WorkerArtifactInput[];
-}
-
-export interface WorkerArtifactInput {
+/** One artifact in the cloud run output. */
+export interface CloudArtifact {
   kind: "message" | "file" | "report" | "attachment";
   name: string;
   path?: string;
@@ -396,13 +371,44 @@ export interface WorkerArtifactInput {
   truncated?: boolean;
 }
 
-export interface WorkerReportResponse {
-  ok: true;
+/** The metadata blob the cloud agent-run task refreshes on every poll
+ *  (well under the 256KB metadata ceiling — `chunks` is a newest-only ring). */
+export interface CloudRunMetadata {
+  phase: "init" | "mount" | "verify" | "start" | "monitor" | "finalize" | "done";
+  progress: TaskRunProgress;
+  /** Monotonic chunk counter in the WORKER's seq space. */
+  chunkSeq: number;
+  /** Newest chunks (ring, newest last) — drained by the app each poll. */
+  chunks: Array<Omit<TaskStatusChunk, "seq"> & { seq: number }>;
+  updatedAt: number;
 }
 
-export interface WorkerSweepResponse {
-  ok: true;
-  fired: number;
+/** The cloud task's return value, read by the app from the finished run. */
+export interface CloudRunOutput {
+  runId: string;
+  status: "completed" | "failed";
+  error?: string;
+  sandboxId?: string;
+  artifacts: CloudArtifact[];
+}
+
+/** Trigger payload for the deployed agent-run task (direct execution). */
+export interface CloudAgentRunPayload {
+  run: {
+    runId: string;
+    type: BackgroundTaskType;
+    prompt: string;
+    config: TaskRunConfig;
+    payload: TaskPayload;
+    startedAt: string;
+    timeoutMs: number;
+  };
+  credentials: {
+    e2bApiKey: string;
+    chatUrl: string;
+    chatToken: string;
+    keyPool: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -4,10 +4,10 @@ import { SectionTriggerCloud } from "@/components/settings/section-trigger-cloud
 
 /**
  * Cloud Tasks settings route (Background Task Execution Framework) — the
- * Trigger.dev Cloud orchestrator: connect/verify an api.trigger.dev key,
- * manage the kicked task id, wire the deployed cloud worker, and watch
- * recent cloud-orchestrated runs. The third execution mode (after the
- * in-process local driver and the optional self-hosted Trigger.dev worker).
+ * Trigger.dev Cloud panel: paste an environment secret key and every
+ * background task (chat agent runs, sub-agents, schedules, businesses) runs
+ * durably on the operator's own cloud project. Zero setup, cloud-only —
+ * no self-hosting, no local driver.
  */
 export default function CloudTasksSettingsPage() {
   return <SectionTriggerCloud />;

@@ -1,27 +1,35 @@
 // ============================================================================
-// Trigger.dev v3 project config — OnyxAgent background-task durable driver.
+// Trigger.dev v4 project config — OnyxAgent cloud worker.
 //
-// Deployed against a self-hosted Trigger.dev instance (see
-// ../deploy/trigger-dev/) or trigger.dev Cloud. The CLI reads
-// TRIGGER_DEPLOYMENT_URL + TRIGGER_ACCESS_TOKEN from the environment (or
-// `trigger dev`/`trigger deploy` flags) — see .env.example.
+// Runs the app's background agent execution (chat agent runs, sub-agent
+// chains, project/business tasks, terminal commands) DIRECTLY on
+// trigger.dev Cloud. Deployed automatically by the app at key-connect time
+// (Settings → Cloud) using the operator's own environment secret key —
+// `npx trigger.dev@latest deploy --authorization <key>` from the app
+// server, or manually from this directory:
 //
-// NOTE (v3 API): the project-level retry shape is
-// `retries: { enabledInDev, default: RetryOptions }` where RetryOptions uses
-// `maxAttempts` (NOT `limit`). Task-level `retry` options override `default`.
+//   TRIGGER_PROJECT_REF=<project externalRef> \
+//   npx trigger.dev@latest deploy --env prod --authorization <tr_…_sk_…>
+//
+// The project ref is the dashboard project's externalRef (proj_…), resolved
+// by the app from `GET /api/v1/whoami` at connect time.
 // ============================================================================
 
-import { defineConfig } from "@trigger.dev/sdk/v3";
+import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
-  project: "onyxagent-background-tasks",
-  triggerDirectories: ["./src/tasks"],
+  project: process.env.TRIGGER_PROJECT_REF ?? "proj_hrhpqztgulssacmpehmg",
+  runtime: "node-24",
+  dirs: ["./src/tasks"],
+  maxDuration: 3600,
   retries: {
     enabledInDev: false,
     default: {
-      maxAttempts: 3,
+      maxAttempts: 2,
+      factor: 2,
       minTimeoutInMs: 10_000,
       maxTimeoutInMs: 60_000,
+      randomize: true,
     },
   },
 });

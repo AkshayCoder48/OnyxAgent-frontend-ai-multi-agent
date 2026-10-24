@@ -6,19 +6,30 @@
 // the driver and the Trigger.dev worker both perform (phase transitions,
 // chunk appends with server-side seq assignment, progress merges).
 //
-// Keeping these OUT of local-driver.ts lets the worker route append chunks
-// without pulling the E2B SDK into its module graph.
+// Keeping these OUT of the routes lets them append chunks without pulling
+// the cloud REST client into their module graph.
 // ============================================================================
 
 import { prisma } from "./prisma";
 import {
   TASK_DEFAULT_MAX_ROUNDS,
+  TASK_DEFAULT_DURATION_MS,
+  TASK_MAX_DURATION_MS,
   type TaskPayload,
   type TaskPhase,
   type TaskRunConfig,
   type TaskRunProgress,
   type TaskStatusChunk,
 } from "./protocol";
+
+/** Clamp a run window into [1 min, TASK_MAX_DURATION_MS]. */
+export function clampTimeoutMs(timeoutMs: unknown): number {
+  const raw =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs)
+      ? timeoutMs
+      : TASK_DEFAULT_DURATION_MS;
+  return Math.min(Math.max(Math.round(raw), 60_000), TASK_MAX_DURATION_MS);
+}
 
 /** The empty-payload constant — MUST stay byte-identical to the TaskRun
  *  column default (prisma/schema.prisma). */

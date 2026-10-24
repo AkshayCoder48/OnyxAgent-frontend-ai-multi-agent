@@ -408,7 +408,7 @@ export function SectionSchedules() {
     <div className="space-y-4">
       <SettingsSection
         title="Schedules"
-        description="Cron-driven background tasks. Each firing runs in an isolated sandbox on the server and its artifacts sync back into the linked conversation."
+        description="Cron-driven background tasks. Each firing runs in an isolated sandbox and its artifacts sync back into the linked conversation."
         action={
           <Button size="sm" onClick={openCreate}>
             <Plus className="size-4" />
@@ -420,10 +420,8 @@ export function SectionSchedules() {
           label="Orchestrator"
           description={
             orchestration?.mode === "cloud"
-              ? "Trigger.dev Cloud is connected — scheduled runs execute on trigger.dev's infrastructure (Settings → Cloud Tasks)."
-              : orchestration?.mode === "selfhosted"
-                ? "A self-hosted Trigger.dev worker owns firing (TRIGGER_DEV_URL/TRIGGER_DEV_TOKEN env)."
-                : "Runs fire from this app's server (local orchestrator). Connect Trigger.dev Cloud — or deploy the worker — for durable cloud execution."
+              ? "Trigger.dev Cloud is connected — scheduled runs execute durably on your cloud project (Settings → Cloud Tasks)."
+              : "Not activated — connect a Trigger.dev Cloud key (Settings → Cloud Tasks) and every schedule fires on your cloud project."
           }
           control={
             <span
@@ -431,19 +429,17 @@ export function SectionSchedules() {
                 "inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[10px] uppercase " +
                 (orchestration?.mode === "cloud"
                   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                  : orchestration?.mode === "selfhosted"
-                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                    : "bg-sky-500/10 text-sky-600 dark:text-sky-400")
+                  : "bg-stone-500/10 text-stone-600 dark:text-stone-400")
               }
             >
-              {orchestration?.mode ?? "local"}
+              {orchestration?.mode === "cloud" ? "cloud" : "off"}
             </span>
           }
           className="mb-5"
         />
         {orchestration?.mode !== "cloud" && (
           <p className="text-muted-foreground -mt-3 mb-5 text-xs">
-            Want durable cloud execution without self-hosting?{" "}
+            Want your schedules to run even while this app is closed?{" "}
             <Link href={ROUTES.SETTINGS_CLOUD_TASKS} className="text-foreground underline underline-offset-4">
               Connect a Trigger.dev Cloud key →
             </Link>
@@ -459,8 +455,8 @@ export function SectionSchedules() {
             <CalendarClock className="text-muted-foreground size-5" />
             <p className="text-sm font-medium">No schedules yet</p>
             <p className="text-muted-foreground max-w-sm text-xs leading-relaxed">
-              Create a cron schedule to run agent or terminal tasks automatically — runs
-              fire from the server, so they keep going while this app is closed.
+              Create a cron schedule to run agent or terminal tasks automatically — runs fire on
+              your Trigger.dev Cloud project, so they keep going even while this app is closed.
             </p>
             <Button variant="outline" size="sm" onClick={openCreate}>
               <Plus className="size-3.5" />

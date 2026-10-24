@@ -11,8 +11,8 @@
 // then the durable store: every successful connect is mirrored vault-sealed
 // in Dexie (cloud-config-store.ts) and, whenever the server reports "not
 // configured" while a mirror exists, the hook silently reconnects with the
-// stored key (+ its WORKER_TOKEN, so the setup checklist stays stable).
-// The API key itself is never persisted unencrypted and never rendered.
+// stored key. The API key itself is never persisted unencrypted and never
+// rendered.
 // ============================================================================
 "use client";
 
@@ -45,10 +45,22 @@ export interface CloudAccountSnapshot {
   projects: CloudAccountProject[];
 }
 
+/** Worker bootstrap state (liveness of the deployed agent-run task +
+ *  auto-deploy progress) — see trigger-cloud.ts. */
+export interface WorkerBootstrap {
+  liveness: "live" | "deploying" | "undeployed" | "unknown";
+  probedAt: string | null;
+  deploy: {
+    state: "running" | "succeeded" | "failed" | "unavailable";
+    startedAt: string | null;
+    finishedAt: string | null;
+    tail: string[];
+  } | null;
+}
+
 export interface CloudOrchestratorStatus {
   ok: true;
-  mode: "local" | "selfhosted" | "cloud";
-  selfHosted: boolean;
+  mode: "off" | "cloud";
   appUrl: string;
   cloud: {
     configured: boolean;
@@ -61,11 +73,9 @@ export interface CloudOrchestratorStatus {
     /** Serverless: the server holds the config in memory only; the browser
      *  mirror re-applies it after cold starts. */
     ephemeral: boolean;
-    /** The operator's own worker token (setup checklist). Null when absent. */
-    workerToken: string | null;
-    workerTokenSource: "env" | "generated" | "none";
     apiBase: string;
   };
+  bootstrap?: WorkerBootstrap;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +131,6 @@ export function useCloudOrchestrator() {
         await saveClientCloudConfig(user.id, {
           apiKey: input.apiKey,
           taskSlug: status.cloud.taskSlug || input.taskSlug || "agent-run",
-          workerToken: status.cloud.workerToken,
         });
       }
       return status;
@@ -159,7 +168,6 @@ export function useCloudOrchestrator() {
           await saveClientCloudConfig(user.id, {
             apiKey: mirror.apiKey,
             taskSlug,
-            workerToken: mirror.workerToken || null,
           });
         }
       }
@@ -208,7 +216,6 @@ export function useCloudOrchestrator() {
           body: JSON.stringify({
             apiKey: mirror.apiKey,
             taskSlug: mirror.taskSlug,
-            ...(mirror.workerToken ? { workerToken: mirror.workerToken } : {}),
           }),
         });
         if (res.ok) invalidate();
@@ -232,8 +239,17 @@ export function useCloudOrchestrator() {
     /** Save the kicked task id. */
     setTaskSlug: setTaskSlugM.mutateAsync,
     isSavingSlug: setTaskSlugM.isPending,
-    /** Disconnect (back to the local orchestrator). */
+    /** Disconnect. */
     disconnect: disconnectM.mutateAsync,
     isDisconnecting: disconnectM.isPending,
+    /** (Re)deploy the bundled worker to the operator's cloud project. */
+    deployWorker: async () => {
+      await fetch("/api/tasks/cloud", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "deploy" }),
+      });
+      invalidate();
+    },
   };
 }
