@@ -374,14 +374,21 @@ export function SectionTriggerCloud() {
       });
       setKey("");
       const account = result.cloud.account;
-      toast.success("Connected to Trigger.dev Cloud", {
-        description: account?.partial
-          ? "Secret key verified — background tasks now dispatch to the cloud."
-          : (account?.projects.length ?? 0) > 0
-            ? `Verified — ${account!.projects.length} project${account!.projects.length === 1 ? "" : "s"} visible to this key.`
-            : "Key verified — background tasks now dispatch to the cloud.",
-        icon: <CheckCircle2 className="size-4" />,
-      });
+      toast.success(
+        result.cloud.ephemeral
+          ? "Connected to Trigger.dev Cloud (session mode)"
+          : "Connected to Trigger.dev Cloud",
+        {
+          description: result.cloud.ephemeral
+            ? "This deployment has a read-only filesystem, so the key is stored encrypted in THIS browser and re-applied automatically."
+            : account?.partial
+              ? "Secret key verified — background tasks now dispatch to the cloud."
+              : (account?.projects.length ?? 0) > 0
+                ? `Verified — ${account!.projects.length} project${account!.projects.length === 1 ? "" : "s"} visible to this key.`
+                : "Key verified — background tasks now dispatch to the cloud.",
+          icon: <CheckCircle2 className="size-4" />,
+        },
+      );
     } catch (err) {
       toast.error("Could not connect", {
         description: err instanceof Error ? err.message : "Verification failed",
@@ -464,10 +471,25 @@ export function SectionTriggerCloud() {
           </a>{" "}
           API key and background tasks (agent runs, terminal commands, cron schedules) execute
           durably on trigger.dev&apos;s infrastructure — no self-hosting required. The key is
-          verified live against api.trigger.dev, stored encrypted (AES-256-GCM) on this app&apos;s
-          server, and never shown again after saving.
+          verified live against api.trigger.dev and stored encrypted (AES-256-GCM) — sealed on
+          this app&apos;s server, or in this browser when the deployment is serverless — and never
+          shown again after saving.
         </AlertDescription>
       </Alert>
+
+      {/* ── Session-mode note (serverless deployments) ───────────────────── */}
+      {connected && cloud?.ephemeral && (
+        <Alert>
+          <Cloud className="size-4" />
+          <AlertTitle>Session mode — serverless deployment</AlertTitle>
+          <AlertDescription>
+            This deployment&apos;s server has a read-only filesystem, so the encrypted key lives in
+            THIS browser and is re-applied automatically on every visit (no reconnect needed).
+            Run history and the task queue are per-server-session here; use a persistent
+            deployment (sandbox / local server) for durable server-side history.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* ── Mode ─────────────────────────────────────────────────────────── */}
       <SettingsSection

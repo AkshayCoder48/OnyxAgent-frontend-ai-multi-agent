@@ -170,6 +170,11 @@ export interface CloudConfig {
   workerToken: string;
   workerTokenSource: "env" | "generated" | "none";
   verifiedAt: string | null;
+  /** True when the server filesystem is read-only (serverless — Netlify etc.)
+   *  and the config could NOT be sealed to SQLite. The config lives in
+   *  process memory for this instance only; the BROWSER holds the durable
+   *  mirror (vault-sealed in Dexie) and re-submits it on the next cold start. */
+  ephemeral?: boolean;
 }
 
 const CONFIG_TTL_MS = 30_000;
@@ -178,6 +183,11 @@ const DEFAULT_TASK_SLUG = "agent-run";
 
 const gCfg = globalThis as unknown as {
   __onyxCloudConfigCache?: { data: CloudConfig | null; at: number } | null;
+  /** Serverless fallback: the config that could NOT be sealed to the
+   *  read-only SQLite file. Lives in process memory for this lambda's
+   *  lifetime; the browser mirror (cloud-config-store.ts) re-supplies it
+   *  after a cold start. */
+  __onyxCloudMemoryConfig?: CloudConfig | null;
   // ALSO clears the orchestration-mode cache (globalThis convention — the
   // mode module imports this file, so it cannot import back; both caches
   // live on globalThis and are invalidated together).
@@ -209,38 +219,51 @@ export async function getCloudConfig(): Promise<CloudConfig | null> {
   const cached = gCfg.__onyxCloudConfigCache;
   if (cached && Date.now() - cached.at < CONFIG_TTL_MS) return cached.data;
 
-  let config: CloudConfig | null = null;
-  try {
-    const row = await prisma.taskCloudConfig.findUnique({ where: { id: CONFIG_ROW_ID } });
-    if (row) {
-      const apiKey = openSecret(row.encryptedKey);
-      const storedWorkerToken = openSecret(row.encryptedWorkerToken) || "";
-      const envWorkerToken = process.env.WORKER_TOKEN?.trim() || "";
-      if (apiKey) {
-        const workerToken = envWorkerToken || storedWorkerToken;
-        config = {
-          keySource: "settings",
-          apiKey,
-          maskedKey: row.maskedKey,
-          taskSlug: row.taskSlug || DEFAULT_TASK_SLUG,
-          account: parseAccountJson(row.accountJson),
-          workerToken,
-          workerTokenSource: envWorkerToken
-            ? "env"
-            : storedWorkerToken
-              ? "generated"
-              : "none",
-          verifiedAt: row.verifiedAt.toISOString(),
-        };
+  // 1) Process-memory config (set when a seal FAILED — read-only serverless
+  //    filesystem). It always represents the operator's LATEST verified
+  //    intent in this process, so it shadows any stale SQLite row.
+  let config: CloudConfig | null = gCfg.__onyxCloudMemoryConfig ?? null;
+
+  // 2) Durable SQLite seal.
+  if (!config) {
+    try {
+      const row = await prisma.taskCloudConfig.findUnique({ where: { id: CONFIG_ROW_ID } });
+      if (row) {
+        const apiKey = openSecret(row.encryptedKey);
+        const storedWorkerToken = openSecret(row.encryptedWorkerToken) || "";
+        const envWorkerToken = process.env.WORKER_TOKEN?.trim() || "";
+        if (apiKey) {
+          const workerToken = envWorkerToken || storedWorkerToken;
+          config = {
+            keySource: "settings",
+            apiKey,
+            maskedKey: row.maskedKey,
+            taskSlug: row.taskSlug || DEFAULT_TASK_SLUG,
+            account: parseAccountJson(row.accountJson),
+            workerToken,
+            workerTokenSource: envWorkerToken
+              ? "env"
+              : storedWorkerToken
+                ? "generated"
+                : "none",
+            verifiedAt: row.verifiedAt.toISOString(),
+          };
+        }
       }
+    } catch (err) {
+      // DB hiccup (schema not pushed yet, read-only filesystem on serverless
+      // deployments where even the OPEN can fail) — degrade to env below.
+      console.warn(
+        `[tasks] cloud config read failed: ${
+          err instanceof Error
+            ? err.message || JSON.stringify(err).slice(0, 200)
+            : String(err)
+        }`,
+      );
     }
-  } catch (err) {
-    // DB hiccup (e.g. schema not pushed yet) — degrade to env-only resolution.
-    console.warn(
-      `[tasks] cloud config read failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 
+  // 3) Env fallback.
   if (!config) {
     const envKey = process.env.TRIGGER_CLOUD_KEY?.trim();
     if (envKey) {
@@ -268,78 +291,141 @@ export function invalidateCloudConfigCache(): void {
   gCfg.__onyxOrchestrationMode = null; // mode flips with the config
 }
 
-export interface SaveCloudConfigInput {
-  apiKey: string;
-  taskSlug: string;
-  account: CloudAccountSnapshot;
+export interface SaveCloudConfigResult {
+  config: CloudConfig;
+  /** False when the SQLite seal failed (read-only serverless filesystem) and
+   *  the config is held in process memory only (browser mirror re-supplies
+   *  it after cold starts). */
+  persisted: boolean;
 }
 
 /**
  * Persist a VERIFIED key (the caller verifies first — verifyCloudKey). Mints
- * a WORKER_TOKEN when neither the env var nor a previous token exists, so
- * the operator can wire the deployed cloud worker without touching .env.
+ * a WORKER_TOKEN when neither the env var, the caller's mirror token, nor a
+ * previous token exists, so the operator can wire the deployed cloud worker
+ * without touching .env. On a read-only filesystem (serverless) the config
+ * degrades to process memory (`persisted: false`) instead of failing the
+ * connect — the browser keeps the durable, vault-sealed mirror.
  * Returns the resolved config; never logs the key or token.
  */
 export async function saveCloudConfig(
   input: SaveCloudConfigInput,
-): Promise<CloudConfig> {
-  const existing = await prisma.taskCloudConfig.findUnique({
-    where: { id: CONFIG_ROW_ID },
-  });
-
-  let mintedToken: string | null = null;
-  if (!process.env.WORKER_TOKEN?.trim()) {
-    mintedToken =
-      (existing ? openSecret(existing.encryptedWorkerToken) : null) ||
-      randomBytes(24).toString("hex");
-  }
-
-  const sealedKey = sealSecret(input.apiKey);
-  const sealedToken = sealSecret(mintedToken ?? "");
+): Promise<SaveCloudConfigResult> {
   const common = {
     maskedKey: maskSecret(input.apiKey),
     taskSlug: input.taskSlug,
-    accountJson: JSON.stringify(input.account),
-    verifiedAt: new Date(),
+    account: input.account,
+    verifiedAt: new Date().toISOString(),
   };
 
-  await prisma.taskCloudConfig.upsert({
-    where: { id: CONFIG_ROW_ID },
-    create: { id: CONFIG_ROW_ID, encryptedKey: sealedKey, encryptedWorkerToken: sealedToken, ...common },
-    update: {
-      encryptedKey: sealedKey,
-      ...(mintedToken ? { encryptedWorkerToken: sealedToken } : {}),
-      ...common,
-    },
-  });
+  try {
+    const existing = await prisma.taskCloudConfig.findUnique({
+      where: { id: CONFIG_ROW_ID },
+    });
 
-  invalidateCloudConfigCache();
-  const config = await getCloudConfig();
-  if (!config) throw new Error("cloud config save succeeded but the read-back failed");
-  return config;
+    let mintedToken: string | null = null;
+    if (!process.env.WORKER_TOKEN?.trim()) {
+      mintedToken =
+        (existing ? openSecret(existing.encryptedWorkerToken) : null) ||
+        input.workerToken?.trim() ||
+        randomBytes(24).toString("hex");
+    }
+
+    const sealedKey = sealSecret(input.apiKey);
+    const sealedToken = sealSecret(mintedToken ?? "");
+    const rowCommon = {
+      maskedKey: common.maskedKey,
+      taskSlug: common.taskSlug,
+      accountJson: common.account ? JSON.stringify(common.account) : "{}",
+      verifiedAt: new Date(),
+    };
+
+    await prisma.taskCloudConfig.upsert({
+      where: { id: CONFIG_ROW_ID },
+      create: { id: CONFIG_ROW_ID, encryptedKey: sealedKey, encryptedWorkerToken: sealedToken, ...rowCommon },
+      update: {
+        encryptedKey: sealedKey,
+        ...(mintedToken ? { encryptedWorkerToken: sealedToken } : {}),
+        ...rowCommon,
+      },
+    });
+
+    invalidateCloudConfigCache();
+    const config = await getCloudConfig();
+    if (!config) throw new Error("cloud config save succeeded but the read-back failed");
+    return { config, persisted: !config.ephemeral };
+  } catch (err) {
+    // READ-ONLY FILESYSTEM (serverless — Netlify/Vercel functions): the
+    // SQLite seal is impossible. Hold the verified config in process memory
+    // so THIS instance can dispatch runs; the browser mirror re-applies it
+    // on the next cold start. The connect UX still succeeds.
+    console.warn(
+      `[tasks] cloud config seal failed (memory fallback): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    const config: CloudConfig = {
+      keySource: "settings",
+      apiKey: input.apiKey,
+      maskedKey: common.maskedKey,
+      taskSlug: common.taskSlug,
+      account: common.account,
+      workerToken: process.env.WORKER_TOKEN?.trim() || input.workerToken?.trim() || randomBytes(24).toString("hex"),
+      workerTokenSource: process.env.WORKER_TOKEN?.trim() ? "env" : "generated",
+      verifiedAt: common.verifiedAt,
+      ephemeral: true,
+    };
+    gCfg.__onyxCloudMemoryConfig = config;
+    invalidateCloudConfigCache();
+    return { config, persisted: false };
+  }
 }
 
 /** Update only the task slug (PATCH). */
 export async function updateCloudTaskSlug(taskSlug: string): Promise<void> {
-  await prisma.taskCloudConfig.update({
-    where: { id: CONFIG_ROW_ID },
-    data: { taskSlug },
-  });
+  try {
+    await prisma.taskCloudConfig.update({
+      where: { id: CONFIG_ROW_ID },
+      data: { taskSlug },
+    });
+  } catch {
+    // Serverless: the durable seal is unavailable — patch the memory config.
+    if (!gCfg.__onyxCloudMemoryConfig) throw new Error("no cloud config to update");
+    gCfg.__onyxCloudMemoryConfig = {
+      ...gCfg.__onyxCloudMemoryConfig,
+      taskSlug,
+    };
+  }
   invalidateCloudConfigCache();
 }
 
 /** Refresh the verification snapshot + verifiedAt (POST action:"retest"). */
 export async function refreshCloudAccount(account: CloudAccountSnapshot): Promise<void> {
-  await prisma.taskCloudConfig.update({
-    where: { id: CONFIG_ROW_ID },
-    data: { accountJson: JSON.stringify(account), verifiedAt: new Date() },
-  });
+  try {
+    await prisma.taskCloudConfig.update({
+      where: { id: CONFIG_ROW_ID },
+      data: { accountJson: JSON.stringify(account), verifiedAt: new Date() },
+    });
+  } catch {
+    // Serverless: refresh the memory config instead.
+    if (!gCfg.__onyxCloudMemoryConfig) throw new Error("no cloud config to refresh");
+    gCfg.__onyxCloudMemoryConfig = {
+      ...gCfg.__onyxCloudMemoryConfig,
+      account,
+      verifiedAt: new Date().toISOString(),
+    };
+  }
   invalidateCloudConfigCache();
 }
 
-/** Disconnect — delete the stored config (back to local mode). */
+/** Disconnect — delete the stored config (back to local mode). Always
+ *  succeeds client-side: on a read-only filesystem there is nothing to
+ *  delete and the memory config is simply dropped. */
 export async function clearCloudConfig(): Promise<void> {
-  await prisma.taskCloudConfig.deleteMany({ where: { id: CONFIG_ROW_ID } });
+  try {
+    await prisma.taskCloudConfig.deleteMany({ where: { id: CONFIG_ROW_ID } });
+  } catch {
+    // read-only filesystem — nothing persisted server-side anyway
+  }
+  gCfg.__onyxCloudMemoryConfig = null;
   invalidateCloudConfigCache();
 }
 

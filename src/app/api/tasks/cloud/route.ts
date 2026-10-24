@@ -82,6 +82,10 @@ async function statusPayload(request: NextRequest): Promise<Record<string, unkno
           account: config.account,
           verifiedAt: config.verifiedAt,
           dashboardBase: cloudDashboardBase(config.account),
+          // True when the server filesystem is read-only (serverless) and
+          // the config lives in process memory — the browser mirror is the
+          // durable store and re-applies the key after each cold start.
+          ephemeral: config.ephemeral === true,
           // The operator's own worker token — needed to wire the deployed
           // cloud project (setup checklist). Not the API key.
           workerToken: workerToken.token,
@@ -96,6 +100,7 @@ async function statusPayload(request: NextRequest): Promise<Record<string, unkno
           account: null,
           verifiedAt: null as string | null,
           dashboardBase: null as string | null,
+          ephemeral: false,
           workerToken: workerToken.token,
           workerTokenSource: workerToken.source,
           apiBase: cloudApiBase(),
@@ -116,16 +121,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  let body: { action?: unknown; apiKey?: unknown; taskSlug?: unknown };
+  let body: { action?: unknown; apiKey?: unknown; taskSlug?: unknown; workerToken?: unknown };
   try {
     body = (await request.json()) as {
       action?: unknown;
       apiKey?: unknown;
       taskSlug?: unknown;
+      workerToken?: unknown;
     };
   } catch {
     return bad("invalid JSON body");
   }
+
+  // The browser mirror's WORKER_TOKEN (reconnect path) — re-used instead of
+  // re-minting so the deployed-worker setup checklist stays stable across
+  // serverless cold starts. Shape-guarded; empty/invalid → ignored.
+  const mirrorWorkerToken =
+    typeof body.workerToken === "string" && /^[A-Za-z0-9_\-]{16,128}$/.test(body.workerToken.trim())
+      ? body.workerToken.trim()
+      : undefined;
 
   // ── action:"retest" — re-verify the STORED key against api.trigger.dev
   // (refreshes the account snapshot + verifiedAt; the key never leaves the
@@ -174,8 +188,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // 2) Persist (seals the key; mints a WORKER_TOKEN when none exists).
+  //    On a read-only filesystem (serverless) this degrades to process
+  //    memory (persisted:false) — still a SUCCESSFUL connect.
   try {
-    await saveCloudConfig({ apiKey, taskSlug, account: verified.account });
+    await saveCloudConfig({ apiKey, taskSlug, account: verified.account, workerToken: mirrorWorkerToken });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
@@ -186,12 +202,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   invalidateOrchestrationModeCache();
   startSchedulerLoop(); // re-arm the loop under the new mode
+  const status = await statusPayload(request);
   console.log(
-    `[tasks] Trigger.dev Cloud connected (${maskSecret(apiKey)}, task "${taskSlug}") — background tasks now dispatch to the cloud`,
+    status.cloud.ephemeral
+      ? `[tasks] Trigger.dev Cloud connected in SESSION mode (read-only filesystem — key lives in the operator's browser) (${maskSecret(apiKey)}, task "${taskSlug}")`
+      : `[tasks] Trigger.dev Cloud connected (${maskSecret(apiKey)}, task "${taskSlug}") — background tasks now dispatch to the cloud`,
   );
 
-  const payload = await statusPayload(request);
-  return NextResponse.json({ ...payload, verified: true });
+  return NextResponse.json({ ...status, verified: true });
 }
 
 // ---------------------------------------------------------------------------
