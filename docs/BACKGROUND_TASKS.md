@@ -2,9 +2,11 @@
 
 Implementation of the Background Task Execution Framework PRD for OnyxAgent —
 multi-step long-running tasks, cron scheduling, and asynchronous agent worker
-loops inside E2B sandboxes, orchestrated either by the app's built-in **local
-orchestrator** (zero-config default) or a self-hosted **Trigger.dev v3
-worker** (durable cloud execution), all without abandoning the client-first,
+loops inside E2B sandboxes, orchestrated by one of three execution modes:
+the app's built-in **local orchestrator** (zero-config default),
+**Trigger.dev Cloud** (connect an api.trigger.dev key in Settings → Cloud
+Tasks — no self-hosting), or a **self-hosted Trigger.dev v3 worker**
+(durable execution you operate), all without abandoning the client-first,
 backendless principle.
 
 ## Topology (PRD §2.2)
@@ -41,18 +43,27 @@ backendless principle.
                               sync-back with conflict check (§4.1)
 ```
 
-## Two orchestration modes
+## Three orchestration modes
 
-| | Local (default) | Trigger.dev |
-|---|---|---|
-| Config | none — works out of the box | `TRIGGER_DEV_URL` + `TRIGGER_DEV_TOKEN` (+ `WORKER_TOKEN`) on the app; worker deployed per `deploy/trigger-dev/` |
-| Driver | in-process (`src/lib/tasks/local-driver.ts`), claims via atomic Prisma lock; sweep-on-read re-adopts stale locks | `trigger-worker/src/tasks/agent-run.ts` — every phase in `step.run()` (atomic resumption), cron pull-claims every minute |
-| Schedules | app's 60s loop fires due `TaskSchedule` rows | worker's `sweep-schedules` cron fires them (app loop only arms) |
-| Durability | sandbox runner survives everything (nohup + file protocol); serverless process death is recovered on next status poll | same sandbox persistence + Trigger.dev retry/replay |
-| Best for | dev / single-instance hobby deploys | production / multi-instance serverless |
+Resolved in priority order (see `src/lib/tasks/orchestration-mode.ts`):
+self-hosted env config wins over a connected cloud key; otherwise a cloud
+key wins; otherwise local.
 
-Switching is env-only — no code changes. The app never pushes to the worker;
-workers **pull** claims (`POST /api/tasks/worker {action:"claim"}`).
+| | Local (default) | Trigger.dev Cloud | Self-hosted Trigger.dev |
+|---|---|---|---|
+| Config | none — works out of the box | Settings → **Cloud Tasks**: paste a `tr_trigger_…`/`tr_pat_…` key (verified live, stored AES-256-GCM; `TRIGGER_CLOUD_KEY` env also works) | `TRIGGER_DEV_URL` + `TRIGGER_DEV_TOKEN` (+ `WORKER_TOKEN`) on the app; worker deployed per `deploy/trigger-dev/` |
+| Driver | in-process (`src/lib/tasks/local-driver.ts`), claims via atomic Prisma lock; sweep-on-read re-adopts stale locks | `trigger-worker/src/tasks/agent-run.ts` deployed to cloud — plus the app **kicks** it directly per run via `POST api.trigger.dev/api/v1/runs` (`src/lib/tasks/trigger-cloud.ts`) | same worker, deployed on your own Trigger.dev v3 |
+| Dispatch | `startLocalRun` in-process | instant cloud kick on trigger + `poll-claims` cron backstop | `poll-claims` cron (≤1 min latency) |
+| Schedules | app's 60s loop fires due `TaskSchedule` rows | worker's `sweep-schedules` cron fires them (app loop only arms) | same |
+| Durability | sandbox runner survives everything (nohup + file protocol); serverless process death is recovered on next status poll | same sandbox persistence + cloud retry/replay + **cloud self-heal** (stale rows settled from cloud run state on status polls) | same sandbox persistence + Trigger.dev retry/replay |
+| Extras | — | minted `WORKER_TOKEN` shown in the setup checklist; cloud cancel propagation; `TaskRun.externalRunId` → dashboard links; per-run `cloudRunId` on `/api/tasks/status` | — |
+| Best for | dev / single-instance hobby deploys | production without operating anything | production / air-gapped / custom |
+
+Mode switches are config-only — no code changes. The app never pushes to a
+self-hosted worker; workers **pull** claims
+(`POST /api/tasks/worker {action:"claim"}`). In CLOUD mode the app
+additionally **pushes the kick** through the trigger.dev REST API (the only
+push path, and it targets trigger.dev's own cloud — not your infra).
 
 ## Key flows
 
@@ -86,21 +97,25 @@ workers **pull** claims (`POST /api/tasks/worker {action:"claim"}`).
 | Layer | Files |
 |---|---|
 | Contract | `src/lib/tasks/protocol.ts` (isomorphic) |
-| Server lib | `src/lib/tasks/{prisma,run-store,keyring,cron-scheduler,manifest,runner-config,local-driver,llm-bridge,orchestration-mode}.ts` |
-| API routes | `src/app/api/tasks/{trigger,status,cancel,sync,llm,schedules,schedules/[id],artifact/[id],worker}/route.ts` |
+| Server lib | `src/lib/tasks/{prisma,run-store,keyring,cron-scheduler,manifest,runner-config,local-driver,llm-bridge,orchestration-mode,trigger-cloud}.ts` |
+| API routes | `src/app/api/tasks/{trigger,status,cancel,sync,llm,schedules,schedules/[id],artifact/[id],worker,cloud}/route.ts` |
 | Client lib | `src/lib/tasks/{client,serialize,key-pool}.ts` + `src/hooks/use-background-tasks.ts` (Dexie v7 mirror: `background_tasks`) |
-| UI | `src/components/settings/section-schedules.tsx` (pane), `src/components/chat/background-tasks-strip.tsx` (live strip) |
+| UI | `src/components/settings/section-schedules.tsx` (pane), `src/components/settings/section-trigger-cloud.tsx` (Cloud Tasks pane), `src/components/chat/background-tasks-strip.tsx` (live strip) |
 | Tools | `src/lib/tools/background_task.ts` (create/status/list/cancel), `run_terminal` `background:true` (FR-3.3) |
-| Worker | `trigger-worker/` (pull-based durable driver) |
+| Worker | `trigger-worker/` (pull-based durable driver; deployable to cloud or self-hosted) |
 | Deploy | `deploy/trigger-dev/` (self-hosted Trigger.dev v3 compose) |
 
 ## Environment variables
 
 | Var | Side | Purpose |
 |---|---|---|
-| `TRIGGER_DEV_URL` + `TRIGGER_DEV_TOKEN` | app | both set → worker mode (local firing disabled) |
-| `WORKER_TOKEN` | app + worker | shared secret for claim/report/sweep |
-| `APP_URL` | worker | app origin |
+| `TRIGGER_DEV_URL` + `TRIGGER_DEV_TOKEN` | app | both set → self-hosted worker mode (local firing disabled; takes priority over a cloud key) |
+| `TRIGGER_CLOUD_KEY` | app | trigger.dev Cloud key — activates cloud mode without the UI (Settings → Cloud Tasks stores the same thing, encrypted) |
+| `TRIGGER_CLOUD_TASK_SLUG` | app | task id the app kicks in cloud mode (default `agent-run`) |
+| `TRIGGER_CLOUD_API_URL` | app | api.trigger.dev override (enterprise clouds) |
+| `TASKS_CLOUD_MASTER_KEY` | app | AES-256-GCM master key for the sealed cloud config (hex 64 / base64 32B; default: generated `db/cloud-config.key`) |
+| `WORKER_TOKEN` | app + worker | shared secret for claim/report/sweep — or minted automatically when a cloud key is connected |
+| `APP_URL` | app + worker | app origin (cloud kicks + scheduled-run bridge URL) |
 | `E2B_API_KEY` | app + worker | sandbox creation (app side also accepts the client vault key / `USE_SERVER_ENV`) |
 | `TASK_LLM_URL` / `TASK_LLM_TOKEN` / `TASK_KEY_POOL` | worker | LLM bridge + provider pool for sandbox runners |
 

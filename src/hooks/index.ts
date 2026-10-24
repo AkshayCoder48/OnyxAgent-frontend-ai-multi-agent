@@ -13,3 +13,9 @@ export {
   useTaskSchedules,
   useTriggerBackgroundTask,
 } from "./use-background-tasks";
+export { useCloudOrchestrator } from "./use-cloud-orchestrator";
+export type {
+  CloudAccountProject,
+  CloudAccountSnapshot,
+  CloudOrchestratorStatus,
+} from "./use-cloud-orchestrator";

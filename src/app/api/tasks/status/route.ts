@@ -4,8 +4,10 @@
 //   ?runId=<id>&cursor=<lastSeq>   single run (TaskStatusResponse):
 //       · sweep-on-read housekeeping FIRST — adoptStaleRuns() (local mode
 //         only; single indexed query when nothing is stale) + the throttled
-//         schedule touch(), so a poll-driven session keeps runs alive and
-//         schedules firing even with the loop dead.
+//         schedule touch() + CLOUD self-heal (healStaleCloudRuns settles
+//         runs the cloud worker never reported terminal for), so a
+//         poll-driven session keeps runs alive, schedules firing and cloud
+//         rows truthful even with the loop dead.
 //       · chunks: only seq > cursor (cursor defaults -1), each content
 //         truncated to 4000 chars ON READ (the row stores 16k for
 //         artifact-grade consumers).
@@ -20,7 +22,8 @@ import type { TaskRun } from "@prisma/client";
 import { prisma } from "@/lib/tasks/prisma";
 import { adoptStaleRuns } from "@/lib/tasks/local-driver";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
-import { isTriggerDevMode } from "@/lib/tasks/orchestration-mode";
+import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
+import { healStaleCloudRuns } from "@/lib/tasks/trigger-cloud";
 import { buildProgressView, parseChunks } from "@/lib/tasks/run-store";
 import type {
   BackgroundTaskType,
@@ -54,7 +57,9 @@ function toStatusRun(row: TaskRun, artifacts: TaskArtifactSummary[]): TaskStatus
     type: row.type as BackgroundTaskType,
     status: row.status as TaskRunStatus,
     phase: row.phase as TaskPhase,
-    orchestrator: row.orchestrator === "triggerdev" ? "triggerdev" : "local",
+    // "cloud" rows report as "triggerdev" — the frozen protocol union;
+    // the per-run cloud id below is how clients distinguish/link them.
+    orchestrator: row.orchestrator === "local" ? "local" : "triggerdev",
     title: row.title,
     prompt: row.prompt,
     progress: buildProgressView(row.progress, row.updatedAt),
@@ -65,6 +70,7 @@ function toStatusRun(row: TaskRun, artifacts: TaskArtifactSummary[]): TaskStatus
     error: row.error,
     artifacts,
     scheduleId: row.scheduleId,
+    ...(row.externalRunId ? { cloudRunId: row.externalRunId } : {}),
   };
 }
 
@@ -110,8 +116,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (params.get("list") === "1") {
     const userId = params.get("userId")?.trim();
     if (!userId) return bad("userId is required with list=1");
-    touch(); // throttled sweep-on-read (no-op in triggerdev mode)
+    const mode = await getOrchestrationMode();
+    touch(); // throttled sweep-on-read (self-gates to arm-only in worker modes)
     startSchedulerLoop(); // idempotent — revives the loop after a restart
+    // Cloud self-heal: fire-and-forget, throttled internally (settled rows
+    // surface on the next poll — eventual consistency is fine for lists).
+    if (mode === "cloud") void healStaleCloudRuns().catch(() => {});
     // Schedule-fired runs carry the synthetic "scheduled" user id (no
     // originating browser) — they are single-user-app-visible by design so
     // the strip can surface scheduled activity.
@@ -146,15 +156,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   // Sweep-on-read housekeeping: adopt orphaned local runs (local mode only —
   // a single indexed query when nothing is stale) + fire due schedules
-  // (throttled) + ensure the loop exists after a process restart.
-  if (!isTriggerDevMode()) {
+  // (throttled) + settle stale cloud rows from their cloud run state +
+  // ensure the loop exists after a process restart.
+  const mode = await getOrchestrationMode();
+  if (mode === "local") {
     await adoptStaleRuns();
   }
   touch();
   startSchedulerLoop();
 
-  const row = await prisma.taskRun.findUnique({ where: { id: runId } });
+  let row = await prisma.taskRun.findUnique({ where: { id: runId } });
   if (!row) return bad("run not found", 404);
+
+  // Cloud self-heal (awaited — a user watching a stuck run sees it settled
+  // on THIS response): stale non-terminal cloud rows are checked against
+  // api.trigger.dev and settled when the cloud run already ended.
+  if (
+    mode === "cloud" &&
+    row.orchestrator === "cloud" &&
+    (row.status === "queued" || row.status === "running")
+  ) {
+    const healed = await healStaleCloudRuns(runId).catch(() => false);
+    if (healed) {
+      row = (await prisma.taskRun.findUnique({ where: { id: runId } })) ?? row;
+    }
+  }
 
   const rawCursor = Number(params.get("cursor"));
   const cursor = Number.isFinite(rawCursor) ? Math.max(-1, Math.trunc(rawCursor)) : -1;

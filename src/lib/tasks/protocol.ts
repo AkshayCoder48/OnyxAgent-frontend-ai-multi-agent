@@ -264,6 +264,9 @@ export interface TaskStatusRun {
   chunks?: TaskStatusChunk[];
   cursor?: number;
   scheduleId?: string | null;
+  /** Trigger.dev CLOUD runs only — the api.trigger.dev run id (the row's
+   * externalRunId). Lets clients link straight to the cloud dashboard. */
+  cloudRunId?: string;
 }
 
 export interface TaskStatusResponse {

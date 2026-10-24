@@ -83,3 +83,6 @@ mock-llm/
 # environment
 .env
 .env*.local
+
+# Trigger.dev Cloud master key (AES-256-GCM sealing for TaskCloudConfig)
+db/cloud-config.key

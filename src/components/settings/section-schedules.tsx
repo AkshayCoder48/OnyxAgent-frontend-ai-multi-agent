@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { CalendarClock, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
@@ -37,7 +38,8 @@ import {
 
 import { SettingsRow, SettingsSection } from "./settings-section";
 import { MoreOptions } from "./more-options";
-import { useTaskSchedules } from "@/hooks";
+import { useTaskSchedules, useCloudOrchestrator } from "@/hooks";
+import { ROUTES } from "@/lib/constants";
 import {
   describeCron,
   nextCronRun,
@@ -359,6 +361,7 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
 
 export function SectionSchedules() {
   const { schedules, isLoading, update, remove } = useTaskSchedules();
+  const { status: orchestration } = useCloudOrchestrator();
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<TaskScheduleRecord | null>(null);
   const [deleting, setDeleting] = React.useState<TaskScheduleRecord | null>(null);
@@ -415,14 +418,37 @@ export function SectionSchedules() {
       >
         <SettingsRow
           label="Orchestrator"
-          description="Runs fire from this app's server (local orchestrator). Deploy the Trigger.dev worker for durable cloud execution."
+          description={
+            orchestration?.mode === "cloud"
+              ? "Trigger.dev Cloud is connected — scheduled runs execute on trigger.dev's infrastructure (Settings → Cloud Tasks)."
+              : orchestration?.mode === "selfhosted"
+                ? "A self-hosted Trigger.dev worker owns firing (TRIGGER_DEV_URL/TRIGGER_DEV_TOKEN env)."
+                : "Runs fire from this app's server (local orchestrator). Connect Trigger.dev Cloud — or deploy the worker — for durable cloud execution."
+          }
           control={
-            <span className="inline-flex items-center rounded-full bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] uppercase text-sky-600 dark:text-sky-400">
-              local
+            <span
+              className={
+                "inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[10px] uppercase " +
+                (orchestration?.mode === "cloud"
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  : orchestration?.mode === "selfhosted"
+                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                    : "bg-sky-500/10 text-sky-600 dark:text-sky-400")
+              }
+            >
+              {orchestration?.mode ?? "local"}
             </span>
           }
           className="mb-5"
         />
+        {orchestration?.mode !== "cloud" && (
+          <p className="text-muted-foreground -mt-3 mb-5 text-xs">
+            Want durable cloud execution without self-hosting?{" "}
+            <Link href={ROUTES.SETTINGS_CLOUD_TASKS} className="text-foreground underline underline-offset-4">
+              Connect a Trigger.dev Cloud key →
+            </Link>
+          </p>
+        )}
 
         {isLoading ? (
           <div className="text-muted-foreground flex items-center gap-2 py-6 text-sm">

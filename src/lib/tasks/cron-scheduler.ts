@@ -8,10 +8,13 @@
 //     null), ATOMICALLY claim each via updateMany on the SAME nextRunAt
 //     value (prevents double-fire across concurrent sweeps — local loop,
 //     sweep-on-read, worker), then create + dispatch the TaskRun.
+//     SELF-GATING: when the orchestration mode is NOT local (self-hosted or
+//     Trigger.dev Cloud worker owns execution) it only ARMS nextRunAt and
+//     returns 0 — pass { force: true } (the worker's "sweep" action) to
+//     actually fire.
 //   · startSchedulerLoop() — a 60s interval (unref'd, idempotent singleton)
-//     calling the sweep. In Trigger.dev mode the loop only ARMS nextRunAt —
-//     the deployed worker owns firing (its "sweep" action calls
-//     sweepSchedules over HTTP).
+//     calling the sweep. In worker modes the sweep arms only — the deployed
+//     worker's sweep task fires over HTTP (POST /api/tasks/worker).
 //   · touch() — throttled (5s) sweep-on-read invoked by the GET routes so
 //     short-lived serverless instances still pick up due schedules.
 // ============================================================================
@@ -19,7 +22,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { TaskSchedule } from "@prisma/client";
 import { nextCronRun, type BackgroundTaskType, type TaskRunConfig, type TaskScheduleRecord } from "./protocol";
-import { isTriggerDevMode } from "./orchestration-mode";
+import { getOrchestrationMode } from "./orchestration-mode";
 import { prisma } from "./prisma";
 import { keyring } from "./keyring";
 import { startLocalRun } from "./local-driver";
@@ -92,8 +95,19 @@ export async function armDueSchedules(): Promise<number> {
  * Fire every due schedule exactly once. Returns the number of runs created.
  * Safe to call concurrently from any number of processes — the claim is the
  * updateMany on the schedule's CURRENT nextRunAt value.
+ *
+ * SELF-GATING: when the orchestration mode is NOT local (self-hosted or
+ * Trigger.dev Cloud), the deployed worker owns firing — this only ARMS
+ * nextRunAt and returns 0. The worker route passes { force: true } (its
+ * "sweep" action) to make this actually fire.
  */
-export async function sweepSchedules(): Promise<number> {
+export async function sweepSchedules(opts?: { force?: boolean }): Promise<number> {
+  const mode = await getOrchestrationMode();
+  if (mode !== "local" && !opts?.force) {
+    await armDueSchedules();
+    return 0;
+  }
+
   const now = new Date();
   const due = await prisma.taskSchedule.findMany({
     where: { active: true, OR: [{ nextRunAt: { lte: now } }, { nextRunAt: null }] },
@@ -129,7 +143,7 @@ export async function sweepSchedules(): Promise<number> {
           type: s.taskType,
           status: "queued",
           phase: "claim",
-          orchestrator: isTriggerDevMode() ? "triggerdev" : "local",
+          orchestrator: mode === "local" ? "local" : mode === "cloud" ? "cloud" : "triggerdev",
           title: s.name,
           prompt: s.prompt,
           config: s.config || "{}",
@@ -153,9 +167,9 @@ export async function sweepSchedules(): Promise<number> {
         createdAt: Date.now(),
       });
 
-      // 4) Dispatch. Local mode drives in-process; triggerdev mode leaves
-      //    the row queued for the worker's claim action.
-      if (!isTriggerDevMode()) {
+      // 4) Dispatch. Local mode drives in-process; worker modes (self-hosted
+      //    / cloud) leave the row queued for the deployed poll-claims task.
+      if (mode === "local") {
         startLocalRun(run.id);
       }
       fired += 1;
@@ -206,12 +220,9 @@ export function toScheduleRecord(row: TaskSchedule): TaskScheduleRecord {
 
 async function schedulerTick(): Promise<void> {
   try {
-    if (isTriggerDevMode()) {
-      // Worker owns firing in this mode — arm only.
-      await armDueSchedules();
-    } else {
-      await sweepSchedules();
-    }
+    // sweepSchedules self-gates: worker modes (self-hosted / cloud) arm only,
+    // local mode fires.
+    await sweepSchedules();
   } catch (err) {
     console.warn(`[tasks] scheduler tick failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -226,7 +237,7 @@ export function startSchedulerLoop(): void {
   }, SWEEP_INTERVAL_MS);
   loopTimer.unref?.();
   g.__onyxTaskSchedulerLoop = loopTimer;
-  console.log(`[tasks] scheduler loop started (${SWEEP_INTERVAL_MS / 1000}s, mode=${isTriggerDevMode() ? "triggerdev-arm-only" : "local-fire"})`);
+  console.log(`[tasks] scheduler loop started (${SWEEP_INTERVAL_MS / 1000}s; sweep self-gates by orchestration mode)`);
 }
 
 /** Stop the loop (test/teardown hook). */
@@ -241,10 +252,10 @@ export function stopSchedulerLoop(): void {
 /**
  * Sweep-on-read: called by the GET routes so due schedules fire even when
  * only short-lived serverless instances exist. Throttled to one sweep per
- * 5s per process; fire-and-forget (never blocks the response).
+ * 5s per process; fire-and-forget (never blocks the response). In worker
+ * modes the sweep self-gates to arm-only (the deployed worker fires).
  */
 export function touch(): void {
-  if (isTriggerDevMode()) return; // the worker sweeps in this mode
   const now = Date.now();
   if (touchBusy || now - (g.__onyxTaskSchedulerTouchAt ?? 0) < TOUCH_THROTTLE_MS) return;
   g.__onyxTaskSchedulerTouchAt = now;

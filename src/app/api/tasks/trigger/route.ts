@@ -4,8 +4,10 @@
 // Entry point of every background task: validate the client's
 // TaskTriggerRequest against the protocol budgets, persist the TaskRun (task
 // token stored ONLY as sha256), stash the run's secrets in the in-memory
-// keyring (PRD §4.2), then dispatch — in-process local driver by default, or
-// left queued for the Trigger.dev worker when that mode is configured.
+// keyring (PRD §4.2), then dispatch — in-process local driver by default,
+// kicked straight to Trigger.dev Cloud when a cloud key is connected
+// (Settings → Cloud Tasks), or left queued for a self-hosted Trigger.dev
+// worker when that mode is configured.
 //
 // Body-logging discipline mirrors /api/chat-proxy: request payloads (which
 // carry keys + tokens) are NEVER logged.
@@ -15,7 +17,8 @@ import { prisma } from "@/lib/tasks/prisma";
 import { keyring, sha256Hex } from "@/lib/tasks/keyring";
 import { startLocalRun, clampTimeoutMs } from "@/lib/tasks/local-driver";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
-import { isTriggerDevMode } from "@/lib/tasks/orchestration-mode";
+import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
+import { kickCloudRun } from "@/lib/tasks/trigger-cloud";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -172,6 +175,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { req, keyPool, config, payload } = checked.value;
 
   try {
+    const mode = await getOrchestrationMode();
     const tokenHash = sha256Hex(req.taskToken);
     const run = await prisma.taskRun.create({
       data: {
@@ -180,7 +184,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         type: req.type,
         status: "queued",
         phase: "claim",
-        orchestrator: isTriggerDevMode() ? "triggerdev" : "local",
+        orchestrator: mode === "cloud" ? "cloud" : mode === "selfhosted" ? "triggerdev" : "local",
         title: req.title ? req.title.slice(0, 200) : null,
         prompt: req.prompt,
         config: JSON.stringify(config),
@@ -207,9 +211,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // dispatch the run itself.
     touch();
 
-    if (isTriggerDevMode()) {
-      // Worker owns execution — leave the row queued; the loop only arms.
+    if (mode === "selfhosted") {
+      // Self-hosted worker owns execution — leave the row queued; the loop
+      // only arms.
       startSchedulerLoop();
+      const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "triggerdev" };
+      return NextResponse.json(res);
+    }
+
+    if (mode === "cloud") {
+      // Trigger.dev CLOUD — kick the deployed agent-run task directly over
+      // the cloud REST API (zero queue latency). On failure kickCloudRun
+      // releases the claim and the row stays queued for the deployed
+      // worker's poll-claims cron (backstop dispatcher).
+      startSchedulerLoop();
+      const fallbackAppUrl = new URL(request.url).origin;
+      const kick = await kickCloudRun(run.id, fallbackAppUrl).catch((err) => ({
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      if (!kick.ok) {
+        console.warn(
+          `[tasks] run ${run.id} left queued — cloud kick failed: ${kick.error.slice(0, 200)}`,
+        );
+      }
       const res: TaskTriggerResponse = { ok: true, runId: run.id, orchestrator: "triggerdev" };
       return NextResponse.json(res);
     }

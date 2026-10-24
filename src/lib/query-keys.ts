@@ -90,6 +90,8 @@ export const qk = {
     detail: (runId: string) => ["tasks", "run", runId] as const,
     /** FR-2.1 cron schedules (Settings → Schedules pane). */
     schedules: () => ["tasks", "schedules"] as const,
+    /** Trigger.dev Cloud orchestrator config (Settings → Cloud Tasks). */
+    cloudConfig: () => ["tasks", "cloud-config"] as const,
   },
   admin: {
     stats: () => ["admin", "stats"] as const,

@@ -99,6 +99,37 @@ model TaskSchedule {
   runs      TaskRun[]
 }
 
+// ============================================================================
+// Trigger.dev CLOUD orchestrator config (Settings → Cloud Tasks). Singleton
+// row (id "primary") holding the operator's api.trigger.dev credentials.
+//
+// SECURITY MODEL (mirrors the keyring discipline):
+//   · encryptedKey / encryptedWorkerToken — AES-256-GCM sealed with a master
+//     key from TASKS_CLOUD_MASTER_KEY (env) or db/cloud-config.key (machine
+//     key, generated on first use). Plaintext lives ONLY in process memory.
+//   · maskedKey — the only key material safe for the UI (tr_••••abcd).
+//   · accountJson — the verification snapshot (projects/orgs/environments);
+//     non-secret metadata returned by GET /api/v3/projects.
+// ============================================================================
+
+model TaskCloudConfig {
+  id                   String   @id
+  /** AES-256-GCM sealed api.trigger.dev key (v1:iv:tag:ct, base64 parts). */
+  encryptedKey         String
+  /** UI-safe mask, e.g. tr_••••••••4f2a. */
+  maskedKey            String
+  /** Trigger.dev task id the app kicks per background run. */
+  taskSlug             String   @default("agent-run")
+  /** Verification snapshot (projects / orgs / environments). */
+  accountJson          String   @default("{}")
+  /** AES-256-GCM sealed WORKER_TOKEN minted for the deployed cloud worker
+   * (used only when the env var WORKER_TOKEN is absent). */
+  encryptedWorkerToken String
+  verifiedAt           DateTime
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
 /** FR-4.2 collected artifact (final message / changed file / terminal
  *  report). Content is inlined (utf8 or base64) with size caps enforced by
  *  the driver; the client extracts to Dexie/OPFS on sync-back. */

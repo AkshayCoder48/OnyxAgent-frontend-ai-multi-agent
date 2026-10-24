@@ -12,12 +12,14 @@
 //            error/progress-merge/chunk-append/artifact-create); a terminal
 //            status also settles the row (finishedAt, lock released, phase
 //            done) and drops the keyring entry.
-//   sweep  → fire due schedules (Trigger.dev mode only — the local loop owns
-//            firing otherwise).
+//   sweep  → fire due schedules (worker modes only — self-hosted OR
+//            Trigger.dev Cloud; the local loop owns firing otherwise).
 //
-// Disabled (503) unless WORKER_TOKEN is configured; token compare is
-// constant-time. Body-logging discipline mirrors /api/chat-proxy: payloads,
-// prompts and tokens are never logged.
+// Disabled (503) unless a WORKER_TOKEN is available — the env var, or the
+// token minted by the cloud connection (Settings → Cloud Tasks; stored
+// sealed in TaskCloudConfig) when the operator connected a trigger.dev
+// Cloud key. Token compare is constant-time. Body-logging discipline
+// mirrors /api/chat-proxy: payloads, prompts and tokens are never logged.
 // ============================================================================
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
@@ -25,7 +27,8 @@ import { prisma } from "@/lib/tasks/prisma";
 import { keyring, tokensEqual } from "@/lib/tasks/keyring";
 import { clampTimeoutMs } from "@/lib/tasks/local-driver";
 import { sweepSchedules } from "@/lib/tasks/cron-scheduler";
-import { isTriggerDevMode } from "@/lib/tasks/orchestration-mode";
+import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
+import { getEffectiveWorkerToken } from "@/lib/tasks/trigger-cloud";
 import {
   appendChunksToRun,
   mergeProgressIntoRun,
@@ -67,7 +70,12 @@ function toInt(value: unknown, dflt: number): number {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const workerToken = process.env.WORKER_TOKEN?.trim();
+  // WORKER_TOKEN: env var first, else the token minted by the cloud
+  // connection (Settings → Cloud Tasks) so connecting a key is enough to
+  // enable the worker protocol — no .env edit needed.
+  const envWorkerToken = process.env.WORKER_TOKEN?.trim();
+  const workerToken =
+    envWorkerToken ?? ((await getEffectiveWorkerToken()).token ?? "");
   if (!workerToken) {
     return bad("worker mode disabled", 503);
   }
@@ -276,12 +284,14 @@ async function createWorkerArtifacts(
 
 async function handleSweep(): Promise<NextResponse> {
   // Local mode owns firing (loop + sweep-on-read); the worker sweep is a
-  // triggerdev-mode concern only.
-  if (!isTriggerDevMode()) {
+  // worker-mode concern (self-hosted OR Trigger.dev Cloud) — and it FORCES
+  // the fire path (sweepSchedules self-gates to arm-only otherwise).
+  const mode = await getOrchestrationMode();
+  if (mode === "local") {
     const res: WorkerSweepResponse = { ok: true, fired: 0 };
     return NextResponse.json(res);
   }
-  const fired = await sweepSchedules();
+  const fired = await sweepSchedules({ force: true });
   const res: WorkerSweepResponse = { ok: true, fired };
   return NextResponse.json(res);
 }
