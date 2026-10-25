@@ -319,19 +319,79 @@ function describeUpstreamError(status: number, body: string, providerName: strin
   return `Provider "${providerName}" error (HTTP ${status}): ${detail || "no details provided"}${hint}`;
 }
 
+// ---------------------------------------------------------------------------
+// Native tool_calls → text-protocol synthesis
+// ---------------------------------------------------------------------------
+
+/** One accumulated native tool call (OpenAI `message.tool_calls` shape or
+ *  the streamed `delta.tool_calls` fragments accumulated by index). */
+export interface NativeToolCallInput {
+  name?: unknown;
+  arguments?: unknown;
+  function?: { name?: unknown; arguments?: unknown } | null;
+}
+
+/** Normalize the FIRST valid native tool call into the business text
+ * protocol `{"tool": name, "args": {…}}`.
+ *
+ * WHY: function-calling models (gpt-oss on the free Pollinations tier,
+ * OpenAI, Mistral…) read the tool protocol in the system prompt and reply
+ * with NATIVE `message.tool_calls` + an EMPTY `message.content` — they never
+ * write the JSON as text. Without this synthesis those replies looked like
+ * empty completions and every specialist tool round died in the
+ * empty-completion retry ladder. */
+export function nativeToolCallsToText(calls: NativeToolCallInput[]): string {
+  for (const call of calls) {
+    const name = call.function?.name ?? call.name;
+    if (typeof name !== "string" || !name.trim()) continue;
+    let args: Record<string, unknown> = {};
+    const rawArgs = call.function?.arguments ?? call.arguments;
+    if (typeof rawArgs === "string" && rawArgs.trim()) {
+      try {
+        const parsed = JSON.parse(rawArgs) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Fragmented/invalid argument JSON — the loop's executor will report
+        // a helpful error back to the model instead of dying silently.
+        args = {};
+      }
+    } else if (rawArgs && typeof rawArgs === "object") {
+      args = rawArgs as Record<string, unknown>;
+    }
+    return JSON.stringify({ tool: name, args });
+  }
+  return "";
+}
+
 /** Read a non-streaming completion body: JSON first, SSE-shaped fallback. */
 function parseCompletionText(raw: string): { content: string; usage?: BusinessLlmUsage } {
   const trimmed = raw.trim();
   if (trimmed.startsWith("{")) {
     try {
       const obj = JSON.parse(trimmed) as {
-        choices?: Array<{ message?: { content?: unknown } }>;
+        choices?: Array<{
+          message?: {
+            content?: unknown;
+            tool_calls?: Array<{
+              function?: { name?: unknown; arguments?: unknown } | null;
+            }>;
+          };
+        }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
-      const content = obj.choices?.[0]?.message?.content;
+      const message = obj.choices?.[0]?.message;
+      const content = message?.content;
       if (typeof content === "string" || content === null || content === undefined) {
+        let text = content ?? "";
+        // NATIVE TOOL CALLS (gpt-oss & friends): empty content + tool_calls
+        // → synthesize the text protocol so the caller can execute the call.
+        if (!text.trim() && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+          text = nativeToolCallsToText(message.tool_calls);
+        }
         return {
-          content: content ?? "",
+          content: text,
           usage: obj.usage
             ? { prompt_tokens: obj.usage.prompt_tokens, completion_tokens: obj.usage.completion_tokens }
             : undefined,
@@ -593,16 +653,39 @@ export async function businessLlmStream(
       const reader = res.body.getReader();
       let text = "";
       let usage: BusinessLlmUsage | undefined;
+      // Native tool_calls arrive as indexed delta fragments (name once, then
+      // argument JSON in pieces) — accumulate them by index and, when the
+      // stream ends with no text, synthesize the text-protocol call.
+      const toolCallAcc = new Map<number, { name: string; arguments: string }>();
       for await (const chunk of parseSSEStream(reader, controller.signal)) {
         const delta = extractDelta(chunk);
         if (delta?.text) {
           text += delta.text;
           opts.onDelta(delta.text);
         }
+        if (delta?.toolCalls) {
+          for (const tc of delta.toolCalls) {
+            const slot = toolCallAcc.get(tc.index) ?? { name: "", arguments: "" };
+            if (tc.name) slot.name += tc.name;
+            if (tc.arguments) slot.arguments += tc.arguments;
+            toolCallAcc.set(tc.index, slot);
+          }
+        }
         const u = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
         if (u && typeof u === "object") {
           usage = { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens };
         }
+      }
+      if (!text.trim() && toolCallAcc.size > 0) {
+        // NATIVE TOOL CALL STREAM: no content deltas, but the model called a
+        // tool — return the synthesized protocol text (NEVER streamed via
+        // onDelta: a tool call must not appear in the chat bubble; the
+        // specialist loop turns it into a real tool bar).
+        const calls = [...toolCallAcc.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, v]) => ({ name: v.name, arguments: v.arguments }));
+        const synthesized = nativeToolCallsToText(calls);
+        if (synthesized) return { text: synthesized, usage };
       }
       if (!text.trim()) {
         // EMPTY-COMPLETED-STREAM SELF-HEAL: some reasoning models stream long

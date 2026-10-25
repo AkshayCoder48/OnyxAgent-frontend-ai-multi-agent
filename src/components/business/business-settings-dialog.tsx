@@ -359,23 +359,16 @@ export function BusinessSettingsDialog({
               {bt("settings.limits")}
             </h3>
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <Label htmlFor="business-settings-concurrency">{bt("settings.maxConcurrent")}</Label>
-                <span className="text-sm tabular-nums text-muted-foreground">
-                  {form.maxConcurrentTasks}
+                <span className="text-right text-xs leading-relaxed text-muted-foreground">
+                  {bt("settings.sequentialNote")}
                 </span>
               </div>
-              <Slider
-                id="business-settings-concurrency"
-                value={[form.maxConcurrentTasks]}
-                min={1}
-                max={6}
-                step={1}
-                onValueChange={(v) =>
-                  setForm((f) => ({ ...f, maxConcurrentTasks: v[0] ?? f.maxConcurrentTasks }))
-                }
-                aria-label={bt("settings.maxConcurrent")}
-              />
+              {/* USER DIRECTIVE: agents answer ONE BY ONE — the swarm runs
+                  sequentially (next agent starts only after the previous
+                  completes), so the concurrency slider is retired. */}
+              <input type="hidden" id="business-settings-concurrency" value={form.maxConcurrentTasks} />
             </div>
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">

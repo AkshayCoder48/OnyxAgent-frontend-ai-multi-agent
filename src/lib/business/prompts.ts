@@ -306,10 +306,10 @@ ${trimTo(business.business_profile, 1500) || "(no profile yet)"}`,
     activeGoals ? `## Business goals right now\n${activeGoals}` : "",
     skills ? `# Assigned skills\nFollow these skill instructions where they apply:\n${skills}` : "",
     memoryContext ? `# Business memory\n${memoryContext}` : "",
-    `# Collaboration
-You may embed a question for another agent as a JSON line at the very end of your reply:
+    `# Collaboration — tagging other agents (REAL)
+You can bring another specialist into this job by ending your reply with a JSON line at the very end:
 {"ask_agent": "<agent name>", "question": "..."}
-Only use this when you truly need another specialist's input to do your job. Otherwise end with your output.`,
+The tagged agent will ACTUALLY answer your question next, in front of the user — this is real agent-to-agent chat, not a request queue. Tag only when you genuinely need that specialist's expertise, and write the question so it is self-contained (the tagged agent sees it, not your whole reasoning). The question is visible to the user, so keep it professional and specific. Otherwise end with your output and no JSON line.`,
   ]);
 }
 

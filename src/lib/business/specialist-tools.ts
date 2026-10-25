@@ -24,6 +24,7 @@
 // ============================================================================
 
 import { getTool, type ToolContext } from "@/lib/tools/registry";
+import { umbrellaFor } from "@/lib/agent/tool-umbrella";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { businessLlmStream, type BusinessLlmConfig, type BusinessLlmUsage } from "./llm";
 
@@ -55,6 +56,7 @@ Available tools:
     Run code or shell commands in the sandbox (files in your business directory are accessible).
 
 Rules:
+- Tool names are EXACTLY "web", "files" or "code_exec" — never "web_search", "web…" or any other spelling.
 - One tool call per reply, as the ONLY content of the reply (no prose around the JSON).
 - After each call you receive the tool's result and may call another tool or write your final answer.
 - When you have everything you need, write your COMPLETE final deliverable as your reply (no JSON) — it is streamed to the user live and becomes the document/deliverable.
@@ -72,8 +74,85 @@ export interface SpecialistToolCall {
 /** Whitelisted specialist tools (umbrella names — dispatch stays normal). */
 const SPECIALIST_TOOL_WHITELIST: ReadonlySet<string> = new Set(["web", "files", "code_exec"]);
 
+/** Strip creative punctuation from a model-written tool name
+ *  ("web…" → "web", "Web.Tool" → "webtool"). */
+function cleanToolName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+}
+
+/** Fuzzy umbrella prefixes — models write "web…", "web.tool", "files.run",
+ *  "codeexec"… when they freehand the tool name; map the prefix to the
+ *  umbrella so the call still executes. */
+const UMBRELLA_PREFIXES: ReadonlyArray<{ prefix: string; umbrella: string }> = [
+  { prefix: "web", umbrella: "web" },
+  { prefix: "search", umbrella: "web" },
+  { prefix: "file", umbrella: "files" },
+  { prefix: "folder", umbrella: "files" },
+  { prefix: "code", umbrella: "code_exec" },
+  { prefix: "exec", umbrella: "code_exec" },
+  { prefix: "python", umbrella: "code_exec" },
+  { prefix: "terminal", umbrella: "code_exec" },
+  { prefix: "shell", umbrella: "code_exec" },
+];
+
+/** Resolve ANY model spelling of a tool name to a whitelisted umbrella.
+ *  Order: exact umbrella → exact granular action (umbrellaFor) → fuzzy
+ *  prefix. Returns the umbrella (+ the granular name when it was exact,
+ *  so it can ride along as `action`). */
+function resolveSpecialistTool(name: string): { tool: string; granular?: string } | null {
+  const cleaned = cleanToolName(name);
+  if (!cleaned) return null;
+  if (SPECIALIST_TOOL_WHITELIST.has(cleaned)) return { tool: cleaned };
+  const umbrella = umbrellaFor(cleaned);
+  if (umbrella && SPECIALIST_TOOL_WHITELIST.has(umbrella)) {
+    return { tool: umbrella, granular: cleaned };
+  }
+  for (const p of UMBRELLA_PREFIXES) {
+    if (cleaned.startsWith(p.prefix)) return { tool: p.umbrella };
+  }
+  return null;
+}
+
+/** Infer the `action` when the model omitted it (gpt-oss freehands calls
+ *  like {"tool":"web", "query":"…"} with no action). */
+function inferAction(tool: string, args: Record<string, unknown>): string | undefined {
+  if (tool === "web") {
+    if (typeof args.url === "string" && args.url.trim()) return "web_fetch";
+    if (typeof args.query === "string" && args.query.trim()) return "web_search";
+    return undefined;
+  }
+  if (tool === "files") {
+    if (typeof args.path === "string" && typeof args.content === "string") return "create_file";
+    return undefined;
+  }
+  if (tool === "code_exec") {
+    if (typeof args.code === "string" && args.code.trim()) return "run_python";
+    if (typeof args.command === "string" && args.command.trim()) return "run_terminal";
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Extract the args object from a parsed tool-call envelope (nested
+ *  `args`/`arguments` object, or the flat form). */
+function extractCallArgs(obj: Record<string, unknown>): Record<string, unknown> {
+  if (obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)) {
+    return obj.args as Record<string, unknown>;
+  }
+  if (obj.arguments && typeof obj.arguments === "object" && !Array.isArray(obj.arguments)) {
+    return obj.arguments as Record<string, unknown>;
+  }
+  const { tool: _t, name: _n, ...rest } = obj;
+  void _t;
+  void _n;
+  return rest;
+}
+
 /** Parse a tool call from a model reply. A valid call must be the ONLY
- *  content (optionally fenced) — prose + JSON together is a final answer. */
+ *  content (optionally fenced) — prose + JSON together is a final answer.
+ *  Tolerates everything freehanding models do: fuzzy tool names ("web…",
+ *  "files.run"), granular names ("web_search") and double-encoded
+ *  envelopes ({"tool":"web…","args":{"tool":"web","args":{…}}}). */
 export function parseSpecialistToolCall(text: string): SpecialistToolCall | null {
   const raw = (text ?? "").trim();
   if (!raw || raw.length > 4000) return null;
@@ -90,21 +169,36 @@ export function parseSpecialistToolCall(text: string): SpecialistToolCall | null
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
-  const tool = typeof obj.tool === "string" ? obj.tool : typeof obj.name === "string" ? obj.name : "";
-  if (!tool || !SPECIALIST_TOOL_WHITELIST.has(tool)) return null;
-  let args: Record<string, unknown>;
-  if (obj.args && typeof obj.args === "object" && !Array.isArray(obj.args)) {
-    args = obj.args as Record<string, unknown>;
-  } else if (obj.arguments && typeof obj.arguments === "object" && !Array.isArray(obj.arguments)) {
-    args = obj.arguments as Record<string, unknown>;
-  } else {
-    // Flat form: {"tool": "web", "action": "web_search", "query": "…"}
-    const { tool: _t, name: _n, ...rest } = obj;
-    void _t;
-    void _n;
-    args = rest;
+  let toolName =
+    typeof obj.tool === "string" ? obj.tool : typeof obj.name === "string" ? obj.name : "";
+  if (!toolName) return null;
+  let args = extractCallArgs(obj);
+
+  // Unwrap double-encoded envelopes — the model wrapping a full inner call
+  // in another {tool, args} layer (observed live: {"tool":"web…","args":
+  // {"tool":"web","args":{"action":"web_search",…}}}).
+  for (let depth = 0; depth < 3; depth++) {
+    const innerName =
+      typeof args.tool === "string" ? args.tool : typeof args.name === "string" ? args.name : null;
+    const innerArgs = (args.args ?? args.arguments) as Record<string, unknown> | undefined;
+    if (innerName && innerArgs && typeof innerArgs === "object" && !Array.isArray(innerArgs)) {
+      toolName = innerName;
+      args = innerArgs;
+      continue;
+    }
+    break;
   }
-  return { tool, args };
+
+  const resolved = resolveSpecialistTool(toolName);
+  if (!resolved) return null;
+  if (resolved.granular && typeof args.action !== "string") {
+    args = { ...args, action: resolved.granular };
+  }
+  if (typeof args.action !== "string" || !args.action.trim()) {
+    const inferred = inferAction(resolved.tool, args);
+    if (inferred) args = { ...args, action: inferred };
+  }
+  return { tool: resolved.tool, args };
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +250,8 @@ export function sanitizeSpecialistOutput(text: string): string {
   out = out.replace(RESIDUAL_TOOL_TAG_RE, "");
   // Bare JSON tool-call objects left over on their own lines:
   // {"url": "https://…", "max_chars": 5000} — drop whole lines that are JUST
-  // such an object (keys typical of tool args).
+  // such an object (keys typical of tool args — including the envelope keys
+  // `tool`/`args` so a REJECTED pseudo call can never become the deliverable).
   out = out
     .split("\n")
     .filter((line) => {
@@ -167,7 +262,7 @@ export function sanitizeSpecialistOutput(text: string): string {
         const keys = Object.keys(o);
         if (keys.length === 0) return true;
         const toolish = keys.every((k) =>
-          /^(url|query|max_chars|max_length|action|path|content|command|code|file_id|name|tool)$/i.test(k),
+          /^(url|query|max_chars|max_length|action|path|content|command|code|file_id|name|tool|args|arguments|parameters|input)$/i.test(k),
         );
         return !toolish;
       } catch {
@@ -178,6 +273,30 @@ export function sanitizeSpecialistOutput(text: string): string {
   out = out.replace(/\n{3,}/g, "\n\n").trim();
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Tool-call lifecycle events (tool bars in the chat UI).
+// ---------------------------------------------------------------------------
+
+/** A tool call STARTED — the chat renders a live tool bar (running state). */
+export interface SpecialistToolEventStart {
+  type: "start";
+  callId: string;
+  /** The call's tool name as the chat ToolCallCard expects it. */
+  name: string;
+  /** Business-scoped args (files paths already rewritten). */
+  args: Record<string, unknown>;
+}
+
+/** A tool call SETTLED — the bar flips to completed/error with its result. */
+export interface SpecialistToolEventEnd {
+  type: "end";
+  callId: string;
+  ok: boolean;
+  result?: unknown;
+}
+
+export type SpecialistToolEvent = SpecialistToolEventStart | SpecialistToolEventEnd;
 
 // ---------------------------------------------------------------------------
 // The tool loop.
@@ -203,6 +322,10 @@ export interface SpecialistToolLoopOptions {
   /** Visibility hook — one call per executed tool (after execution, with a
    *  short result summary so the Browser tab keeps its result counts). */
   onToolCall?: (info: SpecialistToolCallInfo) => void;
+  /** Tool-call lifecycle — START before execution (live tool bar) and END
+   *  after (settled bar with result). Drives the real tool-call cards in
+   *  the business chat, exactly like the main agent chat renders them. */
+  onToolEvent?: (event: SpecialistToolEvent) => void;
 }
 
 export interface SpecialistToolLoopResult {
@@ -327,13 +450,54 @@ export async function runSpecialistToolLoop(
   const maxRounds = opts.maxToolRounds ?? 10;
   let rounds = 0;
   let usage: BusinessLlmUsage | undefined;
+  let callSeq = 0;
+
+  // ── STREAM GATE (user directive: no raw tool-call JSON in the chat) ──────
+  // A tool call must be a LONE JSON object (optionally fenced) ≤ 4000 chars.
+  // So: hold every delta until the reply PROVES it is not a tool call —
+  // first visible char not `{` / ``` → final answer, flush + stream live;
+  // buffer over the 4000-char tool-call limit → cannot be a call, flush.
+  // Anything that stays held and parses as a call becomes a TOOL BAR, never
+  // bubble text. The user never sees `{"tool": …}` stream into the chat.
+  const streamGate = (): {
+    onDelta: (delta: string) => void;
+    settle: () => void;
+  } => {
+    let whole = "";
+    let holding = true;
+    return {
+      onDelta: (delta: string) => {
+        whole += delta; // businessLlmStream passes INCREMENTAL deltas
+        if (!holding) {
+          opts.onDelta?.(whole);
+          return;
+        }
+        const probe = whole.replace(/^\s+/, "");
+        const mayBeToolCall = probe === "" || probe.startsWith("{") || probe.startsWith("```");
+        if (mayBeToolCall && probe.length <= 4100) return; // keep holding
+        holding = false;
+        opts.onDelta?.(whole); // proven final answer — flush + stream live
+      },
+      settle: () => {
+        if (holding) {
+          holding = false;
+          // Held to the end (a `{`-opening reply): it is either a tool call
+          // (the caller resets before rendering a bar) or a JSON-shaped final
+          // answer — emit the complete text once, now.
+          opts.onDelta?.(whole);
+        }
+      },
+    };
+  };
 
   while (rounds < maxRounds) {
     if (opts.signal?.aborted) throw new Error("cancelled");
 
-    // Tentative streaming: if this round IS the final answer, the caller's
-    // onDelta renders it live; if it turns out to be a tool call, reset.
-    let partial = "";
+    // Tentative streaming THROUGH THE GATE: if this round IS the final
+    // answer it streams live the moment it proves it isn't a tool call; if
+    // it turns out to be a tool call, nothing was ever shown (reset is a
+    // no-op) and a real tool bar renders instead.
+    const gate = streamGate();
     const res = await businessLlmStream(opts.cfg, {
       systemPrompt: opts.systemPrompt,
       userPrompt: opts.userPrompt, // unused when messages is set
@@ -341,10 +505,10 @@ export async function runSpecialistToolLoop(
       temperature: opts.temperature ?? undefined,
       signal: opts.signal,
       onDelta: (delta) => {
-        partial += delta;
-        opts.onDelta?.(partial);
+        gate.onDelta(delta);
       },
     });
+    gate.settle();
     usage = res.usage ?? usage;
     const call = parseSpecialistToolCall(res.text);
 
@@ -363,10 +527,23 @@ export async function runSpecialistToolLoop(
       continue;
     }
 
-    // A tool round — clear the tentative stream and execute for real.
-    partial = "";
+    // A tool round — nothing was streamed (the gate held it), execute for
+    // real and emit the tool-call lifecycle for the chat tool bars.
     opts.onDeltaReset?.();
+    const scopedArgs = call.tool === "files" ? scopeFileArgs(call.args, dir) : { ...call.args };
+    const callId = `spec-${++callSeq}-${Date.now().toString(36)}`;
+    opts.onToolEvent?.({
+      type: "start",
+      callId,
+      // The SAME name shape the main agent's calls use (umbrella name +
+      // action arg) — ToolCallCard resolves it to the granular view with
+      // the specialized renderers (web results, diffs, run-python…).
+      name: call.tool,
+      args: scopedArgs,
+    });
     const { result, resultCount, topUrls } = await executeTool(call);
+    const ok = !(result && typeof result === "object" && "error" in result);
+    opts.onToolEvent?.({ type: "end", callId, ok, result });
     rounds++;
     opts.onToolCall?.({
       tool: call.tool,
@@ -374,7 +551,7 @@ export async function runSpecialistToolLoop(
       detail: describeCall(call),
       resultCount,
       topUrls,
-      ok: !(result && typeof result === "object" && "error" in result),
+      ok,
     });
 
     let resultText: string;
@@ -400,7 +577,7 @@ export async function runSpecialistToolLoop(
     content:
       "You have used the maximum tool budget for this task. Write your COMPLETE final deliverable NOW as your reply (no more tool calls).",
   });
-  let partial = "";
+  const gate = streamGate();
   const res = await businessLlmStream(opts.cfg, {
     systemPrompt: opts.systemPrompt,
     userPrompt: opts.userPrompt,
@@ -408,10 +585,10 @@ export async function runSpecialistToolLoop(
     temperature: opts.temperature ?? undefined,
     signal: opts.signal,
     onDelta: (delta) => {
-      partial += delta;
-      opts.onDelta?.(partial);
+      gate.onDelta(delta);
     },
   });
-  const clean = sanitizeSpecialistOutput(res.text) || partial;
+  gate.settle();
+  const clean = sanitizeSpecialistOutput(res.text) || res.text;
   return { output: clean, sources, usage: res.usage ?? usage, toolRounds: rounds };
 }

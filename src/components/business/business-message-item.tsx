@@ -13,9 +13,11 @@
  */
 
 import * as React from "react";
-import { ChevronDown, ExternalLink } from "lucide-react";
+import { ChevronDown, CornerDownLeft, CornerDownRight, ExternalLink } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { MarkdownContent } from "@/components/chat/markdown-content";
+import { ToolCallCard } from "@/components/chat/tool-call-card";
+import { CopyButton } from "@/components/chat/copy-button";
 import { useBusinessStore } from "@/stores/business-store";
 import { bt } from "@/lib/business/ui-text";
 import type { BusinessChatMessageRow } from "@/lib/business/types";
@@ -283,14 +285,53 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
   // The final answer streams LIVE (tool loop / draft writing): metadata
   // .streaming is set while the specialist (or its document) is writing.
   const specialistStreaming = message.metadata?.streaming === true;
+  // REAL tool-call bars (user directive: copy the normal agent chat's tool
+  // call UI) — the same ToolCallCard stack the main chat renders.
+  const toolCalls = message.metadata?.toolCalls ?? [];
+  // Agent-to-agent collaboration: this message ANSWERS `replyToAgentId`
+  // ("↩ replying to X" badge), or is a TAG of `tagToAgentId` (a compact
+  // "A → @B" question row — the tagged agent answers next).
+  const replyToAgentId = message.metadata?.replyToAgentId;
+  const replyToAgent = replyToAgentId ? agents.find((a) => a.id === replyToAgentId) : undefined;
+  const tagToAgentId = message.metadata?.tagToAgentId;
+  const tagTarget = tagToAgentId ? agents.find((a) => a.id === tagToAgentId) : undefined;
+
+  // ── TAG ROW (agent-to-agent chat): "A tagged B — @B question…" ────────
+  if (tagTarget) {
+    return (
+      <div className="flex items-start gap-3">
+        <AgentLogo logo={agent?.svg_logo ?? "generic"} label={agent?.name} className="mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-1.5">
+            <span className="truncate text-xs font-semibold text-foreground">{agent?.name ?? "Agent"}</span>
+            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <CornerDownRight className="size-3 shrink-0" aria-hidden />
+              {bt("chat.taggedAgent", { agent: tagTarget.name })}
+            </span>
+          </div>
+          <div className="mt-1 max-w-[92%] rounded-2xl rounded-tl-sm border border-primary/15 bg-primary/5 px-3.5 py-2.5 text-sm leading-relaxed break-words">
+            <span className="mr-1.5 font-semibold text-primary">@{tagTarget.name}</span>
+            <span className="whitespace-pre-wrap">{message.content}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-start gap-3">
       <AgentLogo logo={agent?.svg_logo ?? "generic"} label={agent?.name} className="mt-0.5" />
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-baseline gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-1.5">
           <span className="truncate text-xs font-semibold text-foreground">{agent?.name ?? "Agent"}</span>
+          {replyToAgent && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border bg-muted/40 px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+              <CornerDownLeft className="size-2.5 shrink-0" aria-hidden />
+              {bt("chat.replyingTo", { agent: replyToAgent.name })}
+            </span>
+          )}
           <span className="shrink-0 text-[11px] text-muted-foreground">
-            · {isDraftMessage ? bt("chat.agentDocument") : bt("chat.agentContribution")}
+            · {isDraftMessage ? bt("chat.agentDocument") : replyToAgent ? bt("chat.agentAnswer") : bt("chat.agentContribution")}
           </span>
           {specialistStreaming && (
             <span className="shrink-0 text-[11px] text-muted-foreground" aria-live="polite">
@@ -298,6 +339,17 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
             </span>
           )}
         </div>
+        {/* REAL TOOL-CALL BARS — the exact ToolCallCard component the normal
+            agent chat renders (live running state, settled results, friendly
+            captions, specialized renderers: web results, file diffs, code
+            output…). No more raw tool-call JSON in the transcript. */}
+        {toolCalls.length > 0 && (
+          <div className="mt-1.5 w-full space-y-2">
+            {toolCalls.map((tc) => (
+              <ToolCallCard key={tc.id} toolCall={tc} turnId={message.business_id} />
+            ))}
+          </div>
+        )}
         {/* USER DIRECTIVE: a draft task outputs the document ONCE — the draft
             card below is the ONLY full copy (it streams 100% live). The chat
             row itself carries just the compact delivery note — never a
@@ -320,6 +372,12 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
           <p className="mt-1 text-xs italic text-muted-foreground" aria-live="polite">
             {bt("chat.writingDocument")}
           </p>
+        )}
+        {/* Copy affordance — main-chat parity. */}
+        {!specialistStreaming && !isDraftMessage && message.content.trim() && (
+          <div className="mt-0.5">
+            <CopyButton text={message.content} className="text-muted-foreground/60 hover:text-foreground" />
+          </div>
         )}
         {sources.length > 0 && (
           <Collapsible className="mt-2">

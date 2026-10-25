@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { nanoid } from "nanoid";
+import type { ToolCall } from "@/types";
 import { useAuthStore } from "@/stores/auth-store";
 import { useBusinessStore } from "@/stores/business-store";
 import { bt } from "./ui-text";
@@ -50,6 +51,7 @@ import {
   SPECIALIST_TOOL_PROTOCOL,
   runSpecialistToolLoop,
   sanitizeSpecialistOutput,
+  type SpecialistToolEvent,
 } from "./specialist-tools";
 import { randomLogoForRole, AGENT_LOGO_KEYS } from "@/components/business/agent-logos";
 import {
@@ -913,6 +915,9 @@ interface SpecialistOptions {
   onFinalDelta?: (partial: string) => void;
   /** A streamed round turned out to be a tool call — clear the live view. */
   onFinalReset?: () => void;
+  /** Tool-call lifecycle — drives the REAL tool-call bars (ToolCallCard
+   *  stack) on the live chat row, exactly like the main agent chat. */
+  onToolEvent?: (event: SpecialistToolEvent) => void;
 }
 
 async function runSpecialist(opts: SpecialistOptions): Promise<SpecialistOutcome> {
@@ -975,38 +980,32 @@ async function runSpecialist(opts: SpecialistOptions): Promise<SpecialistOutcome
       onDelta: opts.onFinalDelta,
       onDeltaReset: opts.onFinalReset,
       onToolCall: (info) => {
-        if (!recordEvents) return;
+        // Tool usage is now VISIBLE as real tool-call bars (onToolEvent →
+        // ToolCallCard stack on the chat row) — the noisy "X is using Y"
+        // activity rows are gone. The Browser tab still gets its
+        // structured activity events.
+        if (!recordEvents || info.tool !== "web") return;
         void (async () => {
           try {
-            if (info.tool === "web") {
-              await emitEvent({
-                business_id: businessId,
-                task_id: taskId,
-                agent_id: agent?.id,
-                event_type: "browser.activity",
-                payload: {
-                  kind: info.action === "web_fetch" ? "page_read" : "web_search",
-                  query: info.detail,
-                  resultCount: info.resultCount ?? 0,
-                  topUrls: info.topUrls ?? [],
-                },
-                correlation_id: turnId,
-              });
-            }
-            await appendActivity(
-              businessId,
-              bt("chat.agentUsingTool", {
-                agent: agentName,
-                tool: info.action ?? info.tool,
-                detail: trimTo(info.detail, 140),
-              }),
-              { agentId: agent?.id, metadata: { taskId, turnId } },
-            );
+            await emitEvent({
+              business_id: businessId,
+              task_id: taskId,
+              agent_id: agent?.id,
+              event_type: "browser.activity",
+              payload: {
+                kind: info.action === "web_fetch" ? "page_read" : "web_search",
+                query: info.detail,
+                resultCount: info.resultCount ?? 0,
+                topUrls: info.topUrls ?? [],
+              },
+              correlation_id: turnId,
+            });
           } catch {
             // best-effort visibility — never break the tool loop
           }
         })();
       },
+      onToolEvent: opts.onToolEvent,
     });
     return { ok: true, output: res.output, sources: res.sources, usage: res.usage };
   };
@@ -1264,7 +1263,12 @@ export async function sendBusinessMessage(businessId: string, content: string): 
       { metadata: { turnId } },
     );
 
-    // 9. Execution loop (scheduler with dependency resolution + concurrency cap)
+    // 9. Execution — SEQUENTIAL SWARM (user directive: agents answer ONE BY
+    //    ONE — the next agent starts only AFTER the previous one completes,
+    //    in plan order, until every planned agent has finished). An agent
+    //    can optionally TAG another agent (a trailing {"ask_agent": …} line):
+    //    the tagged agent's answer is queued directly after the tagger, so
+    //    the transcript shows real agent-to-agent chat.
     const results: Array<{
       agent: string;
       title: string;
@@ -1274,56 +1278,30 @@ export async function sendBusinessMessage(businessId: string, content: string): 
       sources: { title: string; url: string }[];
       error?: string;
     }> = [];
-    let refreshedTasks = [...taskRows];
+    const refreshedTasks = [...taskRows];
+    /** Exchange tasks (agent tags): taskId → the ASKING agent's id. */
+    const exchangeReplyTo = new Map<string, string>();
+    let agentExchanges = 0;
+    const MAX_AGENT_EXCHANGES = 4;
 
     const isTerminal = (t: BusinessTaskRow) =>
       t.status === "completed" || t.status === "failed" || t.status === "cancelled";
 
-    while (refreshedTasks.some((t) => !isTerminal(t))) {
-      if (signal.aborted) break;
-
-      const running = refreshedTasks.filter((t) => t.status === "running");
-      const ready = refreshedTasks.filter((t) => {
-        if (t.status !== "ready" && t.status !== "backlog") return false;
-        const deps = t.dependencies.map((d) => refreshedTasks.find((x) => x.id === d));
-        return deps.every((d) => !d || d.status === "completed");
-      });
-      const capacity = Math.max(0, business.configuration.maxConcurrentTasks - running.length);
-      const launch = ready.slice(0, capacity);
-
-      if (launch.length === 0 && running.length === 0) {
-        // Blocked: no progress possible — report honestly and stop.
-        const stuck = refreshedTasks.filter((t) => !isTerminal(t));
-        await emitEvent({
-          business_id: businessId,
-          event_type: "notification",
-          payload: { kind: "blocked", tasks: stuck.map((t) => t.title) },
-          correlation_id: turnId,
-        });
-        for (const t of stuck) {
-          const updated = await updateTaskAndMirror(t.id, { status: "blocked" });
-          if (updated) {
-            const idx = refreshedTasks.findIndex((x) => x.id === t.id);
-            if (idx >= 0) refreshedTasks[idx] = updated;
-            await appendActivity(businessId, bt("chat.activityTaskBlocked", { task: t.title }), { metadata: { taskId: t.id, turnId } });
-          }
-        }
-        break;
-      }
-
-      if (launch.length === 0) {
-        // Tasks running — wait for one to settle (poll task rows).
-        await new Promise((r) => setTimeout(r, 400));
-        refreshedTasks = await businessTaskService.list(businessId);
-        refreshedTasks = refreshedTasks.filter((t) => t.correlation_id === turnId);
-        continue;
-      }
-
-      await Promise.allSettled(
-        launch.map(async (task) => {
+    // ── RUN ONE TASK TO COMPLETION ──────────────────────────────────────
+    // The whole specialist lifecycle for a single task: status + events,
+    // the live chat row / draft card with REAL tool-call bars, streaming,
+    // finalization, and the optional agent tag that queues the tagged
+    // agent's answer task.
+    const runOneTask = async (task: BusinessTaskRow): Promise<void> => {
           const planIdx = taskRows.findIndex((t) => t.id === task.id);
           const planTask = plan.tasks[planIdx];
-          const agent = planAgents[planIdx] ?? null;
+          // Plan tasks AND tag-exchange tasks carry assigned_agent_id —
+          // resolve the agent from the task row (exchanges aren't in the
+          // plan arrays).
+          const agent =
+            (task.assigned_agent_id ? agents.find((a) => a.id === task.assigned_agent_id) : undefined) ??
+            planAgents[planIdx] ??
+            null;
           const agentName = agent?.name ?? "Main Agent";
 
           await updateTaskAndMirror(task.id, { status: "running", started_at: nowISO(), error: undefined });
@@ -1370,6 +1348,9 @@ export async function sendBusinessMessage(businessId: string, content: string): 
           // draft card live. Non-draft tasks stream into the chat bubble.
           const willProduceDraft =
             !!planTask?.produces_draft && (!agent || agent.permissions.create_drafts);
+          // Tag-exchange tasks answer the agent that tagged them — the
+          // bubble carries a "replying to X" badge.
+          const replyToAgent = exchangeReplyTo.get(task.id);
 
           let draftRow: import("./types").BusinessDraftRow | null = null;
           let chatRow: BusinessChatMessageRow | null = null;
@@ -1394,6 +1375,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
                   draftId: draftRow.id,
                   streaming: true,
                   turnId,
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
                 },
               });
               store().appendChatMessage(chatRow);
@@ -1410,7 +1392,12 @@ export async function sendBusinessMessage(businessId: string, content: string): 
                 role: "agent",
                 agent_id: agent!.id,
                 content: "",
-                metadata: { taskId: task.id, streaming: true, turnId },
+                metadata: {
+                  taskId: task.id,
+                  streaming: true,
+                  turnId,
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
+                },
               });
               store().appendChatMessage(chatRow);
             }
@@ -1443,6 +1430,66 @@ export async function sendBusinessMessage(businessId: string, content: string): 
             }
           };
 
+          // ── LIVE TOOL-CALL BARS (user directive: copy the normal agent
+          // chat's tool-call UI). Every tool the specialist ACTUALLY runs
+          // becomes a real ToolCallCard on this row — running state while
+          // it executes, settled with its result — the exact same component
+          // the main agent chat renders. Immutable updates only
+          // (ToolCallCard is memoized on object identity).
+          const liveToolCalls: ToolCall[] = [];
+          let lastToolPush = 0;
+          /** Structured-clone-safe copy for BOTH the store and Dexie — a
+           *  tool result carrying a non-cloneable value (class instance,
+           *  function…) must never crash the persistence path. */
+          const persistableToolCalls = (): ToolCall[] =>
+            liveToolCalls.map((c) => {
+              let result = c.result;
+              if (result !== undefined && typeof result !== "string") {
+                try {
+                  result = JSON.parse(JSON.stringify(result)) as unknown;
+                } catch {
+                  result = String(result);
+                }
+              }
+              return { ...c, result, args: { ...c.args } };
+            });
+          const pushToolCalls = () => {
+            if (!chatRow) return;
+            store().updateChatMessage(chatRow.id, {
+              metadata: {
+                ...(chatRow.metadata ?? {}),
+                toolCalls: persistableToolCalls(),
+                streaming: true,
+              },
+            });
+          };
+          const onToolEvent = (ev: SpecialistToolEvent) => {
+            if (ev.type === "start") {
+              liveToolCalls.push({
+                id: ev.callId,
+                name: ev.name,
+                args: ev.args,
+                status: "running",
+                startedAt: Date.now(),
+              });
+            } else {
+              const idx = liveToolCalls.findIndex((c) => c.id === ev.callId);
+              if (idx >= 0 && liveToolCalls[idx]) {
+                liveToolCalls[idx] = {
+                  ...liveToolCalls[idx]!,
+                  status: ev.ok ? "completed" : "error",
+                  result: ev.result,
+                  endedAt: Date.now(),
+                };
+              }
+            }
+            const now = Date.now();
+            if (ev.type === "end" || now - lastToolPush > 300) {
+              lastToolPush = now;
+              pushToolCalls();
+            }
+          };
+
           let outcome = await runSpecialist({
             business,
             agent,
@@ -1461,6 +1508,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
             searchQueries: planTask?.search_queries ?? [],
             onFinalDelta,
             onFinalReset,
+            onToolEvent,
           });
 
           // One task-level retry when the specialist call failed (not on abort).
@@ -1491,6 +1539,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               searchQueries: planTask?.search_queries ?? [],
               onFinalDelta,
               onFinalReset,
+              onToolEvent,
             });
           }
 
@@ -1609,18 +1658,48 @@ export async function sendBusinessMessage(businessId: string, content: string): 
                   sources,
                   turnId,
                   streaming: false,
+                  toolCalls: persistableToolCalls(),
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
                 },
               });
-              store().updateChatMessage(chatRow.id, { content: noteContent, metadata: { taskId: task.id, draftId: draftRow.id, sources, turnId, streaming: false } });
+              store().updateChatMessage(chatRow.id, {
+                content: noteContent,
+                metadata: {
+                  taskId: task.id,
+                  draftId: draftRow.id,
+                  sources,
+                  turnId,
+                  streaming: false,
+                  toolCalls: persistableToolCalls(),
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
+                },
+              });
             } else if (chatRow) {
               // Non-draft specialist contribution — the streamed bubble IS
-              // the deliverable.
+              // the deliverable (with its real tool-call bars above it).
               const sources = outcome.sources.slice(0, 8);
               await businessChatService.update(chatRow.id, {
                 content: cleanOutput,
-                metadata: { taskId: task.id, sources, turnId, streaming: false },
+                metadata: {
+                  taskId: task.id,
+                  sources,
+                  turnId,
+                  streaming: false,
+                  toolCalls: persistableToolCalls(),
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
+                },
               });
-              store().updateChatMessage(chatRow.id, { content: cleanOutput, metadata: { taskId: task.id, sources, turnId, streaming: false } });
+              store().updateChatMessage(chatRow.id, {
+                content: cleanOutput,
+                metadata: {
+                  taskId: task.id,
+                  sources,
+                  turnId,
+                  streaming: false,
+                  toolCalls: persistableToolCalls(),
+                  ...(replyToAgent ? { replyToAgentId: replyToAgent } : {}),
+                },
+              });
             }
 
             results.push({
@@ -1631,6 +1710,62 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               draftCreated,
               sources: outcome.sources.slice(0, 8),
             });
+
+            // ── AGENT TAG → agent-to-agent chat ──────────────────────────
+            // The specialist ended with {"ask_agent": "B", "question": …}:
+            // show the tag in the transcript (a compact A → @B row) and
+            // queue B's answer task directly after this one. B answers
+            // next — and can tag another agent back. This is the visible
+            // agents-chatting-with-one-another flow.
+            if (question && agent && agentExchanges < MAX_AGENT_EXCHANGES) {
+              const target = resolveAgentByName(question.agent, agents);
+              if (
+                target &&
+                target.id !== agent.id &&
+                !target.paused &&
+                target.status !== "disabled"
+              ) {
+                agentExchanges++;
+                const tagRow = await businessChatService.append(businessId, {
+                  role: "agent",
+                  agent_id: agent.id,
+                  content: question.question,
+                  metadata: { turnId, taskId: task.id, tagToAgentId: target.id },
+                });
+                store().appendChatMessage(tagRow);
+                await emitEvent({
+                  business_id: businessId,
+                  task_id: task.id,
+                  agent_id: agent.id,
+                  event_type: "agent.status_changed",
+                  payload: {
+                    status: "collaborating",
+                    tagged: target.name,
+                    question: trimTo(question.question, 200),
+                  },
+                  correlation_id: turnId,
+                });
+                const ex = await businessTaskService.create(businessId, {
+                  title: bt("chat.exchangeTaskTitle", { agent: agent.name }),
+                  description: `${agent.name} tagged you while working on "${task.title}" and needs your input:\n\n${question.question}\n\nAnswer directly and completely — your reply goes straight into the team conversation and back to ${agent.name}.`,
+                  assigned_agent_id: target.id,
+                  dependencies: [],
+                  status: "ready",
+                  priority: "high",
+                  correlation_id: turnId,
+                });
+                exchangeReplyTo.set(ex.id, agent.id);
+                store().upsertTask(ex);
+                // Splice B's answer RIGHT AFTER the tagger — the natural
+                // conversation order — then the planned queue continues.
+                const at = refreshedTasks.findIndex((t) => t.id === task.id);
+                if (at >= 0) refreshedTasks.splice(at + 1, 0, ex);
+                else refreshedTasks.push(ex);
+                const exList = agentTaskIds.get(target.name) ?? [];
+                exList.push(ex.id);
+                agentTaskIds.set(target.name, exList);
+              }
+            }
           } else {
             // ── FAILURE — settle the live views honestly ──────────────────
             const failNote = `⚠️ ${bt("chat.activityTaskFailed", { agent: agentName, task: task.title })}${outcome.error ? ` — ${trimTo(outcome.error, 160)}` : ""}`;
@@ -1642,9 +1777,18 @@ export async function sendBusinessMessage(businessId: string, content: string): 
             if (chatRow) {
               await businessChatService.update(chatRow.id, {
                 content: failNote,
-                metadata: { taskId: task.id, turnId, streaming: false, ...(draftRow ? { draftId: draftRow.id } : {}) },
+                metadata: {
+                  taskId: task.id,
+                  turnId,
+                  streaming: false,
+                  toolCalls: persistableToolCalls(),
+                  ...(draftRow ? { draftId: draftRow.id } : {}),
+                },
               }).catch(() => {});
-              store().updateChatMessage(chatRow.id, { content: failNote, metadata: { streaming: false } });
+              store().updateChatMessage(chatRow.id, {
+                content: failNote,
+                metadata: { streaming: false, toolCalls: persistableToolCalls() },
+              });
             }
             await updateTaskAndMirror(task.id, { status: "failed", error: outcome.error, completed_at: nowISO() });
             await emitEvent({
@@ -1700,8 +1844,41 @@ export async function sendBusinessMessage(businessId: string, content: string): 
           const localIdx = refreshedTasks.findIndex((x) => x.id === task.id);
           const fresh = await businessTaskService.get(task.id);
           if (localIdx >= 0 && fresh) refreshedTasks[localIdx] = fresh;
-        }),
+    };
+
+    // ── THE SEQUENTIAL QUEUE ────────────────────────────────────────────
+    // One task at a time, plan order, dependency-gated. Tag exchanges are
+    // spliced in right after the tagger, so agents visibly chat with one
+    // another while the planned queue keeps its order.
+    while (!signal.aborted) {
+      const pending = refreshedTasks.filter((t) => !isTerminal(t));
+      if (pending.length === 0) break;
+      const next = pending.find(
+        (t) =>
+          (t.status === "ready" || t.status === "backlog") &&
+          t.dependencies.every(
+            (d) => refreshedTasks.find((x) => x.id === d)?.status === "completed",
+          ),
       );
+      if (!next) {
+        // Blocked: no progress possible — report honestly and stop.
+        await emitEvent({
+          business_id: businessId,
+          event_type: "notification",
+          payload: { kind: "blocked", tasks: pending.map((t) => t.title) },
+          correlation_id: turnId,
+        });
+        for (const t of pending) {
+          const updated = await updateTaskAndMirror(t.id, { status: "blocked" });
+          if (updated) {
+            const idx = refreshedTasks.findIndex((x) => x.id === t.id);
+            if (idx >= 0) refreshedTasks[idx] = updated;
+            await appendActivity(businessId, bt("chat.activityTaskBlocked", { task: t.title }), { metadata: { taskId: t.id, turnId } });
+          }
+        }
+        break;
+      }
+      await runOneTask(next);
     }
 
     // 10. Consolidation (streamed Main Agent synthesis)

@@ -258,6 +258,17 @@ export interface BusinessChatMessageMetadata {
   background?: boolean;
   /** The server run id of the background run that produced this message. */
   cloudRunId?: string;
+  /** REAL tool calls the specialist made while producing this message —
+   *  rendered as the same ToolCallCard bars the main agent chat uses
+   *  (user directive: "no tool call bars no tool call uis" in Business
+   *  Mode → fixed by carrying the live tool-call timeline on the row). */
+  toolCalls?: import("@/types").ToolCall[];
+  /** Agent-to-agent collaboration: this message is a TAG — the agent asked
+   *  `tagToAgentId` the attached question; that agent answers next. */
+  tagToAgentId?: string;
+  /** Agent-to-agent collaboration: this message ANSWERS the agent with this
+   *  id (rendered as a "↩ replying to X" badge on the bubble). */
+  replyToAgentId?: string;
 }
 
 export interface BusinessChatMessageRow {
