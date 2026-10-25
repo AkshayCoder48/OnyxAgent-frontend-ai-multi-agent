@@ -24,6 +24,7 @@ import {
   Cpu,
   Download,
   FileText,
+  FolderOpen,
   Globe,
   Info,
   Keyboard,
@@ -69,13 +70,21 @@ import { renderBusinessMarkdown } from "./business-message-item";
 import { SwarmView } from "./swarm-view";
 import { TasksView } from "./tasks-view";
 import { DraftsView } from "./drafts-view";
+import { FilesView } from "./files-view";
 import { MemoryView } from "./memory-view";
 import { ActivityView } from "./activity-view";
 import { BrowserPanel } from "./browser-panel";
 import { BusinessSettingsDialog } from "./business-settings-dialog";
 import { ExportDialog } from "./export-dialog";
 
-export type BusinessTab = "chat" | "swarm" | "tasks" | "drafts" | "memory" | "activity";
+export type BusinessTab =
+  | "chat"
+  | "swarm"
+  | "tasks"
+  | "drafts"
+  | "files"
+  | "memory"
+  | "activity";
 
 /** Task statuses that are finished — everything else counts as "open". */
 const TERMINAL_TASK_STATUSES: ReadonlySet<BusinessTaskStatus> = new Set([
@@ -232,6 +241,12 @@ export function BusinessWorkspace({ tab }: { tab: BusinessTab }) {
       href: `/business/${businessId}/drafts`,
       count: reviewDraftCount,
     },
+    {
+      key: "files",
+      label: bt("ws.tab.files"),
+      icon: FolderOpen,
+      href: `/business/${businessId}/files`,
+    },
     { key: "memory", label: bt("ws.tab.memory"), icon: Brain, href: `/business/${businessId}/memory` },
     { key: "activity", label: bt("ws.tab.activity"), icon: Activity, href: `/business/${businessId}/activity` },
   ];
@@ -382,6 +397,8 @@ export function BusinessWorkspace({ tab }: { tab: BusinessTab }) {
             <TasksView />
           ) : tab === "drafts" ? (
             <DraftsView />
+          ) : tab === "files" ? (
+            <FilesView />
           ) : tab === "memory" ? (
             <MemoryView />
           ) : (

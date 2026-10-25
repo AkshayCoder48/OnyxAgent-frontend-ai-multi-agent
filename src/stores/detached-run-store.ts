@@ -43,10 +43,10 @@ interface DetachedRunState {
  * Durable state of record is the Dexie `detached_runs` table; this store is
  * the fast, subscribeable mirror (persisted to localStorage for re-entry).
  *
- * SINGLETON GUARD (same fix as the auth store): the pagehide turn-handoff
- * (app-level chunk) writes the run view HERE while the DetachedRunStrip
- * (route chunk) subscribes — two module copies would mean the strip never
- * sees the handed-off run until a reload. One instance on globalThis.
+ * SINGLETON GUARD (same fix as the auth store): historical (the E2B
+ * handoff strip was removed — background runs land in the chat bubbles
+ * now); the store still holds the background-run TOGGLE state, which is
+ * read app-wide, so one instance on globalThis stays correct.
  */
 function createDetachedRunStore() {
   return create<DetachedRunState>()(

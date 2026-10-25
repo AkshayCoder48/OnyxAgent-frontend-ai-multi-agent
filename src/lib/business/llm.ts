@@ -42,6 +42,9 @@ export interface BusinessLlmUsage {
 export interface BusinessLlmCompleteOptions {
   systemPrompt: string;
   userPrompt: string;
+  /** Full multi-turn message list (the specialist tool loop) — when set it
+   *  REPLACES the system/user pair verbatim. */
+  messages?: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
@@ -53,8 +56,12 @@ export interface BusinessLlmCompleteOptions {
 export interface BusinessLlmStreamOptions {
   systemPrompt: string;
   userPrompt: string;
+  /** Full multi-turn message list (the specialist tool loop) — when set it
+   *  REPLACES the system/user pair verbatim. */
+  messages?: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
   signal?: AbortSignal;
+  /** Receives each DELTA (not the accumulated text) — accumulate yourself. */
   onDelta: (text: string) => void;
 }
 
@@ -290,7 +297,7 @@ export async function businessLlmComplete(
   const doFetch = async (withJsonMode: boolean): Promise<Response> => {
     const body: Record<string, unknown> = {
       model: cfg.model,
-      messages: [
+      messages: opts.messages ?? [
         { role: "system", content: opts.systemPrompt },
         { role: "user", content: opts.userPrompt },
       ],
@@ -377,7 +384,7 @@ export async function businessLlmStream(
   try {
     const body: Record<string, unknown> = {
       model: cfg.model,
-      messages: [
+      messages: opts.messages ?? [
         { role: "system", content: opts.systemPrompt },
         { role: "user", content: opts.userPrompt },
       ],

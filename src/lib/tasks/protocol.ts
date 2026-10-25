@@ -54,9 +54,12 @@ export const BACKGROUND_TASK_TYPES: readonly BackgroundTaskType[] = [
 export const TASK_MAX_DURATION_MS = 30 * 60 * 1000;
 /** Default execution window. */
 export const TASK_DEFAULT_DURATION_MS = 30 * 60 * 1000;
-/** Default + hard cap on agent rounds inside the sandbox runner. */
-export const TASK_DEFAULT_MAX_ROUNDS = 24;
-export const TASK_HARD_MAX_ROUNDS = 48;
+/** Rounds budget (USER DIRECTIVE: "remove the limit of 24 rounds") — the old
+ *  24/48 caps are GONE. The only real bound is the execution window above
+ *  (30 min); these numbers just stop a runaway loop from spinning forever
+ *  inside it. */
+export const TASK_DEFAULT_MAX_ROUNDS = 400;
+export const TASK_HARD_MAX_ROUNDS = 1000;
 
 // ---------------------------------------------------------------------------
 // Payload budgets (FR-1.1 serialization guards)

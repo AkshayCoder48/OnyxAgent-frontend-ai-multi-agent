@@ -46,6 +46,11 @@ import {
   type WebResearchBlock,
 } from "./prompts";
 import { classifyMessageIntent, type RoutingHint } from "./jev";
+import {
+  SPECIALIST_TOOL_PROTOCOL,
+  runSpecialistToolLoop,
+  sanitizeSpecialistOutput,
+} from "./specialist-tools";
 import { randomLogoForRole, AGENT_LOGO_KEYS } from "@/components/business/agent-logos";
 import {
   registerBusinessTurnHandoff,
@@ -792,11 +797,16 @@ interface SpecialistOptions {
   businessId: string;
   taskId?: string;
   turnId?: string;
+  /** Live FINAL-ANSWER streaming (the delegation loop renders it into the
+   *  draft card / chat bubble as it generates — 100% streaming). Receives
+   *  the ACCUMULATED partial answer. */
+  onFinalDelta?: (partial: string) => void;
+  /** A streamed round turned out to be a tool call — clear the live view. */
+  onFinalReset?: () => void;
 }
 
 async function runSpecialist(opts: SpecialistOptions): Promise<SpecialistOutcome> {
   const { business, agent, businessId, taskId, turnId, recordEvents } = opts;
-  const sources: { title: string; url: string }[] = [];
 
   const cfg = agent?.provider_id
     ? await resolveBusinessLlmConfig({ providerId: agent.provider_id, model: agent.model_id })
@@ -808,74 +818,101 @@ async function runSpecialist(opts: SpecialistOptions): Promise<SpecialistOutcome
       ? memoryContextText(await businessMemoryService.retrieve(businessId, opts.taskDescription, 2000))
       : "";
 
-  // Real web research (only when permitted and requested).
-  let webBlocks: WebResearchBlock[] | undefined;
-  const queries = (opts.searchQueries ?? []).slice(0, 2);
-  if (agent?.permissions.web_search !== false && queries.length) {
-    webBlocks = [];
-    for (const query of queries) {
-      if (opts.signal?.aborted) break;
-      const res = await businessWebSearch(query, opts.signal);
-      if (res.results.length) {
-        webBlocks.push({ query, results: res.results });
-        sources.push(...res.results.map((r) => ({ title: r.title, url: r.url })));
-      }
-      if (recordEvents) {
-        await emitEvent({
-          business_id: businessId,
-          task_id: taskId,
-          agent_id: agent?.id,
-          event_type: "browser.activity",
-          payload: {
-            kind: "web_search",
-            query,
-            resultCount: res.results.length,
-            topUrls: res.results.slice(0, 3).map((r) => r.url),
-          },
-          correlation_id: turnId,
-        });
-        await appendActivity(businessId, bt("chat.activityResearching", { agent: agent?.name ?? "Main Agent", query }), {
-          agentId: agent?.id,
-          metadata: { taskId, turnId },
-        });
-      }
-    }
-  }
-
-  const systemPrompt = agent
+  // REAL TOOL LOOP (USER DIRECTIVE: specialists must be able to USE tools —
+  // search the web, read pages, create files — instead of answering raw).
+  // The planner's search queries ride along as SUGGESTIONS; the specialist
+  // executes them itself through its web tool (no duplicated pre-search).
+  const baseSystem = agent
     ? buildSpecialistSystemPrompt(agent, business, skillContents, memoryContext)
     : `${buildMainChatSystemPrompt(business, memoryContext)}\n\nYou are executing one specialist task yourself. Produce the complete deliverable.`;
+  const systemPrompt = `${baseSystem}\n\n${SPECIALIST_TOOL_PROTOCOL}`;
+  // Tools are disabled for agents whose permissions forbid web search.
+  const toolsAllowed = agent?.permissions.web_search !== false;
 
   const userPrompt = buildSpecialistUserPrompt({
     taskTitle: opts.taskTitle,
     taskDescription: opts.taskDescription,
     upstreamContext: opts.upstreamContext,
     collaborationQuestions: opts.collaborationQuestions,
-    webResults: webBlocks,
+    suggestedQueries: toolsAllowed ? opts.searchQueries : [],
   });
 
+  const agentName = agent?.name ?? "Main Agent";
+
   const attempt = async (): Promise<SpecialistOutcome> => {
-    const res = await businessLlmComplete(cfg, {
+    if (!toolsAllowed) {
+      // No tools: plain streaming completion (still 100% streamed).
+      let partial = "";
+      const res = await businessLlmStream(cfg, {
+        systemPrompt,
+        userPrompt,
+        signal: opts.signal,
+        onDelta: (delta) => {
+          partial += delta;
+          opts.onFinalDelta?.(partial);
+        },
+      });
+      return { ok: true, output: sanitizeSpecialistOutput(res.text), sources: [], usage: res.usage };
+    }
+    const res = await runSpecialistToolLoop({
+      cfg,
       systemPrompt,
       userPrompt,
+      businessId,
+      userId: userId(),
+      agentName,
       signal: opts.signal,
-      timeoutMs: opts.timeoutMs ?? business.configuration.perTaskTimeoutMs,
+      onDelta: opts.onFinalDelta,
+      onDeltaReset: opts.onFinalReset,
+      onToolCall: (info) => {
+        if (!recordEvents) return;
+        void (async () => {
+          try {
+            if (info.tool === "web") {
+              await emitEvent({
+                business_id: businessId,
+                task_id: taskId,
+                agent_id: agent?.id,
+                event_type: "browser.activity",
+                payload: {
+                  kind: info.action === "web_fetch" ? "page_read" : "web_search",
+                  query: info.detail,
+                  resultCount: info.resultCount ?? 0,
+                  topUrls: info.topUrls ?? [],
+                },
+                correlation_id: turnId,
+              });
+            }
+            await appendActivity(
+              businessId,
+              bt("chat.agentUsingTool", {
+                agent: agentName,
+                tool: info.action ?? info.tool,
+                detail: trimTo(info.detail, 140),
+              }),
+              { agentId: agent?.id, metadata: { taskId, turnId } },
+            );
+          } catch {
+            // best-effort visibility — never break the tool loop
+          }
+        })();
+      },
     });
-    return { ok: true, output: res.text, sources, usage: res.usage };
+    return { ok: true, output: res.output, sources: res.sources, usage: res.usage };
   };
 
   try {
     return await attempt();
-  } catch (err) {
+  } catch {
     if (opts.signal?.aborted) {
-      return { ok: false, output: "", sources, error: "cancelled" };
+      return { ok: false, output: "", sources: [], error: "cancelled" };
     }
     // One retry (transient provider errors are common).
     try {
       return await attempt();
     } catch (err2) {
       const message = err2 instanceof Error ? err2.message : String(err2);
-      return { ok: false, output: "", sources, error: trimTo(message, 300) };
+      return { ok: false, output: "", sources: [], error: trimTo(message, 300) };
     }
   }
 }
@@ -1215,6 +1252,87 @@ export async function sendBusinessMessage(businessId: string, content: string): 
           }
 
           const taskStart = Date.now();
+
+          // ── LIVE VIEWS (USER DIRECTIVE: the document streams 100% and the
+          // chat shows it ONCE — only the draft card, never a duplicated
+          // plain-text copy). Draft tasks create the draft + a compact chat
+          // row UP FRONT; the specialist's final answer streams into the
+          // draft card live. Non-draft tasks stream into the chat bubble.
+          const willProduceDraft =
+            !!planTask?.produces_draft && (!agent || agent.permissions.create_drafts);
+
+          let draftRow: import("./types").BusinessDraftRow | null = null;
+          let chatRow: BusinessChatMessageRow | null = null;
+          if (agent || willProduceDraft) {
+            if (willProduceDraft) {
+              draftRow = await businessDraftService.create(businessId, {
+                title: task.title,
+                content: "",
+                draft_type: planTask?.draft_type || "document",
+                task_id: task.id,
+                created_by_agent_id: agent?.id,
+                approval_requirements: business.configuration.requireDraftApproval ? ["user_approval"] : [],
+                sources: [],
+              });
+              store().upsertDraft({ ...draftRow, streaming: true });
+              chatRow = await businessChatService.append(businessId, {
+                role: "agent",
+                agent_id: agent?.id,
+                content: "",
+                metadata: {
+                  taskId: task.id,
+                  draftId: draftRow.id,
+                  streaming: true,
+                  turnId,
+                },
+              });
+              store().appendChatMessage(chatRow);
+              await emitEvent({
+                business_id: businessId,
+                task_id: task.id,
+                agent_id: agent?.id,
+                event_type: "draft.created",
+                payload: { draftId: draftRow.id, title: task.title, version: 1, streaming: true },
+                correlation_id: turnId,
+              });
+            } else {
+              chatRow = await businessChatService.append(businessId, {
+                role: "agent",
+                agent_id: agent!.id,
+                content: "",
+                metadata: { taskId: task.id, streaming: true, turnId },
+              });
+              store().appendChatMessage(chatRow);
+            }
+          }
+
+          /** Live streaming sink — per-delta store updates (the card/bubble
+           *  re-renders live) + THROTTLED Dexie persistence (crash-friendly). */
+          let lastPersist = 0;
+          const persistThrottled = (content: string) => {
+            const now = Date.now();
+            if (now - lastPersist < 700) return;
+            lastPersist = now;
+            if (draftRow) void businessDraftService.update(draftRow.id, { content }).catch(() => {});
+            else if (chatRow) void businessChatService.update(chatRow.id, { content }).catch(() => {});
+          };
+          const onFinalDelta = (partial: string) => {
+            if (draftRow) {
+              store().upsertDraft({ ...draftRow, content: partial, streaming: true });
+              persistThrottled(partial);
+            } else if (chatRow) {
+              store().updateChatMessage(chatRow.id, { content: partial });
+              persistThrottled(partial);
+            }
+          };
+          const onFinalReset = () => {
+            if (draftRow) {
+              store().upsertDraft({ ...draftRow, content: "", streaming: true });
+            } else if (chatRow) {
+              store().updateChatMessage(chatRow.id, { content: "" });
+            }
+          };
+
           let outcome = await runSpecialist({
             business,
             agent,
@@ -1231,6 +1349,8 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               ? await collaborationQuestionsFor(businessId, agent.id, agents)
               : [],
             searchQueries: planTask?.search_queries ?? [],
+            onFinalDelta,
+            onFinalReset,
           });
 
           // One task-level retry when the specialist call failed (not on abort).
@@ -1244,6 +1364,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               payload: { title: task.title, retry_count: task.retry_count + 1 },
               correlation_id: turnId,
             });
+            onFinalReset();
             outcome = await runSpecialist({
               business,
               agent,
@@ -1258,6 +1379,8 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               upstreamContext: upstreamContextFor(task, refreshedTasks),
               collaborationQuestions: agent ? await collaborationQuestionsFor(businessId, agent.id, agents) : [],
               searchQueries: planTask?.search_queries ?? [],
+              onFinalDelta,
+              onFinalReset,
             });
           }
 
@@ -1337,27 +1460,25 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               }
             }
 
-            // Draft creation (permission + plan gated)
+            // ── FINALIZE THE LIVE VIEWS ───────────────────────────────────
+            // Draft task: the DOCUMENT is the one deliverable — the draft
+            // card (streamed live above) holds the full content; the chat
+            // row stays a compact reference (NO duplicated plain copy).
             let draftCreated = false;
-            if (planTask?.produces_draft && (!agent || agent.permissions.create_drafts)) {
-              const draft = await businessDraftService.create(businessId, {
-                title: task.title,
-                content: cleanOutput,
-                draft_type: planTask.draft_type || "document",
-                task_id: task.id,
-                created_by_agent_id: agent?.id,
-                approval_requirements: business.configuration.requireDraftApproval ? ["user_approval"] : [],
-                sources: outcome.sources.slice(0, 8),
-              });
+            if (willProduceDraft && draftRow && chatRow) {
               draftCreated = true;
-              store().upsertDraft(draft);
-              await emitEvent({
-                business_id: businessId,
-                task_id: task.id,
-                agent_id: agent?.id,
-                event_type: "draft.created",
-                payload: { draftId: draft.id, title: draft.title, version: 1 },
-                correlation_id: turnId,
+              const sources = outcome.sources.slice(0, 8);
+              const finalDraft = await businessDraftService.get(draftRow.id);
+              await businessDraftService.update(draftRow.id, {
+                content: cleanOutput,
+                sources,
+                streaming: false,
+              });
+              store().upsertDraft({
+                ...(finalDraft ?? draftRow),
+                content: cleanOutput,
+                sources,
+                streaming: false,
               });
               if (business.configuration.requireDraftApproval) {
                 await emitEvent({
@@ -1365,26 +1486,31 @@ export async function sendBusinessMessage(businessId: string, content: string): 
                   task_id: task.id,
                   agent_id: agent?.id,
                   event_type: "approval.requested",
-                  payload: { draftId: draft.id, title: draft.title, version: 1 },
+                  payload: { draftId: draftRow.id, title: task.title, version: 1 },
                   correlation_id: turnId,
                 });
               }
-              const agentMsg = await businessChatService.append(businessId, {
-                role: "agent",
-                agent_id: agent?.id,
-                content: cleanOutput,
-                metadata: { taskId: task.id, draftId: draft.id, sources: outcome.sources.slice(0, 8), turnId },
+              const noteContent = `**${task.title}** — ${bt("chat.docDeliveredNote")}`;
+              await businessChatService.update(chatRow.id, {
+                content: noteContent,
+                metadata: {
+                  taskId: task.id,
+                  draftId: draftRow.id,
+                  sources,
+                  turnId,
+                  streaming: false,
+                },
               });
-              store().appendChatMessage(agentMsg);
-            } else if (agent) {
-              // Non-draft specialist contribution — still visible inline.
-              const agentMsg = await businessChatService.append(businessId, {
-                role: "agent",
-                agent_id: agent.id,
+              store().updateChatMessage(chatRow.id, { content: noteContent, metadata: { taskId: task.id, draftId: draftRow.id, sources, turnId, streaming: false } });
+            } else if (chatRow) {
+              // Non-draft specialist contribution — the streamed bubble IS
+              // the deliverable.
+              const sources = outcome.sources.slice(0, 8);
+              await businessChatService.update(chatRow.id, {
                 content: cleanOutput,
-                metadata: { taskId: task.id, sources: outcome.sources.slice(0, 8), turnId },
+                metadata: { taskId: task.id, sources, turnId, streaming: false },
               });
-              store().appendChatMessage(agentMsg);
+              store().updateChatMessage(chatRow.id, { content: cleanOutput, metadata: { taskId: task.id, sources, turnId, streaming: false } });
             }
 
             results.push({
@@ -1396,6 +1522,20 @@ export async function sendBusinessMessage(businessId: string, content: string): 
               sources: outcome.sources.slice(0, 8),
             });
           } else {
+            // ── FAILURE — settle the live views honestly ──────────────────
+            const failNote = `⚠️ ${bt("chat.activityTaskFailed", { agent: agentName, task: task.title })}${outcome.error ? ` — ${trimTo(outcome.error, 160)}` : ""}`;
+            if (draftRow) {
+              await businessDraftService.update(draftRow.id, { status: "failed", streaming: false, content: failNote }).catch(() => {});
+              const d = await businessDraftService.get(draftRow.id);
+              if (d) store().upsertDraft({ ...d, streaming: false });
+            }
+            if (chatRow) {
+              await businessChatService.update(chatRow.id, {
+                content: failNote,
+                metadata: { taskId: task.id, turnId, streaming: false, ...(draftRow ? { draftId: draftRow.id } : {}) },
+              }).catch(() => {});
+              store().updateChatMessage(chatRow.id, { content: failNote, metadata: { streaming: false } });
+            }
             await updateTaskAndMirror(task.id, { status: "failed", error: outcome.error, completed_at: nowISO() });
             await emitEvent({
               business_id: businessId,
@@ -1530,18 +1670,22 @@ async function streamMainMessage(
   store().appendChatMessage(placeholder);
 
   try {
+    let partial = "";
     const res = await businessLlmStream(opts.cfg, {
       systemPrompt: opts.systemPrompt,
       userPrompt: opts.userPrompt,
       temperature: opts.temperature,
       signal: opts.signal,
-      onDelta: (text) => {
-        store().updateChatMessage(placeholder.id, { content: text });
+      onDelta: (delta) => {
+        partial += delta;
+        store().updateChatMessage(placeholder.id, { content: partial });
       },
     });
+    // Final write: sanitize residual pseudo tool-call syntax before it lands.
+    const finalText = sanitizeSpecialistOutput(res.text) || partial;
     const metadata = { streaming: false, turnId: opts.turnId, usage: res.usage };
-    await businessChatService.update(placeholder.id, { content: res.text, metadata });
-    store().updateChatMessage(placeholder.id, { content: res.text, metadata });
+    await businessChatService.update(placeholder.id, { content: finalText, metadata });
+    store().updateChatMessage(placeholder.id, { content: finalText, metadata });
   } catch (err) {
     const aborted = opts.signal.aborted;
     const partial = aborted ? "…" : "";

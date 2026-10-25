@@ -48,7 +48,7 @@ function isLive(run: TaskStatusRun): boolean {
   return run.status === "queued" || run.status === "running";
 }
 
-/** "2m 05s" style elapsed label (mirrors detached-run-strip). */
+/** "2m 05s" style elapsed label. */
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(total / 3600);
@@ -505,3 +505,59 @@ export function BackgroundTasksStrip() {
 }
 
 export default BackgroundTasksStrip;
+
+// ---------------------------------------------------------------------------
+// The invisible lander (USER DIRECTIVE: no strips above the composer).
+// ---------------------------------------------------------------------------
+
+/**
+ * BACKGROUND TASKS LANDER — the invisible replacement for the strip: no UI
+ * at all, but it keeps the React-Query polling alive (useBackgroundTasks)
+ * and AUTO-LANDS every finished Trigger.dev Cloud run that belongs to a
+ * conversation of this browser: the finished result is appended straight
+ * into that conversation's chat bubbles + a toast reports the outcome.
+ * Runs landed in-place by use-chat's cloud-handoff adoption (which marks
+ * the mirror row "synced") are skipped here — no duplicates.
+ */
+export function BackgroundTasksLander() {
+  const userId = useAuthStore((s) => s.user?.id);
+  const { runs } = useBackgroundTasks();
+  const landedRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    void (async () => {
+      for (const run of runs) {
+        if (cancelled || isLive(run)) continue;
+        if (landedRef.current.has(run.runId)) continue;
+        landedRef.current.add(run.runId); // claim first — never double-land
+        try {
+          const row = await backgroundTaskService.get(run.runId);
+          // Only auto-land runs linked to a conversation in THIS browser
+          // whose mirror is not already synced (or landed in place).
+          if (!row?.conversation_id || row.sync_state === "synced") continue;
+          const result = await syncRunToConversation(run.runId, userId);
+          if (result === "synced") {
+            if (run.status === "completed") {
+              toast.success("Background run finished", {
+                description: "The result landed in its conversation's chat.",
+              });
+            } else {
+              toast.warning("Background run ended", {
+                description: run.error ? String(run.error).slice(0, 160) : `Status: ${run.status}.`,
+              });
+            }
+          }
+        } catch {
+          landedRef.current.delete(run.runId); // allow a retry on a later poll
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runs, userId]);
+
+  return null;
+}

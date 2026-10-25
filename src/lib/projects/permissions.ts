@@ -47,52 +47,47 @@ export type { ResourcePermission } from "@/types";
 // ---------------------------------------------------------------------------
 
 /**
- * The out-of-the-box policy (PRD §13 / architecture defaults):
+ * The out-of-the-box policy (USER DIRECTIVE: "remove approval — only
+ * approval on task docs, not on tool calls"):
  *
- *   - Composio EXECUTION (`composio_execute_tool`) → approval_required.
- *     (The discovery/OAuth helpers `composio_search_tools` and
- *     `composio_connect_platform` are read-only/user-driven → allowed.)
- *   - Env-var WRITE/DELETE → approval_required. The real tool is the merged
- *     `manage_env_var` (registered name in `src/lib/tools/env_vars.ts`):
- *     actions `add`/`set`/`edit`/`delete` are writes, `list`/`get` are reads.
- *     The pre-merge legacy tool names are recognized too.
- *   - E2B file/folder DELETE (`delete_file`, `delete_folder` — registered
- *     names in `src/lib/tools/e2b_files.ts`) → approval_required. All other
- *     file tools (read/write/move/…) are allowed.
- *   - Business Mode DESTRUCTIVE verbs (`manage_business` — registered name
- *     in `src/lib/tools/manage_business.ts`): action `delete` (cascades the
- *     business across every child table) and manage_agents with
- *     `agent_action: "remove"` → approval_required. Read/create/update
- *     actions stay frictionless (the registry flag is false).
- *   - Everything else → allowed. Users tighten anything via the global
- *     policy (Settings → Tools approval policies) or per-project rules.
+ *   - EVERY tool call is ALLOWED by default — zero interactive approval
+ *     gates on tool execution. The ONLY approval surface left is Business
+ *     Mode task documents (drafts with approval_requirements, PRD §13 doc
+ *     review) — that lives in the business layer, not here.
+ *   - Users can still tighten any tool themselves via the global policy
+ *     (Settings → Tools approval policies) or per-project rules; explicit
+ *     user entries REPLACE these defaults (see resolvePermission).
+ *
+ * The argument-aware buckets below are kept ONLY so the settings UI and
+ * `defaultPermissionFor` keep their shape (and so an explicit user policy
+ * still composes correctly) — every default now resolves to "allowed".
  */
 export const SENSITIVE_TOOL_DEFAULTS = {
   composioExecute: {
     tools: ["composio_execute_tool"] as readonly string[],
-    permission: "approval_required" as ResourcePermission,
-    rationale: "Executes actions on external apps (messages, emails, records, payments).",
+    permission: "allowed" as ResourcePermission,
+    rationale: "Executes actions on external apps — allowed by default (user directive: no tool-call approvals).",
   },
   envVarWrites: {
     tool: "manage_env_var",
     writeActions: ["add", "set", "edit", "delete"] as readonly string[],
     legacyWriteTools: ["add_env_var", "set_env_var", "edit_env_var", "delete_env_var"] as readonly string[],
     readActions: ["list", "get"] as readonly string[],
-    permission: "approval_required" as ResourcePermission,
-    rationale: "Writes or deletes sandbox environment variables (often credentials).",
+    permission: "allowed" as ResourcePermission,
+    rationale: "Writes or deletes sandbox environment variables — allowed by default.",
   },
   e2bDeletes: {
     tools: ["delete_file", "delete_folder"] as readonly string[],
-    permission: "approval_required" as ResourcePermission,
-    rationale: "Permanently removes workspace files or folders.",
+    permission: "allowed" as ResourcePermission,
+    rationale: "Permanently removes workspace files or folders — allowed by default.",
   },
   businessDestructive: {
     tool: "manage_business",
     destructiveActions: ["delete"] as readonly string[],
     destructiveAgentActions: ["remove"] as readonly string[],
-    permission: "approval_required" as ResourcePermission,
+    permission: "allowed" as ResourcePermission,
     rationale:
-      "Deletes a Business Mode workspace (cascading agents, tasks, chat and drafts) or removes a specialist agent from it.",
+      "Deletes a Business Mode workspace or removes a specialist agent — allowed by default (only task DOCUMENTS keep human approval).",
   },
   fallback: {
     permission: "allowed" as ResourcePermission,

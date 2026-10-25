@@ -22,29 +22,27 @@
 //               rotational key pool, E2B key (or the USE_SERVER_ENV sentinel).
 //               A localStorage meta (taskId + taskToken) is the durable
 //               pointer for the return path.
-//   return:     adoptCloudHandoffRun / adoptBusinessCloudHandoff resolve the
-//               server run by the self-minted taskId (?taskId= lookup), write
-//               the Dexie mirror row WITH the task token (so cancel/sync are
-//               authorized), and the existing background-tasks machinery
-//               takes over: the strip polls progress and syncRunToConversation
-//               lands the finished result in the owning conversation/business
-//               chat.
+//   return:     the chat path takes over the interrupted bubble IN PLACE — it
+//               becomes a live background status bubble that is replaced by
+//               the finished answer when the run completes (no strips, no
+//               "interrupted" notes — changes land directly in the chat
+//               bubbles). Business turns land via adoptBusinessCloudHandoff
+//               as a Main Agent chat message.
 //
 // The cloud runner re-executes the turn from the seed (the in-flight partial
-// output is dropped) — identical semantics to the legacy E2B handoff, but
-// the execution lifecycle is owned by Trigger.dev Cloud, not by a sandbox
-// the browser has to keep alive.
+// output is dropped) — and on return the interrupted chat bubble is taken
+// over IN PLACE: it shows live background status and is replaced by the
+// finished answer when the run lands. E2B is only ever a TOOL (sandbox),
+// never the background execution engine.
 //
-// Precedence: CLOUD wins over the legacy E2B beacon when a key is connected;
-// the E2B lane remains the fallback for users without one.
+// The cloud lane is the ONLY durability lane (the legacy E2B beacon was
+// removed — user directive: "use trigger for bg work, not e2b").
 // ============================================================================
 
 import { buildKeyPool } from "@/lib/tasks/key-pool";
 import {
   backgroundTaskService,
   fetchArtifact,
-  pollTaskStatus,
-  syncRunToConversation,
 } from "@/lib/tasks/client";
 import type { TaskStatusRun } from "@/lib/tasks/protocol";
 
@@ -198,7 +196,9 @@ export function dispatchCloudAgentRunBeacon(input: CloudBeaconInput): {
     const config: Record<string, unknown> = {
       systemPrompt,
       model: input.model || undefined,
-      maxRounds: 24,
+      // USER DIRECTIVE: no 24-round cap — the server default (400) governs;
+      // the real bound is the run's execution window.
+      maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
       ...(isAbsoluteHttp(input.chatUrl) ? { chatUrl: input.chatUrl.trim() } : {}),
     };
@@ -307,6 +307,11 @@ export function readCloudHandoffMeta(conversationId: string): CloudHandoffMeta |
   return readMeta(CHAT_META_PREFIX + conversationId);
 }
 
+/** Clear a spent chat-turn handoff meta. */
+export function clearChatHandoffMeta(conversationId: string): void {
+  clearMeta(CHAT_META_PREFIX + conversationId);
+}
+
 /** Persist the chat-turn handoff meta after a pagehide dispatch (sync —
  *  unload-safe; the returning app consumes it exactly once). */
 export function writeChatHandoffMeta(
@@ -325,21 +330,10 @@ export function writeChatHandoffMeta(
   });
 }
 
-/** Clear a spent chat-turn handoff meta. */
-export function clearChatHandoffMeta(conversationId: string): void {
-  clearMeta(CHAT_META_PREFIX + conversationId);
-}
-
 /** Read the pending CLOUD handoff for a business turn (null when none). */
 export function readBusinessCloudHandoffMeta(businessId: string): CloudHandoffMeta | null {
   return readMeta(BUSINESS_META_PREFIX + businessId);
 }
-
-/** The note appended to the stale streaming placeholder when the turn was
- *  handed to Trigger.dev Cloud (must contain "task was interrupted" — the
- *  settle pass uses that substring as its idempotency marker). */
-export const CLOUD_HANDOFF_NOTE =
-  "This task was interrupted by the app closing — it was handed to Trigger.dev Cloud and keeps running in the background. Live progress is shown in the background tasks strip; the finished result lands in this chat automatically when it completes.";
 
 // ---------------------------------------------------------------------------
 // Business turn snapshots (registry lives here; the orchestrator registers).
@@ -408,7 +402,7 @@ export function dispatchBusinessTurnHandoffs(e2bApiKey: string | null): void {
 
 /** Resolve a server run by the self-minted task id (pagehide beacons cannot
  *  read the dispatch response). Null when the run cannot be found. */
-async function fetchRunByTaskId(taskId: string): Promise<TaskStatusRun | null> {
+export async function resolveCloudRun(taskId: string): Promise<TaskStatusRun | null> {
   try {
     const res = await fetch(`/api/tasks/status?taskId=${encodeURIComponent(taskId)}`);
     if (!res.ok) return null;
@@ -421,7 +415,7 @@ async function fetchRunByTaskId(taskId: string): Promise<TaskStatusRun | null> {
 
 /** Upsert the Dexie mirror row WITH the task token so cancel/sync/sync-back
  *  are authorized in this browser. */
-async function mirrorRunWithToken(
+export async function mirrorCloudRunWithToken(
   run: TaskStatusRun,
   meta: CloudHandoffMeta,
   userId: string,
@@ -450,63 +444,26 @@ async function mirrorRunWithToken(
   });
 }
 
-export interface AdoptCloudRunResult {
-  /** The resolved run (null when the beacon never landed). */
-  run: TaskStatusRun | null;
-  /** True when the finished work was landed into the conversation. */
-  landed: boolean;
-}
-
-/**
- * Adopt the cloud handoff for a chat conversation on return:
- *   1. resolve the run by taskId (404 ⇒ the beacon never landed — clear the
- *      meta, the honest interrupted note remains),
- *   2. write/refresh the Dexie mirror row WITH the token,
- *   3. terminal ⇒ clear the meta and land the result now (the strip may also
- *      sync it — both paths are idempotent); live ⇒ keep the meta so a later
- *      reload re-adopts, and let the strip poll progress.
- */
-export async function adoptCloudHandoffRun(
-  userId: string,
-  conversationId: string,
-): Promise<AdoptCloudRunResult> {
-  const meta = readCloudHandoffMeta(conversationId);
-  if (!meta) return { run: null, landed: false };
-
-  const run = await fetchRunByTaskId(meta.taskId);
-  if (!run) {
-    // The beacon never landed (offline close, server error) — no cloud run
-    // exists. Clear the pointer; the interrupted note stays honest.
-    clearMeta(CHAT_META_PREFIX + conversationId);
-    return { run: null, landed: false };
-  }
-
-  await mirrorRunWithToken(run, meta, userId, conversationId);
-
-  const terminal = run.status !== "queued" && run.status !== "running";
-  if (!terminal) return { run, landed: false };
-
-  // Terminal — land it. A run already synced by the strip settles as
-  // "synced" idempotently; the meta is spent either way.
-  clearMeta(CHAT_META_PREFIX + conversationId);
-  let landed = false;
+/** Mark a run's Dexie mirror row terminal + synced — used by the in-bubble
+ * chat landing flow when it lands the finished result ITSELF (the general
+ * background lander must not append a second copy afterwards). */
+export async function markCloudRunSynced(run: TaskStatusRun): Promise<void> {
   try {
-    landed = (await syncRunToConversation(run.runId, userId)) === "synced";
+    await backgroundTaskService.update(run.runId, {
+      status: run.status,
+      sync_state: "synced",
+      finished_at: run.finishedAt ? Date.parse(run.finishedAt) : Date.now(),
+      error: run.error,
+    });
   } catch {
-    landed = false; // the strip's sync button remains available
+    // best-effort — a duplicate sync would be idempotent anyway
   }
-  // Re-settle the mirror status after the sync attempt.
-  const fresh = await pollTaskStatus(run.runId, 0);
-  if (fresh) await mirrorRunWithToken(fresh, meta, userId, conversationId);
-  return { run, landed };
 }
 
-// ---------------------------------------------------------------------------
-// Business landing — the cloud result becomes a Main Agent message.
-// ---------------------------------------------------------------------------
-
-/** Pull the message/report artifacts' text out of a finished business run. */
-async function extractBusinessResult(
+/** Pull the message/report artifacts' text out of a finished run. PUBLIC:
+ * the in-bubble chat landing flow uses it to write the finished answer
+ * straight into the chat bubble. */
+export async function extractChatResult(
   run: TaskStatusRun,
   taskToken: string,
 ): Promise<string | null> {
@@ -533,6 +490,17 @@ async function extractBusinessResult(
   return texts.length > 0 ? texts.join("\n\n---\n\n") : null;
 }
 
+// ---------------------------------------------------------------------------
+// Business landing — the cloud result becomes a Main Agent message.
+// ---------------------------------------------------------------------------
+
+export interface AdoptCloudRunResult {
+  /** The resolved run (null when the beacon never landed). */
+  run: TaskStatusRun | null;
+  /** True when the finished work was landed into the conversation. */
+  landed: boolean;
+}
+
 /**
  * Adopt + (when finished) land a business turn's cloud handoff. Live runs
  * return `{ run, landed: false }` and stay pollable — call this again later
@@ -545,13 +513,13 @@ export async function adoptBusinessCloudHandoff(
   const meta = readBusinessCloudHandoffMeta(businessId);
   if (!meta) return { run: null, landed: false };
 
-  const run = await fetchRunByTaskId(meta.taskId);
+  const run = await resolveCloudRun(meta.taskId);
   if (!run) {
     clearMeta(BUSINESS_META_PREFIX + businessId);
     return { run: null, landed: false };
   }
 
-  await mirrorRunWithToken(run, meta, userId, null);
+  await mirrorCloudRunWithToken(run, meta, userId, null);
 
   const terminal = run.status !== "queued" && run.status !== "running";
   if (!terminal) return { run, landed: false };
@@ -563,7 +531,7 @@ export async function adoptBusinessCloudHandoff(
     const { useBusinessStore } = await import("@/stores/business-store");
     const content =
       run.status === "completed"
-        ? ((await extractBusinessResult(run, meta.taskToken)) ??
+        ? ((await extractChatResult(run, meta.taskToken)) ??
           `The background turn finished, but its result could not be read (run ${run.runId}).`)
         : `The background turn ${
             run.status === "failed" ? "failed" : "was cancelled"
@@ -624,7 +592,8 @@ export async function dispatchDetachedCloudTurn(input: {
     config: {
       systemPrompt: input.systemPrompt,
       model: input.model || undefined,
-      maxRounds: 24,
+      // USER DIRECTIVE: no 24-round cap — the server default (400) governs.
+      maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
       ...(isAbsoluteHttp(input.chatUrl) ? { chatUrl: input.chatUrl.trim() } : {}),
     },

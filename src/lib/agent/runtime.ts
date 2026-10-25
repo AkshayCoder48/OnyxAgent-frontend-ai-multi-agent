@@ -174,10 +174,12 @@ export interface AgentTurnResult {
 // ROUND_BUDGET_EXTEND_BY chunks up to the hard safety ceiling. This
 // replaces the old "stopReason: max_rounds" termination, which silently
 // abandoned unfinished tasks after 50 rounds (a top "AI stops
-// automatically" cause).
-const MAX_ROUNDS = 50;
-const ROUND_BUDGET_EXTEND_BY = 50;
-const ROUND_HARD_CEILING = 1000;
+// automatically" cause). USER DIRECTIVE ("remove the limit of 24 rounds"):
+// the budget starts high and the ceiling is far away — round limits are
+// effectively gone; only the hard safety ceiling remains.
+const MAX_ROUNDS = 400;
+const ROUND_BUDGET_EXTEND_BY = 100;
+const ROUND_HARD_CEILING = 5000;
 /** STREAM IDLE TIMEOUT: no SSE chunk for this long → the read is abandoned
  *  as a transient transport error (see parseSSEStream). Generous enough for
  *  slow-thinking providers that pause before the first token; short enough

@@ -318,17 +318,12 @@ export function buildSpecialistUserPrompt(opts: {
   taskDescription: string;
   upstreamContext?: string;
   collaborationQuestions?: { from: string; question: string }[];
-  webResults?: WebResearchBlock[];
+  /** Research queries the planner suggested — the specialist runs them
+   *  ITSELF through its real web tool (no pre-fetched duplication). */
+  suggestedQueries?: string[];
 }): string {
-  const web = opts.webResults?.length
-    ? opts.webResults
-        .map(
-          (w) =>
-            `## Query: "${w.query}"\n${w.results
-              .map((r) => `- [${r.title}](${r.url})\n  ${trimTo(r.snippet, 350)}`)
-              .join("\n")}`,
-        )
-        .join("\n\n")
+  const suggestions = opts.suggestedQueries?.length
+    ? opts.suggestedQueries.map((q) => `- ${q}`).join("\n")
     : "";
 
   return joinSections([
@@ -343,8 +338,11 @@ ${trimTo(opts.upstreamContext, 6000)}`
       ? `# Questions from other agents
 ${opts.collaborationQuestions.map((q) => `- From ${q.from}: ${trimTo(q.question, 400)}`).join("\n")}`
       : "",
-    web ? `# WEB SEARCH RESULTS (real, retrieved just now)\n${web}` : "",
-    "Produce your best complete output for this task.",
+    suggestions
+      ? `# Suggested research queries (run them with your web tool, then verify by READING key sources)
+${suggestions}`
+      : "",
+    "Produce your best complete output for this task. Use your tools whenever real information or files would make the result better — never fabricate sources, data or tool activity.",
   ]);
 }
 

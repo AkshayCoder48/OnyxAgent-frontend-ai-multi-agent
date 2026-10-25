@@ -279,9 +279,9 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
   // --- specialist agent → logo + contribution -------------------------------
   const agent = message.agent_id ? agents.find((a) => a.id === message.agent_id) : undefined;
   const sources = message.metadata?.sources ?? [];
-  // Specialists stream via the main agent's turn today, so this is normally
-  // false — but if a specialist message ever carries the flag, the markdown
-  // render picks up the live cursor + fade automatically.
+  const isDraftMessage = !!message.metadata?.draftId;
+  // The final answer streams LIVE (tool loop / draft writing): metadata
+  // .streaming is set while the specialist (or its document) is writing.
   const specialistStreaming = message.metadata?.streaming === true;
   return (
     <div className="flex items-start gap-3">
@@ -289,15 +289,38 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-baseline gap-1.5">
           <span className="truncate text-xs font-semibold text-foreground">{agent?.name ?? "Agent"}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">· {bt("chat.agentContribution")}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            · {isDraftMessage ? bt("chat.agentDocument") : bt("chat.agentContribution")}
+          </span>
+          {specialistStreaming && (
+            <span className="shrink-0 text-[11px] text-muted-foreground" aria-live="polite">
+              {isDraftMessage ? bt("chat.writingDocument") : bt("chat.streaming")}
+            </span>
+          )}
         </div>
-        <div className="scrollbar-thin prose-sm mt-1 max-h-[32rem] max-w-none overflow-y-auto break-words pr-1 text-sm">
-          <MarkdownContent
-            content={message.content}
-            streaming={specialistStreaming}
-            showCursor={specialistStreaming}
-          />
-        </div>
+        {/* USER DIRECTIVE: a draft task outputs the document ONCE — the draft
+            card below is the ONLY full copy (it streams 100% live). The chat
+            row itself carries just the compact delivery note — never a
+            duplicated plain-text copy of the same content. */}
+        {!isDraftMessage && (
+          <div className="scrollbar-thin prose-sm mt-1 max-h-[32rem] max-w-none overflow-y-auto break-words pr-1 text-sm">
+            <MarkdownContent
+              content={message.content}
+              streaming={specialistStreaming}
+              showCursor={specialistStreaming}
+            />
+          </div>
+        )}
+        {isDraftMessage && message.content && !specialistStreaming && (
+          <div className="prose-sm mt-1 max-w-none break-words text-sm text-muted-foreground">
+            <MarkdownContent content={message.content} />
+          </div>
+        )}
+        {isDraftMessage && specialistStreaming && !message.content && (
+          <p className="mt-1 text-xs italic text-muted-foreground" aria-live="polite">
+            {bt("chat.writingDocument")}
+          </p>
+        )}
         {sources.length > 0 && (
           <Collapsible className="mt-2">
             <CollapsibleTrigger className="group inline-flex items-center gap-1 rounded-md text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">

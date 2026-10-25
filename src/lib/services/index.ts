@@ -527,6 +527,34 @@ export const conversationService = {
     return messageRow as unknown as ConversationMessage;
   },
 
+  /** Patch ONE message row in place (content / parts / is_streaming …) —
+   *  the in-bubble background-run landing path (use-chat) rewrites the
+   *  interrupted assistant row into a live status bubble and finally the
+   *  finished answer. Extra columns (is_streaming) ride the row like
+   *  settleInterruptedMessages does. */
+  async updateMessage(
+    messageId: string,
+    patch: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const existing = await db.messages.get(messageId);
+      if (!existing) return;
+      const row = { ...existing, ...patch } as typeof existing;
+      await db.messages.put(row);
+      const conversationId = (existing as { conversation_id?: string }).conversation_id;
+      if (conversationId) {
+        await db.conversations.update(conversationId, {
+          last_message_preview: previewTextOf(
+            typeof patch.content === "string" ? patch.content : (existing as { content?: string }).content ?? "",
+          ),
+          last_message_at: nowISO(),
+        });
+      }
+    } catch {
+      // best-effort — the caller polls and rewrites on the next pass
+    }
+  },
+
   /**
    * AGENT CHECKPOINT (PRD §6/§32 — background execution resilience):
    * upsert an IN-PROGRESS assistant message with a STABLE id so a page

@@ -20,6 +20,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useBusinessStore } from "@/stores/business-store";
 import { businessApprovalService, businessDraftService, businessEventService } from "@/lib/business/data";
 import { bt } from "@/lib/business/ui-text";
+import { cn } from "@/lib/utils";
 import type { ApprovalDecision } from "@/lib/business/types";
 
 /** Statuses that still accept a user decision. */
@@ -40,7 +41,10 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
 
   if (!draft) return null;
 
-  const actionable = ACTIONABLE_STATUSES.has(draft.status);
+  // The specialist is STREAMING this document live (100% streaming) — the
+  // content below grows in real time; approval actions appear when it's done.
+  const streaming = draft.streaming === true;
+  const actionable = !streaming && ACTIONABLE_STATUSES.has(draft.status);
 
   const decide = async (decision: DraftDecision) => {
     if (pending) return;
@@ -82,7 +86,10 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
       <div className="flex items-start gap-3">
         <span
           aria-hidden
-          className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-accent/10 text-accent-foreground"
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-accent/10 text-accent-foreground",
+            streaming && "animate-pulse",
+          )}
         >
           <FileText className="size-4" />
         </span>
@@ -92,9 +99,18 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
             <Badge variant="secondary" className="px-1.5 py-0 text-[10px] font-medium">
               {bt("drafts.version", { version: draft.version })}
             </Badge>
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-medium text-muted-foreground">
-              {bt(`draftStatus.${draft.status}`)}
-            </Badge>
+            {streaming ? (
+              <Badge
+                variant="outline"
+                className="border-primary/40 px-1.5 py-0 text-[10px] font-medium text-primary"
+              >
+                {bt("drafts.writing")}
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-medium text-muted-foreground">
+                {bt(`draftStatus.${draft.status}`)}
+              </Badge>
+            )}
           </div>
           {creatorName && (
             <p className="mt-1 text-[11px] text-muted-foreground">{bt("drafts.createdBy", { agent: creatorName })}</p>
@@ -103,9 +119,19 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
       </div>
 
       <div className="scrollbar-thin mt-3 max-h-60 overflow-y-auto rounded-lg bg-muted/30 p-3 text-sm">
-        {/* Full chat markdown stack (tables, headings, highlighted code, GFM)
-            — drafts are completed content, so no streaming props. */}
-        <MarkdownContent content={draft.content} />
+        {/* Full chat markdown stack (tables, headings, highlighted code, GFM).
+            While the specialist streams the document, the inline writing
+            cursor + word-fade cascade render the 100% live writing. */}
+        <MarkdownContent
+          content={draft.content}
+          streaming={streaming}
+          showCursor={streaming}
+        />
+        {streaming && !draft.content && (
+          <p className="text-xs italic text-muted-foreground" aria-live="polite">
+            {bt("chat.writingDocument")}
+          </p>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -159,7 +185,9 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
         )}
       </div>
 
-      <p className="mt-2 text-[10px] text-muted-foreground/70">{bt("drafts.approvalNote")}</p>
+      {!streaming && (
+        <p className="mt-2 text-[10px] text-muted-foreground/70">{bt("drafts.approvalNote")}</p>
+      )}
     </div>
   );
 }

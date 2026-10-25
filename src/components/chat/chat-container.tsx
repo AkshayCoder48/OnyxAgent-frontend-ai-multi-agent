@@ -6,8 +6,10 @@ import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
-import { DetachedRunStrip } from "./detached-run-strip";
-import { BackgroundTasksStrip } from "./background-tasks-strip";
+// USER DIRECTIVE: the strips that used to sit above the composer are GONE —
+// background-run progress + results land directly in the chat bubbles.
+// The invisible lander keeps the polling + auto-landing machinery alive.
+import { BackgroundTasksLander } from "./background-tasks-strip";
 import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
@@ -861,12 +863,10 @@ function ChatUI({
         {/* Queued messages live next to the composer; the todo plan panel
             lives INSIDE the scroll container (inline in the response flow). */}
         <div className="px-2 pb-2 sm:px-4 sm:pb-4">
-          {/* Detached sandbox run status ("close and resume") — live card
-              whenever this conversation has a running/unsynced run. */}
-          <DetachedRunStrip conversationId={conversationId ?? null} />
-          {/* Durable background tasks (Epic 3) — global run strip above the
-              composer; renders null while there is nothing to show. */}
-          <BackgroundTasksStrip />
+          {/* Invisible background-run lander (USER DIRECTIVE: no strips above
+              the composer) — polls Trigger.dev Cloud runs and lands finished
+              results directly in their conversations' chat bubbles. */}
+          <BackgroundTasksLander />
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}

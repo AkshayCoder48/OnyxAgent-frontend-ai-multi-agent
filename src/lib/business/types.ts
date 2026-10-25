@@ -290,6 +290,10 @@ export interface BusinessDraftRow {
   approved_version?: number;
   /** superseded draft_id when a new version was created from this one */
   superseded_by?: string;
+  /** TRUE while a specialist is STREAMING the document live (the draft card
+   *  renders the writing cursor + a "Writing live…" badge; cleared on the
+   *  final write or on failure). */
+  streaming?: boolean;
   created_at: string;
   updated_at: string;
 }

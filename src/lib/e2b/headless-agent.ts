@@ -75,7 +75,9 @@ STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
 
 RUNNER_VERSION = 2
-MAX_ROUNDS_DEFAULT = 24
+# USER DIRECTIVE: "remove the limit of 24 rounds" — the round budget is now
+# effectively unlimited; the real bound is the wall-clock execution window.
+MAX_ROUNDS_DEFAULT = 400
 TOOL_TIMEOUT_DEFAULT = 300
 TOOL_TIMEOUT_MAX = 900
 LLM_TIMEOUT_SECONDS = 240
