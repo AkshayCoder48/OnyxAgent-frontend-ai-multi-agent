@@ -112,6 +112,9 @@ export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   "read_chat", "list_uploaded_files", "read_uploaded_file",
   // Memory & knowledge
   "manage_memory", "knowledge_base",
+  // Business Mode workspaces (manage_business — always-on surface so the
+  // agent can create/list businesses the moment the user asks)
+  "manage_business",
   // Media generation (Pollinations)
   "media_generation",
   // Capability discovery (always on — see DISCOVERY_TOOLS)
@@ -222,6 +225,13 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
     // Chat management.
     re: /list (my )?chats|other (chat|conversation)s?|new chat|open (a |the )?chat|conversations? list/i,
     tools: ["manage_chats"],
+  },
+  {
+    // Business Mode workspaces — agent-team businesses the user opens at
+    // /business/{id}. Generous on purpose: a false positive only costs
+    // payload bytes (the tool's read/create actions are frictionless).
+    re: /\bbusiness(es)?\b|\bcompany\b|team of agents|swarm|store|agency|startup/i,
+    tools: ["manage_business"],
   },
   {
     // Scheduled tasks (sandbox cron).

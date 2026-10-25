@@ -47,6 +47,12 @@ import {
 } from "./prompts";
 import { classifyMessageIntent, type RoutingHint } from "./jev";
 import { randomLogoForRole, AGENT_LOGO_KEYS } from "@/components/business/agent-logos";
+import {
+  registerBusinessTurnHandoff,
+  unregisterBusinessTurnHandoff,
+  readBusinessCloudHandoffMeta,
+  type BusinessTurnSnapshot,
+} from "@/lib/agent/turn-cloud-handoff";
 import type {
   AgentMessageRow,
   BusinessAgentRow,
@@ -560,6 +566,101 @@ export async function createBusinessFromTemplate(
 }
 
 // ---------------------------------------------------------------------------
+// Direct creation (no LLM) — the manage_business tool's spec-driven path.
+// ---------------------------------------------------------------------------
+
+/** One specialist agent in a business spec (the calling LLM composes these
+ *  from the user's natural-language request). */
+export interface BusinessSpecAgent {
+  name: string;
+  role: string;
+  description?: string;
+  /** Operating instructions (system prompt) for the agent. */
+  instructions?: string;
+  logo?: string;
+  permissions?: {
+    web_search?: boolean;
+    create_drafts?: boolean;
+    read_memory?: boolean;
+    write_memory?: boolean;
+  };
+}
+
+export interface BusinessSpec {
+  name: string;
+  description?: string;
+  idea?: string;
+  industry?: string;
+  businessModel?: string;
+  targetCustomers?: string;
+  geography?: string;
+  /** Operating instructions / mission for the whole business. */
+  instructions?: string;
+  goals?: string[];
+  agents?: BusinessSpecAgent[];
+  /** Initial backlog tasks; agent_role matches an agent's name or role. */
+  initialTasks?: { title: string; description?: string; agent_role?: string }[];
+  template?: string;
+}
+
+/**
+ * Create a real, persistent business from a structured spec (NO discovery
+ * LLM call — the agent invoking the tool already did the reasoning). Reuses
+ * the canonical persistBusiness path: business row + created events + agent
+ * rows + backlog tasks + live store refresh. Returns the business id.
+ */
+export async function createBusinessFromSpec(spec: BusinessSpec): Promise<string> {
+  if (!spec.name?.trim()) throw new Error("Business name is required");
+
+  const agents: BusinessSpecAgent[] = (spec.agents ?? []).filter((a) => a?.name?.trim());
+  const profileMarkdown = [
+    `# ${spec.name.trim()}`,
+    "",
+    spec.description?.trim() || spec.idea?.trim() || "",
+    "",
+    spec.instructions?.trim() ? `## Operating instructions\n\n${spec.instructions.trim()}` : "",
+    spec.industry?.trim() ? `**Industry:** ${spec.industry.trim()}` : "",
+    spec.businessModel?.trim() ? `**Business model:** ${spec.businessModel.trim()}` : "",
+    spec.targetCustomers?.trim() ? `**Target customers:** ${spec.targetCustomers.trim()}` : "",
+    spec.geography?.trim() ? `**Geography:** ${spec.geography.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return persistBusiness(
+    {
+      name: spec.name.trim(),
+      idea: spec.description?.trim() || spec.idea?.trim() || "",
+      industry: spec.industry?.trim() || undefined,
+      businessModel: spec.businessModel?.trim() || undefined,
+      targetCustomers: spec.targetCustomers?.trim() || undefined,
+      geography: spec.geography?.trim() || undefined,
+    },
+    profileMarkdown || spec.description || "",
+    spec.goals?.filter((g) => g?.trim()).map((g) => g.trim()) ?? [],
+    agents.map((a) => ({
+      name: a.name.trim(),
+      role: a.role?.trim() || a.name.trim(),
+      description: a.description?.trim() || `${a.role?.trim() || a.name.trim()} for ${spec.name.trim()}.`,
+      logo: a.logo,
+      system_instructions:
+        a.instructions?.trim() ||
+        `You are ${a.name.trim()}, the ${a.role?.trim() || "specialist"} of ${spec.name.trim()}. ${
+          spec.instructions?.trim() ?? spec.description?.trim() ?? ""
+        } Deliver complete, concrete work products.`.trim(),
+    })),
+    (spec.initialTasks ?? [])
+      .filter((t) => t?.title?.trim())
+      .map((t) => ({
+        title: t.title.trim(),
+        description: t.description?.trim() || t.title.trim(),
+        agent_role: t.agent_role?.trim() || "",
+      })),
+    spec.template?.trim() || undefined,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Specialist execution (shared by delegation loop, retry, test)
 // ---------------------------------------------------------------------------
 
@@ -712,6 +813,12 @@ export async function sendBusinessMessage(businessId: string, content: string): 
   if (turnRegistry.has(businessId)) {
     throw new Error(bt("toast.turnAlreadyRunning"));
   }
+  // One durable lane at a time: a live Trigger.dev Cloud handoff from a
+  // previous session owns this business's turn — its result lands in the
+  // chat automatically; a new turn would race it.
+  if (readBusinessCloudHandoffMeta(businessId)) {
+    throw new Error(bt("toast.bgTurnActive"));
+  }
 
   const turnId = nanoid();
   const controller = new AbortController();
@@ -779,6 +886,38 @@ export async function sendBusinessMessage(businessId: string, content: string): 
 
     // 6. Planning call
     const history = await chatHistory(businessId);
+
+    // ── DURABILITY REGISTRATION (Trigger.dev Cloud) ──────────────────────
+    // If the app closes while this turn runs, the pagehide handler
+    // dispatches it to the operator's trigger.dev Cloud project as a
+    // durable agent_run — the work survives reload/close (the browser
+    // lifecycle never owns it). Unregistered when the turn settles.
+    const cloudBase = (mainCfg.baseUrl || "").replace(/\/+$/, "");
+    const cloudChatUrl = !cloudBase
+      ? ""
+      : mainCfg.noPrefix
+        ? cloudBase
+        : `${cloudBase}/chat/completions`;
+    const cloudSnapshot: BusinessTurnSnapshot = {
+      businessId,
+      businessName: business.name,
+      userId: userId(),
+      prompt: content,
+      systemPrompt: buildMainChatSystemPrompt(business, memory),
+      // history INCLUDES this turn's user message (appended at step 1) —
+      // the cloud lane takes the prompt separately, so drop the last row.
+      history: history.slice(0, -1).map((h) => ({
+        role: (h.role === "user" ? "user" : "assistant") as "user" | "assistant",
+        content: h.role !== "user" && h.agentName ? `[${h.agentName}]\n${h.content}` : h.content,
+      })),
+      chatUrl: cloudChatUrl,
+      apiKey: mainCfg.apiKey,
+      model: mainCfg.model,
+      temperature: business.configuration.mainTemperature ?? null,
+      startedAt: Date.now(),
+    };
+    registerBusinessTurnHandoff(cloudSnapshot);
+
     const mentionedAgents = agents.filter((a) => mentions.includes(a.id));
     let plan: TurnPlan | null = null;
     try {
@@ -1318,6 +1457,7 @@ async function streamMainMessage(
 async function finishTurn(businessId: string, turnId: string, startedAt: number): Promise<void> {
   const owns = turnRegistry.get(businessId)?.turnId === turnId;
   if (owns) turnRegistry.delete(businessId);
+  unregisterBusinessTurnHandoff(businessId); // the turn settled — nothing to hand off
   store().setTurnRunning(false);
   await emitEvent({
     business_id: businessId,
@@ -1338,6 +1478,7 @@ export async function cancelBusinessTurn(businessId: string): Promise<void> {
   const handle = turnRegistry.get(businessId);
   if (!handle) return;
   handle.controller.abort();
+  unregisterBusinessTurnHandoff(businessId); // explicit cancel — no cloud handoff
 
   const tasks = await businessTaskService.list(businessId);
   for (const task of tasks) {

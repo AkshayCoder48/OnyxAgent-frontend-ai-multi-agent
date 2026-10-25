@@ -4,6 +4,7 @@ import type { ToolCall } from "@/types";
 import {
   ArrowRight,
   Wrench,
+  Building2,
   Check,
   Clock,
   Search,
@@ -47,6 +48,7 @@ import { FileDownloadResult, parseFileDownloadResult } from "./tool-results/file
 import { EditFileDiff } from "./tool-results/edit-diff";
 import { MemoryResult } from "./tool-results/memory";
 import { KnowledgeBaseResult } from "./tool-results/knowledge-base";
+import { ManageBusinessResult, parseManageBusinessResult } from "./tool-results/manage-business";
 import { WebSessionResult, parseWebSessionResult } from "./tool-results/web-session";
 import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
 import { WebPageResult } from "./tool-results/web-page";
@@ -476,6 +478,11 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // memory chips. ONE presentation for the whole tool — the internal op
   // never appears as a separate tool.
   const isKnowledgeBase = toolCall.name === "knowledge_base";
+  // manage_business — the Business Mode payload (business card / list rows /
+  // agent row) renders inline beneath the narration line: content, never
+  // chrome. ONE presentation for the whole tool (the internal action never
+  // appears as a separate tool).
+  const isManageBusiness = toolCall.name === "manage_business";
 
   return (
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
@@ -587,6 +594,7 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <MemoryResult toolCall={toolCall} />
       )}
       {isKnowledgeBase && isCompleted && <KnowledgeBaseResult toolCall={toolCall} />}
+      {isManageBusiness && isCompleted && <ManageBusinessResult toolCall={toolCall} />}
       {chartSpec && <ChartMessage spec={chartSpec} />}
       {imagePreviewSpec && <ImagePreviewResult spec={imagePreviewSpec} />}
       {/* inspect_image (Runtime PRD §54/§111) — the analyzed image + the
@@ -794,6 +802,22 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   // disclosure (same placement rules as the memory tools).
   const isKnowledgeBase = toolCall.name === "knowledge_base";
   const kbAction = isKnowledgeBase ? String(toolCall.args?.action ?? "") : null;
+  // manage_business — the Business Mode payload. The "new business" moment
+  // (create / create_from_template) renders INLINE like the KB saves (the
+  // card is content the user asked for); reads/lists/updates live behind the
+  // disclosure (same placement rule as the memory search chips). Memoized
+  // parse so streaming deltas don't re-parse on every render.
+  const manageBusinessSpec = useMemo(
+    () =>
+      toolCall.name === "manage_business" && toolCall.status === "completed"
+        ? parseManageBusinessResult(toolCall)
+        : null,
+    [toolCall],
+  );
+  const isManageBusiness = manageBusinessSpec !== null;
+  const isManageBusinessCreate =
+    manageBusinessSpec?.kind === "business" &&
+    (toolCall.args?.action === "create" || toolCall.args?.action === "create_from_template");
   // show_todo / manage_todo specialized renderers (PRD §19) — the parsed
   // todos drive the TodoPreview table; memoized so streaming deltas don't
   // re-parse on every render.
@@ -920,7 +944,7 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
   }
 
   const hasSpecialRenderer =
-    isDateTime || isRAGSearch || isWebSearch || isAskUser || isMediaGeneration || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult || isWebFetch;
+    isDateTime || isRAGSearch || isWebSearch || isAskUser || isMediaGeneration || isChart || isRunPython || isFileDownload || isAnyDDGSearch || isShowTodo || isManageTodo || isEditDiff || isMemorySave || isMemoryList || isMemorySearch || isImagePreview || isWebSessionResult || isBrowserResult || isWebFetch || isManageBusiness;
   const friendlyName = isComposio
     ? // The REAL platform name once branding resolves (GitHub, Slack…);
       // fallback is the platform the call ran through.
@@ -963,7 +987,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
               ? "Manage Todo"
               : isAskUser
             ? "Question"
-            : isFileDownload
+            : isManageBusiness
+              ? "Business"
+              : isFileDownload
               ? fileDownloadSpec?.item_type === "folder"
                 ? "Folder Download"
                 : "File Download"
@@ -1017,7 +1043,9 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             ? PenLine
             : isMemorySave || isMemoryList || isMemorySearch
               ? Brain
-              : isShowTodo
+              : isManageBusiness
+                ? Building2
+                : isShowTodo
             ? ListChecks
             : isManageTodo
               ? ListTodo
@@ -1236,6 +1264,12 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
         <KnowledgeBaseResult toolCall={toolCall} />
       )}
 
+      {/* INLINE BUSINESS CARD (manage_business create / create_from_template):
+          the freshly created workspace renders directly in the MAIN RESPONSE —
+          it is the deliverable the user asked for, never chrome. Reads/lists/
+          updates render behind the disclosure below. */}
+      {isManageBusinessCreate && <ManageBusinessResult toolCall={toolCall} />}
+
       {/* Disclosure panel — the ARGUMENTS/OUTPUT and every specialized
           renderer live behind the simple line. Height animates open/closed
           via the CollapsePanel grid trick. */}
@@ -1318,6 +1352,11 @@ function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
             // disclosure. Everything else (get/update/delete/file links)
             // falls through to the default raw view when expanded.
             <KnowledgeBaseResult toolCall={toolCall} />
+          ) : isManageBusiness ? (
+            // manage_business reads/lists/updates/agent ops — the business
+            // card / rows render behind the disclosure (the create actions
+            // render inline above, outside this panel).
+            <ManageBusinessResult toolCall={toolCall} />
           ) : isLoadSkill ? (
             <LoadSkillResult resultText={resultText} status={toolCall.status} />
           ) : isListSkills ? null : (

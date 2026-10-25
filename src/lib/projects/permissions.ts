@@ -39,6 +39,9 @@ import type {
 } from "@/types";
 import { getProject } from "./service";
 
+// Re-exported for consumers (Settings → Approvals imports it from here).
+export type { ResourcePermission } from "@/types";
+
 // ---------------------------------------------------------------------------
 // Default sensitivity — argument-aware, matched to the REAL registered tools
 // ---------------------------------------------------------------------------
@@ -56,6 +59,11 @@ import { getProject } from "./service";
  *   - E2B file/folder DELETE (`delete_file`, `delete_folder` — registered
  *     names in `src/lib/tools/e2b_files.ts`) → approval_required. All other
  *     file tools (read/write/move/…) are allowed.
+ *   - Business Mode DESTRUCTIVE verbs (`manage_business` — registered name
+ *     in `src/lib/tools/manage_business.ts`): action `delete` (cascades the
+ *     business across every child table) and manage_agents with
+ *     `agent_action: "remove"` → approval_required. Read/create/update
+ *     actions stay frictionless (the registry flag is false).
  *   - Everything else → allowed. Users tighten anything via the global
  *     policy (Settings → Tools approval policies) or per-project rules.
  */
@@ -77,6 +85,14 @@ export const SENSITIVE_TOOL_DEFAULTS = {
     tools: ["delete_file", "delete_folder"] as readonly string[],
     permission: "approval_required" as ResourcePermission,
     rationale: "Permanently removes workspace files or folders.",
+  },
+  businessDestructive: {
+    tool: "manage_business",
+    destructiveActions: ["delete"] as readonly string[],
+    destructiveAgentActions: ["remove"] as readonly string[],
+    permission: "approval_required" as ResourcePermission,
+    rationale:
+      "Deletes a Business Mode workspace (cascading agents, tasks, chat and drafts) or removes a specialist agent from it.",
   },
   fallback: {
     permission: "allowed" as ResourcePermission,
@@ -129,6 +145,18 @@ export function defaultPermissionFor(
   // E2B file/folder deletion — destructive.
   if (SENSITIVE_TOOL_DEFAULTS.e2bDeletes.tools.includes(toolName)) {
     return SENSITIVE_TOOL_DEFAULTS.e2bDeletes.permission;
+  }
+  // Business Mode management — destructive verbs only: action "delete"
+  // (cascades the business) or manage_agents with agent_action "remove".
+  // Reads, creation and updates stay frictionless.
+  if (toolName === SENSITIVE_TOOL_DEFAULTS.businessDestructive.tool) {
+    const action = typeof args?.action === "string" ? args.action : "";
+    const agentAction = typeof args?.agent_action === "string" ? args.agent_action : "";
+    return SENSITIVE_TOOL_DEFAULTS.businessDestructive.destructiveActions.includes(action) ||
+      (action === "manage_agents" &&
+        SENSITIVE_TOOL_DEFAULTS.businessDestructive.destructiveAgentActions.includes(agentAction))
+      ? SENSITIVE_TOOL_DEFAULTS.businessDestructive.permission
+      : "allowed";
   }
   return SENSITIVE_TOOL_DEFAULTS.fallback.permission;
 }

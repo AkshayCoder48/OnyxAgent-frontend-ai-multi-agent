@@ -114,6 +114,22 @@ export const agentRun = task({
     };
 
     try {
+      // ---- NATIVE MODE (no E2B key — the zero-setup lane) ────────────────
+      // Trigger.dev Cloud itself is the compute: the agent loop runs
+      // IN-TASK with NO sandbox and a tools-off surface (text + seed
+      // context only). This keeps chat handoffs executing durably for
+      // operators who connected ONLY a trigger.dev key — no second setup
+      // step. Terminal commands still require a real sandbox (they ARE
+      // shell commands) and fail honestly.
+      if (!credentials.e2bApiKey.trim()) {
+        if (run.type === "terminal_command") {
+          throw new Error(
+            "No E2B sandbox key available for this run — terminal commands need one (add it in Settings → Sandboxes or set E2B_API_KEY on the app server) and retry.",
+          );
+        }
+        return await runNativeAgentRun(payload, state, pushChunk, setStage, flush);
+      }
+
       // ---- Phase: create sandbox (PRD §4.2 — bounded window) --------------
       setStage("init", "creating-sandbox");
       const box = await createTaskSandbox(run, credentials.e2bApiKey);
@@ -189,6 +205,130 @@ export const agentRun = task({
     }
   },
 });
+
+// ---------------------------------------------------------------------------
+// NATIVE agent loop — no sandbox, no tools; Trigger.dev is the compute.
+// ---------------------------------------------------------------------------
+
+/** Sleep helper shared with the monitor loop. */
+const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Zero-setup execution: complete the turn IN-TASK through the resolved LLM
+ * endpoint (pinned provider gateway or the app's keyless bridge), tools-off.
+ * The seed history + system prompt travel in the payload; the answer becomes
+ * one `message` artifact the app syncs back into the conversation exactly
+ * like a sandbox run's response. Key-pool rotation on 401/429 mirrors the
+ * sandbox runner's discipline. Progress streams through the same metadata
+ * blob (round/stage/chunks) the app already polls.
+ */
+async function runNativeAgentRun(
+  payload: AgentRunPayload,
+  state: RunMetadataState,
+  pushChunk: (chunk: Omit<TaskStatusChunk, "seq">) => void,
+  setStage: (phase: RunMetadataState["phase"], stage: string) => void,
+  flush: () => void,
+): Promise<AgentRunOutput> {
+  const { run, credentials } = payload;
+  const runId = run.runId;
+  const deadline = startedAtMs(run.startedAt) + (run.timeoutMs || 30 * 60 * 1000);
+
+  setStage("monitor", "running");
+
+  // Messages: config.systemPrompt first (unless the seed already opens with
+  // a system row — buildTaskPayload keeps a persisted system row in place).
+  const seed = run.payload.conversation.messages ?? [];
+  const hasSystemRow = seed.length > 0 && seed[0]?.role === "system";
+  const messages: Array<{ role: string; content: string }> = [
+    ...(run.config.systemPrompt?.trim() && !hasSystemRow
+      ? [{ role: "system", content: run.config.systemPrompt }]
+      : []),
+    ...seed.map((m) => ({ role: String(m.role), content: String(m.content ?? "") })),
+  ].filter((m) => m.content.trim().length > 0 || m.role === "system");
+
+  const pool = credentials.keyPool.length > 0 ? credentials.keyPool : [credentials.chatToken];
+  let lastError = "unknown error";
+
+  for (let attempt = 0; attempt < Math.max(2, pool.length * 2) && Date.now() < deadline; attempt++) {
+    const key = pool[attempt % pool.length] || credentials.chatToken;
+    try {
+      const res = await fetch(credentials.chatUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(key ? { authorization: `Bearer ${key}` } : {}),
+          "x-task-run-id": runId,
+        },
+        body: JSON.stringify({
+          ...(run.config.model ? { model: run.config.model } : {}),
+          messages,
+          stream: false,
+          ...(typeof run.config.temperature === "number"
+            ? { temperature: run.config.temperature }
+            : {}),
+        }),
+      });
+
+      if (res.status === 401 || res.status === 429 || res.status >= 500) {
+        lastError = `LLM endpoint responded ${res.status}`;
+        logger.warn(`[agent-run ${runId}] native attempt ${attempt + 1}: ${lastError} — rotating`);
+        await sleepMs(1200 * (attempt + 1));
+        continue;
+      }
+      if (!res.ok) {
+        lastError = `LLM endpoint responded ${res.status}: ${(await res.text()).slice(0, 200)}`;
+        await sleepMs(1000);
+        continue;
+      }
+
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string | null } }>;
+      };
+      const content = data.choices?.[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        lastError = "LLM endpoint returned an empty completion";
+        await sleepMs(800);
+        continue;
+      }
+
+      // Success — stream the answer as a text chunk + terminal metadata.
+      pushChunk({ kind: "text", round: 1, content: content.slice(0, RING_CHUNK_MAX_CHARS), ts: Date.now() });
+      state.progress.round = 1;
+      state.progress.totalRounds = 1;
+      state.progress.stage = "completed";
+      state.progress.lastUpdate = Date.now();
+      state.phase = "done";
+      flush();
+      logger.info(`[agent-run ${runId}] native run completed (${content.length} chars)`);
+
+      return {
+        runId,
+        status: "completed",
+        artifacts: [
+          {
+            kind: "message",
+            name: "response.md",
+            mimeType: "text/markdown",
+            content,
+            encoding: "utf8",
+          },
+        ],
+      };
+    } catch (err) {
+      lastError = errorMessage(err);
+      await sleepMs(1500);
+    }
+  }
+
+  // Terminal failure — mirror the sandbox path's honest reporting + retry
+  // semantics (Trigger.dev replays the whole native run idempotently).
+  state.phase = "done";
+  state.progress.stage = "failed";
+  state.progress.lastUpdate = Date.now();
+  pushChunk({ kind: "error", content: lastError.slice(0, RING_CHUNK_MAX_CHARS), ts: Date.now() });
+  flush();
+  throw new Error(`native agent-run failed: ${lastError}`);
+}
 
 // ---------------------------------------------------------------------------
 // Monitor loop — 5s polls of the sandbox file protocol.

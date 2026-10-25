@@ -882,15 +882,16 @@ function ToolDisplayToggle() {
   );
 }
 
-/** DETACHED SANDBOX RUNS ("close and resume") — when ON, the next send
- *  hands the turn to the sandbox-resident headless agent instead of the
- *  in-browser loop: press send, close the app, come back later to the
- *  finished tool outputs + reasoning. The run executes inside the E2B
- *  sandbox (up to 24h) and a status strip above the input tracks it.
- *  Persisted per browser, default OFF — closing the app mid-reply now
- *  ALWAYS hands the in-flight turn to the sandbox automatically (see
- *  turn-handoff.ts), so this toggle only forces the whole turn there from
- *  the start. */
+/** BACKGROUND RUNS ("close and resume") — when ON, the next send hands
+ * the whole turn to the durable background lane instead of the in-browser
+ * loop: press send, close the app, come back later to the finished result.
+ * With a Trigger.dev Cloud key connected the turn runs as a durable cloud
+ * task (agent_run) that reload/close can never touch; without one it falls
+ * back to the E2B sandbox-resident headless runner. A status strip above
+ * the input tracks it either way. Persisted per browser, default OFF —
+ * closing the app mid-reply ALWAYS hands the in-flight turn to the
+ * background lane automatically (see turn-handoff.ts), so this toggle only
+ * forces the whole turn there from the start. */
 function DetachedRunToggle() {
   const enabled = useDetachedRunStore((s) => s.detachedMode);
   const setEnabled = useDetachedRunStore((s) => s.setDetachedMode);
@@ -899,7 +900,7 @@ function DetachedRunToggle() {
       type="button"
       role="switch"
       aria-checked={enabled}
-      aria-label="Sandbox runs (close and resume)"
+      aria-label="Background runs (close and resume)"
       onClick={() => setEnabled(!enabled)}
       className={cn(
         "flex w-full items-center gap-3 rounded-lg border p-2.5 text-left transition-colors",
@@ -924,10 +925,10 @@ function DetachedRunToggle() {
       <span className="min-w-0">
         <span className="text-foreground/80 inline-flex items-center gap-1.5 text-[12px] leading-tight">
           <Server className="h-3 w-3" aria-hidden />
-          Sandbox runs
+          Background runs
         </span>
         <span className="text-foreground/50 block text-[11px] leading-tight">
-          Whole turns run in the E2B sandbox — no streaming, then full results (24h). Closing the app mid-reply hands the turn over automatically either way.
+          Whole turns run on Trigger.dev Cloud (or the E2B sandbox without a cloud key) — no streaming, then full results. Closing the app mid-reply hands the turn over automatically either way.
         </span>
       </span>
     </button>

@@ -254,6 +254,10 @@ export interface BusinessChatMessageMetadata {
   turnId?: string;
   cancelled?: boolean;
   agentNames?: string[];
+  /** True when this message landed from a Trigger.dev Cloud background run. */
+  background?: boolean;
+  /** The server run id of the background run that produced this message. */
+  cloudRunId?: string;
 }
 
 export interface BusinessChatMessageRow {

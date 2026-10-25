@@ -9,6 +9,12 @@
 //       · chunks: only seq > cursor (cursor defaults -1), each content
 //         truncated to 4000 chars ON READ (the row stores 16k for
 //         artifact-grade consumers).
+//   ?taskId=<id>                    resolve a run by the CLIENT-minted task
+//                                   id (newest match) — the reload-adoption
+//                                   path: a pagehide beacon cannot read the
+//                                   dispatch response, so the returning
+//                                   browser re-discovers its cloud run via
+//                                   the taskId it minted itself.
 //   ?list=1&userId=<id>             latest 50 runs (TaskListResponse, no
 //                                   chunks) for the client's mirror reconcile.
 //
@@ -147,9 +153,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json(res);
   }
 
+  // ── taskId lookup (reload adoption) ─────────────────────────────────────
+  // A pagehide beacon cannot read the dispatch response, so the returning
+  // browser only knows the task id IT minted before unloading. Resolve the
+  // newest run for that task id and serve the single-run view (cursor rules
+  // identical to the runId branch below).
+  const taskId = params.get("taskId")?.trim();
+  if (taskId) {
+    const mode = await getOrchestrationMode();
+    touch();
+    startSchedulerLoop();
+    const adopted = await prisma.taskRun.findFirst({
+      where: { taskId },
+      orderBy: { startedAt: "desc" },
+    });
+    if (!adopted) return bad("no run for this task id", 404);
+    if (mode === "cloud" && adopted.orchestrator === "cloud" && adopted.externalRunId) {
+      const synced = await healStaleCloudRuns(adopted.id).catch(() => false);
+      if (synced) {
+        const fresh = await prisma.taskRun.findUnique({ where: { id: adopted.id } });
+        return serveSingleRun(fresh ?? adopted, params);
+      }
+    }
+    return serveSingleRun(adopted, params);
+  }
+
   // ── single-run view ─────────────────────────────────────────────────────
   const runId = params.get("runId")?.trim();
-  if (!runId) return bad("runId is required (or list=1&userId=)");
+  if (!runId) return bad("runId is required (or taskId= / list=1&userId=)");
 
   // Sweep-on-read housekeeping: fire due schedules (throttled) + sync the
   // cloud run (progress + chunks + terminal settle) + ensure the loop
@@ -170,6 +201,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
   }
 
+  return serveSingleRun(row, params);
+}
+
+/** Shared single-run view builder (runId + taskId branches). */
+async function serveSingleRun(
+  row: TaskRun,
+  params: URLSearchParams,
+): Promise<NextResponse> {
+
   const rawCursor = Number(params.get("cursor"));
   const cursor = Number.isFinite(rawCursor) ? Math.max(-1, Math.trunc(rawCursor)) : -1;
 
@@ -181,7 +221,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const cursorOut = Math.max(row.chunkSeq, lastSeq ? lastSeq.seq : 0);
 
   const artifactRows = await prisma.taskArtifact.findMany({
-    where: { runId },
+    where: { runId: row.id },
     select: ARTIFACT_SUMMARY_SELECT,
     orderBy: { createdAt: "asc" },
   });

@@ -35,6 +35,11 @@ import {
   pruneFinishedTurnHandoffs,
   TURN_HANDOFF_NOTE,
 } from "@/lib/agent/turn-handoff";
+import {
+  CLOUD_HANDOFF_NOTE,
+  cloudHandoffActive,
+  readCloudHandoffMeta,
+} from "@/lib/agent/turn-cloud-handoff";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -420,14 +425,6 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
-      const provider = opts.provider;
-      if (!provider?.apiKey || !provider.baseUrl) {
-        failTurn(
-          "The selected AI provider has no API key / base URL — sandbox runs need both (the runner calls the gateway from inside the sandbox).",
-        );
-        return;
-      }
-
       // Load the history BEFORE persisting the new user row, so the seed
       // never duplicates the prompt we are about to append.
       let history: Array<{ role: string; content: string }> = [];
@@ -446,6 +443,49 @@ export function useChat(options: UseChatOptions = {}) {
         });
       } catch (err) {
         console.warn("[useChat] detached: failed to persist the user message", err);
+      }
+
+      // ── CLOUD LANE (Trigger.dev connected) ────────────────────────────
+      // The explicit background toggle dispatches the turn DIRECTLY to the
+      // operator's trigger.dev Cloud project (durable agent_run) — it never
+      // runs in this browser, and reload/close cannot touch it. The LLM
+      // rides the app's keyless bridge (no provider-key/base-URL mismatch
+      // possible); the background-tasks strip owns the live status and
+      // syncRunToConversation lands the finished work here.
+      if (cloudHandoffActive()) {
+        try {
+          const { dispatchDetachedCloudTurn } = await import(
+            "@/lib/agent/turn-cloud-handoff"
+          );
+          await dispatchDetachedCloudTurn({
+            userId,
+            conversationId: convId,
+            prompt: opts.userMessage,
+            systemPrompt: opts.systemPrompt ?? "",
+            chatUrl: "", // bridge — no pinned provider gateway
+            model: opts.provider?.model ?? "",
+            temperature: opts.temperature ?? null,
+            preferredProviderId: useChatStore.getState().selectedProviderId,
+            title: opts.userMessage.replace(/\s+/g, " ").trim().slice(0, 60) || undefined,
+          });
+          // The turn is the cloud's problem now — free the composer; the
+          // strip above the input tracks the live run.
+          executionHub.finishExecution(execution.id, "completed");
+          return;
+        } catch (err) {
+          // Cloud dispatch failed (e.g. the key was disconnected) — fall
+          // through to the E2B lane, which reports its own honest failure.
+          console.warn("[useChat] cloud detached dispatch failed, falling back:", err);
+        }
+      }
+
+      // ── E2B LANE (legacy fallback) ─────────────────────────────────────
+      const provider = opts.provider;
+      if (!provider?.apiKey || !provider.baseUrl) {
+        failTurn(
+          "The selected AI provider has no API key / base URL — sandbox runs need both (the runner calls the gateway from inside the sandbox).",
+        );
+        return;
       }
 
       // Chat URL — resolved exactly like runtime.ts (noPrefix providers
@@ -915,7 +955,26 @@ export function useChat(options: UseChatOptions = {}) {
         }
       };
       try {
-        // HANDOFF FIRST: a pending turn-handoff meta means the closing app
+        // CLOUD HANDOFF FIRST: a pending cloud-handoff meta means the
+        // closing app dispatched this turn to Trigger.dev Cloud — it is NOT
+        // "interrupted". The run keeps executing server-side; adopt it
+        // (Dexie mirror + task token) so the background strip streams its
+        // progress and the finished work lands in this chat automatically.
+        const cloudMeta = readCloudHandoffMeta(turnId);
+        if (cloudMeta) {
+          await conversationService.settleInterruptedMessages(turnId, CLOUD_HANDOFF_NOTE);
+          await refreshRows();
+          try {
+            const { adoptCloudHandoffRun } = await import(
+              "@/lib/agent/turn-cloud-handoff"
+            );
+            await adoptCloudHandoffRun(userId, turnId);
+          } catch (err) {
+            console.warn("[useChat] cloud handoff adoption failed:", err);
+          }
+          return;
+        }
+        // E2B HANDOFF: a pending turn-handoff meta means the closing app
         // moved this turn into the sandbox — it is NOT "interrupted".
         const meta = readTurnHandoffMeta(turnId);
         if (meta) {

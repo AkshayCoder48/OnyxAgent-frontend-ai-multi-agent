@@ -18,7 +18,9 @@ import { Button } from "@/components/ui/button";
 import { useBusinessStore } from "@/stores/business-store";
 import { bt } from "@/lib/business/ui-text";
 import { cancelBusinessTurn, sendBusinessMessage } from "@/lib/business/orchestrator";
+import type { BusinessChatMessageRow } from "@/lib/business/types";
 import { AgentLogo } from "./agent-logos";
+import { BusinessActivityCluster } from "./business-activity-cluster";
 import { BusinessChatInput } from "./business-chat-input";
 import { BusinessMessageItem } from "./business-message-item";
 
@@ -27,12 +29,46 @@ const NEAR_BOTTOM_PX = 120;
 /** Goals shown as starter chips. */
 const MAX_GOAL_CHIPS = 3;
 
+/**
+ * Transcript entry — either a normal message row, or a CLUSTER of consecutive
+ * role:"activity" rows (Task 2-d / PRD §6: internal orchestration events stop
+ * interleaving the chat and render as one compact collapsible group instead).
+ */
+type ChatEntry =
+  | { kind: "message"; message: BusinessChatMessageRow }
+  | { kind: "activity-cluster"; key: string; messages: BusinessChatMessageRow[] };
+
+/** Group the chronological message list: every RUN of consecutive activity
+ *  rows becomes one cluster entry; everything else stays a message entry.
+ *  Pure — recomputed when the store swaps the messages array. */
+function groupChatEntries(messages: BusinessChatMessageRow[]): ChatEntry[] {
+  const entries: ChatEntry[] = [];
+  for (const message of messages) {
+    const last = entries[entries.length - 1];
+    if (message.role === "activity") {
+      if (last?.kind === "activity-cluster") {
+        last.messages.push(message); // consecutive activity row → same run
+      } else {
+        entries.push({ kind: "activity-cluster", key: `cluster-${message.id}`, messages: [message] });
+      }
+    } else {
+      entries.push({ kind: "message", message });
+    }
+  }
+  return entries;
+}
+
 export function BusinessChat() {
   const businessId = useBusinessStore((s) => s.activeBusinessId);
   const business = useBusinessStore((s) => s.activeBusiness);
   const messages = useBusinessStore((s) => s.chatMessages);
   const turnRunning = useBusinessStore((s) => s.turnRunning);
   const tasks = useBusinessStore((s) => s.tasks);
+
+  // Task 2-d: consecutive activity rows cluster into ONE compact component
+  // (memoized on the store's messages array — appendChatMessage swaps the
+  // array, so a growing live run re-groups and joins the last cluster).
+  const entries = React.useMemo(() => groupChatEntries(messages), [messages]);
 
   const reduceMotion = useReducedMotion();
   const entrance = reduceMotion
@@ -114,9 +150,13 @@ export function BusinessChat() {
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
             {hasMessages ? (
-              messages.map((message) => (
-                <motion.div key={message.id} {...entrance}>
-                  <BusinessMessageItem message={message} />
+              entries.map((entry) => (
+                <motion.div key={entry.kind === "message" ? entry.message.id : entry.key} {...entrance}>
+                  {entry.kind === "message" ? (
+                    <BusinessMessageItem message={entry.message} />
+                  ) : (
+                    <BusinessActivityCluster messages={entry.messages} />
+                  )}
                 </motion.div>
               ))
             ) : (

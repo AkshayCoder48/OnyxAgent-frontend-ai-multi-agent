@@ -686,6 +686,10 @@ export function ToolResultRenderer({ toolName, ...props }: ResultProps & { toolN
     case "manage_custom_tool":
     case "manage_subagent_chat":
     case "ocr_document":
+    // manage_business — the dedicated Business Mode card renderer lives in
+    // tool-call-card.tsx (tool-results/manage-business.tsx); this legacy
+    // switch keeps the generic fallback for any other consumer.
+    case "manage_business":
       return <GenericToolResult {...props} />;
     case "web_search":
       return <WebSearchResults {...props} />;

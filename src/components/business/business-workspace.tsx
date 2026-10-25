@@ -129,6 +129,50 @@ export function BusinessWorkspace({ tab }: { tab: BusinessTab }) {
   // openBusiness(null)) so the store, and any running turn, survive route
   // changes between tabs of the same business.
 
+  // ── TRIGGER.DEV CLOUD HANDOFF ADOPTION ──────────────────────────────────
+  // When the app closed mid-turn, pagehide dispatched the business turn to
+  // the operator's trigger.dev Cloud project. On return: adopt the run (Dexie
+  // mirror + task token), land the result when it finishes, and poll while
+  // it is still live. Closing THIS tab never cancels it (the cloud owns the
+  // lifecycle) — the interval just stops.
+  React.useEffect(() => {
+    if (!businessId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const tick = async () => {
+      try {
+        const { useAuthStore: auth } = await import("@/stores/auth-store");
+        const userId = auth.getState().user?.id;
+        if (!userId) return;
+        const mod = await import("@/lib/agent/turn-cloud-handoff");
+        if (!mod.readBusinessCloudHandoffMeta(businessId)) {
+          stop(); // nothing pending (landed / lost / never existed)
+          return;
+        }
+        const res = await mod.adoptBusinessCloudHandoff(userId, businessId);
+        if (cancelled) return;
+        if (res.landed || !res.run) {
+          stop(); // finished — result landed (or the run was lost honestly)
+        } else if (!timer) {
+          timer = setInterval(() => void tick(), 6000);
+        }
+      } catch {
+        // best-effort — the next mount retries the adoption
+      }
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, [businessId]);
+
   const loading = !business && (!opened || activeBusinessId === businessId);
   const notFound = opened && !business && activeBusinessId !== businessId;
 

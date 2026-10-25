@@ -3,34 +3,28 @@
 /**
  * AUTOMATIC TURN HANDOFF ("close and resume" — the zero-action path).
  *
- * The explicit "Sandbox runs" toggle (DetachedRunToggle) hands a WHOLE turn to
- * the sandbox headless runner before it starts. But users naturally test
- * "send a message, close the app, come back" WITHOUT toggling anything — the
- * in-browser loop then dies with the tab and the orphaned-settle path shows
- * the "task was interrupted… send a message to continue" note (the "fake
- * bait" report, 2026-10-22). This module closes that gap:
+ * When the app closes while a foreground turn is running, the in-browser
+ * loop dies with the tab. Closing the app is NOT a cancellation request —
+ * the durable lanes below make sure the work continues:
  *
- *   foreground turn running ──app closes──▶ pagehide:
- *     1. build the run config from IN-MEMORY state (provider + prompt +
- *        seed history from the execution store — all synchronous),
- *     2. persist a handoff meta record to localStorage (sync, unload-safe)
- *        + the detached-run store view (zustand persist → localStorage),
- *     3. markDetachedActive(the shared sandbox) so the pagehide auto-pause
- *        in lifecycle-client.ts skips it (our handler is registered FIRST —
- *        see providers.tsx mount order),
- *     4. sendBeacon /api/sandbox {action:"agent_start"} — the server
- *        deploys + launches the nohup runner and (since the fix) stamps a
- *        fresh 24h sandbox window.
+ *   1. TRIGGER.DEV CLOUD LANE (preferred, when a cloud key is connected):
+ *      pagehide dispatches EVERY running turn (chat + business) to the
+ *      operator's trigger.dev Cloud project as a durable agent_run — a tiny
+ *      beacon to /api/tasks/trigger + a localStorage meta. The cloud owns
+ *      the execution lifecycle from that moment; reload/close/navigate
+ *      cannot touch it. On return, use-chat adopts the run (Dexie mirror +
+ *      task token) and the background-tasks strip streams progress until
+ *      syncRunToConversation lands the finished work.
+ *      (turn-cloud-handoff.ts owns that machinery.)
  *
- *   app reopened ──▶ the orphaned-settle effect in use-chat.ts finds the
- *   meta: settles the stale streaming placeholder with a "moved to the
- *   sandbox" note, hydrates the Dexie run row + store view, and syncs —
- *   the DetachedRunStrip keeps polling until the finished work lands as a
- *   native assistant message (same sync path as explicit detached runs).
+ *   2. E2B LANE (legacy fallback, no cloud key): hand the NEWEST running
+ *      turn to the shared E2B sandbox's headless runner via a pagehide
+ *      beacon ({action:"agent_start"}). Fragile by nature (the beacon, the
+ *      sandbox discovery and the 24h window must all survive the unload) —
+ *      kept only for users who never connected Trigger.dev Cloud.
  *
- * WHY localStorage FOR THE META (not Dexie): pagehide cannot await
- * IndexedDB writes (same reasoning as detached-active.ts). The meta is
- * consumed once on return and rewritten per handoff — size stays tiny.
+ * The snapshot registry is pure in-memory state captured at send time and
+ * consumed synchronously at pagehide.
  */
 
 import { useEffect } from "react";
@@ -38,6 +32,14 @@ import { nanoid } from "nanoid";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { buildSeedMessages } from "@/lib/agent/detached-run";
 import { markDetachedActive } from "@/lib/agent/detached-active";
+import {
+  cloudHandoffActive,
+  dispatchBusinessTurnHandoffs,
+  dispatchCloudAgentRunBeacon,
+  prewarmCloudHandoff,
+  writeChatHandoffMeta,
+} from "@/lib/agent/turn-cloud-handoff";
+import { useAuthStore } from "@/stores/auth-store";
 import { sandboxIdStorageKey } from "@/lib/e2b/client";
 import { useDetachedRunStore } from "@/stores/detached-run-store";
 
@@ -45,8 +47,8 @@ import { useDetachedRunStore } from "@/stores/detached-run-store";
 // Snapshot registry (module-level; lives exactly as long as the tab)
 // ---------------------------------------------------------------------------
 
-/** Everything needed to hand a foreground turn to the sandbox runner —
- *  captured synchronously at send time, consumed synchronously at pagehide. */
+/** Everything needed to hand a foreground turn to a durable lane — captured
+ *  synchronously at send time, consumed synchronously at pagehide. */
 export interface TurnHandoffSnapshot {
   executionId: string;
   conversationId: string;
@@ -65,7 +67,7 @@ export interface TurnHandoffSnapshot {
 const snapshots = new Map<string, TurnHandoffSnapshot>();
 
 /** Register the CURRENT foreground turn for a possible close-handoff.
- *  Called from useChat.doSend right before the runtime starts. */
+ * Called from useChat.doSend right before the runtime starts. */
 export function registerTurnHandoff(snapshot: TurnHandoffSnapshot): void {
   snapshots.set(snapshot.executionId, snapshot);
 }
@@ -90,7 +92,9 @@ function listSnapshots(): TurnHandoffSnapshot[] {
 }
 
 // ---------------------------------------------------------------------------
-// Handoff meta (localStorage — the durable "a run is out there" pointer)
+// Handoff meta (localStorage — the durable "a run is out there" pointer,
+// consumed by the legacy E2B lane; the cloud lane keeps its own meta in
+// turn-cloud-handoff.ts)
 // ---------------------------------------------------------------------------
 
 const META_PREFIX = "onyx-turn-handoff:";
@@ -110,7 +114,7 @@ export interface TurnHandoffMeta {
   promptPreview: string;
 }
 
-/** Read the pending handoff record for a conversation (null when none). */
+/** Read the pending E2B handoff record for a conversation (null when none). */
 export function readTurnHandoffMeta(conversationId: string): TurnHandoffMeta | null {
   if (typeof window === "undefined") return null;
   try {
@@ -123,7 +127,7 @@ export function readTurnHandoffMeta(conversationId: string): TurnHandoffMeta | n
   }
 }
 
-/** Clear the handoff record (after the run synced / was stopped / lost). */
+/** Clear the E2B handoff record (after the run synced / was stopped / lost). */
 export function clearTurnHandoffMeta(conversationId: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -134,20 +138,19 @@ export function clearTurnHandoffMeta(conversationId: string): void {
 }
 
 /** The note appended to the stale streaming placeholder when the turn was
- *  handed to the sandbox (must contain "task was interrupted" — the settle
- *  pass uses that substring as its idempotency marker). */
+ * handed to the sandbox (must contain "task was interrupted" — the settle
+ * pass uses that substring as its idempotency marker). */
 export const TURN_HANDOFF_NOTE =
   "This task was interrupted by the app closing — it was handed to the E2B sandbox and keeps working there. The finished result appears below when it completes; send a message anytime.";
 
 // ---------------------------------------------------------------------------
-// Seed builder (synchronous — reads the execution store at pagehide)
+// Seed builders (synchronous — read the execution store at pagehide)
 // ---------------------------------------------------------------------------
 
-/** Seed = system + history BEFORE this turn's user message + the prompt.
- *  The in-flight partial assistant output is dropped: the runner re-runs the
- *  whole turn from the prompt and the synced result replaces it. */
-function buildHandoffSeed(snapshot: TurnHandoffSnapshot): Array<{
-  role: "system" | "user" | "assistant";
+/** History BEFORE this turn's user message, excluding the system prompt
+ *  (the cloud lane ships the system prompt separately in config). */
+export function handoffHistory(snapshot: TurnHandoffSnapshot): Array<{
+  role: "user" | "assistant";
   content: string;
 }> {
   const store = executionHub.getStore(snapshot.executionId);
@@ -162,11 +165,22 @@ function buildHandoffSeed(snapshot: TurnHandoffSnapshot): Array<{
       break;
     }
   }
-  const history = (lastUserIdx >= 0 ? conversational.slice(0, lastUserIdx) : conversational).map((m) => ({
+  const history = lastUserIdx >= 0 ? conversational.slice(0, lastUserIdx) : conversational;
+  return history.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content ?? "",
   }));
-  return buildSeedMessages(snapshot.systemPrompt, history, snapshot.prompt);
+}
+
+/** Seed = system + history BEFORE this turn's user message + the prompt
+ *  (the E2B lane's runner config consumes the full seed). The in-flight
+ *  partial assistant output is dropped: the runner re-runs the whole turn
+ *  from the prompt and the synced result replaces it. */
+function buildHandoffSeed(snapshot: TurnHandoffSnapshot): Array<{
+  role: "system" | "user" | "assistant";
+  content: string;
+}> {
+  return buildSeedMessages(snapshot.systemPrompt, handoffHistory(snapshot), snapshot.prompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +200,15 @@ async function prewarmE2BKey(): Promise<void> {
     const key = await settingsService.getDecryptedSandboxKey(userId);
     if (key) cachedE2BKey = key;
   } catch {
-    // best-effort — no key ⇒ no handoff (the honest interrupted note remains)
+    // best-effort — no key ⇒ the cloud lane still works (server env E2B key)
   }
+}
+
+/** Refresh everything the pagehide handlers need synchronously: the E2B
+ *  key, the cloud-mode flag and the rotational key pool. */
+async function prewarmAll(): Promise<void> {
+  const userId = useAuthStore.getState().user?.id;
+  await Promise.all([prewarmE2BKey(), prewarmCloudHandoff(userId)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +219,41 @@ function onWindowPageHide(): void {
   try {
     pruneFinishedTurnHandoffs();
     const running = listSnapshots();
+
+    // ── LANE 1: TRIGGER.DEV CLOUD (preferred) ─────────────────────────────
+    // Every running chat turn becomes its OWN durable cloud run — reload,
+    // close and navigate cannot interrupt them. Business turns dispatch
+    // through the same lane (dispatchBusinessTurnHandoffs).
+    if (cloudHandoffActive()) {
+      if (running.length > 0) {
+        // Up to 3 newest turns per pagehide (beacon budget + sanity cap —
+        // a normal app has at most one foreground turn per conversation).
+        const newest = [...running].sort((a, b) => b.startedAt - a.startedAt).slice(0, 3);
+        for (const snap of newest) {
+          if (!snap.conversationId) continue;
+          const dispatched = dispatchCloudAgentRunBeacon({
+            userId: snap.userId,
+            prompt: snap.prompt,
+            systemPrompt: snap.systemPrompt,
+            history: handoffHistory(snap),
+            chatUrl: snap.chatUrl,
+            apiKey: snap.apiKey,
+            model: snap.model,
+            temperature: snap.temperature,
+            conversationId: snap.conversationId,
+            title: snap.prompt.replace(/\s+/g, " ").trim().slice(0, 60) || "Cloud run",
+            e2bApiKey: cachedE2BKey,
+          });
+          if (dispatched) writeChatHandoffMeta(snap.conversationId, dispatched, snap.prompt);
+        }
+        // The snapshots are spent — the cloud owns these turns now.
+        snapshots.clear();
+      }
+      dispatchBusinessTurnHandoffs(cachedE2BKey);
+      return; // cloud lane handled everything — no E2B beacon
+    }
+
+    // ── LANE 2: E2B SANDBOX (legacy, no cloud key) ────────────────────────
     if (running.length === 0 || !cachedE2BKey) return;
 
     // ONE runner per sandbox — hand off only the NEWEST running turn (a
@@ -297,14 +353,15 @@ function installTurnHandoff(): () => void {
 // React binding — mount ONCE in providers, ABOVE SandboxLifecycleSync
 // ---------------------------------------------------------------------------
 
-/** Pre-warms the E2B key while visible + installs the pagehide handoff.
- *  Mount order matters: this component's listener must be registered BEFORE
- *  SandboxLifecycleSync's auto-pause so markDetachedActive is visible to it. */
+/** Pre-warms the E2B key + cloud mode + key pool while visible + installs
+ *  the pagehide handoff. Mount order matters: this component's listener must
+ *  be registered BEFORE SandboxLifecycleSync's auto-pause so
+ *  markDetachedActive is visible to it. */
 export function TurnHandoffController(): null {
   useEffect(() => {
-    void prewarmE2BKey();
+    void prewarmAll();
     const onVisible = () => {
-      if (document.visibilityState === "visible") void prewarmE2BKey();
+      if (document.visibilityState === "visible") void prewarmAll();
     };
     document.addEventListener("visibilitychange", onVisible);
     const uninstall = installTurnHandoff();

@@ -247,6 +247,7 @@ const EN: Record<string, string> = {
   "chat.decisionFallback": "Decision service unavailable — using native routing",
   "chat.decisionUsed": "Routed via decision service ({label}, {confidence}% confidence)",
   "chat.streaming": "Thinking…",
+  "chat.cloudRun": "Trigger.dev Cloud run",
   "chat.suggestion": "Suggestion",
   "chat.noAgents": "This business has no specialist agents yet — open the Swarm tab to create some.",
   "chat.mentionUnavailable": "{name} is {status} — mention skipped",
@@ -438,6 +439,8 @@ const EN: Record<string, string> = {
   "toast.changesRequested": "Changes requested",
   "toast.memorySaved": "Memory saved",
   "toast.turnCancelled": "Turn cancelled",
+  "toast.bgTurnActive":
+    "A background turn from your last session is still running — its result lands in this chat shortly.",
   "toast.businessCreated": "Business created",
   "toast.businessDeleted": "Business deleted",
   "toast.providerAdded": "Pollinations provider added — you're ready to go",
@@ -486,6 +489,9 @@ const PL: Record<string, string> = {
   "settings.title": "Ustawienia biznesu",
   "export.title": "Eksport",
   "browser.title": "Przeglądarka i aktywność",
+  "chat.cloudRun": "Zadanie w tle (Trigger.dev Cloud)",
+  "toast.bgTurnActive":
+    "Zadanie w tle z poprzedniej sesji nadal działa — jego wynik wkrótce pojawi się na czacie.",
 };
 
 /** Current UI locale for business copy ("en" | "pl"). */

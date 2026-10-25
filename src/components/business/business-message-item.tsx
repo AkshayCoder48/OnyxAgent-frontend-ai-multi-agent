@@ -231,12 +231,18 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
   if (message.role === "main") {
     const streaming = message.metadata?.streaming === true;
     const usage = message.metadata?.usage;
+    const cloudRun = message.metadata?.background === true;
     return (
       <div className="flex items-start gap-3" aria-busy={streaming || undefined}>
         <AgentLogo logo="orb" label={bt("ws.mainAgent")} className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="text-xs font-semibold text-foreground">{bt("ws.mainAgent")}</span>
+            {cloudRun && (
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-px text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                {bt("chat.cloudRun")}
+              </span>
+            )}
             {streaming && (
               <span className="text-[11px] text-muted-foreground" aria-live="polite">
                 {bt("chat.streaming")}
