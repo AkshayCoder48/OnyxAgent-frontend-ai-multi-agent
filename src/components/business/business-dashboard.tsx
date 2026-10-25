@@ -91,9 +91,10 @@ import { useAuth } from "@/hooks";
 import { useAuthStore } from "@/stores/auth-store";
 import { aiProviderService } from "@/lib/services";
 import {
-  addFreePollinationsProvider,
+  addPollinationsProvider,
   migrateLegacyPollinationsGateway,
 } from "@/lib/business/llm";
+import { ROUTES } from "@/lib/constants";
 import { cn, getErrorMessage, timeAgo } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -197,8 +198,10 @@ export function BusinessDashboard() {
   const refreshProviders = React.useCallback(async () => {
     if (!authResolved || !userId) return;
     try {
-      // Self-limiting migration: repoint a Pollinations provider stuck on the
-      // keyless-dead gen.pollinations.ai gateway to the legacy text endpoint.
+      // Self-limiting migration: move a "Pollinations" provider still on the
+      // retired keyless text.pollinations.ai endpoint to the authenticated
+      // gen.pollinations.ai gateway (or drop the dead row when no connection
+      // exists to attach a key from).
       await migrateLegacyPollinationsGateway(userId);
       const rows = await aiProviderService.list(userId);
       setHasProvider(rows.length > 0);
@@ -243,11 +246,15 @@ export function BusinessDashboard() {
     if (!userId || addingProvider) return;
     setAddingProvider(true);
     try {
-      await addFreePollinationsProvider(userId);
+      await addPollinationsProvider(userId);
       toast.success(bt("toast.providerAdded"));
       await refreshProviders();
     } catch (e) {
-      toast.error(getErrorMessage(e));
+      // Not connected (or expired) — the official gen.pollinations.ai API
+      // needs the user's own key. Route to the Pollinations settings page;
+      // connecting there auto-syncs the provider into AI Providers.
+      toast.info(getErrorMessage(e));
+      router.push(ROUTES.SETTINGS_POLLINATIONS);
     } finally {
       setAddingProvider(false);
     }

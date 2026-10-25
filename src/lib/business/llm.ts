@@ -14,10 +14,16 @@
 //   - businessWebSearch(query, signal?)     real web search via /api/ddg-search
 // ============================================================================
 
-import { aiProviderService } from "@/lib/services";
+import { aiProviderService, settingsService } from "@/lib/services";
 import { useAuthStore } from "@/stores";
 import { useChatStore } from "@/stores/chat-store";
 import { extractDelta, parseSSEStream } from "@/lib/agent/runtime";
+import {
+  POLLINATIONS_TEXT_BASE_URL,
+  textModelIds,
+  upsertTextProvider,
+} from "@/lib/pollinations/provider-sync";
+import { fetchPollinationsModels } from "@/lib/pollinations/api";
 import type { AIProviderRow } from "@/lib/db";
 
 // ---------------------------------------------------------------------------
@@ -198,7 +204,7 @@ export async function resolveBusinessLlmConfig(
   const providers = await aiProviderService.list(userId);
   if (providers.length === 0) {
     throw new Error(
-      "No AI provider configured — add one in Settings → Config (or use the free Pollinations provider from the business wizard) to use Business Mode.",
+      "No AI provider configured — add one in Settings → Config, or connect your Pollinations account from the business wizard (the official gen.pollinations.ai API uses your own key) to use Business Mode.",
     );
   }
 
@@ -232,9 +238,11 @@ export async function resolveBusinessLlmConfig(
   }
 
   const apiKey = (await aiProviderService.getDecryptedApiKey(provider.id)) ?? "";
-  // Keyless providers (e.g. the free Pollinations tier) are allowed: an empty
-  // key simply means the Authorization header is omitted — the provider then
-  // serves its anonymous tier instead of rejecting an invalid bearer token.
+  // An empty key is still allowed (some gateways serve anonymous tiers): the
+  // Authorization header is then omitted. NOTE — the official Pollinations
+  // gateway (gen.pollinations.ai) retired its keyless tier: requests without
+  // a Bearer key get HTTP 401, which the retry ladder classifies as permanent
+  // (the honest fix is connecting an account, not retrying).
 
   let model: string | undefined = override?.model;
   if (!model && selectedModel && fromChatStore) model = selectedModel;
@@ -717,52 +725,83 @@ export async function businessLlmStream(
 }
 
 // ---------------------------------------------------------------------------
-// Free Pollinations provider (seeding + gateway migration)
+// Pollinations provider — the OFFICIAL gen.pollinations.ai gateway (auth)
 // ---------------------------------------------------------------------------
 
 /**
- * The keyless Pollinations text endpoint — an OpenAI-compatible POST target
- * used AS-IS (no /chat/completions suffix → providers seeded with it set
- * no_prefix: true).
- *
- * Why not gen.pollinations.ai/v1: Pollinations' new gateway retired its
- * keyless anonymous tier mid-2025 — keyless requests get "HTTP 401: A valid
- * API key is required" (streaming requests fail INSTANTLY, which used to kill
- * every discovery draft at "0 characters streamed"). The legacy text endpoint
- * still serves keyless traffic, streaming included.
+ * The user's connected Pollinations (BYOP) key, read straight from the
+ * encrypted settings store — the pollinations zustand store is only
+ * initialized inside the settings UI, so business flows must not depend on
+ * it. Null when not connected or the connection expired.
  */
-export const FREE_POLLINATIONS_BASE_URL = "https://text.pollinations.ai/openai";
-
-/** Seed the free keyless Pollinations provider (wizard/dashboard CTA). */
-export async function addFreePollinationsProvider(userId: string): Promise<void> {
-  await aiProviderService.create(userId, {
-    name: "Pollinations",
-    base_url: FREE_POLLINATIONS_BASE_URL,
-    api_key: "", // keyless — Pollinations legacy text tier
-    models: ["openai"],
-    is_active: true,
-    model_type: "chat",
-    no_prefix: true,
-  });
+async function connectedPollinationsKey(userId: string): Promise<string | null> {
+  const { token, meta } = await settingsService.getPollinationsConnection(userId);
+  if (!token) return null;
+  const expired =
+    !!meta?.expiresAt && new Date(meta.expiresAt).getTime() <= Date.now();
+  return expired ? null : token;
 }
 
 /**
- * One-time, self-limiting migration: a "Pollinations" provider still pointing
- * at the keyless-dead gen.pollinations.ai gateway is repointed to the legacy
- * text endpoint. No-op once the base URL no longer matches (so it is cheap to
- * call on every provider refresh).
+ * Add (or refresh) the official Pollinations text provider — the NEW
+ * authenticated gateway (user directive: real API, with auth):
+ *
+ *   base   https://gen.pollinations.ai/v1  (the app appends /chat/completions)
+ *   auth   Bearer <the user's connected Pollinations key>
+ *   models the LIVE catalogue (publisher/model ids rotate — never hardcoded;
+ *           the same source the Pollinations settings UI uses)
+ *
+ * Requires the user to be connected (Settings → Pollinations): the BYOP
+ * connection key IS the API key — there is no keyless tier anymore. Throws a
+ * friendly error when not connected; callers route the user to the
+ * Pollinations settings page. Returns the live model count now on the row.
+ */
+export async function addPollinationsProvider(userId: string): Promise<number> {
+  const token = await connectedPollinationsKey(userId);
+  if (!token) {
+    throw new Error(
+      "Connect your Pollinations account first (Settings → Pollinations) — the official gen.pollinations.ai API requires your own key.",
+    );
+  }
+  const models = await fetchPollinationsModels();
+  const result = await upsertTextProvider(userId, token, models);
+  return result.modelCount;
+}
+
+/**
+ * One-time, self-limiting migration — now in the NEW-API direction: a
+ * "Pollinations" provider still pointing at the RETIRED keyless
+ * text.pollinations.ai endpoint is moved to the authenticated gateway.
+ *
+ *   connected → repoint to gen.pollinations.ai/v1, attach the connection
+ *               key, refresh models from the live catalogue
+ *   not conn. → delete the dead row (the keyless tier is gone — that base
+ *               URL can never authenticate with the new API)
+ *
+ * No-op once no legacy row matches (cheap to call on every provider refresh).
  */
 export async function migrateLegacyPollinationsGateway(userId: string): Promise<void> {
   try {
     const providers = await aiProviderService.list(userId);
     const legacy = providers.find(
-      (p) => p.name === "Pollinations" && p.base_url.includes("gen.pollinations.ai"),
+      (p) => p.name === "Pollinations" && p.base_url.includes("text.pollinations.ai"),
     );
-    if (legacy) {
+    if (!legacy) return;
+    const token = await connectedPollinationsKey(userId);
+    if (token) {
+      const models = await fetchPollinationsModels();
       await aiProviderService.update(legacy.id, {
-        base_url: FREE_POLLINATIONS_BASE_URL,
-        no_prefix: true,
+        base_url: POLLINATIONS_TEXT_BASE_URL,
+        api_key: token,
+        models: textModelIds(models),
+        no_prefix: false,
+        is_active: true,
       });
+    } else {
+      // Keyless tier is retired — a legacy row with no key to attach can
+      // never work again. Remove it so the honest provider gate + connect
+      // CTA take over.
+      await aiProviderService.delete(legacy.id);
     }
   } catch {
     // Best-effort — provider listing errors surface through the UI paths.

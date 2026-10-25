@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { settingsService } from "@/lib/services";
+import { useAuthStore } from "@/stores/auth-store";
 
 /**
  * AI-GENERATED STATUS PHRASES (user directive 2026-10-02).
@@ -49,6 +51,27 @@ function cacheKey(activity: StatusActivity, tool: string, task: string): string 
   return `${activity}|${tool}|${task.slice(0, 200)}`;
 }
 
+/** The user's connected Pollinations (BYOP) key for the status-phrase LLM
+ * call — read straight from the encrypted settings store (the pollinations
+ * zustand store is only initialized inside the settings UI, so this hook
+ * must not depend on it). Best-effort: no connection / expired / any error
+ * resolves undefined, and /api/status-caption then answers its local
+ * fallback (the official gen.pollinations.ai API requires a key). */
+async function connectedPollinationsKey(): Promise<string | undefined> {
+  try {
+    const userId = useAuthStore.getState().user?.id;
+    if (!userId) return undefined;
+    const { token, meta } = await settingsService.getPollinationsConnection(userId);
+    if (!token) return undefined;
+    if (meta?.expiresAt && new Date(meta.expiresAt).getTime() <= Date.now()) {
+      return undefined;
+    }
+    return token;
+  } catch {
+    return undefined;
+  }
+}
+
 function fetchPhrases(
   key: string,
   activity: StatusActivity,
@@ -59,15 +82,19 @@ function fetchPhrases(
   if (cached) return Promise.resolve(cached);
   const existing = INFLIGHT.get(key);
   if (existing) return existing;
-  const p = fetch("/api/status-caption", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      activity: activity === "reasoning" ? "thinking" : activity,
-      tool: tool || undefined,
-      task: task || undefined,
-    }),
-  })
+  const p = connectedPollinationsKey()
+    .then((pollinationsKey) =>
+      fetch("/api/status-caption", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          activity: activity === "reasoning" ? "thinking" : activity,
+          tool: tool || undefined,
+          task: task || undefined,
+          key: pollinationsKey,
+        }),
+      }),
+    )
     .then(async (res) => {
       if (!res.ok) return null;
       const data = (await res.json().catch(() => null)) as {

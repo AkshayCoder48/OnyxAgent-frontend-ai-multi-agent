@@ -11,15 +11,31 @@
  * own intermediate steps instead of cycling the same canned lines for
  * every conversation.
  *
- * UPSTREAM: the keyless Pollinations text API
- * (https://text.pollinations.ai/{prompt}?json=true) — no SDK, no key, no
- * account. The whole prompt (system rules + turn context + the strict-JSON
- * instruction) rides in the URL like the reference python snippets; a
- * random seed keeps batches fresh. A second attempt with a different seed
- * rescues a malformed first answer.
+ * UPSTREAM: the OFFICIAL Pollinations gen API — POST
+ * https://gen.pollinations.ai/v1/chat/completions (OpenAI-compatible) with
+ * Bearer auth (the real, authenticated gateway; the old keyless
+ * text.pollinations.ai GET endpoint is retired from this app).
+ *
+ * KEY CHAIN (first match wins):
+ *   1. The caller's connected Pollinations key — POST body `key` (BYOP —
+ *      the user's own account pays; the client sends it from the encrypted
+ *      settings store, NEVER logged).
+ *   2. The server's POLLINATIONS_API_KEY env var (app-owner key).
+ *   3. No key → a KEYLESS last-resort attempt on the free nano model (the
+ *      gateway currently serves anonymous non-streaming traffic on free
+ *      models; streaming is the key-required surface). A tightened anonymous
+ *      tier answers 401 INSTANTLY, so the local fallback still never
+ *      blocks — this keeps AI phrases alive for users who have not
+ *      connected yet.
+ *
+ * MODELS: official publisher/model ids from the live catalogue —
+ * openai/gpt-5.4-nano (fast tier) first, openai/gpt-4o-mini as the second
+ * attempt. A second attempt with the alternate model rescues a malformed
+ * first answer.
  *
  * Contract:
- *   POST { activity: "thinking" | "working", task?: string, tool?: string }
+ *   POST { activity: "thinking" | "working", task?: string, tool?: string,
+ *          key?: string }
  *   →   { phrases: string[], source: "ai" | "fallback" }
  *
  * Always answers 200 with usable phrases — on any upstream failure the
@@ -34,21 +50,21 @@ export const dynamic = "force-dynamic";
 // completion, but the guard costs nothing.
 export const maxDuration = 60;
 
-/** Pollinations keyless text endpoint (the user-provided API). */
-const POLLINATIONS_TEXT_URL = "https://text.pollinations.ai";
-/** Primary model — the fast tier answers tiny JSON completions in seconds;
- *  the default tier is the second attempt (keyless latency varies 3-14s
- *  with the anonymous rate limiter, so the client NEVER blocks on this). */
-const POLLINATIONS_MODELS = ["openai-fast", "openai"];
+/** The official Pollinations gen gateway — OpenAI-compatible chat endpoint. */
+const GEN_CHAT_URL = "https://gen.pollinations.ai/v1/chat/completions";
+/** Primary model — the fast nano tier answers tiny JSON completions in
+ *  seconds; the 4o-mini tier is the second attempt. Official publisher/model
+ *  ids (the catalog migrated to publisher-prefixed names). */
+const POLLINATIONS_MODELS = ["openai/gpt-5.4-nano", "openai/gpt-4o-mini"];
 /** Per-attempt timeout — a phrase batch must never hold a request open. */
 const UPSTREAM_TIMEOUT_MS = 15_000;
-/** Max attempts (fresh seed each) before the local fallback answers. */
+/** Max attempts (alternate model each) before the local fallback answers. */
 const MAX_ATTEMPTS = 2;
 
 /** Server-side phrase memo (60s): identical (activity, task, tool) requests
  *  — remounting status lines, multiple open clients on the same turn —
- *  share ONE upstream completion instead of hammering the keyless tier's
- *  rate limiter. */
+ *  share ONE upstream completion instead of paying twice. Only successful
+ *  AI results are memoized (fallback batches stay fresh for a later key). */
 const MEMO_TTL_MS = 60_000;
 const phraseMemo = new Map<string, { at: number; phrases: string[] }>();
 
@@ -88,6 +104,19 @@ interface StatusCaptionRequest {
   activity?: unknown;
   task?: unknown;
   tool?: unknown;
+  /** The caller's connected Pollinations key (BYOP). Optional — see the
+   *  key chain in the header comment. Never logged, never persisted. */
+  key?: unknown;
+}
+
+/** Light shape validation for a caller-supplied Pollinations key
+ *  (sk_/pk_ secret keys — per the official docs). Trusted shape only; the
+ *  upstream is the real authenticator. */
+function sanitizeCallerKey(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const key = raw.trim();
+  if (!/^(sk|pk)_[A-Za-z0-9_-]{8,190}$/.test(key)) return null;
+  return key;
 }
 
 /** Sanitize one model phrase down to a safe status-line string.
@@ -132,6 +161,51 @@ function extractPhrases(content: string): string[] | null {
   return null;
 }
 
+/** One chat completion against the official gen gateway. With an apiKey
+ *  the Bearer header authenticates (BYOP/app-owner); without one the request
+ *  rides the gateway's anonymous tier (currently keyless-OK on free models,
+ *  non-streaming). Returns the assistant text, or null on any failure (the
+ *  caller's attempt loop decides what happens next). Only model + messages
+ *  are sent — the gateway drops unsupported per-model parameters itself, so
+ *  no temperature/max_tokens fields are risked. */
+async function genChatCompletion(
+  apiKey: string | null,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch(GEN_CHAT_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        // Required: the gateway rejects anonymous (keyless) traffic with 401
+        // when no User-Agent is present (node's fetch sends none by default).
+        "user-agent": "OnyxAgent/1.0 (status-caption)",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json().catch(() => null)) as {
+      choices?: Array<{ message?: { content?: unknown } }>;
+    } | null;
+    const content = data?.choices?.[0]?.message?.content;
+    return typeof content === "string" && content.trim() ? content : null;
+  } catch {
+    return null; // timeout / network — the attempt loop handles it
+  }
+}
+
 export async function POST(
   request: Request,
 ): Promise<NextResponse> {
@@ -162,10 +236,13 @@ export async function POST(
     .filter(Boolean)
     .join("\n");
 
-  // Pollinations keyless GET — the ENTIRE prompt rides in the URL (the
-  // user-provided API shape). A fresh seed per attempt keeps batches from
-  // repeating; json=true nudges the model toward JSON output.
-  const prompt = `${SYSTEM_PROMPT}\n\n${userPrompt}\n\nReturn only JSON: {"phrases":["phrase one","phrase two","phrase three","phrase four"]}`;
+  // Key chain: the caller's connected key → the app-owner env key → null
+  // (a keyless attempt on the free nano model — see the header comment).
+  const apiKey =
+    sanitizeCallerKey(body.key) ?? (() => {
+      const envKey = process.env.POLLINATIONS_API_KEY?.trim();
+      return envKey || null;
+    })();
 
   // Hot memo — a batch for this exact turn context was just generated.
   const key = memoKey(activity, task, tool);
@@ -175,32 +252,23 @@ export async function POST(
   }
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    try {
-      const model = POLLINATIONS_MODELS[attempt] ?? POLLINATIONS_MODELS[0]!;
-      const seed = Math.floor(Math.random() * 1_000_000);
-      const url =
-        `${POLLINATIONS_TEXT_URL}/${encodeURIComponent(prompt)}` +
-        `?json=true&seed=${seed}&model=${model}`;
-      const res = await fetch(url, {
-        method: "GET",
-        headers: { accept: "text/plain" },
-        cache: "no-store",
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-      });
-      if (!res.ok) continue;
-      const content = (await res.text()).slice(0, 4_000);
-      const phrases = extractPhrases(content);
-      if (phrases && phrases.length >= 2) {
-        if (phraseMemo.size > 128) {
-          // prune — stale entries only
-          const cutoff = Date.now() - MEMO_TTL_MS;
-          for (const [k, v] of phraseMemo) if (v.at < cutoff) phraseMemo.delete(k);
-        }
-        phraseMemo.set(key, { at: Date.now(), phrases });
-        return NextResponse.json({ phrases, source: "ai" });
+    const model = POLLINATIONS_MODELS[attempt] ?? POLLINATIONS_MODELS[0]!;
+    const content = await genChatCompletion(
+      apiKey,
+      model,
+      SYSTEM_PROMPT,
+      userPrompt,
+    );
+    if (!content) continue;
+    const phrases = extractPhrases(content);
+    if (phrases && phrases.length >= 2) {
+      if (phraseMemo.size > 128) {
+        // prune — stale entries only
+        const cutoff = Date.now() - MEMO_TTL_MS;
+        for (const [k, v] of phraseMemo) if (v.at < cutoff) phraseMemo.delete(k);
       }
-    } catch {
-      // try the next model/seed / fall through to the fallback below
+      phraseMemo.set(key, { at: Date.now(), phrases });
+      return NextResponse.json({ phrases, source: "ai" });
     }
   }
 
