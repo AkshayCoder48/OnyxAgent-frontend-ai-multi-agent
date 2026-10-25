@@ -20,6 +20,7 @@ export const ROUTES = {
   DASHBOARD: "/dashboard",
   CHAT: "/chat",
   BUSINESS: "/business",
+  BROWSER: "/browser",
   KNOWLEDGE_BASE: "/knowledge-base",
   PROFILE: "/profile",
   SETTINGS: "/settings",

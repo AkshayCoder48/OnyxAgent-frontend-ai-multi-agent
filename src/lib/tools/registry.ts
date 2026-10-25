@@ -83,6 +83,10 @@ export interface ToolDefinition<TArgs = Record<string, unknown>> {
   requires_approval?: boolean;
   /** Optional category for the catalog UI. */
   category?: string;
+  /** HIDDEN (umbrella consolidation): the tool stays REGISTERED and
+   *  executable (getTool still returns it), but `listTools()` — the
+   *  MODEL-VISIBLE surface — skips it. Set via `hideTool()`. */
+  hidden?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +95,9 @@ export interface ToolDefinition<TArgs = Record<string, unknown>> {
 
 const _registry = new Map<string, ToolDefinition>();
 const _order: string[] = [];
+/** Names hidden from the model-visible list — by name, so tools that register
+ *  LATER (e.g. per-turn MCP meta-tools) are covered too. */
+const _hiddenNames = new Set<string>();
 
 /**
  * Register a tool. Idempotent for re-registration (HMR / StrictMode
@@ -117,6 +124,9 @@ export function registerTool<TArgs = Record<string, unknown>>(
     handler: handler as ToolHandler,
     requires_approval,
     category,
+    // Umbrella consolidation: honor a pre-marked hide (name-level) even for
+    // late registrations (dynamic MCP meta-tools).
+    hidden: _hiddenNames.has(name) || undefined,
   });
   _order.push(name);
 }
@@ -162,14 +172,33 @@ export function unregisterTool(name: string): boolean {
   return deleted;
 }
 
-/** Get a single tool by name (or undefined). */
+/** Get a single tool by name (or undefined). Hidden tools ARE returned —
+ *  they remain executable (umbrella dispatch, legacy calls); only the
+ *  model-visible list skips them. */
 export function getTool(name: string): ToolDefinition | undefined {
   return _registry.get(name);
 }
 
-/** List all registered tools in registration order. */
+/** Hide a tool from the model-visible list (`listTools()`), keeping it
+ *  registered + executable. Idempotent; works for tools that are not yet
+ *  registered (the hide latches by name). */
+export function hideTool(name: string): void {
+  _hiddenNames.add(name);
+  const def = _registry.get(name);
+  if (def) def.hidden = true;
+}
+
+/** True when a tool name is hidden from the model-visible surface. */
+export function isToolHidden(name: string): boolean {
+  return _hiddenNames.has(name);
+}
+
+/** List the MODEL-VISIBLE tools in registration order (hidden tools are
+ *  skipped — the umbrella consolidation surface). */
 export function listTools(_ctx?: ToolContext): ToolDefinition[] {
-  return _order.map((n) => _registry.get(n)!).filter(Boolean);
+  return _order
+    .map((n) => _registry.get(n)!)
+    .filter((t) => Boolean(t) && !t.hidden && !_hiddenNames.has(t.name));
 }
 
 /** True if a tool with the given name is registered. */
@@ -181,4 +210,5 @@ export function hasTool(name: string): boolean {
 export function clearTools(): void {
   _registry.clear();
   _order.length = 0;
+  _hiddenNames.clear();
 }

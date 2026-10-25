@@ -31,6 +31,7 @@ export interface BrowserLiveState {
   seq: number;
   frameSeq: number;
   tab: string | null;
+  tabCount: number;
   url: string;
   title: string;
   viewport: { width: number; height: number };

@@ -15,12 +15,12 @@ import { toast } from "sonner";
 import { Check, ChevronRight, Edit3, FileText, Loader2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { MarkdownContent } from "@/components/chat/markdown-content";
 import { useAuthStore } from "@/stores/auth-store";
 import { useBusinessStore } from "@/stores/business-store";
 import { businessApprovalService, businessDraftService, businessEventService } from "@/lib/business/data";
 import { bt } from "@/lib/business/ui-text";
 import type { ApprovalDecision } from "@/lib/business/types";
-import { renderBusinessMarkdown } from "./business-message-item";
 
 /** Statuses that still accept a user decision. */
 const ACTIONABLE_STATUSES = new Set(["draft", "in_review", "changes_requested"]);
@@ -103,7 +103,9 @@ export function BusinessDraftCard({ draftId }: { draftId: string }) {
       </div>
 
       <div className="scrollbar-thin mt-3 max-h-60 overflow-y-auto rounded-lg bg-muted/30 p-3 text-sm">
-        {renderBusinessMarkdown(draft.content, { keyPrefix: `draftcard-${draft.id}` })}
+        {/* Full chat markdown stack (tables, headings, highlighted code, GFM)
+            — drafts are completed content, so no streaming props. */}
+        <MarkdownContent content={draft.content} />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">

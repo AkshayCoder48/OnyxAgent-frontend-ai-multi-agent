@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "OnyxAgent",
     short_name: "OnyxAgent",
-    description: "AI Agent Chat App with 51 tools, code execution, web search, file management, and more.",
+    description: "AI Agent Chat App with 22 consolidated tools (50+ actions), code execution, web search, file management, and more.",
     start_url: "/",
     display: "standalone",
     orientation: "portrait",

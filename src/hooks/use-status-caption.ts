@@ -1,4 +1,5 @@
 import type { ChatMessage } from "@/types";
+import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 
 /**
  * useStatusCaption — CAPTION GENERATION for the live status circle (user
@@ -143,7 +144,10 @@ export function statusCaptionFor(message: ChatMessage): string | null {
     const p = parts[i];
     if (!p || p.type !== "tool" || !p.toolCall) continue;
     if (p.toolCall.status === "running" || p.toolCall.status === "pending") {
-      return toolCaption(p.toolCall.name, p.toolCall.args);
+      // UMBRELLA RESOLUTION (tool consolidation): an umbrella call
+      // (`files {action:"read_file"}`) narrates with the granular caption.
+      const eff = resolveEffectiveToolCall(p.toolCall);
+      return toolCaption(eff.name, eff.args);
     }
     break; // the LAST tool part is settled — no live tool
   }

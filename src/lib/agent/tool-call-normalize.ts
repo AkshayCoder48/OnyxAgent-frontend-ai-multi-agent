@@ -327,9 +327,10 @@ export function unknownToolResult(
       `. Do not retry '${name}' — it is not registered.`,
     did_you_mean: suggestions.map((s) => s.name),
     next_step:
-      `If unsure of the real tool surface, call analyze_workspace — its ` +
-      `available_tools field lists every registered tool — or read ` +
-      `/home/user/Onyx.md. Never fabricate a tool to work around this error.`,
+      `If unsure of the real tool surface, call the workspace tool with ` +
+      `action "analyze_workspace" — its available_tools field lists every ` +
+      `registered tool — or read /home/user/Onyx.md. Never fabricate a tool ` +
+      `to work around this error.`,
   };
 
   if (top?.viaParam) {

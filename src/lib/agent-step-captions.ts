@@ -78,6 +78,22 @@ const EXACT_CAPTIONS: Record<string, string> = {
   preview_image: "Showing an image",
   inspect_image: "Inspecting an image",
   media_generation: "Using Pollinations AI",
+  // Umbrella tools (tool consolidation) — generic captions for callers that
+  // see the umbrella name before action resolution; resolved calls hit the
+  // granular entries above.
+  files: "Working with files",
+  web: "Searching and reading the web",
+  code_exec: "Running code",
+  subagents: "Delegating to a subagent",
+  schedule: "Scheduling tasks",
+  integrations: "Using integrations",
+  chats: "Looking up past chats",
+  memory: "Working with memories",
+  todos: "Managing the plan",
+  media: "Creating media",
+  workspace: "Analyzing the workspace",
+  custom_tools: "Building a custom tool",
+  decision: "Taking a structured decision",
 };
 
 /** Prefix-based fallbacks for tools like `generate_*`. */

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { Briefcase, LibraryBig, MessageSquare, Search, Settings } from "lucide-react";
+import { Briefcase, Globe, LibraryBig, MessageSquare, Search, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { ROUTES } from "@/lib/constants";
@@ -34,6 +34,7 @@ export function MobileTabBar() {
       icon: LibraryBig,
       startsWith: true,
     },
+    { label: t("browser"), href: ROUTES.BROWSER, icon: Globe, startsWith: true },
     {
       label: t("search"),
       icon: Search,

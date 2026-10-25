@@ -8,9 +8,17 @@
  * Split into its own file so `registry.ts` (which the tool files import
  * `registerTool` from) doesn't form a circular dependency with them.
  *
+ * ORDER MATTERS at the tail:
+ *   - "./decision" registers the decision-engine tool (a keeper).
+ *   - "./consolidated" registers the 12 UMBRELLA tools and hides the ~55
+ *     granular tools they absorb — it MUST come after every granular
+ *     registration above so the umbrellas can dispatch to them.
+ *
  * NOTE: MCP tools are registered per-turn by `loadMCPTools()` (called from
  * `runtime.ts` before each agent turn) — they're NOT side-effect-imported
- * here because the set of active MCP servers is user-specific.
+ * here because the set of active MCP servers is user-specific. Their
+ * meta-tools (mcp_search_tools / mcp_call_tool) are hidden by name under
+ * the `integrations` umbrella regardless of when they register.
  */
 
 import "./datetime";
@@ -47,5 +55,7 @@ import "./media_generation";
 import "./sandbox_schedule";
 import "./background_task";
 import "./manage_business";
+import "./decision";
+import "./consolidated";
 
 export {};

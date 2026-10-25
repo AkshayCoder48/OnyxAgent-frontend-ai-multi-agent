@@ -3,15 +3,19 @@
 /**
  * Business Mode — chat message renderer (Task 4-b).
  *
- * Branches by message role (user / main / agent / activity) and hosts the
- * dependency-free lightweight markdown renderer shared with the inline draft
- * card (exported as `renderBusinessMarkdown` — function declaration, so the
- * circular import with business-draft-card.tsx is hoisting-safe).
+ * Branches by message role (user / main / agent / activity). Agent output
+ * renders through the FULL chat markdown stack (MarkdownContent — dynamic
+ * react-markdown + remark-gfm + syntax highlighting, streaming inline cursor
+ * and word-fade) for visual parity with the normal agent chat. The legacy
+ * dependency-free renderer stays exported as `renderBusinessMarkdown`
+ * (function declaration) — still used by business-workspace.tsx for business
+ * profile blurbs.
  */
 
 import * as React from "react";
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { MarkdownContent } from "@/components/chat/markdown-content";
 import { useBusinessStore } from "@/stores/business-store";
 import { bt } from "@/lib/business/ui-text";
 import type { BusinessChatMessageRow } from "@/lib/business/types";
@@ -24,8 +28,10 @@ import { BusinessDraftCard } from "./business-draft-card";
 // Lightweight markdown renderer (no dependencies).
 // Supports: paragraphs, headings #–####, **bold**, *italic*, `code`,
 // [links](https://…), -/* unordered lists, 1. ordered lists, > quotes,
-// ``` fenced code blocks and --- rules. Good enough for agent output and
-// business profiles without pulling the heavy chat markdown stack.
+// ``` fenced code blocks and --- rules.
+// LEGACY: the chat transcript now renders through the full stack
+// (MarkdownContent above); this stays for business profile blurbs in
+// business-workspace.tsx. Keep it dependency-free and hoisting-safe.
 // ---------------------------------------------------------------------------
 
 /** Inline tokens: bold / italic / code / http(s) links. */
@@ -249,13 +255,13 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
               </span>
             )}
           </div>
-          <div className="mt-1 text-sm">
-            {renderBusinessMarkdown(message.content, { keyPrefix: `msg-${message.id}` })}
-            {streaming && (
-              <span aria-hidden className="ml-0.5 inline-block animate-pulse text-primary">
-                ▌
-              </span>
-            )}
+          {/* Full markdown stack (tables, headings, highlighted code, GFM).
+              While streaming, MarkdownContent renders the inline writing
+              cursor + word-fade cascade — the same props the normal chat
+              passes its live assistant messages (fadeMs is optional; the
+              impl defaults it when streaming). */}
+          <div className="prose-sm mt-1 max-w-none break-words text-sm">
+            <MarkdownContent content={message.content} streaming={streaming} showCursor={streaming} />
           </div>
           {message.metadata?.cancelled && (
             <p className="mt-1.5 text-xs italic text-muted-foreground">{bt("chat.activityCancelled")}</p>
@@ -273,6 +279,10 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
   // --- specialist agent → logo + contribution -------------------------------
   const agent = message.agent_id ? agents.find((a) => a.id === message.agent_id) : undefined;
   const sources = message.metadata?.sources ?? [];
+  // Specialists stream via the main agent's turn today, so this is normally
+  // false — but if a specialist message ever carries the flag, the markdown
+  // render picks up the live cursor + fade automatically.
+  const specialistStreaming = message.metadata?.streaming === true;
   return (
     <div className="flex items-start gap-3">
       <AgentLogo logo={agent?.svg_logo ?? "generic"} label={agent?.name} className="mt-0.5" />
@@ -281,8 +291,12 @@ export function BusinessMessageItem({ message }: { message: BusinessChatMessageR
           <span className="truncate text-xs font-semibold text-foreground">{agent?.name ?? "Agent"}</span>
           <span className="shrink-0 text-[11px] text-muted-foreground">· {bt("chat.agentContribution")}</span>
         </div>
-        <div className="scrollbar-thin mt-1 max-h-[32rem] overflow-y-auto pr-1 text-sm">
-          {renderBusinessMarkdown(message.content, { keyPrefix: `msg-${message.id}` })}
+        <div className="scrollbar-thin prose-sm mt-1 max-h-[32rem] max-w-none overflow-y-auto break-words pr-1 text-sm">
+          <MarkdownContent
+            content={message.content}
+            streaming={specialistStreaming}
+            showCursor={specialistStreaming}
+          />
         </div>
         {sources.length > 0 && (
           <Collapsible className="mt-2">

@@ -31,6 +31,7 @@ import { chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/compone
 import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
+import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
@@ -335,7 +336,12 @@ function SimpleWebPageDisclosure({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
-function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
+function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps) {
+  // UMBRELLA RESOLUTION (tool consolidation): an umbrella call like
+  // `files {action:"read_file", path}` renders EXACTLY like a granular
+  // `read_file` call — every name-matching flag, verb and spec parser below
+  // sees the resolved call. Non-umbrella calls pass through by reference.
+  const toolCall = resolveEffectiveToolCall(rawToolCall);
   const isRunning =
     toolCall.status === "running" || toolCall.status === "pending";
   const isError = toolCall.status === "error";
@@ -638,7 +644,10 @@ function SimpleToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
 // TECHNICAL MODE — the disclosure line: arguments + output when expanded.
 // ---------------------------------------------------------------------------
 
-function TechnicalToolCallCard({ toolCall, turnId }: ToolCallCardProps) {
+function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps) {
+  // UMBRELLA RESOLUTION (tool consolidation) — same contract as in
+  // SimpleToolCallCard: specialized renderers key on the granular name.
+  const toolCall = resolveEffectiveToolCall(rawToolCall);
   // Collapsed by default — the bar acts as the toggle. `showRaw` swaps the
   // formatted view for args + raw output (the </> button). Charts are the
   // exception: they're only useful when visible, so expand them by default.

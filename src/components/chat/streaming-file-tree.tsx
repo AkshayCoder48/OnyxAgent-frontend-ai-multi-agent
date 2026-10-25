@@ -21,6 +21,7 @@ import { CollapsePanel } from "@/components/assistant-ui/elements";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { FILE_TOOLS } from "@/lib/agent-tool-steps";
+import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import type { ToolCall } from "@/types";
 
 // ── FilesFooter (Beta V1.3) ─────────────────────────────────────────────────
@@ -171,7 +172,10 @@ export function deriveStreamingTree(
 ): { root: StreamingTreeNode[]; fileCount: number; totalAdditions: number; totalDeletions: number } {
   const files = new Map<string, FileEntry>();
 
-  for (const tc of toolCalls) {
+  for (const raw of toolCalls) {
+    // UMBRELLA RESOLUTION (tool consolidation): `files {action:"create_file"…}`
+    // feeds the tree exactly like a granular create_file call.
+    const tc = resolveEffectiveToolCall(raw);
     if (!tc || !tc.name || !FILE_TOOLS.has(tc.name)) continue;
     const args = (tc.args ?? {}) as Record<string, unknown>;
     const path =

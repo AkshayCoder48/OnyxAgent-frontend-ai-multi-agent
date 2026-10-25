@@ -11,6 +11,7 @@ import {
 } from "@/components/assistant-ui/elements";
 import { deriveTimeline } from "@/lib/agent-tool-steps";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
+import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import { isComposioToolName, useComposioBranding } from "@/lib/composio/branding";
 import { ComposioToolBadge } from "./tool-results/composio-branding";
 import { useAuthStore } from "@/stores/auth-store";
@@ -76,7 +77,7 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
           ? { ...step, iconNode: <TimelineComposioIcon toolCall={tc} userId={userId} /> }
           : step;
       }),
-      friendlySteps: all.map(friendlyStep),
+      friendlySteps: all.map((tc) => friendlyStep(resolveEffectiveToolCall(tc))),
       stats: derived.stats,
       filesChanged: derived.filesChanged,
       anyRunning: running,

@@ -33,7 +33,7 @@ const PROMPTS = [
 ];
 
 const FEATURES = [
-  { icon: Code2, label: "51 Tools" },
+  { icon: Code2, label: "22 Tools · 50+ Actions" },
   { icon: Wrench, label: "Code Runner" },
   { icon: FileSearch, label: "File System" },
   { icon: Globe, label: "Web Search" },
@@ -86,8 +86,9 @@ export function ChatEmptyState({ onPick }: ChatEmptyStateProps) {
 
         {/* Subtitle */}
         <p className="mt-2 max-w-md text-center text-xs leading-relaxed text-muted-foreground sm:mt-3 sm:text-sm">
-          Your AI-powered assistant with 51 tools, code execution, web search,
-          file management, memory, and more. Start a conversation or pick a prompt below.
+          Your AI-powered assistant with 22 tools (50+ actions), code
+          execution, web search, file management, memory, and more. Start a
+          conversation or pick a prompt below.
         </p>
 
         {/* Feature badges — compact on phones (part of the "other things

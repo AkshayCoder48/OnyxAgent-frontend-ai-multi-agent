@@ -37,6 +37,7 @@
     "settings": "Settings",
     "knowledge": "Knowledge",
     "knowledgeBase": "Knowledge Base",
+    "browser": "Browser",
     "knowledgeBases": "Knowledge bases",
     "knowledgeBasesDesc": "Documents & collections",
     "rag": "RAG",

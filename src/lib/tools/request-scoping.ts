@@ -2,32 +2,35 @@
  * REQUEST-SCOPED TOOL EXPOSURE — intent-based tool routing.
  *
  * WHY (tool-reliability PRD Part B / "the model never calls tools" audit,
- * 2026-10): the registry holds 64 built-in tools whose wire definitions
- * weigh ~70KB (~20k tokens). Every round of every turn shipped ALL of them,
- * so on the app's typical providers (unknown model ids on community
+ * 2026-10): the registry held 64 granular tools whose wire definitions
+ * weighed ~70KB (~20k tokens). Every round of every turn shipped ALL of
+ * them, so on the app's typical providers (unknown model ids on community
  * gateways → the context resolver's 32K safe-fallback) the FIXED payload
  * (tools + ~24KB system prompt) alone blew the input budget, and tool-
  * selection accuracy on small/quantized models collapses far past the
  * ~10-20 definition sweet spot anyway.
  *
+ * UPDATE (umbrella consolidation): the granular tools are now folded into
+ * 12 action-based UMBRELLA tools (files / web / code_exec / subagents /
+ * schedule / integrations / chats / memory / todos / media / workspace /
+ * custom_tools) + 10 keepers — 22 model-visible built-ins total. The
+ * surfaces and intent rules below speak UMBRELLA names; the granular tools
+ * are hidden from listTools() entirely (src/lib/tools/consolidated.ts).
+ *
  * POLICY (mirrors how the audit ranked the failure):
- *   1. DYNAMIC tools (custom tools, MCP meta-tools — anything NOT in the
- *      built-in digest) are ALWAYS included: they are few and explicitly
- *      user-configured, so hiding one is a capability regression.
+ *   1. DYNAMIC tools (custom tools, per-server MCP tools — anything NOT in
+ *      the built-in digest) are ALWAYS included: they are few and
+ *      explicitly user-configured, so hiding one is a capability regression.
  *   2. A CORE surface ships on every normal turn (context ≥128K models):
- *      the general-assistant toolset — web/research, code/exec, file
- *      authoring, todos, workspace, chats, uploads, memory, media,
- *      subagents and chat management.
+ *      the general-assistant toolset — web/research, code/exec, files,
+ *      todos, memory, knowledge, media, chats, schedules, subagents and
+ *      workspace ops.
  *   3. Small-context models (<128K, incl. the 32K safe-fallback) get the
  *      tighter ESSENTIAL surface instead — the same core minus the
- *      long-tail extras (image/video search, file-management verbs,
- *      preview/ocr, chat management, the full subagent suite) which stay
- *      reachable through intent matching.
- *   4. SITUATIONAL tools (composio suite,
- *      env vars, skills, MCP config, security audit, workflow,
- *      counterfactual, custom-tool management, subagent config) ride in
- *      ONLY when the user's intent mentions them — keyword rules below —
- *      or when they were already used earlier in the conversation.
+ *      long-tail extras which stay reachable through intent matching.
+ *   4. SITUATIONAL tools (custom-tool authoring, counterfactual, workflow)
+ *      ride in ONLY when the user's intent mentions them — keyword rules
+ *      below — or when they were already used earlier in the conversation.
  *   5. Tools used earlier in THIS turn (the runtime latches live tool
  *      calls into usedToolNames) are never scoped out mid-turn.
  *
@@ -81,13 +84,11 @@ const SMALL_MODEL_WINDOW = 128_000;
  * search-first pattern keeps the payload bounded no matter how many
  * servers/actions are actually connected. */
 export const DISCOVERY_TOOLS: ReadonlySet<string> = new Set([
-  // NOTE: mcp_search_tools / mcp_call_tool are intentionally NOT here —
-  // they are not digest-listed built-ins, so the filter's rule 1 (anything
-  // outside the built-in digest always ships) already guarantees they ride
-  // on EVERY request regardless of surface or intent.
-  "composio_search_tools", // discover connected Composio actions
-  "composio_execute_tool", // execute a discovered Composio action
-  "composio_connect_platform", // hand the user an OAuth link
+  // NOTE: the `integrations` umbrella (which absorbed mcp_search_tools /
+  // mcp_call_tool / the composio suite) is digest-listed, so it rides the
+  // normal surface rules — it is ALSO here so it ships on EVERY turn
+  // (both surfaces): it is HOW the agent discovers connected capabilities.
+  "integrations", // MCP servers + Composio (250+ platforms)
   "manage_skill", // list/read installed + library skills
   "manage_mcp", // MCP server configuration (list/market)
 ]);
@@ -99,38 +100,39 @@ export const DISCOVERY_TOOLS: ReadonlySet<string> = new Set([
 export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   // Conversation & time
   "ask_user", "current_datetime",
-  // Web / research
-  "web_search", "web_fetch", "use_browser",
-  // Code & execution
-  "run_python", "run_terminal", "create_chart",
-  // File authoring (the incremental-writing policy surface)
-  "read_file", "create_file", "write_file", "edit_file", "list_folder",
-  "verify_path", "create_file_chunk", "read_file_section", "search_documents",
-  // Todos & workspace
-  "manage_todo", "show_todo", "analyze_workspace",
-  // Chats & uploads
-  "read_chat", "list_uploaded_files", "read_uploaded_file",
-  // Memory & knowledge
-  "manage_memory", "knowledge_base",
-  // Business Mode workspaces (manage_business — always-on surface so the
-  // agent can create/list businesses the moment the user asks)
+  // Web / research (umbrella: web_search / image_search / video_search / web_fetch)
+  "web", "use_browser",
+  // Code & execution (umbrella: run_python / run_terminal / background_task)
+  "code_exec",
+  // Files & uploads (umbrella: all file verbs + search_documents + ocr_document)
+  "files",
+  // Todos & memory (umbrellas)
+  "todos", "memory",
+  // Knowledge
+  "knowledge_base",
+  // Media (umbrella: media_generation / create_chart / preview_image)
+  "media",
+  // Workspace ops (umbrella: analyze_workspace / security_audit / manage_env_var)
+  // — analyze_workspace is the "run FIRST on every task" meta-tool.
+  "workspace",
+  // Business Mode workspaces (always-on so the agent can create/list
+  // businesses the moment the user asks)
   "manage_business",
-  // Media generation (Pollinations)
-  "media_generation",
+  // Structured decision engine (JEV systemone) — a first-class capability
+  "decision",
   // Capability discovery (always on — see DISCOVERY_TOOLS)
   ...DISCOVERY_TOOLS,
 ]);
 
 /** CORE extras — shipped on normal-context turns, intent-matched on small
- * ones (20 tools). (Exported for tests + diagnostics.) */
+ * ones. (Exported for tests + diagnostics.) */
 export const CORE_EXTRA_TOOLS: ReadonlySet<string> = new Set([
-  "image_search", "video_search",
-  "delete_file", "delete_folder", "create_folder", "move_file",
-  "send_file", "send_folder",
-  "preview_image", "ocr_document",
-  "manage_chats",
-  "spawn_subagent", "list_subagents", "query_subagent", "steer_subagent",
-  "complete_subagent", "cancel_subagent", "manage_subagent_chat",
+  "chats", // past-conversation recall (read_chat / manage_chats)
+  "schedule", // sandbox cron (schedule/list/remove)
+  "subagents", // full subagent orchestration suite
+  "custom_tools", // custom-tool authoring
+  "counterfactual", // structured "what if" analysis
+  "workflow", // multi-step pipelines
 ]);
 
 /** The full CORE surface (ESSENTIAL + extras). (Exported for tests +
@@ -151,17 +153,17 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
   {
     // Composio external integrations.
     re: /composio|integrat(e|ion|ions)|gmail|google\s+(sheets?|drive|calendar)|slack\b|notion|linear\b|trello|asana|hubspot|salesforce|zendesk|jira|airtable|discord|telegram|whatsapp|intercom|shopify|stripe|twitter|sendgrid| calendly|zoom\b|dropbox|box\.com/i,
-    tools: ["composio_search_tools", "composio_connect_platform", "composio_execute_tool"],
+    tools: ["integrations"],
   },
   {
     // MCP configuration.
     re: /\bmcp\b|model context protocol|tool server/i,
-    tools: ["manage_mcp"],
+    tools: ["manage_mcp", "integrations"],
   },
   {
     // Environment variables / secrets.
     re: /env(ironment)?\.?\s*var|api\s*key|secret|credential|\btokens?\b/i,
-    tools: ["manage_env_var"],
+    tools: ["workspace"],
   },
   {
     // Skills.
@@ -171,7 +173,7 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
   {
     // Security review.
     re: /security|vulnerab|pen[- ]?test|owasp|exploit|malware|encrypt(ion|ed)/i,
-    tools: ["security_audit"],
+    tools: ["workspace"],
   },
   {
     // Workflows / pipelines.
@@ -181,7 +183,7 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
   {
     // Custom tool authoring.
     re: /custom\s*tool/i,
-    tools: ["manage_custom_tool", "create_custom_tool"],
+    tools: ["custom_tools"],
   },
   {
     // Counterfactual analysis.
@@ -191,40 +193,36 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
   {
     // Sub-agent orchestration (essential on small models via this rule).
     re: /sub[- ]?agent|delegate|delegation|orchestrat|specialist|worker agent|spawn/i,
-    tools: [
-      "spawn_subagent", "list_subagents", "query_subagent", "steer_subagent",
-      "complete_subagent", "cancel_subagent", "manage_subagent_chat",
-      "set_subagent_config",
-    ],
+    tools: ["subagents"],
   },
   {
     // Media search.
     re: /image search|images? of|photos? of|pictures? of|find (a |some )?(picture|photo|image)/i,
-    tools: ["image_search"],
+    tools: ["web"],
   },
   {
     re: /video search|videos? of|find (a |some )?video|youtube search/i,
-    tools: ["video_search"],
+    tools: ["web"],
   },
   {
     // Image understanding.
     re: /\bocr\b|handwrit|extract text|scan(ned)? (doc|image|pdf|text)|read (the |this )?(image|screenshot)/i,
-    tools: ["ocr_document", "preview_image"],
+    tools: ["files", "media"],
   },
   {
     // File management verbs.
     re: /\bdelete\b|\bremove\b|\brename\b|move (a |the |my )?(file|folder)|clean up|organize|tidy/i,
-    tools: ["delete_file", "delete_folder", "move_file", "create_folder"],
+    tools: ["files"],
   },
   {
     // Sending/sharing files.
     re: /\bsend\b|\bshare\b|\bexport\b/i,
-    tools: ["send_file", "send_folder"],
+    tools: ["files"],
   },
   {
     // Chat management.
     re: /list (my )?chats|other (chat|conversation)s?|new chat|open (a |the )?chat|conversations? list/i,
-    tools: ["manage_chats"],
+    tools: ["chats"],
   },
   {
     // Business Mode workspaces — agent-team businesses the user opens at
@@ -236,7 +234,12 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
   {
     // Scheduled tasks (sandbox cron).
     re: /\bschedul(e|ed|ing)\b|\bcron\b|recurring|run (it |this )?(later|tonight|overnight|every)|(nightly|hourly|daily|weekly|monthly)\b|every (day|hour|minute|week|morning|evening|night)|at midnight|in the (morning|evening)|background job/i,
-    tools: ["schedule_agent_task", "list_scheduled_tasks", "remove_scheduled_task"],
+    tools: ["schedule"],
+  },
+  {
+    // Decision/judgment requests — surface the decision engine.
+    re: /decide|decision|should we|is this good|rate this|which option|worth it|verdict/i,
+    tools: ["decision"],
   },
 ];
 

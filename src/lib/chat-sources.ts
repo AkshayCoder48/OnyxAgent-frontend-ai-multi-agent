@@ -1,4 +1,5 @@
 import { parseRAGResults } from "@/components/chat/tool-results/rag";
+import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import type { ChatMessage, ToolCall } from "@/types";
 
 export interface SourceItem {
@@ -102,7 +103,11 @@ export function extractSources(message: ChatMessage): SourceItem[] {
   // result — for the dominant single-search turn they are identical.
   let webIndex = 0;
 
-  for (const tc of getToolCalls(message)) {
+  for (const raw of getToolCalls(message)) {
+    // UMBRELLA RESOLUTION (tool consolidation): `web {action:"web_search"}`
+    // and `files {action:"search_documents"}` contribute sources exactly
+    // like the granular calls.
+    const tc = resolveEffectiveToolCall(raw);
     const result = tc.result;
     if (!result) continue;
 

@@ -5,13 +5,14 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { cn } from "@/lib/utils";
 import { APP_NAME, ROUTES } from "@/lib/constants";
-import { LayoutDashboard, MessageSquare, UserCircle, Settings } from "lucide-react";
+import { LayoutDashboard, MessageSquare, UserCircle, Settings, Globe } from "lucide-react";
 import { useSidebarStore } from "@/stores";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetClose } from "@/components/ui";
 
 const navigation = [
   { nameKey: "dashboard", href: ROUTES.DASHBOARD, icon: LayoutDashboard },
   { nameKey: "chat", href: ROUTES.CHAT, icon: MessageSquare },
+  { nameKey: "browser", href: ROUTES.BROWSER, icon: Globe },
   { nameKey: "profile", href: ROUTES.PROFILE, icon: UserCircle },
   { nameKey: "settings", href: ROUTES.SETTINGS, icon: Settings },
 ];
