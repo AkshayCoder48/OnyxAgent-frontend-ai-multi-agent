@@ -285,19 +285,92 @@ function extractAgentQuestion(output: string): { agent: string; question: string
 // Discovery (creation wizard)
 // ---------------------------------------------------------------------------
 
-export async function runBusinessDiscovery(input: BusinessDiscoveryInput): Promise<BusinessBlueprint> {
+/** Live discovery phases, surfaced verbatim to the wizard's monitor UI. */
+export type DiscoveryPhase =
+  | "config"   // resolving provider + model
+  | "enrich"   // expanding a raw prompt into structured fields
+  | "research" // real web searches (one event per query)
+  | "draft"    // streaming the blueprint JSON
+  | "repair"   // re-asking after an invalid JSON reply
+  | "validate"; // parsing + validating the blueprint
+
+/**
+ * Real-time progress event emitted by runBusinessDiscovery. Nothing here is
+ * simulated — every event maps to an actual execution step (PRD §31), which
+ * is exactly what the wizard's live monitor renders.
+ */
+export interface DiscoveryProgressEvent {
+  phase: DiscoveryPhase;
+  status: "start" | "done" | "skip";
+  /** config: resolved provider + model actually used for this run. */
+  provider?: string;
+  model?: string;
+  /** research: the query currently being searched. */
+  query?: string;
+  /** research done: how many real results came back. */
+  resultCount?: number;
+  /** research done: top result titles (display only). */
+  topResults?: string[];
+  /** enrich/draft/repair: streamed model output chunk ("what the AI writes"). */
+  delta?: string;
+  /** enrich/draft/repair: total characters streamed for the current generation. */
+  chars?: number;
+}
+
+export interface DiscoveryRunOptions {
+  /** Cancels the whole run (web searches + LLM streams). */
+  signal?: AbortSignal;
+  /** Live progress sink — called on every real execution event. */
+  onEvent?: (event: DiscoveryProgressEvent) => void;
+}
+
+/**
+ * STREAMING discovery run.
+ *
+ * Why streaming (not businessLlmComplete): the blueprint is a long JSON
+ * generation. Non-streaming requests sit idle on the wire until the whole
+ * completion is ready — providers with gateway inactivity limits (e.g.
+ * Pollinations' "Inactivity Timeout" 504 HTML page) kill exactly those.
+ * Streaming keeps bytes flowing for the entire generation — the same wire
+ * path normal chat uses — while giving the wizard a live view of what the
+ * Main Agent is writing.
+ */
+export async function runBusinessDiscovery(
+  input: BusinessDiscoveryInput,
+  opts: DiscoveryRunOptions = {},
+): Promise<BusinessBlueprint> {
+  const { signal, onEvent } = opts;
+  const emit = (event: DiscoveryProgressEvent) => onEvent?.(event);
+
+  emit({ phase: "config", status: "start" });
   const cfg = await resolveBusinessLlmConfig();
+  emit({
+    phase: "config",
+    status: "done",
+    provider: cfg.providerName,
+    model: cfg.model,
+  });
 
   // Expand a raw prompt into structured fields when the form is thin.
   let enriched: BusinessDiscoveryInput = { ...input };
-  if (input.rawPrompt?.trim() && (!input.idea?.trim() || input.idea.trim().length < 40)) {
+  const rawPrompt = input.rawPrompt?.trim() ? input.rawPrompt : "";
+  const needsEnrichment =
+    !!rawPrompt && (!input.idea?.trim() || input.idea.trim().length < 40);
+  if (!needsEnrichment) {
+    emit({ phase: "enrich", status: "skip" });
+  } else {
+    emit({ phase: "enrich", status: "start" });
+    let enrichChars = 0;
     try {
-      const res = await businessLlmComplete(cfg, {
+      const res = await businessLlmStream(cfg, {
         systemPrompt:
           "You extract structured business facts from a natural-language prompt. Return ONLY a JSON object with keys: name, idea, industry, businessModel, targetCustomers, objectives, geography, budget. Fill what the prompt states; use \"\" for the rest. Never invent specifics.",
-        userPrompt: input.rawPrompt.slice(0, 4000),
-        jsonMode: true,
-        timeoutMs: 60_000,
+        userPrompt: rawPrompt.slice(0, 4000),
+        signal,
+        onDelta: (delta) => {
+          enrichChars += delta.length;
+          emit({ phase: "enrich", status: "start", delta, chars: enrichChars });
+        },
       });
       const parsed = extractJsonObject(res.text);
       if (parsed && typeof parsed === "object") {
@@ -317,8 +390,11 @@ export async function runBusinessDiscovery(input: BusinessDiscoveryInput): Promi
           rawPrompt: input.rawPrompt,
         };
       }
-    } catch {
+      emit({ phase: "enrich", status: "done" });
+    } catch (err) {
+      if (signal?.aborted) throw err;
       // enrichment is best-effort — raw prompt is passed through below
+      emit({ phase: "enrich", status: "done" });
     }
   }
 
@@ -330,27 +406,53 @@ export async function runBusinessDiscovery(input: BusinessDiscoveryInput): Promi
     `${enriched.targetCustomers || enriched.industry || "customers"} buying behavior ${enriched.geography || ""}`.trim(),
   ];
   for (const q of baseQueries.slice(0, 3)) {
-    const res = await businessWebSearch(q);
+    emit({ phase: "research", status: "start", query: q });
+    const res = await businessWebSearch(q, signal);
     if (res.results.length) research.push({ query: q, results: res.results });
+    emit({
+      phase: "research",
+      status: "done",
+      query: q,
+      resultCount: res.results.length,
+      topResults: res.results.slice(0, 3).map((r) => r.title),
+    });
+    if (signal?.aborted) throw new Error("The request was cancelled.");
   }
 
-  const res = await businessLlmComplete(cfg, {
+  // Draft the blueprint — STREAMED (fixes provider inactivity 504s and
+  // feeds the wizard's live "what the AI is writing" monitor).
+  emit({ phase: "draft", status: "start" });
+  let draftText = "";
+  const res = await businessLlmStream(cfg, {
     systemPrompt: buildDiscoverySystemPrompt(),
     userPrompt: buildDiscoveryUserPrompt(enriched, research),
-    jsonMode: true,
-    timeoutMs: 180_000,
+    signal,
+    onDelta: (delta) => {
+      draftText += delta;
+      emit({ phase: "draft", status: "start", delta, chars: draftText.length });
+    },
   });
+  let text = res.text;
+  if (!text.trim()) text = draftText; // paranoid: keep what we saw streamed
+  emit({ phase: "draft", status: "done", chars: text.length });
 
-  let parsed = extractJsonObject(res.text) as Record<string, unknown> | null;
+  emit({ phase: "validate", status: "start" });
+  let parsed = extractJsonObject(text) as Record<string, unknown> | null;
   if (!parsed) {
-    // one repair retry
-    const repair = await businessLlmComplete(cfg, {
+    // one streamed repair retry
+    emit({ phase: "repair", status: "start" });
+    let repairText = "";
+    const repair = await businessLlmStream(cfg, {
       systemPrompt: buildDiscoverySystemPrompt(),
       userPrompt: `${buildDiscoveryUserPrompt(enriched, research)}\n\nIMPORTANT: your previous reply was not valid JSON. Return ONLY the JSON object.`,
-      jsonMode: true,
-      timeoutMs: 120_000,
+      signal,
+      onDelta: (delta) => {
+        repairText += delta;
+        emit({ phase: "repair", status: "start", delta, chars: repairText.length });
+      },
     });
-    parsed = extractJsonObject(repair.text) as Record<string, unknown> | null;
+    parsed = extractJsonObject(repair.text || repairText) as Record<string, unknown> | null;
+    emit({ phase: "repair", status: "done" });
   }
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Discovery returned an unreadable blueprint — try again, or continue with a template team.");
@@ -395,6 +497,8 @@ export async function runBusinessDiscovery(input: BusinessDiscoveryInput): Promi
       };
     })
     .slice(0, 12);
+
+  emit({ phase: "validate", status: "done" });
 
   return {
     overview: asString(parsed.overview),

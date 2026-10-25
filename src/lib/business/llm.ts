@@ -75,8 +75,14 @@ const DEFAULT_TIMEOUT_MS = 120_000;
  * Resolve the LLM configuration for a Business Mode call.
  *
  * Provider chain: override.providerId → chat-store selectedProviderId →
- * first active provider. Model chain: override.model → (when the provider
- * came from the chat store) chat-store selectedModel → provider.models[0].
+ * the provider that offers the chat-store selectedModel (stale-provider
+ * recovery) → first active provider. Model chain: override.model →
+ * chat-store selectedModel (when the selected provider resolved, or the
+ * resolved provider offers that model) → provider.models[0].
+ *
+ * Net effect: Business Mode calls (discovery, chat turns, regeneration)
+ * always run on the model CURRENTLY SELECTED in the chat UI whenever it
+ * can be resolved to a configured provider.
  *
  * Throws a friendly Error when nothing is usable — callers surface UI
  * guidance (wizard empty state / toast), never a raw stack trace.
@@ -104,6 +110,15 @@ export async function resolveBusinessLlmConfig(
     provider = providers.find((p) => p.id === selectedProviderId);
     fromChatStore = !!provider;
   }
+  // Stale selectedProviderId (provider deleted / imported id drifted) but a
+  // live selectedModel: resolve the provider that actually offers that model
+  // so the user's current chat selection still wins.
+  if (!provider && selectedModel) {
+    provider =
+      providers.find((p) => p.is_active && (p.models ?? []).includes(selectedModel)) ??
+      providers.find((p) => (p.models ?? []).includes(selectedModel));
+    fromChatStore = !!provider;
+  }
   if (!provider) {
     provider = providers.find((p) => p.is_active) ?? providers[0];
     fromChatStore = false;
@@ -118,7 +133,13 @@ export async function resolveBusinessLlmConfig(
   // serves its anonymous tier instead of rejecting an invalid bearer token.
 
   let model: string | undefined = override?.model;
-  if (!model && fromChatStore) model = selectedModel ?? undefined;
+  if (!model && selectedModel && fromChatStore) model = selectedModel;
+  // The selected provider may not list the selected model explicitly (some
+  // providers accept arbitrary model ids) — still honor the selection when
+  // it is at least offered by the resolved provider.
+  if (!model && selectedModel && (provider.models ?? []).includes(selectedModel)) {
+    model = selectedModel;
+  }
   if (!model) model = provider.models?.[0];
   if (!model) {
     throw new Error(

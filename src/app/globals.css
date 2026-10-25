@@ -5,19 +5,14 @@
 @import "@fontsource-variable/fraunces/wght-italic.css";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
-/* Lato — the full-app text face (Łukasz Dziedzic, 2010; 100–900 + italics).
+/* DM Sans — carries ALL app text (display, body, accent). Variable font
+   with BOTH axes: wght 100–1000 + opsz 9–40 (the opsz axis is what makes
+   `font-optical-sizing: auto` on `body` actually do something). Designed
+   by Colophon Foundry (with Jonny Pinhorn; 5 styles + variable).
    Self-hosted via Fontsource so it renders identically offline and in
    every deployment environment. */
-@import "@fontsource/lato/100.css";
-@import "@fontsource/lato/100-italic.css";
-@import "@fontsource/lato/300.css";
-@import "@fontsource/lato/300-italic.css";
-@import "@fontsource/lato/400.css";
-@import "@fontsource/lato/400-italic.css";
-@import "@fontsource/lato/700.css";
-@import "@fontsource/lato/700-italic.css";
-@import "@fontsource/lato/900.css";
-@import "@fontsource/lato/900-italic.css";
+@import "@fontsource-variable/dm-sans/standard.css";
+@import "@fontsource-variable/dm-sans/standard-italic.css";
 @import "tailwindcss";
 /* tw-animate — REQUIRED for the animate-in / slide-in-from-* / fade-in / zoom-in
    utilities used by Sheet, Dialog, Popover, DropdownMenu, Tooltip and the
@@ -87,12 +82,14 @@
   --radius-card: 1rem;
   --radius-pill: 999px;
 
-  /* Typography — Lato (designed by Łukasz Dziedzic) carries ALL app text
-     (display, body, accent); JetBrains Mono stays for code. Self-hosted via
-     Fontsource (imported at the top of this file). */
-  --font-display: "Lato", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-body: "Lato", ui-sans-serif, system-ui, sans-serif;
-  --font-accent: "Lato", ui-sans-serif, system-ui, sans-serif;
+  /* Typography — DM Sans (designed by Colophon Foundry with Jonny Pinhorn)
+     carries ALL app text (display, body, accent) as a variable font
+     (wght 100–1000 + opsz 9–40 → `font-optical-sizing: auto` on body);
+     JetBrains Mono stays for code. Self-hosted via Fontsource (imported
+     at the top of this file). */
+  --font-display: "DM Sans Variable", "DM Sans", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "DM Sans Variable", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-accent: "DM Sans Variable", "DM Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Motion */

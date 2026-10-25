@@ -6,8 +6,8 @@ import { SITE } from "@/lib/seo";
 // Prevent static generation errors (React Query needs a provider at runtime)
 export const dynamic = "force-dynamic";
 
-// Terra editorial typefaces (Fraunces / Inter / JetBrains Mono) are
-// self-hosted via Fontsource and imported at the top of globals.css.
+// Self-hosted typefaces (DM Sans app text + Fraunces / Inter / JetBrains
+// Mono) via Fontsource, imported at the top of globals.css.
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.url),

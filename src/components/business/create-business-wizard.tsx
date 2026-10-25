@@ -28,6 +28,7 @@ import {
   Briefcase,
   Building2,
   Check,
+  Cpu,
   Loader2,
   MapPin,
   Megaphone,
@@ -70,7 +71,7 @@ import { AGENT_LOGOS, AgentLogo } from "@/components/business/agent-logos";
 import { bt, setBusinessTextLocale } from "@/lib/business/ui-text";
 import { getBusinessTemplate } from "@/lib/business/templates";
 import {
-  businessLlmComplete,
+  businessLlmStream,
   resolveBusinessLlmConfig,
 } from "@/lib/business/llm";
 import {
@@ -81,6 +82,7 @@ import {
   createBusinessFromBlueprint,
   createBusinessFromTemplate,
   runBusinessDiscovery,
+  type DiscoveryProgressEvent,
 } from "@/lib/business/orchestrator";
 import type {
   BlueprintProposedAgent,
@@ -135,6 +137,23 @@ const DISCOVERY_STEP_KEYS: readonly string[] = [
   "wizard.discoveryStep2",
   "wizard.discoveryStep3",
 ];
+
+/** One REAL web search executed during discovery (rendered as a live row). */
+interface ResearchRow {
+  query: string;
+  state: "active" | "done";
+  resultCount?: number;
+}
+
+/** Execution rank of each discovery phase (drives the live checklist state). */
+const PHASE_RANK: Record<DiscoveryProgressEvent["phase"], number> = {
+  config: 0,
+  enrich: 1,
+  research: 2,
+  draft: 3,
+  repair: 3,
+  validate: 4,
+};
 
 /** Soft minimum for the idea textarea (a nudge, not a hard gate). */
 const IDEA_SOFT_MIN = 80;
@@ -264,6 +283,28 @@ export function CreateBusinessWizard() {
   const timerRef = React.useRef<number | null>(null);
   const runIdRef = React.useRef(0);
 
+  // Live discovery monitor — every value below is driven ONLY by real
+  // DiscoveryProgressEvents from the orchestrator (PRD §31: no simulation).
+  const [livePhase, setLivePhase] = React.useState<
+    DiscoveryProgressEvent["phase"] | null
+  >(null);
+  const [modelBadge, setModelBadge] = React.useState<{
+    provider: string;
+    model: string;
+  } | null>(null);
+  const [enrichState, setEnrichState] = React.useState<
+    "idle" | "active" | "done" | "skip"
+  >("idle");
+  const [researchRows, setResearchRows] = React.useState<ResearchRow[]>([]);
+  const [writingLabelKey, setWritingLabelKey] = React.useState<string | null>(
+    null,
+  );
+  const [liveText, setLiveText] = React.useState("");
+  const [liveChars, setLiveChars] = React.useState(0);
+  const [validateDone, setValidateDone] = React.useState(false);
+  const abortRef = React.useRef<AbortController | null>(null);
+  const liveScrollRef = React.useRef<HTMLDivElement | null>(null);
+
   // Blueprint (single editable source of truth; approve passes it whole).
   const [blueprint, setBlueprint] = React.useState<BusinessBlueprint | null>(
     null,
@@ -290,6 +331,12 @@ export function CreateBusinessWizard() {
   }
 
   React.useEffect(() => stopTimer, []);
+
+  // Keep the live writing monitor pinned to the newest streamed characters.
+  React.useEffect(() => {
+    const el = liveScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [liveText]);
 
   // ---- Provider gate --------------------------------------------------------
 
@@ -350,14 +397,112 @@ export function CreateBusinessWizard() {
 
   // ---- Discovery ------------------------------------------------------------
 
+  function resetLiveMonitor() {
+    setLivePhase(null);
+    setModelBadge(null);
+    setEnrichState("idle");
+    setResearchRows([]);
+    setWritingLabelKey(null);
+    setLiveText("");
+    setLiveChars(0);
+    setValidateDone(false);
+  }
+
+  /** Apply one REAL orchestrator event to the live monitor state. */
+  function applyDiscoveryEvent(ev: DiscoveryProgressEvent) {
+    if (ev.phase === "config") {
+      setLivePhase("config");
+      if (ev.status === "done" && ev.provider && ev.model) {
+        setModelBadge({ provider: ev.provider, model: ev.model });
+      }
+      return;
+    }
+
+    if (ev.phase === "enrich") {
+      setLivePhase("enrich");
+      if (ev.status === "skip") {
+        setEnrichState("skip");
+      } else if (ev.status === "start") {
+        setEnrichState("active");
+        const delta = ev.delta;
+        if (delta) {
+          setLiveText((t) => t + delta);
+          if (typeof ev.chars === "number") setLiveChars(ev.chars);
+        } else {
+          setWritingLabelKey("wizard.discovery.writeLabel.enrich");
+          setLiveText("");
+          setLiveChars(0);
+        }
+      } else {
+        setEnrichState("done");
+      }
+      return;
+    }
+
+    if (ev.phase === "research") {
+      setLivePhase("research");
+      const query = ev.query;
+      if (!query) return;
+      if (ev.status === "start") {
+        setResearchRows((rows) => [...rows, { query, state: "active" }]);
+      } else {
+        setResearchRows((rows) =>
+          rows.map((r) =>
+            r.query === query && r.state === "active"
+              ? { ...r, state: "done", resultCount: ev.resultCount ?? 0 }
+              : r,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (ev.phase === "draft" || ev.phase === "repair") {
+      setLivePhase(ev.phase);
+      if (ev.status === "start") {
+        const delta = ev.delta;
+        if (delta) {
+          setLiveText((t) => t + delta);
+          if (typeof ev.chars === "number") setLiveChars(ev.chars);
+        } else {
+          setWritingLabelKey(
+            ev.phase === "draft"
+              ? "wizard.discovery.writeLabel.draft"
+              : "wizard.discovery.writeLabel.repair",
+          );
+          setLiveText("");
+          setLiveChars(0);
+        }
+      } else if (typeof ev.chars === "number") {
+        setLiveChars(ev.chars);
+      }
+      return;
+    }
+
+    // validate
+    setLivePhase("validate");
+    setWritingLabelKey("wizard.discovery.writeLabel.validate");
+    if (ev.status === "done") setValidateDone(true);
+  }
+
   async function runDiscovery() {
     const runId = ++runIdRef.current;
     const input = buildInput();
+    resetLiveMonitor();
     setDiscoveryError(null);
     setDiscoveryRunning(true);
     startTimer();
+    const controller = new AbortController();
+    abortRef.current?.abort(); // orphan any previous run's network work
+    abortRef.current = controller;
     try {
-      const result = await runBusinessDiscovery(input);
+      const result = await runBusinessDiscovery(input, {
+        signal: controller.signal,
+        onEvent: (ev) => {
+          if (runIdRef.current !== runId) return; // superseded
+          applyDiscoveryEvent(ev);
+        },
+      });
       if (runIdRef.current !== runId) return; // superseded (user went back)
       setBlueprint(result);
       setStep("blueprint");
@@ -388,6 +533,8 @@ export function CreateBusinessWizard() {
 
   function backToForm() {
     runIdRef.current++; // orphan any in-flight run; its result is discarded
+    abortRef.current?.abort(); // …and actually cancel its network work
+    abortRef.current = null;
     stopTimer();
     setDiscoveryRunning(false);
     setStep("form");
@@ -518,15 +665,18 @@ export function CreateBusinessWizard() {
     setRegenerating(sectionKey);
     try {
       const cfg = await resolveBusinessLlmConfig();
-      const res = await businessLlmComplete(cfg, {
+      // STREAMED (not businessLlmComplete): regeneration outputs are long,
+      // and non-streaming requests trip provider inactivity limits (the
+      // Pollinations "Inactivity Timeout" 504). Streaming keeps the wire
+      // alive for the whole generation — same fix as discovery drafting.
+      const res = await businessLlmStream(cfg, {
         systemPrompt: buildDiscoverySystemPrompt(),
         userPrompt: buildBlueprintSectionRegeneratePrompt(
           sectionKey,
           blueprint,
           buildInput(),
         ),
-        jsonMode: true,
-        timeoutMs: 120_000,
+        onDelta: () => {}, // deltas not shown in the regenerate spinner UI
       });
       const next = parseSectionText(res.text);
       if (next === null) throw new Error("unreadable model response");
@@ -566,6 +716,35 @@ export function CreateBusinessWizard() {
   }, [blueprint]);
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
+
+  // ---- Discovery live-checklist derivation (from REAL phases only) ---------
+
+  const phaseRank = livePhase ? PHASE_RANK[livePhase] : -1;
+
+  /** done | active | pending for checklist step i — derived from real phases:
+   *  step 1 ← config+enrich, step 2 ← the actual web searches, step 3 ← the
+   *  streamed blueprint generation (draft/repair) + validation. */
+  const stepState = (i: number): "done" | "active" | "pending" => {
+    if (i === 0) {
+      return phaseRank >= 2 ? "done" : phaseRank >= 0 ? "active" : "pending";
+    }
+    if (i === 1) {
+      return phaseRank >= 3 ? "done" : phaseRank === 2 ? "active" : "pending";
+    }
+    return validateDone ? "done" : phaseRank >= 3 ? "active" : "pending";
+  };
+
+  const step1Detail =
+    enrichState === "active"
+      ? bt("wizard.discovery.phase.enrich")
+      : enrichState === "skip"
+        ? bt("wizard.discovery.enrichSkip")
+        : enrichState === "done"
+          ? bt("wizard.discovery.enrichDone")
+          : bt("wizard.discovery.preparing");
+
+  /** Tail of the streamed text — keeps the live monitor DOM light. */
+  const liveTail = liveText.length > 4000 ? `…${liveText.slice(-4000)}` : liveText;
 
   // Subtle entrance (≤300ms); reduced-motion renders static.
   const entrance = reduceMotion
@@ -961,33 +1140,196 @@ export function CreateBusinessWizard() {
                 </p>
               </div>
 
-              {/* HONEST progress: one overall spinner + real elapsed time.
-                  The checklist below is static — no simulated advancement. */}
-              {discoveryRunning && (
-                <p className="mt-5 flex items-center gap-2.5 text-sm">
-                  <Spinner aria-hidden className="size-4 text-primary" />
-                  <span className="text-foreground font-medium tabular-nums">
+              {/* Live status row: real elapsed time + the model this run is
+                  actually running on (the chat UI selection, resolved live). */}
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {discoveryRunning && (
+                  <span className="bg-secondary text-secondary-foreground border-border inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium tabular-nums">
+                    <Spinner aria-hidden className="text-primary size-3" />
                     {elapsed}s
                   </span>
-                </p>
-              )}
+                )}
+                {modelBadge && (
+                  <Badge
+                    variant="outline"
+                    className="gap-1.5 text-[11px] font-medium"
+                  >
+                    <Cpu aria-hidden className="size-3" />
+                    {bt("wizard.discovery.modelBadge", {
+                      provider: modelBadge.provider,
+                      model: modelBadge.model,
+                    })}
+                  </Badge>
+                )}
+              </div>
 
-              <ol className="mt-6 space-y-2.5">
-                {DISCOVERY_STEP_KEYS.map((key, i) => (
-                  <li key={key} className="flex items-center gap-3">
-                    <span
-                      aria-hidden
-                      className="border-border text-muted-foreground flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium"
-                    >
-                      {i + 1}
-                    </span>
-                    <span className="text-muted-foreground text-sm">
-                      {bt(key)}
-                    </span>
-                  </li>
-                ))}
+              {/* LIVE checklist — every state is derived from REAL execution
+                  events (never simulated): step 1 ← config+enrich, step 2 ←
+                  the actual web searches, step 3 ← blueprint drafting. */}
+              <ol className="mt-6 space-y-1.5">
+                {DISCOVERY_STEP_KEYS.map((key, i) => {
+                  const state = stepState(i);
+                  const active = state === "active";
+                  const done = state === "done";
+                  return (
+                    <li key={key} className="space-y-1.5">
+                      <div
+                        className={cn(
+                          "-mx-1.5 flex items-center gap-3 rounded-lg px-1.5 py-1 transition-colors",
+                          active && "bg-secondary",
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium transition-colors",
+                            done &&
+                              "border-primary bg-primary text-primary-foreground",
+                            active && "border-primary text-primary",
+                            !done &&
+                              !active &&
+                              "border-border text-muted-foreground",
+                          )}
+                        >
+                          {done ? (
+                            <Check className="size-3.5" />
+                          ) : active ? (
+                            <Spinner className="size-3" />
+                          ) : (
+                            i + 1
+                          )}
+                        </span>
+                        <span
+                          className={cn(
+                            "text-sm",
+                            done && "text-foreground",
+                            active && "text-foreground font-medium",
+                            !done && !active && "text-muted-foreground",
+                          )}
+                        >
+                          {bt(key)}
+                        </span>
+                      </div>
+
+                      {/* Step 1 detail — what "analyzing" actually did. */}
+                      {i === 0 && (active || done) && (
+                        <p className="text-muted-foreground pl-[42px] text-xs">
+                          {step1Detail}
+                        </p>
+                      )}
+
+                      {/* Step 2 detail — one live row per REAL search query. */}
+                      {i === 1 && researchRows.length > 0 && (
+                        <ul className="ml-[42px] space-y-1.5">
+                          {researchRows.map((row) => (
+                            <li
+                              key={row.query}
+                              className="flex items-start gap-2 text-xs"
+                            >
+                              {row.state === "active" ? (
+                                <Loader2
+                                  aria-hidden
+                                  className="text-primary mt-0.5 size-3 shrink-0 animate-spin"
+                                />
+                              ) : (
+                                <Check
+                                  aria-hidden
+                                  className={cn(
+                                    "mt-0.5 size-3 shrink-0",
+                                    row.resultCount
+                                      ? "text-primary"
+                                      : "text-muted-foreground",
+                                  )}
+                                />
+                              )}
+                              <span className="text-muted-foreground min-w-0">
+                                <span className="block truncate">
+                                  {bt("wizard.discovery.searching", {
+                                    query: row.query,
+                                  })}
+                                </span>
+                                {row.state === "done" && (
+                                  <span
+                                    className={cn(
+                                      row.resultCount
+                                        ? "text-foreground font-medium"
+                                        : "text-muted-foreground",
+                                    )}
+                                  >
+                                    {row.resultCount
+                                      ? bt("wizard.discovery.resultsFound", {
+                                          count: row.resultCount,
+                                        })
+                                      : bt("wizard.discovery.noResults")}
+                                  </span>
+                                )}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+
+                      {/* Step 3 detail — live "what the AI is writing" counter. */}
+                      {i === 2 && (active || done) && (
+                        <p className="text-muted-foreground pl-[42px] text-xs tabular-nums">
+                          {livePhase === "validate"
+                            ? bt("wizard.discovery.writeLabel.validate")
+                            : bt("wizard.discovery.drafting", {
+                                chars: liveChars,
+                              })}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
               </ol>
             </Card>
+
+            {/* LIVE WRITING MONITOR — the model's raw output exactly as it is
+                written, auto-scrolled to the newest characters. This is
+                "what the AI is writing" during discovery. */}
+            {(discoveryRunning || liveText) && (
+              <Card className="overflow-hidden">
+                <div className="bg-secondary/50 border-border flex items-center justify-between gap-2 border-b px-4 py-2.5">
+                  <p className="text-foreground flex min-w-0 items-center gap-2 text-xs font-medium">
+                    {discoveryRunning && (
+                      <span aria-hidden className="relative flex size-2 shrink-0">
+                        <span className="bg-primary absolute inline-flex size-full animate-ping rounded-full opacity-60" />
+                        <span className="bg-primary relative inline-flex size-2 rounded-full" />
+                      </span>
+                    )}
+                    <span className="truncate">
+                      {bt("wizard.discovery.liveWrite")}
+                      {writingLabelKey ? ` — ${bt(writingLabelKey)}` : ""}
+                    </span>
+                  </p>
+                  <span className="text-muted-foreground shrink-0 text-[11px] tabular-nums">
+                    {bt("wizard.discovery.charsStreamed", { count: liveChars })}
+                  </span>
+                </div>
+                <div
+                  ref={liveScrollRef}
+                  className="max-h-72 overflow-y-auto px-4 py-3"
+                  aria-label={bt("wizard.discovery.liveWrite")}
+                >
+                  {liveText ? (
+                    <pre className="font-mono text-muted-foreground text-[11px] leading-relaxed break-all whitespace-pre-wrap">
+                      {liveTail}
+                      {discoveryRunning && (
+                        <span aria-hidden className="text-primary animate-pulse">
+                          ▌
+                        </span>
+                      )}
+                    </pre>
+                  ) : (
+                    <p className="text-muted-foreground flex items-center gap-2 py-2 text-xs">
+                      <Spinner aria-hidden className="text-primary size-3" />
+                      {bt("wizard.discovery.writeIdle")}
+                    </p>
+                  )}
+                </div>
+              </Card>
+            )}
 
             {/* Failure — retry, fall back to the template team, or go back. */}
             {discoveryError && !discoveryRunning && (
