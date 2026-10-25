@@ -51,6 +51,9 @@ export interface BusinessLlmCompleteOptions {
   signal?: AbortSignal;
   /** Overall call timeout (default 120s). */
   timeoutMs?: number;
+  /** Max attempts for transient provider failures (default 4 — 1 try +
+   *  3 bounded retries; pass 1 to disable the ladder). */
+  maxAttempts?: number;
 }
 
 export interface BusinessLlmStreamOptions {
@@ -63,6 +66,27 @@ export interface BusinessLlmStreamOptions {
   signal?: AbortSignal;
   /** Receives each DELTA (not the accumulated text) — accumulate yourself. */
   onDelta: (text: string) => void;
+  /** Max attempts for transient provider failures (default 4 — 1 try +
+   *  3 bounded retries; pass 1 to disable the ladder). */
+  maxAttempts?: number;
+  /** Fired when a transient provider failure (rate limit, gateway hiccup,
+   *  idle timeout, empty reply…) schedules a retry. The stream RESTARTS
+   *  FROM ZERO after waitMs — callers that accumulate deltas MUST reset
+   *  their accumulated text (and any UI state) when this fires. */
+  onRetry?: (info: LlmRetryInfo) => void;
+}
+
+/** Details of a scheduled transient-failure retry, surfaced to callers so
+ *  discovery's live monitor can tell the user WHY a stream restarted. */
+export interface LlmRetryInfo {
+  /** 1-based index of the attempt that just failed. */
+  attempt: number;
+  /** Total attempts the ladder will make before giving up. */
+  maxAttempts: number;
+  /** Short human-readable reason (e.g. "HTTP 429 — rate limited"). */
+  error: string;
+  /** How long the ladder waits before restarting the stream. */
+  waitMs: number;
 }
 
 export interface BusinessWebSearchResult {
@@ -73,6 +97,79 @@ export interface BusinessWebSearchResult {
 
 const CHAT_PROXY_URL = "/api/chat-proxy";
 const DEFAULT_TIMEOUT_MS = 120_000;
+
+// ---------------------------------------------------------------------------
+// Transient-failure retry ladder
+// ---------------------------------------------------------------------------
+
+/** Bounded backoff between retry attempts (4s → 10s → 20s). Free/anonymous
+ *  provider tiers rate-limit bursts (e.g. a third discovery run in a row);
+ *  these windows outlive most anonymous-tier cooldowns without making the
+ *  UI feel dead — and the live monitor shows exactly what is happening. */
+const RETRY_DELAYS_MS = [4_000, 10_000, 20_000] as const;
+export const DEFAULT_LLM_MAX_ATTEMPTS = 4;
+
+/**
+ * Classify a business-LLM failure as TRANSIENT (worth a bounded retry: rate
+ * limits, gateway hiccups, inactivity 504s, idle-timeout dead streams,
+ * network resets, empty replies) or PERMANENT (bad key 401/403, bad request
+ * 400/404, user cancellation — retrying cannot help).
+ *
+ * Mirrors the chat runtime's transient classifier (runtime.ts) so Business
+ * Mode calls survive the same provider flakiness normal chat already does.
+ */
+export function isTransientLlmError(err: unknown): boolean {
+  if (err instanceof Error && err.name === "AbortError") return false; // user cancel
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  const m = msg.toLowerCase();
+  // Auth / request-shape problems: retrying is pointless.
+  if (/http 40[0134]|http 405|http 422|check the api key|unsupported parameter/i.test(m)) {
+    return false;
+  }
+  // Rate limits + gateway/server errors + empty replies + dead streams.
+  return /http 429|http 5\d\d|rate.?limit|too many requests|inactivity timeout|idle timeout|timeout|timed out|econnreset|socket hang up|fetch failed|failed to fetch|network error|load failed|terminated|connection reset|abnormal|stream aborted|empty completion|empty response|internal server error|bad gateway|service unavailable|overloaded/i.test(m);
+}
+
+/** Human-readable one-liner for a retry (kept short — the monitor shows it). */
+function shortRetryReason(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).replace(/\s+/g, " ").trim();
+  return msg.length > 140 ? `${msg.slice(0, 140)}…` : msg || "the provider failed";
+}
+
+/**
+ * Run one bounded retry ladder around an attempt function. The attempt fn
+ * returns its result on success; on a TRANSIENT error the ladder waits the
+ * backoff, notifies onRetry (so callers reset accumulated stream text), and
+ * restarts. User cancellations and permanent errors rethrow immediately.
+ */
+async function withRetryLadder<T>(
+  opts: { signal?: AbortSignal; maxAttempts?: number; onRetry?: (info: LlmRetryInfo) => void },
+  attemptFn: (attempt: number) => Promise<T>,
+): Promise<T> {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? DEFAULT_LLM_MAX_ATTEMPTS);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await attemptFn(attempt);
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      if (opts.signal?.aborted) throw err;
+      if (attempt >= maxAttempts || !isTransientLlmError(err)) throw err;
+      const waitMs = RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)] ?? 10_000;
+      opts.onRetry?.({ attempt, maxAttempts, error: shortRetryReason(err), waitMs });
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, waitMs);
+        opts.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            reject(new Error("The request was cancelled."));
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Config resolution
@@ -291,70 +388,72 @@ export async function businessLlmComplete(
   cfg: BusinessLlmConfig,
   opts: BusinessLlmCompleteOptions,
 ): Promise<{ text: string; usage?: BusinessLlmUsage }> {
-  const targetUrl = buildTargetUrl(cfg);
-  const { controller, cleanup } = combinedController(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  return withRetryLadder(opts, async () => {
+    const targetUrl = buildTargetUrl(cfg);
+    const { controller, cleanup } = combinedController(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
-  const doFetch = async (withJsonMode: boolean): Promise<Response> => {
-    const body: Record<string, unknown> = {
-      model: cfg.model,
-      messages: opts.messages ?? [
-        { role: "system", content: opts.systemPrompt },
-        { role: "user", content: opts.userPrompt },
-      ],
-      stream: false,
+    const doFetch = async (withJsonMode: boolean): Promise<Response> => {
+      const body: Record<string, unknown> = {
+        model: cfg.model,
+        messages: opts.messages ?? [
+          { role: "system", content: opts.systemPrompt },
+          { role: "user", content: opts.userPrompt },
+        ],
+        stream: false,
+      };
+      if (typeof opts.temperature === "number") body.temperature = opts.temperature;
+      if (typeof opts.maxTokens === "number") body.max_tokens = opts.maxTokens;
+      if (withJsonMode && opts.jsonMode) body.response_format = { type: "json_object" };
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-target-url": targetUrl,
+        Accept: "text/event-stream",
+      };
+      if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+      return fetch(proxyUrl(targetUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        cache: "no-store",
+      });
     };
-    if (typeof opts.temperature === "number") body.temperature = opts.temperature;
-    if (typeof opts.maxTokens === "number") body.max_tokens = opts.maxTokens;
-    if (withJsonMode && opts.jsonMode) body.response_format = { type: "json_object" };
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "x-target-url": targetUrl,
-      Accept: "text/event-stream",
-    };
-    if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
-    return fetch(proxyUrl(targetUrl), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  };
 
-  try {
-    let res = await doFetch(!!opts.jsonMode);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      const canSelfHeal =
-        opts.jsonMode && res.status >= 400 && res.status < 500 && /response_format/i.test(errText);
-      if (!canSelfHeal) {
-        throw new Error(describeUpstreamError(res.status, errText, cfg.providerName));
-      }
-      // Wire-compat self-healing: retry once WITHOUT response_format.
-      res = await doFetch(false);
+    try {
+      let res = await doFetch(!!opts.jsonMode);
       if (!res.ok) {
-        const errText2 = await res.text().catch(() => "");
-        throw new Error(describeUpstreamError(res.status, errText2, cfg.providerName));
+        const errText = await res.text().catch(() => "");
+        const canSelfHeal =
+          opts.jsonMode && res.status >= 400 && res.status < 500 && /response_format/i.test(errText);
+        if (!canSelfHeal) {
+          throw new Error(describeUpstreamError(res.status, errText, cfg.providerName));
+        }
+        // Wire-compat self-healing: retry once WITHOUT response_format.
+        res = await doFetch(false);
+        if (!res.ok) {
+          const errText2 = await res.text().catch(() => "");
+          throw new Error(describeUpstreamError(res.status, errText2, cfg.providerName));
+        }
       }
+      const raw = await res.text();
+      const parsed = parseCompletionText(raw);
+      if (!parsed.content.trim()) {
+        throw new Error(`Provider "${cfg.providerName}" returned an empty completion.`);
+      }
+      return { text: parsed.content, usage: parsed.usage };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(
+          opts.signal?.aborted
+            ? "The request was cancelled."
+            : `The request to "${cfg.providerName}" timed out — try again or pick a faster model.`,
+        );
+      }
+      throw err;
+    } finally {
+      cleanup();
     }
-    const raw = await res.text();
-    const parsed = parseCompletionText(raw);
-    if (!parsed.content.trim()) {
-      throw new Error(`Provider "${cfg.providerName}" returned an empty completion.`);
-    }
-    return { text: parsed.content, usage: parsed.usage };
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(
-        opts.signal?.aborted
-          ? "The request was cancelled."
-          : `The request to "${cfg.providerName}" timed out — try again or pick a faster model.`,
-      );
-    }
-    throw err;
-  } finally {
-    cleanup();
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -366,80 +465,224 @@ export async function businessLlmComplete(
  * they arrive (the caller updates UI state per delta and persists only at the
  * end). SSE parsing + 120s idle-timeout handling come from the runtime's
  * battle-tested parseSSEStream.
+ *
+ * TRANSIENT-RETRY LADDER: rate limits (429), gateway 5xx/inactivity pages,
+ * idle-timeout dead streams and empty completions are retried up to
+ * maxAttempts (default 4) with bounded backoff. Because a retried stream
+ * RESTARTS FROM ZERO, the ladder fires `onRetry` before each restart so
+ * delta-accumulating callers can reset their state (otherwise the retried
+ * output would be prepended with the aborted attempt's partial text).
+ *
+ * STREAMING-REJECTED SELF-HEAL: providers increasingly gate their streaming
+ * endpoint behind auth while still serving the SAME request non-streaming
+ * (Pollinations' keyless tier started doing exactly this — stream:true gets
+ * HTTP 401 "A valid API key is required" while stream:false returns 200,
+ * which killed every discovery draft at "0 characters streamed"). When the
+ * streaming attempt is rejected with 400/401/403 — or the "streaming"
+ * response arrives as plain JSON — the call self-heals with ONE
+ * non-streaming request and synthesizes the delta feed, so the live monitor
+ * still shows what the model wrote.
  */
 export async function businessLlmStream(
   cfg: BusinessLlmConfig,
   opts: BusinessLlmStreamOptions,
 ): Promise<{ text: string; usage?: BusinessLlmUsage }> {
-  const targetUrl = buildTargetUrl(cfg);
-  // No overall timeout: generation length is unbounded; parseSSEStream enforces
-  // the 120s idle timeout that catches dead streams.
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (opts.signal) {
-    if (opts.signal.aborted) controller.abort();
-    else opts.signal.addEventListener("abort", onAbort, { once: true });
-  }
+  return withRetryLadder(opts, async () => {
+    const targetUrl = buildTargetUrl(cfg);
+    // No overall timeout: generation length is unbounded; parseSSEStream enforces
+    // the 120s idle timeout that catches dead streams.
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
 
+    const doFetch = async (stream: boolean): Promise<Response> => {
+      const body: Record<string, unknown> = {
+        model: cfg.model,
+        messages: opts.messages ?? [
+          { role: "system", content: opts.systemPrompt },
+          { role: "user", content: opts.userPrompt },
+        ],
+        stream,
+      };
+      if (stream) body.stream_options = { include_usage: true };
+      if (typeof opts.temperature === "number") body.temperature = opts.temperature;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-target-url": targetUrl,
+        Accept: "text/event-stream",
+      };
+      if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+      return fetch(proxyUrl(targetUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+    };
+
+    /** Feed a fully-generated text through onDelta in small animated chunks —
+     *  the self-heal path's honest equivalent of a live stream. */
+    const synthesizeDeltas = async (
+      text: string,
+      usage?: BusinessLlmUsage,
+    ): Promise<{ text: string; usage?: BusinessLlmUsage }> => {
+      const CHUNK = 96;
+      for (let i = 0; i < text.length; i += CHUNK) {
+        if (opts.signal?.aborted) throw new Error("The stream was cancelled.");
+        opts.onDelta(text.slice(i, i + CHUNK));
+        if (i + CHUNK < text.length) {
+          // A few ms per chunk — the whole blueprint animates in well under a
+          // second; fast, but visibly "written" in the live monitor.
+          await new Promise<void>((r) => setTimeout(r, 8));
+        }
+      }
+      return { text, usage };
+    };
+
+    try {
+      const res = await doFetch(true);
+
+      // STREAMING-REJECTED SELF-HEAL (see doc comment): 400/401/403 on the
+      // streaming attempt → ONE non-streaming retry of the same request.
+      if (!res.ok && (res.status === 400 || res.status === 401 || res.status === 403)) {
+        const streamErrText = await res.text().catch(() => "");
+        const nonStream = await doFetch(false);
+        if (nonStream.ok && nonStream.body) {
+          const raw = await nonStream.text();
+          const parsed = parseCompletionText(raw);
+          if (parsed.content.trim()) {
+            return await synthesizeDeltas(parsed.content, parsed.usage);
+          }
+          // Non-streaming replied but with no content — surface the ORIGINAL
+          // streaming error (the likelier truthful reason).
+          throw new Error(describeUpstreamError(res.status, streamErrText, cfg.providerName));
+        }
+        // Non-streaming also rejected — ITS error is the truthful one (a
+        // genuinely missing/invalid key, a genuinely bad request).
+        const errText2 = await nonStream.text().catch(() => "");
+        throw new Error(
+          describeUpstreamError(nonStream.status, errText2, cfg.providerName),
+        );
+      }
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(describeUpstreamError(res.status, errText, cfg.providerName));
+      }
+      if (!res.body) {
+        throw new Error(`Provider "${cfg.providerName}" returned an empty response body.`);
+      }
+
+      // Some relays accept stream:true but answer with a single plain-JSON
+      // body (content-type application/json, no SSE events). Detect that
+      // before the SSE reader and use the same self-heal path.
+      const contentType = res.headers.get("content-type") ?? "";
+      if (contentType.includes("application/json")) {
+        const raw = await res.text();
+        const parsed = parseCompletionText(raw);
+        if (parsed.content.trim()) {
+          return await synthesizeDeltas(parsed.content, parsed.usage);
+        }
+        throw new Error(`Provider "${cfg.providerName}" returned an empty completion.`);
+      }
+
+      const reader = res.body.getReader();
+      let text = "";
+      let usage: BusinessLlmUsage | undefined;
+      for await (const chunk of parseSSEStream(reader, controller.signal)) {
+        const delta = extractDelta(chunk);
+        if (delta?.text) {
+          text += delta.text;
+          opts.onDelta(delta.text);
+        }
+        const u = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+        if (u && typeof u === "object") {
+          usage = { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens };
+        }
+      }
+      if (!text.trim()) {
+        // EMPTY-COMPLETED-STREAM SELF-HEAL: some reasoning models stream long
+        // thinking (delta.reasoning…) that consumes the ENTIRE output budget
+        // — the stream completes 200-OK with ZERO content deltas (observed
+        // on Pollinations' gpt-oss keyless tier). One non-streaming request
+        // usually returns the answer directly (message.content), so fall
+        // back to it instead of failing the turn.
+        const nonStream = await doFetch(false);
+        if (nonStream.ok && nonStream.body) {
+          const raw = await nonStream.text();
+          const parsed = parseCompletionText(raw);
+          if (parsed.content.trim()) {
+            return await synthesizeDeltas(parsed.content, parsed.usage);
+          }
+        }
+        throw new Error(`Provider "${cfg.providerName}" returned an empty completion.`);
+      }
+      return { text, usage };
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error("The stream was cancelled.");
+      }
+      throw err;
+    } finally {
+      opts.signal?.removeEventListener("abort", onAbort);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Free Pollinations provider (seeding + gateway migration)
+// ---------------------------------------------------------------------------
+
+/**
+ * The keyless Pollinations text endpoint — an OpenAI-compatible POST target
+ * used AS-IS (no /chat/completions suffix → providers seeded with it set
+ * no_prefix: true).
+ *
+ * Why not gen.pollinations.ai/v1: Pollinations' new gateway retired its
+ * keyless anonymous tier mid-2025 — keyless requests get "HTTP 401: A valid
+ * API key is required" (streaming requests fail INSTANTLY, which used to kill
+ * every discovery draft at "0 characters streamed"). The legacy text endpoint
+ * still serves keyless traffic, streaming included.
+ */
+export const FREE_POLLINATIONS_BASE_URL = "https://text.pollinations.ai/openai";
+
+/** Seed the free keyless Pollinations provider (wizard/dashboard CTA). */
+export async function addFreePollinationsProvider(userId: string): Promise<void> {
+  await aiProviderService.create(userId, {
+    name: "Pollinations",
+    base_url: FREE_POLLINATIONS_BASE_URL,
+    api_key: "", // keyless — Pollinations legacy text tier
+    models: ["openai"],
+    is_active: true,
+    model_type: "chat",
+    no_prefix: true,
+  });
+}
+
+/**
+ * One-time, self-limiting migration: a "Pollinations" provider still pointing
+ * at the keyless-dead gen.pollinations.ai gateway is repointed to the legacy
+ * text endpoint. No-op once the base URL no longer matches (so it is cheap to
+ * call on every provider refresh).
+ */
+export async function migrateLegacyPollinationsGateway(userId: string): Promise<void> {
   try {
-    const body: Record<string, unknown> = {
-      model: cfg.model,
-      messages: opts.messages ?? [
-        { role: "system", content: opts.systemPrompt },
-        { role: "user", content: opts.userPrompt },
-      ],
-      stream: true,
-      stream_options: { include_usage: true },
-    };
-    if (typeof opts.temperature === "number") body.temperature = opts.temperature;
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "x-target-url": targetUrl,
-      Accept: "text/event-stream",
-    };
-    if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
-    const res = await fetch(proxyUrl(targetUrl), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(describeUpstreamError(res.status, errText, cfg.providerName));
+    const providers = await aiProviderService.list(userId);
+    const legacy = providers.find(
+      (p) => p.name === "Pollinations" && p.base_url.includes("gen.pollinations.ai"),
+    );
+    if (legacy) {
+      await aiProviderService.update(legacy.id, {
+        base_url: FREE_POLLINATIONS_BASE_URL,
+        no_prefix: true,
+      });
     }
-    if (!res.body) {
-      throw new Error(`Provider "${cfg.providerName}" returned an empty response body.`);
-    }
-
-    const reader = res.body.getReader();
-    let text = "";
-    let usage: BusinessLlmUsage | undefined;
-    for await (const chunk of parseSSEStream(reader, controller.signal)) {
-      const delta = extractDelta(chunk);
-      if (delta?.text) {
-        text += delta.text;
-        opts.onDelta(delta.text);
-      }
-      const u = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
-      if (u && typeof u === "object") {
-        usage = { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens };
-      }
-    }
-    if (!text.trim()) {
-      throw new Error(`Provider "${cfg.providerName}" returned an empty completion.`);
-    }
-    return { text, usage };
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("The stream was cancelled.");
-    }
-    throw err;
-  } finally {
-    opts.signal?.removeEventListener("abort", onAbort);
+  } catch {
+    // Best-effort — provider listing errors surface through the UI paths.
   }
 }
 

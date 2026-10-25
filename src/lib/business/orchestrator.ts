@@ -157,6 +157,83 @@ function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
 
+/**
+ * Best-effort salvage of a TRUNCATED JSON object. Small / keyless models hit
+ * their output-token limit mid-blueprint (the stream simply stops inside a
+ * string or a nested array — the balanced-brace parser in extractJsonObject
+ * then returns null and the whole discovery used to die with "unreadable
+ * blueprint" even though 90% of the document was fine).
+ *
+ * Strategy: single state-machine pass tracking string/escape state and the
+ * bracket stack, remembering the index right AFTER every COMPLETE top-level
+ * member. Cut there, strip a trailing comma, close the outer object, parse.
+ * The blueprint validator fills missing sections with honest defaults, so a
+ * salvaged partial beats a dead run. Returns null when even the prefix is
+ * not parseable (callers fall through to their normal error paths).
+ */
+function salvageTruncatedJson(text: string): unknown | null {
+  const t = text.trim();
+  // A fenced block is only used when it CLOSES (a truncated reply usually
+  // lost its closing fence — then we salvage the whole raw text instead).
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fence?.[1]?.trim() || t;
+  const start = body.indexOf("{");
+  if (start === -1) return null;
+
+  let inStr = false;
+  let esc = false;
+  let depth = 0;
+  let lastBoundary = -1; // index just after a complete top-level member
+  for (let i = start; i < body.length; i++) {
+    const ch = body[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 1) lastBoundary = i + 1; // closed a top-level member value
+      if (depth < 0) return null; // malformed (closed more than opened)
+    } else if (ch === "," && depth === 1) {
+      lastBoundary = i; // comma directly after a complete member
+    }
+  }
+  if (lastBoundary <= start) return null;
+  // The boundary must sit at depth 1 (inside the outer object, nothing else
+  // open) — otherwise the cut would not be a valid member edge.
+  let boundaryDepth = 0;
+  {
+    // cheap re-scan up to the boundary to know how deep we were there
+    let s = false;
+    let e = false;
+    for (let i = start; i < lastBoundary; i++) {
+      const ch = body[i];
+      if (s) {
+        if (e) e = false;
+        else if (ch === "\\") e = true;
+        else if (ch === '"') s = false;
+        continue;
+      }
+      if (ch === '"') s = true;
+      else if (ch === "{" || ch === "[") boundaryDepth++;
+      else if (ch === "}" || ch === "]") boundaryDepth--;
+    }
+  }
+  if (boundaryDepth !== 1) return null;
+  let candidate = body.slice(start, lastBoundary).replace(/,\s*$/, "");
+  candidate += "}";
+  try {
+    const parsed = JSON.parse(candidate) as unknown;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Validate a parsed plan object into a TurnPlan. */
 function safeParsePlan(text: string): TurnPlan | null {
   const raw = extractJsonObject(text);
@@ -320,6 +397,16 @@ export interface DiscoveryProgressEvent {
   delta?: string;
   /** enrich/draft/repair: total characters streamed for the current generation. */
   chars?: number;
+  /** enrich/draft/repair: set on a start event when a transient provider
+   *  failure (rate limit, gateway hiccup, dead stream, empty reply) forced
+   *  the retry ladder to restart the generation from zero. The monitor
+   *  shows the reason instead of silently sitting at "0 characters". */
+  retry?: {
+    attempt: number;
+    maxAttempts: number;
+    error: string;
+    waitMs: number;
+  };
 }
 
 export interface DiscoveryRunOptions {
@@ -376,6 +463,12 @@ export async function runBusinessDiscovery(
           enrichChars += delta.length;
           emit({ phase: "enrich", status: "start", delta, chars: enrichChars });
         },
+        onRetry: (info) => {
+          // The stream restarts from zero — reset the accumulator so the
+          // retried output is not prepended with the aborted attempt's text.
+          enrichChars = 0;
+          emit({ phase: "enrich", status: "start", retry: info });
+        },
       });
       const parsed = extractJsonObject(res.text);
       if (parsed && typeof parsed === "object") {
@@ -425,7 +518,10 @@ export async function runBusinessDiscovery(
   }
 
   // Draft the blueprint — STREAMED (fixes provider inactivity 504s and
-  // feeds the wizard's live "what the AI is writing" monitor).
+  // feeds the wizard's live "what the AI is writing" monitor). The LLM
+  // transport's transient-retry ladder (rate limits, gateway hiccups, dead
+  // streams) fires onRetry here — the run no longer dies at "0 characters
+  // streamed" just because the provider hiccuped on its biggest generation.
   emit({ phase: "draft", status: "start" });
   let draftText = "";
   const res = await businessLlmStream(cfg, {
@@ -436,13 +532,22 @@ export async function runBusinessDiscovery(
       draftText += delta;
       emit({ phase: "draft", status: "start", delta, chars: draftText.length });
     },
+    onRetry: (info) => {
+      draftText = ""; // restart from zero — drop the aborted attempt's partial
+      emit({ phase: "draft", status: "start", retry: info });
+    },
   });
   let text = res.text;
   if (!text.trim()) text = draftText; // paranoid: keep what we saw streamed
   emit({ phase: "draft", status: "done", chars: text.length });
 
   emit({ phase: "validate", status: "start" });
-  let parsed = extractJsonObject(text) as Record<string, unknown> | null;
+  // Strict parse first; a TRUNCATED stream (small-model output cap) falls to
+  // the salvage path — the blueprint validator fills missing sections with
+  // honest defaults instead of killing the whole run.
+  let parsed = (extractJsonObject(text) ?? salvageTruncatedJson(text)) as
+    | Record<string, unknown>
+    | null;
   if (!parsed) {
     // one streamed repair retry
     emit({ phase: "repair", status: "start" });
@@ -455,8 +560,13 @@ export async function runBusinessDiscovery(
         repairText += delta;
         emit({ phase: "repair", status: "start", delta, chars: repairText.length });
       },
+      onRetry: (info) => {
+        repairText = "";
+        emit({ phase: "repair", status: "start", retry: info });
+      },
     });
-    parsed = extractJsonObject(repair.text || repairText) as Record<string, unknown> | null;
+    parsed = (extractJsonObject(repair.text || repairText) ??
+      salvageTruncatedJson(repair.text || repairText)) as Record<string, unknown> | null;
     emit({ phase: "repair", status: "done" });
   }
   if (!parsed || typeof parsed !== "object") {

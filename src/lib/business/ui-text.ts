@@ -178,6 +178,7 @@ const EN: Record<string, string> = {
   "wizard.discovery.resultsFound": "{count} results",
   "wizard.discovery.noResults": "0 results — continuing with honest estimates",
   "wizard.discovery.drafting": "Drafting the blueprint — {chars} characters streamed",
+  "wizard.discovery.retryLine": "Attempt {attempt} of {max} hit a provider hiccup — {error}. Restarting the stream in {seconds}s…",
   "wizard.discovery.liveWrite": "Live — the Main Agent is writing",
   "wizard.discovery.writeLabel.enrich": "Expanding your prompt",
   "wizard.discovery.writeLabel.draft": "Drafting the business blueprint",
@@ -542,6 +543,7 @@ const PL: Record<string, string> = {
   "wizard.discovery.searching": "Szukam: {query}",
   "wizard.discovery.resultsFound": "Wyniki: {count}",
   "wizard.discovery.drafting": "Piszę plan biznesowy — przesłano {chars} znaków",
+  "wizard.discovery.retryLine": "Próba {attempt} z {max} napotkała problem dostawcy — {error}. Ponawiam strumień za {seconds}s…",
   "wizard.discovery.charsStreamed": "Przesłano {count} znaków",
   "toast.bgTurnActive":
     "Zadanie w tle z poprzedniej sesji nadal działa — jego wynik wkrótce pojawi się na czacie.",

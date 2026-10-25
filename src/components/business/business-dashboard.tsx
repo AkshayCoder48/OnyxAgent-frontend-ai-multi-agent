@@ -90,6 +90,10 @@ import { useBusinessStore } from "@/stores/business-store";
 import { useAuth } from "@/hooks";
 import { useAuthStore } from "@/stores/auth-store";
 import { aiProviderService } from "@/lib/services";
+import {
+  addFreePollinationsProvider,
+  migrateLegacyPollinationsGateway,
+} from "@/lib/business/llm";
 import { cn, getErrorMessage, timeAgo } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -193,6 +197,9 @@ export function BusinessDashboard() {
   const refreshProviders = React.useCallback(async () => {
     if (!authResolved || !userId) return;
     try {
+      // Self-limiting migration: repoint a Pollinations provider stuck on the
+      // keyless-dead gen.pollinations.ai gateway to the legacy text endpoint.
+      await migrateLegacyPollinationsGateway(userId);
       const rows = await aiProviderService.list(userId);
       setHasProvider(rows.length > 0);
     } catch {
@@ -236,14 +243,7 @@ export function BusinessDashboard() {
     if (!userId || addingProvider) return;
     setAddingProvider(true);
     try {
-      await aiProviderService.create(userId, {
-        name: "Pollinations",
-        base_url: "https://gen.pollinations.ai/v1",
-        api_key: "", // keyless — Pollinations anonymous tier
-        models: ["openai"],
-        is_active: true,
-        model_type: "chat",
-      });
+      await addFreePollinationsProvider(userId);
       toast.success(bt("toast.providerAdded"));
       await refreshProviders();
     } catch (e) {

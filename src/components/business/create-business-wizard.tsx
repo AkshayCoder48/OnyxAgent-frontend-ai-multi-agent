@@ -72,6 +72,8 @@ import { bt, setBusinessTextLocale } from "@/lib/business/ui-text";
 import { getBusinessTemplate } from "@/lib/business/templates";
 import {
   businessLlmStream,
+  migrateLegacyPollinationsGateway,
+  addFreePollinationsProvider,
   resolveBusinessLlmConfig,
 } from "@/lib/business/llm";
 import {
@@ -302,6 +304,15 @@ export function CreateBusinessWizard() {
   const [liveText, setLiveText] = React.useState("");
   const [liveChars, setLiveChars] = React.useState(0);
   const [validateDone, setValidateDone] = React.useState(false);
+  /** Set while the LLM transport's transient-retry ladder waits out a
+   *  provider hiccup (rate limit, gateway 504, dead stream, empty reply) —
+   *  shows WHY the stream restarted instead of a silent "0 characters". */
+  const [retryNote, setRetryNote] = React.useState<{
+    attempt: number;
+    maxAttempts: number;
+    error: string;
+    seconds: number;
+  } | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
   const liveScrollRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -343,6 +354,9 @@ export function CreateBusinessWizard() {
   const refreshProviders = React.useCallback(async () => {
     if (!authResolved || !userId) return;
     try {
+      // Self-limiting migration: repoint a Pollinations provider stuck on the
+      // keyless-dead gen.pollinations.ai gateway to the legacy text endpoint.
+      await migrateLegacyPollinationsGateway(userId);
       const rows = await aiProviderService.list(userId);
       setProviderState(rows.length > 0 ? "ok" : "missing");
     } catch {
@@ -358,14 +372,7 @@ export function CreateBusinessWizard() {
     if (!userId || addingProvider) return;
     setAddingProvider(true);
     try {
-      await aiProviderService.create(userId, {
-        name: "Pollinations",
-        base_url: "https://gen.pollinations.ai/v1",
-        api_key: "", // keyless — Pollinations anonymous tier
-        models: ["openai"],
-        is_active: true,
-        model_type: "chat",
-      });
+      await addFreePollinationsProvider(userId);
       toast.success(bt("toast.providerAdded"));
       await refreshProviders();
     } catch (e) {
@@ -406,6 +413,7 @@ export function CreateBusinessWizard() {
     setLiveText("");
     setLiveChars(0);
     setValidateDone(false);
+    setRetryNote(null);
   }
 
   /** Apply one REAL orchestrator event to the live monitor state. */
@@ -426,15 +434,27 @@ export function CreateBusinessWizard() {
         setEnrichState("active");
         const delta = ev.delta;
         if (delta) {
+          setRetryNote(null); // deltas are flowing again — the hiccup is over
           setLiveText((t) => t + delta);
           if (typeof ev.chars === "number") setLiveChars(ev.chars);
         } else {
           setWritingLabelKey("wizard.discovery.writeLabel.enrich");
           setLiveText("");
           setLiveChars(0);
+          setRetryNote(
+            ev.retry
+              ? {
+                  attempt: ev.retry.attempt,
+                  maxAttempts: ev.retry.maxAttempts,
+                  error: ev.retry.error,
+                  seconds: Math.round(ev.retry.waitMs / 1000),
+                }
+              : null,
+          );
         }
       } else {
         setEnrichState("done");
+        setRetryNote(null);
       }
       return;
     }
@@ -462,6 +482,7 @@ export function CreateBusinessWizard() {
       if (ev.status === "start") {
         const delta = ev.delta;
         if (delta) {
+          setRetryNote(null); // deltas are flowing again — the hiccup is over
           setLiveText((t) => t + delta);
           if (typeof ev.chars === "number") setLiveChars(ev.chars);
         } else {
@@ -472,6 +493,16 @@ export function CreateBusinessWizard() {
           );
           setLiveText("");
           setLiveChars(0);
+          setRetryNote(
+            ev.retry
+              ? {
+                  attempt: ev.retry.attempt,
+                  maxAttempts: ev.retry.maxAttempts,
+                  error: ev.retry.error,
+                  seconds: Math.round(ev.retry.waitMs / 1000),
+                }
+              : null,
+          );
         }
       } else if (typeof ev.chars === "number") {
         setLiveChars(ev.chars);
@@ -1274,9 +1305,16 @@ export function CreateBusinessWizard() {
                         <p className="text-muted-foreground pl-[42px] text-xs tabular-nums">
                           {livePhase === "validate"
                             ? bt("wizard.discovery.writeLabel.validate")
-                            : bt("wizard.discovery.drafting", {
-                                chars: liveChars,
-                              })}
+                            : retryNote
+                              ? bt("wizard.discovery.retryLine", {
+                                  attempt: retryNote.attempt,
+                                  max: retryNote.maxAttempts,
+                                  error: retryNote.error,
+                                  seconds: retryNote.seconds,
+                                })
+                              : bt("wizard.discovery.drafting", {
+                                  chars: liveChars,
+                                })}
                         </p>
                       )}
                     </li>
@@ -1312,6 +1350,25 @@ export function CreateBusinessWizard() {
                   className="max-h-72 overflow-y-auto px-4 py-3"
                   aria-label={bt("wizard.discovery.liveWrite")}
                 >
+                  {/* Retry note — the transient-retry ladder is waiting out a
+                      provider hiccup; show the real reason instead of a
+                      silent "0 characters streamed" stall. */}
+                  {retryNote && discoveryRunning && (
+                    <p
+                      role="status"
+                      className="mb-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400"
+                    >
+                      <AlertTriangle aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+                      <span>
+                        {bt("wizard.discovery.retryLine", {
+                          attempt: retryNote.attempt,
+                          max: retryNote.maxAttempts,
+                          error: retryNote.error,
+                          seconds: retryNote.seconds,
+                        })}
+                      </span>
+                    </p>
+                  )}
                   {liveText ? (
                     <pre className="font-mono text-muted-foreground text-[11px] leading-relaxed break-all whitespace-pre-wrap">
                       {liveTail}
