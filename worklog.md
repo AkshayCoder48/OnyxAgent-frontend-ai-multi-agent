@@ -44,3 +44,27 @@ Stage Summary:
 - Free-catalog-models-only policy (nano + deepseek flash); paid-only gpt-4o-mini removed from the surface
 - Graceful degradation verified live: anonymous hourly budget exhausted → instant 401 → local fallback phrases keep the status line moving
 - Business Mode untouched and re-verified: addPollinationsProvider = real gen.pollinations.ai/v1 + Bearer BYOP key + live catalog (235 live chat models), discovery/chat run on the SELECTED chat model with its provider (resolveBusinessLlmConfig chain)
+
+---
+Task ID: 3
+Agent: main (Z.ai Code)
+Task: Fix the business "Provider Pollinations error (HTTP 404): Model community/CloudCompile/dots-studio-dots-3-note-preview:free isn't on the Classic API" error; remove the decision model; keep every AI call on the gen.pollinations.ai endpoint (selected model with its provider) for main-agent discovery (third process) and all — except status captions (keyless)
+
+Work Log:
+- Reproduced the upstream error by curl: text.pollinations.ai/openai/chat/completions returns EXACTLY the user's 404 ("isn't on the Classic API") for the dots model — proving the business call resolved a LEGACY provider row still on the classic endpoint. gen.pollinations.ai has the model (catalog: community:true, paid_only:false, /v1/chat/completions in supported_endpoints) — the user is right
+- Root cause: the chat model picker lists models from ALL providers flat, so selectedModel (dots, gen-catalog-only) can coexist with a stale selectedProviderId pointing at a legacy text.pollinations.ai row; old resolveBusinessLlmConfig then blindly sent the model to the classic base URL
+- src/lib/business/llm.ts resolveBusinessLlmConfig REWRITTEN: (1) LEGACY-CLASSIC GUARD — any Pollinations row still on text.pollinations.ai triggers migrateLegacyPollinationsGateway inline (repoint-to-gen with connected key / delete when not connected) then re-lists; usable providers are additionally filtered so a classic URL is NEVER called; (2) MODEL-FIRST resolution — the chat-selected model resolves with the provider that OFFERS it (override.providerId → model owner → selectedProviderId → first active); (3) orphaned model ids fall back to the provider's first model instead of a guaranteed 404
+- Decision model (JEV systemone, typesafe/jev-1.13) REMOVED: orchestrator chat-turn step-4 classify + routingHint plumbing; prompts.ts routing-hint section + RoutingHint import; deleted src/lib/business/jev.ts, src/app/api/jev-decide/route.ts, src/lib/tools/decision.ts; tools/index.ts import + comment; ONYX.md digest tool entry + name list; ui-text decisionFallback/decisionUsed keys (fixed a self-inflicted duplicate ui-text key + duplicate prompts import + invented-import slip along the way)
+- decision_records Dexie table + service left inert (historical data; no runtime users remain)
+- Lint 0 errors (only pre-existing warnings); tsc clean for all edited files (added the missing !provider guard + corrected ChatHistoryEntry which is defined IN prompts.ts, not types)
+- E2E (agent-browser, injected the user's exact broken state into IndexedDB: legacy classic row + gen row offering the dots model, chat-store selection = legacy provider + dots model):
+  * /business mount → legacy row auto-deleted (guard worked; only gen-poll-row remains)
+  * wizard discovery run → config badge shows "Using Pollinations · community/CloudCompile/dots-studio-dots-3-note-preview:free" (model-first resolution proven)
+  * network log: ONLY POSTs to gen.pollinations.ai/v1/chat/completions (401 with the empty test key = the honest auth error, NEVER the classic 404; with the user's connected key this call succeeds)
+  * zero jev-decide calls, zero console/page errors, dev.log clean
+- Committed (business-llm classic-404 fix + decision model removal)
+
+Stage Summary:
+- The Classic-API 404 is dead: legacy text.pollinations.ai rows self-heal on every business call path and classic URLs are never callable; the selected model always resolves together with the provider that offers it
+- ALL business AI (discovery steps 1-3 incl. the blueprint-drafting third process, specialist agents, chat turns, regeneration) runs on the user's selected gen.pollinations.ai model via the single resolveBusinessLlmConfig path — status captions remain the one keyless exception
+- The JEV decision model is fully removed from the product (business chat, agent tools, docs, UI text); no decision-engine network calls remain
