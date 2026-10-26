@@ -23,3 +23,24 @@ Stage Summary:
 - All Pollinations surfaces now on the official gen.pollinations.ai API with Bearer auth: chat (BYOP provider sync), media/image/video/audio/3D (already were), models (live 405-model catalog), status captions (new)
 - BYOP flow is the auth path: connect in Settings → Pollinations (OAuth or paste sk_ key) → auto-synced "Pollinations" provider with live models for chat + business mode
 - Anonymous/keyless traffic is only a best-effort last resort (status captions) — instantly falls back when the hourly IP budget is exhausted
+
+---
+Task ID: 2
+Agent: main (Z.ai Code)
+Task: Make status captions KEYLESS Pollinations (user directive) — no BYOP key, no env key; keep Business Mode on the BYOP gen.pollinations.ai flow (addPollinationsProvider, live catalog, Bearer auth, selected chat model with its provider)
+
+Work Log:
+- Read worklog Task 1 + current code: status-caption route had a 3-step key chain (caller BYOP key → POLLINATIONS_API_KEY env → keyless); business llm.ts already fully on addPollinationsProvider/BYOP (commit eed357b)
+- Verified live catalog (409 models, 122 free text): openai/gpt-5.4-nano free (paid_only:false) but openai/gpt-4o-mini is NOW paid_only:true — unusable as a keyless fallback; picked deepseek/deepseek-v4.1-flash (free, tools, /v1/chat/completions) as the second attempt
+- src/app/api/status-caption/route.ts: removed the key field + sanitizeCallerKey + POLLINATIONS_API_KEY env lookup + apiKey param + Authorization header — route is now KEYLESS-ONLY (anonymous tier, free models, User-Agent kept); rewrote header docs as the KEYLESS POLICY; models = [openai/gpt-5.4-nano, deepseek/deepseek-v4.1-flash]; contract comment updated
+- src/hooks/use-ai-status-phrases.ts: removed connectedPollinationsKey() + key from the POST body; dropped settingsService/useAuthStore imports; hook now fully keyless (KEYLESS BY DESIGN note in the doc comment)
+- Lint: 0 errors, no warnings in either edited file
+- Live verification: keyless nano completion succeeded earlier (proved the path); then the gateway's hourly anonymous IP budget exhausted for this server IP → instant 401 on all endpoints (chat + GET /text) — exactly the documented degradation: route answers 200 with local fallback phrases, never blocks
+- E2E (agent-browser): app loads clean (zero page/console errors); POST /api/status-caption from browser context returns valid {phrases, source:"fallback"}; /business renders the provider gate + "Connect Pollinations" CTA (addPollinationsProvider flow) intact, no errors
+- Committed 25fb948 (local main; NOT pushed — user pushes on explicit request)
+
+Stage Summary:
+- Status captions are now 100% keyless Pollinations: no key is read, sent, or stored anywhere in the feature (route + hook), so decorative micro-generations never spend BYOP credits
+- Free-catalog-models-only policy (nano + deepseek flash); paid-only gpt-4o-mini removed from the surface
+- Graceful degradation verified live: anonymous hourly budget exhausted → instant 401 → local fallback phrases keep the status line moving
+- Business Mode untouched and re-verified: addPollinationsProvider = real gen.pollinations.ai/v1 + Bearer BYOP key + live catalog (235 live chat models), discovery/chat run on the SELECTED chat model with its provider (resolveBusinessLlmConfig chain)
