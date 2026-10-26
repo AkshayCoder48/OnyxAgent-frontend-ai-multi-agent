@@ -11,7 +11,6 @@
 // activity.
 // ============================================================================
 
-import type { RoutingHint } from "./jev";
 import type {
   BusinessAgentRow,
   BusinessBlueprint,
@@ -72,7 +71,6 @@ export function buildPlannerSystemPrompt(
   business: BusinessRow,
   agents: BusinessAgentRow[],
   memoryContext: string,
-  routingHint: RoutingHint | null,
   mentionedAgents: BusinessAgentRow[],
 ): string {
   const roster = agents.length
@@ -96,10 +94,6 @@ export function buildPlannerSystemPrompt(
           .map((g) => `[${g.status}] ${g.title}`),
       )
     : "(no goals recorded)";
-
-  const routing = routingHint
-    ? `A decision service classified the user's message intent (routing hint: "${routingHint}"). Weigh this hint, but override it when the business needs something else.`
-    : "The decision service was unavailable — use your own judgment.";
 
   const mentions = mentionedAgents.length
     ? `The user explicitly mentioned: ${mentionedAgents.map((a) => a.name).join(", ")}. When the work fits them, delegate to them.`
@@ -125,10 +119,7 @@ ${goals}`,
 Reference agents by their exact NAME (the token before the first dash).
 ${roster}`,
     memoryContext ? `# Business memory\n${memoryContext}` : "",
-    `# Routing hint
-${routing}
-
-# Mentions
+    `# Mentions
 ${mentions}`,
     `# Output contract
 Return ONLY a JSON object — no prose, no markdown fences — with EXACTLY this shape:

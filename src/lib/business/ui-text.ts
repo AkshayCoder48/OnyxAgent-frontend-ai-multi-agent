@@ -267,8 +267,6 @@ const EN: Record<string, string> = {
   "chat.approve": "Approve",
   "chat.reject": "Reject",
   "chat.requestChanges": "Request changes",
-  "chat.decisionFallback": "Decision service unavailable — using native routing",
-  "chat.decisionUsed": "Routed via decision service ({label}, {confidence}% confidence)",
   "chat.streaming": "Thinking…",
   "chat.cloudRun": "Trigger.dev Cloud run",
   "chat.suggestion": "Suggestion",

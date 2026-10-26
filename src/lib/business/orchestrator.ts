@@ -46,7 +46,6 @@ import {
   type ChatHistoryEntry,
   type WebResearchBlock,
 } from "./prompts";
-import { classifyMessageIntent, type RoutingHint } from "./jev";
 import {
   SPECIALIST_TOOL_PROTOCOL,
   runSpecialistToolLoop,
@@ -1112,20 +1111,11 @@ export async function sendBusinessMessage(businessId: string, content: string): 
       }
     }
 
-    // 4. Memory + JEV decision
+    // 4. Memory context
+    // (The JEV decision-model routing step was removed by user directive —
+    // every AI call now runs on the user's selected gen.pollinations.ai
+    // model; the Main Agent plans with its own judgment.)
     const memory = memoryContextText(await businessMemoryService.retrieve(businessId, content, 2500));
-    const decision = await classifyMessageIntent({ businessId, message: content, signal });
-    await appendActivity(
-      businessId,
-      decision.result.fallbackUsed
-        ? bt("chat.decisionFallback")
-        : bt("chat.decisionUsed", {
-            label: decision.result.label ?? "",
-            confidence: Math.round((decision.result.confidence ?? 0) * 100),
-          }),
-      { metadata: { turnId } },
-    );
-    const routingHint: RoutingHint | null = decision.hint;
 
     // 5. Main Agent model
     const mainCfg = await resolveBusinessLlmConfig(
@@ -1172,7 +1162,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
     let plan: TurnPlan | null = null;
     try {
       const res = await businessLlmComplete(mainCfg, {
-        systemPrompt: buildPlannerSystemPrompt(business, agents, memory, routingHint, mentionedAgents),
+        systemPrompt: buildPlannerSystemPrompt(business, agents, memory, mentionedAgents),
         userPrompt: buildPlannerUserPrompt({
           userMessage: content,
           history: history.slice(0, -1),
@@ -1186,7 +1176,7 @@ export async function sendBusinessMessage(businessId: string, content: string): 
       plan = safeParsePlan(res.text);
       if (!plan) {
         const repair = await businessLlmComplete(mainCfg, {
-          systemPrompt: buildPlannerSystemPrompt(business, agents, memory, routingHint, mentionedAgents),
+          systemPrompt: buildPlannerSystemPrompt(business, agents, memory, mentionedAgents),
           userPrompt: `${buildPlannerUserPrompt({ userMessage: content, history: history.slice(0, -1), mentionNames: mentionedAgents.map((a) => a.name) })}\n\nIMPORTANT: your previous reply was not valid JSON. Return ONLY the JSON plan object.`,
           jsonMode: true,
           signal,

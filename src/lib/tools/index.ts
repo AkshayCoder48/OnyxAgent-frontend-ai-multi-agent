@@ -9,7 +9,6 @@
  * `registerTool` from) doesn't form a circular dependency with them.
  *
  * ORDER MATTERS at the tail:
- *   - "./decision" registers the decision-engine tool (a keeper).
  *   - "./consolidated" registers the 12 UMBRELLA tools and hides the ~55
  *     granular tools they absorb — it MUST come after every granular
  *     registration above so the umbrellas can dispatch to them.
@@ -55,7 +54,6 @@ import "./media_generation";
 import "./sandbox_schedule";
 import "./background_task";
 import "./manage_business";
-import "./decision";
 import "./consolidated";
 
 export {};

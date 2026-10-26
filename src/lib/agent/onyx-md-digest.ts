@@ -46,7 +46,6 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - counterfactual — Structured "what if X had been different" analysis.
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 - manage_business [create / create_from_template / list / get / update / manage_agents / status / delete] — Business Mode workspaces — agent-team businesses the user opens at /business/{id}.
-- decision — Structured decision engine: pass \`state\` (the text/scenario) + \`queries\` [{id, question, kind: choice|noul|score, options?|legend?}] — get probability-backed verdicts. Use for judgments ("is this good?", "which option?", "rate this").
 
 ### Availability rules (anti-hallucination)
 - EVERY tool listed above is REAL and CALLABLE. If a tool is in your tool definitions, you HAVE it — NEVER say "I don't have access to that tool" or "I forgot I had those tools" without trying the call first.
@@ -60,5 +59,5 @@ export const ONYX_MD_DIGEST_TOOLS: readonly string[] = [
   "files","web","code_exec","subagents","schedule","integrations","chats",
   "memory","todos","media","workspace","custom_tools",
   "use_browser","ask_user","knowledge_base","manage_skill","manage_mcp",
-  "workflow","counterfactual","current_datetime","manage_business","decision",
+  "workflow","counterfactual","current_datetime","manage_business",
 ];

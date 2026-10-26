@@ -184,15 +184,36 @@ async function withRetryLadder<T>(
 /**
  * Resolve the LLM configuration for a Business Mode call.
  *
- * Provider chain: override.providerId → chat-store selectedProviderId →
- * the provider that offers the chat-store selectedModel (stale-provider
- * recovery) → first active provider. Model chain: override.model →
- * chat-store selectedModel (when the selected provider resolved, or the
- * resolved provider offers that model) → provider.models[0].
+ * LEGACY-CLASSIC GUARD: a "Pollinations" row still pointing at the RETIRED
+ * text.pollinations.ai (Classic) endpoint can never serve gen-catalog
+ * models — the gateway answers the "…isn't on the Classic API" 404 the
+ * user hit. The guard self-heals it HERE (not only on wizard/dashboard
+ * mount) so every call path is protected — discovery's three steps
+ * (including blueprint drafting), specialist agent turns and business
+ * chat: repoint the row to the gen gateway with the connected key, or
+ * delete the dead row when no connection exists, then re-list. As
+ * belt-and-braces, a classic URL is NEVER called even if a row somehow
+ * survived the migration.
  *
- * Net effect: Business Mode calls (discovery, chat turns, regeneration)
- * always run on the model CURRENTLY SELECTED in the chat UI whenever it
- * can be resolved to a configured provider.
+ * Provider chain (first match wins):
+ *   1. override.providerId (explicit — e.g. a business's saved main
+ *      provider config)
+ *   2. the chat-store's selectedModel resolved to the provider that
+ *      OFFERS it (MODEL-FIRST — "the selected model with its provider");
+ *      active providers are preferred
+ *   3. the chat-store's selectedProviderId (no model picked / orphaned
+ *      model id)
+ *   4. first active provider
+ *
+ * Model chain: override.model → the chat-store selectedModel when the
+ * resolved provider offers it → provider.models[0]. An orphaned selected
+ * model id (its provider was deleted/re-synced away) falls back to the
+ * provider's first model instead of sending a guaranteed-404 model.
+ *
+ * Net effect: Business Mode calls (discovery, chat turns, regeneration,
+ * specialists) always run on the model CURRENTLY SELECTED in the chat UI
+ * together with the provider that actually serves it — and always on the
+ * official gen.pollinations.ai gateway when the selection is Pollinations.
  *
  * Throws a friendly Error when nothing is usable — callers surface UI
  * guidance (wizard empty state / toast), never a raw stack trace.
@@ -201,37 +222,49 @@ export async function resolveBusinessLlmConfig(
   override?: { providerId?: string; model?: string },
 ): Promise<BusinessLlmConfig> {
   const userId = useAuthStore.getState().user?.id ?? "local-user";
-  const providers = await aiProviderService.list(userId);
-  if (providers.length === 0) {
+  let providers = await aiProviderService.list(userId);
+
+  // ---- Legacy-classic guard (see doc comment) ---------------------------
+  if (
+    providers.some(
+      (p) => p.name === "Pollinations" && p.base_url.includes("text.pollinations.ai"),
+    )
+  ) {
+    // Repoint-to-gen (connected) or delete (not connected) — idempotent,
+    // best-effort; resolution continues with whatever rows remain.
+    await migrateLegacyPollinationsGateway(userId).catch(() => undefined);
+    providers = await aiProviderService.list(userId);
+  }
+  const usable = providers.filter(
+    (p) => !p.base_url.includes("text.pollinations.ai"),
+  );
+  if (usable.length === 0) {
     throw new Error(
-      "No AI provider configured — add one in Settings → Config, or connect your Pollinations account from the business wizard (the official gen.pollinations.ai API uses your own key) to use Business Mode.",
+      "No AI provider configured — add one in Settings → Config, or connect your Pollinations account from the business wizard (the official gen.pollinations.ai API uses your own key; the old keyless text.pollinations.ai endpoint is retired) to use Business Mode.",
     );
   }
 
   const { selectedProviderId, selectedModel } = useChatStore.getState();
 
   let provider: AIProviderRow | undefined;
-  let fromChatStore = false;
 
   if (override?.providerId) {
-    provider = providers.find((p) => p.id === override.providerId);
+    provider = usable.find((p) => p.id === override.providerId);
   }
-  if (!provider && selectedProviderId) {
-    provider = providers.find((p) => p.id === selectedProviderId);
-    fromChatStore = !!provider;
-  }
-  // Stale selectedProviderId (provider deleted / imported id drifted) but a
-  // live selectedModel: resolve the provider that actually offers that model
-  // so the user's current chat selection still wins.
+  // MODEL-FIRST: the selected model with the provider that OWNS it. This
+  // is also the stale-selection recovery — a selectedProviderId pointing
+  // at a deleted/legacy row while the model lives on another provider's
+  // list still lands on the right gateway (the Classic-API-404 fix).
   if (!provider && selectedModel) {
     provider =
-      providers.find((p) => p.is_active && (p.models ?? []).includes(selectedModel)) ??
-      providers.find((p) => (p.models ?? []).includes(selectedModel));
-    fromChatStore = !!provider;
+      usable.find((p) => p.is_active && (p.models ?? []).includes(selectedModel)) ??
+      usable.find((p) => (p.models ?? []).includes(selectedModel));
+  }
+  if (!provider && selectedProviderId) {
+    provider = usable.find((p) => p.id === selectedProviderId);
   }
   if (!provider) {
-    provider = providers.find((p) => p.is_active) ?? providers[0];
-    fromChatStore = false;
+    provider = usable.find((p) => p.is_active) ?? usable[0];
   }
   if (!provider) {
     throw new Error("No AI provider configured — add one in Settings → Config.");
@@ -245,10 +278,10 @@ export async function resolveBusinessLlmConfig(
   // (the honest fix is connecting an account, not retrying).
 
   let model: string | undefined = override?.model;
-  if (!model && selectedModel && fromChatStore) model = selectedModel;
-  // The selected provider may not list the selected model explicitly (some
-  // providers accept arbitrary model ids) — still honor the selection when
-  // it is at least offered by the resolved provider.
+  // Adopt the chat-store model ONLY when the resolved provider offers it
+  // (guaranteed by model-first resolution; an explicit provider+model pair
+  // is consistent by construction). An orphaned id falls through to the
+  // provider's first model — never a guaranteed-404 model.
   if (!model && selectedModel && (provider.models ?? []).includes(selectedModel)) {
     model = selectedModel;
   }
