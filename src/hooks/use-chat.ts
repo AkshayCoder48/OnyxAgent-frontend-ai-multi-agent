@@ -1018,9 +1018,14 @@ export function useChat(options: UseChatOptions = {}) {
 
           const live = run.status === "queued" || run.status === "running";
           if (bubble && live) {
+            // The EXACT required background banner copy (E2B persistent
+            // background execution PRD §4): non-blocking, honest (only shown
+            // while the cloud run is verifiably live), auto-updates when the
+            // task finishes or fails (the poll loop below rewrites the
+            // bubble with the landed answer).
             await writeBubble(
               bubble.id,
-              "⏳ Working in the background — the finished answer will appear here.",
+              "Onyx is working in the background. Wait until the task is finished to see the complete response here.",
               true,
             );
             await refreshRows();
