@@ -1,0 +1,201 @@
+{
+ "id": "ecc",
+ "name": "ECC Skills",
+ "source_url": "https://github.com/affaan-m/ecc",
+ "bundled_at": "2026-10-18",
+ "partial": false,
+ "skills": [
+  {
+   "name": "frontend-slides",
+   "description": "Create stunning, animation-rich HTML presentations from scratch or by converting PowerPoint files. Use when the user wants to build a presentation, convert a PPT/PPTX to web, or create slides for a talk/pitch. Helps non-designers discover their aesthetic through visual exploration rather than abstra",
+   "dir": "skills/frontend-slides",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 6559
+    },
+    {
+     "path": "STYLE_PRESETS.md",
+     "size": 9145
+    },
+    {
+     "path": "animation-patterns.md",
+     "size": 4233
+    },
+    {
+     "path": "html-template.md",
+     "size": 12533
+    },
+    {
+     "path": "viewport-base.css",
+     "size": 4037
+    },
+    {
+     "path": "scripts/export-pdf.sh",
+     "size": 12847
+    },
+    {
+     "path": "scripts/extract-pptx.py",
+     "size": 2917
+    }
+   ]
+  },
+  {
+   "name": "liquid-glass-design",
+   "description": "iOS 26 Liquid Glass design system — dynamic glass material with blur, reflection, and interactive morphing for SwiftUI, UIKit, and WidgetKit. Use when building iOS 26 Liquid Glass UI in SwiftUI, UIKit, or WidgetKit.",
+   "dir": "skills/liquid-glass-design",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 9119
+    }
+   ]
+  },
+  {
+   "name": "make-interfaces-feel-better",
+   "description": "Apply concrete design-engineering details that make interfaces feel polished. Use when reviewing or improving UI spacing, typography, borders, shadows, motion, hit areas, icons, text wrapping, and interaction states.",
+   "dir": "skills/make-interfaces-feel-better",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 4795
+    }
+   ]
+  },
+  {
+   "name": "remotion-video-creation",
+   "description": "Best practices for Remotion - Video creation in React. 29 domain-specific rules covering 3D, animations, audio, captions, charts, transitions, and more. Use when building video in React with Remotion — animations, audio, captions, charts, or transitions.",
+   "dir": "skills/remotion-video-creation",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 3642
+    },
+    {
+     "path": "rules/3d.md",
+     "size": 2279
+    },
+    {
+     "path": "rules/animations.md",
+     "size": 784
+    },
+    {
+     "path": "rules/assets.md",
+     "size": 1590
+    },
+    {
+     "path": "rules/audio.md",
+     "size": 3822
+    },
+    {
+     "path": "rules/calculate-metadata.md",
+     "size": 2920
+    },
+    {
+     "path": "rules/can-decode.md",
+     "size": 1587
+    },
+    {
+     "path": "rules/charts.md",
+     "size": 1748
+    },
+    {
+     "path": "rules/compositions.md",
+     "size": 3442
+    },
+    {
+     "path": "rules/display-captions.md",
+     "size": 3698
+    },
+    {
+     "path": "rules/extract-frames.md",
+     "size": 5496
+    },
+    {
+     "path": "rules/fonts.md",
+     "size": 3484
+    },
+    {
+     "path": "rules/get-audio-duration.md",
+     "size": 1354
+    },
+    {
+     "path": "rules/get-video-dimensions.md",
+     "size": 1627
+    },
+    {
+     "path": "rules/get-video-duration.md",
+     "size": 1341
+    },
+    {
+     "path": "rules/gifs.md",
+     "size": 3868
+    },
+    {
+     "path": "rules/images.md",
+     "size": 2783
+    },
+    {
+     "path": "rules/import-srt-captions.md",
+     "size": 2113
+    },
+    {
+     "path": "rules/lottie.md",
+     "size": 1776
+    },
+    {
+     "path": "rules/measuring-dom-nodes.md",
+     "size": 973
+    },
+    {
+     "path": "rules/measuring-text.md",
+     "size": 3000
+    },
+    {
+     "path": "rules/sequencing.md",
+     "size": 2385
+    },
+    {
+     "path": "rules/tailwind.md",
+     "size": 423
+    },
+    {
+     "path": "rules/text-animations.md",
+     "size": 700
+    },
+    {
+     "path": "rules/timing.md",
+     "size": 3927
+    },
+    {
+     "path": "rules/transcribe-captions.md",
+     "size": 856
+    },
+    {
+     "path": "rules/transitions.md",
+     "size": 3726
+    },
+    {
+     "path": "rules/trimming.md",
+     "size": 1209
+    },
+    {
+     "path": "rules/videos.md",
+     "size": 3507
+    },
+    {
+     "path": "rules/assets/charts-bar-chart.tsx",
+     "size": 3429
+    },
+    {
+     "path": "rules/assets/text-animations-typewriter.tsx",
+     "size": 2183
+    },
+    {
+     "path": "rules/assets/text-animations-word-highlight.tsx",
+     "size": 2387
+    }
+   ]
+  }
+ ]
+}

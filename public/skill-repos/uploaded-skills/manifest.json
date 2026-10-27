@@ -1,0 +1,760 @@
+{
+ "id": "uploaded-skills",
+ "name": "Uploaded Skills (Skills.zip)",
+ "source_url": "(user upload — see upload/Skills.zip)",
+ "bundled_at": "2026-10-18",
+ "partial": false,
+ "skills": [
+  {
+   "name": "agent-browser",
+   "description": "Headless browser automation CLI optimized for AI agents with accessibility tree snapshots and ref-based element selection",
+   "dir": "agent-browser",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 5548
+    },
+    {
+     "path": "_meta.json",
+     "size": 141
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2181
+    }
+   ]
+  },
+  {
+   "name": "agent-browser-2",
+   "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form",
+   "dir": "agent-browser-2",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 34042
+    },
+    {
+     "path": "references/authentication.md",
+     "size": 8432
+    },
+    {
+     "path": "references/commands.md",
+     "size": 11484
+    },
+    {
+     "path": "references/profiling.md",
+     "size": 3405
+    },
+    {
+     "path": "references/proxy-support.md",
+     "size": 4971
+    },
+    {
+     "path": "references/session-management.md",
+     "size": 4337
+    },
+    {
+     "path": "references/snapshot-refs.md",
+     "size": 5377
+    },
+    {
+     "path": "references/video-recording.md",
+     "size": 3569
+    },
+    {
+     "path": "templates/authenticated-session.sh",
+     "size": 3678
+    },
+    {
+     "path": "templates/capture-workflow.sh",
+     "size": 1832
+    },
+    {
+     "path": "templates/form-automation.sh",
+     "size": 1838
+    }
+   ]
+  },
+  {
+   "name": "elite-longterm-memory",
+   "description": "Ultimate AI agent memory system for Cursor, Claude, ChatGPT & Copilot. WAL protocol + vector search + git-notes + cloud backup. Never lose context again. Vibe-coding ready.",
+   "dir": "elite-longterm-memory",
+   "files": [
+    {
+     "path": "README.md",
+     "size": 5593
+    },
+    {
+     "path": "SKILL.md",
+     "size": 12723
+    },
+    {
+     "path": "_meta.json",
+     "size": 140
+    },
+    {
+     "path": "package.json",
+     "size": 1288
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2556
+    },
+    {
+     "path": "bin/elite-memory.js",
+     "size": 4875
+    }
+   ]
+  },
+  {
+   "name": "excel-xlsx",
+   "description": "Create, inspect, and edit Microsoft Excel workbooks and XLSX files with reliable formulas, dates, types, formatting, recalculation, and template preservation. Use when (1) the task is about Excel, `.xlsx`, `.xlsm`, `.xls`, `.csv`, or `.tsv`; (2) formulas, formatting, workbook structure, or compatibi",
+   "dir": "excel-xlsx",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 6960
+    },
+    {
+     "path": "_meta.json",
+     "size": 129
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2290
+    }
+   ]
+  },
+  {
+   "name": "frontend-design",
+   "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults.",
+   "dir": "frontend-design",
+   "files": [
+    {
+     "path": "LICENSE.txt",
+     "size": 10174
+    },
+    {
+     "path": "SKILL.md",
+     "size": 8260
+    }
+   ]
+  },
+  {
+   "name": "humanizer",
+   "description": "|",
+   "dir": "humanizer",
+   "files": [
+    {
+     "path": "README.md",
+     "size": 2879
+    },
+    {
+     "path": "SKILL.md",
+     "size": 17782
+    },
+    {
+     "path": "_meta.json",
+     "size": 128
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2068
+    }
+   ]
+  },
+  {
+   "name": "local-tts",
+   "description": "Local text-to-speech using Qwen3-TTS with mlx_audio (macOS Apple Silicon) or qwen-tts (Linux/Windows). Privacy-first offline TTS with natural, realistic voice cloning and voice design. Use for local, secure, high-quality multilingual speech synthesis.",
+   "dir": "local-tts",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 6094
+    },
+    {
+     "path": "_meta.json",
+     "size": 128
+    },
+    {
+     "path": "package.json",
+     "size": 1297
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2210
+    },
+    {
+     "path": "references/linux_windows_transformers.md",
+     "size": 12947
+    },
+    {
+     "path": "references/macos_mlx_audio.md",
+     "size": 6971
+    },
+    {
+     "path": "references/privacy_security.md",
+     "size": 7297
+    },
+    {
+     "path": "scripts/tts_linux.py",
+     "size": 9971
+    },
+    {
+     "path": "scripts/tts_macos.py",
+     "size": 5090
+    },
+    {
+     "path": "tests/__init__.py",
+     "size": 0
+    },
+    {
+     "path": "tests/test_integration.py",
+     "size": 7390
+    },
+    {
+     "path": "tests/test_unit.py",
+     "size": 7393
+    }
+   ]
+  },
+  {
+   "name": "nano-pdf",
+   "description": "Edit PDFs with natural-language instructions using the nano-pdf CLI.",
+   "dir": "nano-pdf",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 765
+    },
+    {
+     "path": "_meta.json",
+     "size": 127
+    },
+    {
+     "path": "skill-card.md",
+     "size": 1816
+    }
+   ]
+  },
+  {
+   "name": "pdf-generation",
+   "description": "Professional PDF generation from markdown using Pandoc with Eisvogel template and EB Garamond fonts. Use when converting markdown to PDF, creating white papers, research documents, marketing materials, or technical documentation. Supports both English and Russian documents with professional typograp",
+   "dir": "pdf-generation",
+   "files": [
+    {
+     "path": "README.md",
+     "size": 6034
+    },
+    {
+     "path": "SKILL.md",
+     "size": 5232
+    }
+   ]
+  },
+  {
+   "name": "ppt",
+   "description": "Presentation creation, editing, and analysis for .pptx files: (1) Creating new presentations, (2) Modifying or editing content, (3) Working with layouts, (4) Adding comments or speaker notes. Academic/paper-based presentations use the embedded Beamer module at end of this file (PDF output only).",
+   "dir": "ppt",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 38755
+    },
+    {
+     "path": "__init__.py",
+     "size": 336
+    },
+    {
+     "path": "base.py",
+     "size": 39848
+    },
+    {
+     "path": "batch_html2pptx.js",
+     "size": 7781
+    },
+    {
+     "path": "check_slides.py",
+     "size": 32936
+    },
+    {
+     "path": "docx.py",
+     "size": 9996
+    },
+    {
+     "path": "extract_html_style.py",
+     "size": 1781
+    },
+    {
+     "path": "extract_pptx_style.py",
+     "size": 9332
+    },
+    {
+     "path": "html2pptx1.js",
+     "size": 261326
+    },
+    {
+     "path": "pack.py",
+     "size": 5596
+    },
+    {
+     "path": "pptx.py",
+     "size": 12238
+    },
+    {
+     "path": "redlining.py",
+     "size": 11130
+    },
+    {
+     "path": "unpack.py",
+     "size": 1497
+    },
+    {
+     "path": "validate.py",
+     "size": 1997
+    }
+   ]
+  },
+  {
+   "name": "remotion-best-practices",
+   "description": "Best practices for Remotion - Video creation in React",
+   "dir": "remotion-best-practices",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 3421
+    }
+   ]
+  },
+  {
+   "name": "remotion-video-toolkit",
+   "description": "Complete toolkit for programmatic video creation with Remotion + React. Covers animations, timing, rendering (CLI/Node.js/Lambda/Cloud Run), captions, 3D, charts, text effects, transitions, and media handling. Use when writing Remotion code, building video generation pipelines, or creating data-driv",
+   "dir": "remotion-video-toolkit",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 5595
+    },
+    {
+     "path": "_meta.json",
+     "size": 141
+    },
+    {
+     "path": "skill-card.md",
+     "size": 3140
+    },
+    {
+     "path": "rules/3d.md",
+     "size": 2290
+    },
+    {
+     "path": "rules/animations.md",
+     "size": 790
+    },
+    {
+     "path": "rules/assets.md",
+     "size": 1590
+    },
+    {
+     "path": "rules/audio.md",
+     "size": 3822
+    },
+    {
+     "path": "rules/calculate-metadata.md",
+     "size": 2920
+    },
+    {
+     "path": "rules/can-decode.md",
+     "size": 1587
+    },
+    {
+     "path": "rules/charts.md",
+     "size": 1751
+    },
+    {
+     "path": "rules/compositions.md",
+     "size": 3445
+    },
+    {
+     "path": "rules/display-captions.md",
+     "size": 3698
+    },
+    {
+     "path": "rules/extract-frames.md",
+     "size": 5496
+    },
+    {
+     "path": "rules/fonts.md",
+     "size": 3484
+    },
+    {
+     "path": "rules/get-audio-duration.md",
+     "size": 1354
+    },
+    {
+     "path": "rules/get-video-dimensions.md",
+     "size": 1627
+    },
+    {
+     "path": "rules/get-video-duration.md",
+     "size": 1341
+    },
+    {
+     "path": "rules/gifs.md",
+     "size": 3868
+    },
+    {
+     "path": "rules/images.md",
+     "size": 2783
+    },
+    {
+     "path": "rules/import-srt-captions.md",
+     "size": 2113
+    },
+    {
+     "path": "rules/lottie.md",
+     "size": 1779
+    },
+    {
+     "path": "rules/measuring-dom-nodes.md",
+     "size": 974
+    },
+    {
+     "path": "rules/measuring-text.md",
+     "size": 3000
+    },
+    {
+     "path": "rules/rendering.md",
+     "size": 5847
+    },
+    {
+     "path": "rules/sequencing.md",
+     "size": 2389
+    },
+    {
+     "path": "rules/tailwind.md",
+     "size": 422
+    },
+    {
+     "path": "rules/text-animations.md",
+     "size": 700
+    },
+    {
+     "path": "rules/timing.md",
+     "size": 3939
+    },
+    {
+     "path": "rules/transcribe-captions.md",
+     "size": 850
+    },
+    {
+     "path": "rules/transitions.md",
+     "size": 3730
+    },
+    {
+     "path": "rules/trimming.md",
+     "size": 1210
+    },
+    {
+     "path": "rules/videos.md",
+     "size": 3509
+    },
+    {
+     "path": "rules/assets/charts-bar-chart.tsx",
+     "size": 3429
+    },
+    {
+     "path": "rules/assets/text-animations-typewriter.tsx",
+     "size": 2183
+    },
+    {
+     "path": "rules/assets/text-animations-word-highlight.tsx",
+     "size": 2387
+    }
+   ]
+  },
+  {
+   "name": "self-improving-agent",
+   "description": "Captures learnings, errors, and corrections to enable continuous improvement. Use when: (1) A command or operation fails unexpectedly, (2) User corrects Claude ('No, that's wrong...', 'Actually...'), (3) User requests a capability that doesn't exist, (4) An external API or tool fails, (5) Claude rea",
+   "dir": "self-improving-agent",
+   "files": [
+    {
+     "path": "CHANGELOG.md",
+     "size": 6416
+    },
+    {
+     "path": "SKILL.md",
+     "size": 21091
+    },
+    {
+     "path": "_meta.json",
+     "size": 139
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2374
+    },
+    {
+     "path": "assets/ERRORS.md",
+     "size": 75
+    },
+    {
+     "path": "assets/FEATURE_REQUESTS.md",
+     "size": 84
+    },
+    {
+     "path": "assets/LEARNINGS.md",
+     "size": 1135
+    },
+    {
+     "path": "assets/SKILL-TEMPLATE.md",
+     "size": 3407
+    },
+    {
+     "path": "hooks/openclaw/HOOK.md",
+     "size": 2465
+    },
+    {
+     "path": "hooks/openclaw/handler.js",
+     "size": 13741
+    },
+    {
+     "path": "hooks/openclaw/handler.test.js",
+     "size": 8921
+    },
+    {
+     "path": "hooks/openclaw/handler.ts",
+     "size": 14615
+    },
+    {
+     "path": "references/examples.md",
+     "size": 8287
+    },
+    {
+     "path": "references/openclaw-integration.md",
+     "size": 9602
+    },
+    {
+     "path": "references/uninstall.md",
+     "size": 1891
+    },
+    {
+     "path": "scripts/extract-skill.sh",
+     "size": 5293
+    }
+   ]
+  },
+  {
+   "name": "self-improving-proactive-agent",
+   "description": "Self-reflection + Self-criticism + Self-learning + Self-organizing memory. Agent evaluates its own work, catches mistakes, and improves permanently. Use when (1) a command, tool, API, or operation fails; (2) the user corrects you or rejects your work; (3) you realize your knowledge is outdated or in",
+   "dir": "self-improving-proactive-agent",
+   "files": [
+    {
+     "path": "HEARTBEAT.md",
+     "size": 261
+    },
+    {
+     "path": "SKILL.md",
+     "size": 8582
+    },
+    {
+     "path": "_meta.json",
+     "size": 134
+    },
+    {
+     "path": "boundaries.md",
+     "size": 2236
+    },
+    {
+     "path": "corrections.md",
+     "size": 1026
+    },
+    {
+     "path": "heartbeat-rules.md",
+     "size": 1843
+    },
+    {
+     "path": "heartbeat-state.md",
+     "size": 584
+    },
+    {
+     "path": "learning.md",
+     "size": 2951
+    },
+    {
+     "path": "memory-template.md",
+     "size": 1278
+    },
+    {
+     "path": "memory.md",
+     "size": 756
+    },
+    {
+     "path": "openclaw-heartbeat.md",
+     "size": 261
+    },
+    {
+     "path": "operations.md",
+     "size": 3435
+    },
+    {
+     "path": "reflections.md",
+     "size": 840
+    },
+    {
+     "path": "scaling.md",
+     "size": 2945
+    },
+    {
+     "path": "setup.md",
+     "size": 6347
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2515
+    }
+   ]
+  },
+  {
+   "name": "ui-design",
+   "description": "Use when users need visual direction, interface hierarchy, layout decisions, design specifications, or prototypes before implementing a Web or mini program UI.",
+   "dir": "ui-design",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 14979
+    },
+    {
+     "path": "checklist.md",
+     "size": 838
+    }
+   ]
+  },
+  {
+   "name": "video-editing",
+   "description": "AI-assisted video editing workflows for cutting, structuring, and augmenting real footage. Covers the full pipeline from raw capture through FFmpeg, Remotion, ElevenLabs, fal.ai, and final polish in Descript or CapCut. Use when the user wants to edit video, cut footage, create vlogs, or build video ",
+   "dir": "video-editing",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 9737
+    }
+   ]
+  },
+  {
+   "name": "video-frames",
+   "description": "Extract frames or short clips from videos using ffmpeg.",
+   "dir": "video-frames",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 776
+    },
+    {
+     "path": "_meta.json",
+     "size": 131
+    },
+    {
+     "path": "skill-card.md",
+     "size": 1914
+    },
+    {
+     "path": "scripts/frame.sh",
+     "size": 1347
+    }
+   ]
+  },
+  {
+   "name": "video-prompt-reverse-engineer",
+   "description": "Reverse-engineer AI video prompts from any video or screenshot. Analyzes shot types, camera movements, lighting, color grading, and director style. Outputs structured prompts for Kling, Seedance, Runway, Veo, Sora, Pika, HappyHorse and more. Includes full reproduction workflow. Use when user provide",
+   "dir": "video-prompt-reverse-engineer",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 7961
+    },
+    {
+     "path": "_meta.json",
+     "size": 148
+    },
+    {
+     "path": "skill-card.md",
+     "size": 1952
+    },
+    {
+     "path": "references/model_params.md",
+     "size": 11090
+    }
+   ]
+  },
+  {
+   "name": "video-transcript-downloader",
+   "description": "Download videos, audio, subtitles, and clean paragraph-style transcripts from YouTube and any other yt-dlp supported site. Use when asked to “download this video”, “save this clip”, “rip audio”, “get subtitles”, “get transcript”, or to troubleshoot yt-dlp/ffmpeg and formats/playlists.",
+   "dir": "video-transcript-downloader",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 2338
+    },
+    {
+     "path": "_meta.json",
+     "size": 146
+    },
+    {
+     "path": "package.json",
+     "size": 171
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2147
+    },
+    {
+     "path": "scripts/vtd.js",
+     "size": 13653
+    }
+   ]
+  },
+  {
+   "name": "webapp-testing",
+   "description": "Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs.",
+   "dir": "webapp-testing",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 3913
+    },
+    {
+     "path": "examples/console_logging.py",
+     "size": 1027
+    },
+    {
+     "path": "examples/element_discovery.py",
+     "size": 1463
+    },
+    {
+     "path": "examples/static_html_automation.py",
+     "size": 953
+    }
+   ]
+  },
+  {
+   "name": "word-docx",
+   "description": "Create, inspect, and edit Microsoft Word documents and DOCX files with reliable styles, numbering, tracked changes, tables, sections, and compatibility checks. Use when (1) the task is about Word or `.docx`; (2) the file includes tracked changes, comments, fields, tables, templates, or page layout c",
+   "dir": "word-docx",
+   "files": [
+    {
+     "path": "SKILL.md",
+     "size": 7887
+    },
+    {
+     "path": "_meta.json",
+     "size": 128
+    },
+    {
+     "path": "skill-card.md",
+     "size": 2093
+    }
+   ]
+  }
+ ]
+}
