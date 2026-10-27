@@ -21,6 +21,7 @@ import {
 } from "./protocol";
 import type { KeyringEntry } from "./keyring";
 import { parseConfig, parsePayload } from "./run-store";
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 
 /**
  * Build the /home/user/.onyx/agent/run.json payload for a run (same shape as
@@ -35,9 +36,16 @@ export function buildRunnerConfig(
   const payload = parsePayload(run.payload);
 
   // Keyless bridge by default; a user provider chatUrl wins when present.
-  const usingBridge = !entry.chatUrl;
-  const chatUrl =
-    entry.chatUrl || `${entry.appUrl.replace(/\/+$/, "")}/api/tasks/llm`;
+  // LEGACY-CLASSIC GUARD (endpoint-migration PRD §3): a pinned gateway URL
+  // on the retired text.pollinations.ai endpoint can never serve
+  // gen-catalog models (instant "…isn't on the Classic API" 404) — such a
+  // stale pin (e.g. a schedule saved before the migration) drops to the
+  // bridge instead of calling the dead endpoint. No silent retry against
+  // the classic host, ever.
+  const usingBridge = !entry.chatUrl || isLegacyClassicUrl(entry.chatUrl);
+  const chatUrl = usingBridge
+    ? `${entry.appUrl.replace(/\/+$/, "")}/api/tasks/llm`
+    : entry.chatUrl!
   // Bridge auth = the task token (the bridge authorizes against the
   // keyring/hash). User gateway auth = the first key of the pool.
   const apiKey = usingBridge ? entry.taskToken : entry.keyPool[0] || entry.taskToken;

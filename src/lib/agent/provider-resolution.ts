@@ -35,14 +35,18 @@
 
 import { aiProviderService } from "@/lib/services";
 import type { AIProviderRow } from "@/lib/db";
+import {
+  chatCompletionsUrl,
+  isLegacyClassicRow,
+  isLegacyClassicUrl,
+  LEGACY_CLASSIC_HOST,
+} from "./provider-url";
 
-/** The RETIRED keyless Classic endpoint host — never callable. */
-const LEGACY_CLASSIC_HOST = "text.pollinations.ai";
-
-/** True when the row still points at the retired Classic endpoint. */
-export function isLegacyClassicRow(p: { name: string; base_url: string }): boolean {
-  return p.name === "Pollinations" && p.base_url.includes(LEGACY_CLASSIC_HOST);
-}
+// Re-exported for the existing importers (runtime, subagent-runtime,
+// use-chat, provider-diagnostics, business/llm, orchestrator) — the pure
+// helpers live in the leaf ./provider-url so the service layer and the
+// server-side background lanes can share them without a module cycle.
+export { chatCompletionsUrl, isLegacyClassicRow, isLegacyClassicUrl, LEGACY_CLASSIC_HOST };
 
 /**
  * List the user's providers with the LEGACY-CLASSIC GUARD applied:
@@ -86,16 +90,4 @@ export function resolveProviderForModel(
     providers.find((p) => p.is_active && (p.models ?? []).includes(selectedModel)) ??
     providers.find((p) => (p.models ?? []).includes(selectedModel))
   );
-}
-
-/**
- * The ONE chat-completions URL construction (PRD §5). `noPrefix` (the
- * provider row's no_prefix flag) uses the base URL as-is; otherwise the
- * standard OpenAI-compatible `/chat/completions` is appended to the
- * trailing-slash-stripped base. Never appends duplicate path segments — the
- * base is used exactly as configured.
- */
-export function chatCompletionsUrl(baseUrl: string, noPrefix?: boolean): string {
-  const base = baseUrl.replace(/\/+$/, "");
-  return noPrefix ? base : `${base}/chat/completions`;
 }

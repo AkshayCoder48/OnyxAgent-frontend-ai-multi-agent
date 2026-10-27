@@ -45,6 +45,8 @@ import type { BackgroundTaskType, CloudAgentRunPayload, CloudRunMetadata, CloudR
 import { TASK_CLOUD_PAYLOAD_MAX_BYTES } from "./protocol";
 import { prisma } from "./prisma";
 import { keyring } from "./keyring";
+// PURE leaf of the shared AI client layer (zero imports — safe server-side).
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 import {
   appendChunksToRun,
   mergeProgressIntoRun,
@@ -815,7 +817,13 @@ export async function dispatchCloudRun(
   //   · pinned provider gateway (config.chatUrl) — bearer = first pool key,
   //   · otherwise the app's keyless bridge (/api/tasks/llm) — bearer = the
   //     task token (pool keys are NOT rotated against the bridge).
-  const usingBridge = !runConfig.chatUrl?.trim();
+  // LEGACY-CLASSIC GUARD (endpoint-migration PRD §3): a pinned gateway on the
+  // retired text.pollinations.ai endpoint can never serve gen-catalog models
+  // (instant "…isn't on the Classic API" 404) — a stale pin (a snapshot or
+  // schedule saved before the migration) drops to the bridge instead of
+  // calling the dead endpoint. No silent retry against the classic host.
+  const usingBridge =
+    !runConfig.chatUrl?.trim() || isLegacyClassicUrl(runConfig.chatUrl);
   const chatUrl = usingBridge ? `${appUrl}/api/tasks/llm` : runConfig.chatUrl!.trim();
   const pool = entry?.keyPool ?? [];
   const chatToken = usingBridge ? (entry?.taskToken ?? "") : (pool[0] ?? entry?.taskToken ?? "");

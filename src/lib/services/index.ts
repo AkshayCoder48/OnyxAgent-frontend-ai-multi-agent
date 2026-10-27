@@ -19,6 +19,10 @@
 
 import { nanoid } from "nanoid";
 import { logError, logInfo } from "@/lib/client-logger";
+// The PURE leaf of the shared AI client layer — no cycle: provider-url has
+// zero imports (provider-resolution, which depends on this module, re-exports
+// it for the agent layer).
+import { chatCompletionsUrl } from "@/lib/agent/provider-url";
 import { db, getDB, wipeUserData, type AIProviderRow, type ConversationRow, type ToolCallRow, type UserSettingsRow } from "@/lib/db";
 import {
   createVault,
@@ -1214,7 +1218,11 @@ export const aiProviderService = {
       };
     }
     const base = provider.base_url.replace(/\/$/, "");
-    const targetUrl = provider.no_prefix ? base : `${base}/chat/completions`;
+    // The ONE shared URL construction (lib/agent/provider-url — imported via
+    // the leaf so the service layer never cycles through the agent layer):
+    // identical to what the runtime, subagents, business mode and the
+    // background lanes call.
+    const targetUrl = chatCompletionsUrl(base, provider.no_prefix);
     try {
       const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`, {
         method: "POST",

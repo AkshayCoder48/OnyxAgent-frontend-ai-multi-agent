@@ -38,7 +38,7 @@ import {
   cloudHandoffActive,
   readCloudHandoffMeta,
 } from "@/lib/agent/turn-cloud-handoff";
-import { chatCompletionsUrl } from "@/lib/agent/provider-resolution";
+import { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } from "@/lib/agent/provider-resolution";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -219,12 +219,29 @@ export function useChat(options: UseChatOptions = {}) {
       fileIds?: string[],
       emit?: (event: import("@/types").WSEvent) => void,
     ): Promise<AgentTurnOptions | null> => {
-      // Provider: explicit override (providerIdRef) → first active provider.
+      // Provider resolution — the SAME shared contract as Business Mode
+      // (resolveBusinessLlmConfig) and subagents (resolveApiConfig), via
+      // lib/agent/provider-resolution (endpoint-migration PRD §2/§8):
+      //
+      //   LEGACY-CLASSIC GUARD — stale text.pollinations.ai (Classic) rows
+      //   self-heal (repoint-to-gen / delete) and are NEVER returned, so the
+      //   retired Classic endpoint — which answers the "…isn't on the
+      //   Classic API" 404 for gen-catalog models — is unreachable from the
+      //   main chat too, not just Business Mode.
+      //
+      //   MODEL-FIRST — the chat store's selectedModel resolves together
+      //   with the provider that OFFERS it; a stale selectedProviderId
+      //   pointing at a deleted/legacy row can never send the selected
+      //   model to a gateway that doesn't serve it. (The model picker sets
+      //   model + owning provider atomically, so the two only diverge when
+      //   the provider row went stale — exactly the case model-first
+      //   recovers.)
+      //
       // NOTE (stale "OnyxAI" ghost fix): no load-ALL fallback. The old
       // `db.ai_providers.toArray()` fallback pulled rows belonging to OTHER
       // (obsolete/transient) user ids — deleted legacy seed rows could ride
       // a turn on the wrong provider. An honest empty list errors below.
-      const providers = await aiProviderService.list(userId, true);
+      const providers = await listUsableProviders(userId);
       if (providers.length === 0) {
         // (The emitted error event is mirrored into the Logs store by the
         // event processor — no double-logging here.)
@@ -262,6 +279,10 @@ export function useChat(options: UseChatOptions = {}) {
       if (providerOverrideId === AUTO_ROUTER_PROVIDER_ID) {
         const candidates: RouterCandidate[] = [];
         for (const row of providers) {
+          // ACTIVE rows only — listUsableProviders returns active + inactive
+          // (the guard's contract); routing stays on providers the user
+          // hasn't disabled.
+          if (!row.is_active) continue;
           const firstModel = row.models?.[0];
           if (!firstModel || !row.api_key_encrypted) continue;
           try {
@@ -292,16 +313,37 @@ export function useChat(options: UseChatOptions = {}) {
         if (candidates.length > 1) routerCandidates = candidates;
       }
 
+      // Resolution chain (first match wins — mirrors subagent-runtime's
+      // resolveApiConfig):
+      //   1. MODEL-FIRST — the selected model with the provider that OWNS it
+      //      (active preferred; inactive still matches when the model lives
+      //      only there).
+      //   2. the chat store's selectedProviderId (no model picked).
+      //   3. first ACTIVE provider → providers[0] (the previous
+      //      activeOnly=list semantics).
       const selectedProvider =
-        providerOverrideId != null
-          ? (providers.find((p) => p.id === providerOverrideId) ?? providers[0])
-          : providers[0];
+        resolveProviderForModel(providers, modelOverride) ??
+        (providerOverrideId != null
+          ? providers.find((p) => p.id === providerOverrideId)
+          : undefined) ??
+        providers.find((p) => p.is_active) ??
+        providers[0];
       if (!selectedProvider) {
         emit?.({ type: "error", data: { message: "Selected AI provider not found." } });
         return null;
       }
       const apiKey = await aiProviderService.getDecryptedApiKey(selectedProvider.id);
-      const model = modelOverride ?? selectedProvider.models[0] ?? "";
+      // Orphaned-selection recovery (shared contract): adopt the selected
+      // model only when the resolved provider OFFERS it — a model id whose
+      // provider was deleted/re-synced away falls to the provider's first
+      // model instead of a guaranteed-404 id. When the provider lists NO
+      // models, the explicit pick stays (best guess — never a hardcoded
+      // fallback model; endpoint-migration PRD §4).
+      let model = modelOverride ?? "";
+      if (model && !(selectedProvider.models ?? []).includes(model)) {
+        model = selectedProvider.models?.[0] ?? model;
+      }
+      if (!model) model = selectedProvider.models?.[0] ?? "";
 
       // Dev instrumentation (PRD §15).
       if (process.env.NODE_ENV !== "production") {

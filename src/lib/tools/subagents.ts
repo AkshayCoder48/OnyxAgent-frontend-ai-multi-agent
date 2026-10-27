@@ -303,11 +303,14 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
     // If list_ai_providers is true, return the available providers.
     if (args.list_ai_providers) {
       try {
-        const { aiProviderService } = await import("@/lib/services");
+        // Shared guard (endpoint-migration PRD §2): stale text.pollinations.ai
+        // (Classic) rows self-heal and are never listed — the agent can only
+        // assign gateways that actually serve gen-catalog models.
+        const { listUsableProviders } = await import("@/lib/agent/provider-resolution");
         const { useAuthStore } = await import("@/stores");
         const userId = useAuthStore.getState().user?.id;
         if (!userId) return { error: "No authenticated user." };
-        const providers = await aiProviderService.list(userId);
+        const providers = await listUsableProviders(userId);
         return {
           providers: providers.map((p) => ({
             id: p.id,

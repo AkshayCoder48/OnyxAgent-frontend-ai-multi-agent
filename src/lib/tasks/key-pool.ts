@@ -20,6 +20,8 @@
 
 import { aiProviderService } from "@/lib/services";
 import { TASK_PAYLOAD_BUDGET } from "@/lib/tasks/protocol";
+// PURE leaf of the shared AI client layer (zero imports).
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 
 /** localStorage round-robin index (int) — advances once per built pool. */
 const ROTATION_STORAGE_KEY = "onyx:key-rotation";
@@ -72,10 +74,15 @@ export async function buildKeyPool(opts?: BuildKeyPoolOptions): Promise<KeyPool>
     /* locked vault → empty pool is a valid outcome (bridge fallback) */
   }
 
-  // (2) Active providers, preferred first.
+  // (2) Active providers, preferred first. LEGACY-CLASSIC GUARD: rows on
+  // the retired text.pollinations.ai endpoint never contribute keys — a
+  // classic key rotated into a run could only ever authenticate a gateway
+  // the app no longer calls.
   let providers: Awaited<ReturnType<typeof aiProviderService.list>> = [];
   try {
-    providers = await aiProviderService.list(userId, true);
+    providers = (await aiProviderService.list(userId, true)).filter(
+      (p) => !isLegacyClassicUrl(p.base_url),
+    );
   } catch {
     return { pool: [], rotated: false };
   }
