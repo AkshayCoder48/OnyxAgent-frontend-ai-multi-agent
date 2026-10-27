@@ -90,3 +90,46 @@ Stage Summary:
 - The retired text.pollinations.ai endpoint is unreachable everywhere except the intentional legacy-row matchers; status captions remain the one keyless dedicated surface (on gen, free catalog models — stricter than the PRD asked)
 - Model resolution priority everywhere: task-level override → agent/subagent config → shared chat-store selection (model-first with its owning provider) → provider's first model as the documented orphaned-id fallback; NO hardcoded model id survives anywhere
 - Background runs carry the foreground turn's effective configuration (pinned gateway + its key leading the pool, no rotation against a pinned gateway); stale classic pins drop to the bridge instead of calling the dead endpoint
+
+---
+Task ID: 5
+Agent: main (Z.ai Code)
+Task: Fix the recurring business legacy-endpoint regression ("coming back changes my gen pollinations endpoint to text.pollinations") + push; then begin the E2B persistent-background-execution PRD.
+
+Work Log:
+- Pushed 821e5ef..7662ca5 (user directive: push first)
+- Audited EVERY ai_providers write path: current code writes text.pollinations.ai NOWHERE — root cause found in git history: the PRE-migration bundle (821e5ef, still running in stale browser tabs) does the exact damage on /business mount — its migrateLegacyPollinationsGateway ran the OPPOSITE direction (finds the row named "Pollinations" on gen, FLIPS it onto https://text.pollinations.ai/openai with no_prefix:true) and its dashboard mount re-seeds a keyless legacy row via addFreePollinationsProvider. A stale tab re-breaks the row every time the user comes back to it
+- EMERGENCY during work: the user's E2B workspace-sync resurrected 69 untracked files from an old sandbox snapshot (src/lib/db.ts Prisma stub SHADOWING the canonical src/lib/db/index.ts Dexie module → 692 TS errors + app 500; Task-3 deletions jev.ts/decision.ts/api/jev-decide back; plus parallel-work files). Killed the zombies that break the canonical tree (db.ts + jev + decision + jev-decide route) → app recovered 200; remaining ~80 tsc errors live only inside the unimported parallel-work files
+- Fix 1 — migrateLegacyPollinationsGateway (business/llm.ts): heals ALL legacy rows in one pass — repoint the first to gen (connected key + live models + no_prefix reset), purge ghost extras, delete all when not connected
+- Fix 2 — providers.tsx LegacyRowHealer (root controller): sweeps on boot, on authResolved flip (store subscribe), and on EVERY window focus/visibility return — the current bundle wins the write war within milliseconds of the user returning to the app; verified live: focus event on damaged rows → "[healer] repointed a legacy text.pollinations.ai provider row back to the gen gateway" + ghost rows deleted
+- Fix 3 — turn-cloud-handoff.ts: legacy-pin guards on BOTH cloud dispatch sites (pagehide beacon + dispatchDetachedCloudTurn) — the retired endpoint can never be pinned into a NEW cloud run; a legacy pin drops to the keyless bridge
+- Fix 4 — trigger-cloud.ts syncCloudRunIntoRow: stale runs pinned to the legacy endpoint (dispatched pre-migration) settle honestly as failed (code legacy_endpoint_pin, retry hint) instead of surfacing endless upstream Classic-404s
+- Verified: lint 0 src errors; my files tsc-clean; E2E (agent-browser) healer + business gate + chat all clean, zero console errors; committed 43da0fa + pushed
+
+Stage Summary:
+- The ghost-tab write war is won deterministically: every current-app return (focus/visibility/boot/auth) re-heals any damage a stale pre-migration tab inflicted; every AI turn ALSO re-guards lazily (listUsableProviders); no new cloud run can ever pin the legacy endpoint; stale legacy-pinned runs fail honestly with a retry hint
+- Business mode always runs the CHAT-SELECTED model with the provider that offers it, on gen.pollinations.ai — the only legacy exception is status captions (keyless, by design)
+- The zombie resurrection (workspace-sync writing an old snapshot into src/) is a REAL hazard: src/lib/db.ts shadowing broke the whole app — flagged in the report for the user
+
+---
+Task ID: 6
+Agent: main (Z.ai Code)
+Task: E2B Persistent Background AI Execution PRD — audit existing infrastructure, implement the exact §4 reconnect banner, map the remaining gaps honestly.
+
+Work Log:
+- Audited the existing background-execution stack against the 16-section PRD (see Stage Summary mapping)
+- use-chat.ts: the reconnecting cloud-turn bubble now shows the EXACT required §4 banner copy: "Onyx is working in the background. Wait until the task is finished to see the complete response here." (shown only while the cloud run is verifiably queued/running; the poll loop rewrites the bubble with the landed answer on completion)
+- Restarted the dev server after it died mid-session (no fatal log errors; Turbopack had also panicked once when the zombie workspace-sync files landed — removing them fixed compilation)
+- E2E: /chat loads with zero page/console errors; server stable 200; committed 28cfe82 + pushed (43da0fa..28cfe82)
+
+Stage Summary (PRD §1-§16 → existing vs gap):
+- §2/§3/§10 durable records + lifecycle + ownership: EXISTS — Prisma TaskRun rows (status/phase/lockHolder/attempts/finishedAt), Trigger.dev Cloud queue with claim-locks, chunked event history with seq cursors; runs survive tab close/refresh/navigation (pagehide close-handoff for chat + business turns)
+- §4 leave-during-response UX: EXISTS + exact banner now in place — pagehide beacons the in-flight turn to Cloud; on return the meta re-adopts the run, the interrupted bubble shows the required banner, polls, and the finished answer lands in the ORIGINAL conversation (no duplicate chat)
+- §5 event persistence + heartbeats: PARTIAL — chunked progress with persisted cursors + missed-event recovery exists; server-side execution-health heartbeats (stalled-run detection) remain a gap
+- §6 scheduled tasks: EXISTS — server-side cron-scheduler dispatches durable runs with pinned provider gateway (no browser needed); duplicate-trigger protection via claim-locks; legacy-pinned schedules now drop to the bridge (Task 5 fix)
+- §7 project agents / §8 business swarm: PARTIAL — business main-agent cloud lane exists (BusinessTurnSnapshot + pagehide dispatch + child specialist turns inside the run); durable PARENT↔CHILD execution records for swarm delegation + restore UI remain a gap
+- §9 provider/model consistency: EXISTS — pinned gateway + pinnedApiKey lead the pool (Task 4); chat-selected model travels with the turn; no hardcoded models
+- §11 tools in background: PARTIAL — the E2B runner runs terminal/file/web tools server-side; frontend-only tools are unavailable in background runs by design (the runner degrades to tools-off on 400s)
+- §12 cancellation: EXISTS — cancel route + taskToken-authorized cancel/sync; business explicit cancel unregisters the handoff
+- §13 security: EXISTS — taskToken sha256 server-side, keys vault-sealed + pooled server-side, no secrets in events/logs (verified)
+- REMAINING for a future task: server-side heartbeat/stalled-run recovery (§5), durable swarm child-task records + swarm restore UI (§7/§8), E2B env failure auto-recovery with checkpoints (§3 last paragraph)
