@@ -38,6 +38,7 @@ import {
   cloudHandoffActive,
   readCloudHandoffMeta,
 } from "@/lib/agent/turn-cloud-handoff";
+import { chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -437,13 +438,25 @@ export function useChat(options: UseChatOptions = {}) {
         const { dispatchDetachedCloudTurn } = await import(
           "@/lib/agent/turn-cloud-handoff"
         );
+        // CONFIG PROPAGATION (endpoint-migration PRD §9): the background
+        // lane receives the SAME effective configuration the foreground
+        // turn resolved — the selected provider's gateway URL, its key and
+        // the selected model. Previously this pinned `chatUrl: ""`, which
+        // silently rerouted every background chat turn onto the app's
+        // keyless bridge model instead of the user's selected provider+model.
+        // The bridge remains only as the documented fallback when no
+        // provider gateway exists (empty base URL).
+        const provider = opts.provider;
         await dispatchDetachedCloudTurn({
           userId,
           conversationId: convId,
           prompt: opts.userMessage,
           systemPrompt: opts.systemPrompt ?? "",
-          chatUrl: "", // bridge — no pinned provider gateway
-          model: opts.provider?.model ?? "",
+          chatUrl: provider.baseUrl
+            ? chatCompletionsUrl(provider.baseUrl, provider.noPrefix)
+            : "",
+          apiKey: provider.apiKey,
+          model: provider.model,
           temperature: opts.temperature ?? null,
           preferredProviderId: useChatStore.getState().selectedProviderId,
           title: opts.userMessage.replace(/\s+/g, " ").trim().slice(0, 60) || undefined,
@@ -631,14 +644,17 @@ export function useChat(options: UseChatOptions = {}) {
       // in-memory state; pagehide builds the run config from it + the
       // execution store synchronously.
       const fgProvider = opts.provider;
-      const fgBase = (fgProvider.baseUrl || "").replace(/\/+$/, "");
       registerTurnHandoff({
         executionId: execution.id,
         conversationId: convId,
         userId,
         prompt: opts.userMessage,
         systemPrompt: opts.systemPrompt ?? "",
-        chatUrl: fgProvider.noPrefix ? fgBase : `${fgBase}/chat/completions`,
+        // The ONE shared URL construction (provider-resolution) — the close
+        // handoff carries the exact gateway the foreground turn is using.
+        chatUrl: fgProvider.baseUrl
+          ? chatCompletionsUrl(fgProvider.baseUrl, fgProvider.noPrefix)
+          : "",
         apiKey: fgProvider.apiKey,
         model: fgProvider.model,
         temperature: opts.temperature ?? null,

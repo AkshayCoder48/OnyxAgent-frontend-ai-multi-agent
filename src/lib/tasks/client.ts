@@ -194,6 +194,11 @@ export interface TriggerBackgroundTaskInput {
   config?: TaskRunConfig;
   includeWorkspace?: boolean;
   preferredProviderId?: string;
+  /** The resolved provider's key when config.chatUrl PINS that provider's
+   *   gateway — leads the key pool (the runner's bearer) and disables the
+   *   pool's rotation (endpoint-migration PRD §9: background runs carry the
+   *   foreground turn's effective configuration). */
+  pinnedApiKey?: string;
   /** Decrypted E2B sandbox key; omitted → the "USE_SERVER_ENV" sentinel. */
   sandboxApiKey?: string;
   /** Set when the run is fired by a schedule (pass-through). */
@@ -222,6 +227,7 @@ export async function triggerBackgroundTask(
     buildKeyPool({
       userId: input.userId,
       preferredProviderId: input.preferredProviderId,
+      pinnedApiKey: input.pinnedApiKey,
     }),
   ]);
 

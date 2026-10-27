@@ -568,7 +568,11 @@ export async function dispatchDetachedCloudTurn(input: {
   conversationId: string;
   prompt: string;
   systemPrompt: string;
+  /** Absolute provider chat URL. Empty/relative → the keyless LLM bridge
+   *  (the documented fallback when no provider gateway exists). */
   chatUrl: string;
+  /** The pinned provider's API key — leads the runner's key pool. */
+  apiKey?: string;
   model: string;
   temperature: number | null;
   preferredProviderId?: string | null;
@@ -599,6 +603,11 @@ export async function dispatchDetachedCloudTurn(input: {
     },
     includeWorkspace: true,
     preferredProviderId: input.preferredProviderId ?? undefined,
+    // Pinned gateway → its key leads the pool (no rotation). Empty chatUrl
+    // (bridge lane) ignores the key — the bridge authorizes by task token.
+    ...(isAbsoluteHttp(input.chatUrl) && input.apiKey?.trim()
+      ? { pinnedApiKey: input.apiKey.trim() }
+      : {}),
     sandboxApiKey,
   });
 }

@@ -22,6 +22,7 @@ import {
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { normalizeToolCall, unknownToolResult } from "@/lib/agent/tool-call-normalize";
 import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
+import { listUsableProviders, resolveProviderForModel, chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
 import {
@@ -64,11 +65,35 @@ interface ChatCompletionMessage {
   reasoning_content?: string;
 }
 
+/**
+ * resolveApiConfig — SAME resolution contract as the main chat
+ * (use-chat buildTurnOptions) and Business Mode (resolveBusinessLlmConfig),
+ * via the shared layer (lib/agent/provider-resolution):
+ *
+ *   LEGACY-CLASSIC GUARD — stale text.pollinations.ai rows self-heal and are
+ *   never callable; the retired Classic endpoint cannot serve gen-catalog
+ *   models (it answers the "isn't on the Classic API" 404).
+ *
+ *   PROVIDER CHAIN (first match wins):
+ *     1. subagent.providerId — an intentional per-subagent override
+ *        (configured in the subagent editor), respected verbatim
+ *     2. MODEL-FIRST — the chat store's selectedModel resolved to the
+ *        provider that OFFERS it (active providers preferred). The selected
+ *        model always travels with a gateway that actually serves it.
+ *     3. the chat store's selectedProviderId
+ *     4. first active provider
+ *
+ *   MODEL CHAIN: subagent.model (intentional override) → the chat store's
+ *   selectedModel when the resolved provider offers it → provider.models[0].
+ *   NO hardcoded fallback model — a provider without models is an honest
+ *   error, never a silent switch to an unrelated model (endpoint-migration
+ *   PRD §4: "Never silently default to a hardcoded model").
+ */
 async function resolveApiConfig(subagent: SubagentConfig) {
   const userId = useAuthStore.getState().user?.id;
   if (!userId) throw new Error("No authenticated user");
 
-  const providers = await aiProviderService.list(userId);
+  const providers = await listUsableProviders(userId);
   if (providers.length === 0) throw new Error("No AI providers configured. Add one in Settings → Config.");
 
   const { selectedProviderId, selectedModel } = await import("@/stores/chat-store").then(m => {
@@ -78,10 +103,16 @@ async function resolveApiConfig(subagent: SubagentConfig) {
 
   let provider = subagent.providerId
     ? providers.find((p) => p.id === subagent.providerId)
-    : selectedProviderId
-      ? providers.find((p) => p.id === selectedProviderId)
-      : providers.find((p) => p.is_active) || providers[0];
-  if (!provider) provider = providers[0];
+    : undefined;
+  // MODEL-FIRST: the selected model with the provider that OWNS it (also the
+  // stale-selection recovery — a selectedProviderId pointing at a deleted or
+  // legacy row while the model lives on another provider still lands on the
+  // right gateway).
+  if (!provider) provider = resolveProviderForModel(providers, selectedModel);
+  if (!provider && selectedProviderId) {
+    provider = providers.find((p) => p.id === selectedProviderId);
+  }
+  if (!provider) provider = providers.find((p) => p.is_active) ?? providers[0];
   if (!provider) throw new Error("No provider available");
 
   let apiKey = subagent.apiKey;
@@ -90,7 +121,19 @@ async function resolveApiConfig(subagent: SubagentConfig) {
   }
   if (!apiKey) throw new Error(`No API key for provider "${provider.name}"`);
 
-  const model = subagent.model || selectedModel || provider.models[0] || "gpt-4o-mini";
+  let model = subagent.model;
+  // Adopt the chat-store model ONLY when the resolved provider offers it —
+  // an orphaned selection id falls through to the provider's first model
+  // instead of a guaranteed-404 model.
+  if (!model && selectedModel && (provider.models ?? []).includes(selectedModel)) {
+    model = selectedModel;
+  }
+  if (!model) model = provider.models?.[0];
+  if (!model) {
+    throw new Error(
+      `The provider "${provider.name}" has no models configured — add at least one model in Settings → Config, or pick a model for this subagent.`,
+    );
+  }
   const baseUrl = subagent.baseUrl || provider.base_url;
   const noPrefix = (provider as { no_prefix?: boolean }).no_prefix ?? false;
 
@@ -277,9 +320,8 @@ async function runSubagentLoop(
       })),
     ];
 
-    // Build the target URL — same logic as the main runtime.
-    const base = config.baseUrl.replace(/\/$/, "");
-    const targetUrl = config.noPrefix ? base : `${base}/chat/completions`;
+    // Build the target URL — the ONE shared construction (provider-resolution).
+    const targetUrl = chatCompletionsUrl(config.baseUrl, config.noPrefix);
     let fullResponse = "";
     // ITERATION CAP (Persistent Execution PRD §3): a SAFETY bound, not a
     // silent truncation — raised 10 → 25, and an exhausted cap returns an

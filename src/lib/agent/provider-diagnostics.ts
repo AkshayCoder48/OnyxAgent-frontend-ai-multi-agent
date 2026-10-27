@@ -30,6 +30,7 @@ import { parseSSEStream, extractDelta } from "./runtime";
 import { extractStreamError } from "./stream-guards";
 import { applyParamPolicy } from "./param-policy";
 import { getWireCompat, wireAllowsTools, COMPAT_SYSTEM_PROMPT } from "./wire-compat";
+import { chatCompletionsUrl } from "./provider-resolution";
 
 // ---------------------------------------------------------------------------
 // Types.
@@ -144,10 +145,11 @@ function extractHttpError(text: string): string {
   return truncate(text.replace(/\s+/g, " ").trim(), 200);
 }
 
-/** Build the chat-completions endpoint the same way streamRound does. */
+/** Build the chat-completions endpoint — the ONE shared construction
+ *  (provider-resolution), so diagnostics probe the exact URL the runtime
+ *  calls. */
 function chatEndpoint(baseUrl: string, noPrefix?: boolean): string {
-  const base = baseUrl.replace(/\/+$/, "");
-  return noPrefix ? base : `${base}/chat/completions`;
+  return chatCompletionsUrl(baseUrl, noPrefix);
 }
 
 /** Per-test abort controller: fires on (a) the test timeout, (b) the user

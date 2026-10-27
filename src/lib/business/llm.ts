@@ -19,6 +19,11 @@ import { useAuthStore } from "@/stores";
 import { useChatStore } from "@/stores/chat-store";
 import { extractDelta, parseSSEStream } from "@/lib/agent/runtime";
 import {
+  chatCompletionsUrl,
+  listUsableProviders,
+  resolveProviderForModel,
+} from "@/lib/agent/provider-resolution";
+import {
   POLLINATIONS_TEXT_BASE_URL,
   textModelIds,
   upsertTextProvider,
@@ -184,23 +189,18 @@ async function withRetryLadder<T>(
 /**
  * Resolve the LLM configuration for a Business Mode call.
  *
- * LEGACY-CLASSIC GUARD: a "Pollinations" row still pointing at the RETIRED
- * text.pollinations.ai (Classic) endpoint can never serve gen-catalog
- * models — the gateway answers the "…isn't on the Classic API" 404 the
- * user hit. The guard self-heals it HERE (not only on wizard/dashboard
- * mount) so every call path is protected — discovery's three steps
- * (including blueprint drafting), specialist agent turns and business
- * chat: repoint the row to the gen gateway with the connected key, or
- * delete the dead row when no connection exists, then re-list. As
- * belt-and-braces, a classic URL is NEVER called even if a row somehow
- * survived the migration.
+ * The LEGACY-CLASSIC GUARD + MODEL-FIRST provider resolution live in the
+ * SHARED layer (lib/agent/provider-resolution — listUsableProviders /
+ * resolveProviderForModel), so Business Mode, the main chat and subagents
+ * resolve identically: a stale text.pollinations.ai (Classic) row can never
+ * be called (it self-heals here), and the selected model always travels with
+ * the provider that OFFERS it (the Classic-API-404 fix).
  *
  * Provider chain (first match wins):
  *   1. override.providerId (explicit — e.g. a business's saved main
- *      provider config)
- *   2. the chat-store's selectedModel resolved to the provider that
- *      OFFERS it (MODEL-FIRST — "the selected model with its provider");
- *      active providers are preferred
+ *      provider config in Settings → Business → Main agent model)
+ *   2. MODEL-FIRST — the chat-store's selectedModel resolved to the
+ *      provider that OFFERS it; active providers are preferred
  *   3. the chat-store's selectedProviderId (no model picked / orphaned
  *      model id)
  *   4. first active provider
@@ -208,12 +208,14 @@ async function withRetryLadder<T>(
  * Model chain: override.model → the chat-store selectedModel when the
  * resolved provider offers it → provider.models[0]. An orphaned selected
  * model id (its provider was deleted/re-synced away) falls back to the
- * provider's first model instead of sending a guaranteed-404 model.
+ * provider's first model instead of sending a guaranteed-404 model. No
+ * hardcoded fallback model, ever.
  *
- * Net effect: Business Mode calls (discovery, chat turns, regeneration,
- * specialists) always run on the model CURRENTLY SELECTED in the chat UI
- * together with the provider that actually serves it — and always on the
- * official gen.pollinations.ai gateway when the selection is Pollinations.
+ * Net effect: Business Mode calls (discovery incl. the blueprint-drafting
+ * third step, chat turns, regeneration, specialists) always run on the
+ * model CURRENTLY SELECTED in the chat UI together with the provider that
+ * actually serves it — and always on the official gen.pollinations.ai
+ * gateway when the selection is Pollinations.
  *
  * Throws a friendly Error when nothing is usable — callers surface UI
  * guidance (wizard empty state / toast), never a raw stack trace.
@@ -222,22 +224,7 @@ export async function resolveBusinessLlmConfig(
   override?: { providerId?: string; model?: string },
 ): Promise<BusinessLlmConfig> {
   const userId = useAuthStore.getState().user?.id ?? "local-user";
-  let providers = await aiProviderService.list(userId);
-
-  // ---- Legacy-classic guard (see doc comment) ---------------------------
-  if (
-    providers.some(
-      (p) => p.name === "Pollinations" && p.base_url.includes("text.pollinations.ai"),
-    )
-  ) {
-    // Repoint-to-gen (connected) or delete (not connected) — idempotent,
-    // best-effort; resolution continues with whatever rows remain.
-    await migrateLegacyPollinationsGateway(userId).catch(() => undefined);
-    providers = await aiProviderService.list(userId);
-  }
-  const usable = providers.filter(
-    (p) => !p.base_url.includes("text.pollinations.ai"),
-  );
+  const usable = await listUsableProviders(userId);
   if (usable.length === 0) {
     throw new Error(
       "No AI provider configured — add one in Settings → Config, or connect your Pollinations account from the business wizard (the official gen.pollinations.ai API uses your own key; the old keyless text.pollinations.ai endpoint is retired) to use Business Mode.",
@@ -251,14 +238,10 @@ export async function resolveBusinessLlmConfig(
   if (override?.providerId) {
     provider = usable.find((p) => p.id === override.providerId);
   }
-  // MODEL-FIRST: the selected model with the provider that OWNS it. This
-  // is also the stale-selection recovery — a selectedProviderId pointing
-  // at a deleted/legacy row while the model lives on another provider's
-  // list still lands on the right gateway (the Classic-API-404 fix).
-  if (!provider && selectedModel) {
-    provider =
-      usable.find((p) => p.is_active && (p.models ?? []).includes(selectedModel)) ??
-      usable.find((p) => (p.models ?? []).includes(selectedModel));
+  // MODEL-FIRST (shared helper): the selected model with the provider that
+  // OWNS it — also the stale-selection recovery.
+  if (!provider) {
+    provider = resolveProviderForModel(usable, selectedModel);
   }
   if (!provider && selectedProviderId) {
     provider = usable.find((p) => p.id === selectedProviderId);
@@ -307,8 +290,9 @@ export async function resolveBusinessLlmConfig(
 // ---------------------------------------------------------------------------
 
 function buildTargetUrl(cfg: BusinessLlmConfig): string {
-  const base = cfg.baseUrl.replace(/\/$/, "");
-  return cfg.noPrefix ? base : `${base}/chat/completions`;
+  // The ONE shared construction (provider-resolution) — no workflow builds
+  // its own endpoint URL.
+  return chatCompletionsUrl(cfg.baseUrl, cfg.noPrefix);
 }
 
 function proxyUrl(targetUrl: string): string {

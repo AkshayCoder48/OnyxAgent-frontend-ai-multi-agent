@@ -78,6 +78,7 @@ import {
 import { manageContext } from "@/lib/agent/context/context-manager";
 import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
+import { chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 import { useChatStore, type ManagedContextSnapshot } from "@/stores/chat-store";
 import {
   classifyRouterError,
@@ -1035,13 +1036,10 @@ async function streamRound(
     onStreamProgress,
   } = opts;
 
-  // Target URL — strip trailing slash. If the provider has `no_prefix` set,
-  // use the base URL as-is (no /chat/completions suffix). Otherwise append
-  // /chat/completions (standard OpenAI-compatible endpoint).
-  const base = provider.baseUrl.replace(/\/$/, "");
-  const targetUrl = provider.noPrefix
-    ? base
-    : `${base}/chat/completions`;
+  // Target URL — the ONE shared construction (provider-resolution): the
+  // provider's base URL + the standard /chat/completions suffix, unless the
+  // row's no_prefix flag says to use the base as-is.
+  const targetUrl = chatCompletionsUrl(provider.baseUrl, provider.noPrefix);
 
   // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of the
   // messages is rebuilt through buildWireMessages on EVERY request (and

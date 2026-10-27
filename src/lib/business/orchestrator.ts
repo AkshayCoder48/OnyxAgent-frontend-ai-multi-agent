@@ -59,6 +59,7 @@ import {
   readBusinessCloudHandoffMeta,
   type BusinessTurnSnapshot,
 } from "@/lib/agent/turn-cloud-handoff";
+import { chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 import type {
   AgentMessageRow,
   BusinessAgentRow,
@@ -1132,12 +1133,11 @@ export async function sendBusinessMessage(businessId: string, content: string): 
     // dispatches it to the operator's trigger.dev Cloud project as a
     // durable agent_run — the work survives reload/close (the browser
     // lifecycle never owns it). Unregistered when the turn settles.
-    const cloudBase = (mainCfg.baseUrl || "").replace(/\/+$/, "");
-    const cloudChatUrl = !cloudBase
-      ? ""
-      : mainCfg.noPrefix
-        ? cloudBase
-        : `${cloudBase}/chat/completions`;
+    // The cloud lane carries the SAME resolved gateway as the in-browser
+    // turn (the ONE shared URL construction — provider-resolution).
+    const cloudChatUrl = (mainCfg.baseUrl || "").trim()
+      ? chatCompletionsUrl(mainCfg.baseUrl, mainCfg.noPrefix)
+      : "";
     const cloudSnapshot: BusinessTurnSnapshot = {
       businessId,
       businessName: business.name,

@@ -1201,7 +1201,18 @@ export const aiProviderService = {
     const apiKey = provider.api_key_encrypted
       ? await vaultDecrypt(provider.api_key_encrypted)
       : "";
-    const targetModel = model ?? provider.models[0] ?? "gpt-4o-mini";
+    // NO hardcoded fallback model (endpoint-migration PRD §4): probing with
+    // an unrelated model id would 404 on the provider and lie about its
+    // health. A model-less provider is an honest failure.
+    const targetModel = model ?? provider.models?.[0];
+    if (!targetModel) {
+      return {
+        ok: false,
+        status_code: 0,
+        detail: `The provider "${provider.name}" has no models configured — add at least one model in Settings → Config before testing.`,
+        sample_response: "",
+      };
+    }
     const base = provider.base_url.replace(/\/$/, "");
     const targetUrl = provider.no_prefix ? base : `${base}/chat/completions`;
     try {

@@ -28,6 +28,13 @@ export interface BuildKeyPoolOptions {
   userId: string;
   /** Provider id whose key should lead the pool (the active chat provider). */
   preferredProviderId?: string;
+  /** When the run PINS a provider gateway (config.chatUrl), the bearer for
+   *   that gateway must be THIS provider's key — it leads the pool and the
+   *   round-robin rotation is skipped (a rotated pool could put a different
+   *   provider's key at position 0 and auth-fail the pinned gateway).
+   *   Endpoint-migration PRD §9: the background lane receives the SAME
+   *   effective configuration the foreground turn resolved. */
+  pinnedApiKey?: string;
 }
 
 export interface KeyPool {
@@ -83,6 +90,13 @@ export async function buildKeyPool(opts?: BuildKeyPoolOptions): Promise<KeyPool>
   // (3) Decrypt + dedupe + cap.
   const seen = new Set<string>();
   const pool: string[] = [];
+  // PINNED GATEWAY KEY (config.chatUrl runs): leads the pool unconditionally
+  // — the runner authenticates against the pinned gateway with keyPool[0].
+  const pinned = opts?.pinnedApiKey?.trim();
+  if (pinned) {
+    seen.add(pinned);
+    pool.push(pinned);
+  }
   for (const provider of ordered) {
     if (pool.length >= TASK_PAYLOAD_BUDGET.maxKeyPool) break;
     let key = "";
@@ -98,7 +112,10 @@ export async function buildKeyPool(opts?: BuildKeyPoolOptions): Promise<KeyPool>
 
   if (pool.length === 0) return { pool: [], rotated: false };
 
-  // (4) Round-robin across triggers.
+  // (4) Round-robin across triggers — ONLY when no key is pinned (see
+  //     BuildKeyPoolOptions.pinnedApiKey).
+  if (pinned) return { pool, rotated: false };
+
   let index = 0;
   try {
     const raw =
