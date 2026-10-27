@@ -43,6 +43,7 @@ import {
   buildPlannerUserPrompt,
   buildSpecialistSystemPrompt,
   buildSpecialistUserPrompt,
+  sanitizeRecommendedConnectors,
   type ChatHistoryEntry,
   type WebResearchBlock,
 } from "./prompts";
@@ -627,7 +628,13 @@ export async function runBusinessDiscovery(
     risks: asString(parsed.risks),
     proposed_goals: asStringArray(parsed.proposed_goals).slice(0, 6),
     recommended_skills: asStringArray(parsed.recommended_skills),
-    recommended_connectors: asStringArray(parsed.recommended_connectors),
+    // ANTI-HALLUCINATION GUARD: only the app's REAL capability catalog
+    // (prompts.ts) may surface as connector chips — an off-catalog answer
+    // ("Stripe (payments)", "AWS / Google Cloud / Azure", "Unity Asset
+    // Store SDK"…) is dropped here, before any UI can render it.
+    recommended_connectors: sanitizeRecommendedConnectors(
+      asStringArray(parsed.recommended_connectors),
+    ),
     proposed_agents: proposed_agents.length ? proposed_agents : fallbackTeam(enriched),
     initial_task_backlog,
     assumptions: asStringArray(parsed.assumptions),
@@ -677,6 +684,12 @@ function blueprintProfileMarkdown(blueprint: BusinessBlueprint): string {
   add("Revenue model", blueprint.revenue_model);
   add("Operational workflow", blueprint.operational_workflow);
   add("Risks & dependencies", blueprint.risks);
+  if (blueprint.recommended_skills.length) {
+    add(
+      "Team expertise",
+      blueprint.recommended_skills.map((s) => `- ${s}`).join("\n"),
+    );
+  }
   if (blueprint.assumptions.length) {
     add("Assumptions", blueprint.assumptions.map((a) => `- ${a}`).join("\n"));
   }

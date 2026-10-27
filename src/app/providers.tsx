@@ -12,6 +12,7 @@ import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
 import { TurnHandoffController } from "@/lib/agent/turn-handoff";
 import { useAuthStore } from "@/stores/auth-store";
 import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
+import { hydrateModelPrefFromRows } from "@/lib/agent/model-pref";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -112,6 +113,70 @@ function LegacyRowHealer() {
   return null;
 }
 
+/**
+ * MODEL-PREF HYDRATOR — restores the user's picked model on EVERY route
+ * (the "Business uses a fixed model instead of my selected model" fix).
+ *
+ * The persisted model preference (onyx:selected-model) used to be re-applied
+ * ONLY by ChatControls' mount effect — a chat-page-only component. On any
+ * other route (Business wizard after a refresh, a fresh /business tab,
+ * projects, …) the chat store booted as {null, null}, so the resolution
+ * chains saw "no selection" and silently fell to the first active
+ * provider's FIRST catalog model (in the alphabetical Pollinations catalog:
+ * community/CloudCompile/dots-studio-dots-3-note-preview:free). The user's
+ * pick was never lost — it was never RESTORED off the chat page.
+ *
+ * This root controller hydrates the persisted pick into the chat store:
+ *   · once auth resolves (boot), and
+ *   · on every window focus / visibility return (cheap Dexie read + an
+ *     idempotent guarded write).
+ *
+ * hydrateModelPrefFromRows never overwrites an explicit in-store selection
+ * and never resurrects a deleted/healed provider row through the stale
+ * preference — the same semantics the chat page's restore always had.
+ */
+function ModelPrefHydrator() {
+  useEffect(() => {
+    let stopped = false;
+
+    const hydrate = async () => {
+      if (stopped || typeof document === "undefined") return;
+      if (document.visibilityState === "hidden") return;
+      const { user, authResolved } = useAuthStore.getState();
+      if (!authResolved || !user) return;
+      try {
+        const { aiProviderService } = await import("@/lib/services");
+        const rows = await aiProviderService.list(user.id);
+        hydrateModelPrefFromRows(rows);
+      } catch {
+        // best-effort — the business lane re-runs the same hydration
+        // against its own provider list at resolution time anyway
+      }
+    };
+
+    const unsubAuth = useAuthStore.subscribe((s, prev) => {
+      if (s.authResolved && s.authResolved !== prev.authResolved) void hydrate();
+    });
+
+    const onFocus = () => void hydrate();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void hydrate();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+
+    void hydrate(); // initial (covers auth resolved before mount)
+
+    return () => {
+      stopped = true;
+      unsubAuth();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+  return null;
+}
+
 /** Apply saved color scheme on app mount so it persists across refreshes. */
 function ColorSchemeInitializer() {
   useEffect(() => {
@@ -189,6 +254,10 @@ export function Providers({ children }: ProvidersProps) {
             pre-migration tabs that flip the gen Pollinations row back onto
             the retired text.pollinations.ai host (see its doc comment). */}
         <LegacyRowHealer />
+        {/* MODEL-PREF HYDRATOR — restores the user's picked model on every
+            route so Business/projects never fall back to a "fixed" first
+            catalog model (see its doc comment). */}
+        <ModelPrefHydrator />
         {/* AUTOMATIC CLOSE-HANDOFF — mounts STRICTLY ABOVE SandboxLifecycleSync:
             its pagehide listener must run FIRST so a handed-off turn's
             sandbox is flagged detached-active before the auto-pause handler

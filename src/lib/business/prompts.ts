@@ -341,6 +341,81 @@ ${suggestions}`
 // Discovery (wizard)
 // ---------------------------------------------------------------------------
 
+/**
+ * The app's REAL capability catalog — the ONLY entries the discovery
+ * blueprint may recommend as "connectors" (the anti-hallucination fix).
+ *
+ * The old prompt asked the model for a free-form `recommended_connectors:
+ * string[]` — so it invented "Stripe (payments)", "Discord (community)",
+ * "AWS / Google Cloud / Azure", "Unity Asset Store SDK", "Google Analytics",
+ * "AI/ML engineering"… and the wizard rendered them as integration chips
+ * with nothing behind them (the user: "hallucinating tools and connectors
+ * … no direct option to connect them"). EVERY entry below is a capability
+ * that genuinely exists in THIS app — no invented integrations, ever.
+ * External services the business would need go to "risks"/"assumptions"
+ * instead.
+ */
+export const REAL_CONNECTOR_CATALOG: ReadonlyArray<{ label: string; matches: ReadonlyArray<string> }> = [
+  {
+    label: "Web Search & Reading",
+    matches: ["web search", "web reading", "browser"],
+  },
+  {
+    label: "Pollinations Media Generation (image · video · audio · 3D)",
+    matches: ["pollinations", "media generation", "image generation", "video generation"],
+  },
+  {
+    label: "Code Execution Sandbox",
+    matches: ["code execution", "sandbox", "python"],
+  },
+  {
+    label: "Workspace Files & Knowledge Base",
+    matches: ["workspace files", "knowledge base", "files & knowledge"],
+  },
+  {
+    label: "Scheduled & Background Tasks",
+    matches: ["scheduled", "background task"],
+  },
+  {
+    label: "Subagent Delegation",
+    matches: ["subagent"],
+  },
+  {
+    label: "App Integrations (Composio — Gmail, Slack, Discord, Notion, GitHub & more)",
+    matches: ["composio", "app integration"],
+  },
+];
+
+function normalizeConnectorText(s: string): string {
+  return s.toLowerCase().replace(/[\s\u2013\u2014]+/g, " ").trim();
+}
+
+/**
+ * Keep ONLY real catalog entries (the parse-time guard — the prompt
+ * constraint alone cannot be trusted for every model). Matching is
+ * containment-based so a slightly-decorated LLM answer ("Web search &
+ * reading (built-in)") still maps to its canonical catalog label; anything
+ * off-catalog ("Stripe (payments)", "AWS / Google Cloud / Azure", "Unity
+ * Asset Store SDK") is DROPPED, not shown. Output = canonical labels,
+ * deduped, catalog-ordered.
+ */
+export function sanitizeRecommendedConnectors(raw: string[]): string[] {
+  const picked: string[] = [];
+  for (const entry of REAL_CONNECTOR_CATALOG) {
+    const hit = raw.some((r) => {
+      const n = normalizeConnectorText(r ?? "");
+      return n.length > 0 && entry.matches.some((m) => n.includes(normalizeConnectorText(m)));
+    });
+    if (hit) picked.push(entry.label);
+  }
+  return picked;
+}
+
+/** The catalog as prompt text (the EXACT whitelist the model must pick from). */
+function connectorCatalogPromptText(): string {
+  return REAL_CONNECTOR_CATALOG.map((c) => `  - "${c.label}"`).join("\n");
+}
+
 export function buildDiscoverySystemPrompt(): string {
   return `You are the Main Agent of Onyx Agent in discovery mode — a rigorous, honest business architect. Given a business idea and (when available) REAL web research results, you produce a complete business blueprint.
 
@@ -367,6 +442,10 @@ Rules:
 - proposed_goals: 3-6 concrete first goals.
 - proposed_agents: 2-6 agents this business genuinely needs. "role" AND "logo" must each be ONE word from this palette: research, strategy, marketing, content, finance, operations, developer, quality, support, legal, sales, data, creative, growth. "name" is human-style (e.g. "Research Agent", "Finance Agent"). "system_instructions": 2-4 sentences of high-quality, role-specific instructions for that agent.
 - initial_task_backlog: 3-8 concrete first tasks; "agent_role" must match a role used in proposed_agents.
+- recommended_skills: the team's genuine expertise areas (e.g. "financial modeling", "SEO") — they become part of the business profile the agents operate from.
+- recommended_connectors: ONLY entries from this EXACT catalog of capabilities that actually exist in the app (pick the ones the proposed agents will genuinely use, usually 2-5):
+${connectorCatalogPromptText()}
+  NEVER invent connectors. External services the business would need (payment gateways, cloud platforms, game-engine SDKs, analytics suites, community platforms…) are NOT app connectors — name them ONLY inside "risks" or "assumptions" as external dependencies.
 - research_findings: "verified": true ONLY for facts taken from the WEB SEARCH RESULTS in the user message — then "source" is the result URL. Every claim you reason out yourself gets "verified": false and an empty "source". NEVER invent statistics.
 - assumptions: every assumption you made about the business, explicit.
 - Ground sections in the search results where they exist; mark the rest as your own reasoning.
@@ -429,7 +508,8 @@ const SECTION_SHAPES: Record<string, string> = {
   risks: "a plain string with the new section text",
   proposed_goals: "a JSON array of strings (the new goals)",
   recommended_skills: "a JSON array of strings",
-  recommended_connectors: "a JSON array of strings",
+  recommended_connectors:
+    `a JSON array of strings — ONLY from this whitelist: ${REAL_CONNECTOR_CATALOG.map((c) => JSON.stringify(c.label)).join("; ")}. Never invent connectors — external services belong in risks/assumptions`,
   assumptions: "a JSON array of strings",
   proposed_agents:
     'a JSON array of objects with the same shape as the current section: { "name", "role", "description", "logo", "system_instructions" } — role and logo are single words from the palette: research, strategy, marketing, content, finance, operations, developer, quality, support, legal, sales, data, creative, growth',

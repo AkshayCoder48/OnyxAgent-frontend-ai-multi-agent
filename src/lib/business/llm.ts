@@ -23,6 +23,7 @@ import {
   listUsableProviders,
   resolveProviderForModel,
 } from "@/lib/agent/provider-resolution";
+import { hydrateModelPrefFromRows } from "@/lib/agent/model-pref";
 import {
   POLLINATIONS_TEXT_BASE_URL,
   textModelIds,
@@ -230,6 +231,16 @@ export async function resolveBusinessLlmConfig(
       "No AI provider configured — add one in Settings → Config, or connect your Pollinations account from the business wizard (the official gen.pollinations.ai API uses your own key; the old keyless text.pollinations.ai endpoint is retired) to use Business Mode.",
     );
   }
+
+  // PERSISTED-PREF HYDRATION (the "Business uses a fixed model" fix): the
+  // chat store is in-memory — a fresh tab / refresh on /business boots it as
+  // {null, null} because the chat-page picker is what used to restore the
+  // persisted preference. Restore it HERE against the very provider list
+  // this resolution uses (only fills an empty store; a deleted/healed
+  // provider row never resurrects through the preference), so Business
+  // resolves the user's ACTUAL picked model instead of silently falling to
+  // the first active provider's first catalog model.
+  hydrateModelPrefFromRows(usable);
 
   const { selectedProviderId, selectedModel } = useChatStore.getState();
 

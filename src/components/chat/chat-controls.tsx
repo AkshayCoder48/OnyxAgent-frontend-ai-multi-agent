@@ -17,6 +17,10 @@ import {
   AUTO_ROUTER_PROVIDER_ID,
 } from "@/lib/auto-router";
 import { cn } from "@/lib/utils";
+import {
+  loadModelPref,
+  saveModelPref,
+} from "@/lib/agent/model-pref";
 
 type ThinkingEffort = "off" | "low" | "medium" | "high";
 type Tab = "model" | "settings";
@@ -39,9 +43,9 @@ interface ChatControlsProps {
   onProviderSelect?: (provider: CustomProvider | null) => void;
 }
 
-/** localStorage persistence for the model preference (PRD §14): saved on
- *  every pick, restored + validated against the live provider list on mount. */
-const MODEL_PREF_KEY = "onyx:selected-model";
+// Model preference persistence lives in the SHARED leaf
+// (lib/agent/model-pref) — the ONE owner of the key, so every lane (root
+// boot hydration, Business, subagents) reads the SAME pick the picker saved.
 
 /** The synthetic "provider" handed to onProviderSelect when the Auto
  *  Router row is picked — only its `id` matters (chat-container maps it to
@@ -56,26 +60,6 @@ const AUTO_ROUTER_PICK: CustomProvider = {
   models: [],
 };
 
-export function saveModelPref(providerId: string | null, model: string | null): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(MODEL_PREF_KEY, JSON.stringify({ providerId, model }));
-  } catch {
-    // Storage unavailable (private mode / quota) — non-fatal, session-only selection.
-  }
-}
-
-function loadModelPref(): { providerId: string | null; model: string | null } | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(MODEL_PREF_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { providerId?: string | null; model?: string | null };
-    return { providerId: parsed.providerId ?? null, model: parsed.model ?? null };
-  } catch {
-    return null;
-  }
-}
 
 const EFFORT_OPTIONS: { label: string; value: ThinkingEffort; hint: string }[] = [
   { label: "Off", value: "off", hint: "Direct answer, no reasoning" },

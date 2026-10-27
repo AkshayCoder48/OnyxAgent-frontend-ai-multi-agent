@@ -1713,35 +1713,49 @@ export function CreateBusinessWizard() {
               </Card>
             )}
 
-            {/* Read-only: recommended skills / connectors (chips). */}
+            {/* Read-only: recommended skills / connectors (chips). Both
+                rows carry an HONEST label (the anti-hallucination fix):
+                skills are expertise woven into the business profile, and
+                connectors are only the app's REAL capabilities (the
+                orchestrator sanitizer drops anything off-catalog before it
+                can reach this UI). */}
             {blueprint.recommended_skills.length > 0 ||
             blueprint.recommended_connectors.length > 0 ? (
               <Card className="space-y-3 p-4 sm:p-5">
                 {blueprint.recommended_skills.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Wrench
-                      aria-hidden
-                      className="text-muted-foreground size-3.5 shrink-0"
-                    />
-                    <span className="sr-only">{bt("agent.skills")}</span>
-                    {blueprint.recommended_skills.map((s) => (
-                      <Badge key={s} variant="secondary">
-                        {s}
-                      </Badge>
-                    ))}
+                  <div className="space-y-2">
+                    <p className="text-muted-foreground flex items-start gap-1.5 text-xs leading-relaxed">
+                      <Wrench
+                        aria-hidden
+                        className="text-muted-foreground mt-0.5 size-3.5 shrink-0"
+                      />
+                      {bt("wizard.blueprint.skillsLabel")}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {blueprint.recommended_skills.map((s) => (
+                        <Badge key={s} variant="secondary">
+                          {s}
+                        </Badge>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {blueprint.recommended_connectors.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Plug
-                      aria-hidden
-                      className="text-muted-foreground size-3.5 shrink-0"
-                    />
-                    {blueprint.recommended_connectors.map((c) => (
-                      <Badge key={c} variant="outline">
-                        {c}
-                      </Badge>
-                    ))}
+                  <div className="space-y-2">
+                    <p className="text-muted-foreground flex items-start gap-1.5 text-xs leading-relaxed">
+                      <Plug
+                        aria-hidden
+                        className="text-muted-foreground mt-0.5 size-3.5 shrink-0"
+                      />
+                      {bt("wizard.blueprint.connectorsLabel")}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {blueprint.recommended_connectors.map((c) => (
+                        <Badge key={c} variant="outline">
+                          {c}
+                        </Badge>
+                      ))}
+                    </div>
                   </div>
                 )}
               </Card>

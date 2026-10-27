@@ -11,7 +11,7 @@ import {
 import { Loader2, Paperclip, Rocket, X } from "lucide-react";
 import { toast } from "sonner";
 
-import { saveModelPref } from "@/components/chat/chat-controls";
+import { saveModelPref } from "@/lib/agent/model-pref";
 import {
   ModelPicker,
   ShinyButton,
