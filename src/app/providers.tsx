@@ -11,6 +11,7 @@ import { applyPersistedBrand } from "@/lib/brand";
 import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
 import { TurnHandoffController } from "@/lib/agent/turn-handoff";
 import { useAuthStore } from "@/stores/auth-store";
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 
 interface ProvidersProps {
   children: ReactNode;
@@ -32,6 +33,81 @@ interface ProvidersProps {
 function AuthInitializer() {
   useEffect(() => {
     void useAuthStore.getState().init();
+  }, []);
+  return null;
+}
+
+/**
+ * LEGACY-ROW HEALER — the write-war winner against stale pre-migration tabs
+ * (the "coming back changes my gen endpoint to text.pollinations" fix).
+ *
+ * Pre-migration app bundles (still running in old browser tabs) actively
+ * DAMAGE the provider table: their /business mount effect re-seeds a keyless
+ * row on text.pollinations.ai AND their migrateLegacyPollinationsGateway
+ * runs the OPPOSITE direction — it finds the row named "Pollinations" on
+ * gen.pollinations.ai and FLIPS it onto the legacy host. Coming back to
+ * such a tab therefore re-breaks the row the current app just healed.
+ *
+ * This root controller makes the CURRENT bundle win deterministically:
+ *   · on boot (once the real user resolves) — sweep once;
+ *   · on EVERY window focus/visibility return — sweep again, so any damage
+ *     a ghost tab did while we were backgrounded is healed within
+ *     milliseconds of the user returning to THIS tab.
+ *
+ * The sweep itself is migrateLegacyPollinationsGateway (new direction):
+ * repoint-to-gen with the connected key + live models, delete when not
+ * connected, and purge duplicate ghost rows. Cheap when nothing matches
+ * (one indexed Dexie read).
+ */
+function LegacyRowHealer() {
+  useEffect(() => {
+    let stopped = false;
+
+    const sweep = async () => {
+      if (stopped || typeof document === "undefined") return;
+      if (document.visibilityState === "hidden") return; // nothing to heal while hidden
+      const { user, authResolved } = useAuthStore.getState();
+      if (!authResolved || !user) return;
+      try {
+        // Quick pre-check: any "Pollinations" row on the legacy host at all?
+        // (Keeps the common no-op sweep to a single Dexie read with no
+        // dynamic-import churn.)
+        const { aiProviderService } = await import("@/lib/services");
+        const rows = await aiProviderService.list(user.id);
+        const damaged = rows.some(
+          (p) => p.name === "Pollinations" && isLegacyClassicUrl(p.base_url),
+        );
+        if (!damaged) return;
+        const { migrateLegacyPollinationsGateway } = await import("@/lib/business/llm");
+        await migrateLegacyPollinationsGateway(user.id);
+        console.info(
+          "[healer] repointed a legacy text.pollinations.ai provider row back to the gen gateway",
+        );
+      } catch {
+        // best-effort — every AI turn re-runs the same guard lazily anyway
+      }
+    };
+
+    const unsubAuth = useAuthStore.subscribe((s, prev) => {
+      if (s.authResolved && s.authResolved !== prev.authResolved) void sweep();
+    });
+
+    const onFocus = () => void sweep();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void sweep();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+
+    // Initial sweep (covers the case where auth resolved before mount).
+    void sweep();
+
+    return () => {
+      stopped = true;
+      unsubAuth();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
   return null;
 }
@@ -109,6 +185,10 @@ export function Providers({ children }: ProvidersProps) {
         <ExperimentalUiSync />
         {/* Auth bootstrap FIRST (see AuthInitializer note above). */}
         <AuthInitializer />
+        {/* LEGACY-ROW HEALER — wins the write war against stale
+            pre-migration tabs that flip the gen Pollinations row back onto
+            the retired text.pollinations.ai host (see its doc comment). */}
+        <LegacyRowHealer />
         {/* AUTOMATIC CLOSE-HANDOFF — mounts STRICTLY ABOVE SandboxLifecycleSync:
             its pagehide listener must run FIRST so a handed-off turn's
             sandbox is flagged detached-active before the auto-pause handler

@@ -45,6 +45,9 @@ import {
   fetchArtifact,
 } from "@/lib/tasks/client";
 import type { TaskStatusRun } from "@/lib/tasks/protocol";
+// PURE leaf of the shared AI client layer — the legacy-endpoint guard for
+// every pinned-gateway dispatch lane below.
+import { isLegacyClassicUrl } from "./provider-url";
 
 // ---------------------------------------------------------------------------
 // Prewarm — cloud mode + key pool, cached while the page is visible.
@@ -200,7 +203,14 @@ export function dispatchCloudAgentRunBeacon(input: CloudBeaconInput): {
       // the real bound is the run's execution window.
       maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
-      ...(isAbsoluteHttp(input.chatUrl) ? { chatUrl: input.chatUrl.trim() } : {}),
+      // LEGACY-CLASSIC GUARD: never pin the retired text.pollinations.ai
+      // endpoint into a NEW cloud run (a stale pre-migration tab can still
+      // flip the provider row onto the legacy host — the foreground turn
+      // may have resolved it before the flip was healed). A legacy pin
+      // drops to the keyless bridge instead of a guaranteed-404 gateway.
+      ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl)
+        ? { chatUrl: input.chatUrl.trim() }
+        : {}),
     };
 
     const body = JSON.stringify({
@@ -599,13 +609,18 @@ export async function dispatchDetachedCloudTurn(input: {
       // USER DIRECTIVE: no 24-round cap — the server default (400) governs.
       maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
-      ...(isAbsoluteHttp(input.chatUrl) ? { chatUrl: input.chatUrl.trim() } : {}),
+      // LEGACY-CLASSIC GUARD (same as the beacon lane): never pin the
+      // retired text.pollinations.ai endpoint into a NEW cloud run — a
+      // legacy pin drops to the keyless bridge instead.
+      ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl)
+        ? { chatUrl: input.chatUrl.trim() }
+        : {}),
     },
     includeWorkspace: true,
     preferredProviderId: input.preferredProviderId ?? undefined,
     // Pinned gateway → its key leads the pool (no rotation). Empty chatUrl
     // (bridge lane) ignores the key — the bridge authorizes by task token.
-    ...(isAbsoluteHttp(input.chatUrl) && input.apiKey?.trim()
+    ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl) && input.apiKey?.trim()
       ? { pinnedApiKey: input.apiKey.trim() }
       : {}),
     sandboxApiKey,

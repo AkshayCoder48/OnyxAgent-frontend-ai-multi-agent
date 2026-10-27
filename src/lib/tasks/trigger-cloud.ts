@@ -921,6 +921,30 @@ export async function syncCloudRunIntoRow(runId: string): Promise<boolean> {
   if (["completed", "failed", "cancelled"].includes(row.status)) return false;
   if (!row.externalRunId) return false;
 
+  // ── STALE LEGACY-PIN SWEEP (endpoint-migration PRD §3) ──────────────────
+  // A run dispatched BEFORE the migration may still carry a pinned
+  // config.chatUrl on the retired text.pollinations.ai endpoint — the cloud
+  // runner then hammers a gateway that can only answer the "…isn't on the
+  // Classic API" 404 for gen-catalog models. Such a run can NEVER succeed:
+  // settle it honestly with a retry hint instead of surfacing the endless
+  // upstream 404.
+  const runConfig = parseConfig(row.config);
+  if (runConfig.chatUrl && isLegacyClassicUrl(runConfig.chatUrl)) {
+    await prisma.taskRun
+      .update({
+        where: { id: runId },
+        data: {
+          status: "failed",
+          phase: "failed",
+          error:
+            "This run was dispatched against the retired text.pollinations.ai (Classic) endpoint before the migration to the official gen.pollinations.ai gateway — it can no longer succeed. Retry the task to run it on your currently selected provider and model. (code: legacy_endpoint_pin)",
+          finishedAt: new Date(),
+        },
+      })
+      .catch(() => undefined);
+    return true;
+  }
+
   const view = await fetchCloudRunView(config, row.externalRunId).catch(() => null);
   if (!view) return false;
 

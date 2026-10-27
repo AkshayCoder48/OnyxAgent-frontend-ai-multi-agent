@@ -786,39 +786,60 @@ export async function addPollinationsProvider(userId: string): Promise<number> {
 }
 
 /**
- * One-time, self-limiting migration — now in the NEW-API direction: a
- * "Pollinations" provider still pointing at the RETIRED keyless
- * text.pollinations.ai endpoint is moved to the authenticated gateway.
+ * Self-limiting migration — NEW-API direction: every "Pollinations" provider
+ * row still pointing at the RETIRED keyless text.pollinations.ai endpoint is
+ * moved to the authenticated gateway.
  *
- *   connected → repoint to gen.pollinations.ai/v1, attach the connection
- *               key, refresh models from the live catalogue
- *   not conn. → delete the dead row (the keyless tier is gone — that base
+ *   connected → repoint the FIRST legacy row to gen.pollinations.ai/v1
+ *               (attach the connection key, refresh models from the live
+ *               catalogue, reset no_prefix) and DELETE any extra legacy rows
+ *   not conn. → delete the dead rows (the keyless tier is gone — that base
  *               URL can never authenticate with the new API)
  *
- * No-op once no legacy row matches (cheap to call on every provider refresh).
+ * WHY "delete extras": pre-migration app bundles (still running in stale
+ * browser tabs) both RE-SEED a keyless legacy row on /business mount AND
+ * FLIP the user's gen row back onto the legacy host (the old
+ * migrateLegacyPollinationsGateway ran the OPPOSITE direction). This sweep
+ * therefore heals ALL matching rows in one pass — repoint one, purge the
+ * rest — so a ghost tab can never leave duplicate legacy rows behind.
+ *
+ * No-op once no legacy row matches (cheap to call on every provider refresh,
+ * every app boot and every window refocus — see LegacyRowHealer in
+ * app/providers.tsx).
  */
 export async function migrateLegacyPollinationsGateway(userId: string): Promise<void> {
   try {
     const providers = await aiProviderService.list(userId);
-    const legacy = providers.find(
+    const legacyRows = providers.filter(
       (p) => p.name === "Pollinations" && p.base_url.includes("text.pollinations.ai"),
     );
-    if (!legacy) return;
+    if (legacyRows.length === 0) return;
     const token = await connectedPollinationsKey(userId);
     if (token) {
-      const models = await fetchPollinationsModels();
-      await aiProviderService.update(legacy.id, {
-        base_url: POLLINATIONS_TEXT_BASE_URL,
-        api_key: token,
-        models: textModelIds(models),
-        no_prefix: false,
-        is_active: true,
-      });
+      const [primary, ...extras] = legacyRows;
+      if (primary) {
+        const models = await fetchPollinationsModels();
+        await aiProviderService.update(primary.id, {
+          base_url: POLLINATIONS_TEXT_BASE_URL,
+          api_key: token,
+          models: textModelIds(models),
+          no_prefix: false,
+          is_active: true,
+        });
+      }
+      // A healthy gen row exists now — any additional legacy rows (re-seeded
+      // by a stale pre-migration tab) are pure ghosts: delete, never adopt.
+      // (When even the primary repoint was skipped, extras includes it.)
+      for (const extra of extras) {
+        await aiProviderService.delete(extra.id).catch(() => undefined);
+      }
     } else {
-      // Keyless tier is retired — a legacy row with no key to attach can
-      // never work again. Remove it so the honest provider gate + connect
+      // Keyless tier is retired — legacy rows with no key to attach can
+      // never work again. Remove them so the honest provider gate + connect
       // CTA take over.
-      await aiProviderService.delete(legacy.id);
+      for (const row of legacyRows) {
+        await aiProviderService.delete(row.id).catch(() => undefined);
+      }
     }
   } catch {
     // Best-effort — provider listing errors surface through the UI paths.
