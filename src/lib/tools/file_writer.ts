@@ -121,7 +121,16 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const rawPath = safePath(args.path as string);
+    // Missing path → actionable error (previously safePath fell back to "."
+    // and probed the workspace root — a confusing no-op for the model).
+    const rawPathArg = typeof args.path === "string" ? args.path.trim() : "";
+    if (!rawPathArg) {
+      return {
+        error: "verify_path requires a 'path' (relative to the workspace root), but no path was provided.",
+        fix: 'Re-issue the call with e.g. {"path": "projects/my-app/index.html"} (directories: trailing slash or no file extension).',
+      };
+    }
+    const rawPath = safePath(rawPathArg);
     const createDirs = (args.create_dirs as boolean) ?? true;
     const sbx = await getSandbox(ctx);
     if (!sbx) return { error: NO_KEY_ERROR };
@@ -325,11 +334,55 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const rawPath = safePath(args.path as string);
-    const content = (args.content as string) ?? "";
-    const mode = (args.mode as string) ?? "append";
+    // ── Argument validation — BEFORE any sandbox work ────────────────
+    // Previously a missing/empty `path` silently fell back to "." (the
+    // workspace ROOT directory) and the append ran `printf %s … >> '.'`
+    // — guaranteed "Is a directory" → SDK CommandExitError → the opaque
+    // "Append failed (exit -1): exit status 1" on EVERY chunked write.
+    // Unusable paths now fail fast with an actionable message instead.
+    const rawPathArg = typeof args.path === "string" ? args.path.trim() : "";
+    if (!rawPathArg) {
+      return {
+        error:
+          "create_file_chunk requires a file 'path' (relative to the workspace root), but no path was provided.",
+        fix: 'Re-issue the call with BOTH parameters, e.g. {"path": "projects/my-app/index.html", "content": "<chunk text>", "mode": "create", "chunk_index": 0}.',
+      };
+    }
+    const rawPath = safePath(rawPathArg);
+    // A directory-looking target (".", "./", trailing "/", "/home/user/")
+    // can never be appended to — reject with the same actionable shape.
+    if (rawPath === "." || rawPath === "./" || rawPath.endsWith("/")) {
+      return {
+        error: `create_file_chunk writes FILES, but the path "${rawPathArg}" resolves to the directory "${rawPath}" — appending to a directory always fails.`,
+        fix: 'Pass the full FILE path (e.g. "projects/my-app/index.html"). To create directories, call verify_path first.',
+      };
+    }
+    // Content alias rescue: the old umbrella digest documented the content
+    // parameter as `chunk` — models that followed it sent `chunk` while
+    // `content` stayed undefined (a silent empty append). Accept the alias
+    // and report it so the model self-corrects next round.
+    let content = typeof args.content === "string" ? args.content : "";
+    let usedContentAlias = false;
+    if (!content && typeof args.chunk === "string" && args.chunk) {
+      content = args.chunk;
+      usedContentAlias = true;
+    }
+    const modeRaw = typeof args.mode === "string" ? args.mode.trim().toLowerCase() : "append";
+    const mode =
+      modeRaw === "create" || modeRaw === "overwrite" || modeRaw === "write" || modeRaw === "new"
+        ? "create"
+        : "append";
     const chunkIndex = (args.chunk_index as number) ?? 0;
     const totalChunks = (args.total_chunks as number) ?? undefined;
+    // An empty append is never intended (verify_path already creates empty
+    // files) — it wastes a round and reports fake progress. Only the
+    // create/overwrite of chunk 0 may legitimately write an empty file.
+    if (!content && !(mode === "create" && chunkIndex === 0)) {
+      return {
+        error: "create_file_chunk requires 'content' (the chunk text to write), but it was missing or empty.",
+        fix: 'Re-issue the call with "content" set to the chunk (2–4 KB / 50–200 lines), e.g. {"path": "projects/my-app/index.html", "content": "<chunk text>", "mode": "append", "chunk_index": 1}. The parameter is named content — not chunk, text or body.',
+      };
+    }
 
     const sbx = await getSandbox(ctx);
     if (!sbx) return { error: NO_KEY_ERROR };
@@ -412,6 +465,9 @@ registerTool(
         file_size: fileSize,
         created_dirs: createdDirs,
         verified,
+        ...(usedContentAlias
+          ? { note: "Used the 'chunk' parameter as the content — the canonical parameter name is 'content'; use 'content' in future calls." }
+          : {}),
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -457,7 +513,11 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const rawPath = safePath(args.path as string);
+    const rawPathArg = typeof args.path === "string" ? args.path.trim() : "";
+    if (!rawPathArg) {
+      return { error: "read_file_section requires a file 'path', but no path was provided." };
+    }
+    const rawPath = safePath(rawPathArg);
     const startLine = Math.max(0, Math.floor((args.start_line as number) ?? 0));
     const endLineRaw = args.end_line as number | undefined;
     const endLine = typeof endLineRaw === "number" ? Math.floor(endLineRaw) : undefined;

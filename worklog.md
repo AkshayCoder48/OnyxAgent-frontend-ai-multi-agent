@@ -155,3 +155,28 @@ Stage Summary:
 - Business Mode now resolves the user's ACTUAL selected model on every route: the persisted pick is restored at app boot and again inside the business lane itself — the "fixed model" first-catalog fallback can only appear for users who never picked a model (and then the badge names it honestly).
 - The wizard can no longer display invented connectors: prompt whitelist + parse-time sanitizer + honest labels; external services the blueprint needs are routed to risks/assumptions.
 - Committed af81be7 + pushed.
+
+---
+
+## 2026-10-29 — "Append failed (exit -1): exit status 1" on every writefile (+ full-app 500)
+
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: User report — every chunked writefile fails with `{"error": "Append failed (exit -1): exit status 1", "path": ".", "chunk_index": 0, "bytes_written": 0, "created_dirs": [], "verified": false}`. Continue the worklog; push.
+
+Work Log:
+- Reproduced the exact error shape: it is create_file_chunk's own return (src/lib/tools/file_writer.ts) after `client.exec("printf %s '…' >> '.'")` — i.e. the tool tried to APPEND TO THE WORKSPACE ROOT DIRECTORY (path fell back to ".").
+- ROOT CAUSE 1 (the "-1 / exit status 1"): E2B SDK v2's `commands.run()` THROWS `CommandExitError` on ANY non-zero exit (node_modules/e2b/dist — wait(): `if (exitCode !== 0) throw new CommandExitError(result)`). The /api/sandbox route's catch treated that as a generic sandbox failure → `{exit_code: -1, stderr: "exit status 1", error: …}` with the REAL stdout/stderr (e.g. "bash: .: Is a directory") and exit code DISCARDED. Affected: exec (non-stream — used by every append/probe), exec_stream (every failed run_terminal command ended as an error frame instead of its real exit code), and the run_python_stream `script -qec` fallback (a Python traceback exit became "exit status 1").
+- ROOT CAUSE 2 (the path: "."): create_file_chunk ran `safePath(args.path)` with fallback "." — a missing/empty/"/" path silently targeted the workspace root directory. No validation, no actionable error. Related: the files-umbrella digest (consolidated.ts) documented the content parameter as `chunk` (wrong name) — models that followed it sent `chunk` while `content` stayed undefined (silent empty appends) or dropped params entirely.
+- ROOT CAUSE 3 (found via dev.log while verifying): HEAD commit 94f40c8 (Task 7) added `src/lib/db.ts` — a 13-line Prisma stub that SHADOWED `src/lib/db/index.ts` (the Dexie client DB behind the whole app). Every client import of `@/lib/db` failed ("The export wipeUserData was not found") → GET / 500 — the entire app was down since that commit.
+- FIX (route.ts): new `commandExitInfo(err)` helper (duck-types the SDK's CommandExitError: name + result.exitCode/stdout/stderr, prefers real stderr over envd's Go "exit status N" message). Applied BEFORE the dead-sandbox branch in all six catch sites (exec ×2, exec_stream ×2, run_python_stream fallback ×2, incl. the fresh-sandbox retry catches with a hoisted freshSandboxId). Legit non-zero exits now return the REAL exit code + stdout + stderr; error frames only for actual failures.
+- FIX (file_writer.ts): argument validation BEFORE any sandbox work — missing/whitespace path, directory-looking path (".", "./", trailing "/", workspace root) and missing `content` each return an actionable error with an exact example call; `chunk` alias rescue (content = args.chunk when content is absent) with a self-correcting note on success; mode aliases (write/overwrite/new → create); empty append rejected (only create+chunk 0 may write empty). verify_path + read_file_section get the same missing-path guard.
+- FIX (consolidated.ts): digest corrected — `create_file_chunk (path, content, mode, chunk_index)` + first-chunk create / append flow spelled out (was: `chunk`).
+- FIX (bg-agent-script.ts): the sandbox-NATIVE create_file_chunk (background lane) gets the same directory guard + chunk-alias rescue + mode aliases (parity with the browser lane); embedded script syntax-verified with Bun.Transpiler (260,284 chars parse clean).
+- FIX (app-down): deleted the shadowing `src/lib/db.ts`. Audited every `@/lib/db` importer (services barrel, auth-store→providers→root-layout chain, tasks, search, uploads, business, agent/*) — all Dexie consumers; the Task-7 files (jev.ts/decision.ts/jev-decide route) import `@/lib/db` NOWHERE; real Prisma users go through `@/lib/prisma/client`. GET / went 500 → 307 → /chat 200.
+- VERIFIED: tsc 0 errors + eslint clean on all touched files; Bun test of commandExitInfo against the REAL installed SDK class (real exit code + "bash: .: Is a directory" stderr extracted; "exit status N" fallback; non-exit errors → null so dead-sandbox recovery still fires); Bun test of the registered create_file_chunk handler — all 6 bad-arg shapes now return actionable errors, chunk-alias calls pass validation; agent-browser: / → /chat 200, full UI renders, no page errors, console clean, Settings dialog (incl. the wipeUserData-dependent Data management + Sandbox E2B sections) fully interactive.
+- OPS: the platform reaps non-daemonized processes between tool calls (took down the dev server mid-verification); relaunched double-forked (subshell + setsid → PPid 1) — stable.
+
+Stage Summary:
+- Chunked file writes can no longer produce the opaque "Append failed (exit -1): exit status 1": paths/contents are validated up front with actionable fixes, the `chunk` digest bug is gone, and any legitimately failing sandbox command now reports its REAL exit code, stdout and stderr to the model (across exec, run_terminal streaming, and the Python fallback).
+- The app-down 500 from the Task-7 db.ts shadow is fixed (file deleted; Dexie module resolution restored).

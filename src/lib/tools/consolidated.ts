@@ -47,7 +47,7 @@ const SPECS: Record<keyof typeof UMBRELLA_TOOLS & string, UmbrellaSpec> = {
 - "send_file" (path) — deliver a file to the chat as a download.
 - "send_folder" (path) — deliver a folder as a ZIP download.
 - "verify_path" (path) — pre-create/verify dirs before writing.
-- "create_file_chunk" (path, chunk, mode: "create"|"append", chunk_index) — write big files incrementally (>200 lines).
+- "create_file_chunk" (path, content, mode: "create"|"append", chunk_index) — write big files incrementally (>200 lines). FIRST chunk: mode "create" + chunk_index 0; following chunks: mode "append" + increasing indexes.
 - "list_uploaded_files" () — the uploads registry (stable file_ids, sizes).
 - "read_uploaded_file" (file_id | name) — read an uploaded file (text → contents; binary → base64 preview).
 - "search_documents" (query) — semantic search over uploaded documents; cite as [1], [2].

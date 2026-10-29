@@ -2651,13 +2651,38 @@ const TOOLS = [
     },
     run: async (args) => {
       const raw = String(args.path ?? "").trim();
-      if (!raw) return { error: "path is required" };
+      if (!raw) {
+        return {
+          error: "create_file_chunk requires a file 'path', but no path was provided.",
+          fix: 'Re-issue the call with BOTH parameters, e.g. {"path": "projects/my-app/index.html", "content": "<chunk text>", "mode": "create", "chunk_index": 0}.',
+        };
+      }
       const p = safePath(raw);
       if (!p) return { error: "Invalid path" };
-      const content = String(args.content ?? "");
+      // A directory-looking target (".", "./", trailing "/") can never be
+      // appended to — reject with an actionable message instead of an
+      // opaque EISDIR failure (browser-lane parity: file_writer.ts).
+      if (raw === "." || raw === "./" || raw.endsWith("/") || p === HOME) {
+        return {
+          error: 'create_file_chunk writes FILES, but the path "' + raw + '" resolves to a directory — appending to a directory always fails.',
+          fix: 'Pass the full FILE path (e.g. "projects/my-app/index.html"). To create directories, call verify_path first.',
+        };
+      }
+      // Content alias rescue: the canonical parameter is 'content'; accept
+      // the old digest's 'chunk' alias so digest-following calls still work.
+      let content = typeof args.content === "string" ? args.content : "";
+      const usedContentAlias = !content && typeof args.chunk === "string" && !!args.chunk;
+      if (usedContentAlias) content = args.chunk;
       const chunkIndex = Number(args.chunk_index ?? 0) || 0;
       const totalChunks = args.total_chunks !== undefined ? Number(args.total_chunks) : undefined;
-      const mode = String(args.mode ?? "append");
+      const modeRaw = String(args.mode ?? "append").trim().toLowerCase();
+      const mode = modeRaw === "create" || modeRaw === "overwrite" || modeRaw === "write" || modeRaw === "new" ? "create" : "append";
+      if (!content && !(mode === "create" && chunkIndex === 0)) {
+        return {
+          error: "create_file_chunk requires 'content' (the chunk text to write), but it was missing or empty.",
+          fix: 'Re-issue the call with "content" set to the chunk (2–4 KB / 50–200 lines). The parameter is named content — not chunk, text or body.',
+        };
+      }
       const createdDirs = [];
       const bytesWritten = Buffer.byteLength(content, "utf8");
       try {
@@ -2677,7 +2702,16 @@ const TOOLS = [
         } catch {
           verified = false;
         }
-        return { path: raw, chunk_index: chunkIndex, total_chunks: totalChunks, bytes_written: bytesWritten, file_size: fileSize, created_dirs: createdDirs, verified };
+        return {
+          path: raw,
+          chunk_index: chunkIndex,
+          total_chunks: totalChunks,
+          bytes_written: bytesWritten,
+          file_size: fileSize,
+          created_dirs: createdDirs,
+          verified,
+          ...(usedContentAlias ? { note: "Used the 'chunk' parameter as the content — the canonical parameter name is 'content'; use 'content' in future calls." } : {}),
+        };
       } catch (e) {
         return { error: "Failed to write chunk to " + raw + ": " + friendlyErr(e), path: raw, chunk_index: chunkIndex, total_chunks: totalChunks, bytes_written: 0, verified: false };
       }

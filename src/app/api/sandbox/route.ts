@@ -285,6 +285,68 @@ function isDeadSandboxError(err: unknown): boolean {
 }
 
 /**
+ * E2B SDK v2 throw-on-nonzero-exit recovery. `commands.run()` THROWS
+ * `CommandExitError` when a command exits non-zero — a legitimate RESULT,
+ * not a sandbox failure. Previously every failed command (a compile error,
+ * `grep` with no match, an append to a directory) surfaced as
+ * `{ exit_code: -1, stderr: "exit status 1" }` with the REAL stdout/stderr
+ * DISCARDED — callers could never see WHY the command failed (user report:
+ * "Append failed (exit -1): exit status 1" on every chunked writefile).
+ *
+ * The error carries the full result (envd's Go message + accumulated
+ * stdout/stderr). This helper recognizes it and extracts the real values.
+ */
+function commandExitInfo(err: unknown): {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+} | null {
+  if (!err || typeof err !== "object") return null;
+  const e = err as {
+    name?: unknown;
+    exitCode?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    error?: unknown;
+    result?: {
+      exitCode?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+      error?: unknown;
+    };
+  };
+  if (e.name !== "CommandExitError") return null;
+  const exitCode =
+    typeof e.exitCode === "number"
+      ? e.exitCode
+      : typeof e.result?.exitCode === "number"
+        ? e.result.exitCode
+        : 1;
+  const stdout =
+    typeof e.stdout === "string"
+      ? e.stdout
+      : typeof e.result?.stdout === "string"
+        ? e.result.stdout
+        : "";
+  const stderr =
+    typeof e.stderr === "string"
+      ? e.stderr
+      : typeof e.result?.stderr === "string"
+        ? e.result.stderr
+        : "";
+  const errStr =
+    typeof e.error === "string"
+      ? e.error
+      : typeof e.result?.error === "string"
+        ? e.result.error
+        : "";
+  // envd reports the Go exec message ("exit status 1") as `error`; the
+  // command's own stderr (e.g. "bash: .: Is a directory") is in `stderr`.
+  // Prefer the real stderr; fall back to the exec message only if empty.
+  return { exitCode, stdout, stderr: stderr || errStr };
+}
+
+/**
  * Liveness check — pings the sandbox with a cheap filesystem operation to
  * verify envd is reachable. Returns true if alive, false if dead (in which
  * case the caller should evict the cache entry and create a new sandbox).
@@ -1474,6 +1536,19 @@ export async function POST(req: NextRequest) {
             exit_code: result.exitCode ?? 0,
           });
         } catch (execErr) {
+          // NON-ZERO EXIT (E2B SDK v2 throws CommandExitError): a
+          // legitimate command result, NOT a sandbox failure. Return the
+          // real exit code + stdout + stderr so callers see WHY the command
+          // failed (previously masked as exit_code -1 / "exit status 1").
+          const exitInfo = commandExitInfo(execErr);
+          if (exitInfo) {
+            return NextResponse.json({
+              sandboxId: sandbox.sandboxId,
+              stdout: exitInfo.stdout,
+              stderr: exitInfo.stderr,
+              exit_code: exitInfo.exitCode,
+            });
+          }
           // DEAD-SANDBOX RECOVERY: if the sandbox died mid-command, evict
           // it from the cache, create a fresh one, and retry the command
           // once. This prevents the user from being stuck with a dead
@@ -1495,6 +1570,17 @@ export async function POST(req: NextRequest) {
                 exit_code: result.exitCode ?? 0,
               });
             } catch (retryErr) {
+              // The retried command itself may exit non-zero — same
+              // CommandExitError recovery as above.
+              const retryExit = commandExitInfo(retryErr);
+              if (retryExit) {
+                return NextResponse.json({
+                  sandboxId: null,
+                  stdout: retryExit.stdout,
+                  stderr: retryExit.stderr,
+                  exit_code: retryExit.exitCode,
+                });
+              }
               const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
               return NextResponse.json({
                 sandboxId: null,
@@ -1633,11 +1719,25 @@ export async function POST(req: NextRequest) {
               }
               send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
             } catch (execErr) {
-              if (isDeadSandboxError(execErr)) {
+              // NON-ZERO EXIT (E2B SDK v2 throws CommandExitError): the
+              // command RAN — its output already streamed. Send the REAL
+              // exit code as a normal result frame instead of an opaque
+              // error frame ("exit status 1") that loses the code.
+              const exitInfo = commandExitInfo(execErr);
+              if (exitInfo) {
+                if (ansiBuffer) {
+                  send({ type: "stdout", data: ansiBuffer });
+                  ansiBuffer = "";
+                }
+                if (exitInfo.stderr) send({ type: "stderr", data: exitInfo.stderr });
+                send({ type: "result", exit_code: exitInfo.exitCode, sandboxId: sandbox.sandboxId });
+              } else if (isDeadSandboxError(execErr)) {
                 const key = cacheKey(apiKey, conversationId, sandboxMode);
                 evictCacheEntry(sandboxMode, key);
+                let freshSandboxId: string | undefined;
                 try {
                   const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode, envs);
+                  freshSandboxId = fresh.sandboxId;
                   await fresh.commands.run(ptyCommand, {
                     cwd,
                     envs,
@@ -1647,8 +1747,16 @@ export async function POST(req: NextRequest) {
                   });
                   send({ type: "result", exit_code: 0, sandboxId: fresh.sandboxId });
                 } catch (retryErr) {
-                  const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-                  send({ type: "error", error: errMsg });
+                  // The retried command may also exit non-zero — same
+                  // CommandExitError recovery (real exit code, not an error).
+                  const retryExit = commandExitInfo(retryErr);
+                  if (retryExit) {
+                    if (retryExit.stderr) send({ type: "stderr", data: retryExit.stderr });
+                    send({ type: "result", exit_code: retryExit.exitCode, sandboxId: freshSandboxId });
+                  } else {
+                    const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                    send({ type: "error", error: errMsg });
+                  }
                 }
               } else {
                 const errMsg = execErr instanceof Error ? execErr.message : String(execErr);
@@ -1764,11 +1872,21 @@ export async function POST(req: NextRequest) {
                 });
                 send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
               } catch (fallbackErr) {
-                if (isDeadSandboxError(fallbackErr)) {
+                // Python exited non-zero (uncaught exception — the traceback
+                // already streamed via the PTY). Recover the REAL exit code
+                // from the SDK's CommandExitError instead of masking it as
+                // an opaque "exit status 1" error frame.
+                const exitInfo = commandExitInfo(fallbackErr);
+                if (exitInfo) {
+                  if (exitInfo.stderr) send({ type: "stderr", data: exitInfo.stderr });
+                  send({ type: "result", exit_code: exitInfo.exitCode, sandboxId: sandbox.sandboxId });
+                } else if (isDeadSandboxError(fallbackErr)) {
                   const key = cacheKey(apiKey, conversationId, sandboxMode);
                   evictCacheEntry(sandboxMode, key);
+                  let freshSandboxId: string | undefined;
                   try {
                     const fresh = await createAndCacheSandbox(apiKey, conversationId, sandboxMode);
+                    freshSandboxId = fresh.sandboxId;
                     const escaped = code.replace(/'/g, "'\\''");
                     await fresh.commands.run(`script -qec 'python3 -c '\''${escaped}'\''' /dev/null`, {
                       cwd: DEFAULT_CWD,
@@ -1778,8 +1896,14 @@ export async function POST(req: NextRequest) {
                     });
                     send({ type: "result", exit_code: 0, sandboxId: fresh.sandboxId });
                   } catch (retryErr) {
-                    const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-                    send({ type: "error", error: errMsg });
+                    const retryExit = commandExitInfo(retryErr);
+                    if (retryExit) {
+                      if (retryExit.stderr) send({ type: "stderr", data: retryExit.stderr });
+                      send({ type: "result", exit_code: retryExit.exitCode, sandboxId: freshSandboxId });
+                    } else {
+                      const errMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                      send({ type: "error", error: errMsg });
+                    }
                   }
                 } else {
                   const errMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
