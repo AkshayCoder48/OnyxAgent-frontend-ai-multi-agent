@@ -67,7 +67,7 @@ interface ChatCompletionMessage {
 
 /**
  * resolveApiConfig — SAME resolution contract as the main chat
- * (use-chat buildTurnOptions) and Business Mode (resolveBusinessLlmConfig),
+ * (use-chat buildTurnOptions),
  * via the shared layer (lib/agent/provider-resolution):
  *
  *   LEGACY-CLASSIC GUARD — stale text.pollinations.ai rows self-heal and are

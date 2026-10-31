@@ -8,14 +8,15 @@
  * the durable lane below makes sure the work continues:
  *
  *   TRIGGER.DEV CLOUD LANE (the ONLY lane — USER DIRECTIVE: "use trigger for
- *   bg work, not E2B"): pagehide dispatches EVERY running turn (chat +
- *   business) to the operator's trigger.dev Cloud project as a durable
- *   agent_run — a tiny beacon to /api/tasks/trigger + a localStorage meta.
- *   The cloud owns the execution lifecycle from that moment; reload/close/
- *   navigate cannot touch it. On return, use-chat adopts the run: the
- *   interrupted chat bubble becomes a live background status bubble and the
- *   finished result lands IN THE CHAT BUBBLE automatically (no strips, no
- *   scary "task was interrupted" notes).
+ *   bg work, not E2B"): pagehide dispatches EVERY running chat turn to the
+ *   operator's trigger.dev Cloud project as a durable agent_run — a tiny
+ *   beacon to /api/tasks/trigger + a localStorage meta. The cloud owns the
+ *   execution lifecycle from that moment; reload/close/navigate cannot touch
+ *   it. On return, use-chat adopts the run: the interrupted chat bubble
+ *   becomes a live background status bubble and the finished result lands IN
+ *   THE CHAT BUBBLE automatically (no strips, no scary "task was interrupted"
+ *   notes). When the beacon never landed, use-chat's SELF-HEAL pass
+ *   re-dispatches the interrupted turn to the cloud instead of settling it.
  *   (turn-cloud-handoff.ts owns that machinery.)
  *
  * The legacy E2B-sandbox beacon lane was REMOVED (user directive) — E2B is
@@ -29,7 +30,6 @@ import { useEffect } from "react";
 import { executionHub } from "@/lib/agent/execution-hub";
 import {
   cloudHandoffActive,
-  dispatchBusinessTurnHandoffs,
   dispatchCloudAgentRunBeacon,
   prewarmCloudHandoff,
   writeChatHandoffMeta,
@@ -152,14 +152,12 @@ function onWindowPageHide(): void {
     pruneFinishedTurnHandoffs();
     const running = listSnapshots();
     if (running.length === 0 && !cloudHandoffActive()) {
-      dispatchBusinessTurnHandoffs(cachedE2BKey); // business snapshots live in the cloud module
       return;
     }
 
     // ── TRIGGER.DEV CLOUD (the ONLY durability lane) ─────────────────────
     // Every running chat turn becomes its OWN durable cloud run — reload,
-    // close and navigate cannot interrupt them. Business turns dispatch
-    // through the same lane (dispatchBusinessTurnHandoffs).
+    // close and navigate cannot interrupt them.
     if (cloudHandoffActive()) {
       if (running.length > 0) {
         // Up to 3 newest turns per pagehide (beacon budget + sanity cap —
@@ -185,7 +183,6 @@ function onWindowPageHide(): void {
         // The snapshots are spent — the cloud owns these turns now.
         snapshots.clear();
       }
-      dispatchBusinessTurnHandoffs(cachedE2BKey);
       return;
     }
 
@@ -216,9 +213,16 @@ export function TurnHandoffController(): null {
       if (document.visibilityState === "visible") void prewarmAll();
     };
     document.addEventListener("visibilitychange", onVisible);
+    // Periodic refresh while visible: the cached cloud-mode flag must stay
+    // FRESH at pagehide time — a tab left open for hours would otherwise
+    // dispatch (or skip) beacons based on a stale connect/disconnect state.
+    const prewarmTimer = setInterval(() => {
+      if (document.visibilityState === "visible") void prewarmAll();
+    }, 60_000);
     const uninstall = installTurnHandoff();
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(prewarmTimer);
       uninstall();
     };
   }, []);

@@ -2,14 +2,14 @@
 
 // ============================================================================
 // Model preference — the ONE owner of the persisted "which model did the
-// user pick" key (the "Business ignores my selected model" fix).
+// user pick" key (the "non-chat routes ignore my selected model" fix).
 //
 // ROOT CAUSE this module closes: the chat selection lived in TWO layers —
 // the in-memory chat store (reset on every reload / fresh tab) and the
 // persisted localStorage preference. The ONLY code that ever re-applied the
 // persisted preference was ChatControls' mount effect — a chat-page-only
-// component. On EVERY other route (Business wizard, projects, subagent
-// dashboards, a refresh on /business, a direct /business visit in a new
+// component. On EVERY other route (projects, subagent
+// dashboards, a refresh, a direct visit in a new
 // tab) the store booted as {null, null}, so the resolution chains saw "no
 // selection" and fell to the first active provider's FIRST catalog model —
 // which in the live Pollinations catalog (alphabetical order) is
@@ -26,10 +26,10 @@
 //     store, ONLY when the store holds no explicit selection, and ONLY when
 //     the pick's provider still exists (a healed/deleted legacy row must
 //     never resurrect through the preference). Safe to call anywhere
-//     (root boot controller, business lane, focus sweeps) — idempotent.
+//     (root boot controller, focus sweeps) — idempotent.
 //
 // The user's picked model then survives refresh, route changes and fresh
-// tabs — and Business Mode resolves it model-first, together with the
+// tabs — and the resolver applies it model-first, together with the
 // provider that offers it (provider-resolution).
 // ============================================================================
 

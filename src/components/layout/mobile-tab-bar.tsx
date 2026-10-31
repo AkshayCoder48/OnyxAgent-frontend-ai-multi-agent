@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { Briefcase, Globe, LibraryBig, MessageSquare, Search, Settings } from "lucide-react";
+import { Globe, LibraryBig, MessageSquare, Search, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { ROUTES } from "@/lib/constants";
@@ -27,7 +27,6 @@ export function MobileTabBar() {
 
   const items: TabItem[] = [
     { label: t("chat"), href: ROUTES.CHAT, icon: MessageSquare, startsWith: true },
-    { label: t("business"), href: ROUTES.BUSINESS, icon: Briefcase, startsWith: true },
     {
       label: t("knowledgeBase"),
       href: ROUTES.KNOWLEDGE_BASE,

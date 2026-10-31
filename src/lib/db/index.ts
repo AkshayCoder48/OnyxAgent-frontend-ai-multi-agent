@@ -27,34 +27,6 @@ import type {
   ApprovalRequest,
   MessageSearchRow,
 } from "@/types";
-import type {
-  AgentMessageRow,
-  BusinessAgentRow,
-  BusinessApprovalRow,
-  BusinessChatMessageRow,
-  BusinessDraftRow,
-  BusinessEventRow,
-  BusinessMemoryRow,
-  BusinessRow,
-  BusinessTaskRow,
-  DecisionRecordRow,
-} from "@/lib/business/types";
-
-// Re-export the Business Mode row types so callers can import them from this
-// module too — parity with the other row interfaces defined below (the
-// canonical definitions live in `@/lib/business/types`, never redeclared).
-export type {
-  AgentMessageRow,
-  BusinessAgentRow,
-  BusinessApprovalRow,
-  BusinessChatMessageRow,
-  BusinessDraftRow,
-  BusinessEventRow,
-  BusinessMemoryRow,
-  BusinessRow,
-  BusinessTaskRow,
-  DecisionRecordRow,
-};
 
 // ---------------------------------------------------------------------------
 // Row shapes — augment the wire types with the columns the original backend
@@ -326,8 +298,8 @@ export interface BackgroundTaskRow {
 }
 
 // ---------------------------------------------------------------------------
-// Business Mode rows (v6) — shapes are OWNED by `@/lib/business/types`
-// (the shared contract module); this file only wires the Dexie tables.
+// The database class — versions below keep the historical upgrade chain
+// intact (v6 created the removed Business Mode tables; v8 drops them).
 // ---------------------------------------------------------------------------
 
 export class AppDatabase extends Dexie {
@@ -353,17 +325,6 @@ export class AppDatabase extends Dexie {
   detached_runs!: Table<DetachedRunRow, string>;
   // -- Background Task Execution Framework (v7) ------------------------------
   background_tasks!: Table<BackgroundTaskRow, string>;
-  // -- Business Mode (v6) ----------------------------------------------------
-  businesses!: Table<BusinessRow, string>;
-  business_agents!: Table<BusinessAgentRow, string>;
-  business_tasks!: Table<BusinessTaskRow, string>;
-  business_chat_messages!: Table<BusinessChatMessageRow, string>;
-  business_drafts!: Table<BusinessDraftRow, string>;
-  business_approvals!: Table<BusinessApprovalRow, string>;
-  business_memory!: Table<BusinessMemoryRow, string>;
-  agent_messages!: Table<AgentMessageRow, string>;
-  business_events!: Table<BusinessEventRow, string>;
-  decision_records!: Table<DecisionRecordRow, string>;
 
   constructor(name = "agent-chat-app") {
     super(name);
@@ -435,9 +396,8 @@ export class AppDatabase extends Dexie {
       detached_runs: "&id, user_id, conversation_id, status, updated_at",
     });
 
-    // Version 6: Business Mode (PRD — Onyx Business). Ten NEW tables; row
-    // shapes are pinned in `src/lib/business/types.ts` (single source of
-    // truth). Services live in `src/lib/business/data.ts` (Task 2-a).
+    // Version 6: Business Mode (REMOVED feature — kept verbatim for the
+    // upgrade chain; v8 below drops these tables on every client).
     this.version(6).stores({
       businesses: "&id, owner_id, status, updated_at",
       business_agents: "&id, business_id, status, updated_at",
@@ -459,6 +419,23 @@ export class AppDatabase extends Dexie {
     // client-minted task_token lives only here (PRD §4.2).
     this.version(7).stores({
       background_tasks: "&id, user_id, status, updated_at",
+    });
+
+    // Version 8: Business Mode removal — drop the ten v6 tables. Setting a
+    // store to null in a newer version is Dexie's documented table-delete;
+    // historical versions above stay untouched so every client upgrades
+    // through the same chain.
+    this.version(8).stores({
+      businesses: null,
+      business_agents: null,
+      business_tasks: null,
+      business_chat_messages: null,
+      business_drafts: null,
+      business_approvals: null,
+      business_memory: null,
+      agent_messages: null,
+      business_events: null,
+      decision_records: null,
     });
   }
 }
@@ -533,17 +510,6 @@ export async function wipeAllData(): Promise<void> {
     d.project_memories.clear(),
     d.approval_requests.clear(),
     d.message_search_index.clear(),
-    // Business Mode (v6)
-    d.businesses.clear(),
-    d.business_agents.clear(),
-    d.business_tasks.clear(),
-    d.business_chat_messages.clear(),
-    d.business_drafts.clear(),
-    d.business_approvals.clear(),
-    d.business_memory.clear(),
-    d.agent_messages.clear(),
-    d.business_events.clear(),
-    d.decision_records.clear(),
     // Background Task Execution Framework (v7)
     d.background_tasks.clear(),
   ]);
@@ -588,25 +554,6 @@ export async function wipeUserData(userId: string): Promise<void> {
     await d.approval_requests.where("project_id").anyOf(projectIds).delete();
     await d.message_search_index.where("project_id").anyOf(projectIds).delete();
     await d.projects.where("user_id").equals(userId).delete();
-  }
-  // Business Mode cascade (v6): the user's businesses + every child table
-  // keyed by business_id (agents, tasks, chat, drafts, approvals, memory,
-  // agent-to-agent messages, events, decision records).
-  const businessIds = (await d.businesses
-    .where("owner_id")
-    .equals(userId)
-    .primaryKeys()) as string[];
-  if (businessIds.length > 0) {
-    await d.business_agents.where("business_id").anyOf(businessIds).delete();
-    await d.business_tasks.where("business_id").anyOf(businessIds).delete();
-    await d.business_chat_messages.where("business_id").anyOf(businessIds).delete();
-    await d.business_drafts.where("business_id").anyOf(businessIds).delete();
-    await d.business_approvals.where("business_id").anyOf(businessIds).delete();
-    await d.business_memory.where("business_id").anyOf(businessIds).delete();
-    await d.agent_messages.where("business_id").anyOf(businessIds).delete();
-    await d.business_events.where("business_id").anyOf(businessIds).delete();
-    await d.decision_records.where("business_id").anyOf(businessIds).delete();
-    await d.businesses.bulkDelete(businessIds);
   }
   await d.chat_files.where("user_id").equals(userId).delete();
   await d.user_slash_commands.where("user_id").equals(userId).delete();

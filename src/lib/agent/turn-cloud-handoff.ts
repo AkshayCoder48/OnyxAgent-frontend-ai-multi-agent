@@ -13,11 +13,9 @@
 // fully decoupled from the browser:
 //
 //   send time:  registerChatTurnHandoff is called by use-chat (turn-handoff
-//               already owns that registry); business turns register HERE
-//               (registerBusinessTurnHandoff) from the orchestrator.
+//               already owns that registry).
 //   pagehide:   turn-handoff.ts → dispatchCloudAgentRunBeacon(...) for the
-//               newest running chat turns + dispatchBusinessTurnHandoffs()
-//               for running business turns. Each beacon carries: prompt,
+//               newest running chat turns. Each beacon carries: prompt,
 //               system prompt, budget-clamped history seed, provider config,
 //               rotational key pool, E2B key (or the USE_SERVER_ENV sentinel).
 //               A localStorage meta (taskId + taskToken) is the durable
@@ -26,8 +24,9 @@
 //               becomes a live background status bubble that is replaced by
 //               the finished answer when the run completes (no strips, no
 //               "interrupted" notes — changes land directly in the chat
-//               bubbles). Business turns land via adoptBusinessCloudHandoff
-//               as a Main Agent chat message.
+//               bubbles). When the beacon never landed, use-chat re-dispatches
+//               the turn itself (self-heal) instead of settling it as
+//               interrupted.
 //
 // The cloud runner re-executes the turn from the seed (the in-flight partial
 // output is dropped) — and on return the interrupted chat bubble is taken
@@ -260,15 +259,14 @@ export function dispatchCloudAgentRunBeacon(input: CloudBeaconInput): {
 export interface CloudHandoffMeta {
   taskId: string;
   taskToken: string;
-  kind: "chat" | "business";
+  kind: "chat";
   conversationId: string | null;
-  businessId: string | null;
+  businessId: null;
   startedAt: number;
   promptPreview: string;
 }
 
 const CHAT_META_PREFIX = "onyx-turn-cloud-handoff:";
-const BUSINESS_META_PREFIX = "onyx-turn-cloud-handoff:business:";
 /** Stale metas older than this are dropped on read (runs cap at ~35 min). */
 const META_STALE_MS = 12 * 60 * 60 * 1000;
 
@@ -340,72 +338,6 @@ export function writeChatHandoffMeta(
   });
 }
 
-/** Read the pending CLOUD handoff for a business turn (null when none). */
-export function readBusinessCloudHandoffMeta(businessId: string): CloudHandoffMeta | null {
-  return readMeta(BUSINESS_META_PREFIX + businessId);
-}
-
-// ---------------------------------------------------------------------------
-// Business turn snapshots (registry lives here; the orchestrator registers).
-// ---------------------------------------------------------------------------
-
-export interface BusinessTurnSnapshot {
-  businessId: string;
-  businessName: string;
-  userId: string;
-  prompt: string;
-  systemPrompt: string;
-  history: Array<{ role: "user" | "assistant"; content: string }>;
-  chatUrl: string;
-  apiKey: string;
-  model: string;
-  temperature: number | null;
-  startedAt: number;
-}
-
-const businessSnapshots = new Map<string, BusinessTurnSnapshot>();
-
-/** Register the CURRENT business turn for a possible close-handoff. Called
- *  from sendBusinessMessage once the model config is resolved. */
-export function registerBusinessTurnHandoff(snapshot: BusinessTurnSnapshot): void {
-  businessSnapshots.set(snapshot.businessId, snapshot);
-}
-
-/** Drop the business snapshot (turn finished/stopped/failed). */
-export function unregisterBusinessTurnHandoff(businessId: string): void {
-  businessSnapshots.delete(businessId);
-}
-
-/** Pagehide pass — dispatch every running business turn to the cloud. */
-export function dispatchBusinessTurnHandoffs(e2bApiKey: string | null): void {
-  for (const snap of businessSnapshots.values()) {
-    const dispatched = dispatchCloudAgentRunBeacon({
-      userId: snap.userId,
-      prompt: snap.prompt,
-      systemPrompt: snap.systemPrompt,
-      history: snap.history,
-      chatUrl: snap.chatUrl,
-      apiKey: snap.apiKey,
-      model: snap.model,
-      temperature: snap.temperature,
-      title: `${snap.businessName} — background turn`,
-      e2bApiKey,
-    });
-    if (dispatched) {
-      writeMeta(BUSINESS_META_PREFIX + snap.businessId, {
-        taskId: dispatched.taskId,
-        taskToken: dispatched.taskToken,
-        kind: "business",
-        conversationId: null,
-        businessId: snap.businessId,
-        startedAt: Date.now(),
-        promptPreview: snap.prompt.slice(0, 400),
-      });
-    }
-  }
-  businessSnapshots.clear();
-}
-
 // ---------------------------------------------------------------------------
 // Run adoption — the return path.
 // ---------------------------------------------------------------------------
@@ -472,7 +404,11 @@ export async function markCloudRunSynced(run: TaskStatusRun): Promise<void> {
 
 /** Pull the message/report artifacts' text out of a finished run. PUBLIC:
  * the in-bubble chat landing flow uses it to write the finished answer
- * straight into the chat bubble. */
+ * straight into the chat bubble.
+ *
+ * When the task token is unknown (a beacon run whose localStorage meta was
+ * lost), the artifact fetch 401s — the caller falls back to the run's public
+ * TEXT CHUNKS (extractChunkText), which carry the native runner's answer. */
 export async function extractChatResult(
   run: TaskStatusRun,
   taskToken: string,
@@ -500,72 +436,31 @@ export async function extractChatResult(
   return texts.length > 0 ? texts.join("\n\n---\n\n") : null;
 }
 
-// ---------------------------------------------------------------------------
-// Business landing — the cloud result becomes a Main Agent message.
-// ---------------------------------------------------------------------------
-
-export interface AdoptCloudRunResult {
-  /** The resolved run (null when the beacon never landed). */
-  run: TaskStatusRun | null;
-  /** True when the finished work was landed into the conversation. */
-  landed: boolean;
-}
-
-/**
- * Adopt + (when finished) land a business turn's cloud handoff. Live runs
- * return `{ run, landed: false }` and stay pollable — call this again later
- * (or from a poll loop) to land the result when it completes.
- */
-export async function adoptBusinessCloudHandoff(
-  userId: string,
-  businessId: string,
-): Promise<AdoptCloudRunResult> {
-  const meta = readBusinessCloudHandoffMeta(businessId);
-  if (!meta) return { run: null, landed: false };
-
-  const run = await resolveCloudRun(meta.taskId);
-  if (!run) {
-    clearMeta(BUSINESS_META_PREFIX + businessId);
-    return { run: null, landed: false };
-  }
-
-  await mirrorCloudRunWithToken(run, meta, userId, null);
-
-  const terminal = run.status !== "queued" && run.status !== "running";
-  if (!terminal) return { run, landed: false };
-
-  clearMeta(BUSINESS_META_PREFIX + businessId);
-  let landed = false;
-  try {
-    const { businessChatService } = await import("@/lib/business/data");
-    const { useBusinessStore } = await import("@/stores/business-store");
-    const content =
-      run.status === "completed"
-        ? ((await extractChatResult(run, meta.taskToken)) ??
-          `The background turn finished, but its result could not be read (run ${run.runId}).`)
-        : `The background turn ${
-            run.status === "failed" ? "failed" : "was cancelled"
-          }: ${run.error ?? "no error detail"}.`;
-    const row = await businessChatService.append(businessId, {
-      role: "main",
-      content,
-      metadata: {
-        turnId: `cloud-${meta.taskId.slice(0, 8)}`,
-        cloudRunId: run.runId,
-        background: true,
-      },
-    });
-    useBusinessStore.getState().appendChatMessage(row);
-    landed = true;
-  } catch {
-    landed = false;
-  }
-  return { run, landed };
+/** Reconstruct answer text from a run's PUBLIC status chunks — the tokenless
+ * fallback for adopted beacon runs whose artifacts cannot be fetched. Text
+ * chunks arrive in seq order; each was capped at write time, so long answers
+ * are joined back together on multiple chunks. */
+export function extractChunkText(run: TaskStatusRun): string | null {
+  const chunks = (run.chunks ?? [])
+    .filter((c) => c.kind === "text" && typeof c.content === "string")
+    .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  const text = chunks.map((c) => String(c.content).trim()).filter(Boolean).join("");
+  return text.length > 0 ? text : null;
 }
 
 // ---------------------------------------------------------------------------
 // Detached-mode dispatch — the EXPLICIT background lane (not in unload).
 // ---------------------------------------------------------------------------
+
+/** The detached dispatch result — runId for the strip plus the client-minted
+ * taskId/taskToken pair (the self-heal re-dispatch path persists it as a
+ * handoff meta so the standard adoption loop can take over). */
+export interface DetachedCloudTurn {
+  runId: string;
+  orchestrator: string;
+  taskId: string;
+  taskToken: string;
+}
 
 /**
  * Start a chat turn directly as a Trigger.dev Cloud run (the "cloud runs"
@@ -587,7 +482,7 @@ export async function dispatchDetachedCloudTurn(input: {
   temperature: number | null;
   preferredProviderId?: string | null;
   title?: string;
-}): Promise<{ runId: string; orchestrator: string }> {
+}): Promise<DetachedCloudTurn> {
   const { triggerBackgroundTask } = await import("@/lib/tasks/client");
   let sandboxApiKey: string | undefined;
   try {
@@ -597,7 +492,7 @@ export async function dispatchDetachedCloudTurn(input: {
   } catch {
     // no E2B key — the cloud worker uses the server env
   }
-  return triggerBackgroundTask({
+  const dispatched = await triggerBackgroundTask({
     userId: input.userId,
     conversationId: input.conversationId,
     type: "agent_run",
@@ -625,4 +520,10 @@ export async function dispatchDetachedCloudTurn(input: {
       : {}),
     sandboxApiKey,
   });
+  return {
+    runId: dispatched.runId,
+    orchestrator: dispatched.orchestrator,
+    taskId: dispatched.taskId,
+    taskToken: dispatched.taskToken,
+  };
 }

@@ -43,9 +43,9 @@ function AuthInitializer() {
  * (the "coming back changes my gen endpoint to text.pollinations" fix).
  *
  * Pre-migration app bundles (still running in old browser tabs) actively
- * DAMAGE the provider table: their /business mount effect re-seeds a keyless
- * row on text.pollinations.ai AND their migrateLegacyPollinationsGateway
- * runs the OPPOSITE direction — it finds the row named "Pollinations" on
+ * DAMAGE the provider table: their mount effects re-seed a keyless row on
+ * text.pollinations.ai AND their migrateLegacyPollinationsGateway runs the
+ * OPPOSITE direction — it finds the row named "Pollinations" on
  * gen.pollinations.ai and FLIPS it onto the legacy host. Coming back to
  * such a tab therefore re-breaks the row the current app just healed.
  *
@@ -79,7 +79,7 @@ function LegacyRowHealer() {
           (p) => p.name === "Pollinations" && isLegacyClassicUrl(p.base_url),
         );
         if (!damaged) return;
-        const { migrateLegacyPollinationsGateway } = await import("@/lib/business/llm");
+        const { migrateLegacyPollinationsGateway } = await import("@/lib/agent/pollinations-healer");
         await migrateLegacyPollinationsGateway(user.id);
         console.info(
           "[healer] repointed a legacy text.pollinations.ai provider row back to the gen gateway",
@@ -115,12 +115,13 @@ function LegacyRowHealer() {
 
 /**
  * MODEL-PREF HYDRATOR — restores the user's picked model on EVERY route
- * (the "Business uses a fixed model instead of my selected model" fix).
+ * (the "a non-chat route uses a fixed model instead of my selected model"
+ * fix).
  *
  * The persisted model preference (onyx:selected-model) used to be re-applied
  * ONLY by ChatControls' mount effect — a chat-page-only component. On any
- * other route (Business wizard after a refresh, a fresh /business tab,
- * projects, …) the chat store booted as {null, null}, so the resolution
+ * other route (projects, subagent dashboards, a fresh tab,
+ * …) the chat store booted as {null, null}, so the resolution
  * chains saw "no selection" and silently fell to the first active
  * provider's FIRST catalog model (in the alphabetical Pollinations catalog:
  * community/CloudCompile/dots-studio-dots-3-note-preview:free). The user's
@@ -149,7 +150,7 @@ function ModelPrefHydrator() {
         const rows = await aiProviderService.list(user.id);
         hydrateModelPrefFromRows(rows);
       } catch {
-        // best-effort — the business lane re-runs the same hydration
+        // best-effort — provider resolution re-runs the same hydration
         // against its own provider list at resolution time anyway
       }
     };
@@ -255,7 +256,7 @@ export function Providers({ children }: ProvidersProps) {
             the retired text.pollinations.ai host (see its doc comment). */}
         <LegacyRowHealer />
         {/* MODEL-PREF HYDRATOR — restores the user's picked model on every
-            route so Business/projects never fall back to a "fixed" first
+            route so non-chat surfaces never fall back to a "fixed" first
             catalog model (see its doc comment). */}
         <ModelPrefHydrator />
         {/* AUTOMATIC CLOSE-HANDOFF — mounts STRICTLY ABOVE SandboxLifecycleSync:

@@ -279,7 +279,7 @@ export function SectionTriggerCloud() {
         description={
           connected
             ? undefined
-            : "Run your chat agent, sub-agents, projects and businesses durably on your own Trigger.dev Cloud — no self-hosting, no setup."
+            : "Run your chat agent, sub-agents and projects durably on your own Trigger.dev Cloud — no self-hosting, no setup."
         }
         action={connected ? <StatusPill state={pill} /> : undefined}
       >

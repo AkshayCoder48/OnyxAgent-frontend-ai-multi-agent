@@ -45,7 +45,7 @@ interface ChatControlsProps {
 
 // Model preference persistence lives in the SHARED leaf
 // (lib/agent/model-pref) — the ONE owner of the key, so every lane (root
-// boot hydration, Business, subagents) reads the SAME pick the picker saved.
+// boot hydration, subagents) reads the SAME pick the picker saved.
 
 /** The synthetic "provider" handed to onProviderSelect when the Auto
  *  Router row is picked — only its `id` matters (chat-container maps it to

@@ -73,6 +73,7 @@ function toStatusRun(row: TaskRun, artifacts: TaskArtifactSummary[]): TaskStatus
     error: row.error,
     artifacts,
     scheduleId: row.scheduleId,
+    conversationId: row.conversationId,
     ...(row.externalRunId ? { cloudRunId: row.externalRunId } : {}),
   };
 }

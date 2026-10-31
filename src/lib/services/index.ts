@@ -1220,7 +1220,7 @@ export const aiProviderService = {
     const base = provider.base_url.replace(/\/$/, "");
     // The ONE shared URL construction (lib/agent/provider-url — imported via
     // the leaf so the service layer never cycles through the agent layer):
-    // identical to what the runtime, subagents, business mode and the
+    // identical to what the runtime, subagents and the
     // background lanes call.
     const targetUrl = chatCompletionsUrl(base, provider.no_prefix);
     try {

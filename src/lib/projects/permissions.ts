@@ -51,9 +51,7 @@ export type { ResourcePermission } from "@/types";
  * approval on task docs, not on tool calls"):
  *
  *   - EVERY tool call is ALLOWED by default — zero interactive approval
- *     gates on tool execution. The ONLY approval surface left is Business
- *     Mode task documents (drafts with approval_requirements, PRD §13 doc
- *     review) — that lives in the business layer, not here.
+ *     gates on tool execution.
  *   - Users can still tighten any tool themselves via the global policy
  *     (Settings → Tools approval policies) or per-project rules; explicit
  *     user entries REPLACE these defaults (see resolvePermission).
@@ -80,14 +78,6 @@ export const SENSITIVE_TOOL_DEFAULTS = {
     tools: ["delete_file", "delete_folder"] as readonly string[],
     permission: "allowed" as ResourcePermission,
     rationale: "Permanently removes workspace files or folders — allowed by default.",
-  },
-  businessDestructive: {
-    tool: "manage_business",
-    destructiveActions: ["delete"] as readonly string[],
-    destructiveAgentActions: ["remove"] as readonly string[],
-    permission: "allowed" as ResourcePermission,
-    rationale:
-      "Deletes a Business Mode workspace or removes a specialist agent — allowed by default (only task DOCUMENTS keep human approval).",
   },
   fallback: {
     permission: "allowed" as ResourcePermission,
@@ -140,18 +130,6 @@ export function defaultPermissionFor(
   // E2B file/folder deletion — destructive.
   if (SENSITIVE_TOOL_DEFAULTS.e2bDeletes.tools.includes(toolName)) {
     return SENSITIVE_TOOL_DEFAULTS.e2bDeletes.permission;
-  }
-  // Business Mode management — destructive verbs only: action "delete"
-  // (cascades the business) or manage_agents with agent_action "remove".
-  // Reads, creation and updates stay frictionless.
-  if (toolName === SENSITIVE_TOOL_DEFAULTS.businessDestructive.tool) {
-    const action = typeof args?.action === "string" ? args.action : "";
-    const agentAction = typeof args?.agent_action === "string" ? args.agent_action : "";
-    return SENSITIVE_TOOL_DEFAULTS.businessDestructive.destructiveActions.includes(action) ||
-      (action === "manage_agents" &&
-        SENSITIVE_TOOL_DEFAULTS.businessDestructive.destructiveAgentActions.includes(agentAction))
-      ? SENSITIVE_TOOL_DEFAULTS.businessDestructive.permission
-      : "allowed";
   }
   return SENSITIVE_TOOL_DEFAULTS.fallback.permission;
 }

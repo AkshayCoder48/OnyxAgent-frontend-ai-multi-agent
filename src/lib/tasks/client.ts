@@ -212,9 +212,19 @@ export interface TriggerBackgroundTaskInput {
  *   3. POST /api/tasks/trigger with the full TaskTriggerRequest,
  *   4. persist the durable BackgroundTaskRow mirror (status "queued").
  */
+/** The dispatch result — the server run id for the strip plus the
+ *  client-minted (taskId, taskToken) pair (the durable handoff pointer for
+ *  adoption paths that need to re-discover or authorize the run later). */
+export interface TriggerBackgroundTaskResult {
+  runId: string;
+  orchestrator: "local" | "triggerdev";
+  taskId: string;
+  taskToken: string;
+}
+
 export async function triggerBackgroundTask(
   input: TriggerBackgroundTaskInput,
-): Promise<{ runId: string; orchestrator: "local" | "triggerdev" }> {
+): Promise<TriggerBackgroundTaskResult> {
   const taskId = crypto.randomUUID();
   const taskToken = mintTaskToken();
 
@@ -278,7 +288,7 @@ export async function triggerBackgroundTask(
     error: null,
   });
 
-  return { runId: data.runId, orchestrator: data.orchestrator };
+  return { runId: data.runId, orchestrator: data.orchestrator, taskId, taskToken };
 }
 
 // ---------------------------------------------------------------------------

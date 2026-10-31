@@ -12,7 +12,7 @@
 //      provider that OFFERS it — a stale selectedProviderId pointing at a
 //      deleted/legacy row can never send a model to a gateway that doesn't
 //      serve it; this is the Classic-API-404 fix generalized to every
-//      workflow, not just Business Mode).
+//      workflow, everywhere).
 //
 //   2. WHAT is the chat-completions URL for a provider?          →
 //      chatCompletionsUrl() — the single construction (base + optional
@@ -43,7 +43,7 @@ import {
 } from "./provider-url";
 
 // Re-exported for the existing importers (runtime, subagent-runtime,
-// use-chat, provider-diagnostics, business/llm, orchestrator) — the pure
+// use-chat, provider-diagnostics) — the pure
 // helpers live in the leaf ./provider-url so the service layer and the
 // server-side background lanes can share them without a module cycle.
 export { chatCompletionsUrl, isLegacyClassicRow, isLegacyClassicUrl, LEGACY_CLASSIC_HOST };
@@ -65,9 +65,9 @@ export { chatCompletionsUrl, isLegacyClassicRow, isLegacyClassicUrl, LEGACY_CLAS
 export async function listUsableProviders(userId: string): Promise<AIProviderRow[]> {
   let providers = await aiProviderService.list(userId);
   if (providers.some(isLegacyClassicRow)) {
-    // Dynamic import: keeps the agent layer free of a static business-module
+    // Dynamic import: keeps the agent layer free of a static healer
     // dependency (and out of the subagent bundle unless actually needed).
-    const { migrateLegacyPollinationsGateway } = await import("@/lib/business/llm");
+    const { migrateLegacyPollinationsGateway } = await import("./pollinations-healer");
     await migrateLegacyPollinationsGateway(userId).catch(() => undefined);
     providers = await aiProviderService.list(userId);
   }

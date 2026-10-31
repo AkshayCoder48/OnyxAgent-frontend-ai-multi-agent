@@ -80,16 +80,14 @@ function browserTimezone(): string {
   }
 }
 
-const TASK_TYPE_LABELS: Record<BackgroundTaskType, string> = {
+const TASK_TYPE_LABELS: Record<string, string> = {
   agent_run: "Agent task",
-  scheduled_business: "Business task",
   terminal_command: "Terminal command",
 };
 
 /** Short mono pill label per task type (card badge). */
-const TASK_TYPE_PILL: Record<BackgroundTaskType, string> = {
+const TASK_TYPE_PILL: Record<string, string> = {
   agent_run: "agent",
-  scheduled_business: "business",
   terminal_command: "terminal",
 };
 
@@ -280,7 +278,6 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="agent_run">Agent task</SelectItem>
-                  <SelectItem value="scheduled_business">Business task</SelectItem>
                   <SelectItem value="terminal_command">Terminal command</SelectItem>
                 </SelectContent>
               </Select>

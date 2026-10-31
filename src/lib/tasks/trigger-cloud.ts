@@ -4,7 +4,7 @@
 //
 // The ONLY execution mode: the operator connects a trigger.dev Cloud key
 // (Settings → Cloud) and every background task (chat agent runs, sub-agent
-// chains, scheduled business tasks, terminal commands) executes durably on
+// chains, scheduled tasks, terminal commands) executes durably on
 // their own trigger.dev Cloud project — no self-hosting, no local mode, no
 // worker callbacks.
 //

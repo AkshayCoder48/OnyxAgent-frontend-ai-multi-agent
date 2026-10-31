@@ -80,9 +80,8 @@ function statusPillClass(status: TaskRunStatus): string {
   }
 }
 
-const TYPE_BADGES: Record<BackgroundTaskType, string> = {
+const TYPE_BADGES: Record<string, string> = {
   agent_run: "agent",
-  scheduled_business: "business",
   terminal_command: "terminal",
 };
 

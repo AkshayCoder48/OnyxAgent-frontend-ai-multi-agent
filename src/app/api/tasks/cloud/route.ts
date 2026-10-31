@@ -3,7 +3,7 @@
 //
 // The Settings → Cloud backend. The ONLY execution mode: connect a
 // trigger.dev Cloud key and every background task (chat agent runs,
-// sub-agent chains, scheduled business tasks, terminal commands) runs
+// sub-agent chains, scheduled tasks, terminal commands) runs
 // durably on the operator's own cloud project — zero setup beyond the key:
 //
 //   GET    → mode + connection status (masked key, verification snapshot,

@@ -6,7 +6,7 @@
 // token stored ONLY as sha256), stash the run's secrets in the in-memory
 // keyring (PRD §4.2), then dispatch DIRECTLY to the operator's Trigger.dev
 // Cloud project (the deployed agent-run task) — chat agent runs, sub-agent
-// chains, scheduled business tasks and terminal commands all execute
+// chains, scheduled tasks and terminal commands all execute
 // durably on the cloud. No local driver, no self-hosting.
 //
 // Body-logging discipline mirrors /api/chat-proxy: request payloads (which

@@ -8,10 +8,6 @@
  *   1. Chat agents     — general conversations (no project), most recent
  *                        first, each with its own live sandbox-browser view.
  *   2. Project agents  — project conversations grouped under their project.
- *   3. Business agents — business agents do NOT run E2B sandbox browsers;
- *                        their web interaction is recorded as
- *                        `browser.activity` events (query, result count,
- *                        top URLs) shown as compact per-agent cards.
  *
  * Stream discipline (efficiency + correctness):
  *   - "shared" sandbox mode → every conversation drives the SAME sandbox
@@ -22,13 +18,12 @@
  *     ("+N more" note for the rest) to keep concurrent SSE streams bounded.
  *
  * Event-honest throughout: no session → waiting state; no E2B key → error
- * with the Settings hint; business cards never fabricate entries.
+ * with the Settings hint.
  */
 
 import * as React from "react";
 import Link from "next/link";
 import {
-  Briefcase,
   FolderKanban,
   Globe,
   MessageSquare,
@@ -38,38 +33,17 @@ import {
 import { PageHeader } from "@/components/dashboard/page-header";
 import { Badge, Button, Skeleton } from "@/components/ui";
 import { AgentBrowserCard } from "@/components/browser/agent-browser-card";
-import { BusinessAgentCard } from "@/components/browser/business-agent-card";
 import { useBrowserLive } from "@/hooks/use-browser-live";
 import { useAuth, useConversations } from "@/hooks";
 import { useSettings } from "@/hooks/use-data";
 import { useProjectsStore } from "@/lib/projects/store";
-import { useBusinessStore } from "@/stores/business-store";
 import { useAuthStore } from "@/stores";
-import { businessAgentService, businessEventService, businessService } from "@/lib/business/data";
-import type {
-  BusinessAgentRow,
-  BusinessEventRow,
-  BusinessRow,
-} from "@/lib/business/types";
 import { ROUTES } from "@/lib/constants";
 import { timeAgo } from "@/lib/utils";
 import type { Conversation } from "@/types";
 
 /** Max concurrent per-conversation live streams ("separate" mode only). */
 const SEPARATE_STREAM_CAP = 12;
-
-// ---------------------------------------------------------------------------
-// Loaded business data (services — the zustand store only holds the ACTIVE
-// business; this tab needs every business's agents + browser.activity log).
-// ---------------------------------------------------------------------------
-
-interface BusinessBrowserData {
-  businesses: BusinessRow[];
-  /** businessId → agents (roster order). */
-  agentsByBusiness: Record<string, BusinessAgentRow[]>;
-  /** businessId → agentId → browser.activity events, NEWEST first. */
-  browserEventsByBusiness: Record<string, Record<string, BusinessEventRow[]>>;
-}
 
 // ---------------------------------------------------------------------------
 // Small presentational helpers
@@ -170,12 +144,6 @@ export function BrowserTabPage() {
     if (authResolved) void refreshProjects();
   }, [authResolved, refreshProjects]);
 
-  // Business store — only the ACTIVE business's live agents/events (kept
-  // fresh by the orchestrator's event listener) overlay the loaded data.
-  const activeBusinessId = useBusinessStore((s) => s.activeBusinessId);
-  const storeAgents = useBusinessStore((s) => s.agents);
-  const storeEvents = useBusinessStore((s) => s.events);
-
   // ── Conversation partition ───────────────────────────────────────────────
   const agentConversations = React.useMemo(
     () =>
@@ -232,104 +200,12 @@ export function BrowserTabPage() {
     mode: "shared",
   });
 
-  // ── Business data load (all businesses, once auth settles) ──────────────
-  const [businessData, setBusinessData] = React.useState<BusinessBrowserData | null>(null);
-  const [businessLoading, setBusinessLoading] = React.useState(true);
-
-  React.useEffect(() => {
-    if (!authResolved || !userId) return;
-    let alive = true;
-    setBusinessLoading(true);
-    void (async () => {
-      try {
-        const businesses = await businessService.list(userId);
-        const results = await Promise.all(
-          businesses.map(async (business) => {
-            const [agents, events] = await Promise.all([
-              businessAgentService.list(business.id),
-              businessEventService.list(business.id, 200),
-            ]);
-            return { business, agents, events };
-          }),
-        );
-        if (!alive) return;
-        const agentsByBusiness: Record<string, BusinessAgentRow[]> = {};
-        const browserEventsByBusiness: Record<string, Record<string, BusinessEventRow[]>> = {};
-        for (const { business, agents, events } of results) {
-          agentsByBusiness[business.id] = agents;
-          const byAgent: Record<string, BusinessEventRow[]> = {};
-          // businessEventService.list returns CHRONOLOGICAL order —
-          // prepend so each agent's list ends up newest-first.
-          for (const e of events) {
-            if (e.event_type !== "browser.activity" || !e.agent_id) continue;
-            byAgent[e.agent_id] = [e, ...(byAgent[e.agent_id] ?? [])];
-          }
-          browserEventsByBusiness[business.id] = byAgent;
-        }
-        setBusinessData({ businesses, agentsByBusiness, browserEventsByBusiness });
-      } catch {
-        if (alive) setBusinessData({ businesses: [], agentsByBusiness: {}, browserEventsByBusiness: {} });
-      } finally {
-        if (alive) setBusinessLoading(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [authResolved, userId]);
-
-  // Business groups: businesses that have at least one agent; the ACTIVE
-  // business's live store data (agents + newest events) overlays the loaded
-  // rows so a running turn updates its cards in real time.
-  const businessGroups = React.useMemo(() => {
-    if (!businessData) return [];
-    return businessData.businesses
-      .map((business) => {
-        const loadedAgents = businessData.agentsByBusiness[business.id] ?? [];
-        const agents =
-          business.id === activeBusinessId && storeAgents.length > 0
-            ? storeAgents
-            : loadedAgents;
-        if (agents.length === 0) return null;
-
-        let eventsByAgent = businessData.browserEventsByBusiness[business.id] ?? {};
-        if (business.id === activeBusinessId && storeEvents.length > 0) {
-          // Store events are newest-first; merge with the loaded (older)
-          // list, deduped by id and re-sorted newest-first.
-          const merged: Record<string, BusinessEventRow[]> = {};
-          const add = (e: BusinessEventRow) => {
-            if (!e.agent_id) return;
-            merged[e.agent_id] = [e, ...(merged[e.agent_id] ?? [])];
-          };
-          for (const e of storeEvents) {
-            if (e.event_type === "browser.activity") add(e);
-          }
-          const seen = new Set(storeEvents.map((e) => e.id));
-          for (const [agentId, list] of Object.entries(eventsByAgent)) {
-            for (const e of list) {
-              if (!seen.has(e.id)) merged[agentId] = [...(merged[agentId] ?? []), e];
-            }
-          }
-          eventsByAgent = Object.fromEntries(
-            Object.entries(merged).map(([agentId, list]) => [
-              agentId,
-              [...list].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")),
-            ]),
-          );
-        }
-        return { business, agents, eventsByAgent };
-      })
-      .filter((g): g is NonNullable<typeof g> => g !== null);
-  }, [businessData, activeBusinessId, storeAgents, storeEvents]);
-
   // ── Loading / empty gates ────────────────────────────────────────────────
-  const initialLoading = !authResolved || businessLoading || conversationsLoading;
+  const initialLoading = !authResolved || conversationsLoading;
 
-  const businessAgentCount = businessGroups.reduce((n, g) => n + g.agents.length, 0);
   const noAgentsAtAll =
     generalConversations.length === 0 &&
-    projectConversations.length === 0 &&
-    businessAgentCount === 0;
+    projectConversations.length === 0;
 
   return (
     <div className="scrollbar-thin relative h-full overflow-y-auto px-3 py-4 sm:px-6 sm:py-8">
@@ -365,15 +241,12 @@ export function BrowserTabPage() {
               No agents yet
             </h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-              Every agent gets its own browser view here. Start a chat or create a
-              business — their live browsers and web research will appear on this tab.
+              Every agent gets its own browser view here. Start a chat — its
+              live browser and web research will appear on this tab.
             </p>
             <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
               <Button asChild size="lg" className="min-h-11">
                 <Link href={ROUTES.CHAT}>Open Chat</Link>
-              </Button>
-              <Button asChild size="lg" variant="outline" className="min-h-11">
-                <Link href={ROUTES.BUSINESS}>Open Business</Link>
               </Button>
             </div>
           </section>
@@ -469,56 +342,6 @@ export function BrowserTabPage() {
                     );
                   })}
                   <MoreNote count={projectHidden} />
-                </div>
-              )}
-            </section>
-
-            {/* ── Section 3 · Business agents ─────────────────────────── */}
-            <section aria-label="Business agents" className="space-y-4">
-              <SectionHeader
-                icon={Briefcase}
-                title="Business agents"
-                count={businessAgentCount}
-                description="Business agents don't run sandbox browsers — their web research is recorded per search."
-              />
-              {businessGroups.length === 0 ? (
-                <SectionEmpty
-                  icon={Briefcase}
-                  title="No business agents yet"
-                  body="Create a business and add agents — their recorded web research appears here after their first turn."
-                  action={{ label: "Open Business", href: ROUTES.BUSINESS }}
-                />
-              ) : (
-                <div className="scrollbar-thin max-h-[28rem] space-y-5 overflow-y-auto pr-1">
-                  {businessGroups.map(({ business, agents, eventsByAgent }) => (
-                    <div key={business.id} className="space-y-3">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Briefcase
-                          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                          aria-hidden
-                        />
-                        <h3
-                          className="truncate text-sm font-medium text-foreground"
-                          title={business.name}
-                        >
-                          {business.name}
-                        </h3>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {agents.length} agent{agents.length === 1 ? "" : "s"}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                        {agents.map((agent) => (
-                          <BusinessAgentCard
-                            key={agent.id}
-                            agent={agent}
-                            businessName={business.name}
-                            events={eventsByAgent[agent.id] ?? []}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
                 </div>
               )}
             </section>

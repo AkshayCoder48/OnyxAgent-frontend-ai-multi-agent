@@ -33,20 +33,20 @@
 /**
  * - `agent_run` — Epic 3: an asynchronous subagent chain (full headless
  *   tool-loop) executing inside an isolated sandbox.
- * - `scheduled_business` — Epic 2: a scheduled multi-agent business task
- *   fired by a TaskSchedule row (cron).
  * - `terminal_command` — FR-3.3: a single long-running terminal command that
  *   would time out in the local 120s tool budget; runs to completion inside
  *   the sandbox lifecycle managed by the orchestrator.
+ *
+ * Historical note: `scheduled_business` (the removed Business Mode's cron
+ * task kind) was dropped from the union; existing rows with that type stay
+ * readable in the DB and render with the generic fallback.
  */
 export type BackgroundTaskType =
   | "agent_run"
-  | "scheduled_business"
   | "terminal_command";
 
 export const BACKGROUND_TASK_TYPES: readonly BackgroundTaskType[] = [
   "agent_run",
-  "scheduled_business",
   "terminal_command",
 ];
 
@@ -288,6 +288,10 @@ export interface TaskStatusRun {
   chunks?: TaskStatusChunk[];
   cursor?: number;
   scheduleId?: string | null;
+  /** The originating chat conversation, when the run was dispatched from one
+   *  (chat beacons + detached turns + the self-heal re-dispatch guard key on
+   *  it to avoid double-running an interrupted turn). */
+  conversationId?: string | null;
   /** Trigger.dev CLOUD runs only — the api.trigger.dev run id (the row's
    * externalRunId). Lets clients link straight to the cloud dashboard. */
   cloudRunId?: string;
