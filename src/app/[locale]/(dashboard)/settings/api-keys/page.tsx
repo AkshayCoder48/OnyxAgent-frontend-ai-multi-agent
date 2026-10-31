@@ -77,7 +77,7 @@ const KEY_ROWS: KeyRowConfig[] = [
     description: (
       <>
         When set, <code className="font-mono">web_search</code> uses LangSearch&apos;s
-        hybrid API for richer summaries; falls back to Miklium when blank or on
+        hybrid API for richer summaries; falls back to DuckDuckGo when blank or on
         error. Get a key at{" "}
         <a
           href="https://langsearch.com"

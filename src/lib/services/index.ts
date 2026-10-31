@@ -1306,8 +1306,8 @@ export interface UserSettings {
    *  `extra.langsearch_api_key_encrypted`). When present, the `web_search`
    *  tool routes through LangSearch's hybrid search API
    *  (https://api.langsearch.com/v1/web-search) instead of the default
-   *  Miklium search — yielding richer summaries and better recall.
-   *  When absent, the tool transparently falls back to Miklium. */
+   *  keyless DuckDuckGo search — yielding richer summaries and better recall.
+   *  When absent, the tool uses the keyless DuckDuckGo search instead. */
   langsearch_api_key_present: boolean;
   /** Env vars — read shape is the metadata array; the update patch accepts
    *  a `Record<string, string>` (the service converts to the DB shape). */
@@ -1827,7 +1827,7 @@ export const settingsService = {
    *  encrypted with the user's vault key. Stored under
    *  `extra.langsearch_api_key_encrypted` so we don't need a schema migration.
    *  When set, `web_search` routes through LangSearch's hybrid
-   *  API; when unset, it falls back to the Miklium search API. */
+   *  API; when unset, it falls back to the keyless DuckDuckGo search. */
   async setLangSearchKey(userId: string, key: string | null): Promise<void> {
     let row = await db.user_settings.where("user_id").equals(userId).first();
     if (!row) {

@@ -1,17 +1,16 @@
-// Web Search Tools — web, image, and video search.
+// Web Search Tools — web, image, and video search, all DuckDuckGo-backed.
 //
 // Routing:
 //   - **web_search**: When the user has a LangSearch API key saved (encrypted
-//     in their settings), queries route through LangSearch's hybrid
-//     keyword+vector API via the unified `/api/ddg-search` proxy. LangSearch
-//     returns enhanced results with long-text summaries — better recall and
-//     cleaner context for the LLM. If no key is set or LangSearch errors out,
-//     the proxy transparently falls back to the Miklium Search API (Yahoo-based).
-//   - **image_search**: DuckDuckGo via @mudbill/duckduckgo-images-api — no
-//     API key, no billing, real thumbnails + dimensions. Miklium stays as the
-//     automatic fallback when DDG errors out or returns nothing.
-//   - **video_search**: Always uses Miklium (neither LangSearch nor DDG
-//     support videos).
+//     in their settings — their own key, BYOK), queries route through
+//     LangSearch's hybrid keyword+vector API via the unified `/api/ddg-search`
+//     proxy, which returns enhanced results with long-text summaries. If no
+//     key is set or LangSearch errors out, the proxy serves the query from
+//     DuckDuckGo's keyless HTML search.
+//   - **image_search**: DuckDuckGo images via @mudbill/duckduckgo-images-api
+//     — no API key, no billing, real thumbnails + dimensions.
+//   - **video_search**: DuckDuckGo videos via the keyless v.js endpoint —
+//     real durations, thumbnails, channel and view counts.
 //
 // The LangSearch key is read lazily from
 // `settingsService.getDecryptedLangSearchApiKey` on every call so changes in
@@ -24,9 +23,9 @@ import type { ToolResult } from "@/types";
 /**
  * Clean, user-facing label per search kind — used by the no-results notice
  * and the sanitized error paths below. Raw upstream messages (provider
- * names like "Miklium", raw JSON bodies like
- * '{"success":false,"error":"No results found"}') must never reach the
- * model's context or the chat tool-result card verbatim.
+ * names, raw JSON bodies like '{"success":false,"error":"No results
+ * found"}') must never reach the model's context or the chat tool-result
+ * card verbatim.
  */
 const SEARCH_LABELS = {
   web: { singular: "Web search", results: "web results" },
@@ -106,8 +105,10 @@ function noResultsOutput(query: string, type: string, provider?: string, note?: 
 /**
  * Sanitize a failed search into a clean message. Belt-and-suspenders on top
  * of the proxy's own sanitization: strips any provider name / raw JSON
- * that slipped through so the chat never renders e.g.
- * 'Miklium HTTP 404: {"success":false,"error":"No results found"}'.
+ * that slipped through so the chat never renders raw backend error blobs.
+ * ("miklium" stays in the blocklist on purpose: it is the provider whose
+ * raw errors once leaked into the chat — if any stale/regressed upstream
+ * ever emits it again, it gets scrubbed here.)
  */
 function sanitizedError(type: string, e: unknown): string {
   const labels = labelsFor(type);
@@ -125,7 +126,7 @@ function sanitizedError(type: string, e: unknown): string {
 // ---- Web Search ----
 registerTool(
   "web_search",
-  "Search the web for information. Returns titles, URLs, descriptions, and favicons. When a LangSearch API key is configured in Settings, results come from LangSearch's hybrid keyword+vector search (richer summaries, better recall); otherwise uses Miklium (Yahoo-based). Use for finding information, documentation, articles, tutorials.",
+  "Search the web for information. Returns titles, URLs, descriptions, and favicons. When a LangSearch API key is configured in Settings, results come from LangSearch's hybrid keyword+vector search (richer summaries, better recall); otherwise uses DuckDuckGo. Use for finding information, documentation, articles, tutorials.",
   {
     type: "object",
     properties: {
@@ -153,7 +154,7 @@ registerTool(
           type: "web",
           results,
           count: results.length,
-          provider: provider ?? "miklium",
+          provider: provider ?? "ddg",
         },
       };
     } catch (e) {
@@ -181,8 +182,8 @@ registerTool(
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
     try {
-      // The proxy tries DuckDuckGo first and reports the provider that
-      // actually served the results ("ddg", or "miklium" on fallback).
+      // The proxy reports the provider that actually served the results
+      // ("ddg", or "langsearch" when the user's key is active).
       const { results, provider, note } = await search(query, "image", limit, ctx);
       if (results.length === 0) {
         return { success: true, output: noResultsOutput(query, "image", provider, note) };
@@ -208,7 +209,7 @@ registerTool(
 // ---- Video Search ----
 registerTool(
   "video_search",
-  "Search for videos using Miklium (Yahoo-based). Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants to find videos, tutorials, or multimedia content.",
+  "Search for videos using DuckDuckGo. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants to find videos, tutorials, or multimedia content.",
   {
     type: "object",
     properties: {
@@ -222,9 +223,9 @@ registerTool(
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
     try {
-      const { results, note } = await search(query, "video", limit, ctx);
+      const { results, provider, note } = await search(query, "video", limit, ctx);
       if (results.length === 0) {
-        return { success: true, output: noResultsOutput(query, "video", "miklium", note) };
+        return { success: true, output: noResultsOutput(query, "video", provider ?? "ddg", note) };
       }
       return {
         success: true,
@@ -233,7 +234,7 @@ registerTool(
           type: "video",
           results,
           count: results.length,
-          provider: "miklium",
+          provider: provider ?? "ddg",
         },
       };
     } catch (e) {

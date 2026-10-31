@@ -18,7 +18,7 @@ This Space runs OnyxAgent — a frontend-only AI multi-agent chat application bu
 - E2B sandbox code execution
 - GenUI (Generative UI) with 33+ component types
 - Single-round mode for faster responses
-- DuckDuckGo image search + Miklium web/video search (auto-fallback)
+- DuckDuckGo web, image, and video search (LangSearch optional for web)
 - Free OCR (freeocr.ai)
 
 ## Usage

@@ -1,7 +1,6 @@
 /**
- * DuckDuckGo image search tests — the new primary backend for the
- * `image_search` tool (replaces Miklium images; Miklium stays as the
- * fallback inside /api/ddg-search).
+ * DuckDuckGo image search tests — the `image_search` tool's backend
+ * (the only image provider; the old third-party search service is gone).
  *
  * The network is fully mocked: the package's real flow is
  *   1. GET duckduckgo.com?q=<query>       → HTML containing the vqd token
@@ -36,7 +35,7 @@ afterEach(() => {
 });
 
 describe("normalizeDDGImages (pure)", () => {
-  it("maps DuckDuckGoImage rows onto the Miklium-compatible result shape", () => {
+  it("maps DuckDuckGoImage rows onto the normalized result shape", () => {
     const [r] = normalizeDDGImages([mkImage()], 10);
     expect(r).toEqual({
       title: "An example image",
@@ -149,7 +148,7 @@ describe("searchDDGImages (real package flow, mocked network)", () => {
     });
   });
 
-  it("propagates token failures so the route can fall back to Miklium", async () => {
+  it("propagates token failures so the route can answer with a sanitized error", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("<html>no token here</html>", { status: 200 })),
@@ -157,7 +156,7 @@ describe("searchDDGImages (real package flow, mocked network)", () => {
     await expect(searchDDGImages("query", 5)).rejects.toThrow("Failed to get token");
   });
 
-  it("treats an empty i.js result set as an empty array (route falls back)", async () => {
+  it("treats an empty i.js result set as an empty array (graceful no-results)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: unknown) => {
@@ -176,8 +175,8 @@ describe("searchDDGImages (real package flow, mocked network)", () => {
 
   it("races an 8s timeout instead of hanging on dropped egress", async () => {
     // A fetch whose host silently drops SYNs never resolves in Node's TCP
-    // retransmission loop (~2min) — the race must reject at 8s so the route's
-    // Miklium fallback runs well inside its 30s maxDuration.
+    // retransmission loop (~2min) — the race must reject at 8s so the route
+    // answers well inside its 30s maxDuration.
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
     vi.useFakeTimers();
     try {

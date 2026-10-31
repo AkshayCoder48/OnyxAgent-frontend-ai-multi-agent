@@ -1,16 +1,16 @@
 /**
- * DUCKDUCKGO IMAGE SEARCH — new primary backend for the `image_search` tool,
- * replacing Miklium images. Uses `@mudbill/duckduckgo-images-api`, which
- * scrapes DuckDuckGo's official image-search endpoint (`duckduckgo.com/i.js`)
- * through a short-lived `vqd` session token — no API key, no billing.
+ * DUCKDUCKGO IMAGE SEARCH — the `image_search` tool's backend.
+ * Uses `@mudbill/duckduckgo-images-api`, which scrapes DuckDuckGo's official
+ * image-search endpoint (`duckduckgo.com/i.js`) through a short-lived `vqd`
+ * session token — no API key, no billing.
  *
- * Layering (mirrors src/lib/search/search.ts conventions):
+ * Layering (mirrors src/lib/search/ddg-web.ts conventions):
  *   - PURE (unit-tested with a mocked fetch, no network):
  *     normalizeDDGImages — maps the package's DuckDuckGoImage rows onto the
- *     exact SearchResult shape the Miklium backend used to emit
+ *     normalized SearchResult shape
  *     ({ title, url, domain, imageUrl, thumbnail, width, height, source,
  *     provider }), so the `image_search` tool-call payload and the chat
- *     ImageSearchResults carousel render identically to before.
+ *     ImageSearchResults carousel render consistently.
  *   - NETWORK: searchDDGImages — calls the package's imageSearch() with
  *     safe search on and retries enabled, then normalizes.
  *
@@ -20,8 +20,8 @@
  *     browser-loadable. We pass them through untouched.
  *   - The package swallows per-request failures after its retries and just
  *     returns fewer results (only a failed token lookup throws), so callers
- *     must treat an EMPTY array as "backend down" and fall back to Miklium —
- *     exactly what /api/ddg-search does.
+ *     must treat an EMPTY array as a legitimate "no images found" outcome —
+ *     exactly what /api/ddg-search does (success with a friendly note).
  */
 
 import { imageSearch } from "@mudbill/duckduckgo-images-api";
@@ -53,10 +53,9 @@ export interface DDGImage {
 }
 
 /**
- * Normalized image result — the same fields the Miklium image backend
- * emitted, so downstream consumers (the /api/ddg-search route, the
- * `image_search` tool payload, and the chat ImageSearchResults carousel)
- * keep working unchanged.
+ * Normalized image result — the fields downstream consumers (the
+ * /api/ddg-search route, the `image_search` tool payload, and the chat
+ * ImageSearchResults carousel) render.
  */
 export interface DDGImageResult {
   title: string;
@@ -87,9 +86,9 @@ function getDomain(url: string): string {
 }
 
 /**
- * Normalize raw DuckDuckGo image rows into the Miklium-compatible
- * SearchResult shape. Dedupes by binary image URL, drops rows without a
- * usable image URL, and caps at `limit`.
+ * Normalize raw DuckDuckGo image rows into the normalized SearchResult
+ * shape. Dedupes by binary image URL, drops rows without a usable image
+ * URL, and caps at `limit`.
  */
 export function normalizeDDGImages(raw: DDGImage[], limit: number): DDGImageResult[] {
   const seen = new Set<string>();
@@ -131,8 +130,8 @@ const DDG_SAFE_SEARCH = true;
 /** Hard ceiling for the whole DDG round-trip (vqd token + i.js). The package
  *  has no abort-signal support, so we race it: a dropped-SYN egress path
  *  otherwise hangs ~2 minutes in Node's TCP retransmission loop, which
- *  would blow /api/ddg-search's maxDuration (30s) before the Miklium
- *  fallback ever runs. Live DDG round-trips measured ~0.6s. */
+ *  would blow /api/ddg-search's maxDuration (30s). Live DDG round-trips
+ *  measured ~0.6s. */
 const DDG_TIMEOUT_MS = 8_000;
 
 function ddgTimeout(): Promise<never> {
@@ -148,14 +147,13 @@ function ddgTimeout(): Promise<never> {
 }
 
 /**
- * Search DuckDuckGo for images and normalize to the Miklium-compatible
- * result shape.
+ * Search DuckDuckGo for images and normalize to the SearchResult shape.
  *
  * Throws when DDG cannot be contacted for a session token, when the request
  * exceeds DDG_TIMEOUT_MS, or when the package gives up; after the token
  * lookup, per-request failures are retried internally by the package and
- * can legitimately yield an EMPTY array — callers should fall back to
- * Miklium on throw OR empty.
+ * can legitimately yield an EMPTY array — callers treat that as a
+ * graceful "no images found" outcome (success with an empty list).
  */
 export async function searchDDGImages(query: string, limit: number): Promise<DDGImageResult[]> {
   const raw = await Promise.race([

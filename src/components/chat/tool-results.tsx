@@ -281,11 +281,10 @@ function parseResult<T = Record<string, unknown>>(result: unknown): T | null {
 }
 
 // ---- Search no-results / failure notice ----
-// "No results" is a legitimate outcome (the API route normalizes upstream
-// 404 "No results found" responses into an empty list), and failures carry
-// a sanitized `error`. Render either as one clean sentence — never dump the
-// raw tool-result JSON (that's how 'Miklium HTTP 404: {"success":false,…}'
-// leaked into the chat in the first place).
+// "No results" is a legitimate outcome (the API route normalizes empty
+// upstream answers into an empty list), and failures carry a sanitized
+// `error`. Render either as one clean sentence — never dump the raw
+// tool-result JSON into the chat.
 function SearchOutcomeNotice({
   result,
   icon: Icon,
@@ -323,9 +322,9 @@ function SearchOutcomeNotice({
   return <GenericToolResult result={result} />;
 }
 
-// ---- Web Search Results (LangSearch + Miklium) ----
+// ---- Web Search Results (LangSearch + DuckDuckGo) ----
 // Handles results from both LangSearch (has title, domain, icon, description)
-// and Miklium (has url, snippet, snippetType, symbols).
+// and DuckDuckGo (same shape, provider "ddg").
 export function WebSearchResults({ result }: ResultProps) {
   const parsed = parseResult<{
     output?: {
@@ -346,7 +345,7 @@ export function WebSearchResults({ result }: ResultProps) {
     };
   }>(result);
   const results = parsed?.output?.results ?? [];
-  const provider = parsed?.output?.provider ?? "miklium";
+  const provider = parsed?.output?.provider ?? "ddg";
 
   // Parse each hit into LinkPreview card data — only http(s) URLs with a
   // parseable hostname become cards (LinkPreview also self-gates unsafe
@@ -419,8 +418,7 @@ export function WebSearchResults({ result }: ResultProps) {
 }
 
 // ---- Image Search Results — Swipeable Carousel ----
-// Served by DuckDuckGo (provider "ddg") with a Miklium fallback
-// (provider "miklium") — both emit the same result shape:
+// Served by DuckDuckGo (provider "ddg"): result shape
 // { imageUrl, title, url (reference page), width, height, thumbnail, domain }
 export function ImageSearchResults({ result }: ResultProps) {
   const parsed = parseResult<{
@@ -475,7 +473,7 @@ export function ImageSearchResults({ result }: ResultProps) {
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
           <ImageIcon className="h-3 w-3" /> {total} image{total !== 1 ? "s" : ""}
         </div>
-        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">{parsed?.output?.provider ?? "miklium"}</Badge>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">{parsed?.output?.provider ?? "ddg"}</Badge>
       </div>
 
       {/* Swipeable image carousel */}
@@ -590,11 +588,13 @@ export function ImageSearchResults({ result }: ResultProps) {
   );
 }
 
-// ---- Video Search Results (Miklium) ----
-// Miklium returns: { videoUrl, thumbUrl, title, description, duration, query, additionalData: { channelTitle, statistics } }
+// ---- Video Search Results (DuckDuckGo) ----
+// The v.js backend returns: { videoUrl, thumbUrl, title, description,
+// duration, channelTitle, viewCount, likeCount, domain } (provider "ddg").
 export function VideoSearchResults({ result }: ResultProps) {
   const parsed = parseResult<{
     output?: {
+      provider?: string;
       results?: Array<{
         title?: string;
         url?: string;
@@ -621,7 +621,7 @@ export function VideoSearchResults({ result }: ResultProps) {
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
           <Video className="h-3 w-3" /> {results.length} video{results.length !== 1 ? "s" : ""}
         </div>
-        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">miklium</Badge>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">{parsed?.output?.provider ?? "ddg"}</Badge>
       </div>
       <div className="space-y-1.5">
         {results.slice(0, 5).map((item, i) => {

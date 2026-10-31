@@ -252,18 +252,35 @@ registerTool({
   },
 });
 
-// web_search (uses Miklium API — no key needed)
+// DuckDuckGo search tools — web (HTML SERP), images (@mudbill package),
+// videos (vqd token + v.js JSON endpoint). All keyless — no third-party
+// search service, no API keys.
 //
-// "No results" handling: Miklium signals "nothing matched" as HTTP 404
-// with {"success":false,"error":"No results found"} (or success:false on
-// a 200). That is a legitimate empty outcome — normalized here to a
-// success:true empty list so the agent says "nothing found" instead of
-// dumping a raw backend error at the user. Real failures are sanitized:
-// provider names / raw JSON bodies never surface in the CLI output.
+// "No results" handling: DuckDuckGo legitimately answers with an empty
+// result set when nothing matched. That is a SUCCESS with an empty list so
+// the agent says "nothing found" instead of dumping a raw backend error at
+// the user. Real failures are sanitized: provider names / raw JSON bodies
+// never surface in the CLI output.
 
-function isNoResultsResponse(status: number, errText: string): boolean {
-  if (status === 404) return true;
-  return /no results|nothing found|not found|empty result/i.test(errText);
+const DDG_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+const DDG_HEADERS: Record<string, string> = {
+  "User-Agent": DDG_UA,
+  Accept: "*/*",
+  "Accept-Language": "en",
+  Referer: "https://duckduckgo.com/",
+};
+
+/** Race any promise against an 8s ceiling (fetch has no default timeout). */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      (t as { unref?: () => void }).unref?.();
+    }),
+  ]);
 }
 
 function searchLabel(type: "web" | "image" | "video"): string {
@@ -272,6 +289,9 @@ function searchLabel(type: "web" | "image" | "video"): string {
 
 function sanitizedSearchError(type: "web" | "image" | "video", e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
+  // "miklium" stays in the blocklist on purpose: it is the provider whose
+  // raw errors once leaked into the chat — if any stale/regressed upstream
+  // ever emits it again, it gets scrubbed here.
   const cleaned = raw
     .replace(/miklium|duckduckgo|langsearch/gi, "search backend")
     .replace(/\{[\s\S]*\}/g, "")
@@ -282,9 +302,204 @@ function sanitizedSearchError(type: "web" | "image" | "video", e: unknown): stri
     : `${searchLabel(type)} is temporarily unavailable. Please try again in a moment.`;
 }
 
+/** Resolve DDG's click-redirect links (/l/?uddg=<encoded>) to real URLs. */
+function unwrapDDGUrl(href: string): string {
+  if (!href) return "";
+  // Only absolute / protocol-relative / root-relative hrefs are resolvable;
+  // anything else passes through so the http(s) filter drops it.
+  if (!/^(https?:)?\/\//i.test(href) && !href.startsWith("/")) return href;
+  try {
+    const abs = href.startsWith("//") ? `https:${href}` : href;
+    const u = new URL(abs, "https://duckduckgo.com");
+    const uddg = u.searchParams.get("uddg");
+    if (u.pathname === "/l/" && uddg) return uddg;
+    return u.toString();
+  } catch {
+    return href;
+  }
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+/** DuckDuckGo web search via the HTML SERP endpoint — no key, no token. */
+async function ddgWebSearch(
+  query: string,
+  limit: number,
+): Promise<Array<{ url: string; title: string; snippet: string; domain: string }>> {
+  const body = new URLSearchParams({ q: query, kl: "wt-wt" });
+  const res = await withTimeout(
+    fetch("https://html.duckduckgo.com/html/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": DDG_UA,
+        Accept: "text/html",
+      },
+      body: body.toString(),
+    }),
+    8_000,
+    "DuckDuckGo web search",
+  );
+  const html = await res.text().catch(() => "");
+  if (res.status === 202 || res.status === 403 || /anomaly|ratelimit|rate limit/i.test(html.slice(0, 2000))) {
+    throw new Error("DuckDuckGo web search is rate-limited right now");
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const anchors = html.match(/<a[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*>[\s\S]*?<\/a>/gi) || [];
+  const snippets = html.match(/<a[^>]*class="[^"]*\bresult__snippet\b[^"]*"[^>]*>[\s\S]*?<\/a>/gi) || [];
+
+  const seen = new Set<string>();
+  const rows: Array<{ url: string; title: string; snippet: string; domain: string }> = [];
+  for (const anchor of anchors) {
+    const href = anchor.match(/href="([^"]*)"/)?.[1] || "";
+    // Ad rows click through duckduckgo.com/y.js trackers — skip them.
+    if (/duckduckgo\.com\/y\.js/i.test(href)) continue;
+    const url = unwrapDDGUrl(href);
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    const title = decodeEntities(anchor.replace(/<[^>]+>/g, " "));
+    if (!title) continue;
+    seen.add(url);
+    rows.push({ url, title, snippet: "", domain: domainOf(url) });
+    if (rows.length >= limit) break;
+  }
+  snippets.slice(0, rows.length).forEach((snip, i) => {
+    rows[i].snippet = decodeEntities(snip.replace(/<[^>]+>/g, " "));
+  });
+  return rows;
+}
+
+/** Derive a YouTube thumbnail from a watch/shorts link (keyless, stable). */
+function youtubeThumbFor(url: string): string {
+  const m = url.match(
+    /(?:youtube\.com\/(?:watch\?[^#]*v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/,
+  );
+  return m ? `https://i.ytimg.com/vi/${m[1]}/hqdefault.jpg` : "";
+}
+
+/** Format a duration: seconds (325) → "5:25"; "5:25" passes through. */
+function formatDDGDuration(duration: string | number | undefined): string {
+  if (duration === undefined || duration === null) return "";
+  if (typeof duration === "number" && Number.isFinite(duration) && duration > 0) {
+    const s = Math.round(duration);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return h > 0
+      ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+      : `${m}:${String(sec).padStart(2, "0")}`;
+  }
+  const text = String(duration).trim();
+  return /^\d+(:\d{1,2}){1,2}$/.test(text) ? text : "";
+}
+
+interface DDGVideoRow {
+  url?: string;
+  title?: string;
+  description?: string;
+  content?: string;
+  duration?: string | number;
+  publisher?: string;
+  statistics?: { viewCount?: number | string; likeCount?: number | string };
+}
+
+/** DuckDuckGo video search — vqd token handshake + v.js JSON endpoint. */
+async function ddgVideoSearch(
+  query: string,
+  limit: number,
+): Promise<
+  Array<{
+    videoUrl: string;
+    thumbnail: string;
+    title: string;
+    description: string;
+    duration: string;
+    channel?: string;
+    views?: string;
+    likes?: string;
+  }>
+> {
+  // 1) vqd session token from duckduckgo.com's HTML (same handshake the
+  //    image search package uses for i.js).
+  const tokenRes = await withTimeout(
+    fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, { headers: DDG_HEADERS }),
+    8_000,
+    "DuckDuckGo token request",
+  );
+  if (!tokenRes.ok) throw new Error(`HTTP ${tokenRes.status}`);
+  const tokenHtml = await tokenRes.text().catch(() => "");
+  const vqd = tokenHtml.match(/vqd=([\d-]+)/)?.[1] || "";
+  if (!vqd) throw new Error("DuckDuckGo token unavailable");
+
+  // 2) v.js results — the way duckduckgo.com's own videos tab fetches them.
+  const params = new URLSearchParams({ o: "json", q: query, l: "us-en", vqd, f: ",,,,", p: "1" });
+  const res = await withTimeout(
+    fetch(`https://duckduckgo.com/v.js?${params.toString()}`, { headers: DDG_HEADERS }),
+    8_000,
+    "DuckDuckGo video search",
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = (await res.json().catch(() => null)) as { results?: DDGVideoRow[] } | null;
+  const rows = Array.isArray(data?.results) ? (data!.results as DDGVideoRow[]) : [];
+
+  const seen = new Set<string>();
+  const out: Array<{
+    videoUrl: string;
+    thumbnail: string;
+    title: string;
+    description: string;
+    duration: string;
+    channel?: string;
+    views?: string;
+    likes?: string;
+  }> = [];
+  for (const r of rows) {
+    const videoUrl = typeof r.url === "string" ? r.url : "";
+    if (!videoUrl || !/^https?:\/\//i.test(videoUrl) || seen.has(videoUrl)) continue;
+    seen.add(videoUrl);
+    const content = typeof r.content === "string" ? r.content : "";
+    const thumbnail = /^https?:\/\//i.test(content) ? content : youtubeThumbFor(videoUrl);
+    const channel = typeof r.publisher === "string" ? r.publisher : undefined;
+    out.push({
+      videoUrl,
+      thumbnail,
+      title: typeof r.title === "string" ? r.title : "",
+      description: typeof r.description === "string" ? r.description : "",
+      duration: formatDDGDuration(r.duration),
+      ...(channel ? { channel } : {}),
+      ...(r.statistics?.viewCount !== undefined && r.statistics?.viewCount !== null
+        ? { views: String(r.statistics.viewCount) }
+        : {}),
+      ...(r.statistics?.likeCount !== undefined && r.statistics?.likeCount !== null
+        ? { likes: String(r.statistics.likeCount) }
+        : {}),
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 registerTool({
   name: "web_search",
-  description: "Search the web for information. Returns titles, URLs, and snippets.",
+  description: "Search the web for information using DuckDuckGo. Returns titles, URLs, and snippets.",
   parameters: {
     type: "object",
     properties: {
@@ -298,43 +513,11 @@ registerTool({
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
     try {
-      const res = await fetch("https://miklium.vercel.app/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          search: [query],
-          type: "default",
-          maxSmallSnippets: Math.min(limit, 10),
-          maxLargeSnippets: 0,
-        }),
-      });
-      if (!res.ok) {
-        if (isNoResultsResponse(res.status, "")) {
-          return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
-        }
-        throw new Error(`HTTP ${res.status}`);
+      const rows = await ddgWebSearch(query, limit);
+      if (rows.length === 0) {
+        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No web results found for "${query}". Try different or more general keywords.` } };
       }
-      const data = await res.json() as any;
-      if (!data.success) {
-        if (isNoResultsResponse(200, String(data.error || ""))) {
-          return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
-        }
-        throw new Error(data.error || "Search failed");
-      }
-      // Group by URL
-      const byUrl = new Map<string, { url: string; snippet: string; domain: string }>();
-      for (const item of data.results || []) {
-        const url = item.url;
-        if (!byUrl.has(url)) {
-          const domain = url?.split("/")[2]?.replace(/^www\./, "") || url;
-          byUrl.set(url, { url, snippet: item.snippet || "", domain });
-        }
-      }
-      const results = Array.from(byUrl.values()).slice(0, limit);
-      if (results.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
-      }
-      return { success: true, output: { query, results, count: results.length } };
+      return { success: true, output: { query, results: rows, count: rows.length, provider: "ddg" } };
     } catch (e) {
       return { success: false, output: null, error: sanitizedSearchError("web", e) };
     }
@@ -342,10 +525,9 @@ registerTool({
 });
 
 // image_search
-// DuckDuckGo primary (via @mudbill/duckduckgo-images-api — no key, no
-// billing, real thumbnails + dimensions), Miklium fallback when DDG errors
-// out or returns nothing. Output shape is unchanged from the Miklium-only
-// era: { imageUrl, title, width, height, source (reference page) }.
+// DuckDuckGo only (via @mudbill/duckduckgo-images-api — no key, no
+// billing, real thumbnails + dimensions). Output shape:
+// { imageUrl, title, width, height, source (reference page) }.
 registerTool({
   name: "image_search",
   description: "Search for images using DuckDuckGo. Returns image URLs, titles, and dimensions.",
@@ -362,75 +544,41 @@ registerTool({
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
     try {
-      // ---- DuckDuckGo (primary) ----
-      try {
-        // Race an 8s ceiling: the package has no abort support and a
-        // dropped-SYN egress path hangs ~2min in Node's TCP retries.
-        const raw = await Promise.race([
-          imageSearch({
-            query,
-            safe: true, // filter adult content
-            retries: 2,
-            iterations: 1, // one pass = up to 100 rows; sliced to `limit`
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("DuckDuckGo image search timed out after 8000ms")),
-              8_000,
-            ),
+      // Race an 8s ceiling: the package has no abort support and a
+      // dropped-SYN egress path hangs ~2min in Node's TCP retries.
+      const raw = await Promise.race([
+        imageSearch({
+          query,
+          safe: true, // filter adult content
+          retries: 2,
+          iterations: 1, // one pass = up to 100 rows; sliced to `limit`
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("DuckDuckGo image search timed out after 8000ms")),
+            8_000,
           ),
-        ]);
-        const seen = new Set<string>();
-        const results = (raw ?? [])
-          .filter((r) => r?.image && !seen.has(r.image) && seen.add(r.image))
-          .slice(0, limit)
-          .map((r) => ({
-            imageUrl: r.image,
-            thumbnail: r.thumbnail || r.image,
-            title: r.title,
-            width: r.width,
-            height: r.height,
-            source: r.url || r.image, // reference page
-          }));
-        if (results.length > 0) {
-          return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
-        }
-        // Empty after retries — treat as "backend down" and fall through.
-      } catch {
-        // Token/network failure — fall through to Miklium.
-      }
-
-      // ---- Miklium (fallback) ----
-      const res = await fetch("https://miklium.vercel.app/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ search: [query], type: "images", maxResults: limit }),
-      });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        if (isNoResultsResponse(res.status, errText)) {
-          return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
-        }
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json() as any;
-      if (data.success === false && isNoResultsResponse(200, String(data.error || ""))) {
-        return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
-      }
-      const results = (data.results || []).map((r: { imageUrl: string; title: string; size?: { width?: number; height?: number }; referenceUrl: string }) => ({
-        imageUrl: r.imageUrl,
-        thumbnail: r.imageUrl,
-        title: r.title,
-        width: r.size?.width,
-        height: r.size?.height,
-        source: r.referenceUrl,
-      }));
-      // Both backends up but nothing matched — still a success, with a
-      // graceful notice instead of an empty/misleading payload.
+        ),
+      ]);
+      const seen = new Set<string>();
+      const results = (raw ?? [])
+        .filter((r) => r?.image && !seen.has(r.image) && seen.add(r.image))
+        .slice(0, limit)
+        .map((r) => ({
+          imageUrl: r.image,
+          thumbnail: r.thumbnail || r.image,
+          title: r.title,
+          width: r.width,
+          height: r.height,
+          source: r.url || r.image, // reference page
+        }));
+      // DuckDuckGo answered but nothing matched (or per-request fetches
+      // failed after retries) — still a success, with a graceful notice
+      // instead of an empty/misleading payload.
       if (results.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
+        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No images found for "${query}". Try different or more general keywords.` } };
       }
-      return { success: true, output: { query, results, count: results.length, provider: "miklium" } };
+      return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
     } catch (e) {
       return { success: false, output: null, error: sanitizedSearchError("image", e) };
     }
@@ -438,9 +586,11 @@ registerTool({
 });
 
 // video_search
+// DuckDuckGo videos — vqd token handshake + v.js JSON endpoint (the way
+// duckduckgo.com's own videos tab fetches results). No API key needed.
 registerTool({
   name: "video_search",
-  description: "Search for videos. Returns video URLs, thumbnails, durations, and channel info.",
+  description: "Search for videos using DuckDuckGo. Returns video URLs, thumbnails, durations, and channel info.",
   parameters: {
     type: "object",
     properties: {
@@ -454,36 +604,11 @@ registerTool({
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
     try {
-      const res = await fetch("https://miklium.vercel.app/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ search: [query], type: "videos", maxResults: limit, includeAdditionalData: true }),
-      });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        if (isNoResultsResponse(res.status, errText)) {
-          return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
-        }
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json() as any;
-      if (data.success === false && isNoResultsResponse(200, String(data.error || ""))) {
-        return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
-      }
-      const results = (data.results || []).map((r: { videoUrl: string; thumbUrl: string; title: string; description: string; duration: string; additionalData?: { channelTitle?: string; statistics?: { viewCount?: string; likeCount?: string } } }) => ({
-        videoUrl: r.videoUrl,
-        thumbnail: r.thumbUrl,
-        title: r.title,
-        description: r.description,
-        duration: r.duration,
-        channel: r.additionalData?.channelTitle,
-        views: r.additionalData?.statistics?.viewCount,
-        likes: r.additionalData?.statistics?.likeCount,
-      }));
+      const results = await ddgVideoSearch(query, limit);
       if (results.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
+        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No videos found for "${query}". Try different or more general keywords.` } };
       }
-      return { success: true, output: { query, results, count: results.length } };
+      return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
     } catch (e) {
       return { success: false, output: null, error: sanitizedSearchError("video", e) };
     }
