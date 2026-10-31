@@ -111,6 +111,12 @@ export function buildProgressView(
     currentTool: typeof p.currentTool === "string" ? p.currentTool : null,
     ...(p.mountReport ? { mountReport: p.mountReport } : {}),
     ...(p.logTail !== undefined ? { logTail: p.logTail } : {}),
+    // HITL approval mirror (Trigger.dev PRD §3.3/§5.1) — surfaces the
+    // PAUSED banner + Approve/Deny controls while the cloud run is
+    // suspended on its waitpoint token.
+    ...(p.approval && typeof p.approval === "object" && typeof p.approval.token === "string"
+      ? { approval: p.approval }
+      : {}),
     lastUpdate:
       typeof p.lastUpdate === "number" ? p.lastUpdate : updatedAt.getTime(),
   };

@@ -24,19 +24,35 @@ env var to enable Pro (seat-limited).
 
 The default `code-interpreter-v1` template doesn't include a browser. Without
 this template, the browser tool pip-installs `cloakbrowser + playwright` into
-a fresh sandbox at runtime (~280s on first use) and downloads the stealth
-Chromium binary on first launch. With this template everything is **baked
-into the image** — every new sandbox starts browser-ready.
+a fresh sandbox at runtime (~minutes) and downloads the stealth Chromium
+binary on first launch — historically behind a fixed 6-minute boot ceiling,
+which produced the `browser_startup_failed — did not finish booting in time.
+No boot output was captured` failures. With this template everything is
+**baked into the image** — every new sandbox starts browser-ready and `use_browser`
+boots in **seconds**.
+
+The runtime boot path (`src/lib/e2b/browser-session.ts`) now also:
+
+- **pre-flight probes** the runtime — template-warm sandboxes get a tight
+  2-minute boot ceiling (wedges fail fast); cold installs get an honest
+  10-minute ceiling with live narration;
+- **pre-fetches the ~200 MB browser binaries inside the detached boot window**
+  after a fresh pip install (the first action no longer hides the download);
+- **pre-boots the browser before the driver reports READY** (`.preboot`
+  marker — "ready" means "browser usable", `src/lib/e2b/browser-driver.ts`);
+- **fails fast with a real diagnosis** when the sandbox itself stops
+  responding (6 consecutive poll failures) instead of spinning the whole
+  window and reporting "No boot output was captured".
 
 ## Build
 
 ```bash
 # Install E2B CLI (if not already)
-npm install -g @e2b/cli
+npm install -g @e2b/cli && e2b auth login
 
 # Build the template (takes ~5-10 minutes — downloads Chromium twice)
-cd /home/z/my-project
-e2b template build -c e2b-template/Dockerfile -n onyx-cloakbrowser
+# (or just: bash scripts/build-browser-sandbox-template.sh)
+bash scripts/build-browser-sandbox-template.sh
 ```
 
 The template is stored in your E2B account and referenced by name.

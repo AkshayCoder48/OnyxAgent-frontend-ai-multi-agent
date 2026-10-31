@@ -1,7 +1,9 @@
 // ============================================================================
 // Background Task Execution Framework — runner config builder.
 //
-// buildRunnerConfig mirrors DetachedRunConfig (src/lib/agent/detached-run.ts)
+// buildRunnerConfig mirrors the legacy DetachedRunConfig contract (the
+// detached-run module was removed with the E2B-detached lane; the frozen
+// runner contract it described lives on here).
 // — the exact JSON the sandbox-resident headless runner reads from
 // /home/user/.onyx/agent/run.json — with two task-framework additions:
 //

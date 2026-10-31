@@ -172,7 +172,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (!config) {
       return bad("not connected — connect a key first", 409);
     }
-    const deploy = await autoDeployWorker(config);
+    // Pass the request origin so the deployed scheduled-sweep task can call
+    // the tick endpoint (env APP_URL still wins when set — PRD §3.4).
+    const deploy = await autoDeployWorker(config, { appUrl: request.nextUrl.origin });
     const bootstrap = await getWorkerBootstrapState().catch(() => null);
     const payload = await statusPayload(request, bootstrap ?? undefined);
     return NextResponse.json({ ...payload, deploy });
@@ -223,7 +225,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (config) {
       const liveness = await probeWorkerLiveness(config, { skipCache: true });
       if (liveness === "undeployed" || liveness === "unknown") {
-        await autoDeployWorker(config);
+        await autoDeployWorker(config, { appUrl: request.nextUrl.origin });
       }
       bootstrap = await getWorkerBootstrapState().catch(() => null);
     }

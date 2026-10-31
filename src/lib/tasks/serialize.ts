@@ -115,8 +115,9 @@ async function getWorkspaceDir(userId: string): Promise<FileSystemDirectoryHandl
 // Conversation slice (text-only seed history).
 // ---------------------------------------------------------------------------
 
-/** Per-message char cap — mirrors the detached-run seed budget
- *  (SEED_MAX_MESSAGE_CHARS in agent/detached-run.ts) so one bloated message
+/** Per-message char cap — mirrors the legacy detached-run seed budget
+ *  (the module is gone; the frozen budget it defined lives on here) so one
+ *  bloated message
  *  can't crowd out the rest of the payload. */
 const SEED_MESSAGE_MAX_CHARS = 12_000;
 

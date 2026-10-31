@@ -51,13 +51,28 @@ const BOOT_LOG_PATH = `${BR_DIR}/boot.log`;
 const INSTALL_LOG_PATH = `${BR_DIR}/boot-install.log`;
 const BOOT_FAIL_PATH = `${BR_DIR}/.boot-failed`;
 
-/** First boot downloads the browser binary (~200 MB) — generous ceiling. */
+/** First action ceiling — with the boot-time PREBOOT (see BOOT_SH_SOURCE)
+ *  the browser is already up when the driver reports READY, so this is a
+ *  safety net, not the expected path. */
 const FIRST_BOOT_TIMEOUT_MS = 6 * 60_000;
-/** Detached-boot polling ceiling (cold pip install can take minutes;
- *  each poll is a short request, the install itself runs in the sandbox). */
-const BOOT_POLL_TIMEOUT_MS = 6 * 60_000;
+/** Detached-boot polling ceiling when the runtime must be installed first
+ *  (cold pip install + ~200 MB binary pre-fetch legitimately takes minutes
+ *  on a slow sandbox network; each poll is a short request, the install
+ *  itself runs in the sandbox). */
+const BOOT_POLL_TIMEOUT_MS = 10 * 60_000;
+/** Polling ceiling when the runtime is ALREADY importable (the
+ *  onyx-cloakbrowser template, or a warm sandbox that installed it
+ *  earlier) — the driver starts in seconds and the preboot browser launch
+ *  in a few more; anything past this window means the sandbox is wedged. */
+const FAST_BOOT_POLL_TIMEOUT_MS = 2 * 60_000;
 /** Usual per-action ceiling. */
 const DEFAULT_ACTION_TIMEOUT_MS = 90_000;
+/** Consecutive failed polls before declaring the sandbox unreachable. A
+ *  dead/paused/out-of-quota sandbox used to spin the FULL boot window with
+ *  every poll silently swallowed (`.catch(() => null)`) and then time out
+ *  with the diagnostic-free "No boot output was captured" — the exact
+ *  browser_startup_failed the users hit after 6-10 silent minutes. */
+const MAX_CONSECUTIVE_POLL_FAILURES = 6;
 
 /** Minimal client surface this manager needs (E2BClient implements it). */
 export interface BrowserSandboxClient {
@@ -193,9 +208,11 @@ fi
 echo \$\$ > .boot-lock
 
 log "checking the browser runtime…"
+fresh_install=0
 if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
   log "browser runtime already installed"
 else
+  fresh_install=1
   log "installing the browser runtime (first run — can take a few minutes)…"
   ok=0
   for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
@@ -226,19 +243,56 @@ else
   fi
 fi
 
+# BINARY PRE-FETCH (browser_startup_failed fix): after a FRESH install the
+# ~200 MB browser binaries are still missing — fetch them HERE (inside the
+# detached, narrated boot window) instead of letting the first use_browser
+# action pay the download behind its own action timeout. Best-effort: a
+# failed pre-fetch degrades to the old lazy-download behavior.
+if [ "\$fresh_install" = "1" ]; then
+  log "pre-fetching the browser binaries (~200 MB — the slow part of a cold boot)…"
+  if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
+    log "stealth Chromium binary cached — the browser will launch instantly"
+  else
+    log "cloakbrowser binary pre-fetch failed — the driver will download it on first launch"
+  fi
+  if "\$PY" -m playwright install chromium >> boot-install.log 2>&1; then
+    log "stock Chromium (fallback runtime) cached"
+  else
+    log "playwright chromium pre-fetch failed — the fallback will self-install if needed"
+  fi
+fi
+
+# PREBOOT MARKER: driver.py boots the BROWSER (the expensive part) before
+# it writes .ready, so "boot done" means "browser USABLE": the first
+# action no longer hides a ~200 MB download behind its own timeout, and a
+# boot failure surfaces in the boot poll instead of an action timeout.
+: > .preboot
+
 log "starting the browser driver…"
 rm -f .ready
 nohup "\$PY" driver.py > driver.log 2>&1 &
-log "driver launched (pid \$!)"
+log "driver launched (pid \$!) — it will preboot the browser before reporting ready"
 `;
 
 /** One short-lived sandbox command that answers the whole boot state:
- *  the failure marker (+ its contents), READY, or the latest progress line. */
+ *  the failure marker (+ its contents), READY, or the latest progress line
+ *  (boot.sh AND the driver's preboot lines both append to boot.log). */
 const BOOT_POLL_CMD = [
   `if [ -f ${BOOT_FAIL_PATH} ]; then echo "BOOT_FAILED"`,
   `sed -n '1,60p' ${BOOT_FAIL_PATH}`,
   `elif test -f ${READY_PATH} && pgrep -f "[d]river.py" >/dev/null 2>&1; then echo "READY"`,
   `else tail -n 1 ${BOOT_LOG_PATH} 2>/dev/null; true; fi`,
+].join("; ");
+
+/** Detects whether the browser runtime is already importable in the
+ *  sandbox (onyx-cloakbrowser template, or a warm sandbox that installed
+ *  it earlier) so the poll window matches reality: template-warm boots in
+ *  seconds, cold installs legitimately need minutes. One short command;
+ *  ANY probe failure assumes the slow path (safe default). */
+const RUNTIME_PROBE_CMD = [
+  `PY=python3; command -v python3 >/dev/null 2>&1 || PY=python3.12`,
+  `command -v "\$PY" >/dev/null 2>&1 || PY=python`,
+  `"\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo RUNTIME_PRESENT || echo RUNTIME_MISSING`,
 ].join("; ");
 
 /**
@@ -286,11 +340,26 @@ export async function ensureBrowserDriver(
           15,
         );
 
+        // PRE-FLIGHT RUNTIME PROBE (browser_startup_failed fix): pick a
+        // poll window that matches reality instead of a fixed 6 minutes for
+        // everyone. A template-warm sandbox (onyx-cloakbrowser) or a sandbox
+        // that already installed the runtime boots in seconds → tight
+        // ceiling, wedged sandboxes fail fast. A cold install legitimately
+        // needs minutes (pip ladder + ~200 MB binary pre-fetch) → honest
+        // ceiling + honest narration.
+        const probe = await execInSandbox(client, RUNTIME_PROBE_CMD, 30).catch(() => null);
+        const runtimePresent = (probe?.output ?? "").includes("RUNTIME_PRESENT");
+        const pollCeilingMs = runtimePresent ? FAST_BOOT_POLL_TIMEOUT_MS : BOOT_POLL_TIMEOUT_MS;
+        onProgress?.(
+          runtimePresent
+            ? "Browser runtime found in the sandbox — starting the browser driver…"
+            : "No browser runtime in this sandbox — installing cloakbrowser + playwright and pre-fetching the stealth Chromium binary (first run only, up to ~10 minutes)…",
+        );
+
         // DETACHED BOOT (the fix for browser_startup_failed on serverless):
         // launch boot.sh under nohup INSIDE the sandbox — the sandbox VM
         // outlives any HTTP request, so the minutes-long pip install can
         // actually finish. The client only polls (short requests) below.
-        onProgress?.("Installing the browser runtime (first run only — up to a few minutes)…");
         const launched = await execInSandbox(
           client,
           `cd ${BR_DIR} && nohup bash boot.sh > ${BOOT_LOG_PATH} 2>&1 & echo booting`,
@@ -303,11 +372,33 @@ export async function ensureBrowserDriver(
           };
         }
 
-        const deadline = Date.now() + BOOT_POLL_TIMEOUT_MS;
+        const deadline = Date.now() + pollCeilingMs;
         let lastProgress = "";
+        let consecutivePollFailures = 0;
+        let lastPollError = "";
         while (Date.now() < deadline) {
-          const poll = await execInSandbox(client, BOOT_POLL_CMD, 30).catch(() => null);
-          const out = (poll?.output ?? "").trim();
+          const poll = await execInSandbox(client, BOOT_POLL_CMD, 30).catch((e) => {
+            lastPollError = e instanceof Error ? e.message : String(e);
+            return null;
+          });
+          if (poll === null) {
+            // SANDBOX-UNREACHABLE FAST-FAIL (the "No boot output was
+            // captured" fix): a dead/paused/out-of-quota sandbox used to
+            // swallow every poll for the FULL window and then time out with
+            // zero diagnostic value. Consecutive failures mean the sandbox
+            // itself (not the boot) is the problem — say so and stop early.
+            consecutivePollFailures += 1;
+            if (consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+              return {
+                ok: false,
+                error: `The sandbox stopped responding while the browser was booting (${MAX_CONSECUTIVE_POLL_FAILURES} consecutive poll failures${lastPollError ? ` — last error: ${lastPollError.slice(-200)}` : ""}). It may be paused, out of quota, or the E2B connection dropped. Retry the action; if it persists, restart the sandbox session.`,
+              };
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          consecutivePollFailures = 0;
+          const out = poll.output.trim();
           if (out.startsWith("BOOT_FAILED")) {
             const detail = out.slice("BOOT_FAILED".length).trim();
             return {
@@ -331,7 +422,7 @@ export async function ensureBrowserDriver(
         const tail = `${bootLog ? ` Boot log: ${bootLog.slice(-300)}` : ""}${installLog ? ` Install log: ${installLog.slice(-300)}` : ""}`;
         return {
           ok: false,
-          error: `The sandbox browser runtime did not finish booting in time.${tail || " No boot output was captured."}`,
+          error: `The sandbox browser runtime did not finish booting within ${Math.round(pollCeilingMs / 60_000)} minutes.${tail || " No boot output was captured."} Tip: build the custom sandbox template (see e2b-template/README.md — “e2b template build -c e2b-template/Dockerfile -n onyx-cloakbrowser”) and set E2B_TEMPLATE_ID so every sandbox starts browser-ready and boots in seconds instead of installing at runtime.`,
         };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };

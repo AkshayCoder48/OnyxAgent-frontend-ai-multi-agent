@@ -80,6 +80,12 @@ registerTool(
         description:
           "create: mount the current workspace files into the task sandbox (default true).",
       },
+      require_approval: {
+        type: "boolean",
+        default: false,
+        description:
+          "create: human-in-the-loop — suspend the cloud run on a Trigger.dev waitpoint and wait for the user's Approve/Deny in the web UI before executing. Destructive terminal commands gate automatically even when false.",
+      },
       run_id: {
         type: "string",
         description: "status/cancel: the run_id returned by create.",
@@ -111,6 +117,7 @@ registerTool(
             return { error: "terminal_command background tasks need a command to run." };
           }
           const includeWorkspace = args.include_workspace !== false;
+          const requireApproval = args.require_approval === true;
           const res = await triggerBackgroundTask({
             userId: ctx.userId,
             conversationId: ctx.conversationId ?? null,
@@ -123,7 +130,11 @@ registerTool(
               taskType === "terminal_command"
                 ? `Terminal: ${command.slice(0, 60)}`
                 : excerpt(prompt, 60),
-            ...(taskType === "terminal_command" ? { config: { command } } : {}),
+            ...(taskType === "terminal_command"
+              ? { config: { command, ...(requireApproval ? { requireApproval } : {}) } }
+              : requireApproval
+                ? { config: { requireApproval } }
+                : {}),
             includeWorkspace,
             sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
           });

@@ -337,6 +337,32 @@ export async function cancelTask(runId: string): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// HITL approval (Trigger.dev PRD §3.3 — Approve/Deny a suspended cloud run).
+// ---------------------------------------------------------------------------
+
+/** Approve or deny a run suspended on a Trigger.dev waitpoint token.
+ * Requires the local task token (only the triggering browser holds it —
+ * same authorization lane as cancel). */
+export async function decideTaskApproval(runId: string, approved: boolean): Promise<void> {
+  const row = await backgroundTaskService.get(runId);
+  if (!row || !row.task_token) {
+    throw new Error(
+      "No local task token for this run — it was not triggered from this browser, so it cannot be approved here.",
+    );
+  }
+  const res = await fetch("/api/tasks/approval", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ runId, taskToken: row.task_token, approved }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      await errorMessage(res, approved ? "Failed to approve the task" : "Failed to deny the task"),
+    );
+  }
+}
+
 /** One extracted artifact's content (fetch is authorized by the task token). */
 export interface TaskArtifactContent {
   name: string;

@@ -30,7 +30,7 @@ export type BackgroundTaskType =
   | "terminal_command";
 
 /** Hard sandbox execution cap — PRD §4.2 ("maximum 30 minutes execution"). */
-export const TASK_MAX_DURATION_MS = 30 * 60 * 1000;
+export const TASK_MAX_DURATION_MS = 2 * 60 * 60 * 1000; // PRD §4 timeout freedom: up to 2h durable windows (default stays 30min)
 /** Default execution window. */
 export const TASK_DEFAULT_DURATION_MS = 30 * 60 * 1000;
 /** Default + hard cap on agent rounds inside the sandbox runner. */
@@ -127,6 +127,14 @@ export interface TaskRunConfig {
   command?: string;
   /** terminal_command only: working directory (default /home/user). */
   cwd?: string;
+  /**
+   * HUMAN-IN-THE-LOOP (Trigger.dev PRD §3.3): when true the task suspends
+   * on a Trigger.dev WAITPOINT TOKEN before executing anything sensitive
+   * and waits indefinitely for the user's Approve/Deny (the app completes
+   * the token via POST /api/v1/waitpoints/tokens/:id/complete). Destructive
+   * terminal commands auto-gate even without this flag.
+   */
+  requireApproval?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +177,17 @@ export interface RunMetadataState {
   chunkSeq: number;
   /** Newest chunks (ring, newest last). */
   chunks: TaskStatusChunk[];
+  /**
+   * HITL approval request (Trigger.dev PRD §3.3): present while this run is
+   * SUSPENDED on a waitpoint token. The token id travels out through run
+   * metadata (the app polls it), the decision travels back via the
+   * waitpoint complete endpoint — the pull-only protocol stays intact.
+   */
+  approval?: {
+    token: string;
+    reason: string;
+    createdAt: number;
+  };
   updatedAt: number;
 }
 
@@ -241,7 +260,9 @@ export interface AgentRunPayload {
 /** The task's return value — the app reads it from the finished cloud run. */
 export interface AgentRunOutput {
   runId: string;
-  status: "completed" | "failed";
+  /** "cancelled" = human approval was DENIED (PRD §5.1 HITL) or the run was
+   *  aborted before producing artifacts. */
+  status: "completed" | "failed" | "cancelled";
   error?: string;
   sandboxId?: string;
   artifacts: CloudArtifact[];

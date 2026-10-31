@@ -10,11 +10,22 @@
 // cloud run reaches a terminal state.
 //
 // Execution map (mirrors the app's local driver):
-//   init → create-sandbox → mount → verify → start → monitor (5s poll) →
-//   collect-artifacts → output.
+//   [HITL gate] → init → create-sandbox → mount → verify → start →
+//   monitor (5s poll) → collect-artifacts → output.
+//
+// Trigger.dev v4 PRD compliance:
+//   §3.2 resilience — LLM calls retry with exponential backoff + full jitter
+//     (retry.fetch discipline) on 401/429/5xx, rotating the BYOK key pool.
+//   §3.3 HITL — sensitive runs SUSPEND on a waitpoint token (needsApproval)
+//     and wait indefinitely (7d ceiling) for the web UI's Approve/Deny; the
+//     run's state checkpoints survive the suspension by construction.
+//   §3.4 timeout freedom — hour-scale maxDuration instead of HTTP seconds.
+//   §4  concurrency — a per-user queue key (concurrencyKey = userId, passed
+//     by the app at trigger time) caps each user at 2 concurrent runs so one
+//     user can never exhaust the operator's cloud allocation.
 // ============================================================================
 
-import { task, metadata, logger } from "@trigger.dev/sdk";
+import { task, metadata, logger, wait } from "@trigger.dev/sdk";
 import type {
   AgentRunOutput,
   AgentRunPayload,
@@ -56,10 +67,107 @@ const STALL_LIMIT_MS = 10 * 60 * 1000;
 const CHUNK_RING_SIZE = 30;
 /** Per-chunk content cap for the metadata ring (keeps the blob small). */
 const RING_CHUNK_MAX_CHARS = 1_500;
+/** HITL waitpoint ceiling — PRD §3.3 says "wait indefinitely"; 7 days is
+ *  the practical durable decision window (the run parks PAUSED on the
+ *  cloud consuming no worker capacity while it waits). */
+const APPROVAL_TIMEOUT = "7d";
+
+// ---------------------------------------------------------------------------
+// Resilience + HITL helpers (Trigger.dev PRD §3.2 / §3.3)
+// ---------------------------------------------------------------------------
+
+/** Exponential backoff with full jitter — the PRD §3.2 retry.fetch
+ *  discipline for upstream LLM failures (rate limits, drops, 5xx). */
+function backoffDelayMs(attempt: number, baseMs = 1_000, capMs = 30_000): number {
+  const exp = Math.min(baseMs * 2 ** attempt, capMs);
+  return Math.round(exp / 2 + Math.random() * (exp / 2));
+}
+
+/** Destructive terminal commands auto-gate on human approval even without
+ *  config.requireApproval (PRD §3.3: "deploying code or processing a
+ *  charge"-class sensitive actions must suspend, not run blind). */
+const DESTRUCTIVE_PATTERN =
+  /(?:rm\s+(?:-[a-z]*f[a-z]*|-[a-z]*r[a-z]*)|mkfs|dd\s+if=|shutdown|reboot|:\(\)\s*\{|drop\s+(?:table|database)|truncate\s+table|git\s+push\s+(?:--force\b|-f\b)|npm\s+publish|curl[^|;]*\|\s*(?:ba)?sh|wget[^|;]*\|\s*(?:ba)?sh|chmod\s+-R\s+777\s+\/|kill\s+-9\s+1\b)/i;
+
+function requiresHumanApproval(run: AgentRunPayload["run"]): boolean {
+  if (run.config.requireApproval === true) return true;
+  if (run.type === "terminal_command" && typeof run.config.command === "string") {
+    return DESTRUCTIVE_PATTERN.test(run.config.command);
+  }
+  return false;
+}
+
+type ApprovalOutcome = { kind: "approved" } | { kind: "denied" } | { kind: "skipped" };
+
+/**
+ * HUMAN-IN-THE-LOOP GATE (PRD §3.3): mint a Trigger.dev waitpoint token,
+ * publish it through run metadata (the app's status poll renders the
+ * Approve/Deny banner from it), then SUSPEND this run by waiting on the
+ * token. The run parks PAUSED on the cloud — no worker slot, no HTTP
+ * timeout — until the app completes the token with { approved } (POST
+ * /api/v1/waitpoints/tokens/:id/complete, called by /api/tasks/approval).
+ * Everything accumulated so far IS the checkpoint: it lives in run
+ * metadata, and v4 resumes this exact execution after the decision.
+ */
+async function maybeSuspendForApproval(
+  payload: AgentRunPayload,
+  state: RunMetadataState,
+  pushChunk: (chunk: Omit<TaskStatusChunk, "seq">) => void,
+  flush: () => void,
+): Promise<ApprovalOutcome> {
+  const { run } = payload;
+  if (!requiresHumanApproval(run)) return { kind: "skipped" };
+
+  const reason =
+    run.type === "terminal_command"
+      ? `Destructive terminal command needs approval before it runs in the sandbox: ${String(run.config.command ?? "").slice(0, 240)}`
+      : "This run was flagged for human approval (requireApproval) before executing.";
+
+  state.phase = "init";
+  state.progress.stage = "awaiting-approval";
+  state.progress.lastUpdate = Date.now();
+  pushChunk({ kind: "log", content: `Approval required — ${reason}`, ts: Date.now() });
+
+  const token = await wait.createToken({
+    timeout: APPROVAL_TIMEOUT,
+    tags: ["onyx-approval", `run:${run.runId}`],
+  });
+
+  // Publish the approval request BEFORE suspending — this metadata write is
+  // the only channel the app has to see it (pull-only protocol).
+  state.approval = { token: token.id, reason, createdAt: Date.now() };
+  flush();
+  logger.info(`[agent-run ${run.runId}] suspended awaiting human approval (waitpoint ${token.id}, ${APPROVAL_TIMEOUT} ceiling)`);
+
+  // SUSPEND — returns only when the token is completed (or times out).
+  const decision = (await wait.forToken<{ approved?: boolean }>(token.id)) as {
+    ok: boolean;
+    output?: { approved?: boolean };
+    error?: unknown;
+  };
+
+  delete state.approval;
+  state.progress.stage = "approved";
+  state.progress.lastUpdate = Date.now();
+  flush();
+
+  if (!decision.ok) {
+    throw new Error(
+      `human approval was not given within the ${APPROVAL_TIMEOUT} window — the run was abandoned without executing`,
+    );
+  }
+  return decision.output?.approved === true ? { kind: "approved" } : { kind: "denied" };
+}
 
 export const agentRun = task({
   id: "agent-run",
-  maxDuration: 2100, // 35 min — the 30-min sandbox window + finalize headroom
+  // PRD §4 timeout freedom: hour-scale durable execution (was 35 min).
+  maxDuration: 3600,
+  // PRD §4 concurrency controls: one queue, keyed per user — the app passes
+  // concurrencyKey = userId at trigger time, so each user is capped at 2
+  // concurrent runs and can never exhaust the operator's allocation.
+  queue: { name: "agent-runs" },
+  concurrency: { perKey: 2 },
   retry: { maxAttempts: 2 },
   run: async (payload: AgentRunPayload): Promise<AgentRunOutput> => {
     const { run, credentials } = payload;
@@ -114,6 +222,27 @@ export const agentRun = task({
     };
 
     try {
+      // ---- HITL approval gate (PRD §3.3) — both lanes ---------------------
+      const approval = await maybeSuspendForApproval(payload, state, pushChunk, flush);
+      if (approval.kind === "denied") {
+        state.phase = "done";
+        state.progress.stage = "denied";
+        state.progress.lastUpdate = Date.now();
+        pushChunk({
+          kind: "error",
+          content: "Human approval was DENIED — the run was cancelled without executing.",
+          ts: Date.now(),
+        });
+        flush();
+        logger.info(`[agent-run ${runId}] denied by human approval — cancelling`);
+        return {
+          runId,
+          status: "cancelled",
+          error: "Denied by human approval.",
+          artifacts: [],
+        };
+      }
+
       // ---- NATIVE MODE (no E2B key — the zero-setup lane) ────────────────
       // Trigger.dev Cloud itself is the compute: the agent loop runs
       // IN-TASK with NO sandbox and a tools-off surface (text + seed
@@ -130,9 +259,27 @@ export const agentRun = task({
         return await runNativeAgentRun(payload, state, pushChunk, setStage, flush);
       }
 
-      // ---- Phase: create sandbox (PRD §4.2 — bounded window) --------------
+      // ---- Phase: create sandbox (PRD §4.2 — bounded window, with
+      // exponential-backoff retries on transient E2B failures) ------------
       setStage("init", "creating-sandbox");
-      const box = await createTaskSandbox(run, credentials.e2bApiKey);
+      let box: Awaited<ReturnType<typeof createTaskSandbox>> | null = null;
+      let lastCreateError = "";
+      for (let attempt = 0; attempt < 3 && !box; attempt++) {
+        try {
+          box = await createTaskSandbox(run, credentials.e2bApiKey);
+        } catch (err) {
+          lastCreateError = errorMessage(err);
+          // A missing key is permanent — don't burn retries on it.
+          if (lastCreateError.includes("No E2B sandbox key")) break;
+          logger.warn(
+            `[agent-run ${runId}] sandbox create attempt ${attempt + 1} failed: ${lastCreateError.slice(0, 160)}`,
+          );
+          if (attempt < 2) await sleepMs(backoffDelayMs(attempt));
+        }
+      }
+      if (!box) {
+        throw new Error(`sandbox creation failed after retries: ${lastCreateError.slice(0, 300)}`);
+      }
       sandbox = box;
       state.progress.stage = "sandbox-ready";
       flush();
@@ -271,13 +418,14 @@ async function runNativeAgentRun(
 
       if (res.status === 401 || res.status === 429 || res.status >= 500) {
         lastError = `LLM endpoint responded ${res.status}`;
-        logger.warn(`[agent-run ${runId}] native attempt ${attempt + 1}: ${lastError} — rotating`);
-        await sleepMs(1200 * (attempt + 1));
+        logger.warn(`[agent-run ${runId}] native attempt ${attempt + 1}: ${lastError} — rotating key, backing off`);
+        // PRD §3.2: exponential backoff + full jitter between rotated retries.
+        await sleepMs(backoffDelayMs(attempt));
         continue;
       }
       if (!res.ok) {
         lastError = `LLM endpoint responded ${res.status}: ${(await res.text()).slice(0, 200)}`;
-        await sleepMs(1000);
+        await sleepMs(backoffDelayMs(attempt));
         continue;
       }
 
@@ -287,7 +435,7 @@ async function runNativeAgentRun(
       const content = data.choices?.[0]?.message?.content ?? "";
       if (!content.trim()) {
         lastError = "LLM endpoint returned an empty completion";
-        await sleepMs(800);
+        await sleepMs(backoffDelayMs(attempt, 800, 10_000));
         continue;
       }
 
@@ -316,7 +464,7 @@ async function runNativeAgentRun(
       };
     } catch (err) {
       lastError = errorMessage(err);
-      await sleepMs(1500);
+      await sleepMs(backoffDelayMs(attempt));
     }
   }
 

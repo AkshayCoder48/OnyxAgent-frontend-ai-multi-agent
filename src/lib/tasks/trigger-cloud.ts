@@ -42,9 +42,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskPayloadFile, TaskRunProgress } from "./protocol";
 import type { BackgroundTaskType, CloudAgentRunPayload, CloudRunMetadata, CloudRunOutput } from "./protocol";
-import { TASK_CLOUD_PAYLOAD_MAX_BYTES } from "./protocol";
+import { TASK_CLOUD_PAYLOAD_MAX_BYTES, TASK_MAX_DURATION_MS } from "./protocol";
 import { prisma } from "./prisma";
-import { keyring } from "./keyring";
+import { keyring, tokensEqual } from "./keyring";
 // PURE leaf of the shared AI client layer (zero imports — safe server-side).
 import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 import {
@@ -57,7 +57,8 @@ import {
 
 const clampTimeoutMsLocal = (ms: unknown): number => {
   const raw = typeof ms === "number" && Number.isFinite(ms) ? ms : 30 * 60 * 1000;
-  return Math.min(Math.max(Math.round(raw), 60_000), 30 * 60 * 1000);
+  // PRD §4 timeout freedom: windows may run up to TASK_MAX_DURATION_MS (2h).
+  return Math.min(Math.max(Math.round(raw), 60_000), TASK_MAX_DURATION_MS);
 };
 
 // ---------------------------------------------------------------------------
@@ -316,7 +317,7 @@ export async function saveCloudConfig(
       create: {
         id: CONFIG_ROW_ID,
         encryptedKey: sealedKey,
-        encryptedWorkerToken: sealSecret(""), // legacy column — unused
+        encryptedWorkerToken: sealSecret(""), // minted lazily by getCloudWorkerToken
         ...rowCommon,
       },
       update: {
@@ -324,6 +325,12 @@ export async function saveCloudConfig(
         ...rowCommon,
       },
     });
+
+    // Mint the durable-cron worker token (scheduled-sweep tick auth) now —
+    // lazily-created otherwise, but connect time is the natural moment
+    // because the worker deploy that needs it as an env var follows right
+    // after (autoDeployWorker). Never blocks the connect on failure.
+    await getCloudWorkerToken().catch(() => null);
 
     invalidateCloudConfigCache();
     const config = await getCloudConfig();
@@ -598,14 +605,23 @@ export async function verifyCloudKey(apiKey: string): Promise<VerifyCloudKeyResu
 export async function triggerCloudTaskRun(
   config: Pick<CloudConfig, "apiKey" | "taskSlug">,
   payload: unknown,
-  options?: { tags?: string[] },
+  options?: { tags?: string[]; concurrencyKey?: string },
 ): Promise<string> {
   const run = (await cloudRequest(
     config.apiKey,
     `/api/v1/tasks/${encodeURIComponent(config.taskSlug)}/trigger`,
     {
       method: "POST",
-      body: { payload, ...(options?.tags ? { options: { tags: options.tags } } : {}) },
+      body: {
+        payload,
+        options: {
+          ...(options?.tags ? { tags: options.tags } : {}),
+          // PRD §4 concurrency controls: the per-user queue key — the
+          // agent-run task's queue is keyed on this, capping each user at 2
+          // concurrent cloud runs.
+          ...(options?.concurrencyKey ? { concurrencyKey: options.concurrencyKey } : {}),
+        },
+      },
       timeoutMs: 20_000,
     },
   )) as { id?: unknown };
@@ -683,11 +699,15 @@ export async function fetchCloudRunView(
   if (metaRaw && typeof metaRaw === "object") {
     const m = metaRaw as Partial<CloudRunMetadata>;
     if (m && typeof m === "object" && m.progress && typeof m.progress === "object") {
+      const approvalRaw = m.approval;
       metadata = {
         phase: m.phase ?? "init",
         progress: m.progress as TaskRunProgress,
         chunkSeq: typeof m.chunkSeq === "number" ? m.chunkSeq : 0,
         chunks: Array.isArray(m.chunks) ? m.chunks : [],
+        ...(approvalRaw && typeof approvalRaw === "object" && typeof approvalRaw.token === "string"
+          ? { approval: approvalRaw }
+          : {}),
         updatedAt: typeof m.updatedAt === "number" ? m.updatedAt : Date.now(),
       };
     }
@@ -731,6 +751,132 @@ export async function cancelCloudRunById(
     if (err instanceof CloudApiError && (err.status === 404 || err.status === 409)) return;
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Waitpoints (HITL approvals — Trigger.dev PRD §3.3) + durable schedules
+// (PRD §3.4). Both use the same environment secret key that dispatched the
+// run — the decision authority and the dispatch authority are identical.
+// ---------------------------------------------------------------------------
+
+/**
+ * Complete a waitpoint token — the APPROVE/DENY decision that resumes a
+ * suspended cloud run (the worker parked it on wait.forToken). Called by
+ * POST /api/tasks/approval after the user clicks the banner.
+ */
+export async function completeCloudWaitpoint(
+  config: Pick<CloudConfig, "apiKey">,
+  waitpointId: string,
+  approved: boolean,
+): Promise<void> {
+  await cloudRequest(
+    config.apiKey,
+    `/api/v1/waitpoints/tokens/${encodeURIComponent(waitpointId)}/complete`,
+    { method: "POST", body: { data: { approved } }, timeoutMs: 15_000 },
+  );
+}
+
+/** The worker task the app registers durable schedules against. */
+const SCHEDULE_SWEEP_TASK = "scheduled-sweep";
+
+/** Deduplication key for a TaskSchedule row's cloud mirror. */
+export function cloudScheduleKey(scheduleId: string): string {
+  return `onyx-sched-${scheduleId}`;
+}
+
+/**
+ * Register / refresh ONE imperative Trigger.dev schedule mirroring a
+ * TaskSchedule row (PRD §3.4 — durable cron per user profile). POST creates;
+ * a 409/400 (duplicate or validation) degrades to PUT (update in place).
+ * Best-effort by contract — the in-app sweep loop stays the fallback.
+ */
+export async function upsertCloudSchedule(
+  config: Pick<CloudConfig, "apiKey">,
+  input: { scheduleId: string; cron: string; timezone: string },
+): Promise<void> {
+  const deduplicationKey = cloudScheduleKey(input.scheduleId);
+  try {
+    await cloudRequest(config.apiKey, "/api/v1/schedules", {
+      method: "POST",
+      body: {
+        task: SCHEDULE_SWEEP_TASK,
+        cron: input.cron,
+        timezone: input.timezone,
+        deduplicationKey,
+      },
+      timeoutMs: 15_000,
+    });
+  } catch (err) {
+    if (err instanceof CloudApiError && (err.status === 409 || err.status === 400)) {
+      // Already registered — update the cron/timezone in place instead.
+      await cloudRequest(
+        config.apiKey,
+        `/api/v1/schedules/${encodeURIComponent(deduplicationKey)}`,
+        {
+          method: "PUT",
+          body: { task: SCHEDULE_SWEEP_TASK, cron: input.cron, timezone: input.timezone },
+          timeoutMs: 15_000,
+        },
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
+/** Remove a schedule's cloud mirror (row deleted / deactivated).
+ * 404 = already gone — fine. */
+export async function deleteCloudSchedule(
+  config: Pick<CloudConfig, "apiKey">,
+  scheduleId: string,
+): Promise<void> {
+  try {
+    await cloudRequest(
+      config.apiKey,
+      `/api/v1/schedules/${encodeURIComponent(cloudScheduleKey(scheduleId))}`,
+      { method: "DELETE", timeoutMs: 15_000 },
+    );
+  } catch (err) {
+    if (err instanceof CloudApiError && err.status === 404) return;
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Worker token — authenticates the cloud-fired scheduled-sweep task's tick
+// callback (POST /api/tasks/schedules/tick). Sealed in TaskCloudConfig;
+// minted lazily; constant-time compared (tokensEqual).
+// ---------------------------------------------------------------------------
+
+/**
+ * Read (or mint on first read) the sealed worker token. Null when the
+ * filesystem/DB is read-only (serverless) — durable cloud cron then stays
+ * disabled and the in-app loop carries the schedules.
+ */
+export async function getCloudWorkerToken(): Promise<string | null> {
+  try {
+    const row = await prisma.taskCloudConfig.findUnique({
+      where: { id: CONFIG_ROW_ID },
+      select: { encryptedWorkerToken: true },
+    });
+    const existing = row?.encryptedWorkerToken ? openSecret(row.encryptedWorkerToken) : null;
+    if (existing) return existing;
+    const token = randomBytes(32).toString("hex");
+    await prisma.taskCloudConfig.update({
+      where: { id: CONFIG_ROW_ID },
+      data: { encryptedWorkerToken: sealSecret(token) },
+    });
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/** Constant-time worker-token check for the tick route. */
+export async function verifyWorkerToken(presented: string): Promise<boolean> {
+  const expected = await getCloudWorkerToken();
+  if (!expected) return false;
+  return tokensEqual(presented, expected);
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +1002,9 @@ export async function dispatchCloudRun(
   try {
     const cloudRunId = await triggerCloudTaskRun(config, cloudPayload, {
       tags: [`run:${row.id}`],
+      // PRD §4 concurrency controls: per-user queue key — caps each user at
+      // 2 concurrent cloud runs (agent-run task's queue/concurrency config).
+      concurrencyKey: row.userId || "anon",
     });
     await prisma.taskRun
       .update({ where: { id: runId }, data: { externalRunId: cloudRunId } })
@@ -984,6 +1133,12 @@ export async function syncCloudRunIntoRow(runId: string): Promise<boolean> {
       ...(meta.chunkSeq > lastSyncedWorkerSeq
         ? { [CLOUD_CHUNK_SEQ_KEY]: meta.chunkSeq }
         : {}),
+      // HITL approval request (PRD §3.3): the worker published it into run
+      // metadata while SUSPENDED on the waitpoint — mirror it into the row's
+      // progress JSON so /api/tasks/status surfaces the Approve/Deny banner.
+      // Once decided, /api/tasks/approval patches .state locally (the worker
+      // drops the field after resuming).
+      ...(meta.approval ? { approval: meta.approval } : {}),
     };
     await mergeProgressIntoRun(runId, patch as Partial<TaskRunProgress>);
     if (meta.chunkSeq > lastSyncedWorkerSeq || newChunks.length > 0) changed = true;
@@ -1002,15 +1157,23 @@ export async function syncCloudRunIntoRow(runId: string): Promise<boolean> {
   // ── Terminal settle (output artifacts) ──────────────────────────────────
   if (view.state.status !== "live") {
     const output = view.output;
-    const error =
+    // HITL denial (PRD §3.3/§5.1): the cloud run itself COMPLETED (the task
+    // returned normally) but its output says the human DENIED the approval —
+    // the honest row status is "cancelled", with the denial as the error.
+    const denied = view.state.status === "completed" && output?.status === "cancelled";
+    const rowStatus: "completed" | "cancelled" | "failed" = denied
+      ? "cancelled"
+      : view.state.status;
+    const failedError =
       view.state.status === "failed"
         ? (view.state.error ?? output?.error ?? view.error ?? "the run failed on Trigger.dev Cloud")
         : null;
+    const error = denied ? (output?.error ?? "Denied by human approval.") : failedError;
 
     const settled = await prisma.taskRun.updateMany({
       where: { id: runId, status: { in: ["queued", "running"] } },
       data: {
-        status: view.state.status,
+        status: rowStatus,
         phase: "done",
         error,
         finishedAt: new Date(),
@@ -1213,7 +1376,10 @@ function saveDeployState(state: NonNullable<WorkerBootstrapState["deploy"]>): vo
  * deployment persists server-side and only needs re-deploying when the
  * worker code changes, which happens from a checkout anyway.
  */
-export async function autoDeployWorker(config: CloudConfig): Promise<WorkerBootstrapState["deploy"]> {
+export async function autoDeployWorker(
+  config: CloudConfig,
+  opts?: { appUrl?: string },
+): Promise<WorkerBootstrapState["deploy"]> {
   const state = loadDeployState();
   if (state.state === "running") return state; // already in flight
 
@@ -1261,6 +1427,14 @@ export async function autoDeployWorker(config: CloudConfig): Promise<WorkerBoots
   };
 
   try {
+    // DURABLE-CRON ENV (PRD §3.4): the deployed scheduled-sweep task calls
+    // back into the app's /api/tasks/schedules/tick — it needs the public
+    // app origin and the sealed worker token as env vars. Env APP_URL wins
+    // (proxies can make the request origin internal); the request origin is
+    // the fallback passed by the connect route.
+    const appUrl = (process.env.APP_URL?.trim() || opts?.appUrl?.trim() || "").replace(/\/+$/, "");
+    const workerToken = await getCloudWorkerToken().catch(() => null);
+
     const child = spawn(
       "npx",
       ["--yes", "trigger.dev@latest", "deploy", "--env", "prod", "--plain", "--skip-update-check"],
@@ -1270,6 +1444,8 @@ export async function autoDeployWorker(config: CloudConfig): Promise<WorkerBoots
           ...process.env,
           TRIGGER_ACCESS_TOKEN: config.apiKey,
           TRIGGER_PROJECT_REF: projectRef,
+          ...(appUrl ? { APP_URL: appUrl } : {}),
+          ...(workerToken ? { ONYX_WORKER_TOKEN: workerToken } : {}),
           npm_config_yes: "true",
         },
         detached: true,

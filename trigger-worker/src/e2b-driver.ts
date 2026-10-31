@@ -21,6 +21,7 @@ import type {
 import {
   MANIFEST_PATH,
   TASK_ARTIFACT_EXCLUDES,
+  TASK_MAX_DURATION_MS,
   TASK_PAYLOAD_BUDGET,
 } from "./protocol.js";
 import { HEADLESS_RUNNER_PY } from "./runner-source.js";
@@ -40,9 +41,13 @@ export interface MountReport {
 // Sandbox lifecycle
 // ---------------------------------------------------------------------------
 
-/** Create a dedicated task sandbox with the PRD §4.2 hard window. The E2B
- *  key ALWAYS comes from the run payload (the app resolved it from the
- *  triggering client's vault or its server env). */
+/** Create a dedicated task sandbox. The E2B key ALWAYS comes from the run
+ *  payload (the app resolved it from the triggering client's vault or its
+ *  server env). The sandbox window follows the run's execution window
+ *  (PRD §4 timeout freedom — up to TASK_MAX_DURATION_MS = 2h); when the
+ *  account's tier rejects the larger window the create is retried once at
+ *  the legacy 30-minute cap so long-horizon runs still execute, just with a
+ *  shorter live window. */
 export async function createTaskSandbox(
   run: AgentRunPayload["run"],
   e2bApiKey: string,
@@ -53,19 +58,27 @@ export async function createTaskSandbox(
       "No E2B sandbox key available for this run — add one in Settings → Sandboxes (or set E2B_API_KEY on the app server) and retry.",
     );
   }
-  const timeoutMs = Math.min(
+  const requestedMs = Math.min(
     Number.isFinite(run.timeoutMs) ? run.timeoutMs : 30 * 60 * 1000,
-    30 * 60 * 1000,
+    TASK_MAX_DURATION_MS,
   );
-  return Sandbox.create({
-    apiKey,
-    timeoutMs,
-    metadata: {
-      "onyx-app": "onyx",
-      "onyx-scope": "background-task-worker",
-      "onyx-task": run.runId,
-    },
-  });
+  const create = (timeoutMs: number) =>
+    Sandbox.create({
+      apiKey,
+      timeoutMs,
+      metadata: {
+        "onyx-app": "onyx",
+        "onyx-scope": "background-task-worker",
+        "onyx-task": run.runId,
+      },
+    });
+  try {
+    return await create(requestedMs);
+  } catch (err) {
+    if (requestedMs <= 30 * 60 * 1000) throw err;
+    // Tier caps the window — fall back to the 30-minute legacy cap.
+    return await create(30 * 60 * 1000);
+  }
 }
 
 /** Best-effort kill — never throws (finalize must not fail on cleanup). */

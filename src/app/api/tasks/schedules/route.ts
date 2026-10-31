@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { armDueSchedules, armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
+import { getCloudConfig, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -60,6 +61,30 @@ function validateConfig(raw: unknown, taskType: string): { error: string } | { v
     return { error: "terminal_command schedules require config.command" };
   }
   return { value: config };
+}
+
+/** Durable-cron mirror (Trigger.dev PRD §3.4): register the row's cron on
+ *  the operator's Trigger.dev Cloud so it fires even when no browser polls
+ *  and the Next.js server is asleep. Best-effort — the in-app sweep loop
+ *  remains the fallback; NEVER blocks or fails the HTTP response. */
+async function mirrorScheduleToCloud(
+  scheduleId: string,
+  cron: string,
+  timezone: string,
+  active: boolean,
+): Promise<void> {
+  if (!active) return; // deactivation is handled by the caller's remove path
+  const cloud = await getCloudConfig().catch(() => null);
+  if (!cloud) return;
+  try {
+    await upsertCloudSchedule(cloud, { scheduleId, cron, timezone });
+    console.log(`[tasks] cloud cron registered for schedule ${scheduleId} (${cron} ${timezone})`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[tasks] cloud cron registration failed for schedule ${scheduleId} (in-app loop carries it): ${message.slice(0, 160)}`,
+    );
+  }
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -131,6 +156,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       await armSchedule(created);
       row =
         (await prisma.taskSchedule.findUnique({ where: { id: created.id } })) ?? created;
+      // Durable cloud mirror (PRD §3.4) — best-effort, never blocks creation.
+      await mirrorScheduleToCloud(row.id, row.cronExpr, row.timezone, row.active).catch(() => undefined);
     }
     return NextResponse.json({ ok: true, schedule: toScheduleRecord(row) });
   } catch (err) {

@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
+import { deleteCloudSchedule, getCloudConfig, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -48,6 +49,38 @@ function validTimezone(raw: unknown): string | null {
     return raw.trim();
   } catch {
     return null;
+  }
+}
+
+/** Durable-cron mirror helpers (Trigger.dev PRD §3.4) — best-effort, never
+ *  block or fail the HTTP response; the in-app sweep loop is the fallback. */
+async function mirrorScheduleToCloud(
+  scheduleId: string,
+  cron: string,
+  timezone: string,
+): Promise<void> {
+  const cloud = await getCloudConfig().catch(() => null);
+  if (!cloud) return;
+  try {
+    await upsertCloudSchedule(cloud, { scheduleId, cron, timezone });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[tasks] cloud cron update failed for schedule ${scheduleId} (in-app loop carries it): ${message.slice(0, 160)}`,
+    );
+  }
+}
+
+async function removeScheduleFromCloud(scheduleId: string): Promise<void> {
+  const cloud = await getCloudConfig().catch(() => null);
+  if (!cloud) return;
+  try {
+    await deleteCloudSchedule(cloud, scheduleId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[tasks] cloud cron removal failed for schedule ${scheduleId}: ${message.slice(0, 160)}`,
+    );
   }
 }
 
@@ -151,9 +184,13 @@ export async function PATCH(
           where: { id },
           data: { nextRunAt: null },
         });
+        // Deactivated → drop its durable cloud cron mirror (PRD §3.4).
+        await removeScheduleFromCloud(id).catch(() => undefined);
       } else {
         await armSchedule(row);
         row = (await prisma.taskSchedule.findUnique({ where: { id } })) ?? row;
+        // Activated / cron / timezone changed → refresh the cloud mirror.
+        await mirrorScheduleToCloud(id, row.cronExpr, row.timezone).catch(() => undefined);
       }
     }
     return NextResponse.json({ ok: true, schedule: toScheduleRecord(row) });
@@ -179,6 +216,8 @@ export async function DELETE(
       data: { scheduleId: null },
     });
     await prisma.taskSchedule.delete({ where: { id } });
+    // Drop its durable cloud cron mirror too (PRD §3.4) — best-effort.
+    await removeScheduleFromCloud(id).catch(() => undefined);
     return NextResponse.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

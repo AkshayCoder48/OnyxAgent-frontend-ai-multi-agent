@@ -51,7 +51,7 @@ export const BACKGROUND_TASK_TYPES: readonly BackgroundTaskType[] = [
 ];
 
 /** Hard sandbox execution cap — PRD §4.2 ("maximum 30 minutes execution"). */
-export const TASK_MAX_DURATION_MS = 30 * 60 * 1000;
+export const TASK_MAX_DURATION_MS = 2 * 60 * 60 * 1000; // PRD §4 timeout freedom: up to 2h durable windows (default stays 30min)
 /** Default execution window. */
 export const TASK_DEFAULT_DURATION_MS = 30 * 60 * 1000;
 /** Rounds budget (USER DIRECTIVE: "remove the limit of 24 rounds") — the old
@@ -147,6 +147,14 @@ export interface TaskRunConfig {
   command?: string;
   /** terminal_command only: working directory (default /home/user). */
   cwd?: string;
+  /**
+   * HUMAN-IN-THE-LOOP (Trigger.dev PRD §3.3): when true the cloud task
+   * suspends on a Trigger.dev WAITPOINT TOKEN before executing anything
+   * sensitive and waits indefinitely for the user to Approve/Deny from the
+   * web UI (`POST /api/tasks/approval`). Destructive terminal commands
+   * auto-gate even without this flag.
+   */
+  requireApproval?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +243,18 @@ export interface TaskRunProgress {
   };
   logTail?: string;
   lastUpdate: number;
+  /**
+   * HITL approval request mirror (Trigger.dev PRD §3.3): present while the
+   * cloud run is SUSPENDED on a waitpoint token. Drives the PAUSED banner
+   * + Approve/Deny buttons (PRD §5.1). `state` is patched by
+   * /api/tasks/approval once the user decides.
+   */
+  approval?: {
+    token: string;
+    reason: string;
+    createdAt: number;
+    state?: "approved" | "denied";
+  };
 }
 
 export interface TaskArtifactSummary {
@@ -383,13 +403,30 @@ export interface CloudRunMetadata {
   chunkSeq: number;
   /** Newest chunks (ring, newest last) — drained by the app each poll. */
   chunks: Array<Omit<TaskStatusChunk, "seq"> & { seq: number }>;
+  /**
+   * HITL approval request (Trigger.dev PRD §3.3): present while the cloud
+   * run is SUSPENDED on a waitpoint token. `token` is the trigger.dev
+   * waitpoint id the app completes via
+   * POST /api/v1/waitpoints/tokens/:id/complete when the user decides.
+   * `state` mirrors the decision once made (the app patches it locally).
+   */
+  approval?: {
+    token: string;
+    reason: string;
+    createdAt: number;
+    /** App-side mirror of the decision ("approved" | "denied") — the
+     * worker never sets this; it only resumes from the completed token. */
+    state?: "approved" | "denied";
+  };
   updatedAt: number;
 }
 
 /** The cloud task's return value, read by the app from the finished run. */
 export interface CloudRunOutput {
   runId: string;
-  status: "completed" | "failed";
+  /** "cancelled" = human approval was DENIED (PRD §5.1 HITL) or the run
+   *  was aborted before producing artifacts. */
+  status: "completed" | "failed" | "cancelled";
   error?: string;
   sandboxId?: string;
   artifacts: CloudArtifact[];

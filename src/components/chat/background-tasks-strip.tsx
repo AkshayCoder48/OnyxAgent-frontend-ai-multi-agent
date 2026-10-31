@@ -11,6 +11,7 @@ import {
   Layers,
   ScrollText,
   Server,
+  ShieldAlert,
   Square,
   Type,
   Wrench,
@@ -23,6 +24,7 @@ import { useBackgroundTask, useBackgroundTasks } from "@/hooks";
 import {
   backgroundTaskService,
   cancelTask,
+  decideTaskApproval,
   fetchArtifact,
   syncRunToConversation,
   type TaskArtifactContent,
@@ -199,6 +201,7 @@ interface RunCardProps {
   onStop: () => void;
   onSync: () => void;
   onDownload: (artifact: TaskArtifactSummary) => void;
+  onApproval: (approved: boolean) => void;
 }
 
 function RunCard({
@@ -211,6 +214,7 @@ function RunCard({
   onStop,
   onSync,
   onDownload,
+  onApproval,
 }: RunCardProps) {
   const live = isLive(run);
   const start = Date.parse(run.startedAt);
@@ -226,6 +230,14 @@ function RunCard({
   const title = run.title?.trim() || excerpt(run.prompt, 60) || "Background task";
   const downloadable = run.artifacts.filter((a) => isDownloadableKind(a.kind));
 
+  // HITL state (Trigger.dev PRD §5.1): a live run with a PENDING approval
+  // request is PAUSED on a cloud waitpoint — the pill says "paused", the
+  // banner blocks with Approve/Deny, and a decided approval shows the
+  // resume note while the cloud run picks the decision up.
+  const approval = live ? (progress?.approval ?? null) : null;
+  const approvalPending = !!approval && !approval.state;
+  const pillLabel = approvalPending ? "paused" : run.status;
+
   return (
     <Collapsible open={expanded} onOpenChange={() => onToggle()}>
       <div className="border-border/70 rounded-xl border px-3 py-2.5">
@@ -233,13 +245,15 @@ function RunCard({
           <span
             className={cn(
               "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase",
-              statusPillClass(run.status),
+              approvalPending
+                ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                : statusPillClass(run.status),
             )}
           >
-            {run.status === "running" && (
+            {run.status === "running" && !approvalPending && (
               <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
             )}
-            {run.status}
+            {pillLabel}
           </span>
           <span className="inline-flex shrink-0 items-center rounded-full bg-foreground/[0.06] px-2 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
             {TYPE_BADGES[run.type]}
@@ -261,8 +275,76 @@ function RunCard({
         </div>
 
         <p className="text-muted-foreground mt-1.5 truncate font-mono text-[11px] tracking-wide">
-          {[roundLabel, stageLabel, elapsed].filter(Boolean).join(" · ") || "…"}
+          {run.status === "queued"
+            ? "Agent is waiting for cloud allocation…"
+            : [roundLabel, stageLabel, elapsed].filter(Boolean).join(" · ") || "…"}
         </p>
+
+        {/* PRD §5.1 — PAUSED (HITL): high-priority banner blocking execution
+            until the user explicitly selects Approve or Deny. */}
+        {approval && (
+          <div
+            className={cn(
+              "mt-2 rounded-lg border px-2.5 py-2",
+              approvalPending
+                ? "border-amber-500/40 bg-amber-500/10"
+                : "border-border/70 bg-foreground/[0.03]",
+            )}
+          >
+            <p
+              className={cn(
+                "flex items-center gap-1.5 text-[12px] font-medium",
+                approvalPending
+                  ? "text-amber-700 dark:text-amber-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              {approvalPending ? (
+                <>
+                  <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  Approval required — execution is paused in the cloud
+                </>
+              ) : approval.state === "approved" ? (
+                <>
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  Approved — resuming the run…
+                </>
+              ) : (
+                <>
+                  <Square className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  Denied — the run is being cancelled…
+                </>
+              )}
+            </p>
+            {approval.reason && (
+              <p className="text-muted-foreground mt-0.5 text-[11px] leading-snug">
+                {excerpt(approval.reason, 240)}
+              </p>
+            )}
+            {approvalPending && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onApproval(true)}
+                  disabled={busy}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-full border border-emerald-600/40 bg-emerald-600/10 px-3 font-mono text-[11px] tracking-wider text-emerald-700 uppercase transition-colors hover:bg-emerald-600/20 disabled:opacity-50 dark:text-emerald-400"
+                >
+                  <CheckCircle2 className="h-3 w-3" />
+                  approve action
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onApproval(false)}
+                  disabled={busy}
+                  className="text-destructive hover:bg-destructive/10 inline-flex h-7 items-center gap-1.5 rounded-full border border-destructive/30 px-3 font-mono text-[11px] tracking-wider uppercase transition-colors disabled:opacity-50"
+                >
+                  <Square className="h-3 w-3" />
+                  deny action
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {live && (
@@ -399,6 +481,21 @@ export function BackgroundTasksStrip() {
     }
   }
 
+  /** HITL decision (Trigger.dev PRD §3.3/§5.1): deliver Approve/Deny to the
+   *  suspended cloud run via the waitpoint token. */
+  async function handleApproval(runId: string, approved: boolean) {
+    setBusyRunId(runId);
+    try {
+      await decideTaskApproval(runId, approved);
+      toast.success(approved ? "Approved — the run is resuming" : "Denied — the run will be cancelled");
+      invalidate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to deliver the approval");
+    } finally {
+      setBusyRunId(null);
+    }
+  }
+
   async function handleSync(runId: string) {
     if (!userId) return;
     setBusyRunId(runId);
@@ -495,6 +592,7 @@ export function BackgroundTasksStrip() {
                 onStop={() => void handleStop(run.runId)}
                 onSync={() => void handleSync(run.runId)}
                 onDownload={(artifact) => void handleDownload(run.runId, artifact)}
+                onApproval={(approved) => void handleApproval(run.runId, approved)}
               />
             ))}
           </div>

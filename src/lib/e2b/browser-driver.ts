@@ -41,7 +41,7 @@
  * failing every command forever even after the source here was fixed.
  * Bump whenever the Python source changes meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.10.21";
+export const BROWSER_DRIVER_VERSION = "2026.10.31";
 
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
@@ -66,6 +66,8 @@ DOWNLOADS = "/home/user/downloads"
 RECORDINGS = os.path.join(DIR, "recordings")
 READY = os.path.join(DIR, ".ready")
 VERSION_PATH = os.path.join(DIR, ".version")
+PREBOOT = os.path.join(DIR, ".preboot")
+BOOT_LOG = os.path.join(DIR, "boot.log")
 DRIVER_VERSION = "${BROWSER_DRIVER_VERSION}"
 LIVE_JSON = os.path.join(DIR, "live.json")
 LIVE_JPG = os.path.join(DIR, "live.jpg")
@@ -337,6 +339,18 @@ def log(msg):
     try:
         with open(os.path.join(DIR, "driver.log"), "a") as f:
             f.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def boot_log(msg):
+    """Append a preboot progress line to BOOT.log — the file the session
+    manager's boot poll narrates live (driver.log is NOT polled during
+    boot). Used only by the startup PREBOOT so a cold browser download
+    shows real movement in the tool UI instead of a silent spinner."""
+    try:
+        with open(BOOT_LOG, "a") as f:
+            f.write("[driver %s] %s\n" % (time.strftime("%H:%M:%S"), msg))
     except Exception:
         pass
 
@@ -1657,6 +1671,21 @@ HANDLERS = {
 
 
 def main():
+    # STARTUP PREBOOT (browser_startup_failed fix): when boot.sh left a
+    # .preboot marker, boot the BROWSER before declaring READY — "ready"
+    # then means "browser USABLE". The first use_browser action no longer
+    # hides a ~200 MB binary download behind its own action timeout (the
+    # 6-10-minute silent hang), and launch failures surface in the boot
+    # poll window (narrated via boot.log) instead of a bare action timeout.
+    # A preboot failure is NOT fatal: the first command retries the boot
+    # and reports the real error.
+    if os.path.exists(PREBOOT):
+        boot_log("prebooting the browser runtime (a first launch may need to download the binary)…")
+        try:
+            boot_browser()
+            boot_log("browser prebooted (runtime: %s) — reporting ready" % (runtime,))
+        except Exception as e:
+            boot_log("preboot failed: %s — the first command will retry the boot" % (e,))
     with open(READY, "w") as f:
         f.write("1")
     with open(VERSION_PATH, "w") as f:
