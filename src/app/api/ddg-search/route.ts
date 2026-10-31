@@ -1,6 +1,6 @@
 // ============================================================================
-// Unified Web Search API — LangSearch (primary, when API key is supplied)
-// with Miklium fallback (https://miklium.vercel.app/api/search).
+// Unified Web Search API — LangSearch (primary for web, when API key is
+// supplied), DuckDuckGo images (primary for image), and Miklium fallbacks.
 //
 // When the client passes `langsearch_key` (the user's decrypted LangSearch
 // API key, fetched from their encrypted settings on the client), `web`
@@ -8,8 +8,13 @@
 // API at https://api.langsearch.com/v1/web-search — which returns enhanced
 // results with long-text summaries, ideal for feeding clean context to an LLM.
 //
+// `image` queries are served by DuckDuckGo via
+// @mudbill/duckduckgo-images-api (src/lib/search/ddg-images.ts) — no API key,
+// no billing, and real DDG thumbnails/dimensions. If DDG errors out or
+// returns nothing, we transparently fall back to the Miklium Search API.
+//
 // If no key is supplied, LangSearch returns an error, or the search type is
-// `image` / `video` (LangSearch only does web search), we transparently
+// `video` (neither LangSearch nor DDG support videos), we transparently
 // fall back to the Miklium Search API — a Yahoo-based search engine that
 // returns text, image, and video results.
 //
@@ -24,6 +29,7 @@
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
+import { searchDDGImages } from "@/lib/search/ddg-images";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +73,7 @@ function getFavicon(domain: string): string {
   return `https://external-content.duckduckgo.com/ip3/${domain}.ico`;
 }
 
-// ---- Miklium Search (fallback for web, primary for images/videos) ----
+// ---- Miklium Search (fallback for web, fallback for images, primary for videos) ----
 
 /**
  * Call the Miklium Search API.
@@ -285,7 +291,7 @@ export async function GET(req: NextRequest) {
 
   try {
     let results: SearchResult[] = [];
-    let provider: "langsearch" | "miklium" = "miklium";
+    let provider: "langsearch" | "miklium" | "ddg" = "miklium";
 
     // For web search: try LangSearch first if key is available, else Miklium
     if (type === "web") {
@@ -307,10 +313,24 @@ export async function GET(req: NextRequest) {
         results = await searchMiklium(query, "web", limit);
       }
     } else if (type === "image") {
-      // Image search always uses Miklium (LangSearch doesn't support images)
-      results = await searchMiklium(query, "image", limit);
+      // Image search: DuckDuckGo first (no key, real thumbnails + dimensions);
+      // Miklium stays as the automatic fallback when DDG errors out or
+      // returns nothing (the package can legitimately yield an empty array
+      // after its internal retries — treat that as "backend down").
+      try {
+        const ddgResults = await searchDDGImages(query, limit);
+        if (ddgResults.length > 0) {
+          results = ddgResults;
+          provider = "ddg";
+        } else {
+          results = await searchMiklium(query, "image", limit);
+        }
+      } catch (err) {
+        console.warn("[image-search] DuckDuckGo failed, falling back to Miklium:", err instanceof Error ? err.message : String(err));
+        results = await searchMiklium(query, "image", limit);
+      }
     } else if (type === "video") {
-      // Video search always uses Miklium (LangSearch doesn't support videos)
+      // Video search always uses Miklium (neither LangSearch nor DDG support videos)
       results = await searchMiklium(query, "video", limit);
     } else {
       // Unknown type — default to web

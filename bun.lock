@@ -18,6 +18,7 @@
         "@hookform/resolvers": "^5.1.1",
         "@hopx-ai/sdk": "^0.5.1",
         "@mdxeditor/editor": "^3.39.1",
+        "@mudbill/duckduckgo-images-api": "^2.0.1",
         "@opentelemetry/api": "^1.9.1",
         "@prisma/client": "^6.11.1",
         "@radix-ui/react-accordion": "^1.2.11",
@@ -504,6 +505,8 @@
     "@mdxeditor/gurx": ["@mdxeditor/gurx@1.2.4", "https://registry.npmjs.com/@mdxeditor/gurx/-/gurx-1.2.4.tgz", { "peerDependencies": { "react": ">= 18 || >= 19", "react-dom": ">= 18 || >= 19" } }, "sha512-9ZykIFYhKaXaaSPCs1cuI+FvYDegJjbKwmA4ASE/zY+hJY6EYqvoye4esiO85CjhOw9aoD/izD/CU78/egVqmg=="],
 
     "@microsoft/fetch-event-source": ["@microsoft/fetch-event-source@2.0.1", "https://registry.npmjs.com/@microsoft/fetch-event-source/-/fetch-event-source-2.0.1.tgz", {}, "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="],
+
+    "@mudbill/duckduckgo-images-api": ["@mudbill/duckduckgo-images-api@2.0.1", "", {}, "sha512-Mg6WCnwzfxQFtfx9gFCadzvEbkcBvDtfqXNj3qEJgqnI3GiGQl9lbm7YS8IBXqFHpFjo9U9SW2dcn++g5lPEog=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@0.2.12", "https://registry.npmjs.com/@napi-rs/wasm-runtime/-/wasm-runtime-0.2.12.tgz", { "dependencies": { "@emnapi/core": "^1.4.3", "@emnapi/runtime": "^1.4.3", "@tybys/wasm-util": "^0.10.0" } }, "sha512-ZVWUcfwY4E/yPitQJl481FjFo3K22D6qF0DuFH6Y/nbnE11GY5uguDxZMGXPQ8WQ0128MXQD7TnfHyK4oWoIJQ=="],
 

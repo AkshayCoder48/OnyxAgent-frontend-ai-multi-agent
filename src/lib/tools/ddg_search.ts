@@ -7,8 +7,11 @@
 //     returns enhanced results with long-text summaries — better recall and
 //     cleaner context for the LLM. If no key is set or LangSearch errors out,
 //     the proxy transparently falls back to the Miklium Search API (Yahoo-based).
-//   - **image_search**: Always uses Miklium (LangSearch doesn't support images).
-//   - **video_search**: Always uses Miklium (LangSearch doesn't support videos).
+//   - **image_search**: DuckDuckGo via @mudbill/duckduckgo-images-api — no
+//     API key, no billing, real thumbnails + dimensions. Miklium stays as the
+//     automatic fallback when DDG errors out or returns nothing.
+//   - **video_search**: Always uses Miklium (neither LangSearch nor DDG
+//     support videos).
 //
 // The LangSearch key is read lazily from
 // `settingsService.getDecryptedLangSearchApiKey` on every call so changes in
@@ -101,7 +104,7 @@ registerTool(
 // ---- Image Search ----
 registerTool(
   "image_search",
-  "Search for images using Miklium (Yahoo-based). Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants to find pictures, photos, diagrams, or visual content.",
+  "Search for images using DuckDuckGo. Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants to find pictures, photos, diagrams, or visual content.",
   {
     type: "object",
     properties: {
@@ -115,7 +118,9 @@ registerTool(
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
     try {
-      const { results } = await search(query, "image", limit, ctx);
+      // The proxy tries DuckDuckGo first and reports the provider that
+      // actually served the results ("ddg", or "miklium" on fallback).
+      const { results, provider } = await search(query, "image", limit, ctx);
       return {
         success: true,
         output: {
@@ -123,7 +128,7 @@ registerTool(
           type: "image",
           results,
           count: results.length,
-          provider: "miklium",
+          provider: provider ?? "ddg",
         },
       };
     } catch (e) {

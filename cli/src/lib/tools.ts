@@ -9,6 +9,7 @@
 import type { Executor, ExecOptions } from "./executor.js";
 import { loadConfig } from "./config.js";
 import { getSecret } from "./vault.js";
+import { imageSearch } from "@mudbill/duckduckgo-images-api";
 
 export interface ToolDef {
   name: string;
@@ -299,9 +300,13 @@ registerTool({
 });
 
 // image_search
+// DuckDuckGo primary (via @mudbill/duckduckgo-images-api — no key, no
+// billing, real thumbnails + dimensions), Miklium fallback when DDG errors
+// out or returns nothing. Output shape is unchanged from the Miklium-only
+// era: { imageUrl, title, width, height, source (reference page) }.
 registerTool({
   name: "image_search",
-  description: "Search for images. Returns image URLs, titles, and dimensions.",
+  description: "Search for images using DuckDuckGo. Returns image URLs, titles, and dimensions.",
   parameters: {
     type: "object",
     properties: {
@@ -315,6 +320,45 @@ registerTool({
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
     try {
+      // ---- DuckDuckGo (primary) ----
+      try {
+        // Race an 8s ceiling: the package has no abort support and a
+        // dropped-SYN egress path hangs ~2min in Node's TCP retries.
+        const raw = await Promise.race([
+          imageSearch({
+            query,
+            safe: true, // filter adult content
+            retries: 2,
+            iterations: 1, // one pass = up to 100 rows; sliced to `limit`
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("DuckDuckGo image search timed out after 8000ms")),
+              8_000,
+            ),
+          ),
+        ]);
+        const seen = new Set<string>();
+        const results = (raw ?? [])
+          .filter((r) => r?.image && !seen.has(r.image) && seen.add(r.image))
+          .slice(0, limit)
+          .map((r) => ({
+            imageUrl: r.image,
+            thumbnail: r.thumbnail || r.image,
+            title: r.title,
+            width: r.width,
+            height: r.height,
+            source: r.url || r.image, // reference page
+          }));
+        if (results.length > 0) {
+          return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
+        }
+        // Empty after retries — treat as "backend down" and fall through.
+      } catch {
+        // Token/network failure — fall through to Miklium.
+      }
+
+      // ---- Miklium (fallback) ----
       const res = await fetch("https://miklium.vercel.app/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -324,12 +368,13 @@ registerTool({
       const data = await res.json() as any;
       const results = (data.results || []).map((r: { imageUrl: string; title: string; size?: { width?: number; height?: number }; referenceUrl: string }) => ({
         imageUrl: r.imageUrl,
+        thumbnail: r.imageUrl,
         title: r.title,
         width: r.size?.width,
         height: r.size?.height,
         source: r.referenceUrl,
       }));
-      return { success: true, output: { query, results, count: results.length } };
+      return { success: true, output: { query, results, count: results.length, provider: "miklium" } };
     } catch (e) {
       return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
     }

@@ -39,6 +39,7 @@
   },
   "dependencies": {
     "@e2b/code-interpreter": "^2.7.1",
+    "@mudbill/duckduckgo-images-api": "^2.0.1",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "ink": "^7.1.1",

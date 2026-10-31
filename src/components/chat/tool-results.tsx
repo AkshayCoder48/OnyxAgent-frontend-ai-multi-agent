@@ -367,11 +367,14 @@ export function WebSearchResults({ result }: ResultProps) {
   );
 }
 
-// ---- Image Search Results (Miklium) — Swipeable Carousel ----
-// Miklium returns: { imageUrl, title, referenceUrl, size: {width, height}, query }
+// ---- Image Search Results — Swipeable Carousel ----
+// Served by DuckDuckGo (provider "ddg") with a Miklium fallback
+// (provider "miklium") — both emit the same result shape:
+// { imageUrl, title, url (reference page), width, height, thumbnail, domain }
 export function ImageSearchResults({ result }: ResultProps) {
   const parsed = parseResult<{
     output?: {
+      provider?: string;
       results?: Array<{
         title?: string;
         imageUrl?: string;
@@ -421,7 +424,7 @@ export function ImageSearchResults({ result }: ResultProps) {
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
           <ImageIcon className="h-3 w-3" /> {total} image{total !== 1 ? "s" : ""}
         </div>
-        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">miklium</Badge>
+        <Badge variant="secondary" className="text-[9px] font-mono uppercase tracking-wider">{parsed?.output?.provider ?? "miklium"}</Badge>
       </div>
 
       {/* Swipeable image carousel */}

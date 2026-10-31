@@ -6,6 +6,7 @@
       "name": "@onyxagent/cli",
       "dependencies": {
         "@e2b/code-interpreter": "^2.7.1",
+        "@mudbill/duckduckgo-images-api": "^2.0.1",
         "chalk": "^5.3.0",
         "commander": "^12.1.0",
         "ink": "^7.1.1",
@@ -30,6 +31,8 @@
     "@e2b/code-interpreter": ["@e2b/code-interpreter@2.7.1", "", { "dependencies": { "e2b": "^2.39.0" } }, "sha512-1M4YhyWOWZzZyt1XessPbMwkVOsfpsWTiOgPKbA60CtDQasUQA8bRdN7HxsajYMrNxF5tk8J0fwrY7oa2oTK4g=="],
 
     "@isaacs/fs-minipass": ["@isaacs/fs-minipass@4.0.1", "", { "dependencies": { "minipass": "^7.0.4" } }, "sha512-wgm9Ehl2jpeqP3zw/7mo3kRHFp5MEDhqAdwy1fTGkHAwnkGOVsgpvQhL8B5n1qlb01jV3n/bI0ZfZp5lWA1k4w=="],
+
+    "@mudbill/duckduckgo-images-api": ["@mudbill/duckduckgo-images-api@2.0.1", "", {}, "sha512-Mg6WCnwzfxQFtfx9gFCadzvEbkcBvDtfqXNj3qEJgqnI3GiGQl9lbm7YS8IBXqFHpFjo9U9SW2dcn++g5lPEog=="],
 
     "@types/node": ["@types/node@22.20.1", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q=="],
 
