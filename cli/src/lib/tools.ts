@@ -252,15 +252,20 @@ registerTool({
   },
 });
 
-// DuckDuckGo search tools — web (HTML SERP), images (@mudbill package),
-// videos (vqd token + v.js JSON endpoint). All keyless — no third-party
-// search service, no API keys.
+// Search tools (USER DIRECTIVE 2026-10-31: "Keep miklium for websearch and
+// for image keep ddg"):
+//   - web_search: Miklium (Yahoo-powered, https://miklium.vercel.app) with
+//     the keyless DuckDuckGo HTML SERP as the automatic fallback.
+//   - image_search: DuckDuckGo only (@mudbill package — no key, no billing).
+//   - video_search: DuckDuckGo only (vqd token + v.js JSON endpoint).
 //
-// "No results" handling: DuckDuckGo legitimately answers with an empty
+// "No results" handling: every engine legitimately answers with an empty
 // result set when nothing matched. That is a SUCCESS with an empty list so
 // the agent says "nothing found" instead of dumping a raw backend error at
-// the user. Real failures are sanitized: provider names / raw JSON bodies
-// never surface in the CLI output.
+// the user. Real failures degrade the same way — a friendly "busy, try
+// again" notice — so a {"success":false,...,"error":...} blob is NEVER
+// emitted (the reported bug), and provider names / raw JSON bodies never
+// surface in the output.
 
 const DDG_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -287,19 +292,25 @@ function searchLabel(type: "web" | "image" | "video"): string {
   return type === "web" ? "Web search" : type === "image" ? "Image search" : "Video search";
 }
 
-function sanitizedSearchError(type: "web" | "image" | "video", e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e);
-  // "miklium" stays in the blocklist on purpose: it is the provider whose
-  // raw errors once leaked into the chat — if any stale/regressed upstream
-  // ever emits it again, it gets scrubbed here.
-  const cleaned = raw
-    .replace(/miklium|duckduckgo|langsearch/gi, "search backend")
-    .replace(/\{[\s\S]*\}/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned && cleaned !== raw
-    ? `${searchLabel(type)} failed: ${cleaned}`
-    : `${searchLabel(type)} is temporarily unavailable. Please try again in a moment.`;
+function searchPlural(type: "web" | "image" | "video"): string {
+  return type === "web" ? "web results" : type === "image" ? "images" : "videos";
+}
+
+/** Graceful "engine unreachable" output — the failure path for every
+ *  search tool returns this INSTEAD of an error blob, mirroring the app's
+ *  /api/ddg-search route (user directive: fix in ALL searches). No upstream
+ *  text is embedded, so nothing can leak. */
+function busySearchOutput(query: string, type: "web" | "image" | "video") {
+  return {
+    success: true as const,
+    output: {
+      query,
+      results: [],
+      count: 0,
+      provider: type === "web" ? "miklium" : "ddg",
+      message: `${searchLabel(type)} couldn't be reached just now — no ${searchPlural(type)} came back for "${query}". Please try again in a moment.`,
+    },
+  };
 }
 
 /** Resolve DDG's click-redirect links (/l/?uddg=<encoded>) to real URLs. */
@@ -337,6 +348,65 @@ function domainOf(url: string): string {
   } catch {
     return "";
   }
+}
+
+/** Miklium web search (Yahoo-powered) — the web engine, restored.
+ *  Answers 404 {"success":false,"error":"No results found"} when a query
+ *  matches nothing: that is an EMPTY list here, never an error (the
+ *  original bug). Rows are normalized to the same {url,title,snippet,domain}
+ *  shape ddgWebSearch emits, grouped by URL, longest snippet per page. */
+async function mikliumWebSearch(
+  query: string,
+  limit: number,
+): Promise<Array<{ url: string; title: string; snippet: string; domain: string }>> {
+  const res = await withTimeout(
+    fetch("https://miklium.vercel.app/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        search: [query],
+        type: "default",
+        // Short snippets only — long ones are full-page scrapes (4500+ chars,
+        // far too slow for a result card).
+        maxSmallSnippets: Math.min(limit, 10),
+        maxLargeSnippets: 0,
+      }),
+    }),
+    9_000,
+    "Miklium web search",
+  );
+  const bodyText = await res.text().catch(() => "");
+
+  // 404 "No results found" is a legitimate empty outcome, not a failure.
+  if (res.status === 404 && /no results/i.test(bodyText)) return [];
+  if (/"error"\s*:\s*"[^"]*no results[^"]*"/i.test(bodyText)) return [];
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  let data: { success?: boolean; error?: string; results?: Array<Record<string, unknown>> };
+  try {
+    data = JSON.parse(bodyText) as typeof data;
+  } catch {
+    throw new Error("invalid JSON");
+  }
+  if (data?.success === false) {
+    if (data.error && /no results/i.test(String(data.error))) return [];
+    throw new Error(String(data.error ?? "unknown error"));
+  }
+
+  const byUrl = new Map<string, { url: string; title: string; snippet: string; domain: string }>();
+  for (const item of data?.results ?? []) {
+    const url = String(item?.url ?? "");
+    if (!url) continue;
+    const snippet = String(item?.snippet ?? "");
+    const domain = domainOf(url);
+    const existing = byUrl.get(url);
+    if (!existing) {
+      byUrl.set(url, { url, title: domain || url, snippet, domain });
+    } else if (snippet.length > existing.snippet.length) {
+      existing.snippet = snippet;
+    }
+  }
+  return Array.from(byUrl.values()).slice(0, limit);
 }
 
 /** DuckDuckGo web search via the HTML SERP endpoint — no key, no token. */
@@ -499,7 +569,8 @@ async function ddgVideoSearch(
 
 registerTool({
   name: "web_search",
-  description: "Search the web for information using DuckDuckGo. Returns titles, URLs, and snippets.",
+  description:
+    "Search the web for information using Miklium, with DuckDuckGo as fallback. Returns titles, URLs, and snippets.",
   parameters: {
     type: "object",
     properties: {
@@ -513,13 +584,22 @@ registerTool({
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
     try {
-      const rows = await ddgWebSearch(query, limit);
+      // Miklium is the web engine (restored); DuckDuckGo is the automatic
+      // fallback when Miklium fails or finds nothing — mirrors the app's
+      // /api/ddg-search cascade.
+      let rows = await mikliumWebSearch(query, limit).catch(() => [] as Array<{ url: string; title: string; snippet: string; domain: string }>);
+      let provider = "miklium";
       if (rows.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No web results found for "${query}". Try different or more general keywords.` } };
+        rows = await ddgWebSearch(query, limit);
+        provider = "ddg";
       }
-      return { success: true, output: { query, results: rows, count: rows.length, provider: "ddg" } };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedSearchError("web", e) };
+      if (rows.length === 0) {
+        return { success: true, output: { query, results: [], count: 0, provider, message: `No web results found for "${query}". Try different or more general keywords.` } };
+      }
+      return { success: true, output: { query, results: rows, count: rows.length, provider } };
+    } catch {
+      // Both engines failed — friendly busy notice, never an error blob.
+      return busySearchOutput(query, "web");
     }
   },
 });
@@ -579,8 +659,10 @@ registerTool({
         return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No images found for "${query}". Try different or more general keywords.` } };
       }
       return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedSearchError("image", e) };
+    } catch {
+      // DDG failed (even the package's internal retries) — friendly busy
+      // notice, never an error blob.
+      return busySearchOutput(query, "image");
     }
   },
 });
@@ -609,8 +691,9 @@ registerTool({
         return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No videos found for "${query}". Try different or more general keywords.` } };
       }
       return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedSearchError("video", e) };
+    } catch {
+      // DDG failed — friendly busy notice, never an error blob.
+      return busySearchOutput(query, "video");
     }
   },
 });

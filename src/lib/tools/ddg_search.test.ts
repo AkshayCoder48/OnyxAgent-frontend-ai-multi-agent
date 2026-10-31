@@ -1,18 +1,21 @@
 /**
  * web/image/video search TOOL layer tests — the chat-facing contract for
- * graceful "no results" and sanitized failures.
+ * graceful degradation in ALL outcomes.
  *
  * History: the operator-reported bug rendered in the chat as
- *   {"success":false,"output":null,"error":"Miklium HTTP 404: {\"success\":false,\"error\":\"No results found\"}"}
- * because the /api/ddg-search proxy surfaced the upstream 404 as an error and
- * the tool passed the raw string through. The route now normalizes "no
- * results" into a 200 + empty list and serves DuckDuckGo for every search
- * kind (route.test.ts covers that); these tests pin the TOOL layer's half of
- * the contract:
+ *   {"success":false,"output":null,"error":"Image search is temporarily
+ *    unavailable. Please try again in a moment."}
+ * whenever the /api/ddg-search proxy 502'd. The route now returns friendly
+ * notes for empty AND failed backends (route.test.ts covers that); these
+ * tests pin the TOOL layer's half of the contract:
  *   1. empty results → success:true + count:0 + a friendly `message` (the
  *      model then says "no images found for that" instead of an error blob).
- *   2. a failed search → success:false + a SANITIZED error — provider names
- *      and raw JSON bodies never reach the model context or the chat card.
+ *   2. even a proxy 502 / network failure → STILL success:true + a friendly
+ *      "couldn't be reached, try again" message — a {"success":false,...,
+ *      "error":...} blob is never emitted for any search kind (user
+ *      directive: "fix this issue in all searches").
+ *   3. the busy message is static text, so a regressed proxy can never leak
+ *      provider names or raw JSON bodies through it.
  *
  * The proxy is reached through a stubbed global fetch (no network).
  */
@@ -50,7 +53,7 @@ describe("image_search tool — graceful no-results", () => {
       note: "No images found for this query.",
     });
 
-    const res = await imageTool().handler({ query:"xyzzy impossible query", limit: 10 }, {} as never);
+    const res = await imageTool().handler({ query: "xyzzy impossible query", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     expect(res.error).toBeUndefined();
     const out = res.output as { results: unknown[]; count: number; message?: string; provider?: string };
@@ -69,7 +72,7 @@ describe("image_search tool — graceful no-results", () => {
       provider: "ddg",
     });
 
-    const res = await imageTool().handler({ query:"cat", limit: 10 }, {} as never);
+    const res = await imageTool().handler({ query: "cat", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     const out = res.output as { results: unknown[]; count: number; provider: string };
     expect(out.count).toBe(1);
@@ -78,35 +81,57 @@ describe("image_search tool — graceful no-results", () => {
   });
 });
 
-describe("image_search tool — sanitized failures", () => {
-  it("maps a proxy 502 to a clean, user-facing error", async () => {
+describe("image_search tool — failures degrade gracefully (no error blob)", () => {
+  it("maps a proxy 502 to a friendly busy notice, not the reported error blob", async () => {
     stubProxy(
       { error: "Image search is temporarily unavailable. Please try again in a moment." },
       502,
     );
 
-    const res = await imageTool().handler({ query:"cat", limit: 10 }, {} as never);
-    expect(res.success).toBe(false);
-    expect(res.output).toBeNull();
-    expect(res.error).toMatch(/image search is temporarily unavailable/i);
-    expect(res.error).not.toContain("Miklium");
-    expect(res.error).not.toContain("miklium");
+    const res = await imageTool().handler({ query: "cat", limit: 10 }, {} as never);
+    // THE reported bug: this used to be success:false + output:null + error.
+    expect(res.success).toBe(true);
+    const out = res.output as { results: unknown[]; count: number; message?: string };
+    expect(out.results).toEqual([]);
+    expect(out.count).toBe(0);
+    expect(out.message).toMatch(/couldn't be reached just now/i);
+    expect(out.message).toMatch(/try again in a moment/i);
+    expect(res.error).toBeUndefined();
   });
 
-  it("scrubs provider names and raw JSON even if the proxy leaks them (belt-and-suspenders)", async () => {
-    // Simulates a regression upstream: the raw pre-fix error string, exactly
-    // as the operator reported it. The sanitizer blocklist (which keeps the
-    // old provider name on purpose) must scrub it before it reaches the chat.
+  it("a network-level proxy failure also degrades to the friendly notice", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("fetch failed");
+      }),
+    );
+
+    const res = await imageTool().handler({ query: "cat", limit: 10 }, {} as never);
+    expect(res.success).toBe(true);
+    const out = res.output as { results: unknown[]; count: number; message?: string };
+    expect(out.results).toEqual([]);
+    expect(out.message).toMatch(/couldn't be reached just now/i);
+    expect(res.error).toBeUndefined();
+  });
+
+  it("never embeds upstream text — a regressed proxy cannot leak through the busy message", async () => {
+    // Simulates a total upstream regression: the raw pre-fix error string,
+    // exactly as the operator once reported it. The busy notice is static
+    // text — nothing upstream can leak through it.
     stubProxy(
       { error: 'Miklium HTTP 404: {"success":false,"error":"No results found"}' },
       502,
     );
 
-    const res = await imageTool().handler({ query:"cat", limit: 10 }, {} as never);
-    expect(res.success).toBe(false);
-    expect(res.error).not.toContain("Miklium");
-    expect(res.error).not.toContain('{"success"');
-    expect(res.error).toMatch(/image search/i);
+    const res = await imageTool().handler({ query: "cat", limit: 10 }, {} as never);
+    expect(res.success).toBe(true);
+    expect(res.error).toBeUndefined();
+    const out = JSON.stringify(res.output);
+    expect(out).not.toContain("Miklium");
+    expect(out).not.toContain("miklium");
+    expect(out).not.toContain('"success":false');
+    expect(out).not.toContain("HTTP 404");
   });
 });
 
@@ -123,29 +148,43 @@ describe("web_search / video_search tools — same contract", () => {
 
     const t = getTool("web_search");
     if (!t) throw new Error("web_search tool not registered");
-    const res = await t.handler({ query:"zzzz", limit: 10 }, {} as never);
+    const res = await t.handler({ query: "zzzz", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     const out = res.output as { count: number; message?: string };
     expect(out.count).toBe(0);
     expect(out.message).toMatch(/no web results found/i);
   });
 
-  it("web: real results carry provider 'ddg' (or 'langsearch' when the user's key served)", async () => {
+  it("web: real results carry the serving provider ('ddg', 'miklium', or 'langsearch')", async () => {
     stubProxy({
       query: "apollo",
       type: "web",
       results: [{ title: "Apollo 11", url: "https://en.wikipedia.org/wiki/Apollo_11" }],
       count: 1,
-      provider: "ddg",
+      provider: "miklium",
     });
 
     const t = getTool("web_search");
     if (!t) throw new Error("web_search tool not registered");
-    const res = await t.handler({ query:"apollo", limit: 10 }, {} as never);
+    const res = await t.handler({ query: "apollo", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     const out = res.output as { count: number; provider?: string };
     expect(out.count).toBe(1);
-    expect(out.provider).toBe("ddg");
+    expect(out.provider).toBe("miklium");
+  });
+
+  it("web: proxy failure → friendly busy notice, never an error blob", async () => {
+    stubProxy({ error: "Web search is temporarily unavailable." }, 502);
+
+    const t = getTool("web_search");
+    if (!t) throw new Error("web_search tool not registered");
+    const res = await t.handler({ query: "apollo", limit: 10 }, {} as never);
+    expect(res.success).toBe(true);
+    const out = res.output as { results: unknown[]; count: number; message?: string };
+    expect(out.results).toEqual([]);
+    expect(out.count).toBe(0);
+    expect(out.message).toMatch(/couldn't be reached just now/i);
+    expect(res.error).toBeUndefined();
   });
 
   it("video: empty results → success + friendly message", async () => {
@@ -160,7 +199,7 @@ describe("web_search / video_search tools — same contract", () => {
 
     const t = getTool("video_search");
     if (!t) throw new Error("video_search tool not registered");
-    const res = await t.handler({ query:"zzzz", limit: 10 }, {} as never);
+    const res = await t.handler({ query: "zzzz", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     const out = res.output as { count: number; message?: string };
     expect(out.count).toBe(0);
@@ -186,11 +225,24 @@ describe("web_search / video_search tools — same contract", () => {
 
     const t = getTool("video_search");
     if (!t) throw new Error("video_search tool not registered");
-    const res = await t.handler({ query:"apollo", limit: 10 }, {} as never);
+    const res = await t.handler({ query: "apollo", limit: 10 }, {} as never);
     expect(res.success).toBe(true);
     const out = res.output as { count: number; provider?: string; results: Array<{ videoUrl?: string }> };
     expect(out.count).toBe(1);
     expect(out.provider).toBe("ddg");
     expect(out.results[0].videoUrl).toContain("youtube.com/watch");
+  });
+
+  it("video: proxy failure → friendly busy notice, never an error blob", async () => {
+    stubProxy({ error: "Video search is temporarily unavailable." }, 502);
+
+    const t = getTool("video_search");
+    if (!t) throw new Error("video_search tool not registered");
+    const res = await t.handler({ query: "apollo", limit: 10 }, {} as never);
+    expect(res.success).toBe(true);
+    const out = res.output as { results: unknown[]; count: number; message?: string };
+    expect(out.results).toEqual([]);
+    expect(out.message).toMatch(/couldn't be reached just now/i);
+    expect(res.error).toBeUndefined();
   });
 });

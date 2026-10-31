@@ -97,7 +97,7 @@ Scheduled scripts that append \`sched-…\`-id todos to \`/home/user/todos.json\
 
 | Tool | Use |
 |---|---|
-| **web_search** | Text web search (LangSearch if configured, else DuckDuckGo). Titles, URLs, snippets. |
+| **web_search** | Text web search (LangSearch if configured, else Miklium, with DuckDuckGo fallback). Titles, URLs, snippets. |
 | **image_search** / **video_search** | Find pictures / videos (both DuckDuckGo): URLs, thumbnails, sources. |
 | **web_fetch** | Read a URL's full text — the DEFAULT way to read pages; deep-read AFTER \`web_search\`. |
 | **use_browser** | ONLY for pages needing real interaction (click, type, login, JS); plain reading is \`web_fetch\`'s job. |

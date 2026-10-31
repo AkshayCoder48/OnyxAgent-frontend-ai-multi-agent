@@ -1,14 +1,16 @@
-// Web Search Tools — web, image, and video search, all DuckDuckGo-backed.
+// Web Search Tools — web, image, and video search.
 //
-// Routing:
+// Routing (USER DIRECTIVE 2026-10-31: "Keep miklium for websearch and for
+// image keep ddg"):
 //   - **web_search**: When the user has a LangSearch API key saved (encrypted
 //     in their settings — their own key, BYOK), queries route through
 //     LangSearch's hybrid keyword+vector API via the unified `/api/ddg-search`
-//     proxy, which returns enhanced results with long-text summaries. If no
-//     key is set or LangSearch errors out, the proxy serves the query from
-//     DuckDuckGo's keyless HTML search.
+//     proxy. Otherwise Miklium (Yahoo-powered) serves the query, with the
+//     keyless DuckDuckGo HTML search as the automatic fallback whenever
+//     Miklium fails or finds nothing.
 //   - **image_search**: DuckDuckGo images via @mudbill/duckduckgo-images-api
-//     — no API key, no billing, real thumbnails + dimensions.
+//     — no API key, no billing, real thumbnails + dimensions (DDG ONLY,
+//     per directive).
 //   - **video_search**: DuckDuckGo videos via the keyless v.js endpoint —
 //     real durations, thumbnails, channel and view counts.
 //
@@ -103,30 +105,28 @@ function noResultsOutput(query: string, type: string, provider?: string, note?: 
 }
 
 /**
- * Sanitize a failed search into a clean message. Belt-and-suspenders on top
- * of the proxy's own sanitization: strips any provider name / raw JSON
- * that slipped through so the chat never renders raw backend error blobs.
- * ("miklium" stays in the blocklist on purpose: it is the provider whose
- * raw errors once leaked into the chat — if any stale/regressed upstream
- * ever emits it again, it gets scrubbed here.)
+ * Build the graceful "engine unreachable" payload. A search whose backend
+ * fails after every retry returns SUCCESS with an empty list and this
+ * notice — the chat must never render a {"success":false,...,"error":...}
+ * blob (the reported bug: 'Image search is temporarily unavailable…'), so
+ * even the last-resort failure path degrades to a friendly sentence the
+ * model can relay. No upstream text is embedded, so nothing can leak.
  */
-function sanitizedError(type: string, e: unknown): string {
+function busyOutput(query: string, type: string) {
   const labels = labelsFor(type);
-  const raw = e instanceof Error ? e.message : String(e);
-  const cleaned = raw
-    .replace(/miklium|langsearch|duckduckgo|ddg-search/gi, "search backend")
-    .replace(/\{[\s\S]*\}/g, "") // raw JSON bodies add nothing for the user
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned && cleaned !== raw
-    ? `${labels.singular} failed: ${cleaned}`
-    : `${labels.singular} is temporarily unavailable. Please try again in a moment.`;
+  return {
+    query,
+    type,
+    results: [],
+    count: 0,
+    message: `${labels.singular} couldn't be reached just now — no ${labels.results} came back for "${query}". Please try again in a moment.`,
+  };
 }
 
 // ---- Web Search ----
 registerTool(
   "web_search",
-  "Search the web for information. Returns titles, URLs, descriptions, and favicons. When a LangSearch API key is configured in Settings, results come from LangSearch's hybrid keyword+vector search (richer summaries, better recall); otherwise uses DuckDuckGo. Use for finding information, documentation, articles, tutorials.",
+  "Search the web for information. Returns titles, URLs, descriptions, and favicons. When a LangSearch API key is configured in Settings, results come from LangSearch's hybrid search (richer summaries); otherwise Miklium serves the query with DuckDuckGo as fallback. Use for finding information, documentation, articles, tutorials.",
   {
     type: "object",
     properties: {
@@ -157,8 +157,11 @@ registerTool(
           provider: provider ?? "ddg",
         },
       };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedError("web", e) };
+    } catch {
+      // Last resort (route unreachable / 502): degrade to the friendly
+      // busy notice — never an error blob (user directive: fix in ALL
+      // searches).
+      return { success: true, output: busyOutput(query, "web") };
     }
   },
   false,
@@ -198,8 +201,11 @@ registerTool(
           provider: provider ?? "ddg",
         },
       };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedError("image", e) };
+    } catch {
+      // Last resort (route unreachable / 502): degrade to the friendly
+      // busy notice — never an error blob (user directive: fix in ALL
+      // searches).
+      return { success: true, output: busyOutput(query, "image") };
     }
   },
   false,
@@ -237,8 +243,11 @@ registerTool(
           provider: provider ?? "ddg",
         },
       };
-    } catch (e) {
-      return { success: false, output: null, error: sanitizedError("video", e) };
+    } catch {
+      // Last resort (route unreachable / 502): degrade to the friendly
+      // busy notice — never an error blob (user directive: fix in ALL
+      // searches).
+      return { success: true, output: busyOutput(query, "video") };
     }
   },
   false,
