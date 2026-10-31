@@ -7,6 +7,15 @@ There is exactly one execution mode: **cloud** — no alternative orchestration
 modes exist. Without a connected cloud key the app has no background
 execution; the trigger route answers with actionable guidance instead.
 
+> **BYOK policy (user directive 2026-10-31):** every background `agent_run`
+> executes its LLM calls on the **user's own provider gateway with the user's
+> own key** (`config.chatUrl` + the rotational key pool). The app's keyless
+> LLM bridge (`/api/tasks/llm` → z-ai-web-dev-sdk) was **removed** — the
+> operator's model credentials are never spent on a user's run. A run
+> without user credentials fails fast with an actionable "add your
+> provider" message (`src/lib/tasks/run-credentials.ts`). terminal_command
+> runs need no LLM credentials.
+
 ## How it works
 
 1. **Connect** a trigger.dev Cloud key in **Settings → Cloud**. The app
@@ -33,8 +42,8 @@ execution; the trigger route answers with actionable guidance instead.
 | Layer | Files |
 |---|---|
 | Contract | `src/lib/tasks/protocol.ts` (isomorphic; `CloudRunMetadata` / `CloudRunOutput` / `CloudAgentRunPayload`) |
-| Server lib | `src/lib/tasks/{prisma,run-store,keyring,cron-scheduler,manifest,runner-config,llm-bridge,orchestration-mode,trigger-cloud,cloud-config-store}.ts` |
-| API routes | `src/app/api/tasks/{trigger,status,cancel,sync,llm,schedules,schedules/[id],artifact/[id],cloud}/route.ts` |
+| Server lib | `src/lib/tasks/{prisma,run-store,keyring,cron-scheduler,manifest,run-credentials,orchestration-mode,trigger-cloud,cloud-config-store}.ts` |
+| API routes | `src/app/api/tasks/{trigger,status,cancel,sync,schedules,schedules/[id],artifact/[id],cloud}/route.ts` |
 | Client lib | `src/lib/tasks/{client,serialize,key-pool}.ts` + `src/hooks/use-background-tasks.ts` (Dexie v7 mirror) |
 | UI | `src/components/settings/section-schedules.tsx`, `src/components/settings/section-trigger-cloud.tsx`, `src/components/chat/background-tasks-strip.tsx` |
 | Tools | `src/lib/tools/background_task.ts` (create/status/list/cancel), `run_terminal` `background:true` |
@@ -48,5 +57,5 @@ execution; the trigger route answers with actionable guidance instead.
 | `TRIGGER_CLOUD_TASK_SLUG` | task id the app triggers (default `agent-run`) |
 | `TRIGGER_CLOUD_API_URL` | api.trigger.dev override (enterprise clouds) |
 | `TASKS_CLOUD_MASTER_KEY` | AES-256-GCM master key for the sealed cloud config (default: generated `db/cloud-config.key`) |
-| `APP_URL` | public app origin — the keyless LLM-bridge fallback URL for sandbox runners |
+| `APP_URL` | public app origin — the cloud-fired schedule tick target (`/api/tasks/schedules/tick`) and worker-deploy default (NOT an LLM endpoint: the keyless bridge was removed with the BYOK policy) |
 | `E2B_API_KEY` | sandbox creation when the client vault has no key (a per-run key may ride in the run payload) |

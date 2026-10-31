@@ -15,7 +15,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { armDueSchedules, armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
-import { getCloudConfig, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
+import { getCloudConfig, sealSecret, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
+import { isAbsoluteHttpUrl, isAppBridgeUrl, NO_PROVIDER_CREDENTIALS_ERROR } from "@/lib/tasks/run-credentials";
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -47,18 +49,41 @@ function normalizeTimezone(raw: unknown): string {
 }
 
 /** Validate the config object (when present); terminal_command schedules
- *  must carry their command now — the sweep fires headless. */
+ *  must carry their command now — the sweep fires headless.
+ *
+ *  BYOK POLICY (user directive 2026-10-31): agent_run schedules MUST pin
+ *  their own provider gateway (config.chatUrl — an absolute, non-legacy,
+ *  non-bridge URL) so every fired run executes on the USER's credentials.
+ *  The app's own model is never a fallback for scheduled work. */
 function validateConfig(raw: unknown, taskType: string): { error: string } | { value: TaskRunConfig | null } {
   if (raw === undefined || raw === null) {
     if (taskType === "terminal_command") {
       return { error: "terminal_command schedules require config.command" };
     }
-    return { value: null };
+    return {
+      error:
+        "Scheduled agent tasks run with YOUR own AI provider — add one in Settings → Agent Settings → AI Providers, then re-create the schedule. (The app's built-in model is never used.)",
+    };
   }
   if (typeof raw !== "object" || Array.isArray(raw)) return { error: "config must be an object" };
   const config = raw as TaskRunConfig;
   if (taskType === "terminal_command" && (typeof config.command !== "string" || !config.command.trim())) {
     return { error: "terminal_command schedules require config.command" };
+  }
+  if (taskType !== "terminal_command") {
+    const chatUrl = typeof config.chatUrl === "string" ? config.chatUrl.trim() : "";
+    if (!isAbsoluteHttpUrl(chatUrl)) {
+      return { error: NO_PROVIDER_CREDENTIALS_ERROR };
+    }
+    if (isLegacyClassicUrl(chatUrl)) {
+      return {
+        error:
+          "The pinned provider gateway is the retired text.pollinations.ai (Classic) endpoint — reselect your provider in Settings → Agent Settings → AI Providers and re-create the schedule. (code: legacy_endpoint_pin)",
+      };
+    }
+    if (isAppBridgeUrl(chatUrl)) {
+      return { error: NO_PROVIDER_CREDENTIALS_ERROR };
+    }
   }
   return { value: config };
 }
@@ -135,6 +160,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if ("error" in checkedConfig) return bad(checkedConfig.error);
   const active = typeof body.active === "boolean" ? body.active : true;
 
+  // BYOK: the schedule's own provider key, sealed at rest (plaintext lives
+  // only in this request + the sealed column — never logged, never returned).
+  const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+  if (apiKey.length > 512) return bad("apiKey exceeds 512 characters");
+
   try {
     const created = await prisma.taskSchedule.create({
       data: {
@@ -144,6 +174,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         taskType: taskType as BackgroundTaskType,
         prompt,
         config: checkedConfig.value ? JSON.stringify(checkedConfig.value) : "{}",
+        encryptedApiKey: apiKey ? sealSecret(apiKey) : null,
         active,
       },
     });

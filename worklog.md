@@ -233,3 +233,27 @@ Work Log:
 Stage Summary:
 - The chat can no longer render a raw Miklium/JSON error: "no results" is a graceful, friendly outcome at every layer (route → tool → UI → CLI), and real backend failures surface as one clean sanitized sentence.
 - vitest is fully green again: 28 files / 490 tests (was 15 failing); the decision tool is actually registered; the Onyx.md → digest pipeline regenerates correctly.
+
+---
+
+## Task 11 — BYOK everywhere: the app's LLM bridge removed from background runs
+
+Date: 2026-10-31
+Agent: main (Z.ai Code)
+Task: User directive on the Task 9 deployment note ("set APP_URL so the cloud worker can reach the app's LLM bridge"): "is wrong — I want users to use their own credentials not mine." Background runs must execute LLM calls ONLY on each user's own provider gateway + key; the operator's (app-side) credentials must never serve a user's run.
+
+Work Log:
+- POLICY in ONE place — new pure leaf src/lib/tasks/run-credentials.ts (+ run-credentials.test.ts, 13 tests): resolveRunLlmCredentials() enforces (a) agent runs REQUIRE the run's pinned user gateway (absolute http(s), non-legacy-classic, non-bridge) — otherwise the actionable NO_PROVIDER_CREDENTIALS_ERROR ("add your provider… the app's built-in model is never used as a fallback", code byok_no_gateway); (b) chatToken = FIRST user pool key, NEVER the task token (the old non-bridge path leaked the task token as an external bearer when the pool was empty); (c) terminal_command runs need no LLM credentials. isAppBridgeUrl() detects the removed route on any origin (rollout belt-and-braces).
+- DISPATCH GATE (trigger-cloud.ts dispatchCloudRun): the bridge fallback block (APP_URL → {appUrl}/api/tasks/llm, taskToken bearer, pool dropped when usingBridge) is GONE. Runs failing the gate settle as failed via settleFailedRun() (status/phase/error/finishedAt, lock released, keyring dropped) — the strip + chat lander surface the actionable message. fallbackAppUrl param removed (both call sites updated); APP_URL keeps only its tick-target/worker-deploy role.
+- WORKER GATE (trigger-worker/src/tasks/agent-run.ts): gateLlmCredentials() before both lanes — an agent run without a user gateway (or pinning the app bridge) returns a FAILED OUTPUT with the same message, no Trigger.dev retry (retrying cannot add credentials). Module + native-lane docs rewritten to the BYOK contract.
+- BRIDGE DELETED: src/app/api/tasks/llm/route.ts, src/lib/tasks/llm-bridge.ts (z-ai-web-dev-sdk completion path), dead src/lib/tasks/runner-config.ts, and now-unimported src/lib/agent/zai.ts. No background lane can spend the operator's model budget — structurally, not by convention.
+- SCHEDULES GO BYOK (they previously ALWAYS rode the bridge — no client, no keys): prisma TaskSchedule += encryptedApiKey (AES-256-GCM, same sealSecret/master-key machinery as TaskCloudConfig); POST /api/tasks/schedules requires config.chatUrl for agent_run schedules (400 with the actionable message otherwise) and seals the client-supplied apiKey; PATCH re-seals/clears + enforces the gateway across the merge; cron-scheduler.ts unseals the key into the in-memory keyring at fire time (no APP_URL warning anymore); section-schedules.tsx pins the user's CURRENT chat provider (gateway + model + decrypted key) at create/edit and refuses creation with a toast when no usable provider exists (+ hint line in the dialog).
+- background_task TOOL: agent_run creates now resolve + pin the user's current provider (chatUrl + model + pinnedApiKey leading the pool) — previously every tool-created agent task silently rode the bridge. No provider → the tool returns an actionable error for the model to relay.
+- CLIENT LANES: use-chat.ts runDetachedTurn refuses turns without a provider gateway BEFORE dispatch (no cloud run created); turn-cloud-handoff comments + docs updated — a beacon without a gateway still fires and the run fails honestly at dispatch, landing in the chat on sync-back. key-pool/keyring/protocol/worker-protocol docs updated to the new contract (task token = cancel/sync/artifact authorizer ONLY).
+- DOCS: BACKGROUND_TASKS.md (BYOK policy callout, surfaces/env tables), TRIGGERDEV-PRD.md (§3.1 policy bullet, §3.4 credential-broker story now TRUE — sealed per-schedule key, env table), .env.example (APP_URL is NOT an LLM endpoint anymore). The Task 9 deployment note is obsolete: there is no bridge to expose; APP_URL only serves the durable-cron tick.
+
+DEPLOY NOTE: TaskSchedule gained the additive-nullable `encryptedApiKey` column — run `bun run db:push` (or your usual prisma migrate) on the app server; no data migration is needed. The cloud worker should be re-deployed (Settings → Cloud → Deploy) so the BYOK gate ships to the cloud side too.
+
+Stage Summary:
+- Every background agent run — chat handoff beacon, detached cloud turn, background_task tool, sub-agent chains, scheduled tasks — now executes on the USER's own provider gateway with the USER's key, or fails fast with instructions naming Settings → Agent Settings → AI Providers. The operator's credentials are unreachable from the background framework (bridge deleted; vision/classic-chat ZAI lanes are separate foreground features, untouched by design).
+- Verified: vitest 490 → 503 passing (13 new run-credentials tests, zero regressions); tsc --noEmit introduces no new src/ errors.

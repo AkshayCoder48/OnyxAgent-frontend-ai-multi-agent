@@ -15,7 +15,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/tasks/prisma";
 import { armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
-import { deleteCloudSchedule, getCloudConfig, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
+import { deleteCloudSchedule, getCloudConfig, sealSecret, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
+import { isAbsoluteHttpUrl, isAppBridgeUrl, NO_PROVIDER_CREDENTIALS_ERROR } from "@/lib/tasks/run-credentials";
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 import {
   BACKGROUND_TASK_TYPES,
   TASK_PAYLOAD_BUDGET,
@@ -145,6 +147,15 @@ export async function PATCH(
     }
     data.config = JSON.stringify(body.config as TaskRunConfig);
   }
+  // BYOK (user directive 2026-10-31): the schedule's own provider key —
+  // re-sealed on every patch that carries one (plaintext only in transit;
+  // never logged, never returned). An explicit empty string CLEARS the
+  // sealed key (keyless gateway); omitting the field keeps the stored one.
+  if (body.apiKey !== undefined) {
+    const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    if (apiKey.length > 512) return bad("apiKey exceeds 512 characters");
+    data.encryptedApiKey = apiKey ? sealSecret(apiKey) : null;
+  }
   if (body.active !== undefined) {
     if (typeof body.active !== "boolean") return bad("active must be a boolean");
     if (body.active !== existing.active) changed.active = true;
@@ -168,6 +179,32 @@ export async function PATCH(
     }
     if (!config || typeof config.command !== "string" || !config.command.trim()) {
       return bad("terminal_command schedules require config.command");
+    }
+  }
+
+  // ── BYOK GATE (user directive 2026-10-31) ────────────────────────────────
+  // agent_run schedules MUST keep a pinned user gateway across the merge —
+  // scheduled runs execute on the USER's credentials, never the app's own
+  // model. A patch that would strip the gateway (or pin a legacy/bridge
+  // URL) is rejected with the actionable message.
+  if (nextTaskType !== "terminal_command") {
+    let nextConfig: TaskRunConfig | null = null;
+    try {
+      nextConfig = data.config
+        ? (JSON.parse(data.config as string) as TaskRunConfig)
+        : (JSON.parse(existing.config) as TaskRunConfig);
+    } catch {
+      nextConfig = null;
+    }
+    const chatUrl =
+      typeof nextConfig?.chatUrl === "string" ? nextConfig.chatUrl.trim() : "";
+    if (!isAbsoluteHttpUrl(chatUrl) || isAppBridgeUrl(chatUrl)) {
+      return bad(NO_PROVIDER_CREDENTIALS_ERROR);
+    }
+    if (isLegacyClassicUrl(chatUrl)) {
+      return bad(
+        "The pinned provider gateway is the retired text.pollinations.ai (Classic) endpoint — reselect your provider in Settings → Agent Settings → AI Providers and re-save the schedule. (code: legacy_endpoint_pin)",
+      );
     }
   }
 

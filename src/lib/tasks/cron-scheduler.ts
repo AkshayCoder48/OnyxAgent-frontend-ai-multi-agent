@@ -18,7 +18,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { TaskSchedule } from "@prisma/client";
 import { nextCronRun, type BackgroundTaskType, type TaskRunConfig, type TaskScheduleRecord } from "./protocol";
-import { getCloudConfig } from "./trigger-cloud";
+import { getCloudConfig, openSecret } from "./trigger-cloud";
 import { dispatchCloudRun } from "./trigger-cloud";
 import { prisma } from "./prisma";
 import { keyring } from "./keyring";
@@ -150,29 +150,37 @@ export async function sweepSchedules(): Promise<number> {
         },
       });
 
-      // 3) Mint the run's bridge credential (server-side, keyring-only —
-      //    scheduled tasks have no client to mint one). The LLM endpoint is
-      //    the schedule's pinned provider gateway (config.chatUrl) or the
-      //    app's keyless bridge; the E2B key comes from the server env.
-      const appUrl = process.env.APP_URL?.trim() || "http://localhost:3000";
-      if (!process.env.APP_URL?.trim()) {
-        console.warn(
-          "[tasks] APP_URL is not set — scheduled runs default the LLM bridge to http://localhost:3000, which is unreachable from an E2B sandbox. Set APP_URL to the public origin.",
-        );
-      }
+      // 3) Mint the run's auth credential (server-side, keyring-only —
+      //    scheduled tasks have no client to mint one). BYOK POLICY (user
+      //    directive 2026-10-31): the LLM endpoint is the schedule's PINNED
+      //    user gateway (config.chatUrl, captured at creation) and the
+      //    schedule's SEALED provider key (encryptedApiKey, unsealed here
+      //    into the in-memory keyring only) is the pool. There is NO
+      //    app-bridge fallback anymore — an agent_run schedule without a
+      //    pinned gateway fails at dispatch with an actionable message.
+      //    terminal_command schedules need no LLM credentials at all.
       const scheduleConfig = parseConfig(s.config);
+      let scheduledKey = "";
+      if (s.encryptedApiKey) {
+        scheduledKey = openSecret(s.encryptedApiKey) ?? "";
+        if (!scheduledKey) {
+          console.warn(
+            `[tasks] schedule ${s.id}: the sealed provider key could not be unsealed (master key changed?) — the run proceeds keyless against the pinned gateway`,
+          );
+        }
+      }
       keyring.set(run.id, {
         taskToken: randomBytes(32).toString("hex"),
-        keyPool: [],
+        keyPool: scheduledKey ? [scheduledKey] : [],
         ...(scheduleConfig.chatUrl ? { chatUrl: scheduleConfig.chatUrl } : {}),
         ...(scheduleConfig.model ? { model: scheduleConfig.model } : {}),
         e2bApiKey: "USE_SERVER_ENV",
-        appUrl,
+        appUrl: process.env.APP_URL?.trim() || "http://localhost:3000",
         createdAt: Date.now(),
       });
 
       // 4) Dispatch directly to the cloud.
-      void dispatchCloudRun(run.id, appUrl).catch(() => {
+      void dispatchCloudRun(run.id).catch(() => {
         // dispatchCloudRun settles the row itself on failure.
       });
       fired += 1;

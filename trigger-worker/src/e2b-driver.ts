@@ -219,7 +219,9 @@ interface HistoryEntry {
 
 /** Launch the headless agent runner (mirrors the app's agent_start). The
  *  LLM endpoint + credentials ride in the run payload — resolved by the app
- *  (user provider gateway + rotational key pool, or the app's own bridge). */
+ *  as the USER'S OWN provider gateway + rotational key pool (BYOK, user
+ *  directive 2026-10-31: the app's keyless bridge was removed; a run
+ *  without user credentials never reaches this driver). */
 export async function startAgentRunner(
   sandbox: Sandbox,
   run: AgentRunPayload["run"],

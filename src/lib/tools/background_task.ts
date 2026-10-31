@@ -24,6 +24,12 @@ import type { BackgroundTaskType, TaskStatusRun } from "@/lib/tasks/protocol";
  *   · list   — the user's 10 most recent runs.
  *   · cancel — stop a live run (needs this browser's task token).
  *
+ * BYOK (user directive 2026-10-31): agent_run tasks are created with the
+ * user's CURRENT chat provider pinned (gateway + key + model) — background
+ * runs execute on the user's own credentials, never the app's built-in
+ * model (the keyless bridge was removed). terminal_command tasks need no
+ * LLM credentials.
+ *
  * NOTE on `requires_approval`: the registry flag is static (per tool, not per
  * action) — it is set because `create` is the only resource-consuming action
  * (a fresh sandbox + up to 30 minutes of execution); status/list/cancel are
@@ -35,6 +41,60 @@ import type { BackgroundTaskType, TaskStatusRun } from "@/lib/tasks/protocol";
 function excerpt(text: string, max: number): string {
   const t = text.trim().replace(/\s+/g, " ");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** Resolve the user's CURRENT chat provider as a BYOK pin for a background
+ * agent task (gateway URL + model + decrypted key). Null when no usable
+ * provider exists — the task is then refused with instructions (it would
+ * otherwise run on the app's own model, which is never a fallback). */
+async function resolveTurnProviderPin(userId: string): Promise<{
+  chatUrl: string;
+  model: string;
+  apiKey: string;
+  providerId: string | null;
+} | null> {
+  try {
+    const { useChatStore } = await import("@/stores/chat-store");
+    const { aiProviderService } = await import("@/lib/services");
+    const {
+      chatCompletionsUrl,
+      listUsableProviders,
+      resolveProviderForModel,
+    } = await import("@/lib/agent/provider-resolution");
+
+    const store = useChatStore.getState();
+    const providers = await listUsableProviders(userId);
+    const selected =
+      resolveProviderForModel(providers, store.selectedModel) ??
+      (store.selectedProviderId
+        ? providers.find((p) => p.id === store.selectedProviderId)
+        : undefined) ??
+      providers.find((p) => p.is_active) ??
+      providers[0];
+    if (!selected || !selected.base_url?.trim()) return null;
+
+    let apiKey = "";
+    try {
+      apiKey = await aiProviderService.getDecryptedApiKey(selected.id);
+    } catch {
+      apiKey = ""; // vault locked — the pinned gateway may still be keyless
+    }
+    const model =
+      store.selectedModel && (selected.models ?? []).includes(store.selectedModel)
+        ? store.selectedModel
+        : (selected.models?.[0] ?? "");
+    return {
+      chatUrl: chatCompletionsUrl(
+        selected.base_url,
+        (selected as { no_prefix?: boolean }).no_prefix ?? false,
+      ),
+      model,
+      apiKey,
+      providerId: selected.id,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function runSummary(run: TaskStatusRun) {
@@ -118,6 +178,44 @@ registerTool(
           }
           const includeWorkspace = args.include_workspace !== false;
           const requireApproval = args.require_approval === true;
+
+          // ── BYOK PIN (user directive 2026-10-31) ────────────────────────
+          // agent_run tasks carry the USER'S OWN provider (the one selected
+          // in chat): its gateway is pinned into the run config and its key
+          // leads the pool. Without a usable provider the task is REFUSED —
+          // background work never runs on the app's built-in model.
+          if (taskType === "agent_run") {
+            const pin = await resolveTurnProviderPin(ctx.userId);
+            if (!pin) {
+              return {
+                error:
+                  "No AI provider of your own is configured — background agent tasks execute with the user's own provider and key (never the app's built-in model). Ask the user to add one in Settings → Agent Settings → AI Providers, then retry.",
+              };
+            }
+            const res = await triggerBackgroundTask({
+              userId: ctx.userId,
+              conversationId: ctx.conversationId ?? null,
+              type: taskType,
+              prompt,
+              title: excerpt(prompt, 60),
+              config: {
+                chatUrl: pin.chatUrl,
+                ...(pin.model ? { model: pin.model } : {}),
+                ...(requireApproval ? { requireApproval } : {}),
+              },
+              includeWorkspace,
+              preferredProviderId: pin.providerId ?? undefined,
+              ...(pin.apiKey ? { pinnedApiKey: pin.apiKey } : {}),
+              sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
+            });
+            return {
+              run_id: res.runId,
+              orchestrator: res.orchestrator,
+              status: "queued",
+              note: "Poll with action status.",
+            };
+          }
+
           const res = await triggerBackgroundTask({
             userId: ctx.userId,
             conversationId: ctx.conversationId ?? null,

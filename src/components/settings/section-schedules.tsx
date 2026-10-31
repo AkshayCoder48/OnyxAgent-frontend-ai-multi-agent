@@ -39,12 +39,14 @@ import {
 import { SettingsRow, SettingsSection } from "./settings-section";
 import { MoreOptions } from "./more-options";
 import { useTaskSchedules, useCloudOrchestrator } from "@/hooks";
+import { useAuthStore } from "@/stores";
 import { ROUTES } from "@/lib/constants";
 import {
   describeCron,
   nextCronRun,
   validateCron,
   type BackgroundTaskType,
+  type TaskRunConfig,
   type TaskScheduleInput,
   type TaskScheduleRecord,
 } from "@/lib/tasks/protocol";
@@ -52,6 +54,54 @@ import {
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+/** The BYOK pin an agent schedule carries: the provider the user has
+ *  selected in chat (gateway URL + model + decrypted key). Null when no
+ *  usable provider exists — scheduled runs then refuse to be created (they
+ *  would otherwise run on the app's own model, which is never a fallback:
+ *  user directive 2026-10-31). */
+async function resolveScheduleProvider(
+  userId: string,
+): Promise<{ chatUrl: string; model: string; apiKey: string } | null> {
+  try {
+    const { useChatStore } = await import("@/stores/chat-store");
+    const { aiProviderService } = await import("@/lib/services");
+    const { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } =
+      await import("@/lib/agent/provider-resolution");
+
+    const store = useChatStore.getState();
+    const providers = await listUsableProviders(userId);
+    const selected =
+      resolveProviderForModel(providers, store.selectedModel) ??
+      (store.selectedProviderId
+        ? providers.find((p) => p.id === store.selectedProviderId)
+        : undefined) ??
+      providers.find((p) => p.is_active) ??
+      providers[0];
+    if (!selected || !selected.base_url?.trim()) return null;
+
+    let apiKey = "";
+    try {
+      apiKey = await aiProviderService.getDecryptedApiKey(selected.id);
+    } catch {
+      apiKey = ""; // vault locked — the schedule is created without a key
+    }
+    const model =
+      store.selectedModel && (selected.models ?? []).includes(store.selectedModel)
+        ? store.selectedModel
+        : (selected.models?.[0] ?? "");
+    return {
+      chatUrl: chatCompletionsUrl(
+        selected.base_url,
+        (selected as { no_prefix?: boolean }).no_prefix ?? false,
+      ),
+      model,
+      apiKey,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Format a date in an IANA timezone — "Mon, Jan 5, 09:30" (EEE, MMM d, HH:mm). */
 function formatDateInTz(date: Date | string, timezone: string): string {
@@ -185,6 +235,29 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
       toast.error("Add the terminal command (under Advanced)");
       return;
     }
+
+    // ── BYOK PIN (user directive 2026-10-31) ────────────────────────────
+    // Scheduled agent tasks run with the USER's own AI provider — the one
+    // selected in chat — and its key, sealed server-side. Never the app's
+    // built-in model: refuse creation when no usable provider exists.
+    let config: TaskRunConfig | undefined;
+    let apiKey: string | undefined;
+    if (form.taskType === "terminal_command") {
+      config = { command: form.command.trim() };
+    } else {
+      const userId = useAuthStore.getState().user?.id;
+      const provider = userId ? await resolveScheduleProvider(userId) : null;
+      if (!provider) {
+        toast.error("Scheduled agent tasks run with your own AI provider", {
+          description:
+            "Add a provider and API key in Settings → Agent Settings → AI Providers, then create the schedule. (The app's built-in model is never used for background work.)",
+        });
+        return;
+      }
+      config = { chatUrl: provider.chatUrl, model: provider.model || undefined };
+      apiKey = provider.apiKey || undefined;
+    }
+
     const input: TaskScheduleInput = {
       name: form.name.trim(),
       cronExpr: trimmedCron,
@@ -194,9 +267,8 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
         form.taskType === "terminal_command" && !form.prompt.trim()
           ? `Terminal: ${form.command.trim().slice(0, 200)}`
           : form.prompt.trim(),
-      ...(form.taskType === "terminal_command"
-        ? { config: { command: form.command.trim() } }
-        : {}),
+      ...(config ? { config } : {}),
+      ...(apiKey ? { apiKey } : {}),
     };
     setSubmitting(true);
     try {
@@ -307,6 +379,13 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
               placeholder="What should each run do? Its result syncs back into the linked conversation."
             />
           </div>
+
+          {form.taskType !== "terminal_command" && (
+            <p className="text-muted-foreground text-xs">
+              Each run executes with YOUR own AI provider (the one selected in chat) — its
+              key is sealed server-side and never the app&apos;s built-in model.
+            </p>
+          )}
 
           {form.taskType === "terminal_command" && (
             <MoreOptions label="Advanced" defaultOpen={editing?.taskType === "terminal_command"}>

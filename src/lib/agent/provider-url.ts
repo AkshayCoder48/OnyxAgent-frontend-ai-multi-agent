@@ -2,8 +2,8 @@
 // PURE endpoint-construction helpers — the leaf of the shared AI client layer
 // (endpoint-migration PRD §5/§8).
 //
-// ZERO imports on purpose: the service layer (src/lib/services) and BOTH
-// background dispatch lanes (runner-config, trigger-cloud — server-side)
+// ZERO imports on purpose: the service layer (src/lib/services) and the
+// background dispatch lanes (run-credentials, trigger-cloud — server-side)
 // share these without importing lib/agent/provider-resolution, which depends
 // on the services (a services → provider-resolution → services cycle). Every
 // module that needs a chat-completions URL or a legacy-classic check imports
@@ -32,9 +32,10 @@ export function isLegacyClassicRow(p: { name: string; base_url: string }): boole
 }
 
 /** True when a chat URL points at the retired Classic endpoint (any scheme,
- *  path or port — host substring match). Background lanes use this to drop
- *  stale pinned gateways onto the keyless bridge instead of calling a
- *  classic URL that can only 404 gen-catalog models. */
+ *  path or port — host substring match). Background lanes use this to fail
+ *  such runs honestly with a migration hint (BYOK policy: there is no
+ *  fallback route anymore) instead of calling a classic URL that can only
+ *  404 gen-catalog models. */
 export function isLegacyClassicUrl(url: string | null | undefined): boolean {
   return typeof url === "string" && url.includes(LEGACY_CLASSIC_HOST);
 }

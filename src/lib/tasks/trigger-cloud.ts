@@ -47,6 +47,12 @@ import { prisma } from "./prisma";
 import { keyring, tokensEqual } from "./keyring";
 // PURE leaf of the shared AI client layer (zero imports — safe server-side).
 import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
+// BYOK credential policy — pure leaf, unit-tested.
+import {
+  isAppBridgeUrl,
+  NO_PROVIDER_CREDENTIALS_ERROR,
+  resolveRunLlmCredentials,
+} from "./run-credentials";
 import {
   appendChunksToRun,
   mergeProgressIntoRun,
@@ -887,6 +893,34 @@ export type CloudDispatchResult =
   | { ok: true; cloudRunId: string }
   | { ok: false; error: string };
 
+/** Settle a claimed run as FAILED without dispatching it (BYOK gate,
+ *  pre-flight misconfiguration) — status/phase/error/finishedAt in one
+ *  atomic-ish update, lock released, keyring entry dropped. Never throws:
+ *  the row settlement is best-effort and the error string is returned to
+ *  the caller for logging. */
+async function settleFailedRun(
+  runId: string,
+  lockHolder: string,
+  error: string,
+): Promise<CloudDispatchResult> {
+  await prisma.taskRun
+    .updateMany({
+      where: { id: runId, status: "running", lockHolder },
+      data: {
+        status: "failed",
+        phase: "claim",
+        error,
+        finishedAt: new Date(),
+        lockHolder: null,
+        lockedAt: null,
+      },
+    })
+    .catch(() => undefined);
+  keyring.drop(runId);
+  console.warn(`[tasks] run ${runId} refused at dispatch: ${error.slice(0, 160)}`);
+  return { ok: false, error };
+}
+
 /** Clamp the serialized cloud trigger payload under the REST ceiling by
  * dropping payload FILES largest-first (names stay honest — the run simply
  * starts with the newest/smallest subset). Conversation text is tiny and
@@ -921,13 +955,18 @@ function clampCloudPayload(payload: CloudAgentRunPayload): CloudAgentRunPayload 
  * agent-run task. The resulting cloud run id is persisted to
  * TaskRun.externalRunId.
  *
+ * BYOK POLICY (user directive 2026-10-31): agent runs carry the USER's own
+ * provider gateway + keys — resolveRunLlmCredentials enforces it. A run
+ * without user credentials NEVER falls back to the app's own model (the
+ * keyless bridge was removed): it settles as failed with an actionable
+ * message so the user knows exactly what to add.
+ *
  * On failure the run FAILS with the cloud error — there is no backstop
  * dispatcher anymore (the deployed worker IS the executor); the message is
  * surfaced to the client.
  */
 export async function dispatchCloudRun(
   runId: string,
-  fallbackAppUrl: string,
 ): Promise<CloudDispatchResult> {
   const config = await getCloudConfig();
   if (!config) {
@@ -954,25 +993,28 @@ export async function dispatchCloudRun(
   const entry = keyring.get(runId);
   const runConfig = parseConfig(row.config);
 
-  // Resolve the app origin the sandbox runner can reach for the keyless LLM
-  // bridge fallback (APP_URL wins — behind proxies the request origin can
-  // be an internal address).
-  const appUrl = (process.env.APP_URL?.trim() || fallbackAppUrl).replace(/\/+$/, "");
-
-  // LLM endpoint resolution (mirrors runner-config.ts):
-  //   · pinned provider gateway (config.chatUrl) — bearer = first pool key,
-  //   · otherwise the app's keyless bridge (/api/tasks/llm) — bearer = the
-  //     task token (pool keys are NOT rotated against the bridge).
-  // LEGACY-CLASSIC GUARD (endpoint-migration PRD §3): a pinned gateway on the
-  // retired text.pollinations.ai endpoint can never serve gen-catalog models
-  // (instant "…isn't on the Classic API" 404) — a stale pin (a snapshot or
-  // schedule saved before the migration) drops to the bridge instead of
-  // calling the dead endpoint. No silent retry against the classic host.
-  const usingBridge =
-    !runConfig.chatUrl?.trim() || isLegacyClassicUrl(runConfig.chatUrl);
-  const chatUrl = usingBridge ? `${appUrl}/api/tasks/llm` : runConfig.chatUrl!.trim();
-  const pool = entry?.keyPool ?? [];
-  const chatToken = usingBridge ? (entry?.taskToken ?? "") : (pool[0] ?? entry?.taskToken ?? "");
+  // ── BYOK GATE (user directive 2026-10-31) ────────────────────────────────
+  // "I want users to use their own credentials not mine." The LLM endpoint
+  // is the run's PINNED user gateway (config.chatUrl — the provider the
+  // triggering client resolved) authenticated with the USER's key pool.
+  // There is NO app-bridge fallback anymore: a run without its own gateway
+  // fails HERE, honestly, with instructions. The task token is never an
+  // LLM bearer — it authorizes cancel/sync/artifact routes only.
+  const llm = resolveRunLlmCredentials({
+    type: row.type,
+    chatUrl: runConfig.chatUrl,
+    keyPool: entry?.keyPool ?? [],
+  });
+  // Belt and braces: a payload minted before the BYOK policy may still pin
+  // the app's own (removed) bridge route — refuse it like a missing
+  // gateway instead of spending the operator's credentials on it.
+  if (llm.ok && isAppBridgeUrl(llm.credentials.chatUrl)) {
+    return settleFailedRun(runId, lockHolder, NO_PROVIDER_CREDENTIALS_ERROR);
+  }
+  if (!llm.ok) {
+    return settleFailedRun(runId, lockHolder, llm.error);
+  }
+  const { chatUrl, chatToken, keyPool } = llm.credentials;
 
   // E2B key: explicit per-run key, else the server env.
   const explicitE2b = entry?.e2bApiKey?.trim() && entry.e2bApiKey !== "USE_SERVER_ENV"
@@ -994,7 +1036,7 @@ export async function dispatchCloudRun(
       e2bApiKey,
       chatUrl,
       chatToken,
-      keyPool: usingBridge ? [] : pool,
+      keyPool,
     },
   };
   const cloudPayload = clampCloudPayload(fullPayload);

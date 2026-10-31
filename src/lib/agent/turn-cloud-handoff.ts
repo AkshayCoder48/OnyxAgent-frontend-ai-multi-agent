@@ -89,7 +89,9 @@ export function cloudHandoffActive(): boolean {
   return g.__onyxCloudHandoffPrewarm?.cloudOn === true;
 }
 
-/** The prewarmed rotational key pool (may be empty → LLM-bridge fallback). */
+/** The prewarmed rotational key pool (may be empty — the run then calls
+ *  the pinned user gateway keylessly; the app's own model is never a
+ *  fallback under the BYOK policy). */
 export function prewarmedKeyPool(): string[] {
   return g.__onyxCloudHandoffPrewarm?.keyPool ?? [];
 }
@@ -105,7 +107,10 @@ export interface CloudBeaconInput {
   /** Conversation history BEFORE this turn's user message (no system row —
    *  the system prompt travels in config.systemPrompt). */
   history: Array<{ role: "user" | "assistant"; content: string }>;
-  /** Absolute provider chat URL. Empty/relative → the keyless LLM bridge. */
+  /** The user's OWN absolute provider chat URL (BYOK — user directive
+   *  2026-10-31). Empty/relative/legacy pins are NOT dispatched onto the
+   *  app's model anymore: the run they would create fails honestly at
+   *  dispatch with instructions. */
   chatUrl: string;
   /** Provider API key (leads the key pool as the runner's bearer). */
   apiKey: string;
@@ -202,11 +207,12 @@ export function dispatchCloudAgentRunBeacon(input: CloudBeaconInput): {
       // the real bound is the run's execution window.
       maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
-      // LEGACY-CLASSIC GUARD: never pin the retired text.pollinations.ai
-      // endpoint into a NEW cloud run (a stale pre-migration tab can still
-      // flip the provider row onto the legacy host — the foreground turn
-      // may have resolved it before the flip was healed). A legacy pin
-      // drops to the keyless bridge instead of a guaranteed-404 gateway.
+      // BYOK POLICY (user directive 2026-10-31) + LEGACY-CLASSIC GUARD: only
+      // the user's OWN, absolute, non-legacy gateway is pinned. A missing or
+      // legacy pin is simply OMITTED — the run then fails honestly at
+      // dispatch (run-credentials.ts) with instructions to add a provider,
+      // which lands in the chat when the run syncs back. Never a reroute onto
+      // the app's own model (the keyless bridge was removed).
       ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl)
         ? { chatUrl: input.chatUrl.trim() }
         : {}),
@@ -473,8 +479,10 @@ export async function dispatchDetachedCloudTurn(input: {
   conversationId: string;
   prompt: string;
   systemPrompt: string;
-  /** Absolute provider chat URL. Empty/relative → the keyless LLM bridge
-   *  (the documented fallback when no provider gateway exists). */
+  /** The user's OWN absolute provider chat URL (BYOK — required: the caller
+   *  refuses turns without a provider gateway BEFORE dispatching, so the
+   *  cloud run always carries user credentials; the app's keyless bridge
+   *  fallback was removed with the BYOK policy). */
   chatUrl: string;
   /** The pinned provider's API key — leads the runner's key pool. */
   apiKey?: string;
@@ -504,17 +512,20 @@ export async function dispatchDetachedCloudTurn(input: {
       // USER DIRECTIVE: no 24-round cap — the server default (400) governs.
       maxRounds: 400,
       ...(typeof input.temperature === "number" ? { temperature: input.temperature } : {}),
-      // LEGACY-CLASSIC GUARD (same as the beacon lane): never pin the
-      // retired text.pollinations.ai endpoint into a NEW cloud run — a
-      // legacy pin drops to the keyless bridge instead.
+      // BYOK POLICY (user directive 2026-10-31) + LEGACY-CLASSIC GUARD
+      // (same as the beacon lane): only the user's OWN, absolute,
+      // non-legacy gateway is pinned. A missing pin would fail the run
+      // honestly at dispatch — the app's own model is never a fallback.
       ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl)
         ? { chatUrl: input.chatUrl.trim() }
         : {}),
     },
     includeWorkspace: true,
     preferredProviderId: input.preferredProviderId ?? undefined,
-    // Pinned gateway → its key leads the pool (no rotation). Empty chatUrl
-    // (bridge lane) ignores the key — the bridge authorizes by task token.
+    // Pinned gateway → its key leads the pool (no rotation). An empty
+    // chatUrl cannot happen on this lane (the caller refuses turns without
+    // a provider gateway) — and would fail the run honestly at dispatch
+    // anyway: the app's own model is never a fallback.
     ...(isAbsoluteHttp(input.chatUrl) && !isLegacyClassicUrl(input.chatUrl) && input.apiKey?.trim()
       ? { pinnedApiKey: input.apiKey.trim() }
       : {}),

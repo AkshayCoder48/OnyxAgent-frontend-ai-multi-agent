@@ -90,6 +90,14 @@ model TaskSchedule {
   taskType  String    @default("scheduled_business")
   prompt    String
   config    String    @default("{}")
+  /// BYOK (user directive 2026-10-31: scheduled runs use the USER's own
+  /// credentials, never the app's): the schedule's provider API key,
+  /// AES-256-GCM sealed with the same master key as TaskCloudConfig
+  /// (sealSecret in trigger-cloud.ts). Unsealed ONLY into the in-memory
+  /// keyring at fire time — never logged, never returned by the API.
+  /// Null for terminal_command schedules and keyless gateways; config
+  /// carries the pinned gateway URL (config.chatUrl — not a secret).
+  encryptedApiKey String?
   active    Boolean   @default(true)
   runCount  Int       @default(0)
   lastRunAt DateTime?

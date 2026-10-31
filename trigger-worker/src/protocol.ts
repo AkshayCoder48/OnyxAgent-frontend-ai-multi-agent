@@ -111,12 +111,14 @@ export interface TaskPayload {
 
 export interface TaskRunConfig {
   /**
-   * OpenAI-compatible chat URL the sandbox runner should call. When omitted,
-   * the orchestrator substitutes the app's own keyless bridge
-   * (`/api/tasks/llm`) and the task token acts as the bearer credential.
+   * OpenAI-compatible chat URL of the USER'S OWN provider gateway (BYOK —
+   * user directive 2026-10-31: background runs never execute on the app's
+   * own model; the keyless bridge was removed). Agent runs without a valid
+   * gateway fail fast with instructions. The bearer is the credentials key
+   * pool (first key) — NEVER the task token.
    */
   chatUrl?: string;
-  /** Model id for the runner. Omitted → bridge default. */
+  /** Model id for the runner. */
   model?: string;
   temperature?: number;
   maxRounds?: number;
@@ -248,9 +250,11 @@ export interface AgentRunPayload {
   credentials: {
     /** E2B API key for this run (app-resolved; no server env required). */
     e2bApiKey: string;
-    /** Resolved OpenAI-compatible chat endpoint for the sandbox runner. */
+    /** The USER'S OWN OpenAI-compatible chat endpoint (BYOK — user
+     *  directive 2026-10-31; the app's keyless bridge was removed). */
     chatUrl: string;
-    /** Bearer for chatUrl (first pool key, or the task token for the app bridge). */
+    /** Bearer for chatUrl — the FIRST user pool key. Empty for keyless
+     *  gateways. NEVER the task token (it must not leave the app). */
     chatToken: string;
     /** FR-1.3 rotational provider key pool (runner rotates on 429/401). */
     keyPool: string[];

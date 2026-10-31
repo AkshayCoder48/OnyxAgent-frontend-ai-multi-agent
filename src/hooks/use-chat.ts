@@ -498,12 +498,18 @@ export function useChat(options: UseChatOptions = {}) {
         // CONFIG PROPAGATION (endpoint-migration PRD §9): the background
         // lane receives the SAME effective configuration the foreground
         // turn resolved — the selected provider's gateway URL, its key and
-        // the selected model. Previously this pinned `chatUrl: ""`, which
-        // silently rerouted every background chat turn onto the app's
-        // keyless bridge model instead of the user's selected provider+model.
-        // The bridge remains only as the documented fallback when no
-        // provider gateway exists (empty base URL).
+        // the selected model. BYOK POLICY (user directive 2026-10-31):
+        // background runs execute ONLY on the user's own provider — the
+        // app's keyless bridge fallback was removed, so a turn without a
+        // provider gateway is refused up front with instructions (no cloud
+        // run is created).
         const provider = opts.provider;
+        if (!provider.baseUrl?.trim()) {
+          failTurn(
+            "Background runs execute with YOUR own AI provider — add one in Settings → Agent Settings → AI Providers. (The app's built-in model is never used for background work.)",
+          );
+          return;
+        }
         await dispatchDetachedCloudTurn({
           userId,
           conversationId: convId,
@@ -1216,8 +1222,10 @@ export function useChat(options: UseChatOptions = {}) {
         }
 
         // Resolve the SAME provider/model/system-prompt config a foreground
-        // send would use (falls back to the app defaults + keyless bridge
-        // when no provider is configured).
+        // send would use. With no provider configured the re-dispatch still
+        // fires — the run then fails honestly at dispatch with the
+        // actionable BYOK message ("add your provider"), which lands in the
+        // chat when it syncs back (the app's own model is never a fallback).
         const opts = await buildTurnOptions(userId, prompt);
         const systemPrompt =
           opts?.systemPrompt?.trim() || `${ONYX_AI_SYSTEM_PROMPT}\n\n${WEB_RESEARCH_DIRECTIVE}`;

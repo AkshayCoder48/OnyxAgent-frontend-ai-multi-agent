@@ -131,12 +131,16 @@ export interface TaskPayload {
 
 export interface TaskRunConfig {
   /**
-   * OpenAI-compatible chat URL the sandbox runner should call. When omitted,
-   * the orchestrator substitutes the app's own keyless bridge
-   * (`/api/tasks/llm`) and the task token acts as the bearer credential.
+   * OpenAI-compatible chat URL of the USER'S OWN provider gateway (BYOK —
+   * user directive 2026-10-31: background runs never execute on the app's
+   * own model). The triggering client pins the provider it resolved for
+   * the turn; agent runs without a valid gateway fail at dispatch with an
+   * actionable error (run-credentials.ts). terminal_command runs need no
+   * gateway. The bearer is the run's key pool (first key), NEVER the task
+   * token.
    */
   chatUrl?: string;
-  /** Model id for the runner. Omitted → bridge default. */
+  /** Model id for the runner. */
   model?: string;
   temperature?: number;
   maxRounds?: number;
@@ -166,9 +170,10 @@ export interface TaskTriggerRequest {
   taskId: string;
   /**
    * Client-minted secret (64 hex chars). Authorizes cancel / mark-synced /
-   * artifact extraction and acts as the bearer token for the LLM bridge.
-   * Stored ONLY as a sha256 hash server-side; the plaintext lives in the
-   * in-memory keyring for the life of the run (PRD §4.2 credential
+   * artifact extraction. (The removed keyless LLM bridge used to accept it
+   * as a chat bearer too — under the BYOK policy it NEVER travels to an LLM
+   * gateway.) Stored ONLY as a sha256 hash server-side; the plaintext lives
+   * in the in-memory keyring for the life of the run (PRD §4.2 credential
    * sandboxing — never persisted to disk or logs).
    */
   taskToken: string;
@@ -320,6 +325,13 @@ export interface TaskScheduleInput {
   taskType: BackgroundTaskType;
   prompt: string;
   config?: TaskRunConfig;
+  /** BYOK (user directive 2026-10-31): the schedule's own provider API key
+   *  (plaintext over the wire — same trust model as TaskTriggerRequest's
+   *  keyPool). The server seals it AES-256-GCM into
+   *  TaskSchedule.encryptedApiKey; it is unsealed ONLY into the in-memory
+   *  keyring when the sweep fires. agent_run schedules must pin
+   *  config.chatUrl (their own gateway) — creation is rejected without it. */
+  apiKey?: string;
   active?: boolean;
 }
 

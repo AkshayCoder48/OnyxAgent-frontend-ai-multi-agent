@@ -34,6 +34,14 @@ Frontend (Next.js client)                Your Backend (Next.js API routes)
   never worker env vars.
 - Key volatility: the worker image carries NO user keys; every run injects them
   dynamically (`CloudAgentRunPayload.credentials`).
+- **BYOK policy (user directive 2026-10-31): "I want users to use their own
+  credentials not mine."** Every background `agent_run` calls the LLM through
+  the user's own pinned gateway (`config.chatUrl`) with the user's key pool —
+  enforced in ONE place, `src/lib/tasks/run-credentials.ts` (unit-tested), and
+  mirrored by a worker-side gate in `agent-run.ts`. The app's keyless LLM
+  bridge (`/api/tasks/llm` → z-ai-web-dev-sdk, the operator's credentials)
+  was **removed**; the task token is never an LLM bearer. Runs without user
+  credentials fail fast with an actionable "add your provider" message.
 
 ## §3.2 Durable Normal Chat Agent — ✅ implemented
 
@@ -82,7 +90,12 @@ Frontend (Next.js client)                Your Backend (Next.js API routes)
 - The sweep task ticks the app (`POST /api/tasks/schedules/tick`, bearer =
   sealed worker token in `TaskCloudConfig.encryptedWorkerToken`), which claims
   + dispatches due rows with FRESH BYOK credentials (the app is the credential
-  broker — keys are never frozen into schedule payloads).
+  broker — keys are never frozen into schedule payloads): the schedule row
+  pins the user's own gateway (`config.chatUrl`) and carries the provider key
+  AES-256-GCM sealed (`TaskSchedule.encryptedApiKey`), unsealed ONLY into the
+  in-memory keyring at fire time. agent_run schedules without a pinned
+  gateway are rejected at creation — scheduled work never runs on the app's
+  own model (the keyless bridge was removed).
 - Timeout freedom: scheduled runs execute on the cloud like any other run —
   up to `TASK_MAX_DURATION_MS` (2h), no HTTP boundary.
 - Fallbacks (unchanged): in-process 60s sweep loop + throttled sweep-on-read.
@@ -125,7 +138,7 @@ Frontend (Next.js client)                Your Backend (Next.js API routes)
 
 | Var | Purpose |
 |---|---|
-| `APP_URL` | Public origin — LLM bridge fallback + the durable-cron tick target (passed to the worker deploy automatically). |
+| `APP_URL` | Public origin — the durable-cron tick target + worker-deploy default (passed to the worker deploy automatically). NOT an LLM endpoint: the keyless bridge fallback was removed with the BYOK policy (user directive 2026-10-31). |
 | `TRIGGER_CLOUD_KEY` | Optional operator key (Settings → Cloud connect is the primary path). |
 | `E2B_TEMPLATE_ID` | The browser-ready sandbox template (see `scripts/build-browser-sandbox-template.sh`). |
 | `TASKS_CLOUD_MASTER_KEY` | AES master key for the server-side seal (defaults to a generated machine key). |

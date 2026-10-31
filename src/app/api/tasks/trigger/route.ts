@@ -219,8 +219,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     touch();
     startSchedulerLoop();
 
-    const fallbackAppUrl = new URL(request.url).origin;
-    const dispatch = await dispatchCloudRun(run.id, fallbackAppUrl).catch((err) => ({
+    const dispatch = await dispatchCloudRun(run.id).catch((err) => ({
       ok: false as const,
       error: err instanceof Error ? err.message : String(err),
     }));

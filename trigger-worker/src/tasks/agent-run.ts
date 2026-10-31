@@ -10,8 +10,8 @@
 // cloud run reaches a terminal state.
 //
 // Execution map (mirrors the app's local driver):
-//   [HITL gate] → init → create-sandbox → mount → verify → start →
-//   monitor (5s poll) → collect-artifacts → output.
+//   [BYOK gate] → [HITL gate] → init → create-sandbox → mount → verify →
+//   start → monitor (5s poll) → collect-artifacts → output.
 //
 // Trigger.dev v4 PRD compliance:
 //   §3.2 resilience — LLM calls retry with exponential backoff + full jitter
@@ -23,6 +23,13 @@
 //   §4  concurrency — a per-user queue key (concurrencyKey = userId, passed
 //     by the app at trigger time) caps each user at 2 concurrent runs so one
 //     user can never exhaust the operator's cloud allocation.
+//
+// BYOK POLICY (user directive 2026-10-31): every LLM call goes through the
+// USER's own pinned provider gateway (credentials.chatUrl + key pool). The
+// app's keyless LLM bridge was REMOVED — this worker never calls back into
+// the app for completions, and an agent run without user credentials fails
+// fast with instructions instead of silently burning the operator's model
+// budget.
 // ============================================================================
 
 import { task, metadata, logger, wait } from "@trigger.dev/sdk";
@@ -98,6 +105,45 @@ function requiresHumanApproval(run: AgentRunPayload["run"]): boolean {
 }
 
 type ApprovalOutcome = { kind: "approved" } | { kind: "denied" } | { kind: "skipped" };
+
+// ---------------------------------------------------------------------------
+// BYOK credential gate (user directive 2026-10-31)
+// ---------------------------------------------------------------------------
+
+/** Actionable failure when an agent run carries no provider gateway of its
+ *  own — the user must add THEIR provider; the app's own model is never a
+ *  fallback for background work. */
+const NO_PROVIDER_CREDENTIALS_ERROR =
+  "This background run has no AI provider of its own — add your provider and API key in Settings → Agent Settings → AI Providers, then retry. Background runs always execute with YOUR credentials; the app's built-in model is never used as a fallback. (code: byok_no_gateway)";
+
+/** Absolute http(s) check — the only gateways a cloud runner can reach. */
+function isAbsoluteHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url.trim());
+}
+
+/** True when a URL points at the app's own (removed) LLM-bridge route —
+ *  payloads minted before the BYOK policy are refused instead of spending
+ *  the operator's credentials. */
+function isAppBridgeUrl(url: string): boolean {
+  if (!isAbsoluteHttpUrl(url)) return false;
+  try {
+    return new URL(url.trim()).pathname.replace(/\/+$/, "") === "/api/tasks/llm";
+  } catch {
+    return false;
+  }
+}
+
+/** Gate ONE payload's LLM credentials: null when the run may execute, or
+ *  the honest error string when it must not. terminal_command runs never
+ *  need an LLM leg. */
+function gateLlmCredentials(payload: AgentRunPayload): string | null {
+  if (payload.run.type === "terminal_command") return null;
+  const chatUrl = (payload.credentials.chatUrl ?? "").trim();
+  if (!isAbsoluteHttpUrl(chatUrl) || isAppBridgeUrl(chatUrl)) {
+    return NO_PROVIDER_CREDENTIALS_ERROR;
+  }
+  return null;
+}
 
 /**
  * HUMAN-IN-THE-LOOP GATE (PRD §3.3): mint a Trigger.dev waitpoint token,
@@ -243,6 +289,27 @@ export const agentRun = task({
         };
       }
 
+      // ---- BYOK credential gate (user directive 2026-10-31) ---------------
+      // Agent runs execute ONLY on the user's own pinned gateway; there is
+      // no app-bridge fallback. A permanent misconfiguration returns a
+      // FAILED OUTPUT (no Trigger.dev retry — retrying cannot add
+      // credentials), and the error names exactly what the user must add.
+      const credentialError = gateLlmCredentials(payload);
+      if (credentialError) {
+        state.phase = "done";
+        state.progress.stage = "failed";
+        state.progress.lastUpdate = Date.now();
+        pushChunk({ kind: "error", content: credentialError.slice(0, RING_CHUNK_MAX_CHARS), ts: Date.now() });
+        flush();
+        logger.error(`[agent-run ${runId}] refused: no user provider credentials`);
+        return {
+          runId,
+          status: "failed",
+          error: credentialError,
+          artifacts: [],
+        };
+      }
+
       // ---- NATIVE MODE (no E2B key — the zero-setup lane) ────────────────
       // Trigger.dev Cloud itself is the compute: the agent loop runs
       // IN-TASK with NO sandbox and a tools-off surface (text + seed
@@ -361,13 +428,15 @@ export const agentRun = task({
 const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Zero-setup execution: complete the turn IN-TASK through the resolved LLM
- * endpoint (pinned provider gateway or the app's keyless bridge), tools-off.
- * The seed history + system prompt travel in the payload; the answer becomes
- * one `message` artifact the app syncs back into the conversation exactly
- * like a sandbox run's response. Key-pool rotation on 401/429 mirrors the
- * sandbox runner's discipline. Progress streams through the same metadata
- * blob (round/stage/chunks) the app already polls.
+ * Zero-setup execution: complete the turn IN-TASK through the USER'S OWN
+ * pinned provider gateway (credentials.chatUrl + key pool — BYOK, never
+ * the app's own model), tools-off. The seed history + system prompt travel
+ * in the payload; the answer becomes one `message` artifact the app syncs
+ * back into the conversation exactly like a sandbox run's response.
+ * Key-pool rotation on 401/429 mirrors the sandbox runner's discipline.
+ * Progress streams through the same metadata blob (round/stage/chunks) the
+ * app already polls. A missing gateway never reaches here — the BYOK gate
+ * above fails the run with instructions first.
  */
 async function runNativeAgentRun(
   payload: AgentRunPayload,

@@ -13,9 +13,12 @@
 // consecutive TRIGGERS start on different keys — spreading rate limits
 // across runs, not just within one.
 //
-// A locked vault is NOT an error: providers whose keys can't be decrypted
-// are skipped silently and an empty pool is returned — the run then uses the
-// app's keyless LLM bridge (/api/tasks/llm) by design (PRD §4.2).
+// BYOK POLICY (user directive 2026-10-31): a locked vault is still not an
+// error — providers whose keys can't be decrypted are skipped silently and
+// an empty pool is returned. The run then proceeds against its PINNED user
+// gateway keylessly (or 401s there, honestly). The app's keyless LLM
+// bridge fallback was REMOVED: an empty pool never reroutes a run onto the
+// operator's credentials.
 // ============================================================================
 
 import { aiProviderService } from "@/lib/services";
@@ -71,7 +74,9 @@ export async function buildKeyPool(opts?: BuildKeyPoolOptions): Promise<KeyPool>
       await restoreVaultFromSession();
     }
   } catch {
-    /* locked vault → empty pool is a valid outcome (bridge fallback) */
+    /* locked vault → empty pool is a valid outcome (BYOK policy: the run
+       proceeds keylessly against the pinned user gateway — never the app's
+       own model, which is no longer a fallback) */
   }
 
   // (2) Active providers, preferred first. LEGACY-CLASSIC GUARD: rows on
