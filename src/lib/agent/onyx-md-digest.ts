@@ -2,23 +2,29 @@
 // Regenerate with: bun run scripts/gen-onyx-md.ts
 //
 // The TOOL DIGEST — a compact (<8192 bytes) always-injected
-// block listing EVERY model-visible tool by exact name + one-line capability.
+// block listing EVERY MODEL-VISIBLE tool by exact name + one-line capability.
 // This is the anti-hallucination companion to the full manual (onyx-md.ts /
 // the /home/user/Onyx.md sandbox file): models that skip reading Onyx.md still
 // know their complete tool surface, and the availability rules make
 // "I don't have that tool" claims about registered tools a prompt violation.
 //
-// UMBRELLA CONSOLIDATION: the surface is 22 tools — 12 action-based umbrella
-// tools (files / web / code_exec / subagents / schedule / integrations /
-// chats / memory / todos / media / workspace / custom_tools) + 10 keepers.
-// Each umbrella takes ONE required `action` argument whose value is the exact
-// granular operation name. The granular tools remain REGISTERED + callable
-// (umbrella dispatch, legacy calls) but are hidden from the model-visible
-// list. Parity with the live registry's VISIBLE tools is enforced by
-// src/lib/agent/onyx-md-digest.test.ts.
+// UMBRELLA CONSOLIDATION: the surface is 21 tools — 12 action-based
+// umbrella tools + 9 standalone keepers. Each umbrella takes ONE
+// required `action` argument whose value is the exact granular operation
+// name. The granular tools remain REGISTERED + callable (umbrella dispatch,
+// legacy calls) but are hidden from the model-visible list. The generator
+// maps the granular Onyx.md compendium onto the umbrella surface using the
+// UMBRELLAS map inlined in scripts/gen-onyx-md.ts (mirrors
+// src/lib/agent/tool-umbrella.ts).
+//
+// Parity with the live registry's VISIBLE tools (listTools()) is enforced by
+// src/lib/agent/onyx-md-digest.test.ts — every visible registry tool must be
+// in the digest and vice versa. After adding/removing/renaming a tool:
+// update the Onyx.md compendium AND (if the umbrella surface changed) the
+// UMBRELLAS map + src/lib/agent/tool-umbrella.ts, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (22 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (21 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -37,13 +43,14 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - custom_tools [create_custom_tool / manage_custom_tool] — Build reusable tools: http_webhook or python_snippet.
 
 ### Single-purpose tools
-- use_browser — ONLY for pages needing real interaction (click, type, login, JS); plain reading is web's web_fetch action.
+- knowledge_base [search / get / save / update / delete / list / file hosting] — Workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
+- manage_skill [list / read / create / edit / delete / catalog / search_marketplace / install_from_marketplace] — Skills — list shows ALL (55-skill library + user's); search_marketplace/install_from_marketplace = live SkillsMP directory.
+- manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
+- workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
+- use_browser — ONLY for pages needing real interaction (click, type, login, JS); plain reading is web_fetch's job.
 - ask_user — Ask a clarifying question when context is missing — never guess user intent.
-- knowledge_base [search / get / save / update / delete / list / file hosting] — Workspace Knowledge Base (OnyxBase) — survives chats.
-- manage_skill [list / read / create / edit / delete / catalog / search_marketplace / install_from_marketplace] — Skills — 55-skill library + user's + live SkillsMP marketplace.
-- manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE). market = MCPMarket catalog.
-- workflow [create / list / get / edit / delete / run] — Multi-step pipelines: AI prompts + tool calls with {{variable}} substitution.
 - counterfactual — Structured "what if X had been different" analysis.
+- decision — Structured decision engine (JEV systemone): pass a state + queries (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip.
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
 ### Availability rules (anti-hallucination)
@@ -52,11 +59,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Be honest BOTH ways: never deny a tool you have; never claim or call a tool that is absent from your definitions this turn.
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — read it (the files umbrella's read_file action) when you need more than this digest.`;
 
-/** Every model-visible tool name (digest ⇄ registry parity is test-enforced
- * against listTools() — hidden granular tools are excluded by design). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = [
-  "files","web","code_exec","subagents","schedule","integrations","chats",
-  "memory","todos","media","workspace","custom_tools",
-  "use_browser","ask_user","knowledge_base","manage_skill","manage_mcp",
-  "workflow","counterfactual","current_datetime",
-];
+/** Every model-visible tool name: the 12 umbrellas + 9 keepers
+ * (digest ⇄ registry parity is test-enforced against listTools() — hidden
+ * granular tools are excluded by design). */
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","counterfactual","decision","current_datetime"];

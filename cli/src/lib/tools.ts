@@ -253,6 +253,35 @@ registerTool({
 });
 
 // web_search (uses Miklium API — no key needed)
+//
+// "No results" handling: Miklium signals "nothing matched" as HTTP 404
+// with {"success":false,"error":"No results found"} (or success:false on
+// a 200). That is a legitimate empty outcome — normalized here to a
+// success:true empty list so the agent says "nothing found" instead of
+// dumping a raw backend error at the user. Real failures are sanitized:
+// provider names / raw JSON bodies never surface in the CLI output.
+
+function isNoResultsResponse(status: number, errText: string): boolean {
+  if (status === 404) return true;
+  return /no results|nothing found|not found|empty result/i.test(errText);
+}
+
+function searchLabel(type: "web" | "image" | "video"): string {
+  return type === "web" ? "Web search" : type === "image" ? "Image search" : "Video search";
+}
+
+function sanitizedSearchError(type: "web" | "image" | "video", e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  const cleaned = raw
+    .replace(/miklium|duckduckgo|langsearch/gi, "search backend")
+    .replace(/\{[\s\S]*\}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned && cleaned !== raw
+    ? `${searchLabel(type)} failed: ${cleaned}`
+    : `${searchLabel(type)} is temporarily unavailable. Please try again in a moment.`;
+}
+
 registerTool({
   name: "web_search",
   description: "Search the web for information. Returns titles, URLs, and snippets.",
@@ -279,9 +308,19 @@ registerTool({
           maxLargeSnippets: 0,
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        if (isNoResultsResponse(res.status, "")) {
+          return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json() as any;
-      if (!data.success) throw new Error(data.error || "Search failed");
+      if (!data.success) {
+        if (isNoResultsResponse(200, String(data.error || ""))) {
+          return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
+        }
+        throw new Error(data.error || "Search failed");
+      }
       // Group by URL
       const byUrl = new Map<string, { url: string; snippet: string; domain: string }>();
       for (const item of data.results || []) {
@@ -292,9 +331,12 @@ registerTool({
         }
       }
       const results = Array.from(byUrl.values()).slice(0, limit);
+      if (results.length === 0) {
+        return { success: true, output: { query, results: [], count: 0, message: `No web results found for "${query}". Try different or more general keywords.` } };
+      }
       return { success: true, output: { query, results, count: results.length } };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedSearchError("web", e) };
     }
   },
 });
@@ -364,8 +406,17 @@ registerTool({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ search: [query], type: "images", maxResults: limit }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        if (isNoResultsResponse(res.status, errText)) {
+          return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json() as any;
+      if (data.success === false && isNoResultsResponse(200, String(data.error || ""))) {
+        return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
+      }
       const results = (data.results || []).map((r: { imageUrl: string; title: string; size?: { width?: number; height?: number }; referenceUrl: string }) => ({
         imageUrl: r.imageUrl,
         thumbnail: r.imageUrl,
@@ -374,9 +425,14 @@ registerTool({
         height: r.size?.height,
         source: r.referenceUrl,
       }));
+      // Both backends up but nothing matched — still a success, with a
+      // graceful notice instead of an empty/misleading payload.
+      if (results.length === 0) {
+        return { success: true, output: { query, results: [], count: 0, provider: "miklium", message: `No images found for "${query}". Try different or more general keywords.` } };
+      }
       return { success: true, output: { query, results, count: results.length, provider: "miklium" } };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedSearchError("image", e) };
     }
   },
 });
@@ -403,8 +459,17 @@ registerTool({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ search: [query], type: "videos", maxResults: limit, includeAdditionalData: true }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        if (isNoResultsResponse(res.status, errText)) {
+          return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json() as any;
+      if (data.success === false && isNoResultsResponse(200, String(data.error || ""))) {
+        return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
+      }
       const results = (data.results || []).map((r: { videoUrl: string; thumbUrl: string; title: string; description: string; duration: string; additionalData?: { channelTitle?: string; statistics?: { viewCount?: string; likeCount?: string } } }) => ({
         videoUrl: r.videoUrl,
         thumbnail: r.thumbUrl,
@@ -415,9 +480,12 @@ registerTool({
         views: r.additionalData?.statistics?.viewCount,
         likes: r.additionalData?.statistics?.likeCount,
       }));
+      if (results.length === 0) {
+        return { success: true, output: { query, results: [], count: 0, message: `No videos found for "${query}". Try different or more general keywords.` } };
+      }
       return { success: true, output: { query, results, count: results.length } };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedSearchError("video", e) };
     }
   },
 });

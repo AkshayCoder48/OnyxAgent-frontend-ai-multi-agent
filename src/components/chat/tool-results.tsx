@@ -280,6 +280,49 @@ function parseResult<T = Record<string, unknown>>(result: unknown): T | null {
   return null;
 }
 
+// ---- Search no-results / failure notice ----
+// "No results" is a legitimate outcome (the API route normalizes upstream
+// 404 "No results found" responses into an empty list), and failures carry
+// a sanitized `error`. Render either as one clean sentence — never dump the
+// raw tool-result JSON (that's how 'Miklium HTTP 404: {"success":false,…}'
+// leaked into the chat in the first place).
+function SearchOutcomeNotice({
+  result,
+  icon: Icon,
+  kindLabel,
+}: {
+  result: unknown;
+  icon: React.ComponentType<{ className?: string }>;
+  kindLabel: string;
+}) {
+  const parsed = parseResult<{ output?: { query?: string; message?: string }; error?: string }>(result);
+
+  // Failed call — clean red line with the sanitized message.
+  if (parsed?.error) {
+    return (
+      <p className="flex items-center gap-2 py-2 text-xs text-rose-500">
+        <XCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {parsed.error}
+      </p>
+    );
+  }
+
+  // Successful call with nothing matched — friendly italic notice.
+  if (parsed?.output) {
+    const query = parsed.output.query;
+    const message = parsed.output.message;
+    return (
+      <p className="text-muted-foreground flex items-center gap-2 py-2 text-xs italic">
+        <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        {message ?? `No ${kindLabel} found${query ? ` for “${query}”` : ""}.`}
+      </p>
+    );
+  }
+
+  // Unrecognized shape — keep the generic renderer as the last resort.
+  return <GenericToolResult result={result} />;
+}
+
 // ---- Web Search Results (LangSearch + Miklium) ----
 // Handles results from both LangSearch (has title, domain, icon, description)
 // and Miklium (has url, snippet, snippetType, symbols).
@@ -326,7 +369,15 @@ export function WebSearchResults({ result }: ResultProps) {
       },
     ];
   });
-  if (cards.length === 0) return <GenericToolResult result={result} />;
+  if (cards.length === 0) {
+    // Graceful empty state: the backend answered but nothing matched (or
+    // the call failed cleanly). Only fall back to the raw renderer when
+    // results exist but none of them preview (rare).
+    if (results.length === 0) {
+      return <SearchOutcomeNotice result={result} icon={Globe} kindLabel="web results" />;
+    }
+    return <GenericToolResult result={result} />;
+  }
 
   return (
     <div className="space-y-2">
@@ -391,7 +442,7 @@ export function ImageSearchResults({ result }: ResultProps) {
   const [currentIdx, setCurrentIdx] = React.useState(0);
   const touchStartX = React.useRef<number | null>(null);
 
-  if (results.length === 0) return <GenericToolResult result={result} />;
+  if (results.length === 0) return <SearchOutcomeNotice result={result} icon={ImageIcon} kindLabel="images" />;
 
   const total = results.length;
   // Clamp index in case results shrank
@@ -562,7 +613,7 @@ export function VideoSearchResults({ result }: ResultProps) {
     };
   }>(result);
   const results = parsed?.output?.results ?? [];
-  if (results.length === 0) return <GenericToolResult result={result} />;
+  if (results.length === 0) return <SearchOutcomeNotice result={result} icon={Video} kindLabel="videos" />;
 
   return (
     <div className="space-y-2">

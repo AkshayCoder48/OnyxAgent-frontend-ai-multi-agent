@@ -13,7 +13,7 @@
  * UPDATE (umbrella consolidation): the granular tools are now folded into
  * 12 action-based UMBRELLA tools (files / web / code_exec / subagents /
  * schedule / integrations / chats / memory / todos / media / workspace /
- * custom_tools) + 10 keepers — 22 model-visible built-ins total. The
+ * custom_tools) + 9 keepers — 21 model-visible built-ins total. The
  * surfaces and intent rules below speak UMBRELLA names; the granular tools
  * are hidden from listTools() entirely (src/lib/tools/consolidated.ts).
  *
@@ -24,13 +24,13 @@
  *   2. A CORE surface ships on every normal turn (context ≥128K models):
  *      the general-assistant toolset — web/research, code/exec, files,
  *      todos, memory, knowledge, media, chats, schedules, subagents and
- *      workspace ops.
+ *      workspace ops, PLUS the CORE extras (custom-tool authoring,
+ *      counterfactual, workflow).
  *   3. Small-context models (<128K, incl. the 32K safe-fallback) get the
  *      tighter ESSENTIAL surface instead — the same core minus the
  *      long-tail extras which stay reachable through intent matching.
- *   4. SITUATIONAL tools (custom-tool authoring, counterfactual, workflow)
- *      ride in ONLY when the user's intent mentions them — keyword rules
- *      below — or when they were already used earlier in the conversation.
+ *   4. The CORE extras (custom-tool authoring, counterfactual, workflow,
+ *      …) are intent-matched on small models and latched when already used.
  *   5. Tools used earlier in THIS turn (the runtime latches live tool
  *      calls into usedToolNames) are never scoped out mid-turn.
  *

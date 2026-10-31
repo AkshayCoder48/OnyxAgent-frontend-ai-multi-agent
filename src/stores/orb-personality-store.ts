@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import {
   buildCustomPersonality,
   getActivePersonality,
@@ -100,6 +100,14 @@ export const useOrbPersonalityStore = create<OrbPersonalityStoreState>()(
     }),
     {
       name: "onyx-orb-personality",
+      // Resolve the storage lazily off the `localStorage` GLOBAL, not
+      // `window.localStorage`: zustand's default getter throws a
+      // ReferenceError wherever `window` is undefined (Node test envs,
+      // workers), and the middleware then silently bails BEFORE attaching
+      // its persist API — the store degrades to unpersisted with no signal.
+      // The bare global exists in every browser and in stubbed test envs;
+      // createJSONStorage still swallows SSR's ReferenceError safely.
+      storage: createJSONStorage(() => localStorage),
       // The override is transient session state — never persist it.
       partialize: (s) => ({ personalityId: s.personalityId, custom: s.custom }),
       // Sanitize the persisted custom copy on rehydrate: an older shape (or a

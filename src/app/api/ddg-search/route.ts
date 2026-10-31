@@ -73,6 +73,34 @@ function getFavicon(domain: string): string {
   return `https://external-content.duckduckgo.com/ip3/${domain}.ico`;
 }
 
+// ---- "No results" is not an error ---------------------------------------
+//
+// Upstream backends signal "nothing matched this query" in a dozen ways —
+// Miklium answers HTTP 404 with {"success":false,"error":"No results
+// found"}, and its 200 path can carry success:false with the same text.
+// That is a LEGITIMATE empty outcome, not a backend failure: bubbling it up
+// as an error makes the chat render a raw
+//   Miklium HTTP 404: {"success":false,"error":"No results found"}
+// blob (operator-reported bug) instead of a graceful "no images found".
+// Detect it here and return an empty result set.
+
+function looksLikeNoResults(status: number, errText: string): boolean {
+  if (status === 404) return true;
+  return /no results|nothing found|not found|empty result/i.test(errText);
+}
+
+/**
+ * Wrap an upstream failure in a clean, user-facing message. Raw provider
+ * names and JSON bodies must NEVER reach the chat — they leak into the
+ * tool-result card verbatim otherwise. Full detail goes to the server log.
+ */
+function sanitizedSearchError(kind: "web" | "image" | "video", err: unknown): Error {
+  const label = kind === "web" ? "Web search" : kind === "image" ? "Image search" : "Video search";
+  const raw = err instanceof Error ? err.message : String(err);
+  console.error(`[ddg-search] ${label} failed:`, raw);
+  return new Error(`${label} is temporarily unavailable. Please try again in a moment.`);
+}
+
 // ---- Miklium Search (fallback for web, fallback for images, primary for videos) ----
 
 /**
@@ -116,12 +144,28 @@ async function searchMiklium(
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`Miklium HTTP ${res.status}: ${errText.slice(0, 200) || res.statusText}`);
+    // "No results found" (404 or 200-body) is a legitimate empty outcome —
+    // return [] so the caller can answer "nothing matched" gracefully
+    // instead of failing the whole tool call.
+    if (looksLikeNoResults(res.status, errText)) {
+      console.warn(`[ddg-search] Miklium reported no results for ${type} query "${query.slice(0, 80)}" (HTTP ${res.status})`);
+      return [];
+    }
+    // Real backend failure — log the raw detail server-side, hand the
+    // client a clean message (no provider name, no raw JSON body).
+    console.error(`[ddg-search] Miklium ${type} HTTP ${res.status}:`, errText.slice(0, 300));
+    throw new Error(`Miklium HTTP ${res.status}`);
   }
 
   const data = await res.json();
   if (!data.success) {
-    throw new Error(`Miklium error: ${data.error || "Unknown error"}`);
+    const errText = String(data.error || "");
+    if (looksLikeNoResults(200, errText)) {
+      console.warn(`[ddg-search] Miklium reported no results for ${type} query "${query.slice(0, 80)}" (success:false)`);
+      return [];
+    }
+    console.error(`[ddg-search] Miklium ${type} error:`, errText.slice(0, 300));
+    throw new Error(`Miklium error: ${errText.slice(0, 120) || "Unknown error"}`);
   }
 
   const rawResults: Array<Record<string, unknown>> = data.results || [];
@@ -337,15 +381,23 @@ export async function GET(req: NextRequest) {
       results = await searchMiklium(query, "web", limit);
     }
 
+    // Every path above now converges on either a populated result set or
+    // an empty one ("no results" is normalized to [] inside searchMiklium).
+    // `note` lets the tool layer (and the LLM behind it) tell the user
+    // "nothing matched" in one clean sentence instead of an error blob.
+    const kindLabel = type === "image" ? "images" : type === "video" ? "videos" : "web results";
     return NextResponse.json({
       query,
       type,
       results: results.slice(0, limit),
       count: results.length,
       provider,
+      ...(results.length === 0 ? { note: `No ${kindLabel} found for this query.` } : {}),
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Search failed";
-    return NextResponse.json({ error: message }, { status: 502 });
+    // Sanitize: raw upstream messages (provider names, JSON bodies) stay in
+    // the server log; the client gets a clean, retry-friendly sentence.
+    const kind = type === "image" ? "image" : type === "video" ? "video" : "web";
+    return NextResponse.json({ error: sanitizedSearchError(kind, err).message }, { status: 502 });
   }
 }

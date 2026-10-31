@@ -67,14 +67,98 @@ const USE_CAP = 180;
 /** Hard ceiling for the whole digest block (small providers reject fat prompts). */
 const DIGEST_MAX_BYTES = 8192;
 
-interface DigestTool {
-  name: string;
-  line: string;
-}
-interface DigestCategory {
-  title: string;
-  tools: DigestTool[];
-}
+// ---------------------------------------------------------------------------
+// UMBRELLA CONSOLIDATION — the model-visible surface is a small set of
+// action-based UMBRELLA tools + standalone keepers, NOT the ~62 granular
+// compendium entries. This map mirrors src/lib/agent/tool-umbrella.ts
+// (kept inline so the generator stays fs-only and can never break on the
+// client module graph). Drift between the two is caught by the vitest
+// parity test (onyx-md-digest.test.ts: digest names ⇄ listTools()).
+// ---------------------------------------------------------------------------
+
+const UMBRELLAS: ReadonlyArray<{ name: string; actions: readonly string[]; blurb: string }> = [
+  {
+    name: "files",
+    actions: [
+      "list_folder", "read_file", "read_file_section", "create_file", "write_file",
+      "edit_file", "delete_file", "delete_folder", "create_folder", "move_file",
+      "send_file", "send_folder", "verify_path", "create_file_chunk",
+      "list_uploaded_files", "read_uploaded_file", "search_documents", "ocr_document",
+    ],
+    blurb:
+      "Everything file-shaped in the workspace (E2B sandbox /home/user) + uploads + OCR. Pass the operation's parameters alongside `action`.",
+  },
+  {
+    name: "web",
+    actions: ["web_search", "image_search", "video_search", "web_fetch"],
+    blurb: "Search and read the web. web_fetch is the DEFAULT reader (try /llms.txt for docs).",
+  },
+  {
+    name: "code_exec",
+    actions: ["run_python", "run_terminal", "background_task"],
+    blurb: "Python, shell, durable background runs in the sandbox.",
+  },
+  {
+    name: "subagents",
+    actions: [
+      "spawn_subagent", "list_subagents", "set_subagent_config", "query_subagent",
+      "steer_subagent", "complete_subagent", "cancel_subagent", "manage_subagent_chat",
+    ],
+    blurb: "Delegate work to subagents.",
+  },
+  {
+    name: "schedule",
+    actions: ["schedule_agent_task", "list_scheduled_tasks", "remove_scheduled_task"],
+    blurb: "Cron-schedule sandbox scripts; output lands in /home/user/cron_output.log.",
+  },
+  {
+    name: "integrations",
+    actions: [
+      "mcp_search_tools", "mcp_call_tool",
+      "composio_search_tools", "composio_connect_platform", "composio_execute_tool",
+    ],
+    blurb: "External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call.",
+  },
+  {
+    name: "chats",
+    actions: ["read_chat", "manage_chats"],
+    blurb: "Recall past conversations; read_chat also inspects a subagent's live reply.",
+  },
+  {
+    name: "memory",
+    actions: ["manage_memory", "project_memory"],
+    blurb: "Persistent facts: user-level (survives chats) and current-project.",
+  },
+  {
+    name: "todos",
+    actions: ["manage_todo", "show_todo"],
+    blurb: "Plan multi-step work. create returns a stable ID like todo_8f42 — quote it later.",
+  },
+  {
+    name: "media",
+    actions: ["media_generation", "create_chart", "preview_image"],
+    blurb: "Generate media (Pollinations; chargeable generations need explicit two-step confirmation), charts, inline images.",
+  },
+  {
+    name: "workspace",
+    actions: ["analyze_workspace", "security_audit", "manage_env_var"],
+    blurb: "Workspace scan (run FIRST on every task), security scan, sandbox env vars.",
+  },
+  {
+    name: "custom_tools",
+    actions: ["create_custom_tool", "manage_custom_tool"],
+    blurb: "Build reusable tools: http_webhook or python_snippet.",
+  },
+];
+
+/** Umbrella-dispatched meta-tools that the Onyx.md compendium deliberately
+ * does not document as standalone rows (they are covered by the umbrella
+ * description + the integrations policy). */
+const META_ACTIONS_NOT_IN_COMPENDIUM: ReadonlySet<string> = new Set([
+  "mcp_search_tools",
+  "mcp_call_tool",
+]);
+
 
 /** Strip markdown emphasis/backticks and collapse whitespace. */
 function clean(text: string): string {
@@ -104,20 +188,14 @@ function buildDigest(source: string): { text: string; tools: string[] } {
   }
   const section = source.slice(start, end);
 
-  const categories: DigestCategory[] = [];
-  const seen = new Set<string>();
-  const order: string[] = [];
-  let current: DigestCategory | null = null;
+  // Parse the GRANULAR compendium rows (the full manual's documentation).
+  const granular = new Map<string, string>(); // name → digest line
 
   for (const raw of section.split("\n")) {
     const line = raw.trim();
     const heading = /^###\s+(.+)$/.exec(line);
-    if (heading) {
-      current = { title: clean(heading[1]!), tools: [] };
-      categories.push(current);
-      continue;
-    }
-    if (!current || !line.startsWith("|")) continue;
+    if (heading) continue; // section titles don't carry tool rows
+    if (!line.startsWith("|")) continue;
 
     // Markdown tables escape a literal pipe as \| — protect it from the
     // cell split (run_terminal's "Shell with |, &&, ;, >" row), then restore.
@@ -138,37 +216,71 @@ function buildDigest(source: string): { text: string; tools: string[] } {
     const use = cells.length >= 3 ? cells[2]! : cells[1]!;
 
     for (const name of names) {
-      if (seen.has(name)) continue; // "(above)" cross-reference rows
-      seen.add(name);
-      order.push(name);
+      if (granular.has(name)) continue; // "(above)" cross-reference rows
       const prefix = actions && !/^\(no action\)$/.test(actions) ? ` [${actions}]` : "";
-      current.tools.push({ name, line: `${name}${prefix} — ${truncate(use, USE_CAP)}` });
+      granular.set(name, `${name}${prefix} — ${truncate(use, USE_CAP)}`);
     }
   }
 
-  if (!order.length) {
+  if (!granular.size) {
     throw new Error("Onyx.md: no tools parsed from the Tool Compendium tables — check the table format.");
   }
 
-  const blocks: string[] = [];
-  for (const cat of categories) {
-    if (!cat.tools.length) continue;
-    blocks.push(`### ${cat.title}\n${cat.tools.map((t) => `- ${t.line}`).join("\n")}`);
+  // Group into the model-visible surface: umbrellas + keepers.
+  const umbrellaActionToName = new Map<string, string>();
+  for (const u of UMBRELLAS) {
+    for (const a of u.actions) umbrellaActionToName.set(a, u.name);
   }
 
-  const text = `## TOOL DIGEST — every registered tool (${order.length} total)
+  // Drift guards — the compendium must cover every umbrella action (modulo
+  // the documented meta-tools), and every granular row must land somewhere.
+  for (const u of UMBRELLAS) {
+    const missing = u.actions.filter(
+      (a) => !granular.has(a) && !META_ACTIONS_NOT_IN_COMPENDIUM.has(a),
+    );
+    if (missing.length) {
+      throw new Error(
+        `Onyx.md: umbrella '${u.name}' actions missing from the Tool Compendium: ${missing.join(", ")} — add their rows or update the UMBRELLAS map in this script (it must mirror src/lib/agent/tool-umbrella.ts).`,
+      );
+    }
+  }
+
+  const umbrellaLines: string[] = [];
+  const umbrellaNames: string[] = [];
+  for (const u of UMBRELLAS) {
+    umbrellaNames.push(u.name);
+    umbrellaLines.push(`${u.name} [${u.actions.join(" / ")}] — ${u.blurb}`);
+  }
+
+  // Keepers: granular tools NOT absorbed by any umbrella, in compendium
+  // (document) order.
+  const keeperLines: string[] = [];
+  const keeperNames: string[] = [];
+  for (const [name, line] of granular) {
+    if (umbrellaActionToName.has(name)) continue;
+    keeperNames.push(name);
+    keeperLines.push(line);
+  }
+
+  const visible = [...umbrellaNames, ...keeperNames];
+
+  const text = `## TOOL DIGEST — every model-visible tool (${visible.length} total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
-${blocks.join("\n\n")}
+### Umbrella tools — one name, one \`action\` parameter (the action value is the exact operation)
+${umbrellaLines.map((l) => `- ${l}`).join("\n")}
+
+### Single-purpose tools
+${keeperLines.map((l) => `- ${l}`).join("\n")}
 
 ### Availability rules (anti-hallucination)
 - EVERY tool listed above is REAL and CALLABLE. If a tool is in your tool definitions, you HAVE it — NEVER say "I don't have access to that tool" or "I forgot I had those tools" without trying the call first.
 - Tool availability is defined ONLY by your active tool definitions this turn — not by your memory, not by this digest alone, not by Onyx.md alone. Dynamic tools (MCP \`mcp_<server>__<tool>\`, custom tools) appear in your definitions when they are active.
 - Be honest BOTH ways: never deny a tool you have; never claim or call a tool that is absent from your definitions this turn.
-- Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — \`read_file\` it when you need more than this digest.`;
+- Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — read it (the files umbrella's read_file action) when you need more than this digest.`;
 
-  return { text, tools: order };
+  return { text, tools: visible };
 }
 
 const digest = buildDigest(md);
@@ -179,26 +291,40 @@ if (digestBytes > DIGEST_MAX_BYTES) {
   );
 }
 
+const umbrellaCount = UMBRELLAS.length;
+const keeperCount = digest.tools.length - umbrellaCount;
+
 const digestOut = `// AUTO-GENERATED from /Onyx.md — DO NOT EDIT BY HAND.
 // Regenerate with: bun run scripts/gen-onyx-md.ts
 //
 // The TOOL DIGEST — a compact (<${DIGEST_MAX_BYTES} bytes) always-injected
-// block listing EVERY registered tool by exact name + one-line capability,
-// derived from the "## Tool Compendium" tables in Onyx.md. This is the
-// anti-hallucination companion to the full manual (onyx-md.ts / the
-// /home/user/Onyx.md sandbox file): models that skip reading Onyx.md still
+// block listing EVERY MODEL-VISIBLE tool by exact name + one-line capability.
+// This is the anti-hallucination companion to the full manual (onyx-md.ts /
+// the /home/user/Onyx.md sandbox file): models that skip reading Onyx.md still
 // know their complete tool surface, and the availability rules make
 // "I don't have that tool" claims about registered tools a prompt violation.
 //
-// Parity with the live registry (src/lib/tools) is enforced by
-// src/lib/agent/onyx-md-digest.test.ts — every registry tool must be in the
-// digest and vice versa. After adding/removing/renaming a tool: update the
-// Onyx.md compendium, then re-run the generator.
+// UMBRELLA CONSOLIDATION: the surface is ${digest.tools.length} tools — ${umbrellaCount} action-based
+// umbrella tools + ${keeperCount} standalone keepers. Each umbrella takes ONE
+// required \`action\` argument whose value is the exact granular operation
+// name. The granular tools remain REGISTERED + callable (umbrella dispatch,
+// legacy calls) but are hidden from the model-visible list. The generator
+// maps the granular Onyx.md compendium onto the umbrella surface using the
+// UMBRELLAS map inlined in scripts/gen-onyx-md.ts (mirrors
+// src/lib/agent/tool-umbrella.ts).
+//
+// Parity with the live registry's VISIBLE tools (listTools()) is enforced by
+// src/lib/agent/onyx-md-digest.test.ts — every visible registry tool must be
+// in the digest and vice versa. After adding/removing/renaming a tool:
+// update the Onyx.md compendium AND (if the umbrella surface changed) the
+// UMBRELLAS map + src/lib/agent/tool-umbrella.ts, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
 export const ONYX_MD_DIGEST = \`${digest.text.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${")}\`;
 
-/** Every tool name parsed from the Onyx.md compendium (digest ⇄ registry parity is test-enforced). */
+/** Every model-visible tool name: the ${umbrellaCount} umbrellas + ${keeperCount} keepers
+ * (digest ⇄ registry parity is test-enforced against listTools() — hidden
+ * granular tools are excluded by design). */
 export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ${JSON.stringify(digest.tools)};
 `;
 

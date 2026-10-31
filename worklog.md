@@ -204,3 +204,32 @@ Work Log:
 Stage Summary:
 - /business is gone (−19.3k lines) with its tool, tables (Dexie v8 drop), nav, i18n and type union; the app-wide pollinations healer it accidentally hosted now lives in the agent layer.
 - Cutting the UI with Trigger.dev connected no longer produces "This task was interrupted…": the return path waits for auth, retries resolution, adopts the beacon run, adopts a live tokenless run, or SELF-HEALS by re-dispatching the turn — the honest note survives only for genuinely unsupported (no cloud key) cases.
+
+---
+
+## Task 10 — Miklium "No results found" error leak + full test-suite repair
+
+Date: 2026-10-31
+Agent: main (Z.ai Code)
+Task: User report — the image search error still showed `{"success":false,"output":null,"error":"Miklium HTTP 404: {\"success\":false,\"error\":\"No results found\"}"}` in the chat, meaning the no-results path was never handled gracefully. Secondary: repair the 15 pre-existing vitest failures left by earlier sessions so the suite runs green again.
+
+Work Log:
+- ROOT CAUSE: /api/ddg-search's searchMiklium() threw `Miklium HTTP ${status}: ${rawBody}` on ANY non-OK upstream answer. Miklium signals "nothing matched" as HTTP 404 {"success":false,"error":"No results found"} (also as success:false on a 200), so an empty DDG pass + Miklium 404 surfaced as a 502 whose raw string rode the tool result into the chat card (GenericToolResult JSON-dumps failed search results).
+- ROUTE FIX (src/app/api/ddg-search/route.ts): "No results" is now a LEGITIMATE empty outcome — looksLikeNoResults() (404 or /no results|nothing found|not found|empty result/i on the body, both the !res.ok and success:false paths) returns [] instead of throwing. Real failures throw a SHORT detail (no raw JSON) which the catch maps through sanitizedSearchError() into "Image/Web/Video search is temporarily unavailable…" with the raw detail only in the server log. Empty outcomes return 200 + a friendly `note` field.
+- TOOL FIX (src/lib/tools/ddg_search.ts): zero-result responses return success:true with results:[] + a `message` ("No images found for “query”. Try different or more general keywords.") so the model TELLS the user instead of erroring; catches run through sanitizedError() which strips provider names (miklium/langsearch/duckduckgo/ddg-search → "search backend") and raw JSON bodies.
+- UI FIX (src/components/chat/tool-results.tsx): new SearchOutcomeNotice — a failed search renders one clean red sentence; a successful-but-empty search renders "No images found for “query”." Web/image/video cards all use it instead of the raw JSON dump.
+- CLI FIX (cli/src/lib/tools.ts): same treatment — isNoResultsResponse() on web/image/video Miklium calls, graceful empty outputs with messages, sanitizedSearchError() in every catch.
+- TESTS: new src/app/api/ddg-search/route.test.ts (10 tests: the exact reported 404→200-empty regression, 200-body no-results, success:true empty, real Miklium rows, 5xx sanitization, DDG passthrough/fallback, web+video parity) and src/lib/tools/ddg_search.test.ts (6 tests: tool-layer no-results message, passthrough, 502 sanitization, belt-and-suspenders scrubbing of a leaked raw error).
+- SUITE REPAIR (15 pre-existing failures, root-caused via git-worktree bisection to commit 75badb8 "22-tool consolidated surface" + one older pair):
+  · decision tool was NEVER REGISTERED — src/lib/tools/index.ts now imports ./decision (it was in ESSENTIAL_TOOLS + request-scoping intent rules but absent from the registry AND the digest). Onyx.md gained the decision row (compendium 66→67 tools).
+  · gen-onyx-md.ts was a landmine: the committed umbrella digest was HAND-EDITED while the generator still emitted the granular form — any regen would have clobbered it. The generator is now umbrella-aware (inline UMBRELLAS map mirroring tool-umbrella.ts with drift guards; keepers = compendium rows not absorbed by an umbrella), so `bun run scripts/gen-onyx-md.ts` reproduces the umbrella digest (21 visible: 12 umbrellas + 9 keepers) and the pipeline is truthful again.
+  · onyx-md-digest.test.ts: ≥50 registered sanity updated to the umbrella era (≥20).
+  · request-scoping.test.ts rewritten to umbrella semantics (granular assertions → umbrella assertions; workflow is a CORE extra that ships on normal turns; latch test uses umbrella names).
+  · orb-personality-store.ts: persist storage now createJSONStorage(() => localStorage) — zustand's default getter is () => window.localStorage, which ReferenceErrors in Node (window undefined) and silently bails BEFORE attaching the persist API; the test now passes and the store degrades honestly on SSR.
+  · projects/service.test.ts: verno 5→8 (v6 business tables, v8 drops them) and permission defaults updated to the user's no-approvals directive (every default "allowed"; strictest-wins matrix re-pinned with an explicit global approval_required entry).
+  · request-scoping.ts + digest header comments updated to the real counts (21 visible built-ins).
+  · Removed the stray t404.out debugging artifact from the repo root.
+
+Stage Summary:
+- The chat can no longer render a raw Miklium/JSON error: "no results" is a graceful, friendly outcome at every layer (route → tool → UI → CLI), and real backend failures surface as one clean sanitized sentence.
+- vitest is fully green again: 28 files / 490 tests (was 15 failing); the decision tool is actually registered; the Onyx.md → digest pipeline regenerates correctly.

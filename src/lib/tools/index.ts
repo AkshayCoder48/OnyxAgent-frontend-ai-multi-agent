@@ -53,6 +53,11 @@ import "./uploaded_files";
 import "./media_generation";
 import "./sandbox_schedule";
 import "./background_task";
+// decision (JEV systemone) — a standalone keeper, NOT absorbed by any
+// umbrella: it's a first-class ESSENTIAL capability (see ESSENTIAL_TOOLS).
+// Must register before ./consolidated (which only hides the granular tools
+// it absorbs — decision isn't one of them, but the ordering rule stands).
+import "./decision";
 import "./consolidated";
 
 export {};

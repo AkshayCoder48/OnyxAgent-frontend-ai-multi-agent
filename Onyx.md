@@ -21,7 +21,7 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 
 ---
 
-## Tool Compendium (66 tools)
+## Tool Compendium (67 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (`scripts/gen-onyx-md.ts` derives it automatically). Keep
@@ -116,6 +116,7 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | **search_documents** | Semantic search over the user's uploaded documents. |
 | **ask_user** | Ask a clarifying question when context is missing — never guess user intent. |
 | **counterfactual** | Structured "what if X had been different" analysis. |
+| **decision** | Structured decision engine (JEV systemone): pass a `state` + `queries` (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip. |
 | **security_audit** | Scan the workspace for vulnerabilities and risky patterns. |
 | **manage_memory** (above) | The user's persistent memory — check it before assuming. |
 | **knowledge_base** (above) | The workspace's persistent Knowledge Base — `search` when prior knowledge helps; `save` what matters later. |

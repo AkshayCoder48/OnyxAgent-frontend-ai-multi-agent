@@ -37,7 +37,11 @@ const digestListedNames = (): string[] =>
 describe("tool digest ⇄ registry parity (PRD §13/§14)", () => {
   it("every REGISTERED tool appears in the digest (no invisible tools)", () => {
     const registered = registryNames();
-    expect(registered.length).toBeGreaterThanOrEqual(50); // sanity: the side-effect imports registered the toolset
+    // Sanity: the side-effect imports registered the toolset. The UMBRELLA
+    // consolidation folded ~60 granular tools into 12 action-based umbrellas
+    // + standalone keepers (hidden granulars never appear in listTools()),
+    // so the model-visible surface is ~21 — not the pre-consolidation 50+.
+    expect(registered.length).toBeGreaterThanOrEqual(20);
     const listed = new Set(digestListedNames());
     const missing = registered.filter((n) => !listed.has(n));
     expect(missing, `tools registered but absent from the digest: ${missing.join(", ")}. Update Onyx.md's Tool Compendium and re-run scripts/gen-onyx-md.ts`).toEqual([]);

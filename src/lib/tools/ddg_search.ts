@@ -22,6 +22,26 @@ import { settingsService } from "@/lib/services";
 import type { ToolResult } from "@/types";
 
 /**
+ * Clean, user-facing label per search kind — used by the no-results notice
+ * and the sanitized error paths below. Raw upstream messages (provider
+ * names like "Miklium", raw JSON bodies like
+ * '{"success":false,"error":"No results found"}') must never reach the
+ * model's context or the chat tool-result card verbatim.
+ */
+const SEARCH_LABELS = {
+  web: { singular: "Web search", results: "web results" },
+  image: { singular: "Image search", results: "images" },
+  video: { singular: "Video search", results: "videos" },
+} as const;
+
+/** Label lookup that degrades to the web wording for unknown types
+ * (noUncheckedIndexedAccess-safe). */
+function labelsFor(type: string): { singular: string; results: string } {
+  const hit = (SEARCH_LABELS as Record<string, { singular: string; results: string } | undefined>)[type];
+  return hit ?? SEARCH_LABELS.web;
+}
+
+/**
  * Issue a search against the unified `/api/ddg-search` proxy. When a
  * LangSearch API key is available for the user, it's appended as
  * `langsearch_key` so the proxy can prefer LangSearch for web queries.
@@ -31,7 +51,7 @@ async function search(
   type: string,
   limit: number,
   ctx?: ToolContext,
-): Promise<{ results: unknown[]; provider?: string }> {
+): Promise<{ results: unknown[]; provider?: string; note?: string }> {
   // Lazily fetch the LangSearch key (only for web — image/video aren't
   // supported by LangSearch, so we skip the decrypt round-trip).
   let langsearchKey = "";
@@ -59,7 +79,47 @@ async function search(
   return {
     results: data.results || [],
     provider: data.provider as string | undefined,
+    note: typeof data.note === "string" ? data.note : undefined,
   };
+}
+
+/**
+ * Build the graceful "nothing matched" payload. "No results" is a
+ * legitimate outcome, NOT a failure — returning success:true with an empty
+ * list plus this notice lets the model say "I couldn't find any images for
+ * that" instead of surfacing a raw backend error blob.
+ */
+function noResultsOutput(query: string, type: string, provider?: string, note?: string) {
+  const labels = labelsFor(type);
+  return {
+    query,
+    type,
+    results: [],
+    count: 0,
+    ...(provider ? { provider } : {}),
+    message:
+      note ??
+      `No ${labels.results} found for "${query}". Try different or more general keywords.`,
+  };
+}
+
+/**
+ * Sanitize a failed search into a clean message. Belt-and-suspenders on top
+ * of the proxy's own sanitization: strips any provider name / raw JSON
+ * that slipped through so the chat never renders e.g.
+ * 'Miklium HTTP 404: {"success":false,"error":"No results found"}'.
+ */
+function sanitizedError(type: string, e: unknown): string {
+  const labels = labelsFor(type);
+  const raw = e instanceof Error ? e.message : String(e);
+  const cleaned = raw
+    .replace(/miklium|langsearch|duckduckgo|ddg-search/gi, "search backend")
+    .replace(/\{[\s\S]*\}/g, "") // raw JSON bodies add nothing for the user
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned && cleaned !== raw
+    ? `${labels.singular} failed: ${cleaned}`
+    : `${labels.singular} is temporarily unavailable. Please try again in a moment.`;
 }
 
 // ---- Web Search ----
@@ -79,7 +139,10 @@ registerTool(
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
     try {
-      const { results, provider } = await search(query, "web", limit, ctx);
+      const { results, provider, note } = await search(query, "web", limit, ctx);
+      if (results.length === 0) {
+        return { success: true, output: noResultsOutput(query, "web", provider, note) };
+      }
       return {
         success: true,
         output: {
@@ -94,7 +157,7 @@ registerTool(
         },
       };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedError("web", e) };
     }
   },
   false,
@@ -120,7 +183,10 @@ registerTool(
     try {
       // The proxy tries DuckDuckGo first and reports the provider that
       // actually served the results ("ddg", or "miklium" on fallback).
-      const { results, provider } = await search(query, "image", limit, ctx);
+      const { results, provider, note } = await search(query, "image", limit, ctx);
+      if (results.length === 0) {
+        return { success: true, output: noResultsOutput(query, "image", provider, note) };
+      }
       return {
         success: true,
         output: {
@@ -132,7 +198,7 @@ registerTool(
         },
       };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedError("image", e) };
     }
   },
   false,
@@ -156,7 +222,10 @@ registerTool(
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
     try {
-      const { results } = await search(query, "video", limit, ctx);
+      const { results, note } = await search(query, "video", limit, ctx);
+      if (results.length === 0) {
+        return { success: true, output: noResultsOutput(query, "video", "miklium", note) };
+      }
       return {
         success: true,
         output: {
@@ -168,7 +237,7 @@ registerTool(
         },
       };
     } catch (e) {
-      return { success: false, output: null, error: e instanceof Error ? e.message : String(e) };
+      return { success: false, output: null, error: sanitizedError("video", e) };
     }
   },
   false,

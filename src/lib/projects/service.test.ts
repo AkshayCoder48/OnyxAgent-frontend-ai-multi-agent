@@ -250,13 +250,15 @@ describe("Dexie v3 → v4 upgrade", () => {
     await legacy.table("todo_lists").add({ conversation_id: "c-legacy", todos: [], updated_at: NOW });
     await legacy.close();
 
-    // Open with the REAL class — the v3 → v4 (→ v5) upgrade runs here.
+    // Open with the REAL class — the v3 → v4 (→ v5 → v8) upgrade runs here.
     const app = new AppDatabase(NAME);
     await app.open();
     // v4 added the project tables; v5 added detached_runs (sandbox-agent
-    // "close and resume") — both additive, so a legacy v3 database upgrades
+    // "close and resume"); v6 added the business tables; v7 added its
+    // stores; v8 DROPS the business tables (Business Mode removal) — all
+    // additive/destructive migrations, so a legacy v3 database upgrades
     // straight through to the current version.
-    expect(app.verno).toBe(5);
+    expect(app.verno).toBe(8);
 
     // Existing data survived the upgrade.
     expect((await app.conversations.get("c-legacy"))?.title).toBe("Chat c-legacy");
@@ -598,26 +600,29 @@ describe("defaultPermissionFor (arg-aware sensitivity)", () => {
     expect(defaultPermissionFor("composio_connect_platform", { toolkit: "slack" })).toBe("allowed");
   });
 
-  it("requires approval for env-var writes but not reads (manage_env_var actions)", () => {
+  it("env-var reads and writes are both allowed by default (no-approvals directive)", () => {
+    // USER DIRECTIVE (no tool-call approvals): every default resolves to
+    // "allowed" — the arg-aware buckets below keep their shape ONLY so an
+    // explicit user policy composes correctly (see SENSITIVE_TOOL_DEFAULTS).
     expect(defaultPermissionFor("manage_env_var", { action: "list" })).toBe("allowed");
     expect(defaultPermissionFor("manage_env_var", { action: "get", name: "X" })).toBe("allowed");
-    expect(defaultPermissionFor("manage_env_var", { action: "add", name: "X", value: "v" })).toBe("approval_required");
-    expect(defaultPermissionFor("manage_env_var", { action: "set", name: "X", value: "v" })).toBe("approval_required");
-    expect(defaultPermissionFor("manage_env_var", { action: "edit", name: "X", value: "v" })).toBe("approval_required");
-    expect(defaultPermissionFor("manage_env_var", { action: "delete", name: "X" })).toBe("approval_required");
+    expect(defaultPermissionFor("manage_env_var", { action: "add", name: "X", value: "v" })).toBe("allowed");
+    expect(defaultPermissionFor("manage_env_var", { action: "set", name: "X", value: "v" })).toBe("allowed");
+    expect(defaultPermissionFor("manage_env_var", { action: "edit", name: "X", value: "v" })).toBe("allowed");
+    expect(defaultPermissionFor("manage_env_var", { action: "delete", name: "X" })).toBe("allowed");
   });
 
-  it("recognizes the legacy pre-merge env-var tool names", () => {
-    expect(defaultPermissionFor("add_env_var", { name: "X" })).toBe("approval_required");
-    expect(defaultPermissionFor("delete_env_var", { name: "X" })).toBe("approval_required");
+  it("recognizes the legacy pre-merge env-var tool names (all allowed by default)", () => {
+    expect(defaultPermissionFor("add_env_var", { name: "X" })).toBe("allowed");
+    expect(defaultPermissionFor("delete_env_var", { name: "X" })).toBe("allowed");
     expect(defaultPermissionFor("list_env_vars", {})).toBe("allowed");
     expect(defaultPermissionFor("get_env_var", { name: "X" })).toBe("allowed");
   });
 
-  it("requires approval for composio execution and e2b deletes", () => {
-    expect(defaultPermissionFor("composio_execute_tool", { toolName: "SLACK_SEND_MESSAGE", args: {} })).toBe("approval_required");
-    expect(defaultPermissionFor("delete_file", { path: "a.txt" })).toBe("approval_required");
-    expect(defaultPermissionFor("delete_folder", { path: "d" })).toBe("approval_required");
+  it("composio execution and e2b deletes are allowed by default (no-approvals directive)", () => {
+    expect(defaultPermissionFor("composio_execute_tool", { toolName: "SLACK_SEND_MESSAGE", args: {} })).toBe("allowed");
+    expect(defaultPermissionFor("delete_file", { path: "a.txt" })).toBe("allowed");
+    expect(defaultPermissionFor("delete_folder", { path: "d" })).toBe("allowed");
   });
 });
 
@@ -633,11 +638,12 @@ describe("resolvePermission matrix", () => {
     updated_at: NOW,
   });
 
-  it("with no project and no policy → defaults apply", () => {
+  it("with no project and no policy → defaults apply (all allowed)", () => {
     expect(resolvePermission("web_search", {}, { globalPolicy: null, project: null })).toBe("allowed");
+    // No-approvals directive: even the sensitive buckets default to allowed.
     expect(
       resolvePermission("manage_env_var", { action: "delete" }, { globalPolicy: {}, project: null }),
-    ).toBe("approval_required");
+    ).toBe("allowed");
   });
 
   it("an explicit global entry replaces the default for that tool", () => {
@@ -663,10 +669,10 @@ describe("resolvePermission matrix", () => {
         project: { id: "p", resources: [toolRule("web_search", "approval_required")] },
       }),
     ).toBe("approval_required");
-    // global approval_required + project allowed → still approval_required.
+    // global approval_required (explicit entry) + project allowed → still approval_required.
     expect(
       resolvePermission("manage_env_var", { action: "delete" }, {
-        globalPolicy: {},
+        globalPolicy: { manage_env_var: "approval_required" },
         project: { id: "p", resources: [toolRule("manage_env_var", "allowed")] },
       }),
     ).toBe("approval_required");
