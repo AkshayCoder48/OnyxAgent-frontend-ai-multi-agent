@@ -33,6 +33,22 @@
 // so hosted deployments keep working image/video search while self-hosted
 // and CLI runs keep their DDG-first results.
 //
+// EGRESS CONTROL — "no datacenter IP involved" (user directive 2026-11-01):
+//   The caller's public IP is extracted from the request's proxy headers
+//   and FORWARDED on every DDG engine call (X-Forwarded-For / X-Real-IP /
+//   Forwarded — what a transparent proxy does; kill-switch
+//   DDG_FORWARD_CLIENT_IP=false). Live-verified honesty: a server cannot
+//   place a call from the user's IP (the TCP connection leaves from the
+//   server), the user's browser cannot fetch DDG JSON itself (duckduckgo.com
+//   serves NO CORS headers), and DDG's WAF IGNORES forwarded headers today
+//   (datacenter XFFs from an allowed IP sail through). The mechanism that
+//   genuinely removes the datacenter IP is DDG_PROXY_BASE — route the whole
+//   handshake through a deployer-controlled non-datacenter relay (home box,
+//   Tailscale exit, residential-proxy URL mode); provider then stays "ddg".
+//   Until one of those lifts the block, the Miklium rescue keeps results
+//   flowing — that is why hosted deployments report provider "miklium".
+//   All of this lives in src/lib/search/ddg-egress.ts.
+//
 // Error contract (pinned by route.test.ts):
 //   - "No results" NEVER surfaces as an error: empty lists come back as
 //     HTTP 200 with a friendly `note`.
@@ -50,6 +66,7 @@ import { searchDDGImages } from "@/lib/search/ddg-images";
 import { searchDDGWeb } from "@/lib/search/ddg-web";
 import { searchDDGVideos } from "@/lib/search/ddg-videos";
 import { searchMikliumImages, searchMikliumVideos } from "@/lib/search/miklium-media";
+import { extractClientIp } from "@/lib/search/ddg-egress";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -283,6 +300,12 @@ export async function GET(req: NextRequest) {
   const pluralLabel = kind === "image" ? "images" : kind === "video" ? "videos" : "web results";
   const singularLabel = kind === "web" ? "Web search" : kind === "image" ? "Image search" : "Video search";
 
+  // The end user's public IP (when forwardable) — attached to every DDG
+  // engine call as the standard proxy-forwarding headers. "No datacenter IP
+  // involved" support; see src/lib/search/ddg-egress.ts for what this can
+  // and cannot do (and DDG_PROXY_BASE for the relay that truly works).
+  const clientIp = extractClientIp(req.headers) ?? undefined;
+
   try {
     let results: SearchResult[] = [];
     let provider: "langsearch" | "miklium" | "ddg" = "ddg";
@@ -347,7 +370,7 @@ export async function GET(req: NextRequest) {
       // answers images keylessly. No npm package escapes the IP block, so
       // the rescue engine IS the fix for hosted deployments.
       provider = "ddg";
-      const ddgRows = await searchWithRetry(() => searchDDGImages(query, limit));
+      const ddgRows = await searchWithRetry(() => searchDDGImages(query, limit, { clientIp }));
       if (ddgRows && ddgRows.length > 0) {
         results = ddgRows as unknown as SearchResult[];
       } else {
@@ -376,7 +399,7 @@ export async function GET(req: NextRequest) {
     } else {
       // Video search — same shape: DDG v.js primary, Miklium videos rescue.
       provider = "ddg";
-      const ddgRows = await searchWithRetry(() => searchDDGVideos(query, limit));
+      const ddgRows = await searchWithRetry(() => searchDDGVideos(query, limit, { clientIp }));
       if (ddgRows && ddgRows.length > 0) {
         results = ddgRows as unknown as SearchResult[];
       } else {

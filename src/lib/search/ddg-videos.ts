@@ -234,6 +234,7 @@ import {
   getVqdToken as getVqdTokenShared,
   isDDGBlocked,
 } from "./ddg-vqd";
+import { buildForwardedHeaders, ddgUrl, type DDGEgressOptions } from "./ddg-egress";
 
 /** Backoff before the one soft-block retry — lets the WAF window breathe. */
 const RETRY_BACKOFF_MS = 600;
@@ -257,9 +258,14 @@ function ddgTimeout(): Promise<never> {
 /**
  * Fetch the per-query `vqd` session token (shared browser-grade client in
  * src/lib/search/ddg-vqd.ts — cached, soft-block aware, abort-safe).
+ * `opts.clientIp` (the end user's public IP) is forwarded on the token page
+ * with the standard proxy headers — see ddg-egress.ts.
  */
-export async function getVqdToken(query: string): Promise<string> {
-  return getVqdTokenShared(query);
+export async function getVqdToken(
+  query: string,
+  opts?: { fresh?: boolean; clientIp?: string },
+): Promise<string> {
+  return getVqdTokenShared(query, opts);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -279,16 +285,29 @@ function sleep(ms: number): Promise<void> {
  * token; a block that survives the retry throws, as do timeouts and hard
  * HTTP errors. An empty 200 result set parses to an EMPTY array — a
  * legitimate "nothing matched" outcome, not a failure.
+ *
+ * `opts.clientIp` (the end user's public IP, when forwardable) is attached
+ * to every request as the standard proxy-forwarding headers, and the URLs
+ * honor DDG_PROXY_BASE — the "no datacenter IP involved" egress options
+ * (see ddg-egress.ts).
  */
-export async function searchDDGVideos(query: string, limit: number): Promise<DDGVideoResult[]> {
-  return Promise.race([searchDDGVideosInner(query, limit), ddgTimeout()]);
+export async function searchDDGVideos(
+  query: string,
+  limit: number,
+  opts?: DDGEgressOptions,
+): Promise<DDGVideoResult[]> {
+  return Promise.race([searchDDGVideosInner(query, limit, opts), ddgTimeout()]);
 }
 
-async function searchDDGVideosInner(query: string, limit: number): Promise<DDGVideoResult[]> {
+async function searchDDGVideosInner(
+  query: string,
+  limit: number,
+  opts?: DDGEgressOptions,
+): Promise<DDGVideoResult[]> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const fresh = attempt > 1; // retry path: never reuse the blocked session
     try {
-      const token = await getVqdTokenShared(query, { fresh });
+      const token = await getVqdTokenShared(query, { fresh, clientIp: opts?.clientIp });
 
       const params = new URLSearchParams({
         o: "json",
@@ -298,8 +317,8 @@ async function searchDDGVideosInner(query: string, limit: number): Promise<DDGVi
         f: ",,,,",
         p: DDG_SAFE ? "1" : "-1",
       });
-      const res = await fetch(`https://duckduckgo.com/v.js?${params.toString()}`, {
-        headers: DDG_XHR_HEADERS,
+      const res = await fetch(ddgUrl(`/v.js?${params.toString()}`), {
+        headers: { ...DDG_XHR_HEADERS, ...buildForwardedHeaders(opts?.clientIp) },
       });
       const body = await res.text().catch(() => "");
 

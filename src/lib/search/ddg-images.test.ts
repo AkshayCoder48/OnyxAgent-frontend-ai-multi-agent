@@ -47,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("normalizeDDGImages (pure)", () => {
@@ -291,5 +292,64 @@ describe("searchDDGImages (in-house client flow, mocked network)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("EGRESS: forwards the caller's IP and routes via DDG_PROXY_BASE on every leg", async () => {
+    // The "no datacenter IP involved" mechanics end-to-end: with a relay
+    // configured, BOTH the token page and i.js go through the relay, and
+    // the caller's public IP rides along as the standard proxy headers.
+    vi.stubEnv("DDG_PROXY_BASE", "https://home.example.com/ddg");
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const u = String(input);
+      calls.push([u, init]);
+      if (u.startsWith("https://home.example.com/ddg/i.js")) {
+        return new Response(JSON.stringify({ results: [mkImage()], next: "" }), {
+          status: 200,
+        });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchDDGImages("cats", 5, { clientIp: "203.0.113.7" });
+
+    expect(calls).toHaveLength(2);
+    // Token page: relay URL + forwarded client IP alongside browser headers.
+    expect(calls[0][0]).toBe("https://home.example.com/ddg/?q=cats");
+    const tokenHeaders = calls[0][1]?.headers as Record<string, string>;
+    expect(tokenHeaders["X-Forwarded-For"]).toBe("203.0.113.7");
+    expect(tokenHeaders["X-Real-IP"]).toBe("203.0.113.7");
+    expect(tokenHeaders.Forwarded).toBe("for=203.0.113.7");
+    expect(tokenHeaders["User-Agent"]).toMatch(/Chrome\/126/);
+    // i.js: relay URL + the same forwarded headers.
+    expect(calls[1][0]).toContain("https://home.example.com/ddg/i.js?");
+    expect(calls[1][0]).toContain("vqd=4-32098503961658400691");
+    const ijsHeaders = calls[1][1]?.headers as Record<string, string>;
+    expect(ijsHeaders["X-Forwarded-For"]).toBe("203.0.113.7");
+    expect(ijsHeaders["X-Requested-With"]).toBe("XMLHttpRequest");
+  });
+
+  it("EGRESS: no clientIp → no forwarding headers, direct duckduckgo.com URLs", async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const u = String(input);
+      calls.push([u, init]);
+      if (u.startsWith("https://duckduckgo.com/i.js")) {
+        return new Response(JSON.stringify({ results: [mkImage()], next: "" }), {
+          status: 200,
+        });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchDDGImages("cats", 5);
+
+    expect(calls[0][0]).toBe("https://duckduckgo.com/?q=cats");
+    const tokenHeaders = calls[0][1]?.headers as Record<string, string>;
+    expect(tokenHeaders["X-Forwarded-For"]).toBeUndefined();
+    expect(tokenHeaders.Forwarded).toBeUndefined();
+    expect(calls[1][0]).toContain("https://duckduckgo.com/i.js?");
   });
 });

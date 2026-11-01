@@ -31,6 +31,13 @@
  *     HTTP 403, and the anomaly/challenge body — so callers can retry with
  *     a fresh token + backoff instead of misreading a block as "no results".
  *   - Every fetch carries its own AbortSignal timeout; no request can hang.
+ *
+ * EGRESS CONTROL (2026-11-01, "no datacenter IP involved" directive): all
+ * DDG URLs route through ddgUrl() from ddg-egress.ts — set DDG_PROXY_BASE
+ * to serve the handshake from a non-datacenter relay — and an optional
+ * `clientIp` (the end user's public IP, extracted in the route) rides along
+ * as the standard X-Forwarded-For / X-Real-IP / Forwarded headers. See
+ * ddg-egress.ts for the live-verified evidence behind both mechanisms.
  */
 
 // ---------------------------------------------------------------------------
@@ -135,6 +142,8 @@ export function extractVqd(html: string): string {
 // Token fetch (network)
 // ---------------------------------------------------------------------------
 
+import { buildForwardedHeaders, ddgUrl } from "./ddg-egress";
+
 /** Per-request ceiling; the caller's engine deadline races the whole flow. */
 const TOKEN_FETCH_TIMEOUT_MS = 5_000;
 
@@ -151,18 +160,23 @@ export class DDGBlockedError extends Error {
  *
  * Serves from the per-query cache when the entry is fresh, unless
  * `opts.fresh` forces a network bootstrap (used by retry paths that suspect
- * the session went bad). Throws DDGBlockedError on a soft-blocked token
- * page and a plain Error when the page is reachable but carries no token.
+ * the session went bad). `opts.clientIp` (the end user's public IP) is
+ * forwarded with the standard proxy headers — see ddg-egress.ts. Throws
+ * DDGBlockedError on a soft-blocked token page and a plain Error when the
+ * page is reachable but carries no token.
  */
-export async function getVqdToken(query: string, opts?: { fresh?: boolean }): Promise<string> {
+export async function getVqdToken(
+  query: string,
+  opts?: { fresh?: boolean; clientIp?: string },
+): Promise<string> {
   if (!opts?.fresh) {
     const cached = tokenCache.get(query);
     if (cacheHit(cached)) return cached.token;
   }
 
-  const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
+  const url = ddgUrl(`/?q=${encodeURIComponent(query)}`);
   const res = await fetch(url, {
-    headers: DDG_HTML_HEADERS,
+    headers: { ...DDG_HTML_HEADERS, ...buildForwardedHeaders(opts?.clientIp) },
     signal: AbortSignal.timeout(TOKEN_FETCH_TIMEOUT_MS),
   });
   const html = await res.text().catch(() => "");

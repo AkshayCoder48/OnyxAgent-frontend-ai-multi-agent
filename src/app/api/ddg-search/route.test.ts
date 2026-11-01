@@ -11,6 +11,10 @@
  *   - web: LangSearch (user's own key, BYOK) → Miklium (restored) → DDG HTML
  *   - image: DuckDuckGo PRIMARY (one full retry) → Miklium images rescue
  *   - video: DuckDuckGo PRIMARY (one full retry) → Miklium videos rescue
+ *   - egress: the caller's public IP is forwarded to the DDG engines
+ *     (X-Forwarded-For semantics — the "no datacenter IP involved"
+ *     directive), never a private IP, and DDG_FORWARD_CLIENT_IP=false
+ *     disables it.
  *
  * The Miklium media rescue exists because DDG's anti-bot WAF hard-blocks
  * shared datacenter egress IPs (the 2026-11-01 outage: 100% of image/video
@@ -55,10 +59,10 @@ import { searchMikliumImages, searchMikliumVideos } from "@/lib/search/miklium-m
 
 type RouteRequest = Parameters<typeof GET>[0];
 
-function mkReq(params: Record<string, string>): RouteRequest {
+function mkReq(params: Record<string, string>, headers: Record<string, string> = {}): RouteRequest {
   const url = new URL("http://localhost/api/ddg-search");
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  return { nextUrl: url } as unknown as RouteRequest;
+  return { nextUrl: url, headers: new Headers(headers) } as unknown as RouteRequest;
 }
 
 /** A DDG image row in the normalized shape ddg-images.ts emits. */
@@ -185,6 +189,7 @@ const jsonResponse = (body: unknown, status = 200) =>
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.clearAllMocks();
 });
 
@@ -601,5 +606,81 @@ describe("hard guarantees", () => {
   it("rejects an empty query with 400", async () => {
     const res = await GET(mkReq({ q: "   ", type: "web", limit: "5" }));
     expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("egress — the caller's public IP is forwarded to the DDG engines (no-datacenter-IP directive)", () => {
+  it("forwards the FIRST entry of the XFF chain to the image and video engines", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+    vi.mocked(searchDDGVideos).mockResolvedValue([ddgVideoRow]);
+
+    const headers = { "x-forwarded-for": "203.0.113.7, 10.0.0.1, 192.168.0.5" };
+    await GET(mkReq({ q: "cats", type: "image", limit: "10" }, headers));
+    await GET(mkReq({ q: "cats", type: "video", limit: "10" }, headers));
+
+    expect(searchDDGImages).toHaveBeenCalledWith("cats", 10, { clientIp: "203.0.113.7" });
+    expect(searchDDGVideos).toHaveBeenCalledWith("cats", 10, { clientIp: "203.0.113.7" });
+  });
+
+  it("prefers x-vercel-forwarded-for over x-forwarded-for and x-real-ip", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+
+    await GET(
+      mkReq(
+        { q: "cats", type: "image", limit: "10" },
+        {
+          "x-vercel-forwarded-for": "198.51.100.3",
+          "x-forwarded-for": "203.0.113.7, 172.18.0.9",
+          "x-real-ip": "192.168.0.1",
+        },
+      ),
+    );
+
+    expect(searchDDGImages).toHaveBeenCalledWith("cats", 10, { clientIp: "198.51.100.3" });
+  });
+
+  it("NEVER forwards a private/loopback caller IP (local dev stays silent)", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+
+    await GET(
+      mkReq({ q: "cats", type: "image", limit: "10" }, { "x-forwarded-for": "192.168.1.5, 203.0.113.7" }),
+    );
+    await GET(mkReq({ q: "cats", type: "image", limit: "10" }, { "x-real-ip": "127.0.0.1" }));
+
+    expect(searchDDGImages).toHaveBeenNthCalledWith(1, "cats", 10, { clientIp: undefined });
+    expect(searchDDGImages).toHaveBeenNthCalledWith(2, "cats", 10, { clientIp: undefined });
+  });
+
+  it("forwards a bare IPv6 caller from the XFF chain", async () => {
+    vi.mocked(searchDDGVideos).mockResolvedValue([ddgVideoRow]);
+
+    await GET(
+      mkReq({ q: "cats", type: "video", limit: "10" }, { "x-forwarded-for": "2607:f8b0:4004:800::1, 10.0.0.9" }),
+    );
+
+    expect(searchDDGVideos).toHaveBeenCalledWith("cats", 10, {
+      clientIp: "2607:f8b0:4004:800::1",
+    });
+  });
+
+  it("DDG_FORWARD_CLIENT_IP=false disables forwarding entirely (privacy kill-switch)", async () => {
+    vi.stubEnv("DDG_FORWARD_CLIENT_IP", "false");
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+
+    await GET(
+      mkReq({ q: "cats", type: "image", limit: "10" }, { "x-forwarded-for": "203.0.113.7" }),
+    );
+
+    expect(searchDDGImages).toHaveBeenCalledWith("cats", 10, { clientIp: undefined });
+  });
+
+  it("requests without proxy headers (or without a Headers object) forward nothing", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+
+    await GET(mkReq({ q: "cats", type: "image", limit: "10" }));
+
+    expect(searchDDGImages).toHaveBeenCalledWith("cats", 10, { clientIp: undefined });
   });
 });

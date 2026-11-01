@@ -39,6 +39,7 @@
  */
 
 import { DDGBlockedError, DDG_XHR_HEADERS, getVqdToken, isDDGBlocked } from "./ddg-vqd";
+import { buildForwardedHeaders, ddgUrl, type DDGEgressOptions } from "./ddg-egress";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -181,6 +182,11 @@ function sleep(ms: number): Promise<void> {
  * next page (a relative URL whose `vqd` param we re-pin, since DDG drops
  * it), or "" on the last page.
  *
+ * `clientIp` (the end user's public IP) rides along as the standard
+ * X-Forwarded-For / X-Real-IP / Forwarded headers; the URL itself routes
+ * through ddgUrl() so a DDG_PROXY_BASE relay takes the whole handshake off
+ * the datacenter egress. See ddg-egress.ts.
+ *
  * Throws DDGBlockedError when the response carries DDG's anti-bot shape
  * (202/403/challenge JSON) so the retry path can refresh the session.
  * A 200 with an empty `results` array resolves to zero rows — a genuine
@@ -190,6 +196,7 @@ async function fetchImagePage(
   query: string,
   vqd: string,
   start: number,
+  clientIp?: string,
 ): Promise<{ rows: DDGImage[]; next: string }> {
   const params = new URLSearchParams({
     o: "json",
@@ -200,8 +207,8 @@ async function fetchImagePage(
     p: DDG_SAFE_SEARCH ? "1" : "-1",
     s: String(start),
   });
-  const res = await fetch(`https://duckduckgo.com/i.js?${params.toString()}`, {
-    headers: DDG_XHR_HEADERS,
+  const res = await fetch(ddgUrl(`/i.js?${params.toString()}`), {
+    headers: { ...DDG_XHR_HEADERS, ...buildForwardedHeaders(clientIp) },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   const body = await res.text().catch(() => "");
@@ -222,11 +229,12 @@ async function fetchImagePage(
   const rows = Array.isArray(data?.results) ? (data.results as DDGImage[]) : [];
 
   // DDG's `next` cursor is relative ("i.js?o=json&q=…&s=100…"), sometimes
-  // empty. Re-pin the token (DDG omits it from the cursor) and absolutize.
+  // empty. Re-pin the token (DDG omits it from the cursor) and absolutize
+  // (ddgUrl("/") keeps relay routing correct for relative resolution).
   let next = "";
   if (typeof data?.next === "string" && data.next) {
     try {
-      const u = new URL(data.next, "https://duckduckgo.com");
+      const u = new URL(data.next, ddgUrl("/"));
       u.searchParams.set("vqd", vqd);
       next = u.toString();
     } catch {
@@ -245,19 +253,32 @@ async function fetchImagePage(
  * `RETRY_BACKOFF_MS` — the token cache is bypassed so the retry isn't
  * poisoned by the blocked session.
  *
+ * `opts.clientIp` (the end user's public IP, when forwardable) is attached
+ * to every request as the standard proxy-forwarding headers, and the URLs
+ * honor DDG_PROXY_BASE — the "no datacenter IP involved" egress options
+ * (see ddg-egress.ts).
+ *
  * Throws on token failure, timeout, or a block that survives the retry —
  * the route's retry + graceful "busy" note handle those. A query that
  * simply matches nothing resolves to an EMPTY array.
  */
-export async function searchDDGImages(query: string, limit: number): Promise<DDGImageResult[]> {
-  return Promise.race([searchDDGImagesInner(query, limit), ddgTimeout()]);
+export async function searchDDGImages(
+  query: string,
+  limit: number,
+  opts?: DDGEgressOptions,
+): Promise<DDGImageResult[]> {
+  return Promise.race([searchDDGImagesInner(query, limit, opts), ddgTimeout()]);
 }
 
-async function searchDDGImagesInner(query: string, limit: number): Promise<DDGImageResult[]> {
+async function searchDDGImagesInner(
+  query: string,
+  limit: number,
+  opts?: DDGEgressOptions,
+): Promise<DDGImageResult[]> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const fresh = attempt > 1; // retry path: never reuse the blocked session
     try {
-      const vqd = await getVqdToken(query, { fresh });
+      const vqd = await getVqdToken(query, { fresh, clientIp: opts?.clientIp });
       const raw: DDGImage[] = [];
 
       // Bulk: walk i.js pages via DDG's `next` cursor until we have enough
@@ -265,7 +286,7 @@ async function searchDDGImagesInner(query: string, limit: number): Promise<DDGIm
       // offset for the following page.
       let start = 0;
       for (let page = 1; page <= MAX_PAGES; page++) {
-        const fetched = await fetchImagePage(query, vqd, start);
+        const fetched = await fetchImagePage(query, vqd, start, opts?.clientIp);
         raw.push(...fetched.rows);
         if (fetched.rows.length === 0) break; // last page / nothing matched
         if (raw.length >= limit) break; // bulk satisfied

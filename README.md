@@ -6,7 +6,7 @@
 
 A fully client-side AI assistant with 50+ tools, multi-agent orchestration, real-time streaming, sandbox code execution, and a beautiful glassmorphic UI — all running in the browser with zero backend.
 
-[![Deploy](https://img.shields.io/badge/Deploy-Vercel-000000?style=for-the-badge&logo=vercel)](https://my-project-livid-zeta-99.vercel.app)
+[![Deploy](https://img.shields.io/badge/Deploy-Vercel-000000?style=for-the-badge&logo=vercel)](https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app)
 [![Framework](https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=next.js)](https://nextjs.org)
 [![Language](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript)](https://typescriptlang.org)
 [![Styling](https://img.shields.io/badge/Tailwind-CSS4-06B6D4?style=for-the-badge&logo=tailwindcss)](https://tailwindcss.com)
