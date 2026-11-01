@@ -112,6 +112,19 @@ describe("buildDDGSandboxCommand — injection safety", () => {
     const on = buildDDGSandboxCommand("cat", "image", 10);
     expect(on).toContain("DDG_SAFE='1'");
     expect(on).not.toContain("DDG_SAFE='-1'");
+    vi.unstubAllEnvs();
+  });
+
+  it("SAFE SEARCH: the per-call safeSearch parameter overrides the env in BOTH directions", () => {
+    // true forces the filtered leg even with the env off…
+    vi.stubEnv("DDG_SAFE_SEARCH", "false");
+    expect(buildDDGSandboxCommand("cat", "image", 10, true)).toContain("DDG_SAFE='1'");
+    // …and false forces the unfiltered leg even with the env on.
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    expect(buildDDGSandboxCommand("cat", "video", 10, false)).toContain("DDG_SAFE='-1'");
+    // omitted → env decides.
+    expect(buildDDGSandboxCommand("cat", "video", 10, undefined)).toContain("DDG_SAFE='1'");
+    vi.unstubAllEnvs();
   });
 
   it("wraps the script in a QUOTED heredoc (shell never expands it)", () => {

@@ -45,6 +45,29 @@ describe("ddgSafeSearchParam (DDG_SAFE_SEARCH env)", () => {
   });
 });
 
+describe("ddgSafeSearchParam — per-call safeSearch override (the search tools' parameter)", () => {
+  it("safeSearch:true forces the filtered p=1 leg regardless of the env", () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "false");
+    expect(ddgSafeSearchParam(true)).toBe("1");
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    expect(ddgSafeSearchParam(true)).toBe("1");
+  });
+
+  it("safeSearch:false forces the unfiltered p=-1 leg even when the env says ON", () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    expect(ddgSafeSearchParam(false)).toBe("-1");
+  });
+
+  it("undefined (param omitted) falls back to the deployment env", () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    expect(ddgSafeSearchParam(undefined)).toBe("1");
+    vi.stubEnv("DDG_SAFE_SEARCH", "off");
+    expect(ddgSafeSearchParam(undefined)).toBe("-1");
+    vi.unstubAllEnvs();
+    expect(ddgSafeSearchParam(undefined)).toBe("-1"); // unset env → OFF
+  });
+});
+
 describe("isPublicIp (pure)", () => {
   it("accepts public IPv4 and IPv6 addresses", () => {
     expect(isPublicIp("203.0.113.7")).toBe(true); // TEST-NET-3 (documentation)

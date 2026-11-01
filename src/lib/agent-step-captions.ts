@@ -4,6 +4,8 @@
  * in plain language. Dependency-free — safe to use anywhere in the UI.
  */
 
+import { toolDisplayName } from "@/lib/tool-display-names";
+
 const EXACT_CAPTIONS: Record<string, string> = {
   search_knowledge_base: "Searching the knowledge base",
   knowledge_base: "Working with the Knowledge Base",
@@ -107,12 +109,9 @@ const PREFIX_CAPTIONS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 function humanizeToolName(name: string): string {
-  const words = name
-    .replace(/_tool$/, "")
-    .split("_")
-    .filter(Boolean);
-  if (words.length === 0) return name;
-  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  // UI-only plain display names (user directive 2026-11-01) — raw registry
+  // identifiers never render.
+  return toolDisplayName(name);
 }
 
 /**

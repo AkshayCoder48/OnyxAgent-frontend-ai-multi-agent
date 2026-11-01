@@ -47,7 +47,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - manage_skill [list / read / create / edit / delete / catalog / search_marketplace / install_from_marketplace] — Skills — list shows ALL (55-skill library + user's); search_marketplace/install_from_marketplace = live SkillsMP directory.
 - manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
 - workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
-- use_browser — ONLY for pages needing real interaction (click, type, login, JS); plain reading is web_fetch's job.
+- use_browser — ONLY for pages needing real interaction (click, type, login, JS): navigate, click, type, extract_text, inspect, snapshot, screenshot, wait, back/forward, close +…
 - ask_user — Ask a clarifying question when context is missing — never guess user intent.
 - counterfactual — Structured "what if X had been different" analysis.
 - decision — Structured decision engine (JEV systemone): pass a state + queries (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip.

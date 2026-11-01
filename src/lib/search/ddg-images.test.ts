@@ -313,6 +313,34 @@ describe("searchDDGImages (in-house client flow, mocked network)", () => {
     expect(calls[1][0]).not.toContain("p=-1");
   });
 
+  it("SAFE SEARCH: the per-call safeSearch override wins over the env in both directions", async () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true"); // env says filtered…
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const u = String(input);
+      calls.push(u);
+      if (u.startsWith("https://duckduckgo.com/i.js")) {
+        return new Response(JSON.stringify({ results: [mkImage()], next: "" }), { status: 200 });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // …but safeSearch:false forces the unfiltered p=-1 leg.
+    await searchDDGImages("cats", 5, { safeSearch: false });
+    expect(calls.find((u) => u.includes("/i.js"))).toContain("p=-1");
+    expect(calls.find((u) => u.includes("/i.js"))).not.toContain("p=1");
+
+    // And safeSearch:true filters even with the env off.
+    vi.stubEnv("DDG_SAFE_SEARCH", "false");
+    calls.length = 0;
+    await searchDDGImages("cats", 5, { safeSearch: true });
+    // NOTE: the vqd token is CACHED across calls in one process, so this
+    // leg may be a single i.js fetch — find it instead of indexing.
+    expect(calls.find((u) => u.includes("/i.js"))).toContain("p=1");
+    expect(calls.find((u) => u.includes("/i.js"))).not.toContain("p=-1");
+  });
+
   it("EGRESS: forwards the caller's IP and routes via DDG_PROXY_BASE on every leg", async () => {
     // The "no datacenter IP involved" mechanics end-to-end: with a relay
     // configured, BOTH the token page and i.js go through the relay, and

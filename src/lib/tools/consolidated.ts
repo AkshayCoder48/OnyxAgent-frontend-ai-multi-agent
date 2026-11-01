@@ -56,10 +56,12 @@ const SPECS: Record<keyof typeof UMBRELLA_TOOLS & string, UmbrellaSpec> = {
   web: {
     category: "web",
     description: `Search and read the web. ONE tool, ONE \`action\` parameter:
-- "web_search" (query) — text web search; titles, URLs, snippets. The first step for finding information.
-- "image_search" (query) — pictures: URLs, thumbnails, dimensions, sources.
-- "video_search" (query) — videos: titles, URLs, thumbnails, durations, channels.
-- "web_fetch" (url) — read a page's full text — the DEFAULT way to READ any page (try /llms.txt for docs). For pages that need real interaction (clicks, login, JS, anti-bot) use the use_browser tool instead.`,
+- "web_search" (query, safeSearch?) — text web search; titles, URLs, snippets. The first step for finding information.
+- "image_search" (query, safeSearch?) — pictures: URLs, thumbnails, dimensions, sources.
+- "video_search" (query, safeSearch?) — videos: titles, URLs, thumbnails, durations, channels.
+- "web_fetch" (url) — read a page's full text — the DEFAULT way to READ any page (try /llms.txt for docs). For pages that need real interaction (clicks, login, JS, anti-bot) use the use_browser tool instead.
+
+\`safeSearch\` (all three search actions): true filters adult/explicit content; false returns fully unfiltered results; omit for the deployment default (unfiltered). Set false explicitly for sensitive-topic research where filtering drops legitimate results; set true when the user asks for family-friendly/safe results.`,
   },
   code_exec: {
     category: "exec",

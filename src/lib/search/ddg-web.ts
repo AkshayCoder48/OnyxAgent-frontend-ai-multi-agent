@@ -195,19 +195,26 @@ function ddgTimeout(): Promise<never> {
   });
 }
 
-import { ddgSafeSearchParam } from "./ddg-egress";
+import { ddgSafeSearchParam, type DDGEgressOptions } from "./ddg-egress";
 
 /**
  * Search DuckDuckGo's web index and normalize the results.
  *
- * Raced against the timeout (the endpoint has no abort-signal support worth
- * wiring for a single POST). Throws on network failure, timeout, or DDG's
- * soft rate-limit block — the caller (/api/ddg-search) turns that into a
+ * `opts.safeSearch` is the per-call override from the `web_search` tool's
+ * `safeSearch` parameter (true → kp=1 filtered, false → kp=-1 unfiltered);
+ * when omitted the DDG_SAFE_SEARCH env default applies (off). Raced against
+ * the timeout (the endpoint has no abort-signal support worth wiring for a
+ * single POST). Throws on network failure, timeout, or DDG's soft
+ * rate-limit block — the caller (/api/ddg-search) turns that into a
  * sanitized user-facing message. A query that simply matches nothing parses
  * to an EMPTY array.
  */
-export async function searchDDGWeb(query: string, limit: number): Promise<DDGWebResult[]> {
-  const body = new URLSearchParams({ q: query, kl: "wt-wt", kp: ddgSafeSearchParam() }); // wt-wt = no region bias; kp = safe-search flag (off by default — see ddg-egress.ts)
+export async function searchDDGWeb(
+  query: string,
+  limit: number,
+  opts?: DDGEgressOptions,
+): Promise<DDGWebResult[]> {
+  const body = new URLSearchParams({ q: query, kl: "wt-wt", kp: ddgSafeSearchParam(opts?.safeSearch) }); // wt-wt = no region bias; kp = safe-search flag (per-call override, else env default — see ddg-egress.ts)
   const res = await Promise.race([
     fetch("https://html.duckduckgo.com/html/", {
       method: "POST",

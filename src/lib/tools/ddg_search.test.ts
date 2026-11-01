@@ -135,6 +135,75 @@ describe("image_search tool — failures degrade gracefully (no error blob)", ()
   });
 });
 
+describe("safeSearch parameter — the per-call flag reaches the proxy URL (user directive 2026-11-01)", () => {
+  /** Capture the proxy request URL the tool issued. */
+  function captureProxyUrl(): string[] {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return new Response(
+          JSON.stringify({ query: "x", type: "web", results: [], count: 0, provider: "ddg" }),
+          { status: 200 },
+        );
+      }),
+    );
+    return urls;
+  }
+
+  it("image_search: safeSearch true/false ride as safe_search=true/false; omitted → no param (deployment default)", async () => {
+    for (const [arg, expected] of [
+      [true, "safe_search=true"],
+      [false, "safe_search=false"],
+    ] as const) {
+      const urls = captureProxyUrl();
+      await imageTool().handler({ query: "cat", limit: 5, safeSearch: arg }, {} as never);
+      expect(urls[0]).toContain(expected);
+    }
+    const urls = captureProxyUrl();
+    await imageTool().handler({ query: "cat", limit: 5 }, {} as never);
+    expect(urls[0]).not.toContain("safe_search");
+  });
+
+  it("string spellings a sloppy model emits ('true'/'off') normalize to the boolean param; garbage → no param", async () => {
+    const truthy = captureProxyUrl();
+    await imageTool().handler({ query: "cat", limit: 5, safeSearch: "true" }, {} as never);
+    expect(truthy[0]).toContain("safe_search=true");
+
+    const falsey = captureProxyUrl();
+    await imageTool().handler({ query: "cat", limit: 5, safeSearch: "off" }, {} as never);
+    expect(falsey[0]).toContain("safe_search=false");
+
+    const garbage = captureProxyUrl();
+    await imageTool().handler({ query: "cat", limit: 5, safeSearch: "banana" }, {} as never);
+    expect(garbage[0]).not.toContain("safe_search");
+  });
+
+  it("web_search and video_search: the same safeSearch wiring", async () => {
+    for (const name of ["web_search", "video_search"]) {
+      const t = getTool(name);
+      if (!t) throw new Error(`${name} tool not registered`);
+      const urls = captureProxyUrl();
+      await t.handler({ query: "cat", limit: 5, safeSearch: false }, {} as never);
+      expect(urls[0]).toContain("safe_search=false");
+      const urls2 = captureProxyUrl();
+      await t.handler({ query: "cat", limit: 5, safeSearch: true }, {} as never);
+      expect(urls2[0]).toContain("safe_search=true");
+    }
+  });
+
+  it("every search tool's schema declares the safeSearch boolean parameter", () => {
+    for (const name of ["web_search", "image_search", "video_search"]) {
+      const t = getTool(name);
+      if (!t) throw new Error(`${name} tool not registered`);
+      const props = (t.parameters as { properties?: Record<string, { type?: string }> }).properties;
+      expect(props.safeSearch?.type).toBe("boolean");
+      expect(typeof props.safeSearch?.description).toBe("string");
+    }
+  });
+});
+
 describe("web_search / video_search tools — same contract", () => {
   it("web: empty results → success + friendly message", async () => {
     stubProxy({

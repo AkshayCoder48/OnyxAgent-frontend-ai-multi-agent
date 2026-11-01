@@ -59,6 +59,14 @@
  * safe-search mode does). Set DDG_SAFE_SEARCH=true|1|yes|on to re-enable
  * DDG's adult-content filter for a deployment. Read at CALL time like every
  * other decision here so tests can stub it per-case.
+ *
+ * PER-CALL OVERRIDE (2026-11-01): every search tool (web_search /
+ * image_search / video_search) now exposes a `safeSearch` parameter the
+ * model can set per query — `true` (filter ON), `false` (filter OFF), or
+ * omitted (fall back to the deployment's DDG_SAFE_SEARCH default). The
+ * per-call value ALWAYS wins over the env; only when it is absent does the
+ * env decide. One resolution point (ddgSafeSearchParam) feeds the direct
+ * clients, the HTML client, and the E2B sandbox script identically.
  */
 
 // ---------------------------------------------------------------------------
@@ -72,6 +80,12 @@ export interface DDGEgressOptions {
    * headers). `undefined` = do not forward anything.
    */
   clientIp?: string;
+  /**
+   * Per-call safe-search override from the search tool's `safeSearch`
+   * parameter. `true` = filter ON (p/kp=1), `false` = filter OFF (p/kp=-1),
+   * `undefined` = use the deployment's DDG_SAFE_SEARCH default.
+   */
+  safeSearch?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,14 +156,20 @@ const SAFE_SEARCH_ENABLED = /^(true|1|yes|on)$/i;
  * The DDG safe-search flag value for `p` (i.js/v.js) and `kp` (html endpoint)
  * query params.
  *
- * "-1" (safe search OFF — unfiltered, the default per the operator
- * directive; live-verified 2026-11-01: the identical handshake returns the
- * full adult-inclusive row set with p=-1 and a sanitized one with p=1) or
- * "1" (safe search ON — DDG filters adult content) depending on the
- * DDG_SAFE_SEARCH env. Read at CALL time, never at module load, so tests can
- * stub the env per-case.
+ * Resolution order (the per-call `safeSearch` parameter the search tools
+ * expose wins over the env):
+ *   1. `safeSearch === true`  → "1" (safe search ON — DDG filters adult content)
+ *   2. `safeSearch === false` → "-1" (safe search OFF — unfiltered)
+ *   3. omitted → DDG_SAFE_SEARCH env: truthy (true/1/yes/on) → "1", else "-1".
+ *
+ * "-1" is the default (operator directive; live-verified 2026-11-01: the
+ * identical handshake returns the full adult-inclusive row set with p=-1 and
+ * a sanitized one with p=1). Read at CALL time, never at module load, so
+ * tests can stub the env per-case.
  */
-export function ddgSafeSearchParam(): string {
+export function ddgSafeSearchParam(safeSearch?: boolean): string {
+  if (safeSearch === true) return "1";
+  if (safeSearch === false) return "-1";
   return SAFE_SEARCH_ENABLED.test(process.env.DDG_SAFE_SEARCH?.trim() ?? "")
     ? "1"
     : "-1";

@@ -30,7 +30,8 @@
  *   1. GET https://duckduckgo.com/?q=…&iax=images&ia=images  (browser-grade
  *      headers) → regex out the `vqd` session token.
  *   2. GET https://duckduckgo.com/i.js|v.js?o=json&q=…&l=us-en&vqd=…&f=,,,,
- *      &p=-1 (safe-search OFF by default — DDG_SAFE_SEARCH env controls it,
+ *      &p=-1 (safe-search OFF by default — the search tool's per-call
+ *      `safeSearch` parameter overrides it, else the DDG_SAFE_SEARCH env;
  *      the same live-verified knob as the direct clients) → JSON rows; walk
  *      the `next` cursor up to 3 pages (bulk, like ddg-images.ts).
  *   3. stdout: {"results":[…]} — raw DDG rows — or {"error":"token"|
@@ -190,6 +191,13 @@ export interface DDGSandboxEgressOptions {
   origin: string;
   /** E2B API key: the caller's BYOK key or the server's E2B_API_KEY. */
   apiKey: string;
+  /**
+   * Per-call safe-search override from the search tool's `safeSearch`
+   * parameter (true → DDG_SAFE=1 filtered, false → DDG_SAFE=-1 unfiltered);
+   * omitted → the deployment's DDG_SAFE_SEARCH default. Threads into the
+   * sandbox script's DDG_SAFE env as a validated literal.
+   */
+  safeSearch?: boolean;
 }
 
 /**
@@ -201,16 +209,22 @@ export interface DDGSandboxEgressOptions {
  * as separate lines they would be shell-LOCAL variables that never reach
  * the child process's environment (verified live — python3 saw an empty
  * DDG_B64 until they were joined onto the command). DDG_SAFE is the
- * safe-search flag ("1"/"-1") from ddgSafeSearchParam() — a validated
- * literal, so the command line stays injection-safe.
+ * safe-search flag ("1"/"-1") — `safeSearch` is the search tool's per-call
+ * override, resolved through ddgSafeSearchParam(); a validated literal
+ * either way, so the command line stays injection-safe.
  */
-export function buildDDGSandboxCommand(query: string, kind: "image" | "video", limit: number): string {
+export function buildDDGSandboxCommand(
+  query: string,
+  kind: "image" | "video",
+  limit: number,
+  safeSearch?: boolean,
+): string {
   const b64 = Buffer.from(query, "utf8").toString("base64");
   // Over-fetch the raw pool (3× limit, floor 30, cap 150) — normalization
   // dedupes by image URL, and a starved pool shortchanges large limits
   // (the same lesson as the Miklium over-fetch fix).
   const fetchLimit = Math.min(Math.max(limit * 3, 30), 150);
-  const safe = ddgSafeSearchParam();
+  const safe = ddgSafeSearchParam(safeSearch);
   return [
     `DDG_B64='${b64}' DDG_KIND='${kind}' DDG_LIMIT='${fetchLimit}' DDG_SAFE='${safe}' python3 - <<'DDGPY'`,
     DDG_SANDBOX_SCRIPT,
@@ -232,7 +246,7 @@ async function runDDGMediaInSandbox(
   limit: number,
   opts: DDGSandboxEgressOptions,
 ): Promise<unknown[]> {
-  const command = buildDDGSandboxCommand(query, kind, limit);
+  const command = buildDDGSandboxCommand(query, kind, limit, opts.safeSearch);
 
   const url = new URL("/api/sandbox", opts.origin).toString();
   const res = await fetch(url, {
@@ -283,7 +297,8 @@ async function runDDGMediaInSandbox(
  * Image search with the handshake executed inside the acquired E2B
  * sandbox — every duckduckgo.com request leaves from the sandbox's IP.
  * Raw rows are normalized by the SAME pure normalizer the direct client
- * uses, so dedupe/shape/provider semantics are identical.
+ * uses, so dedupe/shape/provider semantics are identical. `opts.safeSearch`
+ * is the per-call override (true/false); omitted → env default.
  */
 export async function searchDDGImagesViaSandbox(
   query: string,
@@ -296,7 +311,8 @@ export async function searchDDGImagesViaSandbox(
 
 /**
  * Video search with the handshake executed inside the acquired E2B
- * sandbox — same egress story as searchDDGImagesViaSandbox.
+ * sandbox — same egress story as searchDDGImagesViaSandbox, same per-call
+ * `safeSearch` override semantics.
  */
 export async function searchDDGVideosViaSandbox(
   query: string,

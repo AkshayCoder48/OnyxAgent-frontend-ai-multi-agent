@@ -251,6 +251,34 @@ describe("searchDDGVideos (network flow, mocked fetch)", () => {
     expect(calls[1]).not.toContain("p=-1");
   });
 
+  it("SAFE SEARCH: the per-call safeSearch override wins over the env in both directions", async () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true"); // env says filtered…
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const u = String(input);
+      calls.push(u);
+      if (u.startsWith("https://duckduckgo.com/v.js")) {
+        return new Response(JSON.stringify({ results: [], next: "" }), { status: 200 });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // …but safeSearch:false forces the unfiltered p=-1 leg.
+    await searchDDGVideos("cats", 5, { safeSearch: false });
+    expect(calls.find((u) => u.includes("/v.js"))).toContain("p=-1");
+    expect(calls.find((u) => u.includes("/v.js"))).not.toContain("p=1");
+
+    // And safeSearch:true filters even with the env off.
+    vi.stubEnv("DDG_SAFE_SEARCH", "false");
+    calls.length = 0;
+    await searchDDGVideos("cats", 5, { safeSearch: true });
+    // NOTE: the vqd token is CACHED across calls in one process, so this
+    // leg may be a single v.js fetch — find it instead of indexing.
+    expect(calls.find((u) => u.includes("/v.js"))).toContain("p=1");
+    expect(calls.find((u) => u.includes("/v.js"))).not.toContain("p=-1");
+  });
+
   it("throws when the token page has no vqd token (sanitized upstream)", async () => {
     vi.stubGlobal(
       "fetch",

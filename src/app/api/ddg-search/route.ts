@@ -317,6 +317,21 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 10, 50);
   const langsearchKey = searchParams.get("langsearch_key") || "";
 
+  // SAFE SEARCH (per-call override, 2026-11-01): the web/image/video search
+  // tools expose a `safeSearch` parameter the model sets per query. It rides
+  // the proxy URL as `safe_search=true|false`. Absent → undefined → the
+  // deployment's DDG_SAFE_SEARCH default applies (see ddg-egress.ts). Only
+  // the DDG legs honor it — LangSearch and Miklium (the rescue engines)
+  // offer no safe-search knob, so the flag simply doesn't apply on their
+  // legs; the provider field keeps reporting who actually answered.
+  const safeSearchRaw = (searchParams.get("safe_search") || "").trim().toLowerCase();
+  const safeSearch =
+    safeSearchRaw === "true" || safeSearchRaw === "1" || safeSearchRaw === "yes" || safeSearchRaw === "on"
+      ? true
+      : safeSearchRaw === "false" || safeSearchRaw === "0" || safeSearchRaw === "no" || safeSearchRaw === "off"
+        ? false
+        : undefined;
+
   // E2B sandbox egress (user directive 2026-11-01: "make ddg use current
   // acquired e2b sandbox's ip; if e2b not configured then miklium works").
   // The caller's BYOK key (decrypted from their settings, forwarded
@@ -388,7 +403,7 @@ export async function GET(req: NextRequest) {
       // 3) DuckDuckGo HTML — keyless last chance.
       if (!served) {
         try {
-          results = await searchDDGWeb(query, limit);
+          results = await searchDDGWeb(query, limit, { clientIp, safeSearch });
           provider = "ddg";
         } catch (err) {
           engineFailed = true;
@@ -411,9 +426,10 @@ export async function GET(req: NextRequest) {
             searchDDGImagesViaSandbox(query, limit, {
               origin: sandboxOrigin(req),
               apiKey: e2bApiKey,
+              safeSearch,
             })
         : isDDGRelayConfigured()
-          ? () => searchDDGImages(query, limit, { clientIp })
+          ? () => searchDDGImages(query, limit, { clientIp, safeSearch })
           : null;
       const ddgRows = ddgEngine ? await searchWithRetry(ddgEngine) : null;
       if (ddgRows && ddgRows.length > 0) {
@@ -450,9 +466,10 @@ export async function GET(req: NextRequest) {
             searchDDGVideosViaSandbox(query, limit, {
               origin: sandboxOrigin(req),
               apiKey: e2bApiKey,
+              safeSearch,
             })
         : isDDGRelayConfigured()
-          ? () => searchDDGVideos(query, limit, { clientIp })
+          ? () => searchDDGVideos(query, limit, { clientIp, safeSearch })
           : null;
       const ddgRows = ddgEngine ? await searchWithRetry(ddgEngine) : null;
       if (ddgRows && ddgRows.length > 0) {

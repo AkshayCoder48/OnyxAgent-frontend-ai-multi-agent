@@ -20,6 +20,7 @@ import type { ToolCall } from "@/types";
 import type { TimelineStat, TimelineStep } from "@/components/assistant-ui/elements/tool-timeline";
 import type { FileTreeNode } from "@/components/assistant-ui/elements/file-tree";
 import type { DiffLine } from "@/components/assistant-ui/elements/code-diff";
+import { toolDisplayName } from "@/lib/tool-display-names";
 
 /**
  * Shared derivation for the assistant-ui "tool use" elements —
@@ -100,9 +101,9 @@ export const FILE_TOOLS = new Set([
   "delete_file",
 ]);
 
+/** Plain UI label for an unmapped tool (never a raw registry identifier). */
 function humanize(name: string): string {
-  const words = name.replace(/_tool$/, "").split("_").filter(Boolean);
-  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  return toolDisplayName(name);
 }
 
 /** The primary argument shown as a step's chip. */
@@ -135,7 +136,8 @@ export function toolChip(toolCall: ToolCall): string {
     return ids.length ? ids.map(String).join(", ") : "all todos";
   }
   if (typeof args.action === "string") return args.action;
-  return toolCall.name;
+  // No chip-worthy argument — the plain UI label, never the raw identifier.
+  return toolDisplayName(toolCall.name);
 }
 
 /** Best-effort object view of a tool result (handles JSON-string results). */

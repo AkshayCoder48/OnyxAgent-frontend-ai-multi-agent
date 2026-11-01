@@ -256,7 +256,12 @@ describe("web search — Miklium is the engine (restored), DDG the fallback", ()
     expect(res.status).toBe(200);
     expect(data.provider).toBe("ddg");
     expect(data.count).toBe(1);
-    expect(searchDDGWeb).toHaveBeenCalledWith("obscure query", 10);
+    // Third arg = egress opts (client IP + the per-call safeSearch override;
+    // both undefined here → deployment defaults).
+    expect(searchDDGWeb).toHaveBeenCalledWith("obscure query", 10, {
+      clientIp: undefined,
+      safeSearch: undefined,
+    });
     // The historical leak must not come back — not the provider error
     // string, not the raw upstream JSON, not a failure shape at all.
     expect(data.error).toBeUndefined();
@@ -432,6 +437,48 @@ describe("image search — DDG inside the acquired E2B sandbox (primary), Mikliu
       apiKey: "server-e2b-key",
     });
     expect(searchDDGImages).not.toHaveBeenCalled();
+  });
+
+  it("SAFE SEARCH: the safe_search param threads into the sandbox leg (and its spellings normalize)", async () => {
+    vi.mocked(searchDDGImagesViaSandbox).mockResolvedValue([ddgImageRow]);
+
+    // Explicit true → the filtered leg.
+    await GET(mkReq({ q: "cat", type: "image", limit: "10", e2b_api_key: "k", safe_search: "true" }));
+    expect(searchDDGImagesViaSandbox).toHaveBeenLastCalledWith("cat", 10, {
+      origin: "http://localhost",
+      apiKey: "k",
+      safeSearch: true,
+    });
+
+    // Explicit false → the unfiltered leg.
+    await GET(mkReq({ q: "cat", type: "image", limit: "10", e2b_api_key: "k", safe_search: "false" }));
+    expect(searchDDGImagesViaSandbox).toHaveBeenLastCalledWith("cat", 10, {
+      origin: "http://localhost",
+      apiKey: "k",
+      safeSearch: false,
+    });
+
+    // Spelling "1"/"0" normalize the same way.
+    await GET(mkReq({ q: "cat", type: "image", limit: "10", e2b_api_key: "k", safe_search: "1" }));
+    expect(searchDDGImagesViaSandbox).toHaveBeenLastCalledWith("cat", 10, {
+      origin: "http://localhost",
+      apiKey: "k",
+      safeSearch: true,
+    });
+
+    // Omitted / unrecognized → undefined (deployment default decides).
+    await GET(mkReq({ q: "cat", type: "image", limit: "10", e2b_api_key: "k" }));
+    expect(searchDDGImagesViaSandbox).toHaveBeenLastCalledWith("cat", 10, {
+      origin: "http://localhost",
+      apiKey: "k",
+      safeSearch: undefined,
+    });
+    await GET(mkReq({ q: "cat", type: "image", limit: "10", e2b_api_key: "k", safe_search: "banana" }));
+    expect(searchDDGImagesViaSandbox).toHaveBeenLastCalledWith("cat", 10, {
+      origin: "http://localhost",
+      apiKey: "k",
+      safeSearch: undefined,
+    });
   });
 
   it("no E2B key and no relay → DDG NEVER runs (not even direct), Miklium serves — the user directive", async () => {

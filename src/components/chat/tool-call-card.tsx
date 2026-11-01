@@ -30,6 +30,7 @@ import { chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/compone
 import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
@@ -288,7 +289,13 @@ export const ToolCallCard = React.memo(function ToolCallCard({
   // (status "awaiting_approval") flips a card into this state, and the
   // subsequent tool_result event flips it back to the normal rendering.
   if (toolCall.status === "awaiting_approval") {
-    return <ApprovalCard toolCallId={toolCall.id} toolName={toolCall.name} />;
+    // Plain UI label — the raw registry identifier never reaches the card.
+    return (
+      <ApprovalCard
+        toolCallId={toolCall.id}
+        toolName={toolDisplayName(toolCall.name)}
+      />
+    );
   }
   if (displayMode === "simple") {
     return <SimpleToolCallCard toolCall={toolCall} turnId={turnId} />;
@@ -1006,7 +1013,11 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
                     ? "Run Python"
                     : !toolCall.name || toolCall.name.startsWith("pending-")
                       ? "Composing…"
-                      : toolCall.name;
+                      : // UI-ONLY plain display name (user directive 2026-11-01):
+                        // raw registry identifiers like `manage_custom_tool` /
+                        // `custom_tools` / snake_case custom-tool names never
+                        // render — the label is plain language.
+                        toolDisplayName(toolCall.name);
 
   const ToolIcon = isMediaGeneration
     ? Sparkles
@@ -1071,6 +1082,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   // header becomes a step caption. (Note: `isRunning` is declared up top so
   // the auto-expand render-time adjustment can read it.)
   const isError = toolCall.status === "error";
+  // Plain-language running caption (UI-only names — see tool-display-names).
   const liveCaption = toolCaption(toolCall.name);
   // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28).
   const { hint: liveHint, phase: livePhase } = useMemo(

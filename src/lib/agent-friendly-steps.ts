@@ -21,6 +21,7 @@ import {
   Wrench,
 } from "lucide-react";
 import type { ToolCall } from "@/types";
+import { toolDisplayName } from "@/lib/tool-display-names";
 
 /**
  * Friendly narration for tool activity — plain-language sentences that say
@@ -206,11 +207,6 @@ const RULES: Record<string, TenseRule> = {
   },
 };
 
-function humanize(name: string): string {
-  const words = name.replace(/_tool$/, "").split("_").filter(Boolean);
-  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
 /** Truncate a detail string so sentences never blow the layout. */
 function clip(text: string, max = 40): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -285,8 +281,8 @@ export function friendlyStep(toolCall: ToolCall): FriendlyStep {
     return browserStep(toolCall);
   }
   const rule = RULES[name] ?? {
-    past: `Used ${humanize(name)}`,
-    present: `Using ${humanize(name)}`,
+    past: `Used ${toolDisplayName(name)}`,
+    present: `Using ${toolDisplayName(name)}`,
     icon: Wrench,
   };
   return { past: rule.past, present: rule.present, detail: friendlyDetail(toolCall), icon: rule.icon };

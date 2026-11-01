@@ -312,7 +312,7 @@ async function searchDDGVideosInner(
         l: "us-en",
         vqd: token,
         f: ",,,,",
-        p: ddgSafeSearchParam(),
+        p: ddgSafeSearchParam(opts?.safeSearch),
       });
       const res = await fetch(ddgUrl(`/v.js?${params.toString()}`), {
         headers: { ...DDG_XHR_HEADERS, ...buildForwardedHeaders(opts?.clientIp) },

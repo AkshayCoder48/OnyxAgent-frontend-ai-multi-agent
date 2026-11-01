@@ -9,6 +9,7 @@ import { getFileUrl, uploadFile, type FileUploadResponse } from "@/lib/file-api"
 import { MarkdownContent } from "./markdown-content";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { cn } from "@/lib/utils";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { toast } from "sonner";
 import {
   Send, Paperclip, Loader2, X, ChevronDown, Plus, Bot, User, Trash2, MessageSquare,
@@ -494,7 +495,9 @@ function CollapsibleToolCard({ tc }: {
         {tc.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
         {tc.status === "completed" && <ChevronDown className="h-3 w-3 text-emerald-500 shrink-0" />}
         {tc.status === "error" && <X className="h-3 w-3 text-destructive shrink-0" />}
-        <span className="font-mono font-semibold truncate flex-1 text-left">{tc.name}</span>
+        {/* UI-only plain label (user directive 2026-11-01): raw registry
+            identifiers like `manage_custom_tool` never render. */}
+        <span className="font-semibold truncate flex-1 text-left">{toolDisplayName(tc.name)}</span>
         <ChevronDown className={cn("h-3 w-3 text-muted-foreground transition-transform shrink-0", expanded && "rotate-180")} />
       </button>
       {expanded && (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
 import { ChatControls } from "./chat-controls";
@@ -26,7 +26,7 @@ import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
 import { ThinkingIndicator } from "@/components/assistant-ui/elements";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
-import { Hourglass } from "lucide-react";
+import { ArrowDown, Hourglass } from "lucide-react";
 // PROJECTS (Task 1-b) — minimal, surgical additions: the project empty state
 // swaps in for the generic one while a project workspace is open, and a
 // conversation the RUNTIME creates mid-turn is claimed for the active
@@ -67,44 +67,93 @@ function getLastActiveConversation(): string | null {
 }
 
 const SCROLL_NEAR_BOTTOM_THRESHOLD_PX = 150;
+/** Pinned at the TRUE bottom (not "near" it) — the only position that
+ *  re-arms auto-follow after the user's scrolling settles. */
+const PINNED_BOTTOM_PX = 4;
+/** How long after the last USER scroll event the pinned-bottom re-arm check
+ *  runs — the gesture must settle first, or the check fires mid-momentum. */
+const REARM_SETTLE_MS = 350;
+/** Programmatic scroll writes and their scroll events land within this
+ *  window — those events must never re-arm follow (the OLD bug: our own
+ *  ~33fps follow writes re-armed follow, so ANY scroll-up within 150px of
+ *  the bottom was instantly yanked back down — "stuck to the bottom while
+ *  streaming"). */
+const PROGRAMMATIC_SCROLL_QUIET_MS = 120;
 
 /**
- * SINGLE SCROLL OWNER (PRD §8–§11 — scroll jank fix).
+ * SINGLE SCROLL OWNER (PRD §8–§11 — scroll jank fix, rev 2: the
+ * "sticking to the bottom while streaming" fix, 2026-11-01).
  *
- * The old auto-scroll had two failure modes that produced the "pushes up
- * and down at the same time" oscillation during GenUI streaming:
+ * Rev 1 fixed the up/down oscillation (intent-based disengage, rAF-coalesced
+ * container-scoped writes) but kept ONE position-based re-arm: any scroll
+ * event landing within 150px of the bottom re-engaged auto-follow. During
+ * streaming that re-armed on (a) OUR OWN follow writes — they land at
+ * dist≈0 — and (b) every scroll-up that hadn't yet crossed 150px, so the
+ * next flush snapped the user straight back down. Net effect: the user
+ * could not scroll away from the stream — the reported "unwantedly sticking
+ * us to bottom while streaming".
  *
- *   1. `messagesEndRef.scrollIntoView()` ran synchronously on EVERY store
- *      flush (~33×/sec). `scrollIntoView` also scrolls EVERY scrollable
- *      ancestor (page/body on mobile), not just the chat container — competing
- *      scroll contexts fighting each other.
- *   2. "User scrolled up" was inferred from raw scroll POSITION: when a
- *      large GenUI card landed in one flush, dist-from-bottom spiked past
- *      150px and the controller wrongly concluded the user had scrolled,
- *      permanently stopping the follow (the user appeared stuck off-bottom
- *      while the content kept growing).
- *
- * The new controller:
- *   - Tracks USER INTENT (wheel-up / touch-drag-up / arrow-up keys) — the
- *     only thing that disables auto-follow. Content growth can never
- *     masquerade as user intent.
- *   - Resumes follow automatically whenever the viewport is back at/near
- *     the bottom (momentum, keyboard, or our own follow).
- *   - Writes scrolls via container-scoped `scrollTop` (never touches
- *     ancestors) and coalesces them through requestAnimationFrame — at
- *     most ONE scroll write per animation frame, no matter how many
- *     message updates arrive.
+ * Rev 2 rules:
+ *   - DISENGAGE (auto-follow off): explicit user intent only — wheel-up,
+ *     touch-drag-up, ArrowUp/PageUp/Home. Content growth can never
+ *     masquerade as intent.
+ *   - RE-ENGAGE (auto-follow on), in priority order:
+ *       1. Explicit down-intent: wheel-down while near the bottom, or
+ *          ArrowDown/PageDown/End keys.
+ *       2. The "Jump to latest" pill (rendered while disengaged).
+ *       3. A fresh USER message landing in the thread — always follow your
+ *          own turn.
+ *       4. The user manually settling PINNED at the true bottom (≤4px),
+ *          checked 350ms after their LAST scroll event so mid-gesture
+ *          positions never count. "Near" bottom (150px) does NOT re-arm.
+ *   - Programmatic writes (ours) are timestamped; scroll events within
+ *     120ms of one are ignored entirely — they can neither re-arm follow
+ *     nor reset the settle debounce.
+ *   - Writes stay container-scoped `scrollTop`/`scrollTo`, rAF-coalesced
+ *     to at most one write per animation frame.
  */
 function useChatScrollController(
   scrollContainerRef: React.RefObject<HTMLDivElement | null>,
   messages: unknown[],
 ) {
-  /** True once the user takes the viewport; false again when back at bottom. */
+  /** True once the user takes the viewport; false again on explicit re-engage. */
   const userTookScrollRef = useRef(false);
   /** Pending rAF handle for the coalesced follow-bottom write. */
   const scrollRafRef = useRef<number | null>(null);
   /** Stable handle to the frame-scheduled follow (set once on mount). */
   const scheduleFollowRef = useRef<(() => void) | null>(null);
+  /** Timestamp of the last PROGRAMMATIC scroll write (ours). */
+  const lastProgrammaticWriteRef = useRef(0);
+  /** Debounce timer for the settled pinned-bottom re-arm check. */
+  const rearmTimerRef = useRef<number | null>(null);
+  /** Mirror of userTookScrollRef for rendering the Jump pill. */
+  const [followDisengaged, setFollowDisengaged] = useState(false);
+  /** True when content arrived while disengaged (the pill's unread dot). */
+  const [hasNewBelow, setHasNewBelow] = useState(false);
+
+  const clearRearmTimer = useCallback(() => {
+    if (rearmTimerRef.current !== null) {
+      clearTimeout(rearmTimerRef.current);
+      rearmTimerRef.current = null;
+    }
+  }, []);
+
+  const disengage = useCallback(() => {
+    clearRearmTimer();
+    if (!userTookScrollRef.current) {
+      userTookScrollRef.current = true;
+      setFollowDisengaged(true);
+    }
+  }, [clearRearmTimer]);
+
+  const engage = useCallback(() => {
+    clearRearmTimer();
+    if (userTookScrollRef.current) {
+      userTookScrollRef.current = false;
+      setFollowDisengaged(false);
+    }
+    setHasNewBelow(false);
+  }, [clearRearmTimer]);
 
   // Attach intent listeners + define the ONE scroll primitive.
   useEffect(() => {
@@ -121,24 +170,42 @@ function useChatScrollController(
       }
     };
 
+    /** Mark a scroll write as OURS so the scroll event it fires is ignored. */
+    const writeScrollTop = (top: number) => {
+      lastProgrammaticWriteRef.current = performance.now();
+      container.scrollTop = top;
+    };
+
     // The ONE scroll write path: container-scoped, instant, frame-scheduled,
     // and re-checked inside the frame (a user scroll arriving mid-frame wins).
     const scheduleFollowBottom = () => {
       if (scrollRafRef.current !== null) return; // already scheduled this frame
       scrollRafRef.current = requestAnimationFrame(() => {
         scrollRafRef.current = null;
-        if (userTookScrollRef.current) return;
+        if (userTookScrollRef.current) {
+          // Disengaged and content still arriving → unread marker on the pill.
+          setHasNewBelow(true);
+          return;
+        }
         genuiPerfLog("Scroll", "follow-bottom");
-        container.scrollTop = container.scrollHeight;
+        writeScrollTop(container.scrollHeight);
       });
     };
     scheduleFollowRef.current = scheduleFollowBottom;
 
-    // ── USER INTENT: only explicit user input disables auto-follow ──
+    // ── USER INTENT: only explicit user input toggles auto-follow ──
+    // Keyboard toggles only when the keys aren't being typed into an editor
+    // (ArrowUp/Down in the composer must never move the thread).
+    const isEditableTarget = (t: EventTarget | null) =>
+      t instanceof HTMLElement &&
+      (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+
     const onWheel = (e: WheelEvent) => {
-      if (e.deltaY < 0) userTookScrollRef.current = true;
-      else if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX)
-        userTookScrollRef.current = false;
+      if (e.deltaY < 0) {
+        disengage();
+      } else if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX) {
+        engage(); // wheeling down near the bottom = heading to the latest
+      }
     };
     let lastTouchY: number | null = null;
     const onTouchStart = (e: TouchEvent) => {
@@ -148,25 +215,34 @@ function useChatScrollController(
       const y = e.touches[0]?.clientY;
       if (lastTouchY !== null && y !== undefined && y > lastTouchY + 3) {
         // Finger moving down = dragging content up = user scrolling up.
-        userTookScrollRef.current = true;
+        disengage();
       }
       lastTouchY = y ?? lastTouchY;
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isEditableTarget(e.target)) return;
       if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home") {
-        userTookScrollRef.current = true;
-      } else if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX) {
-        userTookScrollRef.current = false;
+        disengage();
+      } else if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === "End") {
+        engage();
       }
     };
 
-    // ── POSITION re-arm: back at the bottom (however it happened) resumes
-    // auto-follow. Content growth alone doesn't fire scroll events, so this
-    // can't be fooled the way the old position-only detector was.
+    // ── POSITION re-arm (rev 2): only PINNED at the true bottom, only after
+    // the user's scrolling has SETTLED, and never for our own writes. A
+    // scroll event inside the programmatic quiet window is ignored outright
+    // (the old code re-armed on every follow write — the sticking bug).
     const onScroll = () => {
-      if (distFromBottom() <= SCROLL_NEAR_BOTTOM_THRESHOLD_PX) {
-        userTookScrollRef.current = false;
+      if (performance.now() - lastProgrammaticWriteRef.current < PROGRAMMATIC_SCROLL_QUIET_MS) {
+        return; // our own write — not user intent, not a settle
       }
+      if (rearmTimerRef.current !== null) clearTimeout(rearmTimerRef.current);
+      rearmTimerRef.current = window.setTimeout(() => {
+        rearmTimerRef.current = null;
+        if (userTookScrollRef.current && distFromBottom() <= PINNED_BOTTOM_PX) {
+          engage();
+        }
+      }, REARM_SETTLE_MS);
     };
 
     container.addEventListener("scroll", onScroll, { passive: true });
@@ -177,6 +253,7 @@ function useChatScrollController(
 
     return () => {
       clearRaf();
+      clearRearmTimer();
       scheduleFollowRef.current = null;
       container.removeEventListener("scroll", onScroll);
       container.removeEventListener("wheel", onWheel);
@@ -186,13 +263,43 @@ function useChatScrollController(
     };
     // The container element is stable for ChatContainer's lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [disengage, engage]);
 
   // Follow the bottom when messages update — through the frame scheduler,
   // so a burst of flushes still produces at most one scroll write per frame.
+  // A fresh USER message re-engages first: always follow your own turn.
+  const lastUserIdRef = useRef<string | null>(null);
   useEffect(() => {
+    const last = messages[messages.length - 1] as { id?: string; role?: string } | undefined;
+    if (last && last.role === "user" && typeof last.id === "string" && last.id !== lastUserIdRef.current) {
+      lastUserIdRef.current = last.id;
+      engage();
+    }
     scheduleFollowRef.current?.();
-  }, [messages]);
+  }, [messages, engage]);
+
+  /** Explicit re-engage + smooth scroll to the very bottom (the pill). */
+  const jumpToBottom = useCallback(() => {
+    engage();
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    lastProgrammaticWriteRef.current = performance.now();
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: reduced ? "auto" : "smooth",
+    });
+  }, [engage, scrollContainerRef]);
+
+  return {
+    /** Render the "Jump to latest" pill while auto-follow is off. */
+    showJump: followDisengaged && messages.length > 0,
+    /** Unread marker — content arrived while the view was parked. */
+    hasNewBelow,
+    jumpToBottom,
+  };
 }
 
 /**
@@ -283,12 +390,15 @@ export function ChatContainer(
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-  // SINGLE SCROLL OWNER (PRD §8–§11): the one controller for the chat scroll
-  // container — user-intent based auto-follow, container-scoped writes,
-  // rAF-coalesced to at most one scroll per animation frame. Replaces the
-  // old position-only "userScrolledUp" + per-flush scrollIntoView pair that
-  // fought itself during GenUI streaming.
-  useChatScrollController(scrollContainerRef, messages);
+  // SINGLE SCROLL OWNER (PRD §8–§11, rev 2): the one controller for the chat
+  // scroll container — user-intent based auto-follow, container-scoped writes,
+  // rAF-coalesced to at most one scroll per animation frame, re-armed ONLY by
+  // explicit down-intent / the Jump pill / a fresh user message / settling
+  // PINNED at the true bottom (never by our own writes — the sticking bug).
+  const { showJump, hasNewBelow, jumpToBottom } = useChatScrollController(
+    scrollContainerRef,
+    messages,
+  );
 
   // Tracks which conversation's messages are CURRENTLY loaded into the chat
   // store. The load-effect (below) uses this to decide whether to (re)load.
@@ -686,6 +796,9 @@ export function ChatContainer(
       onCancelQueued={cancelQueued}
       messagesEndRef={messagesEndRef}
       scrollContainerRef={scrollContainerRef}
+      showJumpToLatest={showJump}
+      hasNewBelow={hasNewBelow}
+      onJumpToLatest={jumpToBottom}
       pendingQuestions={pendingQuestions}
       onAnswerQuestions={sendAskUserResponses}
       onTodoAction={sendTodoAction}
@@ -721,6 +834,12 @@ interface ChatUIProps {
   onCancelQueued?: (id: string) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
+  /** Scroll owner (rev 2): render the Jump pill while auto-follow is off. */
+  showJumpToLatest?: boolean;
+  /** True when content arrived while the view was parked (unread dot). */
+  hasNewBelow?: boolean;
+  /** Explicit re-engage — the pill's click handler. */
+  onJumpToLatest?: () => void;
   pendingQuestions?: AskUserQuestion[] | null;
   onAnswerQuestions?: (answers: AskUserAnswer[]) => void;
   onTodoAction?: (action: "dismiss" | "reset" | "snapshot") => void;
@@ -751,6 +870,9 @@ function ChatUI({
   onCancelQueued,
   messagesEndRef,
   scrollContainerRef,
+  showJumpToLatest,
+  hasNewBelow,
+  onJumpToLatest,
   pendingQuestions,
   onAnswerQuestions,
   onTodoAction,
@@ -781,9 +903,14 @@ function ChatUI({
           companion is the INLINE cursor riding the response stream
           (CompanionCursor in markdown-content) — no floating pet. */}
       <div className="mx-auto flex h-full w-full max-w-[760px] min-w-0 flex-1 flex-col">
+        {/* Relative wrapper hosts the "Jump to latest" pill — the explicit
+            re-engage affordance shown while auto-follow is disengaged (scroll
+            owner rev 2). Without it, leaving the stream mid-answer had no way
+            back except fighting the follow. */}
+        <div className="relative min-h-0 flex-1">
         <div
           ref={scrollContainerRef}
-          className="flex-1 scrollbar-thin overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
+          className="scrollbar-thin h-full overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
         >
           {isLoadingConversation ? (
             <ConversationSkeleton />
@@ -844,6 +971,28 @@ function ChatUI({
               assistant starts streaming. This prevents the jarring instant
               switch to a blank MessageList. */}
           <div ref={messagesEndRef} />
+        </div>
+        {/* JUMP TO LATEST (scroll owner rev 2) — the explicit re-engage
+            affordance while auto-follow is disengaged. The unread dot marks
+            content that arrived while the view was parked; clicking smooth
+            scrolls to the very bottom and re-engages the follow. */}
+        {showJumpToLatest && onJumpToLatest && (
+          <button
+            type="button"
+            onClick={onJumpToLatest}
+            aria-label="Jump to the latest messages"
+            className="border-border bg-background/85 text-foreground/85 hover:bg-accent hover:text-foreground absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors"
+          >
+            <ArrowDown className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="whitespace-nowrap">Jump to latest</span>
+            {hasNewBelow && (
+              <span
+                className="bg-primary h-1.5 w-1.5 shrink-0 rounded-full"
+                aria-hidden
+              />
+            )}
+          </button>
+        )}
         </div>{" "}
         {/* Pollinations media_generation two-step confirmation — the tool
             BLOCKS until this dialog dispatches a response (same mount slot

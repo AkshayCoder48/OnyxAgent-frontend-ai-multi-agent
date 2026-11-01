@@ -52,12 +52,17 @@ function labelsFor(type: string): { singular: string; results: string } {
  * `langsearch_key` so the proxy can prefer LangSearch for web queries.
  * For image/video, the user's E2B sandbox key is appended as `e2b_api_key`
  * so DuckDuckGo can execute inside their current acquired sandbox.
+ *
+ * `safeSearch` (the model-facing parameter on all three search tools) rides
+ * as `safe_search=true|false`; omitted means "use the deployment default",
+ * so the param is only serialized when the model set it explicitly.
  */
 async function search(
   query: string,
   type: string,
   limit: number,
   ctx?: ToolContext,
+  safeSearch?: boolean,
 ): Promise<{ results: unknown[]; provider?: string; note?: string }> {
   // Lazily fetch the LangSearch key (only for web — image/video aren't
   // supported by LangSearch, so we skip the decrypt round-trip).
@@ -88,6 +93,8 @@ async function search(
   });
   if (langsearchKey) params.set("langsearch_key", langsearchKey);
   if (e2bKey) params.set("e2b_api_key", e2bKey);
+  if (safeSearch === true) params.set("safe_search", "true");
+  if (safeSearch === false) params.set("safe_search", "false");
 
   const res = await fetch(`/api/ddg-search?${params.toString()}`);
   if (!res.ok) {
@@ -141,6 +148,38 @@ function busyOutput(query: string, type: string) {
   };
 }
 
+/**
+ * Shared schema fragment — the `safeSearch` parameter every search tool
+ * exposes (user directive 2026-11-01: "add param in image search, videos and
+ * web search for safe search, values and all needed"). Values: `true` —
+ * filter adult content (DDG safe search ON); `false` — unfiltered results
+ * (DDG safe search OFF); omitted — the deployment's default (unfiltered
+ * unless DDG_SAFE_SEARCH=true). One resolver (ddg-egress.ts) feeds every DDG
+ * leg — direct, relay, and in-sandbox — so the value is honored identically
+ * wherever the query ends up executing.
+ */
+const SAFE_SEARCH_PARAM = {
+  type: "boolean",
+  description:
+    "Safe search: true filters adult/explicit content from results, false returns fully unfiltered results. Omit to use the deployment default (unfiltered unless the operator enabled DDG_SAFE_SEARCH). Set false explicitly for sensitive-topic research where filtering silently drops legitimate results; set true when the user asks for family-friendly/safe results or minors may see them.",
+} as const;
+
+/**
+ * Normalize the model-supplied `safeSearch` value. The schema says boolean,
+ * but models occasionally emit the string spellings anyway — accept them;
+ * anything unrecognized (or absent) means "no override" (deployment default).
+ */
+function normalizeSafeSearch(raw: unknown): boolean | undefined {
+  if (raw === true) return true;
+  if (raw === false) return false;
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (v === "true" || v === "1" || v === "yes" || v === "on") return true;
+    if (v === "false" || v === "0" || v === "no" || v === "off") return false;
+  }
+  return undefined;
+}
+
 // ---- Web Search ----
 registerTool(
   "web_search",
@@ -150,6 +189,7 @@ registerTool(
     properties: {
       query: { type: "string", description: "Search query" },
       limit: { type: "number", description: "Max results (default 10, max 50)" },
+      safeSearch: SAFE_SEARCH_PARAM,
     },
     required: ["query"],
     additionalProperties: false,
@@ -157,8 +197,9 @@ registerTool(
   async (args, ctx): Promise<ToolResult> => {
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
+    const safeSearch = normalizeSafeSearch(args.safeSearch);
     try {
-      const { results, provider, note } = await search(query, "web", limit, ctx);
+      const { results, provider, note } = await search(query, "web", limit, ctx, safeSearch);
       if (results.length === 0) {
         return { success: true, output: noResultsOutput(query, "web", provider, note) };
       }
@@ -189,12 +230,13 @@ registerTool(
 // ---- Image Search ----
 registerTool(
   "image_search",
-  "Search for images using DuckDuckGo. Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants to find pictures, photos, diagrams, or visual content.",
+  "Search for images. Returns image URLs, thumbnails, dimensions, and source pages. Use when the user wants to find pictures, photos, diagrams, or visual content.",
   {
     type: "object",
     properties: {
       query: { type: "string", description: "Image search query" },
       limit: { type: "number", description: "Max results (default 10, max 50)" },
+      safeSearch: SAFE_SEARCH_PARAM,
     },
     required: ["query"],
     additionalProperties: false,
@@ -202,10 +244,11 @@ registerTool(
   async (args, ctx): Promise<ToolResult> => {
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
+    const safeSearch = normalizeSafeSearch(args.safeSearch);
     try {
       // The proxy reports the provider that actually served the results
       // ("ddg", or "langsearch" when the user's key is active).
-      const { results, provider, note } = await search(query, "image", limit, ctx);
+      const { results, provider, note } = await search(query, "image", limit, ctx, safeSearch);
       if (results.length === 0) {
         return { success: true, output: noResultsOutput(query, "image", provider, note) };
       }
@@ -233,12 +276,13 @@ registerTool(
 // ---- Video Search ----
 registerTool(
   "video_search",
-  "Search for videos using DuckDuckGo. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants to find videos, tutorials, or multimedia content.",
+  "Search for videos. Returns video titles, URLs, thumbnails, durations, and channel info. Use when the user wants to find videos, tutorials, or multimedia content.",
   {
     type: "object",
     properties: {
       query: { type: "string", description: "Video search query" },
       limit: { type: "number", description: "Max results (default 10, max 50)" },
+      safeSearch: SAFE_SEARCH_PARAM,
     },
     required: ["query"],
     additionalProperties: false,
@@ -246,8 +290,9 @@ registerTool(
   async (args, ctx): Promise<ToolResult> => {
     const query = args.query as string;
     const limit = Math.min((args.limit as number) ?? 10, 50);
+    const safeSearch = normalizeSafeSearch(args.safeSearch);
     try {
-      const { results, provider, note } = await search(query, "video", limit, ctx);
+      const { results, provider, note } = await search(query, "video", limit, ctx, safeSearch);
       if (results.length === 0) {
         return { success: true, output: noResultsOutput(query, "video", provider ?? "ddg", note) };
       }
