@@ -1,0 +1,109 @@
+name: Vercel storage cleanup
+
+# Frees the team's 10 GB Deployment/Functions Storage quota on Vercel's
+# Hobby plan. Every git push creates a production deployment whose
+# artifacts are stored FOREVER on Hobby — nothing auto-deletes, and the
+# pool fills after ~100-150 deployments. This job (runs on GitHub's
+# infrastructure — zero Vercel function usage) deletes stale deployments:
+#
+#   KEEP:  the newest 3 production deployments (rollback runway),
+#          anything younger than 24h (fresh previews / just-pushed),
+#          anything actively building.
+#   DELETE: everything else.
+#
+# Manual trigger: Actions tab -> "Vercel storage cleanup" -> Run workflow.
+
+on:
+  schedule:
+    - cron: "23 3 * * *" # daily, 03:23 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  VERCEL_TEAM: team_rTgcCzDtIYIbRqsyMhbJ9A1f
+  VERCEL_PROJECT: prj_uOlpXN8JYljDEAVlNXEvLiGHBw4k
+  KEEP_PROD: "3"
+  MIN_AGE_H: "24"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete stale Vercel deployments
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          from concurrent.futures import ThreadPoolExecutor
+
+          TOKEN = os.environ["VERCEL_TOKEN"]
+          TEAM = os.environ["VERCEL_TEAM"]
+          PROJ = os.environ["VERCEL_PROJECT"]
+          KEEP_PROD = int(os.environ["KEEP_PROD"])
+          MIN_AGE_MS = int(os.environ["MIN_AGE_H"]) * 3600 * 1000
+          IN_FLIGHT = {"BUILDING", "QUEUED", "INITIALIZING"}
+          API = "https://api.vercel.com"
+
+          def api(path, method="GET"):
+              req = urllib.request.Request(f"{API}{path}", method=method)
+              req.add_header("Authorization", f"Bearer {TOKEN}")
+              for attempt in range(4):
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          body = r.read()
+                          return json.loads(body) if body else {}
+                  except urllib.error.HTTPError as e:
+                      if e.code == 429:
+                          time.sleep(2 * (attempt + 1)); continue
+                      return {"__http_error": e.code}
+                  except Exception:
+                      if attempt == 3: return {"__error": "network"}
+                      time.sleep(1)
+              return {"__error": "retries"}
+
+          # List every deployment (v6 pagination uses the `until` cursor).
+          deps, until = [], None
+          while True:
+              q = f"projectId={PROJ}&teamId={TEAM}&limit=100"
+              if until: q += f"&until={until}"
+              d = api(f"/v6/deployments?{q}")
+              if "__http_error" in d or "__error" in d:
+                  print(f"::error::deployment list failed: {d}")
+                  raise SystemExit(1)
+              batch = d.get("deployments", [])
+              deps.extend(batch)
+              until = d.get("pagination", {}).get("next")
+              if not until or not batch:
+                  break
+          print(f"total deployments: {len(deps)}")
+
+          now = int(time.time() * 1000)
+          ready_prod = sorted(
+              [d for d in deps
+               if d.get("target") == "production" and d.get("state") == "READY"],
+              key=lambda d: d.get("createdAt", 0), reverse=True)
+          keep = {d["uid"] for d in ready_prod[:KEEP_PROD]}
+          for d in deps:
+              if d.get("state") in IN_FLIGHT:
+                  keep.add(d["uid"])
+              elif now - d.get("createdAt", 0) < MIN_AGE_MS:
+                  keep.add(d["uid"])
+
+          victims = [d for d in deps if d["uid"] not in keep]
+          print(f"keeping {len(keep)} (newest {KEEP_PROD} prod + <24h + in-flight); deleting {len(victims)}")
+
+          def delete(dep):
+              uid = dep["uid"]
+              r = api(f"/v13/deployments/{uid}?teamId={TEAM}", method="DELETE")
+              return uid, "__http_error" not in r and "__error" not in r
+
+          ok = fail = 0
+          if victims:
+              with ThreadPoolExecutor(max_workers=6) as ex:
+                  for uid, success in ex.map(delete, victims):
+                      ok += success; fail += not success
+          print(f"deleted {ok}, failed {fail}")
+          PY
