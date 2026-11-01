@@ -9,8 +9,13 @@
  *
  * Routing under test:
  *   - web: LangSearch (user's own key, BYOK) → Miklium (restored) → DDG HTML
- *   - image: DuckDuckGo ONLY, one full retry on transient failures
- *   - video: DuckDuckGo ONLY, one full retry
+ *   - image: DuckDuckGo PRIMARY (one full retry) → Miklium images rescue
+ *   - video: DuckDuckGo PRIMARY (one full retry) → Miklium videos rescue
+ *
+ * The Miklium media rescue exists because DDG's anti-bot WAF hard-blocks
+ * shared datacenter egress IPs (the 2026-11-01 outage: 100% of image/video
+ * probes failed on the Vercel deployment from residential IPs worked fine).
+ * No npm package escapes an egress-IP block — the rescue engine does.
  *
  * Contract pinned here:
  *   1. "No results" → HTTP 200, empty list, friendly `note`, no `error`.
@@ -37,11 +42,16 @@ vi.mock("@/lib/search/ddg-web", () => ({
 vi.mock("@/lib/search/ddg-videos", () => ({
   searchDDGVideos: vi.fn(),
 }));
+vi.mock("@/lib/search/miklium-media", () => ({
+  searchMikliumImages: vi.fn(),
+  searchMikliumVideos: vi.fn(),
+}));
 
 import { GET } from "./route";
 import { searchDDGImages } from "@/lib/search/ddg-images";
 import { searchDDGWeb } from "@/lib/search/ddg-web";
 import { searchDDGVideos } from "@/lib/search/ddg-videos";
+import { searchMikliumImages, searchMikliumVideos } from "@/lib/search/miklium-media";
 
 type RouteRequest = Parameters<typeof GET>[0];
 
@@ -90,6 +100,34 @@ const ddgVideoRow = {
   channelTitle: "NASA",
   viewCount: "1234567",
   provider: "ddg",
+};
+
+/** A Miklium image row in the normalized shape miklium-media.ts emits. */
+const mikliumImageRow = {
+  title: "A sunset over the ocean",
+  url: "https://www.seaart.ai/explore/detail/abc",
+  domain: "seaart.ai",
+  imageUrl: "https://image.cdn2.seaart.ai/sunset-over-ocean.webp",
+  thumbnail: "https://image.cdn2.seaart.ai/sunset-over-ocean.webp",
+  width: 4096,
+  height: 4096,
+  source: "seaart.ai",
+  provider: "miklium",
+};
+
+/** A Miklium video row in the normalized shape miklium-media.ts emits. */
+const mikliumVideoRow = {
+  title: "Blastoff! SpaceX launches Starlink satellites",
+  url: "https://www.youtube.com/watch?v=SIMnxI_DU6s",
+  domain: "youtube.com",
+  description: "A SpaceX Falcon 9 rocket launched 27 Starlink satellites.",
+  imageUrl: "https://up.yimg.com/ib/th?id=OVF.iaFYmFf5&pid=Api&h=360&w=480",
+  thumbnail: "https://up.yimg.com/ib/th?id=OVF.iaFYmFf5&pid=Api&h=360&w=480",
+  thumbUrl: "https://up.yimg.com/ib/th?id=OVF.iaFYmFf5&pid=Api&h=360&w=480",
+  videoUrl: "https://www.youtube.com/watch?v=SIMnxI_DU6s",
+  duration: "2:45",
+  source: "youtube.com",
+  provider: "miklium",
 };
 
 /** Miklium web rows: { url, snippet, type, symbols, query } — no title. */
@@ -324,9 +362,10 @@ describe("web search — LangSearch (BYOK) stays in front when the user's key is
 
 // ---------------------------------------------------------------------------
 
-describe("image search — DuckDuckGo only (per directive)", () => {
-  it("returns a graceful EMPTY outcome when DDG finds nothing", async () => {
+describe("image search — DuckDuckGo primary, Miklium images the rescue", () => {
+  it("returns a graceful EMPTY outcome when both engines find nothing", async () => {
     vi.mocked(searchDDGImages).mockResolvedValue([]);
+    vi.mocked(searchMikliumImages).mockResolvedValue([]);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -338,12 +377,16 @@ describe("image search — DuckDuckGo only (per directive)", () => {
     expect(data.count).toBe(0);
     expect(data.note).toMatch(/no images found/i);
     expect(data.error).toBeUndefined();
-    expect(data.provider).toBe("ddg");
+    // Miklium was the last engine to ANSWER (DDG found nothing, Miklium
+    // found nothing) — the provider field says so honestly.
+    expect(data.provider).toBe("miklium");
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(searchMikliumImages).toHaveBeenCalledTimes(1);
   });
 
-  it("passes DDG results through untouched with provider 'ddg'", async () => {
+  it("passes DDG results through untouched with provider 'ddg' — Miklium never contacted", async () => {
     vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+    vi.mocked(searchMikliumImages).mockResolvedValue([mikliumImageRow]);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -360,13 +403,70 @@ describe("image search — DuckDuckGo only (per directive)", () => {
     });
     expect(data.note).toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
+    // DDG-first directive: when DDG serves, the rescue engine is untouched.
+    expect(searchMikliumImages).not.toHaveBeenCalled();
   });
 
-  it("DDG fails → retried once, then 200 + friendly busy note — NOT the reported error blob", async () => {
+  it("DDG hard-fails (datacenter egress) → Miklium rescues, provider 'miklium'", async () => {
+    // THE outage scenario: DDG's WAF blocks the server's egress IP, so
+    // every vqd/i.js attempt fails. Miklium answers from those same IPs.
+    vi.mocked(searchDDGImages).mockRejectedValue(new Error("Failed to get token"));
+    vi.mocked(searchMikliumImages).mockResolvedValue([mikliumImageRow]);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await GET(mkReq({ q: "sunset", type: "image", limit: "10" }));
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.provider).toBe("miklium");
+    expect(data.count).toBe(1);
+    expect(data.results[0]).toMatchObject({
+      imageUrl: mikliumImageRow.imageUrl,
+      title: "A sunset over the ocean",
+      url: "https://www.seaart.ai/explore/detail/abc",
+      provider: "miklium",
+    });
+    expect(data.note).toBeUndefined();
+    expect(data.error).toBeUndefined();
+    // One full DDG retry happened before the rescue took over.
+    expect(searchDDGImages).toHaveBeenCalledTimes(2);
+    expect(searchMikliumImages).toHaveBeenCalledTimes(1);
+  });
+
+  it("DDG answers empty → Miklium still rescues (different index, more results)", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([]);
+    vi.mocked(searchMikliumImages).mockResolvedValue([mikliumImageRow]);
+
+    const res = await GET(mkReq({ q: "sunset", type: "image", limit: "10" }));
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.provider).toBe("miklium");
+    expect(data.count).toBe(1);
+    expect(data.note).toBeUndefined();
+  });
+
+  it("DDG hard-fails AND Miklium answers empty → 'no images found' (honest, not busy)", async () => {
+    vi.mocked(searchDDGImages).mockRejectedValue(new Error("Failed to get token"));
+    vi.mocked(searchMikliumImages).mockResolvedValue([]);
+
+    const res = await GET(mkReq({ q: "zzzz no match", type: "image", limit: "10" }));
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.results).toEqual([]);
+    expect(data.note).toMatch(/no images found/i);
+    expect(data.note).not.toMatch(/busy/i);
+    expect(data.error).toBeUndefined();
+  });
+
+  it("DDG and Miklium BOTH hard-fail → STILL 200 + friendly busy note — NOT the reported error blob", async () => {
     // THE reported bug: this exact scenario used to 502 and the tool layer
     // rendered '{"success":false,"output":null,"error":"Image search is
     // temporarily unavailable. Please try again in a moment."}' in the chat.
     vi.mocked(searchDDGImages).mockRejectedValue(new Error("Failed to get token"));
+    vi.mocked(searchMikliumImages).mockRejectedValue(new Error("Miklium images search HTTP 503"));
     vi.stubGlobal("fetch", vi.fn());
 
     const res = await GET(mkReq({ q: "cat", type: "image", limit: "5" }));
@@ -382,11 +482,12 @@ describe("image search — DuckDuckGo only (per directive)", () => {
     expect(bodyText).not.toContain("temporarily unavailable");
     expect(bodyText).not.toContain('"success":false');
     expect(bodyText).not.toContain("token");
-    // One full retry happened before giving up.
+    // One full DDG retry happened before giving up on both engines.
     expect(searchDDGImages).toHaveBeenCalledTimes(2);
+    expect(searchMikliumImages).toHaveBeenCalledTimes(1);
   });
 
-  it("a transient first-attempt failure recovers on the retry", async () => {
+  it("a transient first-attempt failure recovers on the retry (no rescue needed)", async () => {
     vi.mocked(searchDDGImages)
       .mockRejectedValueOnce(new Error("Failed to get token"))
       .mockResolvedValueOnce([ddgImageRow]);
@@ -399,14 +500,16 @@ describe("image search — DuckDuckGo only (per directive)", () => {
     expect(data.provider).toBe("ddg");
     expect(data.note).toBeUndefined();
     expect(searchDDGImages).toHaveBeenCalledTimes(2);
+    expect(searchMikliumImages).not.toHaveBeenCalled();
   });
 });
 
 // ---------------------------------------------------------------------------
 
-describe("video search — DuckDuckGo only, same retry contract", () => {
-  it("passes normalized v.js rows through with provider 'ddg'", async () => {
+describe("video search — DDG primary, Miklium videos the rescue", () => {
+  it("passes normalized v.js rows through with provider 'ddg' — Miklium never contacted", async () => {
     vi.mocked(searchDDGVideos).mockResolvedValue([ddgVideoRow]);
+    vi.mocked(searchMikliumVideos).mockResolvedValue([mikliumVideoRow]);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -422,10 +525,12 @@ describe("video search — DuckDuckGo only, same retry contract", () => {
       channelTitle: "NASA",
     });
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(searchMikliumVideos).not.toHaveBeenCalled();
   });
 
-  it("empty video results → 200 with note", async () => {
+  it("empty video results from both engines → 200 with note", async () => {
     vi.mocked(searchDDGVideos).mockResolvedValue([]);
+    vi.mocked(searchMikliumVideos).mockResolvedValue([]);
 
     const res = await GET(mkReq({ q: "zzzz no match", type: "video", limit: "10" }));
     const data = await res.json();
@@ -437,8 +542,28 @@ describe("video search — DuckDuckGo only, same retry contract", () => {
     expect(data.error).toBeUndefined();
   });
 
-  it("video backend failure → retried, then 200 + busy note, never an error blob", async () => {
+  it("DDG hard-fails (datacenter egress) → Miklium videos rescue the query", async () => {
     vi.mocked(searchDDGVideos).mockRejectedValue(new Error("DuckDuckGo token unavailable"));
+    vi.mocked(searchMikliumVideos).mockResolvedValue([mikliumVideoRow]);
+
+    const res = await GET(mkReq({ q: "cat video", type: "video", limit: "10" }));
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.provider).toBe("miklium");
+    expect(data.count).toBe(1);
+    expect(data.results[0]).toMatchObject({
+      videoUrl: "https://www.youtube.com/watch?v=SIMnxI_DU6s",
+      duration: "2:45",
+    });
+    expect(data.note).toBeUndefined();
+    expect(searchDDGVideos).toHaveBeenCalledTimes(2);
+    expect(searchMikliumVideos).toHaveBeenCalledTimes(1);
+  });
+
+  it("DDG and Miklium both hard-fail → retried, then 200 + busy note, never an error blob", async () => {
+    vi.mocked(searchDDGVideos).mockRejectedValue(new Error("DuckDuckGo token unavailable"));
+    vi.mocked(searchMikliumVideos).mockRejectedValue(new Error("Miklium videos search HTTP 500"));
 
     const res = await GET(mkReq({ q: "cat video", type: "video", limit: "10" }));
     const data = await res.json();
@@ -452,15 +577,16 @@ describe("video search — DuckDuckGo only, same retry contract", () => {
     expect(bodyText).not.toContain('"success":false');
     expect(bodyText).not.toContain("token");
     expect(searchDDGVideos).toHaveBeenCalledTimes(2);
+    expect(searchMikliumVideos).toHaveBeenCalledTimes(1);
   });
 });
 
 // ---------------------------------------------------------------------------
 
 describe("hard guarantees", () => {
-  it("image and video search never contact Miklium (DDG only, per directive)", async () => {
-    vi.mocked(searchDDGImages).mockResolvedValue([]);
-    vi.mocked(searchDDGVideos).mockResolvedValue([]);
+  it("when DDG serves images/videos, the Miklium rescue is never contacted (DDG-first directive)", async () => {
+    vi.mocked(searchDDGImages).mockResolvedValue([ddgImageRow]);
+    vi.mocked(searchDDGVideos).mockResolvedValue([ddgVideoRow]);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -468,6 +594,8 @@ describe("hard guarantees", () => {
     await GET(mkReq({ q: "anything", type: "video", limit: "5" }));
 
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(searchMikliumImages).not.toHaveBeenCalled();
+    expect(searchMikliumVideos).not.toHaveBeenCalled();
   });
 
   it("rejects an empty query with 400", async () => {

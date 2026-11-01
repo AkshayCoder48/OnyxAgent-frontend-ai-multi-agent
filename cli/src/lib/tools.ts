@@ -9,7 +9,6 @@
 import type { Executor, ExecOptions } from "./executor.js";
 import { loadConfig } from "./config.js";
 import { getSecret } from "./vault.js";
-import { imageSearch } from "@mudbill/duckduckgo-images-api";
 
 export interface ToolDef {
   name: string;
@@ -252,12 +251,19 @@ registerTool({
   },
 });
 
-// Search tools (USER DIRECTIVE 2026-10-31: "Keep miklium for websearch and
-// for image keep ddg"):
+// Search tools (USER DIRECTIVE 2026-11-01: "I want duck duck go for image
+// and video search"):
 //   - web_search: Miklium (Yahoo-powered, https://miklium.vercel.app) with
 //     the keyless DuckDuckGo HTML SERP as the automatic fallback.
-//   - image_search: DuckDuckGo only (@mudbill package — no key, no billing).
-//   - video_search: DuckDuckGo only (vqd token + v.js JSON endpoint).
+//   - image_search: DuckDuckGo PRIMARY (in-house vqd + i.js client — no key,
+//     no billing, no third-party package; the @mudbill package was dropped:
+//     it sent no headers on its token bootstrap and its regex missed DDG's
+//     quoted `vqd="…"` form). When DDG refuses the connection — its WAF
+//     hard-blocks shared datacenter egress IPs (cloud shells, CI, some
+//     VPNs) — Miklium's keyless images endpoint rescues the query so the
+//     user always gets results instead of a "busy" notice.
+//   - video_search: same shape — DDG vqd + v.js primary, Miklium videos
+//     rescue.
 //
 // "No results" handling: every engine legitimately answers with an empty
 // result set when nothing matched. That is a SUCCESS with an empty list so
@@ -270,12 +276,49 @@ registerTool({
 const DDG_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-const DDG_HEADERS: Record<string, string> = {
+/** Headers for DDG's HTML token page — a top-level document navigation
+ *  (Node's default undici UA is an instant bot tell). */
+const DDG_HTML_HEADERS: Record<string, string> = {
   "User-Agent": DDG_UA,
-  Accept: "*/*",
-  "Accept-Language": "en",
-  Referer: "https://duckduckgo.com/",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "none",
+  "sec-fetch-user": "?1",
+  "upgrade-insecure-requests": "1",
 };
+
+/** Headers for DDG's i.js / v.js JSON endpoints — a same-origin XHR. */
+const DDG_XHR_HEADERS: Record<string, string> = {
+  "User-Agent": DDG_UA,
+  Accept: "application/json, text/javascript, */*; q=0.01",
+  "Accept-Language": "en-US,en;q=0.9",
+  Referer: "https://duckduckgo.com/",
+  "X-Requested-With": "XMLHttpRequest",
+  "sec-fetch-dest": "empty",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-site": "same-origin",
+};
+
+/** Extract the `vqd` session token from a DDG HTML page. Two shapes appear
+ *  in the wild: the quoted attribute form `vqd="4-264…"` and the
+ *  query-string form `…&vqd=4-320…&s=50…`. (The @mudbill package only
+ *  matched the second — one of the reasons it failed.) */
+function extractVqd(html: string): string {
+  if (!html) return "";
+  const quoted = html.match(/vqd\s*=\s*"([0-9-]+)"/);
+  if (quoted?.[1]) return quoted[1];
+  return html.match(/vqd=([0-9-]+)/)?.[1] ?? "";
+}
+
+/** Detect DDG's anti-bot soft block: HTTP 202 (the "anomaly" page), HTTP
+ *  403, or a challenge/rate-limit body. A blocked response must be retried
+ *  with a FRESH token after backoff — never misread as "no results". */
+function isDDGBlocked(status: number, body: string): boolean {
+  if (status === 202 || status === 403) return true;
+  return /anomaly|ratelimit|rate limit|challenge/i.test(body.slice(0, 2000));
+}
 
 /** Race any promise against an 8s ceiling (fetch has no default timeout). */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -507,22 +550,22 @@ async function ddgVideoSearch(
     likes?: string;
   }>
 > {
-  // 1) vqd session token from duckduckgo.com's HTML (same handshake the
-  //    image search package uses for i.js).
+  // 1) vqd session token from duckduckgo.com's HTML (browser-grade
+  //    headers — Node's default UA is a bot tell).
   const tokenRes = await withTimeout(
-    fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, { headers: DDG_HEADERS }),
+    fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, { headers: DDG_HTML_HEADERS }),
     8_000,
     "DuckDuckGo token request",
   );
   if (!tokenRes.ok) throw new Error(`HTTP ${tokenRes.status}`);
   const tokenHtml = await tokenRes.text().catch(() => "");
-  const vqd = tokenHtml.match(/vqd=([\d-]+)/)?.[1] || "";
+  const vqd = extractVqd(tokenHtml);
   if (!vqd) throw new Error("DuckDuckGo token unavailable");
 
   // 2) v.js results — the way duckduckgo.com's own videos tab fetches them.
   const params = new URLSearchParams({ o: "json", q: query, l: "us-en", vqd, f: ",,,,", p: "1" });
   const res = await withTimeout(
-    fetch(`https://duckduckgo.com/v.js?${params.toString()}`, { headers: DDG_HEADERS }),
+    fetch(`https://duckduckgo.com/v.js?${params.toString()}`, { headers: DDG_XHR_HEADERS }),
     8_000,
     "DuckDuckGo video search",
   );
@@ -567,6 +610,192 @@ async function ddgVideoSearch(
   return out;
 }
 
+/** DuckDuckGo image search — in-house vqd + i.js client (the way
+ *  duckduckgo.com's own images tab fetches them). One full retry with a
+ *  FRESH token when DDG's anti-bot soft-blocks a request. No key, no
+ *  package. */
+async function ddgImageSearch(
+  query: string,
+  limit: number,
+): Promise<
+  Array<{
+    imageUrl: string;
+    thumbnail: string;
+    title: string;
+    width: number;
+    height: number;
+    source: string; // reference page
+  }>
+> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    // 1) vqd session token (fresh on every attempt — a blocked token stays
+    //    blocked; the retry exists to re-bootstrap the session).
+    const tokenRes = await withTimeout(
+      fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, { headers: DDG_HTML_HEADERS }),
+      8_000,
+      "DuckDuckGo token request",
+    );
+    const tokenHtml = await tokenRes.text().catch(() => "");
+    if (isDDGBlocked(tokenRes.status, tokenHtml)) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 350));
+        continue;
+      }
+      throw new Error("DuckDuckGo image search unavailable");
+    }
+    const vqd = extractVqd(tokenHtml);
+    if (!vqd) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 350));
+        continue;
+      }
+      throw new Error("DuckDuckGo token unavailable");
+    }
+
+    // 2) i.js results.
+    const params = new URLSearchParams({ o: "json", q: query, l: "us-en", vqd, f: ",,,", p: "1" });
+    const res = await withTimeout(
+      fetch(`https://duckduckgo.com/i.js?${params.toString()}`, { headers: DDG_XHR_HEADERS }),
+      8_000,
+      "DuckDuckGo image search",
+    );
+    const body = await res.text().catch(() => "");
+    if (isDDGBlocked(res.status, body)) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 350));
+        continue;
+      }
+      throw new Error("DuckDuckGo image search unavailable");
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json().catch(() => null)) as
+      | { results?: Array<{ image?: string; thumbnail?: string; title?: string; width?: number; height?: number; url?: string }> }
+      | null;
+    const rows = Array.isArray(data?.results) ? data!.results : [];
+
+    const seen = new Set<string>();
+    const out: Array<{
+      imageUrl: string;
+      thumbnail: string;
+      title: string;
+      width: number;
+      height: number;
+      source: string;
+    }> = [];
+    for (const r of rows) {
+      const image = typeof r?.image === "string" ? r.image : "";
+      if (!image || !/^https?:\/\//i.test(image) || seen.has(image)) continue;
+      seen.add(image);
+      out.push({
+        imageUrl: image,
+        thumbnail: typeof r.thumbnail === "string" && r.thumbnail ? r.thumbnail : image,
+        title: typeof r.title === "string" ? r.title : "",
+        width: typeof r.width === "number" ? r.width : 0,
+        height: typeof r.height === "number" ? r.height : 0,
+        source: typeof r.url === "string" && r.url ? r.url : image, // reference page
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+  throw new Error("DuckDuckGo image search unavailable");
+}
+
+/** Miklium media search (Yahoo-powered, keyless) — the RESCUE engine when
+ *  DDG refuses the connection (datacenter egress). "No results" is an
+ *  empty list, never an error; hard failures throw. */
+async function mikliumMediaSearch(
+  query: string,
+  type: "images" | "videos",
+  limit: number,
+): Promise<
+  Array<{
+    imageUrl: string;
+    thumbnail: string;
+    title: string;
+    width: number;
+    height: number;
+    source: string;
+    videoUrl?: string;
+    description?: string;
+    duration?: string;
+  }>
+> {
+  const res = await withTimeout(
+    fetch("https://miklium.vercel.app/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ search: [query], type, maxResults: Math.min(limit, 50) }),
+    }),
+    9_000,
+    "Miklium media search",
+  );
+  const bodyText = await res.text().catch(() => "");
+
+  // 404 "No results found" is a legitimate empty outcome, not a failure.
+  if (res.status === 404 && /no results/i.test(bodyText)) return [];
+  if (/"error"\s*:\s*"[^"]*no results[^"]*"/i.test(bodyText)) return [];
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  let data: { success?: boolean; error?: string; results?: Array<Record<string, unknown>> };
+  try {
+    data = JSON.parse(bodyText) as typeof data;
+  } catch {
+    throw new Error("invalid JSON");
+  }
+  if (data?.success === false) {
+    if (data.error && /no results/i.test(String(data.error))) return [];
+    throw new Error(String(data.error ?? "unknown error"));
+  }
+
+  const out: Array<{
+    imageUrl: string;
+    thumbnail: string;
+    title: string;
+    width: number;
+    height: number;
+    source: string;
+    videoUrl?: string;
+    description?: string;
+    duration?: string;
+  }> = [];
+  const seen = new Set<string>();
+  for (const item of data?.results ?? []) {
+    if (type === "images") {
+      const imageUrl = String(item?.imageUrl ?? "");
+      if (!imageUrl || !/^https?:\/\//i.test(imageUrl) || seen.has(imageUrl)) continue;
+      seen.add(imageUrl);
+      const size = (item?.size ?? {}) as { width?: unknown; height?: unknown };
+      out.push({
+        imageUrl,
+        thumbnail: imageUrl,
+        title: String(item?.title ?? ""),
+        width: typeof size.width === "number" ? size.width : 0,
+        height: typeof size.height === "number" ? size.height : 0,
+        source: String(item?.referenceUrl ?? imageUrl), // reference page
+      });
+    } else {
+      const videoUrl = String(item?.videoUrl ?? "");
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl) || seen.has(videoUrl)) continue;
+      seen.add(videoUrl);
+      const thumb = String(item?.thumbUrl ?? "");
+      out.push({
+        imageUrl: thumb,
+        thumbnail: thumb,
+        title: String(item?.title ?? ""),
+        width: 0,
+        height: 0,
+        source: videoUrl,
+        videoUrl,
+        description: String(item?.description ?? ""),
+        duration: String(item?.duration ?? ""),
+      });
+    }
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 registerTool({
   name: "web_search",
   description:
@@ -605,9 +834,11 @@ registerTool({
 });
 
 // image_search
-// DuckDuckGo only (via @mudbill/duckduckgo-images-api — no key, no
-// billing, real thumbnails + dimensions). Output shape:
-// { imageUrl, title, width, height, source (reference page) }.
+// DuckDuckGo PRIMARY (in-house vqd + i.js client — no key, no billing, no
+// package). Output shape: { imageUrl, title, width, height, source (the
+// reference page) }. When DDG refuses the connection (datacenter egress
+// IPs — cloud shells, CI, hosted runners), Miklium's keyless images
+// endpoint rescues the query so the user always gets results.
 registerTool({
   name: "image_search",
   description: "Search for images using DuckDuckGo. Returns image URLs, titles, and dimensions.",
@@ -623,47 +854,36 @@ registerTool({
   async execute(args) {
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
+    // DDG first (user directive: "I want duck duck go for image and video
+    // search"); the Miklium rescue only fires when DDG is unreachable.
+    let rows: Awaited<ReturnType<typeof ddgImageSearch>> = [];
+    let provider = "ddg";
+    let ddgUnreachable = false;
     try {
-      // Race an 8s ceiling: the package has no abort support and a
-      // dropped-SYN egress path hangs ~2min in Node's TCP retries.
-      const raw = await Promise.race([
-        imageSearch({
-          query,
-          safe: true, // filter adult content
-          retries: 2,
-          iterations: 1, // one pass = up to 100 rows; sliced to `limit`
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error("DuckDuckGo image search timed out after 8000ms")),
-            8_000,
-          ),
-        ),
-      ]);
-      const seen = new Set<string>();
-      const results = (raw ?? [])
-        .filter((r) => r?.image && !seen.has(r.image) && seen.add(r.image))
-        .slice(0, limit)
-        .map((r) => ({
-          imageUrl: r.image,
-          thumbnail: r.thumbnail || r.image,
-          title: r.title,
-          width: r.width,
-          height: r.height,
-          source: r.url || r.image, // reference page
-        }));
-      // DuckDuckGo answered but nothing matched (or per-request fetches
-      // failed after retries) — still a success, with a graceful notice
-      // instead of an empty/misleading payload.
-      if (results.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No images found for "${query}". Try different or more general keywords.` } };
-      }
-      return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
+      rows = await ddgImageSearch(query, limit);
     } catch {
-      // DDG failed (even the package's internal retries) — friendly busy
-      // notice, never an error blob.
-      return busySearchOutput(query, "image");
+      ddgUnreachable = true;
     }
+    if (rows.length === 0) {
+      provider = "miklium";
+      try {
+        rows = await mikliumMediaSearch(query, "images", limit);
+      } catch (err) {
+        if (ddgUnreachable) {
+          // BOTH engines unreachable — friendly busy notice, never an
+          // error blob.
+          return busySearchOutput(query, "image");
+        }
+        provider = "ddg";
+        rows = [];
+        void err;
+      }
+    }
+    if (rows.length === 0) {
+      // The reachable engine simply finds nothing for this query.
+      return { success: true, output: { query, results: [], count: 0, provider, message: `No images found for "${query}". Try different or more general keywords.` } };
+    }
+    return { success: true, output: { query, results: rows, count: rows.length, provider } };
   },
 });
 
@@ -685,16 +905,42 @@ registerTool({
   async execute(args) {
     const query = args.query as string;
     const limit = (args.limit as number) ?? 10;
+    // DDG first; Miklium videos rescue the query when DDG is unreachable
+    // (datacenter egress) — mirrors the image tool and the app route.
+    let rows: Awaited<ReturnType<typeof ddgVideoSearch>> = [];
+    let provider = "ddg";
+    let ddgUnreachable = false;
     try {
-      const results = await ddgVideoSearch(query, limit);
-      if (results.length === 0) {
-        return { success: true, output: { query, results: [], count: 0, provider: "ddg", message: `No videos found for "${query}". Try different or more general keywords.` } };
-      }
-      return { success: true, output: { query, results, count: results.length, provider: "ddg" } };
+      rows = await ddgVideoSearch(query, limit);
     } catch {
-      // DDG failed — friendly busy notice, never an error blob.
-      return busySearchOutput(query, "video");
+      ddgUnreachable = true;
     }
+    if (rows.length === 0) {
+      provider = "miklium";
+      try {
+        const mkRows = await mikliumMediaSearch(query, "videos", limit);
+        rows = mkRows.map((r) => ({
+          videoUrl: r.videoUrl ?? "",
+          thumbnail: r.thumbnail,
+          title: r.title,
+          description: r.description ?? "",
+          duration: r.duration ?? "",
+        }));
+      } catch (err) {
+        if (ddgUnreachable) {
+          // BOTH engines unreachable — friendly busy notice, never an
+          // error blob.
+          return busySearchOutput(query, "video");
+        }
+        provider = "ddg";
+        rows = [];
+        void err;
+      }
+    }
+    if (rows.length === 0) {
+      return { success: true, output: { query, results: [], count: 0, provider, message: `No videos found for "${query}". Try different or more general keywords.` } };
+    }
+    return { success: true, output: { query, results: rows, count: rows.length, provider } };
   },
 });
 

@@ -15,12 +15,23 @@
 //   - `image`: DuckDuckGo images via the in-house i.js client
 //     (src/lib/search/ddg-images.ts + the shared browser-grade vqd client
 //     in src/lib/search/ddg-vqd.ts) — no API key, no billing, no third-party
-//     package. DDG is the ONLY image backend (user directive); one fresh-
-//     token retry on anti-bot soft blocks, bulk pagination via the `next`
-//     cursor.
+//     package. DDG stays the PRIMARY image engine (user directive "for image
+//     keep ddg"). When DDG is unreachable or empty, Miklium's keyless
+//     images endpoint (src/lib/search/miklium-media.ts) takes over.
 //   - `video`: DuckDuckGo videos via the v.js JSON endpoint
-//     (src/lib/search/ddg-videos.ts) — same keyless vqd handshake, one full
-//     retry on transient failures.
+//     (src/lib/search/ddg-videos.ts) — same keyless vqd handshake; Miklium
+//     videos as the rescue engine, same as images.
+//
+// WHY THE MIKLIUM MEDIA RESCUE EXISTS (the 2026-11-01 outage): DuckDuckGo's
+// anti-bot WAF hard-blocks shared datacenter egress IPs — on the Vercel
+// deployment EVERY image/video probe failed ("Image search is busy right
+// now…") while the same client served 50+ images from residential IPs.
+// The block targets the egress IP, not the client — so no npm package can
+// fix it (duck-duck-scrape, ddgs, @mudbill/… all hit the same endpoints
+// from the same blocked IP). Miklium, already the web engine, answers
+// images/videos from those same datacenter IPs (verified: 50 rows, ~1s),
+// so hosted deployments keep working image/video search while self-hosted
+// and CLI runs keep their DDG-first results.
 //
 // Error contract (pinned by route.test.ts):
 //   - "No results" NEVER surfaces as an error: empty lists come back as
@@ -38,6 +49,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { searchDDGImages } from "@/lib/search/ddg-images";
 import { searchDDGWeb } from "@/lib/search/ddg-web";
 import { searchDDGVideos } from "@/lib/search/ddg-videos";
+import { searchMikliumImages, searchMikliumVideos } from "@/lib/search/miklium-media";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -327,24 +339,62 @@ export async function GET(req: NextRequest) {
         }
       }
     } else if (kind === "image") {
-      // Image search: DuckDuckGo ONLY (user directive). One full retry on
-      // transient token failures; a hard failure degrades to the friendly
-      // busy note below — never an error blob.
+      // Image search — DuckDuckGo PRIMARY (user directive: "for image keep
+      // ddg"), Miklium images as the RESCUE engine. DDG serves self-hosted
+      // / local runs; on shared datacenter egress (Vercel &c.) DDG's WAF
+      // blocks the vqd/i.js handshake outright, and Miklium — the same
+      // Yahoo-powered engine already serving web search from those IPs —
+      // answers images keylessly. No npm package escapes the IP block, so
+      // the rescue engine IS the fix for hosted deployments.
       provider = "ddg";
-      const rows = await searchWithRetry(() => searchDDGImages(query, limit));
-      if (rows === null) {
-        engineFailed = true;
+      const ddgRows = await searchWithRetry(() => searchDDGImages(query, limit));
+      if (ddgRows && ddgRows.length > 0) {
+        results = ddgRows as unknown as SearchResult[];
       } else {
-        results = rows as unknown as SearchResult[];
+        // DDG unreachable (null after its retry) or genuinely empty → let
+        // Miklium try. Provider reflects the engine that last ANSWERED.
+        const ddgUnreachable = ddgRows === null;
+        provider = "miklium";
+        try {
+          const mkRows = await searchMikliumImages(query, limit);
+          if (mkRows.length > 0) {
+            results = mkRows as unknown as SearchResult[];
+          }
+          // Miklium answered (even empty) → the reachable engine simply
+          // finds nothing for this query → friendly "no images found".
+        } catch (err) {
+          console.error(
+            "[ddg-search] Miklium image rescue failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+          provider = "ddg";
+          // BOTH engines unreachable → the "busy — try again" note. When
+          // DDG answered but empty, "no images found" stays the honest note.
+          if (ddgUnreachable) engineFailed = true;
+        }
       }
     } else {
-      // Video search: DuckDuckGo v.js (keyless), same retry treatment.
+      // Video search — same shape: DDG v.js primary, Miklium videos rescue.
       provider = "ddg";
-      const rows = await searchWithRetry(() => searchDDGVideos(query, limit));
-      if (rows === null) {
-        engineFailed = true;
+      const ddgRows = await searchWithRetry(() => searchDDGVideos(query, limit));
+      if (ddgRows && ddgRows.length > 0) {
+        results = ddgRows as unknown as SearchResult[];
       } else {
-        results = rows as unknown as SearchResult[];
+        const ddgUnreachable = ddgRows === null;
+        provider = "miklium";
+        try {
+          const mkRows = await searchMikliumVideos(query, limit);
+          if (mkRows.length > 0) {
+            results = mkRows as unknown as SearchResult[];
+          }
+        } catch (err) {
+          console.error(
+            "[ddg-search] Miklium video rescue failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+          provider = "ddg";
+          if (ddgUnreachable) engineFailed = true;
+        }
       }
     }
 
