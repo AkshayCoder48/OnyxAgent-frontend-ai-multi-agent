@@ -60,6 +60,7 @@ import {
   BROWSER_DRIVER_PY_SOURCE,
   BROWSER_BOOT_SH_SOURCE,
   BROWSER_SANDBOX_PATHS,
+  buildDetachedSpawnCommand,
 } from "@/lib/e2b/browser-driver";
 
 export const runtime = "nodejs";
@@ -1142,11 +1143,23 @@ async function prepareBrowserRuntime(sandbox: Sandbox): Promise<{ started: boole
     await sandbox.files.makeDir(BR.dir);
     await sandbox.files.write(BR.driver, BROWSER_DRIVER_PY_SOURCE);
     await sandbox.files.write(BR.bootSh, BROWSER_BOOT_SH_SOURCE);
-    // Detached launch — the install/download runs under nohup inside the
-    // sandbox VM, which outlives this request (same proven pattern as the
-    // headless-agent runner + the client-side browser boot).
+    // DETACHED LAUNCH — the use_browser-runs-forever fix: boot.sh must be
+    // spawned via the Popen(start_new_session) launcher. A bare `nohup … &`
+    // kick does NOT survive E2B envd's post-command cleanup (live-probed
+    // 2026-11-01): the direct commands.run kick below waited the full 15s
+    // for its descendant and then THREW TimeoutError (which this catch
+    // swallowed as "skipped" — 15s wasted on EVERY sandbox creation,
+    // though the install survived by accident); through the client's
+    // exec_stream PTY the same kick returned instantly and KILLED boot.sh,
+    // leaving the boot poll to spin to its ceiling. The Popen launcher
+    // returns in ~1s AND the install survives — see
+    // buildDetachedSpawnCommand in browser-driver.ts for the probe table.
     const res = await sandbox.commands.run(
-      `cd ${BR.dir} && nohup bash boot.sh > ${BR.bootLog} 2>&1 & echo browser_boot_kicked`,
+      buildDetachedSpawnCommand({
+        cwd: BR.dir,
+        argv: ["bash", "boot.sh"],
+        logPath: BR.bootLog,
+      }) + " && echo browser_boot_kicked",
       { timeoutMs: 15_000 },
     );
     const started = (res.stdout ?? "").includes("browser_boot_kicked");
@@ -1743,23 +1756,55 @@ export async function POST(req: NextRequest) {
             // chunks (the PTY emits them in small pieces). A naive per-chunk
             // regex would leave fragments like "[1G" when ESC is in one chunk
             // and "[1G" is in the next. This stateful stripper buffers
-            // incomplete escape sequences and only emits clean text.
-            let ansiBuffer = "";
+            // incomplete escape sequences and emits ONLY THE NEW clean text.
+            //
+            // THE DUPLICATION BUG this rewrite fixes (live-incident
+            // 2026-11-01, "use_browser runs forever"): the previous version
+            // returned the ENTIRE accumulated buffer on every chunk, so the
+            // client received the output duplicated once PER CHUNK
+            // (empirically: `echo transport_ok` streamed "transport_ok"
+            // twice). Every exact-match consumer broke — most fatally the
+            // browser boot's probes (`test -f .ready && pgrep … && echo
+            // READY` produced "READY\r\nREADY", which `=== "READY"` never
+            // matched), so the boot poll never recognized a READY driver and
+            // spun to its ceiling on every call: the multi-minute
+            // "browser runtime didn't finish booting" hang.
+            let ansiPending = "";
             const stripAnsiStream = (s: string): string => {
-              ansiBuffer += s;
+              ansiPending += s;
               // Remove complete ANSI escape sequences:
               // CSI: ESC [ ... letter (e.g. ESC[1G, ESC[0K, ESC[32m)
               // OSC: ESC ] ... BEL or ESC ] ... ESC \
               // Other: ESC =, ESC >, ESC M, etc.
-              // Also remove bare ESC characters left over from split sequences.
-              ansiBuffer = ansiBuffer
+              ansiPending = ansiPending
                 .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "")   // CSI
                 .replace(/\x1b\][^\x07]*\x07/g, "")             // OSC (BEL-terminated)
                 .replace(/\x1b\][^\x1b]*\x1b\\/g, "")           // OSC (ST-terminated)
                 .replace(/\x1b[=>NMcD]/g, "")                   // Simple escapes
-                .replace(/\x1b\([AB0]/g, "")                    // Charset designation
-                .replace(/\x1b/g, "");                           // Bare ESC (cleanup)
-              return ansiBuffer;
+                .replace(/\x1b\([AB0]/g, "");                   // Charset designation
+              // HOLD BACK a trailing INCOMPLETE escape sequence (lone ESC, or
+              // ESC [ with a partial parameter run) so a sequence split across
+              // chunks is never half-emitted as visible text — it completes
+              // (and is stripped) when the rest arrives.
+              const partial = /\x1b(?:\[[0-9;?]*[ -\/]*)?$/.exec(ansiPending);
+              let emit = ansiPending;
+              if (partial) {
+                emit = ansiPending.slice(0, partial.index);
+                ansiPending = ansiPending.slice(partial.index);
+              } else {
+                ansiPending = "";
+              }
+              // Bare ESC cleanup on the EMITTED part only (a lone ESC that
+              // never completed its sequence — the held-back tail above is
+              // preserved for the next chunk instead of being destroyed).
+              return emit.replace(/\x1b/g, "");
+            };
+            /** Flush anything the stripper is still holding (call at stream
+             *  end so a trailing incomplete escape never swallows text). */
+            const flushAnsiStream = (): string => {
+              const rest = ansiPending.replace(/\x1b/g, "");
+              ansiPending = "";
+              return rest;
             };
 
             let promptDetected = false;
@@ -1796,10 +1841,11 @@ export async function POST(req: NextRequest) {
                   }
                 },
               });
-              // Flush any remaining ANSI buffer.
-              if (ansiBuffer) {
-                send({ type: "stdout", data: ansiBuffer });
-                ansiBuffer = "";
+              // Flush anything the ANSI stripper is still holding back
+              // (a trailing incomplete escape sequence).
+              const flushed = flushAnsiStream();
+              if (flushed) {
+                send({ type: "stdout", data: flushed });
               }
               send({ type: "result", exit_code: 0, sandboxId: sandbox.sandboxId });
             } catch (execErr) {
@@ -1809,9 +1855,9 @@ export async function POST(req: NextRequest) {
               // error frame ("exit status 1") that loses the code.
               const exitInfo = commandExitInfo(execErr);
               if (exitInfo) {
-                if (ansiBuffer) {
-                  send({ type: "stdout", data: ansiBuffer });
-                  ansiBuffer = "";
+                const flushed = flushAnsiStream();
+                if (flushed) {
+                  send({ type: "stdout", data: flushed });
                 }
                 if (exitInfo.stderr) send({ type: "stderr", data: exitInfo.stderr });
                 send({ type: "result", exit_code: exitInfo.exitCode, sandboxId: sandbox.sandboxId });
@@ -2873,11 +2919,19 @@ export async function POST(req: NextRequest) {
         // Deploy (version-stamped, cheap when current) BEFORE launching.
         await deployHeadlessRunner(sandbox);
         try {
-          // DETACHED LAUNCH: nohup + & — the command returns immediately
-          // while the runner keeps executing inside the sandbox (proven by
-          // the sandbox browser driver, browser-session.ts).
+          // DETACHED LAUNCH — the Popen(start_new_session) launcher: the
+          // command returns in ~1s while the runner keeps executing inside
+          // the sandbox. (The previous `nohup … &` shape made the direct
+          // commands.run wait 15s for its descendant and then throw
+          // TimeoutError — the runner survived only by accident, and the
+          // same kick through a PTY KILLS the target outright. See
+          // buildDetachedSpawnCommand in browser-driver.ts.)
           const result = await sandbox.commands.run(
-            `nohup python3 ${RUNNER_PATH} > ${BACKGROUND_LOG_PATH} 2>&1 & echo started`,
+            buildDetachedSpawnCommand({
+              cwd: DEFAULT_CWD,
+              argv: ["python3", RUNNER_PATH],
+              logPath: BACKGROUND_LOG_PATH,
+            }) + " && echo started",
             { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
           );
           const started = (result.stdout ?? "").includes("started") && (result.exitCode ?? 0) === 0;
@@ -2962,7 +3016,11 @@ export async function POST(req: NextRequest) {
           await ensureSandbox.files.write(AGENT_STATUS_PATH, JSON.stringify(starting, null, 2));
           await deployHeadlessRunner(ensureSandbox);
           const result = await ensureSandbox.commands.run(
-            `nohup python3 ${RUNNER_PATH} > ${BACKGROUND_LOG_PATH} 2>&1 & echo started`,
+            buildDetachedSpawnCommand({
+              cwd: DEFAULT_CWD,
+              argv: ["python3", RUNNER_PATH],
+              logPath: BACKGROUND_LOG_PATH,
+            }) + " && echo started",
             { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
           );
           const launched = (result.stdout ?? "").includes("started") && (result.exitCode ?? 0) === 0;

@@ -1,6 +1,7 @@
 "use client";
 
 import { FastForward } from "lucide-react";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { useTerra } from "@/components/terra/store";
 import type { ToolCallData } from "@/components/terra/types";
 
@@ -19,7 +20,7 @@ export function SkipWaitButton({ tool }: { tool: ToolCallData }) {
     <button
       type="button"
       onClick={() => tool.toolId && skipToolWait(tool.toolId)}
-      aria-label={`Continue while ${tool.name} runs`}
+      aria-label={`Continue while ${toolDisplayName(tool.name)} runs`}
       title="The tool keeps running in the background — the agent continues now"
       className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-hairline bg-background px-2.5 text-[11px] font-medium text-ink-muted transition-colors hover:border-terra-soft-border hover:bg-terra-soft hover:text-terra-deep"
     >

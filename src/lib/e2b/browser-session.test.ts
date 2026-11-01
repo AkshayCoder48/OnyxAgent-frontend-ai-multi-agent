@@ -43,6 +43,14 @@ interface FakeClientOpts {
   version?: string;
   /** Runtime probe: RUNTIME_PRESENT (warm) or RUNTIME_MISSING (cold). */
   runtimePresent?: boolean;
+  /** Boot-lock probe: true → a boot.sh is ALREADY running in the sandbox
+  *  (the creation-time kick); false → no boot in flight. */
+  bootLocked?: boolean;
+  /** Simulates the exec_stream PTY duplication artifact (live incident
+   *  2026-11-01): every stdout frame is emitted TWICE, so probe outputs
+   *  arrive as "READY\r\nREADY". The session manager must still recognize
+   *  READY / version stamps LINE-wise. */
+  duplicateFrames?: boolean;
   /** Simulates the sandbox driver answering commands with this payload
    *  factory (called with the parsed cmd). */
   onCommand?: (cmd: Record<string, unknown>) => Record<string, unknown>;
@@ -70,7 +78,7 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
   const commands: string[] = [];
   const alive = opts.alive ?? true;
   const version = opts.version ?? BROWSER_DRIVER_VERSION;
-  // The fake "boots": once the nohup launch command ran, the boot polls
+  // The fake "boots": once the detached launch command ran, the boot polls
   // answer READY (exactly like the real detached boot.sh → .ready).
   let booted = false;
 
@@ -103,6 +111,14 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
       if (opts.hangExec || opts.hangOn?.(command)) {
         await new Promise(() => {}); // never yields — the hung HTTP case
       }
+      // The exec_stream PTY shape: each logical output line arrives as one or
+      // more frames CARRIAGE-RETURN-TERMINATED (and the historical
+      // duplication bug doubled them whole).
+      const emit = (data: string) => {
+        const body = data ? `${data}\r\n` : "";
+        const frames = body && opts.duplicateFrames ? [body, body] : [body];
+        return frames.map((d) => ({ type: "stdout", data: d }));
+      };
       // Boot launch echo — marks the sandbox "booted" for later polls.
       if (command.includes("echo booting")) {
         booted = true;
@@ -110,21 +126,32 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
         yield { type: "result", exit_code: 0 };
         return;
       }
+      // Boot-lock probe (is a boot.sh already running in the sandbox?).
+      if (command.includes(".boot-lock") && command.includes("BOOT_LOCKED")) {
+        yield { type: "stdout", data: opts.bootLocked ? "BOOT_LOCKED" : "BOOT_FREE" };
+        yield { type: "result", exit_code: 0 };
+        return;
+      }
+      // When a boot is "already running", the fake flips to READY after the
+      // lock probe saw it — the running boot finishing in the background.
+      if (opts.bootLocked && command.includes(".boot-failed")) {
+        booted = true;
+      }
       // Boot poll answers with the QUOTED READY form once booted.
       if (command.includes('echo "READY"')) {
-        yield { type: "stdout", data: booted ? "READY" : "" };
+        yield* emit(booted ? "READY" : "");
         yield { type: "result", exit_code: 0 };
         return;
       }
       // Driver liveness probe: `... && echo READY || echo NO`.
       if (command.includes("echo READY")) {
-        yield { type: "stdout", data: alive ? "READY" : "NO" };
+        yield* emit(alive ? "READY" : "NO");
         yield { type: "result", exit_code: 0 };
         return;
       }
       // Version stamp probe.
       if (command.includes(".version")) {
-        yield { type: "stdout", data: version };
+        yield* emit(version);
         yield { type: "result", exit_code: 0 };
         return;
       }
@@ -347,5 +374,59 @@ describe("browser-session: timeout configuration", () => {
     expect(BROWSER_TIMEOUTS.bootPollColdMs).toBeLessThanOrEqual(10 * 60_000);
     expect(BROWSER_TIMEOUTS.actionDefaultMs).toBeGreaterThan(0);
     expect(BROWSER_TIMEOUTS.maxConsecutivePollFailures).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. The kill-the-boot regression (E2B post-command cleanup, live-probed
+//    2026-11-01): a bare `nohup bash boot.sh &` kick is KILLED when the
+//    launching command returns — .ready never appears and the boot poll
+//    spins to its ceiling. The kick MUST use the Popen(start_new_session)
+//    detached spawn.
+// ---------------------------------------------------------------------------
+
+describe("browser-session: detached boot launch (the runs-forever fix)", () => {
+  it("the boot kick spawns boot.sh via Popen(start_new_session=True), never a bare nohup background job", async () => {
+    const client = makeFakeClient({ alive: false, runtimePresent: true });
+    expect((await ensureBrowserDriver(client)).ok).toBe(true);
+    const kick = client.commands.find((c) => c.includes("echo booting"));
+    expect(kick).toBeTruthy();
+    // The empirically-required detach shape: a python launcher Popen'ing
+    // boot.sh with start_new_session=True (the ONLY pattern that survives
+    // E2B envd's post-command cleanup — see buildDetachedSpawnCommand).
+    expect(kick).toContain("start_new_session=True");
+    expect(kick).toContain('"bash"');
+    expect(kick).toContain('"boot.sh"');
+    // …and NOT the old kill-prone shapes (a bare single-`&` background job).
+    expect(kick).not.toMatch(/nohup\s+bash\s+boot\.sh/);
+    expect(kick).not.toMatch(/[^&]&\s*echo booting/);
+    // The launcher python must be syntactically valid (the ";"
+    // after the import — a live incident caught by this very suite).
+    expect(kick).toContain("import os,subprocess,json;");
+  });
+
+  it("an in-flight boot (lock held) is POLLED, not redeployed or re-kicked", async () => {
+    const client = makeFakeClient({ alive: false, runtimePresent: true, bootLocked: true });
+    expect((await ensureBrowserDriver(client)).ok).toBe(true);
+    // No redeploy: the creation-time kick's files own the sandbox.
+    expect(client.files.has("/home/user/.onyx/browser/driver.py")).toBe(false);
+    expect(client.files.has("/home/user/.onyx/browser/boot.sh")).toBe(false);
+    // No second boot launch — only the lock probe + polls ran.
+    expect(client.commands.some((c) => c.includes("echo booting"))).toBe(false);
+    expect(client.commands.some((c) => c.includes("BOOT_LOCKED"))).toBe(true);
+  });
+
+  it("duplicated PTY frames (the exec_stream ANSI-stripper bug) never mask a READY driver", async () => {
+    // The live incident: every stdout frame arrived TWICE, so the liveness
+    // probe read "READY\r\nREADY" and `=== "READY"` failed — a LIVE driver
+    // looked dead and every call re-booted (then the boot poll's own strict
+    // READY match spun to the ceiling: the multi-minute hang).
+    const live = makeFakeClient({ alive: true, duplicateFrames: true });
+    expect((await ensureBrowserDriver(live)).ok).toBe(true);
+    expect(live.commands.some((c) => c.includes("echo booting"))).toBe(false);
+
+    const cold = makeFakeClient({ alive: false, runtimePresent: true, duplicateFrames: true });
+    expect((await ensureBrowserDriver(cold)).ok).toBe(true);
+    expect(cold.commands.some((c) => c.includes("echo booting"))).toBe(true);
   });
 });

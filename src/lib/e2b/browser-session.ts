@@ -62,6 +62,7 @@ import {
   BROWSER_DRIVER_VERSION,
   BROWSER_BOOT_SH_SOURCE,
   BROWSER_SANDBOX_PATHS,
+  buildDetachedSpawnCommand,
 } from "./browser-driver";
 
 const BR_DIR = BROWSER_SANDBOX_PATHS.dir;
@@ -128,6 +129,16 @@ class DeadlineReached extends Error {
     super(`${label} did not complete within ${Math.round(ms / 1000)}s`);
     this.name = "DeadlineReached";
   }
+}
+
+/** True when `output` contains `line` as a STANDALONE line. The sandbox
+ * exec transport streams through a PTY whose chunking (and any historical
+ * duplication artifact — see the exec_stream ANSI-stripper fix, 2026-11-01)
+ * must never break an exact-match probe: the browser boot's READY/NO and
+ * version-stamp checks match LINE-wise instead of on the whole output. */
+function hasStandaloneLine(output: string, line: string): boolean {
+  const re = new RegExp(`^\\s*${line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
+  return re.test(output);
 }
 
 /**
@@ -285,7 +296,10 @@ async function driverAlive(client: BrowserSandboxClient): Promise<boolean> {
       t_("httpCallMs") + 35_000,
       "driver liveness probe",
     );
-    return r.ok && r.output.trim() === "READY";
+    // LINE-wise match — the whole-output `=== "READY"` broke on any PTY
+    // artifact (a duplicated frame made it "READY\r\nREADY", and a LIVE
+    // driver read as dead → every call re-booted from scratch).
+    return r.ok && hasStandaloneLine(r.output, "READY");
   } catch {
     return false;
   }
@@ -304,7 +318,10 @@ async function driverUpToDate(client: BrowserSandboxClient): Promise<boolean> {
       t_("httpCallMs") + 20_000,
       "driver version probe",
     );
-    return r.ok && r.output.trim() === BROWSER_DRIVER_VERSION;
+    // LINE-wise match (same PTY-artifact hardening as driverAlive): a
+    // duplicated frame must never make a CURRENT driver read as stale —
+    // that triggered an unnecessary kill + redeploy + full re-boot.
+    return r.ok && hasStandaloneLine(r.output, BROWSER_DRIVER_VERSION);
   } catch {
     return false;
   }
@@ -334,6 +351,19 @@ const RUNTIME_PROBE_CMD = [
   `command -v "\$PY" >/dev/null 2>&1 || PY=python`,
   `"\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo RUNTIME_PRESENT || echo RUNTIME_MISSING`,
 ].join("; ");
+
+/** True while boot.sh is STILL RUNNING in this sandbox (the .boot-lock
+ * holder is alive — e.g. the creation-time prepare kick or an earlier
+ * rotation kick). While held, redeploying files or clearing markers would
+ * orphan the running boot's log (fd → deleted inode, progress lines
+ * vanish) and the second boot.sh would exit on the lock anyway — so the
+ * caller skips straight to polling. A lock whose holder is DEAD (finished
+ * or killed boot) reads BOOT_FREE. */
+const BOOT_LOCK_PROBE_CMD = [
+  `if [ -f ${BR_DIR}/.boot-lock ] && [ -s ${BR_DIR}/.boot-lock ]`,
+  `&& kill -0 "$(cat ${BR_DIR}/.boot-lock 2>/dev/null)" 2>/dev/null; then echo BOOT_LOCKED`,
+  `else echo BOOT_FREE; fi`,
+].join(" ");
 
 /**
  * Install + boot the browser driver in the sandbox. Idempotent + cached
@@ -376,14 +406,33 @@ export async function ensureBrowserDriver(
           t_("httpCallMs"),
           "workspace dir setup",
         );
-        await withTimeout(client.writeFile(DRIVER_PATH, BROWSER_DRIVER_PY_SOURCE), t_("httpCallMs"), "driver deploy");
-        await withTimeout(client.writeFile(BOOT_SH_PATH, BROWSER_BOOT_SH_SOURCE), t_("httpCallMs"), "boot script deploy");
-        // Clear the last boot's markers so the polls below read fresh state.
-        await execInSandbox(
-          client,
-          `rm -f ${READY_PATH} ${BOOT_FAIL_PATH} ${BOOT_LOG_PATH}`,
-          15,
-        ).catch(() => undefined);
+
+        // IN-FLIGHT BOOT GUARD: a boot.sh that is STILL RUNNING (kicked at
+        // sandbox creation or by an earlier rotation) owns this sandbox's
+        // install. Redeploying files / clearing markers now would orphan its
+        // log (fd → deleted inode — the poll would narrate nothing for the
+        // rest of the window) and the second boot.sh would exit on the lock
+        // anyway. When locked, skip the redeploy + kick entirely and poll
+        // the RUNNING boot.
+        const lockProbe = await withTimeout(
+          execInSandbox(client, BOOT_LOCK_PROBE_CMD, 15),
+          t_("httpCallMs") + 20_000,
+          "boot lock probe",
+        ).catch(() => null);
+        const bootAlreadyRunning = (lockProbe?.output ?? "").includes("BOOT_LOCKED");
+
+        if (!bootAlreadyRunning) {
+          await withTimeout(client.writeFile(DRIVER_PATH, BROWSER_DRIVER_PY_SOURCE), t_("httpCallMs"), "driver deploy");
+          await withTimeout(client.writeFile(BOOT_SH_PATH, BROWSER_BOOT_SH_SOURCE), t_("httpCallMs"), "boot script deploy");
+          // Clear the last boot's markers so the polls below read fresh state.
+          await execInSandbox(
+            client,
+            `rm -f ${READY_PATH} ${BOOT_FAIL_PATH} ${BOOT_LOG_PATH}`,
+            15,
+          ).catch(() => undefined);
+        } else {
+          onProgress?.("A browser setup is already running in this sandbox — waiting for it to finish…");
+        }
 
         // PRE-FLIGHT RUNTIME PROBE: pick a poll window that matches
         // reality instead of a fixed ceiling for everyone. A template-warm
@@ -406,24 +455,33 @@ export async function ensureBrowserDriver(
             : "No browser runtime in this sandbox yet — installing cloakbrowser + playwright and pre-fetching the stealth Chromium binary (first run only, up to ~10 minutes)…",
         );
 
-        // DETACHED BOOT: launch boot.sh under nohup INSIDE the sandbox —
-        // the sandbox VM outlives any HTTP request, so the minutes-long
-        // pip install can actually finish. The client only polls (short
-        // requests) below.
-        const launched = await withTimeout(
-          execInSandbox(
-            client,
-            `cd ${BR_DIR} && nohup bash boot.sh > ${BOOT_LOG_PATH} 2>&1 & echo booting`,
-            20,
-          ),
-          t_("httpCallMs"),
-          "boot launch",
-        );
-        if (!launched.output.includes("booting")) {
-          return {
-            ok: false,
-            error: `Could not launch the sandbox browser boot: ${(launched.error || launched.output).slice(-200)}`,
-          };
+        // DETACHED BOOT (the use_browser-runs-forever fix): boot.sh MUST be
+        // spawned via the Popen(start_new_session) launcher — the plain
+        // `nohup … &` kick used here before is KILLED by E2B's post-command
+        // cleanup the moment the kick command returns, so .ready never
+        // appeared and the boot poll spun to its ceiling (see
+        // buildDetachedSpawnCommand's probe table). The sandbox VM outlives
+        // any HTTP request; the client only polls (short requests) below.
+        if (!bootAlreadyRunning) {
+          const launched = await withTimeout(
+            execInSandbox(
+              client,
+              buildDetachedSpawnCommand({
+                cwd: BR_DIR,
+                argv: ["bash", "boot.sh"],
+                logPath: BOOT_LOG_PATH,
+              }) + " && echo booting",
+              20,
+            ),
+            t_("httpCallMs"),
+            "boot launch",
+          );
+          if (!launched.output.includes("booting")) {
+            return {
+              ok: false,
+              error: `Could not launch the sandbox browser boot: ${(launched.error || launched.output).slice(-200)}`,
+            };
+          }
         }
 
         const deadline = Date.now() + pollCeilingMs;
@@ -469,7 +527,10 @@ export async function ensureBrowserDriver(
               error: `Failed to install the browser runtime in the sandbox: ${detail.slice(-400) || "the installer exited without detail (boot-install.log in ~/.onyx/browser has the full log)."}`,
             };
           }
-          if (out === "READY") return { ok: true };
+          // LINE-wise READY match — the strict `out === "READY"` never matched
+          // once the PTY transport duplicated a frame ("READY\r\nREADY"),
+          // which is exactly the multi-minute "didn't finish booting" hang.
+          if (hasStandaloneLine(out, "READY")) return { ok: true };
           // Narrate live progress (e.g. "[boot 12:03:11] pip install …")
           // so a cold install shows real movement instead of a spinner.
           if (out && out !== lastProgress) {

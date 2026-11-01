@@ -88,10 +88,76 @@ export const BROWSER_SANDBOX_PATHS = {
   },
 } as const;
 
+// ---------------------------------------------------------------------------
+// Detached spawn — the ONLY launch shape that survives E2B envd's
+// post-command cleanup (live-probed 2026-11-01 against the production E2B
+// template, e2b SDK 2.32):
+//
+//   PATTERN                                 launcher returns   process alive
+//   script-PTY + nohup ... &                   ~0.2s            KILLED
+//   script-PTY + setsid nohup ... &            ~0.2s            KILLED
+//   script-PTY + ( ... & disown )              ~0.2s            KILLED
+//   script-PTY + trap "" HUP TERM INT &        ~0.2s            KILLED
+//   direct commands.run + ... & (timeout)     timeout THROWN    ALIVE
+//   python Popen(start_new_session=True)        ~0.8s            ALIVE  ✓
+//
+// envd kills every descendant of a command that COMPLETES NORMALLY — nohup,
+// setsid, disown and signal shields do NOT escape it (setsid leaves the
+// process a descendant; nohup only blocks SIGHUP). A python launcher that
+// Popen's the target with start_new_session=True and exits immediately
+// both returns fast AND leaves the target reparented away from the command
+// tree, so the cleanup walk finds nothing to kill. (A command that ends by
+// TIMEOUT also fails to kill the detached target — but that shape burns
+// the whole launcher timeout and throws, which is how the server-side
+// prepare "worked" before: 15s wasted per sandbox creation + a false
+// TimeoutError; and the CLIENT-side kick through the exec_stream PTY
+// completed normally, KILLED boot.sh instantly and left the boot poll
+// spinning to its 10-minute ceiling — the "use_browser runs forever"
+// incident this helper exists to prevent.)
+//
+// Contract: cwd must exist; logPath's directory must exist; the caller
+// appends ` && echo <marker>` when it needs a launch confirmation.
+// ---------------------------------------------------------------------------
+
+/** Single-quote a shell word (POSIX-safe for the values used here). */
+function shellQuote(s: string): string {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
 /**
- * boot.sh — the sandbox-side installer + daemon launcher. Runs detached
- * (`nohup bash boot.sh > boot.log 2>&1 &`) so it survives the HTTP request
- * that spawned it and any serverless function timeout behind that request.
+ * Build the sandbox-side command that spawns `argv` fully detached: the
+ * launcher (python3) exits in under a second, and the spawned process runs
+ * in its own session, reparented away from the command tree, with stdin
+ * from /dev/null and stdout/stderr appended to `logPath`. Use this for
+ * EVERY long-lived sandbox daemon (browser boot.sh, headless agent runner).
+ */
+export function buildDetachedSpawnCommand(opts: {
+  cwd: string;
+  argv: string[];
+  logPath: string;
+}): string {
+  const py = [
+    "import os,subprocess,json;",
+    "subprocess.Popen(json.loads(os.environ[\"ONYX_SPAWN_ARGV\"]),",
+    "stdin=subprocess.DEVNULL,",
+    "stdout=open(os.environ[\"ONYX_SPAWN_LOG\"],\"ab\"),",
+    "stderr=subprocess.STDOUT,",
+    "start_new_session=True)",
+  ].join("");
+  return [
+    `cd ${shellQuote(opts.cwd)}`,
+    `&& ONYX_SPAWN_ARGV=${shellQuote(JSON.stringify(opts.argv))}`,
+    `ONYX_SPAWN_LOG=${shellQuote(opts.logPath)}`,
+    `python3 -c ${shellQuote(py)}`,
+  ].join(" ");
+}
+
+/**
+ * boot.sh — the sandbox-side installer + daemon launcher. Runs fully
+ * DETACHED (spawned via buildDetachedSpawnCommand — see the probe notes
+ * there) so it survives the HTTP request that spawned it, E2B envd's
+ * post-command cleanup, and any serverless function timeout behind that
+ * request.
  *
  * ZERO-STARTUP-DELAY ARCHITECTURE: the server kicks this script AT SANDBOX
  * CREATION (createAndCacheSandbox → prepareBrowserRuntime) so the runtime

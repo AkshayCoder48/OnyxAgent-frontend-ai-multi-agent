@@ -15,6 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { SkipWaitButton } from "./skip-wait-button";
 import { CreateAppResult } from "./tool-results/create-app";
 import { PreviewResult } from "./tool-results/preview";
@@ -80,7 +81,7 @@ export function ToolCard({ tool, streaming = false, workspaceId }: ToolCardProps
           >
             <Icon className="h-3.5 w-3.5 text-terra" />
           </span>
-          <span className="shrink-0 font-mono text-xs text-ink-soft">{tool.name}</span>
+          <span className="shrink-0 text-xs text-ink-soft">{toolDisplayName(tool.name)}</span>
           <span className="hidden min-w-0 truncate text-xs text-ink-muted sm:block">
             — {tool.subtitle}
           </span>
@@ -118,7 +119,7 @@ export function ToolCard({ tool, streaming = false, workspaceId }: ToolCardProps
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          aria-label={open ? `Collapse ${tool.name} details` : `Expand ${tool.name} details`}
+          aria-label={open ? `Collapse ${toolDisplayName(tool.name)} details` : `Expand ${toolDisplayName(tool.name)} details`}
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-terra-soft hover:text-terra"
         >
           <ChevronDown className={cn("h-4 w-4 transition-transform", open && "rotate-180")} aria-hidden />

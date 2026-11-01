@@ -38,6 +38,7 @@ import { customToolService } from "@/lib/services";
 // list without it.
 import "@/lib/tools";
 import { listTools } from "@/lib/tools/registry";
+import { toolDisplayName } from "@/lib/tool-display-names";
 
 interface CustomTool {
   id: string;
@@ -111,10 +112,12 @@ export default function ToolsSettingsPage() {
   );
 
   // Built-in tools are also affected by the search box — a single search
-  // filters both lists so the user can find any tool by name.
+  // filters both lists so the user can find any tool by name (the registry
+  // identifier OR its plain display name).
   const filteredBuiltin = builtinTools.filter(
     (t) =>
       t.name.toLowerCase().includes(search.toLowerCase()) ||
+      toolDisplayName(t.name).toLowerCase().includes(search.toLowerCase()) ||
       t.description.toLowerCase().includes(search.toLowerCase()),
   );
 
@@ -200,8 +203,13 @@ export default function ToolsSettingsPage() {
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-mono text-sm font-medium">
-                              {tool.name}
+                            {/* UI-ONLY plain display name (user directive
+                                2026-11-01): raw registry identifiers like
+                                `custom_tools` / `manage_custom_tool` never
+                                render — the identifier the model calls is still
+                                searchable above. */}
+                            <span className="text-sm font-medium">
+                              {toolDisplayName(tool.name)}
                             </span>
                             <Badge variant="outline" className="text-[10px]">
                               {tool.category ?? "general"}

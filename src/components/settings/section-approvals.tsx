@@ -58,6 +58,7 @@ import {
   type ResourcePermission,
 } from "@/lib/projects/permissions";
 import { listApprovals, sweepExpired } from "@/lib/projects/approvals";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { db } from "@/lib/db";
 import { cn, timeAgo } from "@/lib/utils";
 import type { ApprovalRequest, ApprovalStatus } from "@/types";
@@ -264,8 +265,15 @@ function PolicyEditor({ userId }: { userId: string }) {
                         >
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-xs font-medium">
-                                {tool.name}
+                              {/* UI-ONLY plain display name (user directive
+                                  2026-11-01): the row the user reads never
+                                  shows a raw registry identifier like
+                                  `custom_tools` / `manage_custom_tool` — and a
+                                  user's own custom tool shows ITS name
+                                  ("Weather Checker"), not the family label.
+                                  The policy KEY (tool.name) is untouched. */}
+                              <span className="text-xs font-medium">
+                                {toolDisplayName(tool.name)}
                               </span>
                               <Badge
                                 variant="outline"
@@ -292,7 +300,7 @@ function PolicyEditor({ userId }: { userId: string }) {
                           >
                             <SelectTrigger
                               className="h-8 w-[13.5rem] shrink-0 text-xs"
-                              aria-label={`Permission for ${tool.name}`}
+                              aria-label={`Permission for ${toolDisplayName(tool.name)}`}
                             >
                               <SelectValue />
                             </SelectTrigger>

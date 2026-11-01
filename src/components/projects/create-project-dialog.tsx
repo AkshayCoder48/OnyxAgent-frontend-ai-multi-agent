@@ -62,6 +62,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -264,7 +265,11 @@ export function CreateProjectDialog({
             key: `tool:${t.name}`,
             resource_type: "tool",
             resource_id: t.name,
-            label: t.name,
+            // UI-ONLY plain display name (user directive 2026-11-01): the
+            // row the user reads never shows a raw registry identifier like
+            // `custom_tools` — the policy KEY (resource_id) stays the exact
+            // registry name the gate matches on.
+            label: toolDisplayName(t.name),
             defaultPermission: perm(t.name),
             hint: t.description,
           }));
