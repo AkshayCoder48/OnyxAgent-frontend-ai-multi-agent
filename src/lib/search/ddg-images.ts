@@ -1,39 +1,53 @@
 /**
- * DUCKDUCKGO IMAGE SEARCH — the `image_search` tool's backend.
- * Uses `@mudbill/duckduckgo-images-api`, which scrapes DuckDuckGo's official
- * image-search endpoint (`duckduckgo.com/i.js`) through a short-lived `vqd`
- * session token — no API key, no billing.
+ * DUCKDUCKGO IMAGE SEARCH — the `image_search` tool's backend (DDG ONLY, per
+ * user directive 2026-10-31: "for image keep ddg").
  *
- * Layering (mirrors src/lib/search/ddg-web.ts conventions):
- *   - PURE (unit-tested with a mocked fetch, no network):
- *     normalizeDDGImages — maps the package's DuckDuckGoImage rows onto the
- *     normalized SearchResult shape
- *     ({ title, url, domain, imageUrl, thumbnail, width, height, source,
- *     provider }), so the `image_search` tool-call payload and the chat
- *     ImageSearchResults carousel render consistently.
- *   - NETWORK: searchDDGImages — calls the package's imageSearch() with
- *     safe search on and retries enabled, then normalizes.
+ * IN-HOUSE CLIENT (v3, 2026-11-01) — the @mudbill/duckduckgo-images-api
+ * dependency is GONE. Root cause it carried (verified live against DDG):
+ *   1. Its token bootstrap sent NO headers — Node's default undici UA is an
+ *      instant bot tell, so DDG's anti-bot served a challenge page with no
+ *      `vqd` token → "Failed to get token" on a shared/datacenter IP.
+ *   2. Its i.js UA was Chrome/55 (2017) — another red flag.
+ *   3. Its token regex missed DDG's current quoted form (`vqd="4-…"`).
+ *   4. No timeouts, no token reuse, no soft-block awareness: a 202/anomaly
+ *      response was retried with the SAME dead token, then misread as
+ *      "no results" or thrown as an outage.
+ *
+ * This client instead (the same discipline the in-house v.js engine already
+ * used successfully):
+ *   - Browser-grade headers everywhere (shared ddg-vqd module).
+ *   - Token cache (TTL ~14 min) so warm instances rarely re-bootstrap.
+ *   - DDG's soft block (HTTP 202/403/challenge JSON) is detected, and
+ *     retried ONCE with a fresh token after backoff — never misread as
+ *     "no results".
+ *   - BULK support: pages through i.js's `next` cursor (≈100 rows/page) up
+ *     to MAX_PAGES pages, filling large `limit`s from multiple pages.
+ *   - Every fetch has an AbortSignal; the whole call races an 8s deadline.
+ *
+ * Layering (unchanged shape, so /api/ddg-search and the chat's
+ * ImageSearchResults carousel keep working):
+ *   - PURE (unit-tested with fixtures, no network): normalizeDDGImages.
+ *   - NETWORK: searchDDGImages — token → i.js (→ next pages) → normalize.
  *
  * Honesty rules:
  *   - DDG image/thumbnail URLs come back through DDG's own CDN
- *     (external-content.duckduckgo.com/iu/?u=…), which is public and
- *     browser-loadable. We pass them through untouched.
- *   - The package swallows per-request failures after its retries and just
- *     returns fewer results (only a failed token lookup throws), so callers
- *     must treat an EMPTY array as a legitimate "no images found" outcome —
- *     exactly what /api/ddg-search does (success with a friendly note).
+ *     (external-content.duckduckgo.com/iu/?u=…), public and
+ *     browser-loadable. Passed through untouched.
+ *   - A 200 response with an empty `results` array is a legitimate "no
+ *     images found" outcome (returns [], callers show the friendly note);
+ *     a BLOCKED response throws so the route can retry/degrade honestly.
  */
 
-import { imageSearch } from "@mudbill/duckduckgo-images-api";
+import { DDGBlockedError, DDG_XHR_HEADERS, getVqdToken, isDDGBlocked } from "./ddg-vqd";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 /**
- * One row of DuckDuckGo's i.js image response. Matches the package's
- * `DuckDuckGoImage` interface field-for-field (the package doesn't
- * re-export the type from its entrypoint, so it is declared locally).
+ * One row of DuckDuckGo's i.js image response (the wire format
+ * @mudbill/duckduckgo-images-api also produced — kept so fixtures and the
+ * chat carousel contract stay valid).
  */
 export interface DDGImage {
   /** Height of image in pixels */
@@ -127,12 +141,21 @@ export function normalizeDDGImages(raw: DDGImage[], limit: number): DDGImageResu
  *  end-user product (one-word change to disable). */
 const DDG_SAFE_SEARCH = true;
 
-/** Hard ceiling for the whole DDG round-trip (vqd token + i.js). The package
- *  has no abort-signal support, so we race it: a dropped-SYN egress path
- *  otherwise hangs ~2 minutes in Node's TCP retransmission loop, which
- *  would blow /api/ddg-search's maxDuration (30s). Live DDG round-trips
- *  measured ~0.6s. */
+/** Hard ceiling for the whole DDG round-trip (token + all i.js pages +
+ *  retry). Live round-trips measure ~0.6s/page; the ceiling exists so a
+ *  dropped-SYN egress path can't hang the call — it would otherwise sit in
+ *  Node's TCP retransmission loop for ~2 minutes and blow
+ *  /api/ddg-search's maxDuration (30s). */
 const DDG_TIMEOUT_MS = 8_000;
+
+/** Per-fetch ceiling (token page and each i.js page). */
+const FETCH_TIMEOUT_MS = 5_000;
+
+/** Backoff before the one soft-block retry — lets the WAF window breathe. */
+const RETRY_BACKOFF_MS = 600;
+
+/** Bulk ceiling: i.js pages hold ~100 rows; 3 pages fill any limit≤50. */
+const MAX_PAGES = 3;
 
 function ddgTimeout(): Promise<never> {
   return new Promise((_, reject) => {
@@ -146,24 +169,125 @@ function ddgTimeout(): Promise<never> {
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    (t as { unref?: () => void }).unref?.();
+  });
+}
+
+/**
+ * One i.js page. Returns `{ rows, next }` — `next` is DDG's cursor for the
+ * next page (a relative URL whose `vqd` param we re-pin, since DDG drops
+ * it), or "" on the last page.
+ *
+ * Throws DDGBlockedError when the response carries DDG's anti-bot shape
+ * (202/403/challenge JSON) so the retry path can refresh the session.
+ * A 200 with an empty `results` array resolves to zero rows — a genuine
+ * "nothing matched" outcome.
+ */
+async function fetchImagePage(
+  query: string,
+  vqd: string,
+  start: number,
+): Promise<{ rows: DDGImage[]; next: string }> {
+  const params = new URLSearchParams({
+    o: "json",
+    q: query,
+    l: "us-en",
+    vqd,
+    f: ",,,,",
+    p: DDG_SAFE_SEARCH ? "1" : "-1",
+    s: String(start),
+  });
+  const res = await fetch(`https://duckduckgo.com/i.js?${params.toString()}`, {
+    headers: DDG_XHR_HEADERS,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  const body = await res.text().catch(() => "");
+
+  if (isDDGBlocked(res.status, body)) {
+    throw new DDGBlockedError("i.js");
+  }
+  if (!res.ok) {
+    throw new Error(`DuckDuckGo image search HTTP ${res.status}`);
+  }
+
+  let data: { results?: unknown; next?: unknown };
+  try {
+    data = JSON.parse(body) as typeof data;
+  } catch {
+    throw new Error("DuckDuckGo image search returned invalid JSON");
+  }
+  const rows = Array.isArray(data?.results) ? (data.results as DDGImage[]) : [];
+
+  // DDG's `next` cursor is relative ("i.js?o=json&q=…&s=100…"), sometimes
+  // empty. Re-pin the token (DDG omits it from the cursor) and absolutize.
+  let next = "";
+  if (typeof data?.next === "string" && data.next) {
+    try {
+      const u = new URL(data.next, "https://duckduckgo.com");
+      u.searchParams.set("vqd", vqd);
+      next = u.toString();
+    } catch {
+      next = "";
+    }
+  }
+  return { rows, next };
+}
+
 /**
  * Search DuckDuckGo for images and normalize to the SearchResult shape.
  *
- * Throws when DDG cannot be contacted for a session token, when the request
- * exceeds DDG_TIMEOUT_MS, or when the package gives up; after the token
- * lookup, per-request failures are retried internally by the package and
- * can legitimately yield an EMPTY array — callers treat that as a
- * graceful "no images found" outcome (success with an empty list).
+ * Flow: (cached or fresh) vqd token → i.js page(s) via the `next` cursor
+ * until `limit` rows or MAX_PAGES → normalize. A soft-blocked response
+ * (DDGBlockedError) retries the whole flow once with a FRESH token after
+ * `RETRY_BACKOFF_MS` — the token cache is bypassed so the retry isn't
+ * poisoned by the blocked session.
+ *
+ * Throws on token failure, timeout, or a block that survives the retry —
+ * the route's retry + graceful "busy" note handle those. A query that
+ * simply matches nothing resolves to an EMPTY array.
  */
 export async function searchDDGImages(query: string, limit: number): Promise<DDGImageResult[]> {
-  const raw = await Promise.race([
-    imageSearch({
-      query,
-      safe: DDG_SAFE_SEARCH,
-      retries: 2,
-      iterations: 1, // one pass = up to 100 raw rows; we slice to `limit`
-    }),
-    ddgTimeout(),
-  ]);
-  return normalizeDDGImages((raw ?? []) as unknown as DDGImage[], limit);
+  return Promise.race([searchDDGImagesInner(query, limit), ddgTimeout()]);
+}
+
+async function searchDDGImagesInner(query: string, limit: number): Promise<DDGImageResult[]> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const fresh = attempt > 1; // retry path: never reuse the blocked session
+    try {
+      const vqd = await getVqdToken(query, { fresh });
+      const raw: DDGImage[] = [];
+
+      // Bulk: walk i.js pages via DDG's `next` cursor until we have enough
+      // rows (each page holds ~100). The cursor's `s` param is the start
+      // offset for the following page.
+      let start = 0;
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const fetched = await fetchImagePage(query, vqd, start);
+        raw.push(...fetched.rows);
+        if (fetched.rows.length === 0) break; // last page / nothing matched
+        if (raw.length >= limit) break; // bulk satisfied
+        if (!fetched.next) break; // no cursor → single page of results
+        try {
+          start = Number(new URL(fetched.next).searchParams.get("s") ?? "0") || start + 100;
+        } catch {
+          start += 100;
+        }
+      }
+
+      return normalizeDDGImages(raw, limit);
+    } catch (err) {
+      // Only the anti-block shape merits a retry with a fresh session;
+      // everything else (timeout, bad JSON, hard HTTP error) propagates.
+      if (err instanceof DDGBlockedError && attempt < 2) {
+        await sleep(RETRY_BACKOFF_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
+  /* istanbul ignore next -- for-loop guarantees a return or throw */
+  throw new Error("DuckDuckGo image search failed");
 }

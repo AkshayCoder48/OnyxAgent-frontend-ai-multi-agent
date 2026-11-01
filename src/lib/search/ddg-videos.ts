@@ -1,12 +1,13 @@
 /**
  * DUCKDUCKGO VIDEO SEARCH — keyless video backend for the `video_search`
- * tool (the Miklium replacement). Uses DuckDuckGo's own JSON results
- * endpoint (`https://duckduckgo.com/v.js`), fetched exactly the way
+ * tool. Uses DuckDuckGo's own JSON results endpoint
+ * (`https://duckduckgo.com/v.js`), fetched exactly the way
  * duckduckgo.com's results page does it:
  *
  *   1. GET `https://duckduckgo.com/?q=<query>` → scrape the per-query `vqd`
- *      session token out of the HTML (same handshake the
- *      @mudbill/duckduckgo-images-api package uses for i.js).
+ *      session token out of the HTML — via the shared browser-grade client
+ *      in src/lib/search/ddg-vqd.ts (cached tokens, soft-block detection,
+ *      abort-safe; the same handshake image search now uses for i.js).
  *   2. GET `https://duckduckgo.com/v.js?o=json&q=<query>&l=us-en&vqd=<token>&f=,,,,&p=1`
  *      → `{ results: [...], next: … }` with real video rows (YouTube, Vimeo,
  *      Dailymotion…): url, title, description, duration, publisher, view
@@ -18,14 +19,18 @@
  *     formatDDGDuration — seconds ("325") → "5:25"; "5:25" passes through.
  *     normalizeDDGVideos — maps v.js rows onto the exact result shape the
  *       video tool-call payload and the chat VideoSearchResults card expect.
- *   - NETWORK: searchDDGVideos — the two-step handshake with an 8s ceiling.
+ *   - NETWORK: searchDDGVideos — the two-step handshake with an 8s ceiling,
+ *     one fresh-token retry when DDG's anti-bot soft-blocks (202/403/
+ *     challenge) the endpoint.
  *
  * Honesty rules:
- *   - `content` is a thumbnail URL when it is http(s); when it is missing or
- *     a non-URL blob, we derive a YouTube thumbnail from the video URL and
- *     otherwise ship an empty thumbnail (the card renders a placeholder).
+ *   - `content` IS the video page URL (verified live); thumbnails come from
+ *     the row's `images` object (bing.net CDN). When no usable thumbnail
+ *     exists we derive a YouTube one from the video URL, else ship empty
+ *     (the card renders the play-icon placeholder).
  *   - Empty results is a legitimate outcome (success, empty list). Only
- *     network/token failures throw — the caller sanitizes those.
+ *     network/token failures and surviving blocks throw — the caller
+ *     sanitizes those.
  */
 
 // ---------------------------------------------------------------------------
@@ -33,30 +38,50 @@
 // ---------------------------------------------------------------------------
 
 /**
- * One row of DuckDuckGo's v.js video response. Field names follow the wire
- * format; every field is optional at the row level and validated during
- * normalization.
+ * One row of DuckDuckGo's v.js video response, exactly as the wire serves
+ * it (verified live 2026-11-01 — the previous interface invented a `url`
+ * field the endpoint never sends, so every live row was dropped and video
+ * search silently returned "no results" forever):
+ *   { content, description, duration, embed_html, embed_url, image_token,
+ *     images: {large,medium,small,motion}, provider, published, publisher,
+ *     statistics: {viewCount}, thumbnail_height, thumbnail_width, title,
+ *     uploader }
+ * `url` is tolerated for fixture/back-compat only. Every field is optional
+ * at the row level and validated during normalization.
  */
 export interface DDGVideo {
-  /** Video page URL (YouTube watch link, Vimeo, Dailymotion, …) */
+  /** Video page URL — THIS is the real field (YouTube watch link, Vimeo, …) */
+  content?: string;
+  /** Fixture/back-compat alternate for the video URL (not sent by v.js) */
   url?: string;
   title?: string;
   description?: string;
-  /** Thumbnail URL (sometimes a non-URL blob — normalized away) */
-  content?: string;
   /** Duration — "h:mm:ss" / "m:ss" string, or whole seconds as a number */
   duration?: string | number;
-  /** Source platform ("youtube", "vimeo", …) */
-  encoder?: string;
-  /** Channel / publisher name */
+  /** Thumbnails at several sizes (bing.net CDN via DDG) */
+  images?: {
+    large?: string;
+    medium?: string;
+    small?: string;
+    motion?: string;
+  };
+  /** Channel name ("NASA") — the human creator */
+  uploader?: string;
+  /** Platform ("YouTube", "Vimeo") — NOT the channel */
   publisher?: string;
-  /** Publish date (loose formats) */
+  /** Upstream provider ("Bing") */
+  provider?: string;
+  /** Publish date (loose ISO-ish formats) */
   published?: string;
   statistics?: {
     viewCount?: number | string;
     likeCount?: number | string;
     datePublished?: string;
   };
+  thumbnail_width?: number;
+  thumbnail_height?: number;
+  /** Legacy tolerated (old fixtures) */
+  encoder?: string;
   width?: number;
   height?: number;
 }
@@ -99,7 +124,7 @@ function getDomain(url: string): string {
 /**
  * Derive a YouTube thumbnail URL from a watch/shorts link.
  * img.youtube.com thumbnails are public, keyless, and stable — the standard
- * fallback when DDG's `content` field is missing or not an http(s) URL.
+ * fallback when the row carries no usable `images` thumbnail.
  */
 export function youtubeThumbFor(url: string): string {
   const m = url.match(
@@ -125,8 +150,27 @@ export function formatDDGDuration(duration: string | number | undefined): string
 }
 
 /**
+ * Pick the best thumbnail URL from a v.js row's `images` object
+ * (large → medium → small → motion), validating it is http(s).
+ */
+export function thumbnailFromImages(images: DDGVideo["images"]): string {
+  if (!images || typeof images !== "object") return "";
+  const candidates = [images.large, images.medium, images.small, images.motion];
+  for (const c of candidates) {
+    if (typeof c === "string" && /^https?:\/\//i.test(c)) return c;
+  }
+  return "";
+}
+
+/**
  * Normalize raw v.js rows into the video card's result shape. Dedupes by
  * video URL, drops rows without a usable video link, caps at `limit`.
+ *
+ * Field mapping (verified against live v.js responses):
+ *   videoUrl  ← content (the real field; `url` tolerated for old fixtures)
+ *   thumbnail ← images.large/medium/small, else a derived YouTube thumb
+ *   channel   ← uploader (the channel name; `publisher` is the PLATFORM)
+ *   stats     ← statistics.viewCount / likeCount
  */
 export function normalizeDDGVideos(raw: DDGVideo[], limit: number): DDGVideoResult[] {
   const seen = new Set<string>();
@@ -134,18 +178,25 @@ export function normalizeDDGVideos(raw: DDGVideo[], limit: number): DDGVideoResu
 
   for (const v of raw) {
     if (!v || typeof v !== "object") continue;
-    const videoUrl = typeof v.url === "string" ? v.url : "";
-    if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) continue;
+    // v.js puts the video page URL in `content`; the legacy `url` field is
+    // tolerated so old fixtures keep exercising the same path.
+    const videoUrl =
+      typeof v.content === "string" && /^https?:\/\//i.test(v.content)
+        ? v.content
+        : typeof v.url === "string" && /^https?:\/\//i.test(v.url)
+          ? v.url
+          : "";
+    if (!videoUrl) continue;
     if (seen.has(videoUrl)) continue;
     seen.add(videoUrl);
 
-    // Thumbnail: content when it is an http(s) URL, else a derived YouTube
-    // thumb, else empty (the card shows the play-icon placeholder).
-    const content = typeof v.content === "string" ? v.content : "";
-    const thumb = /^https?:\/\//i.test(content) ? content : youtubeThumbFor(videoUrl);
+    // Thumbnail: the row's own images, else a derived YouTube thumb, else
+    // empty (the card shows the play-icon placeholder).
+    const thumb = thumbnailFromImages(v.images) || youtubeThumbFor(videoUrl);
 
     const domain = getDomain(videoUrl);
-    const channelTitle = typeof v.publisher === "string" ? v.publisher : "";
+    const channelTitle =
+      typeof v.uploader === "string" && v.uploader ? v.uploader : (v.publisher ?? "");
     const viewCount = v.statistics?.viewCount;
     const likeCount = v.statistics?.likeCount;
     const duration = formatDDGDuration(v.duration);
@@ -177,19 +228,20 @@ export function normalizeDDGVideos(raw: DDGVideo[], limit: number): DDGVideoResu
 // Network layer
 // ---------------------------------------------------------------------------
 
-/** Headers that mimic duckduckgo.com's own results-page requests. */
-const DDG_HEADERS: Record<string, string> = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  Accept: "*/*",
-  "Accept-Language": "en",
-  Referer: "https://duckduckgo.com/",
-};
+import {
+  DDGBlockedError,
+  DDG_XHR_HEADERS,
+  getVqdToken as getVqdTokenShared,
+  isDDGBlocked,
+} from "./ddg-vqd";
+
+/** Backoff before the one soft-block retry — lets the WAF window breathe. */
+const RETRY_BACKOFF_MS = 600;
 
 /** Safe search ON — filters adult content; the responsible default. */
 const DDG_SAFE = true;
 
-/** Hard ceiling for the whole handshake (token + v.js). */
+/** Hard ceiling for the whole handshake (token + v.js + retry). */
 const DDG_TIMEOUT_MS = 8_000;
 
 function ddgTimeout(): Promise<never> {
@@ -203,31 +255,29 @@ function ddgTimeout(): Promise<never> {
 }
 
 /**
- * Fetch the per-query `vqd` session token from duckduckgo.com's HTML (the
- * same token @mudbill/duckduckgo-images-api uses for image search).
+ * Fetch the per-query `vqd` session token (shared browser-grade client in
+ * src/lib/search/ddg-vqd.ts — cached, soft-block aware, abort-safe).
  */
 export async function getVqdToken(query: string): Promise<string> {
-  const res = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}`, {
-    headers: DDG_HEADERS,
+  return getVqdTokenShared(query);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    (t as { unref?: () => void }).unref?.();
   });
-  if (!res.ok) {
-    throw new Error(`DuckDuckGo token request HTTP ${res.status}`);
-  }
-  const html = await res.text().catch(() => "");
-  const token = html.match(/vqd=([\d-]+)/)?.[1] || "";
-  if (!token) {
-    throw new Error("DuckDuckGo token unavailable");
-  }
-  return token;
 }
 
 /**
  * Search DuckDuckGo for videos via the v.js JSON endpoint and normalize.
  *
  * The WHOLE handshake (token page + v.js) races the 8s ceiling — a fetch
- * whose host silently drops SYNs never resolves otherwise. Throws when the
- * token handshake fails, the request times out, or DDG answers with a
- * non-OK status. An empty result set parses to an EMPTY array — a
+ * whose host silently drops SYNs never resolves otherwise. A soft-blocked
+ * response (HTTP 202/403 or the challenge body — note 202 counts as `ok`
+ * for fetch, so it must be checked explicitly) retries ONCE with a fresh
+ * token; a block that survives the retry throws, as do timeouts and hard
+ * HTTP errors. An empty 200 result set parses to an EMPTY array — a
  * legitimate "nothing matched" outcome, not a failure.
  */
 export async function searchDDGVideos(query: string, limit: number): Promise<DDGVideoResult[]> {
@@ -235,24 +285,47 @@ export async function searchDDGVideos(query: string, limit: number): Promise<DDG
 }
 
 async function searchDDGVideosInner(query: string, limit: number): Promise<DDGVideoResult[]> {
-  const token = await getVqdToken(query);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const fresh = attempt > 1; // retry path: never reuse the blocked session
+    try {
+      const token = await getVqdTokenShared(query, { fresh });
 
-  const params = new URLSearchParams({
-    o: "json",
-    q: query,
-    l: "us-en",
-    vqd: token,
-    f: ",,,,",
-    p: DDG_SAFE ? "1" : "-1",
-  });
-  const res = await fetch(`https://duckduckgo.com/v.js?${params.toString()}`, {
-    headers: DDG_HEADERS,
-  });
+      const params = new URLSearchParams({
+        o: "json",
+        q: query,
+        l: "us-en",
+        vqd: token,
+        f: ",,,,",
+        p: DDG_SAFE ? "1" : "-1",
+      });
+      const res = await fetch(`https://duckduckgo.com/v.js?${params.toString()}`, {
+        headers: DDG_XHR_HEADERS,
+      });
+      const body = await res.text().catch(() => "");
 
-  if (!res.ok) {
-    throw new Error(`DuckDuckGo video search HTTP ${res.status}`);
+      if (isDDGBlocked(res.status, body)) {
+        throw new DDGBlockedError("v.js");
+      }
+      if (!res.ok) {
+        throw new Error(`DuckDuckGo video search HTTP ${res.status}`);
+      }
+
+      let data: { results?: DDGVideo[] } | null;
+      try {
+        data = JSON.parse(body) as { results?: DDGVideo[] } | null;
+      } catch {
+        throw new Error("DuckDuckGo video search returned invalid JSON");
+      }
+      const rows = Array.isArray(data?.results) ? (data?.results as DDGVideo[]) : [];
+      return normalizeDDGVideos(rows, limit);
+    } catch (err) {
+      if (err instanceof DDGBlockedError && attempt < 2) {
+        await sleep(RETRY_BACKOFF_MS);
+        continue;
+      }
+      throw err;
+    }
   }
-  const data = (await res.json().catch(() => null)) as { results?: DDGVideo[] } | null;
-  const rows = Array.isArray(data?.results) ? (data?.results as DDGVideo[]) : [];
-  return normalizeDDGVideos(rows, limit);
+  /* istanbul ignore next -- for-loop guarantees a return or throw */
+  throw new Error("DuckDuckGo video search failed");
 }

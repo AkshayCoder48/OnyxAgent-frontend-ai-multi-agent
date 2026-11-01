@@ -12,10 +12,12 @@
 //     Yahoo-powered engine), then DuckDuckGo's keyless HTML SERP as the
 //     last-chance fallback. Every leg is optional: an engine that fails,
 //     rate-limits, or comes up empty just hands the query to the next one.
-//   - `image`: DuckDuckGo images via @mudbill/duckduckgo-images-api
-//     (src/lib/search/ddg-images.ts) — no API key, no billing. DDG is the
-//     ONLY image backend (user directive); one full retry on transient
-//     session-token failures.
+//   - `image`: DuckDuckGo images via the in-house i.js client
+//     (src/lib/search/ddg-images.ts + the shared browser-grade vqd client
+//     in src/lib/search/ddg-vqd.ts) — no API key, no billing, no third-party
+//     package. DDG is the ONLY image backend (user directive); one fresh-
+//     token retry on anti-bot soft blocks, bulk pagination via the `next`
+//     cursor.
 //   - `video`: DuckDuckGo videos via the v.js JSON endpoint
 //     (src/lib/search/ddg-videos.ts) — same keyless vqd handshake, one full
 //     retry on transient failures.
@@ -243,7 +245,7 @@ async function searchWithRetry<T>(engine: () => Promise<T[]>): Promise<T[] | nul
         err instanceof Error ? err.message : String(err),
       );
       if (attempt < 2) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 350));
       }
     }
   }

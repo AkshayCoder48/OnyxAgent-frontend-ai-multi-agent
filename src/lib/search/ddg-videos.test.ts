@@ -9,7 +9,7 @@
  * prove the code path deterministically without touching the network (the
  * sandbox/CI may block duckduckgo.com egress).
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatDDGDuration,
   normalizeDDGVideos,
@@ -17,24 +17,37 @@ import {
   youtubeThumbFor,
   type DDGVideo,
 } from "./ddg-videos";
+import { clearVqdCache } from "./ddg-vqd";
 
-// Real vqd tokens are digits+hyphens (the @mudbill images package extracts
-// them with /vqd=([\d-]+)&/ — the same token format the v.js handshake uses).
+// Real vqd tokens are digits+hyphens (the shared ddg-vqd client accepts
+// both this query-string form and the quoted attribute form DDG now serves).
 const SERP_HTML = `<!DOCTYPE html><html><body>
   <script src="//duckduckgo.com/ac/db.js?vqd=4-32098503961658400691&s=50"></script>
 </body></html>`;
 
+// Fixture factory matching the REAL v.js wire schema (verified live
+// 2026-11-01): `content` is the video URL, thumbnails live in `images`,
+// `uploader` is the channel, `publisher` is the platform.
 const mkVideo = (over: Partial<DDGVideo> = {}): DDGVideo => ({
-  url: "https://www.youtube.com/watch?v=ELalc0t9z9I",
+  content: "https://www.youtube.com/watch?v=ELalc0t9z9I",
   title: "Apollo 11 Moon Landing",
   description: "Original NASA footage of the landing.",
-  content: "https://i.ytimg.com/vi/ELalc0t9z9I/hqdefault.jpg",
   duration: "5:32",
-  encoder: "youtube",
-  publisher: "NASA",
+  images: {
+    large: "https://tse4.mm.bing.net/th/id/OVP.Apollo?t=large",
+    medium: "https://tse4.mm.bing.net/th/id/OVP.Apollo?t=medium",
+    small: "https://tse4.mm.bing.net/th/id/OVP.Apollo?t=small",
+  },
+  uploader: "NASA",
+  publisher: "YouTube",
+  provider: "Bing",
   published: "2011-05-06",
   statistics: { viewCount: 1234567, likeCount: 9876 },
   ...over,
+});
+
+beforeEach(() => {
+  clearVqdCache(); // the shared vqd client caches tokens across calls
 });
 
 afterEach(() => {
@@ -83,7 +96,7 @@ describe("formatDDGDuration (pure)", () => {
 });
 
 describe("normalizeDDGVideos (pure)", () => {
-  it("maps v.js rows onto the video card's result shape", () => {
+  it("maps real-shape v.js rows onto the video card's result shape", () => {
     const [r] = normalizeDDGVideos([mkVideo()], 10);
     expect(r).toMatchObject({
       title: "Apollo 11 Moon Landing",
@@ -91,8 +104,8 @@ describe("normalizeDDGVideos (pure)", () => {
       videoUrl: "https://www.youtube.com/watch?v=ELalc0t9z9I",
       domain: "youtube.com",
       description: "Original NASA footage of the landing.",
-      thumbUrl: "https://i.ytimg.com/vi/ELalc0t9z9I/hqdefault.jpg",
-      imageUrl: "https://i.ytimg.com/vi/ELalc0t9z9I/hqdefault.jpg",
+      thumbUrl: "https://tse4.mm.bing.net/th/id/OVP.Apollo?t=large",
+      imageUrl: "https://tse4.mm.bing.net/th/id/OVP.Apollo?t=large",
       duration: "5:32",
       source: "NASA",
       channelTitle: "NASA",
@@ -102,30 +115,58 @@ describe("normalizeDDGVideos (pure)", () => {
     });
   });
 
-  it("derives a YouTube thumbnail when content is missing or not a URL", () => {
-    const [a] = normalizeDDGVideos([mkVideo({ content: undefined })], 10);
+  it("derives a YouTube thumbnail when the row carries no usable images", () => {
+    const [a] = normalizeDDGVideos([mkVideo({ images: undefined })], 10);
     expect(a.thumbUrl).toBe("https://i.ytimg.com/vi/ELalc0t9z9I/hqdefault.jpg");
 
-    const [b] = normalizeDDGVideos([mkVideo({ content: "data:image/png;base64,AAAA" })], 10);
+    const [b] = normalizeDDGVideos(
+      [mkVideo({ images: { large: "data:image/png;base64,AAAA" } })],
+      10,
+    );
     expect(b.thumbUrl).toBe("https://i.ytimg.com/vi/ELalc0t9z9I/hqdefault.jpg");
   });
 
-  it("keeps a non-YouTube provider's content URL when it IS http(s)", () => {
-    const [r] = normalizeDDGVideos(
-      [mkVideo({ url: "https://vimeo.com/12345", content: "https://i.vimeocdn.com/video/t.jpg" })],
+  it("prefers images.large, falling back through medium/small", () => {
+    const [a] = normalizeDDGVideos(
+      [mkVideo({ images: { medium: "https://cdn.example/med.jpg" } })],
       10,
     );
+    expect(a.thumbUrl).toBe("https://cdn.example/med.jpg");
+  });
+
+  it("maps a non-YouTube row: video URL from content, domain from it", () => {
+    const [r] = normalizeDDGVideos(
+      [
+        mkVideo({
+          content: "https://vimeo.com/12345",
+          images: { large: "https://i.vimeocdn.com/video/t.jpg" },
+          uploader: "Vimeo Staff",
+          publisher: "Vimeo",
+        }),
+      ],
+      10,
+    );
+    expect(r.videoUrl).toBe("https://vimeo.com/12345");
     expect(r.thumbUrl).toBe("https://i.vimeocdn.com/video/t.jpg");
     expect(r.domain).toBe("vimeo.com");
+    expect(r.channelTitle).toBe("Vimeo Staff");
+  });
+
+  it("falls back to the legacy `url` field when content is absent (fixtures)", () => {
+    const [r] = normalizeDDGVideos(
+      [mkVideo({ content: undefined, url: "https://www.youtube.com/watch?v=legacy1" })],
+      10,
+    );
+    expect(r.videoUrl).toBe("https://www.youtube.com/watch?v=legacy1");
   });
 
   it("dedupes by video URL, drops rows without an http(s) video URL, caps at limit", () => {
     const rows = [
       mkVideo(),
       mkVideo({ title: "duplicate" }),
-      mkVideo({ url: "not-a-url" }),
-      mkVideo({ url: "https://www.youtube.com/watch?v=2", content: undefined }),
-      mkVideo({ url: "https://www.youtube.com/watch?v=3", content: undefined }),
+      mkVideo({ content: "not-a-url" }),
+      mkVideo({ content: "https://www.youtube.com/watch?v=2", images: undefined }),
+      mkVideo({ content: "https://www.youtube.com/watch?v=3", images: undefined }),
     ];
     const out = normalizeDDGVideos(rows, 2);
     expect(out).toHaveLength(2);
@@ -153,7 +194,10 @@ describe("normalizeDDGVideos (pure)", () => {
 
 describe("searchDDGVideos (network flow, mocked fetch)", () => {
   it("runs the token page → v.js flow and normalizes the payload", async () => {
-    const rows = [mkVideo(), mkVideo({ url: "https://vimeo.com/777", title: "Vimeo copy" })];
+    const rows = [
+      mkVideo(),
+      mkVideo({ content: "https://vimeo.com/777", title: "Vimeo copy", uploader: "Vimeo Picks" }),
+    ];
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: unknown) => {
       const u = String(input);
@@ -212,7 +256,37 @@ describe("searchDDGVideos (network flow, mocked fetch)", () => {
     expect(await searchDDGVideos("zzzz nothing", 5)).toEqual([]);
   });
 
-  it("throws on a non-OK v.js status", async () => {
+  it("retries ONCE with a fresh token after an anti-bot soft block (202), then succeeds", async () => {
+    const CHALLENGE_BODY = JSON.stringify({
+      challenge: { cc: "sre", gk: "d4cd0dabcf4caa22ad92fab40844c786", i: "3" },
+    });
+    let vjsSeen = 0;
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const u = String(input);
+      if (u.startsWith("https://duckduckgo.com/v.js")) {
+        vjsSeen++;
+        if (vjsSeen === 1) {
+          // HTTP 202 counts as `ok` for fetch — the soft-block check must
+          // be explicit or a block is misread as "no results".
+          return new Response(CHALLENGE_BODY, { status: 202 });
+        }
+        return new Response(
+          JSON.stringify({ results: [mkVideo()], next: "" }),
+          { status: 200 },
+        );
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await searchDDGVideos("cats", 5);
+
+    expect(out).toHaveLength(1);
+    // token + v.js(blocked) + fresh token + v.js(ok)
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws on a non-OK v.js status after exhausting the fresh-token retry", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: unknown) => {
@@ -223,7 +297,9 @@ describe("searchDDGVideos (network flow, mocked fetch)", () => {
         return new Response(SERP_HTML, { status: 200 });
       }),
     );
-    await expect(searchDDGVideos("query", 5)).rejects.toThrow(/HTTP 403/);
+    // 403 is DDG's anti-bot shape now — one fresh-token retry, then an
+    // honest failure the route degrades to the friendly "busy" note.
+    await expect(searchDDGVideos("query", 5)).rejects.toThrow(/blocked/i);
   });
 
   it("races an 8s timeout instead of hanging on dropped egress", async () => {

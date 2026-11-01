@@ -8,9 +8,9 @@
 //     proxy. Otherwise Miklium (Yahoo-powered) serves the query, with the
 //     keyless DuckDuckGo HTML search as the automatic fallback whenever
 //     Miklium fails or finds nothing.
-//   - **image_search**: DuckDuckGo images via @mudbill/duckduckgo-images-api
-//     — no API key, no billing, real thumbnails + dimensions (DDG ONLY,
-//     per directive).
+//   - **image_search**: DuckDuckGo images via the in-house i.js client
+//     (src/lib/search/ddg-images.ts) — no API key, no billing, no third-party
+//     package, real thumbnails + dimensions (DDG ONLY, per directive).
 //   - **video_search**: DuckDuckGo videos via the keyless v.js endpoint —
 //     real durations, thumbnails, channel and view counts.
 //
