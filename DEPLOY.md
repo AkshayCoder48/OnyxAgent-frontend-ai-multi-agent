@@ -18,7 +18,7 @@ Every key below is created by the deploy flow (the button's `env` list carries t
 
 | Variable | Needed? | Prefilled | Purpose |
 |---|---|---|---|
-| `E2B_API_KEY` | optional | — | Server-side fallback sandbox key; users normally bring their own in Settings |
+| `E2B_API_KEY` | recommended | — | Server-side fallback sandbox key (users normally bring their own in Settings). **Also flips DuckDuckGo image/video search to genuine `provider: ddg`** — the handshake runs inside the acquired E2B sandbox, on the sandbox's IP |
 | `E2B_TEMPLATE_ID` | optional | — | Durable sandbox browser template id — build once with `bash scripts/build-browser-sandbox-template.sh` for ~seconds browser boots |
 | `DATABASE_URL` | optional | — | SQLite URL; defaults to `file:./db/custom.db` (ephemeral on serverless — fine for the default setup) |
 | `APP_URL` | recommended | — | Public origin of **your** deployment; used by the schedule tick (`/api/tasks/schedules/tick`) and the Trigger.dev worker |
@@ -40,7 +40,7 @@ Every key below is created by the deploy flow (the button's `env` list carries t
 2. Open `/chat`, open **Settings**, and add the provider keys you personally use (OpenAI-compatible, Anthropic, Gemini, Pollinations, ...). They stay in the browser vault — nothing is required on the server.
 3. Optional: set `E2B_API_KEY` (Settings → Sandboxes also accepts a per-user key) if you want the sandbox code-execution tools without BYOK.
 
-## Search egress — why `provider` may say `miklium`, and how to make it say `ddg`
+## Search egress — how DDG image/video search actually reaches duckduckgo.com
 
 DuckDuckGo's anti-bot WAF blocks **Vercel's entire egress range** — not just one region. Verified live on 2026-11-01 with the identical in-house handshake (browser-grade headers, fresh `vqd` token):
 
@@ -50,11 +50,21 @@ DuckDuckGo's anti-bot WAF blocks **Vercel's entire egress range** — not just o
 | `sin1` | blocked |
 | `hkg1` | blocked |
 | `fra1` | blocked |
-| plain non-Vercel cloud VM | 90+ results, HTTP 200 |
+| plain cloud VM (incl. an E2B sandbox) | 90+ results, HTTP 200 |
 
-No region choice, npm package, or header trick escapes it: the block is on the egress IP itself. When DDG is blocked, the rescue engine (Miklium) answers so image/video search keeps working, and the `provider` field honestly reports who served the rows.
+No region choice, npm package, or header trick escapes it: the block is on the egress IP itself. So the route runs the DDG handshake **inside the acquired E2B sandbox** — `E2B_API_KEY` (or each user's own sandbox key saved in Settings) is the one variable that flips image/video search to genuine `provider: ddg` results. With no E2B key configured, Miklium answers so search keeps working (the `provider` field honestly reports who served the rows).
 
-To get genuine `provider: ddg` results, run the one-file relay on any always-on machine that is not Vercel (a home box, a Tailscale exit node, or a cheap VPS — live-verified: a plain cloud-VM IP passes; the block targets Vercel's hammered ranges):
+### Option A — the E2B sandbox (recommended, zero extra infrastructure)
+
+Set `E2B_API_KEY` on the deployment (users who save their own key in Settings get it per-user, BYOK-style). The vqd → `i.js`/`v.js` handshake then executes inside the same shared sandbox the chat's code-execution tools use, via the existing `/api/sandbox` machinery — nothing else to deploy or operate.
+
+```text
+E2B_API_KEY = <your E2B key>
+```
+
+### Option B — the one-file relay (an operator-controlled non-Vercel exit)
+
+Run the relay on any always-on machine that is not Vercel (a home box, a Tailscale exit node, or a cheap VPS — live-verified: a plain cloud-VM IP passes; the block targets Vercel's hammered ranges):
 
 ```bash
 # on the relay box (Node 18+, zero dependencies)
@@ -68,7 +78,7 @@ DDG_PROXY_BASE  = http(s)://<relay-host>:8787
 DDG_RELAY_TOKEN = <same random-string>
 ```
 
-Redeploy, and every DDG call (token page, `i.js`, `v.js`) leaves from your relay's IP. The relay only proxies those three allowlisted paths — it is not an open proxy — and passes upstream statuses through untouched so the app's soft-block detection keeps working. Result thumbnails still load directly in each visitor's browser. Full details: header of `scripts/ddg-relay.mjs` and the search-egress section of `.env.example`.
+Redeploy, and the direct DDG engine's calls (token page, `i.js`, `v.js`) leave from your relay's IP. The relay only proxies those three allowlisted paths — it is not an open proxy — and passes upstream statuses through untouched so the app's soft-block detection keeps working. Result thumbnails still load directly in each visitor's browser. Full details: header of `scripts/ddg-relay.mjs` and the search-egress section of `.env.example`.
 
 ## Function region
 

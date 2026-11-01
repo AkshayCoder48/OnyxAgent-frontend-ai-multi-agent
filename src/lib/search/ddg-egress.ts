@@ -110,6 +110,19 @@ export function ddgUrl(path: string): string {
   return `https://duckduckgo.com${path}`;
 }
 
+/**
+ * True when DDG_PROXY_BASE is set to a valid http(s) URL (read at CALL
+ * time, like every other relay decision). The /api/ddg-search route uses
+ * this to decide whether the DIRECT DDG engines are a usable leg — with
+ * the E2B sandbox as the primary DDG egress (user directive 2026-11-01:
+ * "make ddg use current acquired e2b sandbox's ip; if e2b not configured
+ * then miklium works"), the direct-from-server leg only runs when the
+ * operator pinned it to a relay.
+ */
+export function isDDGRelayConfigured(): boolean {
+  return relayBase() !== "";
+}
+
 // ---------------------------------------------------------------------------
 // Client-IP forwarding (DDG_FORWARD_CLIENT_IP)
 // ---------------------------------------------------------------------------

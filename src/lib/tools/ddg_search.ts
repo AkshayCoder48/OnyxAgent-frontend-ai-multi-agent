@@ -1,22 +1,26 @@
 // Web Search Tools — web, image, and video search.
 //
 // Routing (USER DIRECTIVE 2026-10-31: "Keep miklium for websearch and for
-// image keep ddg"):
+// image keep ddg"; USER DIRECTIVE 2026-11-01: "make ddg use current
+// acquired e2b sandbox's ip; if e2b not configured then miklium works"):
 //   - **web_search**: When the user has a LangSearch API key saved (encrypted
 //     in their settings — their own key, BYOK), queries route through
 //     LangSearch's hybrid keyword+vector API via the unified `/api/ddg-search`
 //     proxy. Otherwise Miklium (Yahoo-powered) serves the query, with the
 //     keyless DuckDuckGo HTML search as the automatic fallback whenever
 //     Miklium fails or finds nothing.
-//   - **image_search**: DuckDuckGo images via the in-house i.js client
-//     (src/lib/search/ddg-images.ts) — no API key, no billing, no third-party
-//     package, real thumbnails + dimensions (DDG ONLY, per directive).
-//   - **video_search**: DuckDuckGo videos via the keyless v.js endpoint —
-//     real durations, thumbnails, channel and view counts.
+//   - **image_search** / **video_search**: DuckDuckGo images/videos executed
+//     INSIDE the user's current acquired E2B sandbox — the handshake runs
+//     there, so duckduckgo.com sees the SANDBOX's IP (the egress its WAF
+//     serves) instead of the deployment's blocked datacenter IP. The user's
+//     own E2B key (BYOK, decrypted from their settings and forwarded
+//     per-request as `e2b_api_key`, exactly like langsearch_key) or the
+//     server's E2B_API_KEY enables the leg; with neither configured Miklium
+//     answers, and it also rescues any sandbox/DDG failure.
 //
-// The LangSearch key is read lazily from
-// `settingsService.getDecryptedLangSearchApiKey` on every call so changes in
-// Settings take effect immediately.
+// The LangSearch and E2B keys are read lazily from
+// `settingsService.getDecrypted*` on every call so changes in Settings take
+// effect immediately.
 import { registerTool } from "./registry";
 import type { ToolContext } from "./registry";
 import { settingsService } from "@/lib/services";
@@ -46,6 +50,8 @@ function labelsFor(type: string): { singular: string; results: string } {
  * Issue a search against the unified `/api/ddg-search` proxy. When a
  * LangSearch API key is available for the user, it's appended as
  * `langsearch_key` so the proxy can prefer LangSearch for web queries.
+ * For image/video, the user's E2B sandbox key is appended as `e2b_api_key`
+ * so DuckDuckGo can execute inside their current acquired sandbox.
  */
 async function search(
   query: string,
@@ -63,6 +69,17 @@ async function search(
       langsearchKey = "";
     }
   }
+  // Lazily fetch the user's E2B sandbox key (only for image/video — the
+  // DDG-in-sandbox egress leg; the server's E2B_API_KEY is the fallback
+  // when the user has no personal key).
+  let e2bKey = "";
+  if (ctx?.userId && (type === "image" || type === "video")) {
+    try {
+      e2bKey = (await settingsService.getDecryptedSandboxKey(ctx.userId)) ?? "";
+    } catch {
+      e2bKey = "";
+    }
+  }
 
   const params = new URLSearchParams({
     q: query,
@@ -70,6 +87,7 @@ async function search(
     limit: String(limit),
   });
   if (langsearchKey) params.set("langsearch_key", langsearchKey);
+  if (e2bKey) params.set("e2b_api_key", e2bKey);
 
   const res = await fetch(`/api/ddg-search?${params.toString()}`);
   if (!res.ok) {

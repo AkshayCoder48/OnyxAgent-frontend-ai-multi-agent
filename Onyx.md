@@ -91,7 +91,7 @@ Scheduled scripts that append `sched-…`-id todos to `/home/user/todos.json` su
 | Tool | Use |
 |---|---|
 | **web_search** | Text web search (LangSearch if configured, else Miklium, with DuckDuckGo fallback). Titles, URLs, snippets. |
-| **image_search** / **video_search** | Find pictures / videos (DuckDuckGo first; auto-rescue engine when DDG blocks the host IP): URLs, thumbnails, sources. Cloud deployments can pin DDG egress to a relay they control via `DDG_PROXY_BASE` (turnkey one-file relay: `scripts/ddg-relay.mjs`), and visitors' public IPs are forwarded on DDG calls (`DDG_FORWARD_CLIENT_IP=false` to disable). |
+| **image_search** / **video_search** | Find pictures / videos (DuckDuckGo first; auto-rescue engine when DDG blocks the host IP): URLs, thumbnails, sources. DuckDuckGo calls execute INSIDE your acquired E2B sandbox — the handshake leaves from the sandbox's IP, so DDG serves results on cloud deployments (no E2B key → the Miklium rescue answers; a `DDG_PROXY_BASE` relay is the operator-controlled alternative). |
 | **web_fetch** | Read a URL's full text — the DEFAULT way to read pages; deep-read AFTER `web_search`. |
 | **use_browser** | ONLY for pages needing real interaction (click, type, login, JS); plain reading is `web_fetch`'s job. |
 

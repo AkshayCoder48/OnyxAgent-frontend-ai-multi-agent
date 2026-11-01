@@ -5,6 +5,16 @@
 // ddg" — web search runs on the Miklium Search API again (restored), while
 // image and video search stay on keyless DuckDuckGo.
 //
+// USER DIRECTIVE (2026-11-01): "make ddg use current acquired e2b sandbox's
+// ip; if e2b not configured then miklium works" — image/video DDG now runs
+// INSIDE the acquired E2B sandbox (src/lib/search/ddg-e2b.ts): the vqd →
+// i.js/v.js handshake executes there, so every duckduckgo.com request
+// leaves from the SANDBOX's IP — the one egress DDG's WAF serves (a plain
+// cloud-VM IP passes; Vercel's entire range — iad1/sin1/hkg1/fra1, all
+// live-verified 2026-11-01 — is blocked). The sandbox is reached through
+// the SAME /api/sandbox exec action the chat's code-execution tools use,
+// so search rides on the user's current acquired shared sandbox.
+//
 // Routing:
 //   - `web`: LangSearch first when the user's own API key is supplied (BYOK —
 //     decrypted from their settings on the client, sent per-request, never
@@ -12,42 +22,39 @@
 //     Yahoo-powered engine), then DuckDuckGo's keyless HTML SERP as the
 //     last-chance fallback. Every leg is optional: an engine that fails,
 //     rate-limits, or comes up empty just hands the query to the next one.
-//   - `image`: DuckDuckGo images via the in-house i.js client
-//     (src/lib/search/ddg-images.ts + the shared browser-grade vqd client
-//     in src/lib/search/ddg-vqd.ts) — no API key, no billing, no third-party
-//     package. DDG stays the PRIMARY image engine (user directive "for image
-//     keep ddg"). When DDG is unreachable or empty, Miklium's keyless
-//     images endpoint (src/lib/search/miklium-media.ts) takes over.
-//   - `video`: DuckDuckGo videos via the v.js JSON endpoint
-//     (src/lib/search/ddg-videos.ts) — same keyless vqd handshake; Miklium
-//     videos as the rescue engine, same as images.
+//   - `image`: (1) E2B key present (caller's e2b_api_key BYOK param or the
+//     server's E2B_API_KEY) → DuckDuckGo images executed inside the acquired
+//     sandbox, provider "ddg"; (2) no key but DDG_PROXY_BASE configured →
+//     the direct in-house i.js client through the operator's relay,
+//     provider "ddg"; (3) neither → Miklium images (provider "miklium").
+//     A sandbox/DDG failure or empty answer also falls to Miklium — the
+//     rescue that keeps image search alive when DDG is unreachable.
+//   - `video`: same shape on the v.js endpoint.
 //
-// WHY THE MIKLIUM MEDIA RESCUE EXISTS (the 2026-11-01 outage): DuckDuckGo's
-// anti-bot WAF hard-blocks shared datacenter egress IPs — on the Vercel
-// deployment EVERY image/video probe failed ("Image search is busy right
-// now…") while the same client served 50+ images from residential IPs.
-// The block targets the egress IP, not the client — so no npm package can
-// fix it (duck-duck-scrape, ddgs, @mudbill/… all hit the same endpoints
-// from the same blocked IP). Miklium, already the web engine, answers
-// images/videos from those same datacenter IPs (verified: 50 rows, ~1s),
-// so hosted deployments keep working image/video search while self-hosted
-// and CLI runs keep their DDG-first results.
+// WHY THE E2B LEG EXISTS (the 2026-11-01 outage): DuckDuckGo's anti-bot WAF
+// hard-blocks shared datacenter egress IPs — on the Vercel deployment EVERY
+// image/video probe failed ("Image search is busy right now…") while the
+// same client served 50+ images from residential IPs, and region-hopping
+// (iad1/sin1/hkg1/fra1) proved the block covers Vercel's whole range. The
+// block targets the egress IP, not the client — so no npm package can fix
+// it. The E2B sandbox is the app's own always-fresh cloud machine: its IP
+// is exactly the kind DDG serves. Miklium stays the rescue so deployments
+// without E2B configured keep working image/video search ("if e2b not
+// configured then miklium works").
 //
 // EGRESS CONTROL — "no datacenter IP involved" (user directive 2026-11-01):
 //   The caller's public IP is extracted from the request's proxy headers
-//   and FORWARDED on every DDG engine call (X-Forwarded-For / X-Real-IP /
+//   and FORWARDED on direct DDG engine calls (X-Forwarded-For / X-Real-IP /
 //   Forwarded — what a transparent proxy does; kill-switch
 //   DDG_FORWARD_CLIENT_IP=false). Live-verified honesty: a server cannot
 //   place a call from the user's IP (the TCP connection leaves from the
 //   server), the user's browser cannot fetch DDG JSON itself (duckduckgo.com
-//   serves NO CORS headers), and DDG's WAF IGNORES forwarded headers today
-//   (datacenter XFFs from an allowed IP sail through). The mechanism that
-//   genuinely removes the datacenter IP is DDG_PROXY_BASE — route the whole
-//   handshake through a deployer-controlled non-datacenter relay (home box,
-//   Tailscale exit, residential-proxy URL mode); provider then stays "ddg".
-//   Until one of those lifts the block, the Miklium rescue keeps results
-//   flowing — that is why hosted deployments report provider "miklium".
-//   All of this lives in src/lib/search/ddg-egress.ts.
+//   serves NO CORS headers), and DDG's WAF IGNORES forwarded headers today.
+//   The mechanisms that genuinely change the DDG egress IP, in priority
+//   order: the E2B sandbox leg (this route's primary), and DDG_PROXY_BASE —
+//   route the handshake through a deployer-controlled non-datacenter relay
+//   (scripts/ddg-relay.mjs is the turnkey one). All of this lives in
+//   src/lib/search/ddg-egress.ts and ddg-e2b.ts.
 //
 // Error contract (pinned by route.test.ts):
 //   - "No results" NEVER surfaces as an error: empty lists come back as
@@ -63,14 +70,15 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { searchDDGImages } from "@/lib/search/ddg-images";
+import { searchDDGImagesViaSandbox, searchDDGVideosViaSandbox } from "@/lib/search/ddg-e2b";
 import { searchDDGWeb } from "@/lib/search/ddg-web";
 import { searchDDGVideos } from "@/lib/search/ddg-videos";
 import { searchMikliumImages, searchMikliumVideos } from "@/lib/search/miklium-media";
-import { extractClientIp } from "@/lib/search/ddg-egress";
+import { extractClientIp, isDDGRelayConfigured } from "@/lib/search/ddg-egress";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 interface SearchResult {
   title: string;
@@ -281,6 +289,24 @@ async function searchWithRetry<T>(engine: () => Promise<T[]>): Promise<T[] | nul
   return null;
 }
 
+/**
+ * Absolute origin for the internal /api/sandbox POST (the E2B sandbox
+ * exec the DDG handshake rides on). APP_URL — the deployment's own public
+ * origin, which operators set for exactly this class of self-call — wins
+ * when parseable; the request's origin is the always-correct fallback.
+ */
+function sandboxOrigin(req: NextRequest): string {
+  const appUrl = process.env.APP_URL?.trim();
+  if (appUrl) {
+    try {
+      return new URL(appUrl).origin;
+    } catch {
+      // malformed APP_URL — fall through to the request's origin
+    }
+  }
+  return req.nextUrl.origin;
+}
+
 // ---- Main handler ----
 
 export async function GET(req: NextRequest) {
@@ -290,6 +316,17 @@ export async function GET(req: NextRequest) {
   const limitRaw = parseInt(searchParams.get("limit") || "10", 10);
   const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 10, 50);
   const langsearchKey = searchParams.get("langsearch_key") || "";
+
+  // E2B sandbox egress (user directive 2026-11-01: "make ddg use current
+  // acquired e2b sandbox's ip; if e2b not configured then miklium works").
+  // The caller's BYOK key (decrypted from their settings, forwarded
+  // per-request exactly like langsearch_key) wins; the server's E2B_API_KEY
+  // is the fallback. Absent both → the DDG legs are skipped entirely and
+  // Miklium serves image/video search.
+  const e2bApiKey =
+    (searchParams.get("e2b_api_key") || "").trim().slice(0, 200) ||
+    process.env.E2B_API_KEY?.trim() ||
+    "";
 
   if (!query.trim()) {
     return NextResponse.json({ error: "Query is required" }, { status: 400 });
@@ -362,15 +399,23 @@ export async function GET(req: NextRequest) {
         }
       }
     } else if (kind === "image") {
-      // Image search — DuckDuckGo PRIMARY (user directive: "for image keep
-      // ddg"), Miklium images as the RESCUE engine. DDG serves self-hosted
-      // / local runs; on shared datacenter egress (Vercel &c.) DDG's WAF
-      // blocks the vqd/i.js handshake outright, and Miklium — the same
-      // Yahoo-powered engine already serving web search from those IPs —
-      // answers images keylessly. No npm package escapes the IP block, so
-      // the rescue engine IS the fix for hosted deployments.
+      // Image search — DuckDuckGo executed INSIDE the acquired E2B sandbox
+      // (user directive 2026-11-01: DDG calls leave from the sandbox's IP,
+      // not the deployment's datacenter egress; a plain cloud-VM IP passes
+      // DDG's WAF while Vercel's whole range is blocked). No E2B key →
+      // Miklium. The direct engine only runs when the operator pinned it
+      // to a DDG_PROXY_BASE relay. Provider reports who actually answered.
       provider = "ddg";
-      const ddgRows = await searchWithRetry(() => searchDDGImages(query, limit, { clientIp }));
+      const ddgEngine = e2bApiKey
+        ? () =>
+            searchDDGImagesViaSandbox(query, limit, {
+              origin: sandboxOrigin(req),
+              apiKey: e2bApiKey,
+            })
+        : isDDGRelayConfigured()
+          ? () => searchDDGImages(query, limit, { clientIp })
+          : null;
+      const ddgRows = ddgEngine ? await searchWithRetry(ddgEngine) : null;
       if (ddgRows && ddgRows.length > 0) {
         results = ddgRows as unknown as SearchResult[];
       } else {
@@ -397,9 +442,19 @@ export async function GET(req: NextRequest) {
         }
       }
     } else {
-      // Video search — same shape: DDG v.js primary, Miklium videos rescue.
+      // Video search — same shape: DDG via the E2B sandbox's IP, Miklium
+      // videos rescue.
       provider = "ddg";
-      const ddgRows = await searchWithRetry(() => searchDDGVideos(query, limit, { clientIp }));
+      const ddgEngine = e2bApiKey
+        ? () =>
+            searchDDGVideosViaSandbox(query, limit, {
+              origin: sandboxOrigin(req),
+              apiKey: e2bApiKey,
+            })
+        : isDDGRelayConfigured()
+          ? () => searchDDGVideos(query, limit, { clientIp })
+          : null;
+      const ddgRows = ddgEngine ? await searchWithRetry(ddgEngine) : null;
       if (ddgRows && ddgRows.length > 0) {
         results = ddgRows as unknown as SearchResult[];
       } else {
