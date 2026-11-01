@@ -31,6 +31,7 @@ import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
+import { toolDisplayName } from "@/lib/tool-display-names";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
@@ -1006,7 +1007,10 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
                     ? "Run Python"
                     : !toolCall.name || toolCall.name.startsWith("pending-")
                       ? "Composing…"
-                      : toolCall.name;
+                      // PLAIN DISPLAY NAME (UI-only): unknown tools — user-created
+                      // custom tools included — render humanized ("Weather Fetch"),
+                      // never the raw snake_case. Execution names are untouched.
+                      : toolDisplayName(toolCall.name);
 
   const ToolIcon = isMediaGeneration
     ? Sparkles
