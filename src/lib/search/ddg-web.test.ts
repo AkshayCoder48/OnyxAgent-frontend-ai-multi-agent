@@ -146,6 +146,9 @@ describe("searchDDGWeb (network flow, mocked fetch)", () => {
     expect(calls[0].url).toBe("https://html.duckduckgo.com/html/");
     expect(calls[0].init?.method).toBe("POST");
     expect(String(calls[0].init?.body)).toContain("q=apollo+11");
+    // Safe-search OFF by default (kp=-1 — the same live-verified knob as
+    // i.js/v.js; operator directive 2026-11-01).
+    expect(String(calls[0].init?.body)).toContain("kp=-1");
     expect(out).toHaveLength(2);
     expect(out[0].url).toBe("https://en.wikipedia.org/wiki/Apollo_11");
   });

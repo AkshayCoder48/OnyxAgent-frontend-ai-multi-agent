@@ -30,8 +30,9 @@
  *   1. GET https://duckduckgo.com/?q=…&iax=images&ia=images  (browser-grade
  *      headers) → regex out the `vqd` session token.
  *   2. GET https://duckduckgo.com/i.js|v.js?o=json&q=…&l=us-en&vqd=…&f=,,,,
- *      &p=1 (safe-search on) → JSON rows; walk the `next` cursor up to 3
- *      pages (bulk, like ddg-images.ts).
+ *      &p=-1 (safe-search OFF by default — DDG_SAFE_SEARCH env controls it,
+ *      the same live-verified knob as the direct clients) → JSON rows; walk
+ *      the `next` cursor up to 3 pages (bulk, like ddg-images.ts).
  *   3. stdout: {"results":[…]} — raw DDG rows — or {"error":"token"|
  *      "blocked"|"bad-json","status":…} when the handshake failed. The
  *      script NEVER exits non-zero for a DDG-level failure; non-zero means
@@ -53,6 +54,7 @@
 
 import { normalizeDDGImages, type DDGImage, type DDGImageResult } from "./ddg-images";
 import { normalizeDDGVideos, type DDGVideo, type DDGVideoResult } from "./ddg-videos";
+import { ddgSafeSearchParam } from "./ddg-egress";
 
 // ---------------------------------------------------------------------------
 // The in-sandbox script (stdlib Python only)
@@ -70,6 +72,7 @@ const DDG_SANDBOX_SCRIPT = `import base64, gzip, json, os, re, sys, urllib.error
 
 Q = base64.b64decode(os.environ.get("DDG_B64", "")).decode("utf-8", "replace").strip()
 KIND = os.environ.get("DDG_KIND", "image")
+SAFE = "1" if os.environ.get("DDG_SAFE", "-1").strip() == "1" else "-1"
 try:
     LIMIT = max(1, min(150, int(os.environ.get("DDG_LIMIT", "30"))))
 except Exception:
@@ -143,7 +146,7 @@ start = 0
 pages = 0
 while pages < 3:
     qs = urllib.parse.urlencode(
-        {"o": "json", "q": Q, "l": "us-en", "vqd": VQD, "f": ",,,,", "p": "1", "s": start}
+        {"o": "json", "q": Q, "l": "us-en", "vqd": VQD, "f": ",,,,", "p": SAFE, "s": start}
     )
     status2, body = fetch("https://duckduckgo.com/" + endpoint + "?" + qs, XHR_HEADERS)
     if status2 != 200:
@@ -197,7 +200,9 @@ export interface DDGSandboxEgressOptions {
  * The env assignments MUST stay on the python3 command line (prefix form):
  * as separate lines they would be shell-LOCAL variables that never reach
  * the child process's environment (verified live — python3 saw an empty
- * DDG_B64 until they were joined onto the command).
+ * DDG_B64 until they were joined onto the command). DDG_SAFE is the
+ * safe-search flag ("1"/"-1") from ddgSafeSearchParam() — a validated
+ * literal, so the command line stays injection-safe.
  */
 export function buildDDGSandboxCommand(query: string, kind: "image" | "video", limit: number): string {
   const b64 = Buffer.from(query, "utf8").toString("base64");
@@ -205,8 +210,9 @@ export function buildDDGSandboxCommand(query: string, kind: "image" | "video", l
   // dedupes by image URL, and a starved pool shortchanges large limits
   // (the same lesson as the Miklium over-fetch fix).
   const fetchLimit = Math.min(Math.max(limit * 3, 30), 150);
+  const safe = ddgSafeSearchParam();
   return [
-    `DDG_B64='${b64}' DDG_KIND='${kind}' DDG_LIMIT='${fetchLimit}' python3 - <<'DDGPY'`,
+    `DDG_B64='${b64}' DDG_KIND='${kind}' DDG_LIMIT='${fetchLimit}' DDG_SAFE='${safe}' python3 - <<'DDGPY'`,
     DDG_SANDBOX_SCRIPT,
     "DDGPY",
   ].join("\n");

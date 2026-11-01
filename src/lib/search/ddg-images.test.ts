@@ -157,7 +157,7 @@ describe("searchDDGImages (in-house client flow, mocked network)", () => {
     );
     expect(calls[1][0]).toContain("/i.js");
     expect(calls[1][0]).toContain("vqd=4-32098503961658400691");
-    expect(calls[1][0]).toContain("p=1"); // safe search on
+    expect(calls[1][0]).toContain("p=-1"); // safe search OFF by default (unfiltered — the operator directive; live-verified 2026-11-01)
     expect((calls[1][1]?.headers as Record<string, string>)["X-Requested-With"]).toBe(
       "XMLHttpRequest",
     );
@@ -292,6 +292,25 @@ describe("searchDDGImages (in-house client flow, mocked network)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("SAFE SEARCH: DDG_SAFE_SEARCH=true switches i.js to the filtered p=1 leg", async () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const u = String(input);
+      calls.push([u, init]);
+      if (u.startsWith("https://duckduckgo.com/i.js")) {
+        return new Response(JSON.stringify({ results: [mkImage()], next: "" }), { status: 200 });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchDDGImages("cats", 5);
+
+    expect(calls[1][0]).toContain("p=1"); // filter re-enabled per-env
+    expect(calls[1][0]).not.toContain("p=-1");
   });
 
   it("EGRESS: forwards the caller's IP and routes via DDG_PROXY_BASE on every leg", async () => {

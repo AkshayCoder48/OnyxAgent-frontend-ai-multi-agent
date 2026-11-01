@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildForwardedHeaders,
+  ddgSafeSearchParam,
   ddgUrl,
   extractClientIp,
   isPublicIp,
@@ -22,6 +23,26 @@ import {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+
+describe("ddgSafeSearchParam (DDG_SAFE_SEARCH env)", () => {
+  it("defaults to OFF — p=-1, the live-verified unfiltered value (operator directive 2026-11-01)", () => {
+    expect(ddgSafeSearchParam()).toBe("-1");
+  });
+
+  it("accepts every truthy spelling as filter ON (p=1)", () => {
+    for (const truthy of ["true", "TRUE", "1", "yes", "on"]) {
+      vi.stubEnv("DDG_SAFE_SEARCH", truthy);
+      expect(ddgSafeSearchParam()).toBe("1");
+    }
+  });
+
+  it("treats explicit-off, garbage, and whitespace-only values as OFF", () => {
+    for (const off of ["false", "0", "no", "off", "banana", "   "]) {
+      vi.stubEnv("DDG_SAFE_SEARCH", off);
+      expect(ddgSafeSearchParam()).toBe("-1");
+    }
+  });
 });
 
 describe("isPublicIp (pure)", () => {

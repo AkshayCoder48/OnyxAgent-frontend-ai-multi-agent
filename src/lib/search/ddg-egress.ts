@@ -51,6 +51,14 @@
  * When DDG is unreachable either way, the Miklium rescue
  * (miklium-media.ts) keeps image/video search working — provider honestly
  * reports "miklium" for those rows.
+ *
+ * SAFE SEARCH (2026-11-01): DDG's `p` (i.js/v.js) and `kp` (html endpoint)
+ * flags are controlled by ONE env knob, DDG_SAFE_SEARCH — OFF by default
+ * ("p=-1"/"kp=-1", the live-verified unfiltered value; the app's operator
+ * directive: DDG must not filter results the way duckduckgo.com's own
+ * safe-search mode does). Set DDG_SAFE_SEARCH=true|1|yes|on to re-enable
+ * DDG's adult-content filter for a deployment. Read at CALL time like every
+ * other decision here so tests can stub it per-case.
  */
 
 // ---------------------------------------------------------------------------
@@ -121,6 +129,30 @@ export function ddgUrl(path: string): string {
  */
 export function isDDGRelayConfigured(): boolean {
   return relayBase() !== "";
+}
+
+// ---------------------------------------------------------------------------
+// Safe-search control (DDG_SAFE_SEARCH)
+// ---------------------------------------------------------------------------
+
+/** Truthy spellings accepted for the safe-search switch. */
+const SAFE_SEARCH_ENABLED = /^(true|1|yes|on)$/i;
+
+/**
+ * The DDG safe-search flag value for `p` (i.js/v.js) and `kp` (html endpoint)
+ * query params.
+ *
+ * "-1" (safe search OFF — unfiltered, the default per the operator
+ * directive; live-verified 2026-11-01: the identical handshake returns the
+ * full adult-inclusive row set with p=-1 and a sanitized one with p=1) or
+ * "1" (safe search ON — DDG filters adult content) depending on the
+ * DDG_SAFE_SEARCH env. Read at CALL time, never at module load, so tests can
+ * stub the env per-case.
+ */
+export function ddgSafeSearchParam(): string {
+  return SAFE_SEARCH_ENABLED.test(process.env.DDG_SAFE_SEARCH?.trim() ?? "")
+    ? "1"
+    : "-1";
 }
 
 // ---------------------------------------------------------------------------

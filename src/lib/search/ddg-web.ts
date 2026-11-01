@@ -195,6 +195,8 @@ function ddgTimeout(): Promise<never> {
   });
 }
 
+import { ddgSafeSearchParam } from "./ddg-egress";
+
 /**
  * Search DuckDuckGo's web index and normalize the results.
  *
@@ -205,7 +207,7 @@ function ddgTimeout(): Promise<never> {
  * to an EMPTY array.
  */
 export async function searchDDGWeb(query: string, limit: number): Promise<DDGWebResult[]> {
-  const body = new URLSearchParams({ q: query, kl: "wt-wt" }); // wt-wt = no region bias
+  const body = new URLSearchParams({ q: query, kl: "wt-wt", kp: ddgSafeSearchParam() }); // wt-wt = no region bias; kp = safe-search flag (off by default — see ddg-egress.ts)
   const res = await Promise.race([
     fetch("https://html.duckduckgo.com/html/", {
       method: "POST",

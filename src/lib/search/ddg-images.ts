@@ -39,7 +39,12 @@
  */
 
 import { DDGBlockedError, DDG_XHR_HEADERS, getVqdToken, isDDGBlocked } from "./ddg-vqd";
-import { buildForwardedHeaders, ddgUrl, type DDGEgressOptions } from "./ddg-egress";
+import {
+  buildForwardedHeaders,
+  ddgSafeSearchParam,
+  ddgUrl,
+  type DDGEgressOptions,
+} from "./ddg-egress";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,9 +143,11 @@ export function normalizeDDGImages(raw: DDGImage[], limit: number): DDGImageResu
 // Network layer
 // ---------------------------------------------------------------------------
 
-/** Safe search ON — filters adult content; the responsible default for an
- *  end-user product (one-word change to disable). */
-const DDG_SAFE_SEARCH = true;
+/** Safe-search flag for i.js — OFF by default (p=-1, unfiltered: DDG must
+ *  return the same rows duckduckgo.com serves with safe search disabled;
+ *  live-verified 2026-11-01 that the shipped p=1 silently stripped the
+ *  adult-content rows). DDG_SAFE_SEARCH=true turns the filter back on for
+ *  the whole deployment. See ddg-egress.ts. */
 
 /** Hard ceiling for the whole DDG round-trip (token + all i.js pages +
  *  retry). Live round-trips measure ~0.6s/page; the ceiling exists so a
@@ -204,7 +211,7 @@ async function fetchImagePage(
     l: "us-en",
     vqd,
     f: ",,,,",
-    p: DDG_SAFE_SEARCH ? "1" : "-1",
+    p: ddgSafeSearchParam(),
     s: String(start),
   });
   const res = await fetch(ddgUrl(`/i.js?${params.toString()}`), {

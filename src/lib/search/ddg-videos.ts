@@ -234,13 +234,10 @@ import {
   getVqdToken as getVqdTokenShared,
   isDDGBlocked,
 } from "./ddg-vqd";
-import { buildForwardedHeaders, ddgUrl, type DDGEgressOptions } from "./ddg-egress";
+import { buildForwardedHeaders, ddgSafeSearchParam, ddgUrl, type DDGEgressOptions } from "./ddg-egress";
 
 /** Backoff before the one soft-block retry — lets the WAF window breathe. */
 const RETRY_BACKOFF_MS = 600;
-
-/** Safe search ON — filters adult content; the responsible default. */
-const DDG_SAFE = true;
 
 /** Hard ceiling for the whole handshake (token + v.js + retry). */
 const DDG_TIMEOUT_MS = 8_000;
@@ -315,7 +312,7 @@ async function searchDDGVideosInner(
         l: "us-en",
         vqd: token,
         f: ",,,,",
-        p: DDG_SAFE ? "1" : "-1",
+        p: ddgSafeSearchParam(),
       });
       const res = await fetch(ddgUrl(`/v.js?${params.toString()}`), {
         headers: { ...DDG_XHR_HEADERS, ...buildForwardedHeaders(opts?.clientIp) },

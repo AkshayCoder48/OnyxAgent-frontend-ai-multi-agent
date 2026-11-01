@@ -81,6 +81,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 const OPTS = { origin: "https://app.example.com", apiKey: "e2b-test-key" };
@@ -89,15 +90,28 @@ describe("buildDDGSandboxCommand — injection safety", () => {
   it("carries the query ONLY as base64 (no raw text in the shell layer)", () => {
     const command = buildDDGSandboxCommand("cat'; rm -rf /; echo '", "image", 10);
     expect(command).not.toContain("rm -rf");
-    // base64 of the query is present, kind/limit are safe literals
-    expect(command).toMatch(/^DDG_B64='[A-Za-z0-9+/=]+' DDG_KIND='image' DDG_LIMIT='\d+' python3 - <<'DDGPY'$/m);
+    // base64 of the query is present, kind/limit/safe are safe literals
+    expect(command).toMatch(/^DDG_B64='[A-Za-z0-9+/=]+' DDG_KIND='image' DDG_LIMIT='\d+' DDG_SAFE='[\d-]+' python3 - <<'DDGPY'$/m);
   });
 
   it("keeps the env assignments ON the python3 command line (prefix form) — separate lines would be shell-LOCAL, never reaching the child's environment", () => {
     const command = buildDDGSandboxCommand("cat", "video", 5);
     const firstLine = command.split("\n")[0];
-    // One line: all three env vars prefix the python3 invocation.
-    expect(firstLine).toMatch(/^DDG_B64='[^']*' DDG_KIND='video' DDG_LIMIT='\d+' python3 - <<'DDGPY'$/);
+    // One line: all four env vars prefix the python3 invocation.
+    expect(firstLine).toMatch(/^DDG_B64='[^']*' DDG_KIND='video' DDG_LIMIT='\d+' DDG_SAFE='[\d-]+' python3 - <<'DDGPY'$/);
+  });
+
+  it("SAFE SEARCH: defaults to the unfiltered p=-1 leg (operator directive; live-verified 2026-11-01) and honors DDG_SAFE_SEARCH=true", () => {
+    const off = buildDDGSandboxCommand("cat", "image", 10);
+    expect(off).toContain("DDG_SAFE='-1'");
+    // the script maps the env to the i.js/v.js `p` param
+    expect(off).toContain('os.environ.get("DDG_SAFE"');
+    expect(off).toContain('"p": SAFE');
+
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    const on = buildDDGSandboxCommand("cat", "image", 10);
+    expect(on).toContain("DDG_SAFE='1'");
+    expect(on).not.toContain("DDG_SAFE='-1'");
   });
 
   it("wraps the script in a QUOTED heredoc (shell never expands it)", () => {

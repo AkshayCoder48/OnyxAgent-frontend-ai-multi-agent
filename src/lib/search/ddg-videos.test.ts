@@ -53,6 +53,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("youtubeThumbFor (pure)", () => {
@@ -220,7 +221,7 @@ describe("searchDDGVideos (network flow, mocked fetch)", () => {
     expect(calls[1]).toContain("https://duckduckgo.com/v.js?");
     expect(calls[1]).toContain("vqd=4-32098503961658400691");
     expect(calls[1]).toContain("q=apollo+landing");
-    expect(calls[1]).toContain("p=1"); // safe search on
+    expect(calls[1]).toContain("p=-1"); // safe search OFF by default (unfiltered — the operator directive; live-verified 2026-11-01)
 
     expect(out).toHaveLength(2);
     expect(out.every((r) => r.provider === "ddg")).toBe(true);
@@ -229,6 +230,25 @@ describe("searchDDGVideos (network flow, mocked fetch)", () => {
       videoUrl: "https://www.youtube.com/watch?v=ELalc0t9z9I",
       duration: "5:32",
     });
+  });
+
+  it("SAFE SEARCH: DDG_SAFE_SEARCH=true switches v.js to the filtered p=1 leg", async () => {
+    vi.stubEnv("DDG_SAFE_SEARCH", "true");
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const u = String(input);
+      calls.push(u);
+      if (u.startsWith("https://duckduckgo.com/v.js")) {
+        return new Response(JSON.stringify({ results: [], next: "" }), { status: 200 });
+      }
+      return new Response(SERP_HTML, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await searchDDGVideos("cats", 5);
+
+    expect(calls[1]).toContain("p=1"); // filter re-enabled per-env
+    expect(calls[1]).not.toContain("p=-1");
   });
 
   it("throws when the token page has no vqd token (sanitized upstream)", async () => {
