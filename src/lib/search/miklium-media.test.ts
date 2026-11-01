@@ -106,18 +106,22 @@ describe("searchMikliumImages", () => {
       source: "seaart.ai",
       provider: "miklium",
     });
-    // Request shape: type "images", maxResults clamped to the limit.
+    // Request shape: type "images", the FULL 50-row pool (over-fetch — the
+    // image index serves ~50% duplicate URLs, so the pool dedupes down to
+    // ~25 unique rows; slicing to `limit` happens after dedupe).
     expect(lastRequestBody(fetchMock)).toEqual({
       search: ["sunset"],
       type: "images",
-      maxResults: 10,
+      maxResults: 50,
     });
   });
 
-  it("caps maxResults at 50 (the live per-call ceiling)", async () => {
+  it("always requests the full 50-row pool — dedupe headroom (mr > 50 is rejected with HTTP 400, and the image index is ~50% duplicates)", async () => {
     const fetchMock = stubFetch(() => jsonResponse(imageFixture));
+    await searchMikliumImages("sunset", 5);
     await searchMikliumImages("sunset", 500);
     expect(lastRequestBody(fetchMock).maxResults).toBe(50);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("404 'No results found' → [] (empty outcome, never an error)", async () => {
@@ -231,7 +235,7 @@ describe("searchMikliumVideos", () => {
     expect(lastRequestBody(fetchMock)).toEqual({
       search: ["space launch"],
       type: "videos",
-      maxResults: 10,
+      maxResults: 50,
     });
   });
 

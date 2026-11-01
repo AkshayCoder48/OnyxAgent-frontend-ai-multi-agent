@@ -46,8 +46,13 @@
 /** Shared request ceiling — matches the /api/ddg-search route budget. */
 const REQUEST_TIMEOUT_MS = 9_000;
 
-/** Miklium answers 50 rows per media call (verified live); the route's
- *  public limit cap is also 50, so one call covers every bulk request. */
+/** Miklium answers 50 rows per media call (verified live: maxResults > 50
+ *  answers HTTP 400), and its IMAGE index serves ~50% duplicate image URLs
+ *  (same binary on multiple reference pages — verified: mr=50 → 25 unique).
+ *  So the engines always request the FULL 50-row pool — one call, same
+ *  latency — then dedupe and slice to `limit`. That keeps every limit ≤ ~25
+ *  fully served even after dedupe, and large bulk limits get the engine's
+ *  entire unique capacity. */
 const MAX_RESULTS_CAP = 50;
 
 // ---------------------------------------------------------------------------
@@ -128,7 +133,8 @@ async function postMikliumSearch(
     body: JSON.stringify({
       search: [query],
       type,
-      maxResults: Math.min(Math.max(limit, 1), MAX_RESULTS_CAP),
+      // Always pull the full pool — see MAX_RESULTS_CAP above.
+      maxResults: MAX_RESULTS_CAP,
     }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });

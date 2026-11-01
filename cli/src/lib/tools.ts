@@ -725,7 +725,11 @@ async function mikliumMediaSearch(
     fetch("https://miklium.vercel.app/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ search: [query], type, maxResults: Math.min(limit, 50) }),
+      // Always pull the full 50-row pool (mr > 50 is rejected with HTTP
+      // 400, and the image index serves ~50% duplicate image URLs — the
+      // pool dedupes to ~25 unique rows; slicing to `limit` happens after
+      // dedupe).
+      body: JSON.stringify({ search: [query], type, maxResults: 50 }),
     }),
     9_000,
     "Miklium media search",
