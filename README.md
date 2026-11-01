@@ -6,12 +6,21 @@
 
 A fully client-side AI assistant with 50+ tools, multi-agent orchestration, real-time streaming, sandbox code execution, and a beautiful glassmorphic UI — all running in the browser with zero backend.
 
-[![Deploy](https://img.shields.io/badge/Deploy-Vercel-000000?style=for-the-badge&logo=vercel)](https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent&env=E2B_API_KEY%2CE2B_TEMPLATE_ID%2CDATABASE_URL%2CAPP_URL%2CNEXT_PUBLIC_APP_URL%2CTAVILY_API_KEY%2CDDG_PROXY_BASE%2CDDG_RELAY_TOKEN%2CDDG_FORWARD_CLIENT_IP%3Dtrue%2CTRIGGER_CLOUD_KEY%2CTRIGGER_CLOUD_TASK_SLUG%2CTRIGGER_CLOUD_API_URL%2CTASKS_CLOUD_MASTER_KEY%2CTRIGGER_PROJECT_REF%2CTRIGGER_ACCESS_TOKEN&envDescription=All%20optional%20%E2%80%94%20OnyxAgent%20is%20BYOK-first%20%28add%20keys%20later%20in%20Settings%29.%20Pair%20DDG_PROXY_BASE%20with%20DDG_RELAY_TOKEN%20after%20running%20scripts%2Fddg-relay.mjs%20on%20any%20non-Vercel%20box%3B%20see%20DEPLOY.md.&envLink=https%3A%2F%2Fgithub.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent%2Fblob%2Fmain%2FDEPLOY.md&project-name=onyxagent&repository-name=onyxagent&demo-title=OnyxAgent&demo-description=Frontend-only%20AI%20multi-agent%20chat%20%E2%80%94%2050%2B%20tools%2C%20subagent%20orchestration%2C%20streaming%2C%20sandboxed%20execution%2C%20BYOK.&demo-url=https%3A%2F%2Fonyx-agent-frontend-ai-multi-agent-wine.vercel.app&demo-image=https%3A%2F%2Fraw.githubusercontent.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent%2Fmain%2Fscreenshots%2Factive-idx-fix-final-desktop.png)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-wine-000000?style=for-the-badge&logo=vercel)](https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app)
 [![Framework](https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=next.js)](https://nextjs.org)
 [![Language](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript)](https://typescriptlang.org)
 [![Styling](https://img.shields.io/badge/Tailwind-CSS4-06B6D4?style=for-the-badge&logo=tailwindcss)](https://tailwindcss.com)
 
 </div>
+
+---
+
+## 🚀 Deploy Your Own Instance
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent&env=E2B_API_KEY%2CE2B_TEMPLATE_ID%2CDATABASE_URL%2CAPP_URL%2CNEXT_PUBLIC_APP_URL%2CTAVILY_API_KEY%2CDDG_PROXY_BASE%2CDDG_RELAY_TOKEN%2CDDG_FORWARD_CLIENT_IP%3Dtrue%2CTRIGGER_CLOUD_KEY%2CTRIGGER_CLOUD_TASK_SLUG%2CTRIGGER_CLOUD_API_URL%2CTASKS_CLOUD_MASTER_KEY%2CTRIGGER_PROJECT_REF%2CTRIGGER_ACCESS_TOKEN&envDescription=All%20optional%20%E2%80%94%20OnyxAgent%20is%20BYOK-first%20%28add%20keys%20later%20in%20Settings%29.%20Pair%20DDG_PROXY_BASE%20with%20DDG_RELAY_TOKEN%20after%20running%20scripts%2Fddg-relay.mjs%20on%20any%20non-Vercel%20box%3B%20see%20DEPLOY.md.&envLink=https%3A%2F%2Fgithub.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent%2Fblob%2Fmain%2FDEPLOY.md&project-name=onyxagent&repository-name=onyxagent&demo-title=OnyxAgent&demo-description=Frontend-only%20AI%20multi-agent%20chat%20%E2%80%94%2050%2B%20tools%2C%20subagent%20orchestration%2C%20streaming%2C%20sandboxed%20execution%2C%20BYOK.&demo-url=https%3A%2F%2Fonyx-agent-frontend-ai-multi-agent-wine.vercel.app&demo-image=https%3A%2F%2Fraw.githubusercontent.com%2FAkshayCoder48%2FOnyxAgent-frontend-ai-multi-agent%2Fmain%2Fscreenshots%2Factive-idx-fix-final-desktop.png)
+
+One click clones the repo into your GitHub, creates the Vercel project, and prompts for **every** environment variable — all optional, the app is BYOK-first (users add their own keys in Settings after deploy). `DDG_PROXY_BASE` + `DDG_RELAY_TOKEN` flip DuckDuckGo search onto a non-Vercel relay so it answers with genuine `provider: ddg` results; the rest of the preset covers sandboxes, background tasks, and fallbacks. Full walkthrough: **[DEPLOY.md](DEPLOY.md)**.
 
 ---
 
@@ -311,7 +320,7 @@ cd cli && bun test
 
 <div align="center">
 
-**[Live Demo](https://my-project-livid-zeta-99.vercel.app)** · **[GitHub](https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent)**
+**[Live Demo](https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app)** · **[Deploy Your Own](DEPLOY.md)** · **[GitHub](https://github.com/AkshayCoder48/OnyxAgent-frontend-ai-multi-agent)**
 
 Built with ❤️ using Next.js, Tailwind CSS, and Zustand
 

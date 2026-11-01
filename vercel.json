@@ -1,6 +1,7 @@
 {
   "buildCommand": "next build",
   "framework": "nextjs",
+  "regions": ["sin1"],
   "functions": {
     "src/app/api/sandbox/route.ts": {
       "maxDuration": 300
