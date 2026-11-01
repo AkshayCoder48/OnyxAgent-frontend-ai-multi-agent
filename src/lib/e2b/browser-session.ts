@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Browser session manager (client side) — boots the sandbox-side browser
- * driver (CloakBrowser, humanize=True, persistent profile) over the
- * existing E2B infrastructure and shuttles commands to it through the
- * file protocol:
+ * Browser session manager (client side) — REIMPLEMENTATION (2026-11-01 PRD).
+ *
+ * Boots the sandbox-side browser driver (CloakBrowser, humanize=True,
+ * persistent profile) over the existing E2B infrastructure and shuttles
+ * commands to it through the file protocol:
  *
  *   write /home/user/.onyx/browser/driver.py   (the Python driver source)
  *   write /home/user/.onyx/browser/boot.sh     (installer + launcher)
@@ -12,67 +13,163 @@
  *   poll .boot-failed / .ready with short commands until up
  *   cmd.json → res-<id>.json round-trip per action
  *
- * WHY THE BOOT IS DETACHED: the pip install of the runtime needs minutes,
- * but the /api/sandbox route runs as a serverless function (Netlify) that
- * is hard-killed after seconds. A blocking install through exec_stream
- * dies mid-flight, the SSE stream closes WITHOUT a result event, and the
- * failure surfaced as a confusing "browser_startup_failed — Failed to
- * install the browser runtime in the sandbox" with no detail. The
- * sandbox VM itself keeps running for hours regardless of any HTTP
- * request — so boot.sh runs there under nohup (the same proven pattern
- * the driver daemon uses) and the client only POLLS with short-lived
- * commands until the boot reports ready or failed.
+ * ── WHAT THIS REWRITE FIXES (the "runs forever, no output" incident) ──────
  *
- * RECONNECTION (PRD §28): a dead driver (crash / sandbox hiccup) is
- * detected on command timeout — the manager re-boots it (the persistent
- * profile under ~/.onyx/browser/profile keeps cookies + localStorage, so
- * the restored session survives where possible) and replays the action
- * ONCE before reporting failure.
+ *  1. NO INFINITE HTTP WAITS. Every sandbox interaction here runs through
+ *     withTimeout(): the E2B client's fetch()-based methods carry NO
+ *     AbortSignal of their own, so a single stalled round-trip (serverless
+ *     cold start, proxy stall, E2B API hiccup) used to leave the tool call
+ *     hanging FOREVER — the deadline checks only ran BETWEEN polls. Now a
+ *     stalled call is abandoned after BROWSER_TIMEOUTS.httpCallMs and the
+ *     poll loop keeps progressing. The orphaned promise is left to be
+ *     reaped by the runtime; control ALWAYS returns.
+ *
+ *  2. PER-CLIENT SESSION STATE. The old module cached ONE global boot
+ *     promise and ONE global command queue — two conversations in
+ *     "separate" mode fought over them (cross-session interference), and
+ *     one wedged command blocked every later browser call globally. State
+ *     now lives in a WeakMap keyed by the sandbox client: isolated
+ *     boot/queue/first-action per agent session.
+ *
+ *  3. ZERO-STARTUP-DELAY PREPARE. The server kicks the detached
+ *     browser install AT SANDBOX CREATION (see /api/sandbox
+ *     createAndCacheSandbox); the client additionally calls
+ *     prepareBrowserInBackground() after sandbox creation/rotation. The
+ *     CloakBrowser download therefore runs WHILE the user chats — the
+ *     first use_browser call finds a ready browser instead of paying the
+ *     whole install behind its own timeout.
+ *
+ *  4. GUARANTEED STRUCTURED OUTPUT. sendBrowserCommand NEVER returns null
+ *     and NEVER rejects: boot failure, timeout, cancellation, sandbox
+ *     death and driver crashes all resolve to a structured result with a
+ *     readable `output` line. The agent always receives an answer.
+ *
+ *  5. CANCELLATION. An AbortSignal (the agent tool context's) stops the
+ *     poll loop and resolves with a cancelled result.
+ *
+ * RECONNECTION: a dead driver (crash / sandbox hiccup) is detected on
+ * command timeout — the manager re-boots it (the persistent profile under
+ * ~/.onyx/browser/profile keeps cookies + localStorage) and replays the
+ * action ONCE before reporting failure. The sandbox-side watchdog (see
+ * browser-driver.ts) guarantees the driver itself always answers.
  *
  * The AI-facing surface stays the single `use_browser` tool; this module
  * is the BrowserSessionManager + BrowserActionExecutor plumbing.
  */
 
-import { BROWSER_DRIVER_PY_SOURCE, BROWSER_DRIVER_VERSION } from "./browser-driver";
+import {
+  BROWSER_DRIVER_PY_SOURCE,
+  BROWSER_DRIVER_VERSION,
+  BROWSER_BOOT_SH_SOURCE,
+  BROWSER_SANDBOX_PATHS,
+} from "./browser-driver";
+
+const BR_DIR = BROWSER_SANDBOX_PATHS.dir;
+const DRIVER_PATH = BROWSER_SANDBOX_PATHS.driver;
+const READY_PATH = BROWSER_SANDBOX_PATHS.ready;
+const VERSION_PATH = BROWSER_SANDBOX_PATHS.version;
+const CMD_PATH = BROWSER_SANDBOX_PATHS.cmd;
+const BOOT_SH_PATH = BROWSER_SANDBOX_PATHS.bootSh;
+const BOOT_LOG_PATH = BROWSER_SANDBOX_PATHS.bootLog;
+const INSTALL_LOG_PATH = BROWSER_SANDBOX_PATHS.installLog;
+const BOOT_FAIL_PATH = BROWSER_SANDBOX_PATHS.bootFailed;
 
 // ---------------------------------------------------------------------------
-// Paths (must match browser-driver.ts).
+// Timeout configuration (PRD §6: configurable, never hardcode scattered
+// limits). Exported for tests; treat as read-only in app code.
 // ---------------------------------------------------------------------------
 
-const BR_DIR = "/home/user/.onyx/browser";
-const DRIVER_PATH = `${BR_DIR}/driver.py`;
-const READY_PATH = `${BR_DIR}/.ready`;
-const VERSION_PATH = `${BR_DIR}/.version`;
-const CMD_PATH = `${BR_DIR}/cmd.json`;
-// driver.log (the daemon's own log) is written by boot.sh's redirect — no
-// client-side reference needed anymore.
-const BOOT_SH_PATH = `${BR_DIR}/boot.sh`;
-const BOOT_LOG_PATH = `${BR_DIR}/boot.log`;
-const INSTALL_LOG_PATH = `${BR_DIR}/boot-install.log`;
-const BOOT_FAIL_PATH = `${BR_DIR}/.boot-failed`;
+export const BROWSER_TIMEOUTS = {
+  /** Ceiling for ONE sandbox HTTP round-trip (exec poll / file read /
+   *  write). A stalled call is abandoned after this — the loop keeps
+   *  progressing instead of hanging the tool call forever. */
+  httpCallMs: 25_000,
+  /** Boot-poll ceiling when the runtime is ALREADY importable (the
+   *  onyx-cloakbrowser template, or a warm sandbox that installed it
+   *  earlier) — the driver starts in seconds; anything past this window
+   *  means the sandbox is wedged. */
+  bootPollFastMs: 2 * 60_000,
+  /** Boot-poll ceiling for a cold install (pip ladder + ~200 MB binary
+   *  pre-fetch legitimately takes minutes on a slow sandbox network;
+   *  each poll is a short request, the install itself runs in the
+   *  sandbox). With the creation-time prepare kick this window is usually
+   *  already elapsed before the first tool call ever arrives. */
+  bootPollColdMs: 10 * 60_000,
+  /** Default per-action ceiling (client side). Driver-side budgets are
+   *  smaller so the DRIVER answers first with the better error. */
+  actionDefaultMs: 105_000,
+  /** Consecutive failed polls before declaring the sandbox unreachable. */
+  maxConsecutivePollFailures: 6,
+  /** Delay between boot polls. */
+  bootPollIntervalMs: 1_500,
+  /** Delay between result-file polls. */
+  resultPollIntervalMs: 500,
+} as const;
 
-/** First action ceiling — with the boot-time PREBOOT (see BOOT_SH_SOURCE)
- *  the browser is already up when the driver reports READY, so this is a
- *  safety net, not the expected path. */
-const FIRST_BOOT_TIMEOUT_MS = 6 * 60_000;
-/** Detached-boot polling ceiling when the runtime must be installed first
- *  (cold pip install + ~200 MB binary pre-fetch legitimately takes minutes
- *  on a slow sandbox network; each poll is a short request, the install
- *  itself runs in the sandbox). */
-const BOOT_POLL_TIMEOUT_MS = 10 * 60_000;
-/** Polling ceiling when the runtime is ALREADY importable (the
- *  onyx-cloakbrowser template, or a warm sandbox that installed it
- *  earlier) — the driver starts in seconds and the preboot browser launch
- *  in a few more; anything past this window means the sandbox is wedged. */
-const FAST_BOOT_POLL_TIMEOUT_MS = 2 * 60_000;
-/** Usual per-action ceiling. */
-const DEFAULT_ACTION_TIMEOUT_MS = 90_000;
-/** Consecutive failed polls before declaring the sandbox unreachable. A
- *  dead/paused/out-of-quota sandbox used to spin the FULL boot window with
- *  every poll silently swallowed (`.catch(() => null)`) and then time out
- *  with the diagnostic-free "No boot output was captured" — the exact
- *  browser_startup_failed the users hit after 6-10 silent minutes. */
-const MAX_CONSECUTIVE_POLL_FAILURES = 6;
+/**
+ * @internal — TEST HOOK. When a key is set here it overrides
+ * BROWSER_TIMEOUTS for every timing read in this module, so tests can
+ * shrink deadlines to milliseconds and verify the no-infinite-wait
+ * guarantees quickly. App code never touches it.
+ */
+export const __browserTimeoutsOverride: Partial<
+  Record<keyof typeof BROWSER_TIMEOUTS | "streamDeadline", number>
+> = {};
+
+const t_ = <K extends keyof typeof BROWSER_TIMEOUTS>(k: K): number =>
+  (__browserTimeoutsOverride[k] ?? BROWSER_TIMEOUTS[k]);
+
+// ---------------------------------------------------------------------------
+// Timeout helper — the heart of the "no infinite waits" guarantee.
+// ---------------------------------------------------------------------------
+
+class DeadlineReached extends Error {
+  constructor(label: string, ms: number) {
+    super(`${label} did not complete within ${Math.round(ms / 1000)}s`);
+    this.name = "DeadlineReached";
+  }
+}
+
+/**
+ * Race a promise against a hard timer. The underlying work is NOT
+ * abortable through the E2B client interface (its fetch calls accept no
+ * signal), so the orphaned promise is simply left behind — what matters
+ * is that CONTROL returns to the caller so the tool call keeps
+ * progressing toward a structured result.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new DeadlineReached(label, ms)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Wait, but wake early when the signal aborts. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      signal?.removeEventListener("abort", done);
+      clearTimeout(t);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Client surface + result contract
+// ---------------------------------------------------------------------------
 
 /** Minimal client surface this manager needs (E2BClient implements it). */
 export interface BrowserSandboxClient {
@@ -87,12 +184,18 @@ export interface BrowserSandboxClient {
 export interface BrowserCommandResult {
   success?: boolean;
   action?: string;
+  /** ALWAYS present in results from sendBrowserCommand — a human-readable
+   *  one-line summary the chat UI renders directly (PRD §5: never an
+   *  empty successful response). */
+  output?: string;
+  url?: string;
+  title?: string;
   error?: { type: string; message: string; recoverable?: boolean };
   [k: string]: unknown;
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox exec helper (collects the stream).
+// Sandbox exec helper (collects the stream; EVERY call deadline-bounded).
 // ---------------------------------------------------------------------------
 
 async function execInSandbox(
@@ -104,7 +207,24 @@ async function execInSandbox(
   let err = "";
   let exit = 0;
   try {
-    for await (const chunk of client.runCommandStream(command, { timeout: timeoutSec })) {
+    const stream = client.runCommandStream(command, { timeout: timeoutSec });
+    // Bound the WHOLE stream consumption — a fetch that never yields a
+    // result event (hung serverless connection) must not hang us forever.
+    // The floor keeps legitimate silent commands (up to their own E2B
+    // timeout) alive; the test hook shrinks it for fast verification.
+    const deadlineMs =
+      (__browserTimeoutsOverride.streamDeadline ?? 0) ||
+      Math.max(t_("httpCallMs"), timeoutSec * 1000 + 5_000);
+    const chunks = await withTimeout(
+      (async () => {
+        const parts: Array<{ type: string; data?: string; exit_code?: number }> = [];
+        for await (const c of stream) parts.push(c);
+        return parts;
+      })(),
+      deadlineMs,
+      "sandbox command stream",
+    );
+    for (const chunk of chunks) {
       if (chunk.type === "stdout" && chunk.data) out += chunk.data;
       else if (chunk.type === "stderr" && chunk.data) err += chunk.data;
       else if (chunk.type === "result") exit = chunk.exit_code ?? 0;
@@ -116,163 +236,83 @@ async function execInSandbox(
 }
 
 // ---------------------------------------------------------------------------
-// Driver boot (serialized — concurrent tool calls must not double-boot).
+// Per-client session state (PRD §9: isolated browser sessions per agent).
 // ---------------------------------------------------------------------------
 
-let bootPromise: Promise<{ ok: true } | { ok: false; error: string }> | null = null;
-
-/** True once a first browser action has completed (binary already fetched). */
-let firstActionDone = false;
-
-export function browserFirstActionDone(): boolean {
-  return firstActionDone;
+interface BrowserSessionState {
+  /** In-flight (or cached-successful) driver boot for THIS sandbox. */
+  bootPromise: Promise<{ ok: true } | { ok: false; error: string }> | null;
+  /** Background prepare already kicked for this client. */
+  prepared: boolean;
+  /** True once a browser action completed against this sandbox (the
+   *  runtime + binaries are warm). */
+  firstActionDone: boolean;
+  /** Serialized command queue — one action at a time, matching the
+   *  driver's single-threaded loop. Per-client, so one chat can never
+   *  block another. */
+  queueTail: Promise<unknown>;
 }
 
+const sessionsHolder: { map: WeakMap<object, BrowserSessionState> } = { map: new WeakMap() };
+
+function sessionOf(client: BrowserSandboxClient): BrowserSessionState {
+  let s = sessionsHolder.map.get(client);
+  if (!s) {
+    s = { bootPromise: null, prepared: false, firstActionDone: false, queueTail: Promise.resolve() };
+    sessionsHolder.map.set(client, s);
+  }
+  return s;
+}
+
+function enqueue<T>(state: BrowserSessionState, task: () => Promise<T>): Promise<T> {
+  const run = state.queueTail.then(task, task);
+  state.queueTail = run.catch(() => undefined);
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// Driver liveness / version checks (each bounded by withTimeout).
+// ---------------------------------------------------------------------------
+
 async function driverAlive(client: BrowserSandboxClient): Promise<boolean> {
-  const r = await execInSandbox(
-    client,
-    `test -f ${READY_PATH} && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO`,
-    30,
-  );
-  return r.ok && r.output.trim() === "READY";
+  try {
+    const r = await withTimeout(
+      execInSandbox(
+        client,
+        `test -f ${READY_PATH} && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO`,
+        30,
+      ),
+      t_("httpCallMs") + 35_000,
+      "driver liveness probe",
+    );
+    return r.ok && r.output.trim() === "READY";
+  } catch {
+    return false;
+  }
 }
 
 /**
  * True when the RUNNING driver's version stamp matches this build's
  * BROWSER_DRIVER_PY_SOURCE. A live driver with an old/missing stamp runs
- * stale code — per-command errors never kill the daemon (the active_idx
- * UnboundLocalError kept "recoverable"-failing every action forever), so
- * the caller must kill + redeploy it instead of reusing it.
+ * stale code — per-command errors never kill the daemon, so the caller
+ * must kill + redeploy it instead of reusing it.
  */
 async function driverUpToDate(client: BrowserSandboxClient): Promise<boolean> {
-  const r = await execInSandbox(client, `cat ${VERSION_PATH} 2>/dev/null`, 15);
-  return r.ok && r.output.trim() === BROWSER_DRIVER_VERSION;
+  try {
+    const r = await withTimeout(
+      execInSandbox(client, `cat ${VERSION_PATH} 2>/dev/null`, 15),
+      t_("httpCallMs") + 20_000,
+      "driver version probe",
+    );
+    return r.ok && r.output.trim() === BROWSER_DRIVER_VERSION;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Detached boot script (runs INSIDE the sandbox under nohup).
+// Boot poll commands (same contract as boot.sh: BOOT_FAILED | READY | progress).
 // ---------------------------------------------------------------------------
-
-/**
- * boot.sh — the sandbox-side installer + daemon launcher. Runs detached
- * (`nohup bash boot.sh > boot.log 2>&1 &`) so it survives the HTTP request
- * that spawned it and any serverless function timeout behind that request.
- *
- * Contract with the polling client (see ensureBrowserDriver):
- *   .boot-failed  — FATAL: written with the pip log tail when the runtime
- *                   could not be installed; the client surfaces it verbatim.
- *   .ready        — SUCCESS: written by driver.py when its command loop is
- *                   up (the driver itself is launched by this script).
- *   boot.log      — human-readable progress lines the client narrates live.
- *
- * Install ladder (first success wins). CRITICAL: pip and the import probe
- * MUST target the SAME interpreter — on the E2B code-interpreter template
- * a bare `pip` can install into a different Python than `python3` (the
- * kernel venv vs the system interpreter), so the install "succeeded" while
- * `python3 -c "import cloakbrowser"` failed on every ladder attempt (the
- * recurring browser_startup_failed). `python3 -m pip` is therefore the
- * PRIMARY resolver — bare pip is only a last resort. No `| tail` on the
- * pip calls — a pipe would mask pip's exit code; success is verified with
- * the import probe instead, and probe failures log the actual ImportError
- * so boot-install.log always says WHY.
- */
-const BOOT_SH_SOURCE = `#!/bin/bash
-# Onyx sandbox browser boot — DETACHED installer + daemon launcher.
-cd "$(dirname "$0")" || exit 1
-
-log() { echo "[boot \$(date +%H:%M:%S)] \$*"; }
-
-# Resolve the interpreter FIRST — every pip call AND the probe use it.
-PY="python3"
-command -v python3 >/dev/null 2>&1 || PY="python3.12"
-command -v "\$PY" >/dev/null 2>&1 || PY="python"
-log "interpreter: \$PY (\$(\$PY -V 2>&1)) at \$(command -v \$PY)"
-
-# pip MODULE of THAT interpreter (never a bare pip binary first — it can
-# target a different site-packages than \$PY reads).
-if ! "\$PY" -m pip --version >/dev/null 2>&1; then
-  log "\$PY -m pip unavailable — falling back to pip3/pip"
-  PIP="pip3"
-  command -v pip3 >/dev/null 2>&1 || PIP="pip"
-else
-  PIP="\$PY -m pip"
-fi
-
-# One boot at a time: a still-running earlier boot (e.g. the client timed
-# out waiting and retried) owns this sandbox — let it finish; the client's
-# poll sees the same .ready either way.
-if [ -f .boot-lock ] && kill -0 "\$(cat .boot-lock 2>/dev/null)" 2>/dev/null; then
-  log "another boot is already running (pid \$(cat .boot-lock)) — exiting"
-  exit 0
-fi
-echo \$\$ > .boot-lock
-
-log "checking the browser runtime…"
-fresh_install=0
-if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
-  log "browser runtime already installed"
-else
-  fresh_install=1
-  log "installing the browser runtime (first run — can take a few minutes)…"
-  ok=0
-  for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
-    log "\$PIP install \${flags:-default}: cloakbrowser==0.6.1 playwright"
-    if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
-      log "pip exited 0 (\${flags:-default}) — verifying the import…"
-      if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
-        ok=1
-        log "browser runtime installed and importable"
-        break
-      else
-        log "import probe FAILED after a successful pip run — interpreter mismatch (see boot-install.log)"
-      fi
-    else
-      log "pip run failed (\${flags:-default}) — trying the next variant"
-    fi
-  done
-  if [ "\$ok" != "1" ]; then
-    {
-      echo "pip could not install cloakbrowser==0.6.1 + playwright into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
-      echo "---- probe error ----"
-      "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
-      echo "---- last 40 lines of boot-install.log ----"
-      tail -n 40 boot-install.log 2>/dev/null
-    } > .boot-failed
-    log "FATAL: browser runtime install failed (details in .boot-failed)"
-    exit 1
-  fi
-fi
-
-# BINARY PRE-FETCH (browser_startup_failed fix): after a FRESH install the
-# ~200 MB browser binaries are still missing — fetch them HERE (inside the
-# detached, narrated boot window) instead of letting the first use_browser
-# action pay the download behind its own action timeout. Best-effort: a
-# failed pre-fetch degrades to the old lazy-download behavior.
-if [ "\$fresh_install" = "1" ]; then
-  log "pre-fetching the browser binaries (~200 MB — the slow part of a cold boot)…"
-  if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
-    log "stealth Chromium binary cached — the browser will launch instantly"
-  else
-    log "cloakbrowser binary pre-fetch failed — the driver will download it on first launch"
-  fi
-  if "\$PY" -m playwright install chromium >> boot-install.log 2>&1; then
-    log "stock Chromium (fallback runtime) cached"
-  else
-    log "playwright chromium pre-fetch failed — the fallback will self-install if needed"
-  fi
-fi
-
-# PREBOOT MARKER: driver.py boots the BROWSER (the expensive part) before
-# it writes .ready, so "boot done" means "browser USABLE": the first
-# action no longer hides a ~200 MB download behind its own timeout, and a
-# boot failure surfaces in the boot poll instead of an action timeout.
-: > .preboot
-
-log "starting the browser driver…"
-rm -f .ready
-nohup "\$PY" driver.py > driver.log 2>&1 &
-log "driver launched (pid \$!) — it will preboot the browser before reporting ready"
-`;
 
 /** One short-lived sandbox command that answers the whole boot state:
  *  the failure marker (+ its contents), READY, or the latest progress line
@@ -296,18 +336,19 @@ const RUNTIME_PROBE_CMD = [
 ].join("; ");
 
 /**
- * Install + boot the browser driver in the sandbox. Idempotent + cached:
- * a live driver CURRENT on version is left alone; a live STALE driver (old
- * code) is killed + redeployed so fixes actually reach running sandboxes;
- * a failed boot drops the cache so the next call retries. `onProgress`
- * receives human narration for the tool UI.
+ * Install + boot the browser driver in the sandbox. Idempotent + cached
+ * PER CLIENT: a live driver CURRENT on version is left alone; a live
+ * STALE driver (old code) is killed + redeployed so fixes actually reach
+ * running sandboxes; a failed boot drops the cache so the next call
+ * retries. `onProgress` receives human narration for the tool UI.
  */
 export async function ensureBrowserDriver(
   client: BrowserSandboxClient,
   onProgress?: (line: string) => void,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!bootPromise) {
-    bootPromise = (async () => {
+  const state = sessionOf(client);
+  if (!state.bootPromise) {
+    state.bootPromise = (async () => {
       try {
         if (await driverAlive(client)) {
           if (await driverUpToDate(client)) return { ok: true };
@@ -319,51 +360,64 @@ export async function ensureBrowserDriver(
             client,
             `pkill -f "[d]river.py"; sleep 1; rm -f ${READY_PATH} ${VERSION_PATH}`,
             20,
-          );
+          ).catch(() => undefined);
         } else {
           // Not alive — clear any stale stamps from a dead run so the
           // version check after boot compares against fresh state.
-          await execInSandbox(client, `rm -f ${VERSION_PATH}`, 15);
+          await execInSandbox(client, `rm -f ${VERSION_PATH}`, 15).catch(() => undefined);
         }
         onProgress?.("Preparing the sandbox browser runtime…");
-        await execInSandbox(
-          client,
-          `mkdir -p ${BR_DIR}/shots ${BR_DIR}/profile /home/user/downloads`,
-          20,
+        await withTimeout(
+          execInSandbox(
+            client,
+            `mkdir -p ${BR_DIR}/shots ${BR_DIR}/profile /home/user/downloads`,
+            20,
+          ),
+          t_("httpCallMs"),
+          "workspace dir setup",
         );
-        await client.writeFile(DRIVER_PATH, BROWSER_DRIVER_PY_SOURCE);
-        await client.writeFile(BOOT_SH_PATH, BOOT_SH_SOURCE);
+        await withTimeout(client.writeFile(DRIVER_PATH, BROWSER_DRIVER_PY_SOURCE), t_("httpCallMs"), "driver deploy");
+        await withTimeout(client.writeFile(BOOT_SH_PATH, BROWSER_BOOT_SH_SOURCE), t_("httpCallMs"), "boot script deploy");
         // Clear the last boot's markers so the polls below read fresh state.
         await execInSandbox(
           client,
           `rm -f ${READY_PATH} ${BOOT_FAIL_PATH} ${BOOT_LOG_PATH}`,
           15,
-        );
+        ).catch(() => undefined);
 
-        // PRE-FLIGHT RUNTIME PROBE (browser_startup_failed fix): pick a
-        // poll window that matches reality instead of a fixed 6 minutes for
-        // everyone. A template-warm sandbox (onyx-cloakbrowser) or a sandbox
-        // that already installed the runtime boots in seconds → tight
-        // ceiling, wedged sandboxes fail fast. A cold install legitimately
-        // needs minutes (pip ladder + ~200 MB binary pre-fetch) → honest
-        // ceiling + honest narration.
-        const probe = await execInSandbox(client, RUNTIME_PROBE_CMD, 30).catch(() => null);
+        // PRE-FLIGHT RUNTIME PROBE: pick a poll window that matches
+        // reality instead of a fixed ceiling for everyone. A template-warm
+        // sandbox (onyx-cloakbrowser) boots in seconds → tight ceiling,
+        // wedged sandboxes fail fast. A cold install legitimately needs
+        // minutes (pip ladder + ~200 MB binary pre-fetch) → honest ceiling
+        // + honest narration.
+        const probe = await withTimeout(
+          execInSandbox(client, RUNTIME_PROBE_CMD, 30),
+          t_("httpCallMs") + 35_000,
+          "runtime probe",
+        ).catch(() => null);
         const runtimePresent = (probe?.output ?? "").includes("RUNTIME_PRESENT");
-        const pollCeilingMs = runtimePresent ? FAST_BOOT_POLL_TIMEOUT_MS : BOOT_POLL_TIMEOUT_MS;
+        const pollCeilingMs = runtimePresent
+          ? t_("bootPollFastMs")
+          : t_("bootPollColdMs");
         onProgress?.(
           runtimePresent
             ? "Browser runtime found in the sandbox — starting the browser driver…"
-            : "No browser runtime in this sandbox — installing cloakbrowser + playwright and pre-fetching the stealth Chromium binary (first run only, up to ~10 minutes)…",
+            : "No browser runtime in this sandbox yet — installing cloakbrowser + playwright and pre-fetching the stealth Chromium binary (first run only, up to ~10 minutes)…",
         );
 
-        // DETACHED BOOT (the fix for browser_startup_failed on serverless):
-        // launch boot.sh under nohup INSIDE the sandbox — the sandbox VM
-        // outlives any HTTP request, so the minutes-long pip install can
-        // actually finish. The client only polls (short requests) below.
-        const launched = await execInSandbox(
-          client,
-          `cd ${BR_DIR} && nohup bash boot.sh > ${BOOT_LOG_PATH} 2>&1 & echo booting`,
-          20,
+        // DETACHED BOOT: launch boot.sh under nohup INSIDE the sandbox —
+        // the sandbox VM outlives any HTTP request, so the minutes-long
+        // pip install can actually finish. The client only polls (short
+        // requests) below.
+        const launched = await withTimeout(
+          execInSandbox(
+            client,
+            `cd ${BR_DIR} && nohup bash boot.sh > ${BOOT_LOG_PATH} 2>&1 & echo booting`,
+            20,
+          ),
+          t_("httpCallMs"),
+          "boot launch",
         );
         if (!launched.output.includes("booting")) {
           return {
@@ -377,24 +431,33 @@ export async function ensureBrowserDriver(
         let consecutivePollFailures = 0;
         let lastPollError = "";
         while (Date.now() < deadline) {
-          const poll = await execInSandbox(client, BOOT_POLL_CMD, 30).catch((e) => {
+          let poll: Awaited<ReturnType<typeof execInSandbox>> | null = null;
+          try {
+            poll = await withTimeout(
+              execInSandbox(client, BOOT_POLL_CMD, 30),
+              t_("httpCallMs") + 35_000,
+              "boot poll",
+            );
+          } catch (e) {
             lastPollError = e instanceof Error ? e.message : String(e);
-            return null;
-          });
-          if (poll === null) {
-            // SANDBOX-UNREACHABLE FAST-FAIL (the "No boot output was
-            // captured" fix): a dead/paused/out-of-quota sandbox used to
-            // swallow every poll for the FULL window and then time out with
-            // zero diagnostic value. Consecutive failures mean the sandbox
-            // itself (not the boot) is the problem — say so and stop early.
+            poll = null;
+          }
+          // A poll that FAILED (execInSandbox returns ok:false — a stream
+          // deadline, an E2B error — or threw) counts toward the cap: a
+          // dead/paused/out-of-quota sandbox used to swallow every poll
+          // for the FULL window and then time out with zero diagnostic
+          // value. Consecutive failures mean the sandbox itself (not the
+          // boot) is the problem — say so and stop early.
+          if (poll === null || !poll.ok) {
+            if (poll !== null) lastPollError = (poll.error || poll.output || lastPollError).slice(-200);
             consecutivePollFailures += 1;
-            if (consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+            if (consecutivePollFailures >= t_("maxConsecutivePollFailures")) {
               return {
                 ok: false,
-                error: `The sandbox stopped responding while the browser was booting (${MAX_CONSECUTIVE_POLL_FAILURES} consecutive poll failures${lastPollError ? ` — last error: ${lastPollError.slice(-200)}` : ""}). It may be paused, out of quota, or the E2B connection dropped. Retry the action; if it persists, restart the sandbox session.`,
+                error: `The sandbox stopped responding while the browser was booting (${t_("maxConsecutivePollFailures")} consecutive poll failures${lastPollError ? ` — last error: ${lastPollError.slice(-200)}` : ""}). It may be paused, out of quota, or the E2B connection dropped. Retry the action; if it persists, restart the sandbox session.`,
               };
             }
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, t_("bootPollIntervalMs")));
             continue;
           }
           consecutivePollFailures = 0;
@@ -413,51 +476,71 @@ export async function ensureBrowserDriver(
             lastProgress = out;
             onProgress?.(out);
           }
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, t_("bootPollIntervalMs")));
         }
         const [bootLog, installLog] = await Promise.all([
-          client.readFile(BOOT_LOG_PATH).catch(() => ""),
-          client.readFile(INSTALL_LOG_PATH).catch(() => ""),
+          withTimeout(client.readFile(BOOT_LOG_PATH), t_("httpCallMs"), "boot log read").catch(() => ""),
+          withTimeout(client.readFile(INSTALL_LOG_PATH), t_("httpCallMs"), "install log read").catch(() => ""),
         ]);
         const tail = `${bootLog ? ` Boot log: ${bootLog.slice(-300)}` : ""}${installLog ? ` Install log: ${installLog.slice(-300)}` : ""}`;
         return {
           ok: false,
-          error: `The sandbox browser runtime did not finish booting within ${Math.round(pollCeilingMs / 60_000)} minutes.${tail || " No boot output was captured."} Tip: build the custom sandbox template (see e2b-template/README.md — “e2b template build -c e2b-template/Dockerfile -n onyx-cloakbrowser”) and set E2B_TEMPLATE_ID so every sandbox starts browser-ready and boots in seconds instead of installing at runtime.`,
+          error: `The sandbox browser runtime did not finish booting within ${Math.round(pollCeilingMs / 60_000)} minutes.${tail || " No boot output was captured."} Tip: build the custom sandbox template (bash scripts/build-browser-sandbox-template.sh, then set E2B_TEMPLATE_ID=onyx-cloakbrowser) so every sandbox starts browser-ready and boots in seconds instead of installing at runtime.`,
         };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     })();
-    const result = await bootPromise;
-    if (!result.ok) bootPromise = null; // transient failure → retry next call
+    const result = await state.bootPromise;
+    if (!result.ok) state.bootPromise = null; // transient failure → retry next call
     return result;
   }
-  return bootPromise;
+  return state.bootPromise;
 }
 
 // ---------------------------------------------------------------------------
-// Command round-trip (serialized queue — one action at a time, matching
-// the driver's single-threaded loop).
+// Background prepare — the zero-startup-delay kick (PRD §3).
 // ---------------------------------------------------------------------------
 
-let queueTail: Promise<unknown> = Promise.resolve();
-
-function enqueue<T>(task: () => Promise<T>): Promise<T> {
-  const run = queueTail.then(task, task);
-  queueTail = run.catch(() => undefined);
-  return run;
+/**
+ * Kick the browser boot WITHOUT waiting for it. Called at sandbox creation
+ * and after sandbox rotation (see sandbox-rotation.ts) so the CloakBrowser
+ * runtime install + binary download run in the background WHILE the user
+ * chats; the first use_browser call then typically finds a READY driver.
+ * Fire-and-forget: every failure is swallowed (the awaited
+ * ensureBrowserDriver path inside the tool reports real errors).
+ */
+export function prepareBrowserInBackground(
+  client: BrowserSandboxClient,
+  onProgress?: (line: string) => void,
+): void {
+  const state = sessionOf(client);
+  if (state.prepared) return;
+  state.prepared = true;
+  void ensureBrowserDriver(client, onProgress ?? (() => {}))
+    .then((r) => {
+      if (r.ok) console.log("[browser] background prepare complete — browser ready before first use");
+      else console.log("[browser] background prepare did not complete:", r.error.slice(0, 200));
+    })
+    .catch(() => undefined);
 }
+
+// ---------------------------------------------------------------------------
+// Command round-trip (serialized per client; every step deadline-bounded).
+// ---------------------------------------------------------------------------
 
 async function readResFile(
   client: BrowserSandboxClient,
   id: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<BrowserCommandResult | null> {
   const resPath = `${BR_DIR}/res-${id}.json`;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (signal?.aborted) return null;
     try {
-      const raw = await client.readFile(resPath);
+      const raw = await withTimeout(client.readFile(resPath), t_("httpCallMs"), "result read");
       if (raw && raw.trim()) {
         const parsed = JSON.parse(raw) as BrowserCommandResult;
         // Best-effort cleanup so the dir doesn't accumulate result files.
@@ -465,9 +548,10 @@ async function readResFile(
         return parsed;
       }
     } catch {
-      // not there yet
+      // not there yet (or the read stalled past httpCallMs) — keep polling
+      // while the deadline allows; progress is guaranteed either way.
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await abortableDelay(t_("resultPollIntervalMs"), signal);
   }
   return null;
 }
@@ -476,72 +560,142 @@ async function sendCommandOnce(
   client: BrowserSandboxClient,
   cmd: Record<string, unknown>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<BrowserCommandResult | null> {
   const id = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  await client.writeFile(CMD_PATH, JSON.stringify({ id, ...cmd }));
-  return readResFile(client, id, timeoutMs);
+  await withTimeout(client.writeFile(CMD_PATH, JSON.stringify({ id, ...cmd })), t_("httpCallMs"), "command write");
+  return readResFile(client, id, timeoutMs, signal);
 }
 
 /**
  * Execute one browser action with automatic reconnection: on a timed-out
  * command the driver's liveness is checked; a dead driver is re-booted
  * (persistent profile keeps the session state) and the action replays ONCE.
+ *
+ * GUARANTEED RESULT (PRD §7): this function NEVER rejects and NEVER returns
+ * null — every path (success, driver error, timeout, cancellation, boot
+ * failure, sandbox death) resolves to a structured BrowserCommandResult
+ * carrying a readable `output` line. The agent is never left waiting for
+ * an answer that never arrives.
  */
 export async function sendBrowserCommand(
   client: BrowserSandboxClient,
   cmd: Record<string, unknown>,
-  opts?: { timeoutMs?: number; onProgress?: (line: string) => void },
+  opts?: {
+    timeoutMs?: number;
+    onProgress?: (line: string) => void;
+    /** Cancellation — the agent tool context's abort signal. Aborting
+     *  resolves immediately with a structured cancelled result. */
+    signal?: AbortSignal;
+  },
 ): Promise<BrowserCommandResult> {
-  const timeoutMs =
-    opts?.timeoutMs ??
-    (firstActionDone ? DEFAULT_ACTION_TIMEOUT_MS : FIRST_BOOT_TIMEOUT_MS);
-  return enqueue(async () => {
+  const state = sessionOf(client);
+  const timeoutMs = opts?.timeoutMs ?? t_("actionDefaultMs");
+  const signal = opts?.signal;
+  if (signal?.aborted) {
+    return {
+      success: false,
+      action: String(cmd.action ?? ""),
+      error: { type: "cancelled", message: "The browser action was cancelled before it started.", recoverable: true },
+      output: "Browser action cancelled.",
+    };
+  }
+  return enqueue(state, async () => {
+    if (signal?.aborted) {
+      return cancelledResult(cmd);
+    }
     const booted = await ensureBrowserDriver(client, opts?.onProgress);
     if (!booted.ok) {
       return {
         success: false,
+        action: String(cmd.action ?? ""),
         error: { type: "browser_startup_failed", message: booted.error, recoverable: true },
+        output: `Browser failed to start: ${booted.error.slice(0, 300)}`,
       } satisfies BrowserCommandResult;
     }
-    let result = await sendCommandOnce(client, cmd, timeoutMs);
-    if (result) {
-      firstActionDone = true;
-      return result;
+    if (signal?.aborted) {
+      return cancelledResult(cmd);
     }
-    // Timed out — is the driver still alive? (PRD §28 reconnection.)
+    let result = await sendCommandOnce(client, cmd, timeoutMs, signal);
+    if (result) {
+      state.firstActionDone = true;
+      return ensureOutput(result, cmd);
+    }
+    if (signal?.aborted) {
+      return cancelledResult(cmd);
+    }
+    // Timed out — is the driver still alive? (Reconnection path.)
     opts?.onProgress?.("The browser driver stopped responding — reconnecting…");
     const alive = await driverAlive(client).catch(() => false);
-    bootPromise = null; // force a re-boot path
+    state.bootPromise = null; // force a re-boot path
     if (!alive) {
       const reboot = await ensureBrowserDriver(client, opts?.onProgress);
       if (!reboot.ok) {
         return {
           success: false,
+          action: String(cmd.action ?? ""),
           error: {
             type: "browser_disconnected",
             message: `The browser session was lost and could not be restored: ${reboot.error}`,
             recoverable: true,
           },
+          output: `Browser session lost: ${reboot.error.slice(0, 300)}`,
         } satisfies BrowserCommandResult;
       }
     }
-    result = await sendCommandOnce(client, cmd, DEFAULT_ACTION_TIMEOUT_MS);
+    result = await sendCommandOnce(client, cmd, Math.min(timeoutMs, t_("actionDefaultMs")), signal);
     if (result) {
-      firstActionDone = true;
-      return result;
+      state.firstActionDone = true;
+      return ensureOutput(result, cmd);
+    }
+    if (signal?.aborted) {
+      return cancelledResult(cmd);
     }
     return {
       success: false,
+      action: String(cmd.action ?? ""),
       error: {
         type: "timeout",
         message: `Browser action "${String(cmd.action)}" timed out after ${Math.round(timeoutMs / 1000)}s.`,
         recoverable: true,
       },
+      output: `Browser action "${String(cmd.action)}" timed out after ${Math.round(timeoutMs / 1000)}s — the driver or sandbox stopped responding.`,
     } satisfies BrowserCommandResult;
   });
 }
 
-/** Reset the cached boot (sandbox rotation / new session). */
+function cancelledResult(cmd: Record<string, unknown>): BrowserCommandResult {
+  return {
+    success: false,
+    action: String(cmd.action ?? ""),
+    error: { type: "cancelled", message: "The browser action was cancelled.", recoverable: true },
+    output: "Browser action cancelled.",
+  };
+}
+
+/** Guarantee the PRD §5 output contract: a non-empty readable `output`. */
+function ensureOutput(result: BrowserCommandResult, cmd: Record<string, unknown>): BrowserCommandResult {
+  if (typeof result.output === "string" && result.output.trim()) return result;
+  const action = String(result.action ?? cmd.action ?? "browser");
+  if (result.success === false && result.error) {
+    return { ...result, output: `${result.error.type}: ${result.error.message.slice(0, 300)}` };
+  }
+  const url = typeof result.url === "string" ? result.url : "";
+  const title = typeof result.title === "string" ? result.title : "";
+  const text = typeof result.text === "string" && result.text ? `${result.text.length} chars of text` : "";
+  const count = typeof result.count === "number" ? `${result.count} items` : "";
+  const fallback =
+    text ||
+    (typeof result.elements === "object" && Array.isArray(result.elements) ? `${result.elements.length} elements` : "") ||
+    count ||
+    (title || url ? `on ${title || url}` : "") ||
+    `${action} completed.`;
+  return { ...result, output: `${action}: ${fallback}` };
+}
+
+/** Reset ALL cached session state (sandbox rotation / new session /
+ *  logout). Each client's next browser command re-boots cleanly. WeakMap
+ *  entries can't be enumerated, so the map is swapped wholesale. */
 export function resetBrowserSessionCache(): void {
-  bootPromise = null;
+  sessionsHolder.map = new WeakMap();
 }

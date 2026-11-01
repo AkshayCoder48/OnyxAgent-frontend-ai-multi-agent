@@ -49,6 +49,18 @@ import {
   SANDBOX_TODOS_PATH,
   RUNNER_PGREP_PATTERN,
 } from "@/lib/e2b/headless-agent";
+// BROWSER RUNTIME PREPARE (CloakBrowser + E2B reimplementation, 2026-11-01):
+// the driver source + detached installer shipped to every fresh sandbox so
+// the CloakBrowser runtime install + ~200 MB binary download run in the
+// background WHILE the user chats — the first use_browser call then finds
+// a ready browser instead of paying the whole install behind its own
+// timeout. browser-driver.ts is plain constants (no "use client") so it is
+// importable here.
+import {
+  BROWSER_DRIVER_PY_SOURCE,
+  BROWSER_BOOT_SH_SOURCE,
+  BROWSER_SANDBOX_PATHS,
+} from "@/lib/e2b/browser-driver";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -196,8 +208,11 @@ interface CacheEntry {
  *  Version 10 = SKILL DIRECTORY AS THE DEFAULT — manage_skill list shows
  *  the master library (/home/user/skills, 55) BY DEFAULT + new actions
  *  catalog / search_marketplace / install_from_marketplace (live SkillsMP
- *  directory, hundreds of skills); analyze_workspace skill_marketplace. */
-const AGENT_MD_VERSION = 10;
+ *  directory, hundreds of skills); analyze_workspace skill_marketplace.
+ *  Version 11 = use_browser digest row updated for the CloakBrowser
+ *  reimplementation (PRD action surface: navigate/click/type/extract_text/
+ *  inspect/snapshot/screenshot/wait/back/forward/close + compat aliases). */
+const AGENT_MD_VERSION = 11;
 
 /** Where a sandbox records the Onyx.md version it carries (same stamping
  *  pattern as the master-skills version). Cold-start reconnects read this
@@ -1101,6 +1116,50 @@ async function readJsonFile(sandbox: Sandbox, path: string): Promise<unknown> {
   }
 }
 
+// ============================================================================
+// BROWSER RUNTIME PREPARE — the zero-startup-delay kick (CloakBrowser + E2B
+// reimplementation, 2026-11-01).
+//
+// "Make the CloakBrowser download at the same time the sandbox starts": at
+// sandbox CREATION we deploy the browser driver + its detached installer and
+// launch boot.sh under nohup INSIDE the sandbox. The minutes-long runtime
+// install + ~200 MB stealth-Chromium binary download then run in the
+// background while the user chats — the first use_browser call typically
+// finds a READY browser and executes in seconds.
+//
+// The whole prepare is best-effort + hard-bounded (~20s of file writes plus
+// an instant nohup launch): a failure NEVER breaks sandbox creation, and
+// the client-side ensureBrowserDriver path re-deploys + re-launches the
+// same files on first use anyway (boot.sh's .boot-lock makes double-kicks
+// idempotent). Sandboxes created from the onyx-cloakbrowser template
+// (E2B_TEMPLATE_ID) already have everything baked in — boot.sh then only
+// starts the driver with a browser preboot, which is even faster.
+// ============================================================================
+
+async function prepareBrowserRuntime(sandbox: Sandbox): Promise<{ started: boolean; detail?: string }> {
+  const BR = BROWSER_SANDBOX_PATHS;
+  try {
+    await sandbox.files.makeDir(BR.dir);
+    await sandbox.files.write(BR.driver, BROWSER_DRIVER_PY_SOURCE);
+    await sandbox.files.write(BR.bootSh, BROWSER_BOOT_SH_SOURCE);
+    // Detached launch — the install/download runs under nohup inside the
+    // sandbox VM, which outlives this request (same proven pattern as the
+    // headless-agent runner + the client-side browser boot).
+    const res = await sandbox.commands.run(
+      `cd ${BR.dir} && nohup bash boot.sh > ${BR.bootLog} 2>&1 & echo browser_boot_kicked`,
+      { timeoutMs: 15_000 },
+    );
+    const started = (res.stdout ?? "").includes("browser_boot_kicked");
+    console.log(`[sandbox] browser runtime prepare ${started ? "kicked" : "launched without confirmation"} for ${sandbox.sandboxId}`);
+    return { started, detail: started ? undefined : (res.stderr || res.stdout || "").slice(-200) };
+  } catch (e) {
+    // Best-effort by design: the tool-side boot path handles everything.
+    const detail = e instanceof Error ? e.message : String(e);
+    console.warn(`[sandbox] browser runtime prepare skipped: ${detail.slice(0, 200)}`);
+    return { started: false, detail };
+  }
+}
+
 async function createAndCacheSandbox(
   apiKey: string,
   conversationId: string | null,
@@ -1241,6 +1300,14 @@ async function createAndCacheSandbox(
     masterSkillsVersion: MASTER_SKILLS_VERSION,
   };
   getCache(mode).set(key, entry);
+
+  // BROWSER RUNTIME PREPARE — kicked AT CREATION so the CloakBrowser
+  // runtime + binary download install in the background while the user
+  // chats (best-effort + bounded; see prepareBrowserRuntime above). On the
+  // onyx-cloakbrowser template this only starts the driver + browser
+  // preboot — effectively instant.
+  await prepareBrowserRuntime(sandbox);
+
   return sandbox;
 }
 
@@ -1517,6 +1584,23 @@ export async function POST(req: NextRequest) {
       case "create": {
         const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
         return NextResponse.json({ sandboxId: sandbox.sandboxId });
+      }
+
+      // BROWSER PREPARE (CloakBrowser + E2B reimplementation): explicit
+      // client-triggered kick of the detached browser runtime install —
+      // the same prepare createAndCacheSandbox performs at creation, for
+      // the reconnect/rotation paths where no fresh create happens.
+      // Returns immediately (the install itself runs under nohup inside
+      // the sandbox VM); readiness is polled by the browser session
+      // manager on the next use_browser call.
+      case "browser_prepare": {
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        const r = await prepareBrowserRuntime(sandbox);
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          started: r.started,
+          ...(r.detail ? { detail: r.detail } : {}),
+        });
       }
 
       case "exec": {

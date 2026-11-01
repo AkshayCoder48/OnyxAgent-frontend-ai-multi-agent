@@ -1,51 +1,235 @@
 /**
- * The OnyxAgent BROWSER DRIVER — a long-running Python process INSIDE the
- * E2B sandbox that owns a persistent-profile Chromium and serves the same
- * file protocol the old Node web-session driver used:
+ * The OnyxAgent BROWSER DRIVER — reimplementation (2026-11-01 PRD).
  *
- *   /home/user/.onyx/browser/driver.py     — this source (started detached)
- *   /home/user/.onyx/browser/cmd.json      — {id, action, …} request
- *   /home/user/.onyx/browser/res-<id>.json — the driver's reply
- *   /home/user/.onyx/browser/.ready        — "the loop is running" marker
- *   /home/user/.onyx/browser/profile/      — persistent browser profile
- *   /home/user/.onyx/browser/shots/*.png   — screenshots
- *   /home/user/downloads/                  — captured browser downloads
+ * A long-running Python process INSIDE the E2B sandbox that owns a
+ * persistent-profile CloakBrowser (stealth Chromium, humanize=True) with a
+ * stock-Playwright-Chromium fallback, serving the file protocol:
  *
- * RUNTIME ABSTRACTION (PRD §5/§32): the primary engine is CloakBrowser —
- * a stealth-patched Chromium driven through Playwright semantics, launched
- * with `humanize=True` (human-like mouse curves, per-character typing,
- * realistic scroll — a browser-runtime feature for legitimate automation,
- * testing, browsing and QA). When CloakBrowser is unavailable (install or
- * launch failure, licensing/deployment change) the driver falls back to
- * STOCK Playwright Chromium. The AI-facing `use_browser` schema never
- * changes — the runtime is an internal detail the model never sees.
+ *   /home/user/.onyx/browser/driver.py      — this source (started detached)
+ *   /home/user/.onyx/browser/cmd.json       — {id, action, …} request
+ *   /home/user/.onyx/browser/res-<id>.json  — the driver's reply (atomic)
+ *   /home/user/.onyx/browser/.ready         — "the loop is running" marker
+ *   /home/user/.onyx/browser/.version       — driver code version stamp
+ *   /home/user/.onyx/browser/events.jsonl   — structured lifecycle events
+ *   /home/user/.onyx/browser/profile/       — persistent browser profile
+ *   /home/user/.onyx/browser/shots/*.png    — screenshots
+ *   /home/user/downloads/                   — captured browser downloads
  *
- * SECURITY BOUNDARIES (PRD §29): this is an authorized automation
- * capability. It does not implement workflows to defeat CAPTCHAs, access
- * controls, authentication protections or rate limits; it respects
- * credentials, service terms and the existing OnyxAgent safety controls.
+ * WHAT THIS REWRITE FIXES (the "infinite execution, no output" incident):
+ *   1. WATCHDOG — every command is armed with a per-action budget. When it
+ *      expires the watchdog SIGKILLs the browser process (the one reliable
+ *      way to unblock ANY stuck Playwright call) and writes the timeout
+ *      reply ITSELF, so the client always receives an answer even if the
+ *      command loop never comes back. The startup preboot gets the same
+ *      backstop (writes .boot-failed and exits the driver).
+ *   2. STRUCTURED EVENTS — every lifecycle transition lands in events.jsonl
+ *      (BROWSER_ACTION_START / COMPLETE / FAILED / TIMEOUT, BROWSER_READY,
+ *      BROWSER_SESSION_CLOSED, …) with ids, actions, durations, runtimes.
+ *   3. GUARANTEED OUTPUT — every handler returns a payload with a
+ *      human-readable "output" string; the loop adds durationMs; replies
+ *      are written atomically exactly once (watchdog-aware).
+ *   4. The full PRD action surface (navigate / screenshot / snapshot /
+ *      click / type / scroll / extract_text / inspect / wait / back /
+ *      forward / close) plus the compat aliases older conversations use.
+ *
+ * KEPT from the battle-tested predecessor (each documents a live incident):
+ *   - the asyncio un-poisoning before every Playwright launch attempt;
+ *   - stale Chromium profile Singleton-lock cleanup;
+ *   - BootFailure → reply written → driver exits (fresh driver next cmd);
+ *   - dead-context detection + rebuild (sandbox pause/resume);
+ *   - the live-cast side thread with its own CDP connection.
+ *
+ * SECURITY BOUNDARIES: this is an authorized automation capability. It does
+ * not implement workflows to defeat CAPTCHAs, access controls,
+ * authentication protections or rate limits; it respects credentials,
+ * service terms and the existing OnyxAgent safety controls.
  *
  * Packaging constraint: this Python source is exported as a TS template
- * literal embedded verbatim —
- * the source must contain NO backticks and NO ${ } sequences (Python
- * naturally has neither; keep it that way).
+ * literal embedded verbatim — the source must contain NO backticks and NO
+ * ${ } sequences (Python naturally has neither; keep it that way).
  */
 
 /**
  * Driver version — stamped into /home/user/.onyx/browser/.version when the
- * driver starts. The session managers (browser-session.ts
- * ensureWsDriver) compare the RUNNING driver's stamp against this constant:
- * a live driver with a stale stamp is killed and redeployed. Without that
- * check a per-command Python error (e.g. the active_idx UnboundLocalError)
- * never kills the daemon, so an already-running buggy driver would keep
- * failing every command forever even after the source here was fixed.
- * Bump whenever the Python source changes meaningfully.
+ * driver starts. The session manager (browser-session.ts) compares the
+ * RUNNING driver's stamp against this constant: a live driver with a stale
+ * stamp is killed and redeployed. Bump whenever the Python source changes
+ * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.10.31";
+export const BROWSER_DRIVER_VERSION = "2026.11.01";
+
+/** Sandbox-side paths (shared by the client session manager and the
+ *  server-side prepare hook — single source of truth). */
+export const BROWSER_SANDBOX_PATHS = {
+  dir: "/home/user/.onyx/browser",
+  get driver() {
+    return `${this.dir}/driver.py`;
+  },
+  get bootSh() {
+    return `${this.dir}/boot.sh`;
+  },
+  get bootLog() {
+    return `${this.dir}/boot.log`;
+  },
+  get installLog() {
+    return `${this.dir}/boot-install.log`;
+  },
+  get ready() {
+    return `${this.dir}/.ready`;
+  },
+  get version() {
+    return `${this.dir}/.version`;
+  },
+  get cmd() {
+    return `${this.dir}/cmd.json`;
+  },
+  get bootFailed() {
+    return `${this.dir}/.boot-failed`;
+  },
+} as const;
+
+/**
+ * boot.sh — the sandbox-side installer + daemon launcher. Runs detached
+ * (`nohup bash boot.sh > boot.log 2>&1 &`) so it survives the HTTP request
+ * that spawned it and any serverless function timeout behind that request.
+ *
+ * ZERO-STARTUP-DELAY ARCHITECTURE: the server kicks this script AT SANDBOX
+ * CREATION (createAndCacheSandbox → prepareBrowserRuntime) so the runtime
+ * install + the ~200 MB CloakBrowser binary download run in the background
+ * WHILE the user chats — the first use_browser call then finds a ready
+ * browser instead of paying the whole install behind its own timeout. The
+ * client's ensureBrowserDriver uses the same script; the .boot-lock makes
+ * double-kicks harmless.
+ *
+ * Contract with the polling client (see ensureBrowserDriver):
+ *   .boot-failed  — FATAL: written with the pip log tail when the runtime
+ *                   could not be installed; the client surfaces it verbatim.
+ *   .ready        — SUCCESS: written by driver.py when its command loop is
+ *                   up AND (preboot marker) the browser is usable.
+ *   boot.log      — human-readable progress lines the client narrates live.
+ *   events.jsonl  — structured install/download lifecycle events.
+ *
+ * Install ladder (first success wins). CRITICAL: pip and the import probe
+ * MUST target the SAME interpreter — on the E2B code-interpreter template
+ * a bare `pip` can install into a different Python than `python3` (the
+ * kernel venv vs the system interpreter), so the install "succeeded" while
+ * `python3 -c "import cloakbrowser"` failed on every ladder attempt (the
+ * recurring browser_startup_failed). `python3 -m pip` is therefore the
+ * PRIMARY resolver — bare pip is only a last resort. No `| tail` on the
+ * pip calls — a pipe would mask pip's exit code; success is verified with
+ * the import probe instead, and probe failures log the actual ImportError
+ * so boot-install.log always says WHY.
+ */
+export const BROWSER_BOOT_SH_SOURCE = `#!/bin/bash
+# Onyx sandbox browser boot — DETACHED installer + daemon launcher.
+# Idempotent: the .boot-lock makes a second kick (client-side boot while the
+# creation-time kick is still running) exit quietly — both see the same .ready.
+cd "$(dirname "$0")" || exit 1
+
+log() { echo "[boot \$(date +%H:%M:%S)] \$*"; }
+evt() { printf '{"ts":%s000,"event":"%s"}\n' "\$(date +%s)" "\$1" >> events.jsonl 2>/dev/null || true; }
+
+# Resolve the interpreter FIRST — every pip call AND the probe use it.
+PY="python3"
+command -v python3 >/dev/null 2>&1 || PY="python3.12"
+command -v "\$PY" >/dev/null 2>&1 || PY="python"
+log "interpreter: \$PY (\$(\$PY -V 2>&1)) at \$(command -v \$PY)"
+
+# pip MODULE of THAT interpreter (never a bare pip binary first — it can
+# target a different site-packages than \$PY reads).
+if ! "\$PY" -m pip --version >/dev/null 2>&1; then
+  log "\$PY -m pip unavailable — falling back to pip3/pip"
+  PIP="pip3"
+  command -v pip3 >/dev/null 2>&1 || PIP="pip"
+else
+  PIP="\$PY -m pip"
+fi
+
+# One boot at a time: a still-running earlier boot (creation-time kick +
+# client kick racing) owns this sandbox — let it finish; both polls see the
+# same .ready either way.
+if [ -f .boot-lock ] && kill -0 "\$(cat .boot-lock 2>/dev/null)" 2>/dev/null; then
+  log "another boot is already running (pid \$(cat .boot-lock)) — exiting"
+  exit 0
+fi
+echo \$\$ > .boot-lock
+
+log "checking the browser runtime…"
+fresh_install=0
+if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+  log "browser runtime already installed"
+  evt "BROWSER_RUNTIME_PRESENT"
+else
+  fresh_install=1
+  evt "BROWSER_DOWNLOAD_START"
+  log "installing the browser runtime (first run — can take a few minutes)…"
+  ok=0
+  for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
+    log "\$PIP install \${flags:-default}: cloakbrowser==0.6.1 playwright"
+    if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
+      log "pip exited 0 (\${flags:-default}) — verifying the import…"
+      if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
+        ok=1
+        log "browser runtime installed and importable"
+        evt "BROWSER_DOWNLOAD_COMPLETE"
+        break
+      else
+        log "import probe FAILED after a successful pip run — interpreter mismatch (see boot-install.log)"
+      fi
+    else
+      log "pip run failed (\${flags:-default}) — trying the next variant"
+    fi
+  done
+  if [ "\$ok" != "1" ]; then
+    evt "BROWSER_DOWNLOAD_FAILED"
+    {
+      echo "pip could not install cloakbrowser==0.6.1 + playwright into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
+      echo "---- probe error ----"
+      "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
+      echo "---- last 40 lines of boot-install.log ----"
+      tail -n 40 boot-install.log 2>/dev/null
+    } > .boot-failed
+    log "FATAL: browser runtime install failed (details in .boot-failed)"
+    exit 1
+  fi
+fi
+
+# BINARY PRE-FETCH: after a FRESH install the ~200 MB browser binaries are
+# still missing — fetch them HERE (inside the detached, narrated boot
+# window) instead of letting the first use_browser action pay the download
+# behind its own action timeout. Best-effort: a failed pre-fetch degrades
+# to the old lazy-download behavior.
+if [ "\$fresh_install" = "1" ]; then
+  log "pre-fetching the browser binaries (~200 MB — the slow part of a cold boot)…"
+  if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
+    log "stealth Chromium binary cached — the browser will launch instantly"
+    evt "BROWSER_BINARY_CACHED"
+  else
+    log "cloakbrowser binary pre-fetch failed — the driver will download it on first launch"
+  fi
+  if "\$PY" -m playwright install chromium >> boot-install.log 2>&1; then
+    log "stock Chromium (fallback runtime) cached"
+  else
+    log "playwright chromium pre-fetch failed — the fallback will self-install if needed"
+  fi
+fi
+
+# PREBOOT MARKER: driver.py boots the BROWSER (the expensive part) before
+# it writes .ready, so "boot done" means "browser USABLE": the first
+# action no longer hides a ~200 MB download behind its own timeout, and a
+# boot failure surfaces in the boot poll instead of an action timeout.
+: > .preboot
+
+log "starting the browser driver…"
+rm -f .ready
+nohup "\$PY" driver.py > driver.log 2>&1 &
+log "driver launched (pid \$!) — it will preboot the browser before reporting ready"
+`;
 
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
-# profile, Playwright-driven, file-protocol command loop.
+# profile, Playwright-driven, file-protocol command loop with a per-action
+# WATCHDOG that guarantees every command eventually resolves.
 import asyncio
 import base64
 import json
@@ -68,6 +252,8 @@ READY = os.path.join(DIR, ".ready")
 VERSION_PATH = os.path.join(DIR, ".version")
 PREBOOT = os.path.join(DIR, ".preboot")
 BOOT_LOG = os.path.join(DIR, "boot.log")
+BOOT_FAIL_PATH = os.path.join(DIR, ".boot-failed")
+EVENTS = os.path.join(DIR, "events.jsonl")
 DRIVER_VERSION = "${BROWSER_DRIVER_VERSION}"
 LIVE_JSON = os.path.join(DIR, "live.json")
 LIVE_JPG = os.path.join(DIR, "live.jpg")
@@ -93,7 +279,104 @@ ref_map = {}          # element ref -> CSS/XPath selector (from get_elements)
 CONSOLE_MAX = 80
 NETWORK_MAX = 60
 
-# ── LIVE CAST (realtime browser view, PRD §2-§4) ────────────────────────────
+# ── STRUCTURED EVENTS (PRD §11) ─────────────────────────────────────────────
+# One JSON object per line in events.jsonl: ts + event + fields. Never
+# raises, never blocks the command loop, never logs secrets — ids, actions,
+# durations and runtime names only.
+
+EVT_LOCK = threading.Lock()
+
+
+def event(name, **fields):
+    """Append a structured lifecycle event. Safe from any thread."""
+    try:
+        row = {"ts": int(time.time() * 1000), "event": str(name)}
+        for k, v in fields.items():
+            if v is None:
+                continue
+            row[k] = v
+        line = json.dumps(row)
+        with EVT_LOCK:
+            with open(EVENTS, "a") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def log(msg):
+    try:
+        with open(os.path.join(DIR, "driver.log"), "a") as f:
+            f.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def boot_log(msg):
+    """Append a preboot progress line to boot.log — the file the session
+    manager's boot poll narrates live (driver.log is NOT polled during
+    boot). Used only by the startup PREBOOT so a cold browser download
+    shows real movement in the tool UI instead of a silent spinner."""
+    try:
+        with open(BOOT_LOG, "a") as f:
+            f.write("[driver %s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def record_console(etype, text):
+    t = str(text or "")[:500]
+    if not t:
+        return
+    key = etype + "|" + t
+    if key in seen_console:
+        return
+    seen_console.add(key)
+    console_log.append({"type": etype, "text": t, "ts": int(time.time())})
+    if len(console_log) > CONSOLE_MAX:
+        console_log.pop(0)
+
+
+def record_network(entry):
+    network_log.append(entry)
+    if len(network_log) > NETWORK_MAX:
+        network_log.pop(0)
+
+
+def attach_page_listeners(p):
+    def on_console(msg):
+        try:
+            mtype = msg.type
+            if mtype in ("error", "warning"):
+                record_console("warn" if mtype == "warning" else "error", msg.text)
+        except Exception:
+            pass
+
+    def on_pageerror(err):
+        record_console("pageerror", getattr(err, "message", str(err)))
+
+    def on_response(resp):
+        try:
+            s = resp.status
+            if s >= 400:
+                record_network({"status": s, "url": str(resp.url)[:300], "ts": int(time.time())})
+        except Exception:
+            pass
+
+    def on_requestfailed(req):
+        try:
+            fail = req.failure
+            err = fail.error_text if fail else ""
+            record_network({"status": 0, "url": str(req.url)[:300], "error": str(err or "failed"), "ts": int(time.time())})
+        except Exception:
+            pass
+
+    p.on("console", on_console)
+    p.on("pageerror", on_pageerror)
+    p.on("response", on_response)
+    p.on("requestfailed", on_requestfailed)
+
+
+# ── LIVE CAST (realtime browser view) ───────────────────────────────────────
 # A side thread streams JPEG frames of the ACTIVE tab via CDP
 # Page.startScreencast (frames pushed on repaint) into live.jpg, while the
 # main loop publishes the interaction state (cursor, action, url, title)
@@ -335,79 +618,6 @@ def live_cast_loop():
         time.sleep(3.0)
 
 
-def log(msg):
-    try:
-        with open(os.path.join(DIR, "driver.log"), "a") as f:
-            f.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
-    except Exception:
-        pass
-
-
-def boot_log(msg):
-    """Append a preboot progress line to BOOT.log — the file the session
-    manager's boot poll narrates live (driver.log is NOT polled during
-    boot). Used only by the startup PREBOOT so a cold browser download
-    shows real movement in the tool UI instead of a silent spinner."""
-    try:
-        with open(BOOT_LOG, "a") as f:
-            f.write("[driver %s] %s\n" % (time.strftime("%H:%M:%S"), msg))
-    except Exception:
-        pass
-
-
-def record_console(etype, text):
-    t = str(text or "")[:500]
-    if not t:
-        return
-    key = etype + "|" + t
-    if key in seen_console:
-        return
-    seen_console.add(key)
-    console_log.append({"type": etype, "text": t, "ts": int(time.time())})
-    if len(console_log) > CONSOLE_MAX:
-        console_log.pop(0)
-
-
-def record_network(entry):
-    network_log.append(entry)
-    if len(network_log) > NETWORK_MAX:
-        network_log.pop(0)
-
-
-def attach_page_listeners(p):
-    def on_console(msg):
-        try:
-            mtype = msg.type
-            if mtype in ("error", "warning"):
-                record_console("warn" if mtype == "warning" else "error", msg.text)
-        except Exception:
-            pass
-
-    def on_pageerror(err):
-        record_console("pageerror", getattr(err, "message", str(err)))
-
-    def on_response(resp):
-        try:
-            s = resp.status
-            if s >= 400:
-                record_network({"status": s, "url": str(resp.url)[:300], "ts": int(time.time())})
-        except Exception:
-            pass
-
-    def on_requestfailed(req):
-        try:
-            fail = req.failure
-            err = fail.error_text if fail else ""
-            record_network({"status": 0, "url": str(req.url)[:300], "error": str(err or "failed"), "ts": int(time.time())})
-        except Exception:
-            pass
-
-    p.on("console", on_console)
-    p.on("pageerror", on_pageerror)
-    p.on("response", on_response)
-    p.on("requestfailed", on_requestfailed)
-
-
 class BootFailure(RuntimeError):
     """Browser boot failed after both engines. The command loop reports
     the error, then EXITS the driver process: a failed boot may leave
@@ -432,15 +642,13 @@ def _unpoison_asyncio():
         asyncio._set_running_loop(None)
     except Exception:
         pass
-
-
 def _clear_stale_profile_locks():
     """Remove Chromium's stale ProcessSingleton locks before launching.
 
-    A hard-killed Chromium (sandbox pause/resume, OOM, crash) leaves
-    Singleton{Lock,Cookie,Socket} in the profile dir — the next
-    launch_persistent_context with the same user-data-dir then REFUSES to
-    start, which (pre-fix) leaked the fallback Playwright instance and
+    A hard-killed Chromium (sandbox pause/resume, OOM, crash, watchdog
+    kill) leaves Singleton{Lock,Cookie,Socket} in the profile dir — the
+    next launch_persistent_context with the same user-data-dir then
+    REFUSES to start, which leaked the fallback Playwright instance and
     poisoned this thread for every later boot. Orphan chromium processes
     still holding OUR profile (no live driver connection owns them — we
     are booting, so any survivor is a zombie) are reaped first."""
@@ -618,12 +826,14 @@ def boot_browser():
     - the fallback's pw is STOPPED on failure (never leaked);
     - a dead context (sandbox resume) is detected and rebuilt;
     - a total boot failure raises BootFailure -> the driver exits after
-      reporting, so the next command boots a FRESH driver."""
+      reporting, so the next command boots a FRESH driver.
+    """
     global context, pw, runtime, boot_error, HEADED
     if context is not None:
         if _context_alive():
             return
         log("browser context is dead — rebooting (the persistent profile keeps cookies/localStorage)")
+        event("BROWSER_INITIALIZATION", phase="reboot", reason="dead-context")
         _reset_browser_state()
     boot_error = None
     _clear_stale_profile_locks()
@@ -631,6 +841,7 @@ def boot_browser():
         HEADED = _ensure_display()
     # -- attempt 1: CloakBrowser (stealth Chromium, humanized input) ------
     _unpoison_asyncio()
+    event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser", headed=HEADED)
     try:
         from cloakbrowser import launch_persistent_context as cb_launch
         context = cb_launch(
@@ -645,6 +856,7 @@ def boot_browser():
             LIVE_STATE["booted"] = True
             LIVE_STATE["closed"] = False
         refresh_live_pages()
+        event("BROWSER_READY", runtime=runtime, headed=HEADED)
         log("booted cloakbrowser runtime (humanize=True, persistent profile)")
         return
     except Exception as e:
@@ -654,6 +866,7 @@ def boot_browser():
         _unpoison_asyncio()
         boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
         log(boot_error)
+        event("BROWSER_ACTION_FAILED", phase="boot", engine="cloakbrowser", detail=_condense_launch_error(e))
     # -- attempt 2: stock Playwright Chromium (runtime-agnostic fallback) --
     _unpoison_asyncio()
     try:
@@ -676,10 +889,12 @@ def boot_browser():
             # browser process" — the missing shared libs (libnss3,
             # libatk, …) were never installed. --with-deps runs the
             # distro package install (the sandbox runs as root).
+            event("BROWSER_DOWNLOAD_START", phase="fallback-deps")
             subprocess.run(
                 [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
                 capture_output=True, timeout=900,
             )
+            event("BROWSER_DOWNLOAD_COMPLETE", phase="fallback-deps")
             context = pw.chromium.launch_persistent_context(
                 PROFILE,
                 headless=not HEADED,
@@ -691,6 +906,7 @@ def boot_browser():
             LIVE_STATE["booted"] = True
             LIVE_STATE["closed"] = False
         refresh_live_pages()
+        event("BROWSER_READY", runtime=runtime, headed=HEADED)
         log("booted standard chromium fallback runtime (persistent profile)")
     except Exception as e:
         # STOP the instance — a leaked sync_playwright() parks its greenlet
@@ -706,6 +922,7 @@ def boot_browser():
         pw = None
         _unpoison_asyncio()
         boot_error = (boot_error + " | chromium fallback failed: %s" % (e,)) if boot_error else str(e)
+        event("BROWSER_ACTION_FAILED", phase="boot", engine="chromium", detail=_condense_launch_error(e))
         raise BootFailure(boot_error)
 
 
@@ -803,10 +1020,16 @@ def state_payload(extra=None):
 
 
 def err_payload(etype, message, recoverable=True):
-    return {"success": False, "error": {"type": etype, "message": str(message)[:600], "recoverable": recoverable}}
+    return {
+        "success": False,
+        "error": {"type": etype, "message": str(message)[:600], "recoverable": recoverable},
+        # PRD §5: never an empty response — even failures carry a readable
+        # one-line output the chat UI can render directly.
+        "output": "%s: %s" % (etype, str(message)[:300]),
+    }
 
 
-# ── Element targeting (PRD §11: semantic first, CSS/XPath/ref fallback) ──
+# ── Element targeting (semantic first, CSS/XPath/ref fallback) ──
 
 def resolve_target(page, target):
     """Resolve a target spec into a Playwright locator.
@@ -883,8 +1106,6 @@ def loc_box(loc):
         }
     except Exception:
         return None
-
-
 # In-page serializer for evaluate: DOM nodes, NodeLists, Promises, circular
 # references and non-serializable values all produce USEFUL plain data
 # instead of crashing the evaluation. (Kept backtick/ES-template free.)
@@ -969,6 +1190,78 @@ ELEMENTS_JS = """
 })()
 """
 
+# SNAPSHOT_JS (PRD §5 snapshot action): the page STRUCTURE — title,
+# heading outline, element counts, the top interactive elements and a
+# compact text excerpt. Cheap to evaluate, cheap to transport, and exactly
+# what a model needs to plan the next interaction.
+SNAPSHOT_JS = """
+(() => {
+  function txt(el, n) { return (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, n); }
+  var headings = [];
+  var hs = document.querySelectorAll('h1, h2, h3');
+  for (var i = 0; i < hs.length && headings.length < 30; i++) {
+    var t = txt(hs[i], 120);
+    if (t) headings.push({ level: parseInt(hs[i].tagName.slice(1), 10), text: t });
+  }
+  var counts = { links: 0, buttons: 0, inputs: 0, images: 0 };
+  document.querySelectorAll('a[href]').forEach(function () { counts.links++; });
+  document.querySelectorAll('button, [role=button], input[type=button], input[type=submit]').forEach(function () { counts.buttons++; });
+  document.querySelectorAll('input, textarea, select').forEach(function () { counts.inputs++; });
+  document.querySelectorAll('img').forEach(function () { counts.images++; });
+  var interactive = [];
+  var nodes = document.querySelectorAll('a[href], button, input, select, textarea, [role=button], [onclick]');
+  for (var j = 0; j < nodes.length && interactive.length < 40; j++) {
+    var el = nodes[j];
+    var r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
+    var row = { tag: el.tagName.toLowerCase(), text: txt(el, 60) || null };
+    if (el.tagName === 'A') row.href = (el.getAttribute('href') || '').slice(0, 200);
+    if (el.id) row.id = el.id;
+    interactive.push(row);
+  }
+  return {
+    title: document.title || '',
+    url: location.href,
+    headings: headings,
+    counts: counts,
+    interactive: interactive,
+    textExcerpt: (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 1200)
+  };
+})()
+"""
+
+FORMS_JS = """
+(() => {
+  var out = [];
+  var nodes = document.querySelectorAll('input, textarea, select');
+  for (var el of nodes) {
+    var r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
+    var type = (el.getAttribute('type') || el.tagName.toLowerCase());
+    if (type === 'hidden') continue;
+    var lbl = '';
+    try {
+      if (el.labels && el.labels.length) lbl = (el.labels[0].innerText || '').trim().slice(0, 60);
+    } catch (e) {}
+    if (!lbl) lbl = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '';
+    var row = { tag: el.tagName.toLowerCase(), type: type, label: lbl.slice(0, 60) || null };
+    if (el.id) row.id = el.id;
+    if (type === 'checkbox' || type === 'radio') row.checked = !!el.checked;
+    else if (type !== 'password') row.value = String(el.value || '').slice(0, 80);
+    if (el.disabled) row.disabled = true;
+    if (el.tagName === 'SELECT') {
+      var opts = [];
+      for (var o of el.selectedOptions) opts.push(String(o.value || o.text).slice(0, 60));
+      row.selected = opts.slice(0, 4);
+      row.optionCount = el.options.length;
+    }
+    out.push(row);
+    if (out.length >= 40) break;
+  }
+  return out;
+})()
+"""
+
 
 def playw_err(e):
     """Map a Playwright/Python error into a structured error payload."""
@@ -998,6 +1291,7 @@ def do_navigate(cmd):
         title = ""
     out = state_payload({"success": True, "action": "navigate", "status": resp.status if resp else None})
     out["title"] = title
+    out["output"] = "Navigated to %s (%s)%s." % (title or url, url, " — HTTP %s" % resp.status if resp and resp.status else "")
     return out
 
 
@@ -1012,6 +1306,7 @@ def do_click(cmd):
     out = state_payload({"success": True, "action": "click", "target": target_label(target)})
     if box:
         out["box"] = box
+    out["output"] = "Clicked %s." % target_label(target)
     return out
 
 
@@ -1037,6 +1332,7 @@ def do_type(cmd):
     out = state_payload({"success": True, "action": "type", "target": target_label(target), "text": text[:80]})
     if box:
         out["box"] = box
+    out["output"] = "Typed %d characters into %s%s." % (len(text), target_label(target), " and pressed Enter" if cmd.get("submit") else "")
     return out
 
 
@@ -1046,7 +1342,9 @@ def do_press(cmd):
     publish_live("keypress")
     p.keyboard.press(key)
     p.wait_for_timeout(300)
-    return state_payload({"success": True, "action": "press", "key": key})
+    out = state_payload({"success": True, "action": "press", "key": key})
+    out["output"] = "Pressed %s." % key
+    return out
 
 
 def do_scroll(cmd):
@@ -1059,7 +1357,9 @@ def do_scroll(cmd):
     except Exception:
         p.evaluate("(d) => window.scrollBy(0, d)", amount if direction == "down" else -amount)
     p.wait_for_timeout(250)
-    return state_payload({"success": True, "action": "scroll", "direction": direction, "amount": amount})
+    out = state_payload({"success": True, "action": "scroll", "direction": direction, "amount": amount})
+    out["output"] = "Scrolled %s by %dpx." % (direction, amount)
+    return out
 
 
 def do_wait(cmd):
@@ -1069,11 +1369,17 @@ def do_wait(cmd):
     text = cmd.get("text")
     if selector:
         p.wait_for_selector(str(selector), timeout=15000)
+        what = "selector %s" % str(selector)[:60]
     elif text:
         p.get_by_text(str(text)).first.wait_for(timeout=15000)
+        what = "text %s" % str(text)[:60]
     else:
-        p.wait_for_timeout(min(15000, max(0, int(ms or 1000))))
-    return state_payload({"success": True, "action": "wait"})
+        ms2 = min(15000, max(0, int(ms or 1000)))
+        p.wait_for_timeout(ms2)
+        what = "%dms" % ms2
+    out = state_payload({"success": True, "action": "wait"})
+    out["output"] = "Waited for %s — condition met." % what
+    return out
 
 
 def do_screenshot(cmd):
@@ -1086,16 +1392,18 @@ def do_screenshot(cmd):
     p.screenshot(path=path, full_page=full)
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
-    return state_payload({
+    out = state_payload({
         "success": True,
         "action": "screenshot",
         "path": path,
         "fullPage": full,
         "dataUrl": "data:image/png;base64," + b64,
     })
+    out["output"] = "Screenshot captured to %s (%s, %d KB)." % (path, "full page" if full else "viewport", len(b64) * 3 // 4 // 1024)
+    return out
 
 
-# ── SCREEN RECORDING (PRD §6) ─────────────────────────────────────────────
+# ── SCREEN RECORDING ─────────────────────────────────────────────────────
 # screen_record.start/stop/status — captures the ACTIVE tab at ~2fps through
 # a SIDE THREAD with its OWN CDP connection (the sync Playwright API is
 # thread-affine; this is the same proven pattern as the live-cast loop), then
@@ -1225,6 +1533,7 @@ def do_screen_record(cmd):
                     "success": True, "action": "screen_record", "operation": "start",
                     "recording": True, "startedAt": REC["started"],
                     "note": "a recording is already in progress",
+                    "output": "A recording is already in progress.",
                 })
             REC["on"] = True
             REC["frames"] = []
@@ -1248,6 +1557,7 @@ def do_screen_record(cmd):
             "success": True, "action": "screen_record", "operation": "start",
             "recording": True, "startedAt": started,
             "message": "Screen recording started — it keeps running while you continue browsing. Call screen_record with operation 'stop' to finish and get the video.",
+            "output": "Screen recording started.",
         })
     if op == "stop":
         with REC_LOCK:
@@ -1300,7 +1610,7 @@ def do_screen_record(cmd):
         if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
             return err_payload("recording_failed", "Assembling the recording into a video failed.", True)
         duration = round(len(frames) / 2.0, 1)
-        return state_payload({
+        out = state_payload({
             "success": True, "action": "screen_record", "operation": "stop",
             "recording": False,
             "file": out_path,
@@ -1311,6 +1621,8 @@ def do_screen_record(cmd):
             "startedAt": started,
             "message": "Screen recording saved (%s, %ss)." % (os.path.basename(out_path), duration),
         })
+        out["output"] = "Screen recording saved: %s (%ss, %d frames)." % (os.path.basename(out_path), duration, len(frames))
+        return out
     # status
     with REC_LOCK:
         on = REC["on"]
@@ -1323,6 +1635,7 @@ def do_screen_record(cmd):
         out["durationMs"] = int(time.time() * 1000) - started
     if rec_err:
         out["note"] = rec_err
+    out["output"] = "Recording is %s (%d frames buffered)." % ("ON" if on else "off", n)
     return state_payload(out)
 
 
@@ -1333,47 +1646,66 @@ def do_get_page(cmd):
     except Exception:
         text = ""
     text = (text or "")[:6000]
-    return state_payload({"success": True, "action": "get_page", "text": text})
+    out = state_payload({"success": True, "action": "get_page", "text": text})
+    out["output"] = "Read %d characters of page text." % len(text)
+    return out
 
 
 def do_read(cmd):
-    """Alias of get_page (PRD §3 unified verb surface)."""
+    """Alias of get_page (unified verb surface)."""
     out = do_get_page(cmd)
     out["action"] = "read"
     return out
 
 
-FORMS_JS = """
-(() => {
-  var out = [];
-  var nodes = document.querySelectorAll('input, textarea, select');
-  for (var el of nodes) {
-    var r = el.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) continue;
-    var type = (el.getAttribute('type') || el.tagName.toLowerCase());
-    if (type === 'hidden') continue;
-    var lbl = '';
-    try {
-      if (el.labels && el.labels.length) lbl = (el.labels[0].innerText || '').trim().slice(0, 60);
-    } catch (e) {}
-    if (!lbl) lbl = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '';
-    var row = { tag: el.tagName.toLowerCase(), type: type, label: lbl.slice(0, 60) || null };
-    if (el.id) row.id = el.id;
-    if (type === 'checkbox' || type === 'radio') row.checked = !!el.checked;
-    else if (type !== 'password') row.value = String(el.value || '').slice(0, 80);
-    if (el.disabled) row.disabled = true;
-    if (el.tagName === 'SELECT') {
-      var opts = [];
-      for (var o of el.selectedOptions) opts.push(String(o.value || o.text).slice(0, 60));
-      row.selected = opts.slice(0, 4);
-      row.optionCount = el.options.length;
-    }
-    out.push(row);
-    if (out.length >= 40) break;
-  }
-  return out;
-})()
-"""
+def do_extract_text(cmd):
+    """extract_text (PRD §5): the VISIBLE page text, whitespace-normalized,
+    with an honest length + truncation flag. Same engine as read/get_page
+    but the PRD-canonical name and a larger budget."""
+    p = active_page()
+    try:
+        text = p.evaluate("() => document.body ? document.body.innerText : ''")
+    except Exception:
+        text = ""
+    text = (text or "").strip()
+    limit = 8000
+    excerpt = text[:limit]
+    out = state_payload({
+        "success": True,
+        "action": "extract_text",
+        "text": excerpt,
+        "textLength": len(text),
+        "truncated": len(text) > limit,
+    })
+    out["output"] = "Extracted %d characters of visible text%s." % (len(text), " (truncated to %d)" % limit if len(text) > limit else "")
+    return out
+
+
+def do_snapshot(cmd):
+    """snapshot (PRD §5): the page STRUCTURE — title, heading outline,
+    element counts, top interactive elements, and a compact text excerpt."""
+    p = active_page()
+    try:
+        snap = p.evaluate(SNAPSHOT_JS)
+    except Exception as e:
+        return playw_err(e)
+    if not isinstance(snap, dict):
+        snap = {}
+    counts = snap.get("counts") or {}
+    headings = snap.get("headings") or []
+    interactive = snap.get("interactive") or []
+    out = state_payload({
+        "success": True,
+        "action": "snapshot",
+        "title": snap.get("title") or "",
+        "headings": headings,
+        "counts": counts,
+        "interactive": interactive,
+        "textExcerpt": snap.get("textExcerpt") or "",
+    })
+    out["output"] = "Page structure: %d headings, %s links, %s buttons, %s interactive elements listed." % (
+        len(headings), counts.get("links", 0), counts.get("buttons", 0), len(interactive))
+    return out
 
 
 def do_get_elements(cmd):
@@ -1392,13 +1724,26 @@ def do_get_elements(cmd):
         if flt and flt not in (el.get("text") or "").lower() and flt not in (el.get("selector") or "").lower() and flt not in str(el.get("role") or "").lower():
             continue
         out.append(row)
-    return state_payload({"success": True, "action": "get_elements", "count": len(out), "elements": out})
+    res = state_payload({"success": True, "action": "get_elements", "count": len(out), "elements": out})
+    res["output"] = "Found %d interactive elements (refs e1…e%d usable as targets)." % (len(out), len(out))
+    return res
 
 
 def do_inspect(cmd):
-    """Alias of get_elements (PRD §3 unified verb surface)."""
+    """Alias of get_elements (unified verb surface)."""
     out = do_get_elements(cmd)
     out["action"] = "inspect"
+    return out
+
+
+def do_forms(cmd):
+    p = active_page()
+    try:
+        forms = p.evaluate(FORMS_JS)
+    except Exception as e:
+        return playw_err(e)
+    out = state_payload({"success": True, "action": "forms", "count": len(forms), "forms": forms})
+    out["output"] = "Found %d form controls." % len(forms)
     return out
 
 
@@ -1413,9 +1758,11 @@ def do_evaluate(cmd):
     out = state_payload({"action": "evaluate", "success": bool(result and result.get("ok"))})
     if result and result.get("ok"):
         out["value"] = result.get("value")
+        out["output"] = "Evaluated JavaScript — result: %s" % _json.dumps(result.get("value"))[:400]
     else:
         out["error"] = {"type": "evaluation_failed", "message": str((result or {}).get("error") or "evaluation returned nothing"), "recoverable": True}
         out["success"] = False
+        out["output"] = "JavaScript evaluation failed: %s" % str((result or {}).get("error"))[:300]
     return out
 
 
@@ -1432,6 +1779,7 @@ def do_select(cmd):
     out = state_payload({"success": True, "action": "select", "target": target_label(target)})
     if box:
         out["box"] = box
+    out["output"] = "Selected %s in %s." % (value if value is not None else values, target_label(target))
     return out
 
 
@@ -1457,6 +1805,7 @@ def do_upload(cmd):
     out = state_payload({"success": True, "action": "upload", "target": target_label(target), "files": [os.path.basename(x) for x in paths]})
     if box:
         out["box"] = box
+    out["output"] = "Uploaded %d file(s) to %s." % (len(paths), target_label(target))
     return out
 
 
@@ -1484,7 +1833,9 @@ def do_download(cmd):
             dest = "%s-%d%s" % (base, n, ext)
             n += 1
         dl.save_as(dest)
-        return state_payload({"success": True, "action": "download", "file": dest, "name": os.path.basename(dest)})
+        out = state_payload({"success": True, "action": "download", "file": dest, "name": os.path.basename(dest)})
+        out["output"] = "Downloaded %s to the workspace." % os.path.basename(dest)
+        return out
     except Exception as e:
         # No download event (maybe a direct file URL) — fetch it via the
         # browser's own request context so cookies/auth still apply.
@@ -1499,7 +1850,9 @@ def do_download(cmd):
                     dest = os.path.join(DOWNLOADS, os.path.basename(fname) or fname)
                     with open(dest, "wb") as f:
                         f.write(r.body())
-                    return state_payload({"success": True, "action": "download", "file": dest, "name": os.path.basename(dest)})
+                    out = state_payload({"success": True, "action": "download", "file": dest, "name": os.path.basename(dest)})
+                    out["output"] = "Downloaded %s to the workspace (direct fetch)." % os.path.basename(dest)
+                    return out
             except Exception as e2:
                 return err_payload("download_failed", "%s | fallback: %s" % (e, e2))
         return playw_err(e)
@@ -1518,7 +1871,9 @@ def do_new_tab(cmd):
     url = cmd.get("url")
     if url:
         p.goto(str(url), wait_until="domcontentloaded", timeout=45000)
-    return state_payload({"success": True, "action": "new_tab", "tabId": tid})
+    out = state_payload({"success": True, "action": "new_tab", "tabId": tid})
+    out["output"] = "Opened a new tab (%s)%s." % (tid, " at " + str(url) if url else "")
+    return out
 
 
 def pick_tab(cmd):
@@ -1546,7 +1901,9 @@ def do_switch_tab(cmd):
     if failed:
         return failed
     active_page().bring_to_front()
-    return state_payload({"success": True, "action": "switch_tab"})
+    out = state_payload({"success": True, "action": "switch_tab"})
+    out["output"] = "Switched to tab %d of %d." % (active_idx + 1, len(pages))
+    return out
 
 
 def do_close_tab(cmd):
@@ -1580,7 +1937,9 @@ def do_close_tab(cmd):
         active_idx = 0
     elif active_idx >= len(pages):
         active_idx = len(pages) - 1
-    return state_payload({"success": True, "action": "close_tab"})
+    out = state_payload({"success": True, "action": "close_tab"})
+    out["output"] = "Closed the tab (%d remain)." % len(pages)
+    return out
 
 
 def do_history(cmd):
@@ -1588,11 +1947,16 @@ def do_history(cmd):
     publish_live(str(cmd.get("action") or "refresh"))
     if cmd.get("action") == "go_back" or cmd.get("dir") == "back":
         p.go_back(timeout=30000)
+        verb = "Went back"
     elif cmd.get("action") == "go_forward" or cmd.get("dir") == "forward":
         p.go_forward(timeout=30000)
+        verb = "Went forward"
     else:
         p.reload(timeout=45000)
-    return state_payload({"success": True, "action": cmd.get("action") or "refresh"})
+        verb = "Reloaded"
+    out = state_payload({"success": True, "action": cmd.get("action") or "refresh"})
+    out["output"] = "%s — now on %s." % (verb, out.get("url") or "the previous page")
+    return out
 
 
 def do_console(cmd):
@@ -1602,7 +1966,9 @@ def do_console(cmd):
     if cmd.get("clear"):
         console_log = []
         seen_console = set()
-    return state_payload({"success": True, "action": "console", "count": len(entries), "entries": entries})
+    out = state_payload({"success": True, "action": "console", "count": len(entries), "entries": entries})
+    out["output"] = "Console log: %d entries (errors/warnings only)." % len(entries)
+    return out
 
 
 def do_network(cmd):
@@ -1611,11 +1977,15 @@ def do_network(cmd):
     entries = network_log[-n:]
     if cmd.get("clear"):
         network_log = []
-    return state_payload({"success": True, "action": "network", "count": len(entries), "entries": entries})
+    out = state_payload({"success": True, "action": "network", "count": len(entries), "entries": entries})
+    out["output"] = "Network log: %d failed/blocked requests." % len(entries)
+    return out
 
 
 def do_state(cmd):
-    return state_payload({"success": True, "action": "get_state", "profileDir": PROFILE, "downloadsDir": DOWNLOADS})
+    out = state_payload({"success": True, "action": "get_state", "profileDir": PROFILE, "downloadsDir": DOWNLOADS})
+    out["output"] = "Browser state: runtime=%s, tabs=%d, url=%s." % (runtime, len(pages), out.get("url") or "-")
+    return out
 
 
 def do_close(cmd):
@@ -1634,7 +2004,13 @@ def do_close(cmd):
         LIVE_STATE["booted"] = False
         LIVE_STATE["action"] = None
     publish_live("close")
-    return {"success": True, "action": "close", "message": "Browser session closed. The persistent profile was kept."}
+    event("BROWSER_SESSION_CLOSED", sessionId=session_id)
+    return {
+        "success": True,
+        "action": "close",
+        "message": "Browser session closed. The persistent profile was kept.",
+        "output": "Browser session closed. The persistent profile was kept.",
+    }
 
 
 HANDLERS = {
@@ -1648,8 +2024,11 @@ HANDLERS = {
     "screen_record": do_screen_record,
     "read": do_read,
     "get_page": do_get_page,
+    "extract_text": do_extract_text,
+    "snapshot": do_snapshot,
     "inspect": do_inspect,
     "get_elements": do_get_elements,
+    "forms": do_forms,
     "evaluate": do_evaluate,
     "select": do_select,
     "upload": do_upload,
@@ -1668,33 +2047,205 @@ HANDLERS = {
     "get_state": do_state,
     "close": do_close,
 }
+# ── PER-ACTION WATCHDOG (PRD §6: eliminate infinite execution) ─────────────
+# The command loop is single-threaded (Playwright sync API is thread-affine),
+# so ONE wedged Playwright call used to block the driver FOREVER — the client
+# timed out, saw the process "alive", replayed, timed out again: minutes of
+# silence, then a bare timeout. The watchdog closes that hole categorically:
+#
+#   every command is armed with a budget (ACTION_BUDGETS);
+#   on expiry the watchdog (1) SIGKILLs the browser — killing the browser is
+#   the ONE reliable way to unblock ANY stuck Playwright call (its websocket
+#   drops and the pending API raises within seconds) — and (2) after a grace
+#   window writes the timeout reply ITSELF, so the client always receives an
+#   answer even if the loop never comes back. The next command reboots the
+#   browser on the SAME persistent profile (cookies/localStorage kept).
+
+ACTION_BUDGETS = {
+    "navigate": 60, "click": 25, "type": 30, "press": 15, "scroll": 20,
+    "wait": 35, "screenshot": 40, "extract_text": 30, "read": 30,
+    "get_page": 30, "snapshot": 30, "inspect": 30, "get_elements": 30,
+    "forms": 30, "evaluate": 45, "select": 25, "upload": 60, "download": 90,
+    "new_tab": 45, "switch_tab": 15, "close_tab": 15,
+    "back": 30, "forward": 30, "go_back": 30, "go_forward": 30,
+    "reload": 45, "refresh": 45, "console": 10, "network": 10,
+    "get_state": 10, "close": 20,
+    "screen_record": 300,   # 'stop' assembles a video (encoder + ffmpeg)
+}
+DEFAULT_ACTION_BUDGET = 60
+PREBOOT_BUDGET = 300        # cold first launch may download ~200 MB
+
+WATCHDOG_LOCK = threading.Lock()
+WATCHDOG = {
+    "cid": None,          # in-flight command id (or the literal "preboot")
+    "action": None,
+    "deadline": 0.0,      # monotonic deadline for the in-flight command
+    "answered": set(),    # command ids the watchdog already answered
+}
+
+
+def _arm_watchdog(cid, action, budget_sec):
+    with WATCHDOG_LOCK:
+        WATCHDOG["cid"] = cid
+        WATCHDOG["action"] = action
+        WATCHDOG["deadline"] = time.monotonic() + max(5, int(budget_sec))
+        WATCHDOG["answered"].discard(cid)
+
+
+def _disarm_watchdog():
+    with WATCHDOG_LOCK:
+        WATCHDOG["cid"] = None
+        WATCHDOG["deadline"] = 0.0
+
+
+def _kill_browser_processes(reason):
+    """SIGKILL every Chromium holding OUR profile. Returns True when at
+    least one process was killed (i.e. a browser was actually running)."""
+    killed = False
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "user-data-dir=" + PROFILE],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.split()
+        for pid in out:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+                killed = True
+            except Exception:
+                pass
+        if out:
+            log("watchdog killed browser pid(s) %s (%s)" % (",".join(out), reason))
+    except Exception:
+        pass
+    return killed
+
+
+def _write_json_atomic(path, payload):
+    """Write a JSON file atomically (tmp + rename) — concurrent writers
+    (loop vs watchdog) never leave a torn file for the client to parse."""
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(payload))
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def watchdog_loop():
+    """The watchdog daemon (PRD §6/§7: every action eventually resolves;
+    never leave a pending browser promise indefinitely)."""
+    while True:
+        time.sleep(0.5)
+        try:
+            with WATCHDOG_LOCK:
+                cid = WATCHDOG["cid"]
+                action = WATCHDOG["action"]
+                deadline = WATCHDOG["deadline"]
+            if not cid or deadline <= 0:
+                continue
+            if time.monotonic() < deadline:
+                continue
+            # Disarm immediately — one shot per command.
+            with WATCHDOG_LOCK:
+                WATCHDOG["cid"] = None
+                WATCHDOG["deadline"] = 0.0
+            event("BROWSER_TIMEOUT", action=action, commandId=cid)
+            _kill_browser_processes("action timeout: %s" % action)
+            # Grace window: the kill usually unblocks the loop, which then
+            # writes its own (error) reply — or, for a wedged preboot, gets
+            # past boot_browser and writes .ready. If nothing lands within
+            # 20s the watchdog answers FOR it — the client always gets a
+            # result. A driver that RECOVERED is never punished.
+            grace = time.monotonic() + 20.0
+            res_path = None if cid == "preboot" else os.path.join(DIR, "res-" + cid + ".json")
+            while time.monotonic() < grace:
+                if res_path and os.path.exists(res_path):
+                    break
+                if cid == "preboot" and os.path.exists(READY):
+                    break
+                time.sleep(0.5)
+            if cid == "preboot":
+                if os.path.exists(READY):
+                    # The kill unblocked the preboot — the driver is up and
+                    # healthy. Do NOT exit; serve commands normally.
+                    log("watchdog: preboot recovered after the browser kill — driver stays up")
+                    continue
+                # Preboot wedged beyond its budget — surface it in the boot
+                # poll (the client reads .boot-failed) and exit so the next
+                # command boots a FRESH driver.
+                try:
+                    with open(BOOT_FAIL_PATH, "w") as f:
+                        f.write("browser preboot timed out after %ds — the driver was restarted; the next command retries the boot\n" % PREBOOT_BUDGET)
+                except Exception:
+                    pass
+                log("watchdog: preboot timed out — exiting driver for a fresh boot")
+                os._exit(1)
+            if res_path and not os.path.exists(res_path):
+                payload = err_payload(
+                    "timeout",
+                    'Browser action "%s" exceeded its time budget; the browser process was killed to unblock it. The next action relaunches the browser automatically (the persistent profile keeps cookies and localStorage).' % action,
+                    True,
+                )
+                if _write_json_atomic(res_path, payload):
+                    with WATCHDOG_LOCK:
+                        WATCHDOG["answered"].add(cid)
+                        if len(WATCHDOG["answered"]) > 200:
+                            WATCHDOG["answered"] = set(sorted(WATCHDOG["answered"])[-100:])
+        except Exception:
+            log("watchdog error: %s" % traceback.format_exc()[-200:])
+
+
+def _sweep_stale_results():
+    """Remove res-*.json files older than 10 minutes — orphaned replies
+    (the client already timed out and moved on) must not accumulate."""
+    try:
+        now = time.time()
+        for name in os.listdir(DIR):
+            if not (name.startswith("res-") and name.endswith(".json")):
+                continue
+            p = os.path.join(DIR, name)
+            try:
+                if now - os.path.getmtime(p) > 600:
+                    os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def main():
-    # STARTUP PREBOOT (browser_startup_failed fix): when boot.sh left a
-    # .preboot marker, boot the BROWSER before declaring READY — "ready"
-    # then means "browser USABLE". The first use_browser action no longer
-    # hides a ~200 MB binary download behind its own action timeout (the
-    # 6-10-minute silent hang), and launch failures surface in the boot
+    # STARTUP PREBOOT: when boot.sh left a .preboot marker, boot the BROWSER
+    # before declaring READY — "ready" then means "browser USABLE". The
+    # first use_browser action no longer hides a ~200 MB binary download
+    # behind its own action timeout, and launch failures surface in the boot
     # poll window (narrated via boot.log) instead of a bare action timeout.
-    # A preboot failure is NOT fatal: the first command retries the boot
-    # and reports the real error.
+    # A preboot failure is NOT fatal: the first command retries the boot and
+    # reports the real error. The WATCHDOG covers a WEDGED preboot (writes
+    # .boot-failed and exits the driver instead of hanging forever).
+    event("BROWSER_DRIVER_START", version=DRIVER_VERSION, pid=os.getpid())
     if os.path.exists(PREBOOT):
         boot_log("prebooting the browser runtime (a first launch may need to download the binary)…")
+        _arm_watchdog("preboot", "preboot", PREBOOT_BUDGET)
         try:
             boot_browser()
             boot_log("browser prebooted (runtime: %s) — reporting ready" % (runtime,))
         except Exception as e:
             boot_log("preboot failed: %s — the first command will retry the boot" % (e,))
+        finally:
+            _disarm_watchdog()
     with open(READY, "w") as f:
         f.write("1")
     with open(VERSION_PATH, "w") as f:
         f.write(DRIVER_VERSION)
     threading.Thread(target=live_pub_loop, daemon=True).start()
     threading.Thread(target=live_cast_loop, daemon=True).start()
+    threading.Thread(target=watchdog_loop, daemon=True).start()
     refresh_live_pages()
-    log("driver loop started (pid %d)" % os.getpid())
+    log("driver loop started (pid %d, watchdog armed)" % os.getpid())
     seen = ""
+    sweep_n = 0
     while True:
         try:
             if not os.path.exists(CMD):
@@ -1710,21 +2261,14 @@ def main():
             seen = cid
             action = str(cmd.get("action") or "")
             handler = HANDLERS.get(action)
+            boot_failed = False
+            event("BROWSER_ACTION_START", action=action, commandId=cid)
+            t0 = time.time()
             if handler is None:
-                # The snapshot action was REMOVED (user directive 2026-10-21:
-                # basic tool call + output only). Models trained on the old
-                # schema still try it — redirect instead of a bare error so
-                # one round self-corrects.
-                if action == "snapshot":
-                    result = err_payload(
-                        "bad_request",
-                        "The snapshot action no longer exists. Use read (page text) plus inspect (interactive elements with refs) instead.",
-                        False,
-                    )
-                else:
-                    result = err_payload("bad_request", "Unknown action: %s" % action, False)
+                result = err_payload("bad_request", "Unknown action: %s (supported: %s)" % (action, ", ".join(sorted(HANDLERS))), False)
             else:
-                boot_failed = False
+                budget = ACTION_BUDGETS.get(action, DEFAULT_ACTION_BUDGET)
+                _arm_watchdog(cid, action, budget)
                 try:
                     result = handler(cmd)
                 except BootFailure as e:
@@ -1738,10 +2282,26 @@ def main():
                 except Exception as e:
                     log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
                     result = playw_err(e)
+                _disarm_watchdog()
+            duration_ms = int((time.time() - t0) * 1000)
+            if isinstance(result, dict):
+                result.setdefault("durationMs", duration_ms)
+                result.setdefault("action", action)
+            event(
+                "BROWSER_ACTION_COMPLETE" if (isinstance(result, dict) and result.get("success")) else "BROWSER_ACTION_FAILED",
+                action=action, commandId=cid, durationMs=duration_ms,
+                error=(result.get("error") or {}).get("type") if isinstance(result, dict) and result.get("error") else None,
+            )
+            event("BROWSER_EXECUTION_COMPLETE", action=action, commandId=cid, durationMs=duration_ms)
+            # Exactly-one-reply discipline: if the WATCHDOG already answered
+            # this command (loop was wedged, client got the timeout), the
+            # loop does NOT overwrite it — a late error would replace the
+            # honest timeout diagnosis the client may still be reading.
+            with WATCHDOG_LOCK:
+                answered = cid in WATCHDOG["answered"]
             res_path = os.path.join(DIR, "res-" + cid + ".json")
-            with open(res_path + ".tmp", "w") as f:
-                f.write(json.dumps(result))
-            os.replace(res_path + ".tmp", res_path)
+            if not answered:
+                _write_json_atomic(res_path, result)
             # BOOT-FAILURE EXIT (asyncio-poisoning fix): the reply is already
             # on disk — now exit so leaked Playwright/node resources die
             # with this process. The session manager's liveness check sees
@@ -1755,11 +2315,14 @@ def main():
                     pass
                 time.sleep(0.2)
                 os._exit(1)
-            # Live-cast upkeep (PRD §2-§4): after every command the active
-            # tab marker + url/title/viewport refresh so the live view tracks
-            # what the agent just did, even for actions that publish nothing.
+            # Live-cast upkeep: after every command the active tab marker +
+            # url/title/viewport refresh so the live view tracks what the
+            # agent just did, even for actions that publish nothing.
             mark_active_tab()
             refresh_live_pages()
+            sweep_n += 1
+            if sweep_n % 200 == 0:
+                _sweep_stale_results()
         except json.JSONDecodeError:
             time.sleep(0.3)
         except Exception:

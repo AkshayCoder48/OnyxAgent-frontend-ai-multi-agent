@@ -34,7 +34,7 @@ import {
   sandboxIdStorageKey,
   type E2BClient,
 } from "./client";
-import { resetBrowserSessionCache } from "./browser-session";
+import { prepareBrowserInBackground, resetBrowserSessionCache } from "./browser-session";
 import type { ToolContext } from "@/lib/tools/registry";
 
 // 50 minutes — rotate BEFORE the 1-hour E2B sandbox timeout kills the sandbox.
@@ -192,6 +192,15 @@ export async function ensureFreshSandbox(
       // or creates a new one.
       await targetE2BClient(t).createSandbox();
       setStoredCreatedAt(t, Date.now());
+      // ZERO-STARTUP-DELAY PREPARE (CloakBrowser + E2B reimplementation):
+      // the sandbox just came up — kick the detached browser runtime
+      // install NOW so the CloakBrowser download runs while the user
+      // chats. Fire-and-forget; failures are swallowed (the tool-side
+      // boot path reports real errors). The server performs the same
+      // kick at creation (createAndCacheSandbox → prepareBrowserRuntime);
+      // boot.sh's .boot-lock makes the double-kick harmless, and this one
+      // covers rotation flows that reuse an existing server instance.
+      prepareBrowserInBackground(targetE2BClient(t));
     } catch {
       // best-effort — don't block the operation. The next call will retry.
     }
@@ -317,6 +326,11 @@ async function performRotation(t: SandboxTarget): Promise<void> {
           // to pick up the new id (the legacy behavior — unchanged).
           evictAllE2BClients();
         }
+        // The replacement sandbox just came up — kick its browser
+        // prepare in the background so the browser is warm before the
+        // next use_browser call (the restored ~/.onyx/browser/profile
+        // backup keeps the session state across the swap).
+        prepareBrowserInBackground(targetE2BClient(t));
       }
       // Record the rotation time so we rotate again after the rotation age.
       setStoredCreatedAt(t, Date.now());

@@ -38,6 +38,12 @@ export interface BrowserPayload {
   tabCount?: number;
   status?: number | null;
   text?: string;
+  textLength?: number;
+  truncated?: boolean;
+  headings?: Array<{ level: number; text: string }>;
+  counts?: { links?: number; buttons?: number; inputs?: number; images?: number };
+  interactive?: Array<{ tag: string; text?: string | null; href?: string; id?: string }>;
+  textExcerpt?: string;
   elements?: Array<{ ref: string; tag: string; role?: string | null; text?: string | null; selector: string }>;
   forms?: Array<Record<string, unknown>>;
   count?: number;
@@ -51,6 +57,9 @@ export interface BrowserPayload {
   sizeBytes?: number;
   recording?: boolean;
   message?: string;
+  /** PRD §5 contract: ALWAYS a non-empty human-readable one-liner. */
+  output?: string;
+  durationMs?: number;
   error?: { type: string; message: string; recoverable?: boolean };
   viewport?: { width: number; height: number } | null;
   box?: { x: number; y: number; w: number; h: number } | null;
@@ -80,12 +89,15 @@ const OP_LABELS: Record<string, string> = {
   wait: "Wait",
   read: "Read",
   get_page: "Read",
-  // Legacy (removed 2026-10-21) — old conversations in history still render.
+  extract_text: "Extract",
+  // snapshot was removed 2026-10-21, then RE-ADDED by the 2026-11-01
+  // CloakBrowser reimplementation (real page-structure capture).
   snapshot: "Snapshot",
   screenshot: "Screenshot",
   screen_record: "Record",
   inspect: "Inspect",
   get_elements: "Inspect",
+  forms: "Forms",
   evaluate: "Eval",
   select: "Select",
   upload: "Upload",
@@ -99,6 +111,7 @@ const OP_LABELS: Record<string, string> = {
   go_forward: "Forward",
   reload: "Reload",
   refresh: "Reload",
+  close: "Close",
 };
 
 /** Settled fallback card header labels (BrowserResult). */
@@ -111,12 +124,15 @@ const ACTION_LABELS: Record<string, string> = {
   wait: "Waited",
   read: "Read page",
   get_page: "Read page",
-  // Legacy (removed 2026-10-21) — old conversations in history still render.
+  extract_text: "Extracted text",
+  // snapshot was removed 2026-10-21, then RE-ADDED by the 2026-11-01
+  // CloakBrowser reimplementation (real page-structure capture).
   snapshot: "Page snapshot",
   screenshot: "Screenshot",
   screen_record: "Screen record",
   inspect: "Elements",
   get_elements: "Elements",
+  forms: "Forms",
   evaluate: "Evaluated",
   select: "Selected",
   upload: "Uploaded",
@@ -130,6 +146,7 @@ const ACTION_LABELS: Record<string, string> = {
   go_forward: "Forward",
   reload: "Reloaded",
   refresh: "Reloaded",
+  close: "Closed",
 };
 
 /** Trim a label so rows never blow the layout. */
@@ -225,13 +242,21 @@ function opResultSummary(action: string, payload: BrowserPayload | null): string
       return typeof payload.status === "number" ? `HTTP ${payload.status}` : "loaded";
     case "read":
     case "get_page":
+    case "extract_text":
       return typeof payload.text === "string" && payload.text
-        ? `${payload.text.length.toLocaleString()} chars`
+        ? `${(payload.textLength ?? payload.text.length).toLocaleString()} chars`
         : null;
     case "inspect":
     case "get_elements":
-    case "snapshot": // legacy — removed 2026-10-21, old history still renders
       return typeof count === "number" ? `${count} elements` : null;
+    case "snapshot": {
+      // Real snapshot (2026-11-01 reimplementation): structure counts.
+      const c = payload.counts;
+      if (c && typeof c.links === "number") return `${c.links} links · ${c.buttons ?? 0} buttons`;
+      return typeof count === "number" ? `${count} elements` : null;
+    }
+    case "forms":
+      return typeof count === "number" ? `${count} controls` : null;
     case "screenshot":
       return "captured";
     case "screen_record": {
@@ -254,9 +279,10 @@ function opResultSummary(action: string, payload: BrowserPayload | null): string
   }
 }
 
-/** The PLAIN OUTPUT of one call — the raw text the tool returned (read text,
- * evaluate value, error message). This is the "output" half of the basic
- * tool-call presentation: no derived UI, just what came back. */
+/** The PLAIN OUTPUT of one call — the raw text the tool returned (the
+ * driver's guaranteed `output` line, the read text, the evaluate value, the
+ * error message). This is the "output" half of the basic tool-call
+ * presentation: no derived UI, just what came back. */
 function opOutput(action: string, payload: BrowserPayload | null, toolCall: ToolCall): string | null {
   if (payload?.error) return `${payload.error.type} — ${payload.error.message}`;
   if (toolCall.status === "error" && !payload) return `Action ${action} failed.`;
@@ -266,6 +292,9 @@ function opOutput(action: string, payload: BrowserPayload | null, toolCall: Tool
       ? payload.value
       : (JSON.stringify(payload.value) ?? String(payload.value));
   }
+  // The PRD §5 contract field first — a readable one-liner for EVERY
+  // action, present since the 2026-11-01 reimplementation.
+  if (typeof payload.output === "string" && payload.output.trim()) return payload.output;
   if (typeof payload.text === "string" && payload.text) return payload.text;
   if (typeof payload.message === "string" && payload.message) return payload.message;
   return null;
@@ -609,7 +638,10 @@ export function BrowserResult({ toolCall }: { toolCall: ToolCall }) {
         </pre>
       ) : null}
 
-      {ok && payload.message && !text ? (
+      {ok && !text && !value && payload.output ? (
+        <p className="text-xs text-muted-foreground">{payload.output}</p>
+      ) : null}
+      {ok && payload.message && !text && !payload.output ? (
         <p className="text-xs text-muted-foreground">{payload.message}</p>
       ) : null}
     </div>

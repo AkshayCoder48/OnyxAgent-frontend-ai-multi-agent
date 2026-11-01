@@ -42,7 +42,11 @@ cat <<'EOF'
 
       E2B_TEMPLATE_ID=TEMPLATE_NAME
 
-    Unset, the app still works — the browser runtime then self-installs in
-    the sandbox on first use (first run only, up to ~10 minutes, narrated
-    live in the tool output).
+    Unset, the app still works — the browser runtime now installs in the
+    background AT SANDBOX CREATION (the /api/sandbox route kicks the
+    detached boot for every fresh sandbox), so first use is fast anyway;
+    the template just makes it instant.
+
+    Offline driver verification (no E2B account needed):
+      python3 scripts/verify-browser-driver.py
 EOF

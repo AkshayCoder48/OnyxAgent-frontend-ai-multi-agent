@@ -25,24 +25,54 @@ env var to enable Pro (seat-limited).
 The default `code-interpreter-v1` template doesn't include a browser. Without
 this template, the browser tool pip-installs `cloakbrowser + playwright` into
 a fresh sandbox at runtime (~minutes) and downloads the stealth Chromium
-binary on first launch — historically behind a fixed 6-minute boot ceiling,
-which produced the `browser_startup_failed — did not finish booting in time.
-No boot output was captured` failures. With this template everything is
-**baked into the image** — every new sandbox starts browser-ready and `use_browser`
-boots in **seconds**.
+binary on first launch — historically behind a fixed boot ceiling inside the
+first tool call, which produced the
+`browser_startup_failed — did not finish booting in time` failures. With this
+template everything is **baked into the image** — every new sandbox starts
+browser-ready and `use_browser` boots in **seconds**.
 
-The runtime boot path (`src/lib/e2b/browser-session.ts`) now also:
+## The zero-startup-delay architecture (2026-11-01 reimplementation)
 
-- **pre-flight probes** the runtime — template-warm sandboxes get a tight
-  2-minute boot ceiling (wedges fail fast); cold installs get an honest
-  10-minute ceiling with live narration;
-- **pre-fetches the ~200 MB browser binaries inside the detached boot window**
-  after a fresh pip install (the first action no longer hides the download);
-- **pre-boots the browser before the driver reports READY** (`.preboot`
-  marker — "ready" means "browser usable", `src/lib/e2b/browser-driver.ts`);
-- **fails fast with a real diagnosis** when the sandbox itself stops
-  responding (6 consecutive poll failures) instead of spinning the whole
-  window and reporting "No boot output was captured".
+The browser runtime now installs **in parallel with the sandbox lifecycle**,
+never inside a tool call:
+
+```
+Sandbox creation (server, createAndCacheSandbox)
+        |
+        v
+  prepareBrowserRuntime()          ← writes driver.py + boot.sh, launches
+        |                             `nohup bash boot.sh &` (detached)
+        v
+  boot.sh runs INSIDE the sandbox   ← pip install + ~200MB binary download
+  while the user chats                (events land in events.jsonl)
+        |
+        +---- user keeps chatting; other tools run unaffected
+        |
+        v
+  First use_browser call  ──►  driver already .ready ──► executes in seconds
+                                     (or polls briefly with live narration)
+```
+
+- **At creation**: `/api/sandbox` `createAndCacheSandbox` kicks the detached
+  boot for EVERY fresh sandbox (best-effort, bounded, failure-tolerant).
+- **Client side**: `prepareBrowserInBackground()` (sandbox-rotation.ts) kicks
+  the same boot after sandbox creation and after every rotation;
+  `boot.sh`'s `.boot-lock` makes double-kicks idempotent.
+- **In the tool**: `ensureBrowserDriver` re-deploys + re-launches if needed,
+  narrating real progress (boot.log lines) through the tool output.
+- **With this template**: the runtime + binaries are baked in, so the boot
+  only starts the driver + browser preboot — effectively instant.
+
+Never-infinite guarantees (browser-driver.ts + browser-session.ts):
+
+- **Watchdog**: every browser action runs under a per-action budget; on
+  expiry the sandbox-side watchdog SIGKILLs the browser (the one reliable
+  way to unblock any stuck Playwright call) and writes the timeout reply
+  itself — the client ALWAYS gets a structured result.
+- **Client deadlines**: every sandbox HTTP interaction is deadline-bounded
+  (a stalled request can no longer hang a tool call forever).
+- **Isolated sessions**: browser session state is per-sandbox-client
+  (multiple agents never fight over one boot or queue).
 
 ## Build
 
@@ -68,8 +98,9 @@ E2B_TEMPLATE_ID=onyx-cloakbrowser
 The sandbox route (`src/app/api/sandbox/route.ts`, `createAndCacheSandbox`)
 reads it and passes `template` to `Sandbox.create({ ... })`. **Unset** → the
 default code-interpreter template is used and the browser runtime
-self-installs at runtime (works, just slower on first use). A missing
-template name never breaks sandbox creation — it is opt-in.
+self-installs at runtime — now kicked at sandbox creation and finished in
+the background, so first use is fast anyway. A missing template name never
+breaks sandbox creation — it is opt-in.
 
 ## What's included
 

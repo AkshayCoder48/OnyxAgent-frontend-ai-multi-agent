@@ -1,16 +1,32 @@
 "use client";
 
-// use_browser — THE ONE AI-facing browser tool (CloakBrowser PRD).
+// use_browser — THE ONE AI-facing browser tool (CloakBrowser + E2B PRD,
+// reimplementation 2026-11-01).
 //
-// Every browser capability (navigation, interaction, screenshots, DOM
-// inspection, JS evaluation, forms, tabs, downloads, uploads) rides this
-// single action-based tool. The runtime underneath (CloakBrowser with
-// humanize=True, standard-Chromium fallback) executes INSIDE the E2B
-// sandbox and is an implementation detail the model never sees — there
-// are no separate browser_navigate / browser_click / … tools.
+// Every browser capability (navigation, interaction, screenshots,
+// snapshots, DOM inspection, JS evaluation, forms, tabs, downloads,
+// uploads) rides this single action-based tool. The runtime underneath
+// (CloakBrowser with humanize=True, standard-Chromium fallback) executes
+// INSIDE the E2B sandbox and is an implementation detail the model never
+// sees — there are no separate browser_navigate / browser_click / … tools.
 //
-// The SAME tool name is implemented natively inside the sandbox runner
-// so every execution path gets the identical surface.
+// REWRITE GUARANTEES (the "infinite execution, no output" incident):
+//   • the handler NEVER throws — every failure resolves to a structured
+//     result, so the agent always receives an answer and can keep
+//     reasoning (PRD §7);
+//   • every result carries a non-empty human-readable `output` line plus
+//     success/action/url/title/error/durationMs (PRD §5);
+//   • every action runs under an explicit per-action deadline (PRD §6) —
+//     the client enforces it AND the sandbox-side watchdog enforces it;
+//   • ctx.signal (the agent's abort signal) is honoured end-to-end;
+//   • progress lines narrate the real lifecycle (sandbox → download →
+//     initialization → action → result) through ctx.onToolOutput.
+//
+// Action surface — the PRD core plus the compat aliases older
+// conversations and trained models still emit (read ≙ extract_text,
+// inspect ≙ get_elements, back/forward/reload ≙ go_back/go_forward/
+// refresh, …). The runtime maps them all; nothing the model sends from
+// the old schema breaks.
 
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
@@ -19,60 +35,115 @@ import { sendBrowserCommand, type BrowserCommandResult } from "@/lib/e2b/browser
 const NO_KEY_ERROR =
   "The browser requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
 
-const ACTIONS = [
+/** PRD §5 core action surface. */
+const CORE_ACTIONS = [
   "navigate",
+  "screenshot",
+  "snapshot",
   "click",
   "type",
-  "press",
   "scroll",
-  "wait",
-  "read",
-  "screenshot",
-  "screen_record",
+  "extract_text",
   "inspect",
-  "evaluate",
+  "wait",
   "back",
   "forward",
-  "reload",
-  "get_page",
-  "get_elements",
+  "close",
+] as const;
+
+/** Compat aliases kept so old conversations / trained behaviors keep
+ *  working against the same driver (PRD rule 10: preserve compatibility
+ *  with the existing orchestration and tool-calling system). */
+const COMPAT_ACTIONS = [
+  "read", // ≙ extract_text
+  "get_page", // ≙ extract_text
+  "get_elements", // ≙ inspect
+  "press",
+  "evaluate",
   "select",
   "upload",
   "download",
   "new_tab",
   "switch_tab",
   "close_tab",
-  "go_back",
-  "go_forward",
-  "refresh",
+  "go_back", // ≙ back
+  "go_forward", // ≙ forward
+  "reload", // ≙ navigate current page
+  "refresh", // ≙ reload
+  "screen_record",
 ] as const;
 
-const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads.
+const ACTIONS = [...CORE_ACTIONS, ...COMPAT_ACTIONS] as const;
+type BrowserAction = (typeof ACTIONS)[number];
+
+/**
+ * Per-action client deadlines (PRD §6 — configurable, in ONE place). Each
+ * is the DRIVER-side budget (browser-driver.ts ACTION_BUDGETS) plus a
+ * ~15-25s transport margin, so the driver answers first with the precise
+ * error (element_not_found, navigation_failed, …) while the client
+ * deadline stays the hard backstop that guarantees a result.
+ */
+const ACTION_TIMEOUT_MS: Record<BrowserAction, number> = {
+  navigate: 85_000,
+  screenshot: 65_000,
+  snapshot: 50_000,
+  click: 45_000,
+  type: 50_000,
+  scroll: 40_000,
+  extract_text: 50_000,
+  inspect: 50_000,
+  wait: 55_000,
+  back: 45_000,
+  forward: 45_000,
+  close: 40_000,
+  // compat aliases
+  read: 50_000,
+  get_page: 50_000,
+  get_elements: 50_000,
+  press: 35_000,
+  evaluate: 65_000,
+  select: 45_000,
+  upload: 85_000,
+  download: 115_000,
+  new_tab: 65_000,
+  switch_tab: 35_000,
+  close_tab: 35_000,
+  go_back: 45_000,
+  go_forward: 45_000,
+  reload: 65_000,
+  refresh: 65_000,
+  screen_record: 320_000, // 'stop' installs the encoder + assembles the video
+};
+
+const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser (CloakBrowser) running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads.
 
 WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads. For simply READING a page's text (articles, docs, APIs) use web_fetch instead — it is the default for reading and much faster/cheaper.
 
 Pass \`action\` plus only the fields that action needs:
 
 - "navigate" (url) — open a URL (https://… or http://localhost:PORT for sandbox-local servers).
+- "screenshot" (fullPage?) — capture a PNG of the page.
+- "snapshot" () — the page STRUCTURE: title, heading outline, element counts, top interactive elements + a text excerpt.
+- "extract_text" () — the visible page text.
+- "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors; the returned "ref" (e.g. "e12") or selector works in subsequent actions.
 - "click" (target) — click a link/button/element.
 - "type" (target, text, submit?, clear?) — fill an input; submit:true presses Enter after typing.
-- "press" (key) — press a keyboard key (e.g. "Enter", "Control+a").
 - "scroll" (direction?, amount?) — scroll the page (down/up/left/right).
 - "wait" (ms? | selector? | text?) — wait for a moment / element / text.
-- "read" () — compact page summary: URL, title, visible text.
-- "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors; the returned "ref" (e.g. "e12") or selector works in subsequent actions.
+- "back" / "forward" — history navigation.
+- "close" () — close the browser session (profile is kept).
+- "press" (key) — press a keyboard key (e.g. "Enter", "Control+a").
 - "evaluate" (code) — run JavaScript in the page and get the result.
 - "select" (target, value) — choose an option in a <select> dropdown.
 - "upload" (target, files) — upload WORKSPACE files (paths like "uploads/report.pdf") to a file input.
 - "download" (url? | target?) — capture a download into the workspace (~/downloads), returns the file path.
 - "new_tab" (url?) / "switch_tab" (tab: index or id) / "close_tab" (tab?) — tab management.
-- "back" / "forward" / "reload" — history navigation (aliases: go_back / go_forward / refresh).
 
 TARGETING (prefer semantic): a target is EITHER a string selector (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]", "ref=e12") OR an object like {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
 
 DOCUMENTATION SITES: do NOT reach for the browser to read docs — use web_fetch on /llms.txt and .md pages first (it is the default reader); the browser is only for doc sites that need interaction to render.
 
-The browser session persists across calls — navigate, then click, then type, all on the same session. First use in a fresh sandbox installs the browser runtime (can take a couple of minutes; consider telling the user).`;
+The browser session persists across calls — navigate, then click, then type, all on the same session. The browser installs in the background while you chat, so the first call is usually instant; a genuinely cold sandbox may still need a one-time setup (narrated live in the tool output).`;
 
 registerTool(
   "use_browser",
@@ -105,8 +176,8 @@ registerTool(
       ms: { type: "number", description: "Milliseconds to wait (wait action, default 1000)." },
       selector: { type: "string", description: "Selector to wait for (wait action)." },
       fullPage: { type: "boolean", description: "Capture the full page (screenshot action)." },
-      filter: { type: "string", description: "Substring filter for get_elements." },
-      limit: { type: "number", description: "Max elements for get_elements (default 60)." },
+      filter: { type: "string", description: "Substring filter for inspect." },
+      limit: { type: "number", description: "Max elements for inspect (default 60)." },
       value: { type: "string", description: "Option value to select (select action)." },
       files: {
         type: "array",
@@ -119,52 +190,74 @@ registerTool(
     additionalProperties: false,
   },
   async (args, ctx) => {
-    const action = String(args.action ?? "");
-    if (!ACTIONS.includes(action as (typeof ACTIONS)[number])) {
-      return { error: `Unknown action: ${action}` };
-    }
-
-    // ── required-arg validation (fail fast with actionable messages) ──
-    const need = (cond: boolean, message: string) => {
-      if (!cond) return { error: message };
-      return null;
+    const startedAt = Date.now();
+    const action = String(args.action ?? "") as BrowserAction;
+    const progress = (line: string) => {
+      ctx.onToolOutput?.("", line, "stdout");
     };
-    if (action === "navigate" || action === "download") {
-      if (action === "navigate" && !args.url) {
-        return { error: "url is required for action 'navigate'." };
-      }
-      if (action === "download" && !args.url && !args.target) {
-        return { error: "url or target is required for action 'download'." };
-      }
-    }
-    if (action === "type" && (args.text === undefined || args.text === null) && !args.target) {
-      return need(!!args.target, "target is required for action 'type'.");
-    }
-    if (action === "evaluate") {
-      const v = need(!!args.code, "code is required for action 'evaluate'.");
-      if (v) return v;
-    }
-    if (action === "upload") {
-      const v = need(
-        Array.isArray(args.files) && args.files.length > 0,
-        "files (workspace paths, e.g. ['uploads/report.pdf']) is required for action 'upload'.",
+
+    // ── structured failure helper: NEVER throw out of this tool ──────
+    const fail = (type: string, message: string, opts?: { recoverable?: boolean }) => ({
+      kind: "browser" as const,
+      success: false,
+      action,
+      url: null,
+      title: null,
+      screenshot: null,
+      error: { type, message, recoverable: opts?.recoverable ?? true },
+      output: `${type}: ${message}`,
+      durationMs: Date.now() - startedAt,
+    });
+
+    // ── action validation (fail fast with actionable messages) ──────
+    if (!ACTIONS.includes(action)) {
+      return fail(
+        "bad_request",
+        `Unknown action "${action}". Supported: ${ACTIONS.join(", ")}.`,
+        { recoverable: false },
       );
-      if (v) return v;
+    }
+    if (action === "navigate" && !args.url) {
+      return fail("bad_request", "url is required for action 'navigate'.", { recoverable: false });
+    }
+    if (action === "download" && !args.url && !args.target) {
+      return fail("bad_request", "url or target is required for action 'download'.", { recoverable: false });
+    }
+    if (action === "type" && args.text === undefined && !args.target) {
+      return fail("bad_request", "target is required for action 'type'.", { recoverable: false });
+    }
+    if (action === "evaluate" && !args.code) {
+      return fail("bad_request", "code is required for action 'evaluate'.", { recoverable: false });
+    }
+    if (
+      action === "upload" &&
+      !(Array.isArray(args.files) && args.files.length > 0)
+    ) {
+      return fail(
+        "bad_request",
+        "files (workspace paths, e.g. ['uploads/report.pdf']) is required for action 'upload'.",
+        { recoverable: false },
+      );
     }
     if (action === "select" && args.value === undefined) {
-      return { error: "value is required for action 'select'." };
+      return fail("bad_request", "value is required for action 'select'.", { recoverable: false });
     }
 
-    // ── sandbox + driver ─────────────────────────────────────────────
-    const sbx = await chatSandboxForCtx(ctx);
+    // ── sandbox acquisition ──────────────────────────────────────────
+    let sbx: Awaited<ReturnType<typeof chatSandboxForCtx>>;
+    try {
+      sbx = await chatSandboxForCtx(ctx);
+    } catch (e) {
+      return fail(
+        "sandbox_unavailable",
+        `Could not reach the E2B sandbox: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     if (!sbx) {
-      return {
-        success: false,
-        error: { type: "sandbox_unavailable", message: NO_KEY_ERROR, recoverable: false },
-      };
+      return fail("sandbox_unavailable", NO_KEY_ERROR, { recoverable: false });
     }
 
-    // Build the wire command (only the fields the driver knows).
+    // ── wire command (only the fields the driver knows) ─────────────
     const cmd: Record<string, unknown> = { action };
     for (const k of [
       "operation",
@@ -189,28 +282,60 @@ registerTool(
       if (args[k] !== undefined) cmd[k] = args[k];
     }
 
-    const onProgress = (line: string) => {
-      ctx.onToolOutput?.("", line, "stdout");
+    // Narrate the real lifecycle — every line corresponds to an actual
+    // backend transition (boot narration comes from sendBrowserCommand).
+    progress(`Browser ${action} started.`);
+
+    // ── execute under the per-action deadline (PRD §6) ──────────────
+    let result: BrowserCommandResult;
+    try {
+      result = await sendBrowserCommand(sbx.client, cmd, {
+        timeoutMs: ACTION_TIMEOUT_MS[action],
+        onProgress: progress,
+        signal: ctx.signal,
+      });
+    } catch (e) {
+      // sendBrowserCommand never rejects by contract — this is belt and
+      // braces so the agent can NEVER be left without an answer.
+      return fail(
+        "browser_error",
+        `The browser action could not be completed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    const durationMs =
+      typeof result.durationMs === "number"
+        ? result.durationMs
+        : Date.now() - startedAt;
+
+    // ── structured pass-through (PRD §5 contract) ───────────────────
+    // success / action / url / title / output / screenshot / error /
+    // durationMs are ALWAYS present; output is NEVER empty.
+    const output =
+      typeof result.output === "string" && result.output.trim()
+        ? result.output
+        : result.error
+          ? `${result.error.type}: ${result.error.message}`
+          : `${action} completed.`;
+
+    return {
+      ...result,
+      // Canonical contract fields, asserted AFTER the spread so the
+      // guarantees hold no matter what the transport returned.
+      kind: "browser" as const,
+      action,
+      success: result.success !== false,
+      url: (result.url as string | undefined) ?? null,
+      title: (result.title as string | undefined) ?? null,
+      output,
+      screenshot: (result.dataUrl as string | undefined) ?? null,
+      error: result.error ?? null,
+      durationMs,
     };
-
-    // OPERATION-AWARE TIMEOUTS (PRD §9): the ceiling belongs to the
-    // OPERATION, never to the overall task. Recording assembly (stop)
-    // installs the video encoder and encodes — it gets the longest budget;
-    // screenshots / downloads get the mid budget; everything else rides the
-    // session manager's default (90s) or the first-boot budget (6 min).
-    const HEAVY_OPS = new Set(["screen_record", "screenshot", "download"]);
-    const result: BrowserCommandResult = await sendBrowserCommand(sbx.client, cmd, {
-      timeoutMs: HEAVY_OPS.has(action) ? 8 * 60_000 : undefined,
-      onProgress,
-    });
-
-    // Structured pass-through (PRD §9/§27) — never silently fail.
-    return { kind: "browser", action, ...result };
   },
   false,
-  // "web" — the browsing category it belongs to. (It was once registered as
-  // "exec", which hid it behind the since-retired coding-surface filter —
-  // the model then truthfully told users "I don't have the use_browser
-  // tool". Kept on "web" regardless: it describes browsing, not execution.)
+  // "web" — the browsing category it belongs to (kept stable across the
+  // reimplementation: hiding or renaming the tool would break existing
+  // conversations and the captions/step-UI keyed on its name).
   "web",
 );
