@@ -14,7 +14,11 @@
 
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
-import { sendBrowserCommand, type BrowserCommandResult } from "@/lib/e2b/browser-session";
+import {
+  browserActionTimeoutMs,
+  sendBrowserCommand,
+  type BrowserCommandResult,
+} from "@/lib/e2b/browser-session";
 
 const NO_KEY_ERROR =
   "The browser requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
@@ -194,13 +198,13 @@ registerTool(
     };
 
     // OPERATION-AWARE TIMEOUTS (PRD §9): the ceiling belongs to the
-    // OPERATION, never to the overall task. Recording assembly (stop)
-    // installs the video encoder and encodes — it gets the longest budget;
-    // screenshots / downloads get the mid budget; everything else rides the
-    // session manager's default (90s) or the first-boot budget (6 min).
-    const HEAVY_OPS = new Set(["screen_record", "screenshot", "download"]);
+    // OPERATION, never to the overall task — and every ceiling is
+    // build-time configurable (ONYX_BROWSER_ACTION_MS / HEAVY_MS / …).
+    // The DRIVER-side watchdog (CMD_DEADLINE_S, default 75s) guarantees a
+    // stuck action always settles, so these ceilings bound transport
+    // waits, not a hung page.
     const result: BrowserCommandResult = await sendBrowserCommand(sbx.client, cmd, {
-      timeoutMs: HEAVY_OPS.has(action) ? 8 * 60_000 : undefined,
+      timeoutMs: browserActionTimeoutMs(action),
       onProgress,
     });
 

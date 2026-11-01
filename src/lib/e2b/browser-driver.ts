@@ -41,7 +41,7 @@
  * failing every command forever even after the source here was fixed.
  * Bump whenever the Python source changes meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.10.31";
+export const BROWSER_DRIVER_VERSION = "2026.11.01";
 
 export const BROWSER_DRIVER_PY_SOURCE = String.raw`#!/usr/bin/env python3
 # OnyxAgent browser driver — CloakBrowser (humanize=True) over a persistent
@@ -66,6 +66,18 @@ DOWNLOADS = "/home/user/downloads"
 RECORDINGS = os.path.join(DIR, "recordings")
 READY = os.path.join(DIR, ".ready")
 VERSION_PATH = os.path.join(DIR, ".version")
+LOCKFILE = os.path.join(DIR, ".driver.lock")
+HEARTBEAT = os.path.join(DIR, ".heartbeat")
+# Fully configurable ceilings (PRD §9): navigation budget + the per-command
+# watchdog deadline that guarantees EVERY command settles — no infinite
+# pending, ever.
+NAV_TIMEOUT_MS = max(5000, int(os.environ.get("ONYX_NAV_TIMEOUT_MS") or "30000"))
+CMD_DEADLINE_S = max(20.0, float(os.environ.get("ONYX_CMD_DEADLINE_S") or "75"))
+# Heavy operations (recording assembly, downloads) legitimately run long —
+# their watchdog ceiling is the heavy budget, not the interactive one, so a
+# healthy encode never gets its browser killed at 75s.
+HEAVY_CMD_DEADLINE_S = max(60.0, float(os.environ.get("ONYX_CMD_DEADLINE_HEAVY_S") or "420"))
+HEAVY_ACTIONS = {"screen_record", "screenshot", "download"}
 PREBOOT = os.path.join(DIR, ".preboot")
 BOOT_LOG = os.path.join(DIR, "boot.log")
 DRIVER_VERSION = "${BROWSER_DRIVER_VERSION}"
@@ -78,6 +90,7 @@ LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--di
 
 context = None
 pw = None
+lock_fd = None            # the single-instance flock handle (held for life)
 pages = []            # ordered tab list: [{ id, page }]
 active_idx = 0
 tab_seq = 0
@@ -666,26 +679,23 @@ def boot_browser():
                 args=LAUNCH_ARGS,
                 viewport={"width": 1280, "height": 800},
             )
-        except Exception:
-            # Missing browser binaries OR missing SYSTEM LIBRARIES on a
-            # fresh sandbox — install BOTH once and retry. The old
-            # "playwright install chromium" only fetched the binary: on
-            # lean base images (the default code-interpreter template
-            # WITHOUT the custom onyx template's apt layer) the browser
-            # then still failed to exec with "Failed to launch the
-            # browser process" — the missing shared libs (libnss3,
-            # libatk, …) were never installed. --with-deps runs the
-            # distro package install (the sandbox runs as root).
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
-                capture_output=True, timeout=900,
+        except Exception as launch_e:
+            # NO runtime installs inside the command loop (the 2→5→15 min
+            # escalation fix): the old 'playwright install --with-deps
+            # chromium' (a 15-minute stall!) ran INSIDE this handler while the
+            # client's action clock kept ticking — every command timed out
+            # client-side, the reconnect path double-booted the driver, and
+            # the second instance SIGKILLed the first one's live Chromium
+            # ('Page.goto: Target page, context or browser has been
+            # closed'). Binaries are the BOOT's job (boot.sh's detached
+            # pre-fetch or the onyx-cloakbrowser template); a missing binary
+            # is an honest BootFailure, never a silent 15-minute stall.
+            log(
+                "chromium fallback launch failed — no in-loop install (use the "
+                "onyx-cloakbrowser template or let boot.sh's pre-fetch finish): %s"
+                % (_condense_launch_error(launch_e),)
             )
-            context = pw.chromium.launch_persistent_context(
-                PROFILE,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
-            )
+            raise
         runtime = "chromium"
         with LIVE_LOCK:
             LIVE_STATE["booted"] = True
@@ -983,6 +993,17 @@ def playw_err(e):
     return err_payload("browser_error", msg, True)
 
 
+def _conn_closed_error(e):
+    """True when the exception means the browser/page DIED under the action
+    (the 'Page.goto: Target page, context or browser has been closed'
+    family: sandbox pause/resume, external kill, crash). Retryable by
+    rebooting the browser on the persistent profile."""
+    m = str(e).lower()
+    return ("has been closed" in m or "target closed" in m or "target crashed" in m
+            or "connection closed" in m or "not connected" in m
+            or "browser has been deleted" in m or "browser closed" in m)
+
+
 def do_navigate(cmd):
     url = str(cmd.get("url") or "").strip()
     if not url:
@@ -991,7 +1012,7 @@ def do_navigate(cmd):
         url = "https://" + url
     p = active_page()
     publish_live("navigate")
-    resp = p.goto(url, wait_until="domcontentloaded", timeout=45000)
+    resp = p.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     try:
         title = p.title()
     except Exception:
@@ -1293,7 +1314,7 @@ def do_screen_record(cmd):
             subprocess.run(
                 [exe, "-y", "-framerate", "2", "-i", os.path.join(tmpdir, "f%06d.jpg"),
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path],
-                capture_output=True, timeout=900,
+                capture_output=True, timeout=360,
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1517,7 +1538,7 @@ def do_new_tab(cmd):
     active_idx = len(pages) - 1
     url = cmd.get("url")
     if url:
-        p.goto(str(url), wait_until="domcontentloaded", timeout=45000)
+        p.goto(str(url), wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     return state_payload({"success": True, "action": "new_tab", "tabId": tid})
 
 
@@ -1591,7 +1612,7 @@ def do_history(cmd):
     elif cmd.get("action") == "go_forward" or cmd.get("dir") == "forward":
         p.go_forward(timeout=30000)
     else:
-        p.reload(timeout=45000)
+        p.reload(timeout=NAV_TIMEOUT_MS)
     return state_payload({"success": True, "action": cmd.get("action") or "refresh"})
 
 
@@ -1670,7 +1691,78 @@ HANDLERS = {
 }
 
 
+def _heartbeat_loop():
+    """Daemon: stamp .heartbeat every second. The session manager's liveness
+    check reads its age (< 60s = alive) — bare pgrep used to report a
+    wedged-but-alive process as healthy while a CPU-starved-but-fine one
+    looked dead, sending the client into spurious double-boots."""
+    while True:
+        try:
+            with open(HEARTBEAT, "w") as f:
+                f.write(str(int(time.time())))
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+
+# The currently-running command (cid + start time + per-action deadline) and
+# the watchdog's last fired cid — plain dicts so the watchdog thread can
+# read/write them atomically enough for a single producer (loop) / single
+# consumer (watchdog) handshake.
+CURRENT_CMD = {"id": None, "started": 0.0, "deadline": 75.0}
+WATCHDOG = {"fired": None}
+
+
+def _command_watchdog():
+    """Daemon: THE no-infinite-pending guarantee. Sync Playwright is
+    thread-affine, so a stuck call cannot be cancelled from another thread —
+    but its BROWSER PROCESS can be killed process-level, which makes the
+    stuck call raise immediately. When one command exceeds CMD_DEADLINE_S
+    the watchdog SIGKILLs the browser (never the driver); the handler
+    raises 'Target closed', the loop replies a structured timeout, and the
+    next command reboots the browser on the persistent profile. Every
+    command settles — the client-side timer can no longer count to
+    infinity."""
+    while True:
+        time.sleep(1.0)
+        cid = CURRENT_CMD["id"]
+        if not cid or WATCHDOG["fired"] == cid:
+            continue
+        if time.time() - CURRENT_CMD["started"] > CURRENT_CMD["deadline"]:
+            WATCHDOG["fired"] = cid
+            log(
+                "watchdog: command %s exceeded %.0fs — killing the browser to "
+                "unblock the command loop (it reboots on the next action)"
+                % (cid, CURRENT_CMD["deadline"])
+            )
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-f", "user-data-dir=" + PROFILE],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+
 def main():
+    global lock_fd
+    # SINGLE-INSTANCE LOCK: exactly ONE driver per sandbox, ever. The old
+    # double-boot race (client reboot path + boot.sh's pid-file guard keyed
+    # on a pid that had already exited) started a SECOND driver whose
+    # _clear_stale_profile_locks SIGKILLed the FIRST driver's live Chromium
+    # mid-goto — the live 'Page.goto: Target page, context or browser has
+    # been closed' incident. flock is held for the process lifetime and
+    # released by the OS when the holder dies, so a crashed driver never
+    # blocks its replacement.
+    try:
+        import fcntl
+        lock_fd = os.open(LOCKFILE, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        pass  # non-POSIX dev box — proceed without the lock
+    except Exception:
+        boot_log("another driver instance already owns this sandbox — exiting (single-instance lock)")
+        os._exit(0)
     # STARTUP PREBOOT (browser_startup_failed fix): when boot.sh left a
     # .preboot marker, boot the BROWSER before declaring READY — "ready"
     # then means "browser USABLE". The first use_browser action no longer
@@ -1692,11 +1784,17 @@ def main():
         f.write(DRIVER_VERSION)
     threading.Thread(target=live_pub_loop, daemon=True).start()
     threading.Thread(target=live_cast_loop, daemon=True).start()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    threading.Thread(target=_command_watchdog, daemon=True).start()
     refresh_live_pages()
-    log("driver loop started (pid %d)" % os.getpid())
+    log("driver loop started (pid %d, nav timeout %dms, watchdog %.0fs)" % (os.getpid(), NAV_TIMEOUT_MS, CMD_DEADLINE_S))
     seen = ""
     while True:
         try:
+            try:
+                os.utime(HEARTBEAT, None)
+            except Exception:
+                pass
             if not os.path.exists(CMD):
                 time.sleep(0.3)
                 continue
@@ -1725,19 +1823,56 @@ def main():
                     result = err_payload("bad_request", "Unknown action: %s" % action, False)
             else:
                 boot_failed = False
-                try:
-                    result = handler(cmd)
-                except BootFailure as e:
-                    log("browser boot failure: %s" % (e,))
-                    result = err_payload(
-                        "browser_startup_failed",
-                        "%s A fresh browser driver will start on the next command." % (e,),
-                        True,
+                # ONE self-heal retry: a command whose browser died under it
+                # (sandbox pause, external kill) reboots the browser on the
+                # persistent profile and replays — in the driver, in seconds,
+                # with no client round-trip and no second driver.
+                for attempt in (0, 1):
+                    CURRENT_CMD["id"] = cid
+                    CURRENT_CMD["started"] = time.time()
+                    CURRENT_CMD["deadline"] = (
+                        HEAVY_CMD_DEADLINE_S if action in HEAVY_ACTIONS else CMD_DEADLINE_S
                     )
-                    boot_failed = True
-                except Exception as e:
-                    log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
-                    result = playw_err(e)
+                    try:
+                        result = handler(cmd)
+                    except BootFailure as e:
+                        log("browser boot failure: %s" % (e,))
+                        result = err_payload(
+                            "browser_startup_failed",
+                            "%s A fresh browser driver will start on the next command." % (e,),
+                            True,
+                        )
+                        boot_failed = True
+                    except Exception as e:
+                        log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
+                        if WATCHDOG["fired"] == cid:
+                            # The watchdog unblocked a hung sync call — the
+                            # browser is gone by design. Reset so the NEXT
+                            # command reboots it.
+                            _reset_browser_state()
+                            result = err_payload(
+                                "timeout",
+                                "The browser stopped responding mid-action (watchdog closed it after %.0fs). "
+                                "The browser reboots automatically on the next action — retry now." % CURRENT_CMD["deadline"],
+                                True,
+                            )
+                        else:
+                            result = playw_err(e)
+                        if attempt == 0 and not boot_failed and _conn_closed_error(e):
+                            log("browser closed mid-action — rebooting on the persistent profile and retrying once")
+                            try:
+                                _reset_browser_state()
+                                boot_browser()
+                                continue
+                            except Exception as retry_e:
+                                result = err_payload(
+                                    "browser_error",
+                                    "%s | reboot retry failed: %s" % (e, retry_e),
+                                    True,
+                                )
+                    CURRENT_CMD["id"] = None
+                    break
+                CURRENT_CMD["id"] = None
             res_path = os.path.join(DIR, "res-" + cid + ".json")
             with open(res_path + ".tmp", "w") as f:
                 f.write(json.dumps(result))

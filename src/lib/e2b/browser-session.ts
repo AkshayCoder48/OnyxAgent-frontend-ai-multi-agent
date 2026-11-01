@@ -44,6 +44,8 @@ const DRIVER_PATH = `${BR_DIR}/driver.py`;
 const READY_PATH = `${BR_DIR}/.ready`;
 const VERSION_PATH = `${BR_DIR}/.version`;
 const CMD_PATH = `${BR_DIR}/cmd.json`;
+const HEARTBEAT_PATH = `${BR_DIR}/.heartbeat`;
+const PROFILE_DIR = `${BR_DIR}/profile`;
 // driver.log (the daemon's own log) is written by boot.sh's redirect — no
 // client-side reference needed anymore.
 const BOOT_SH_PATH = `${BR_DIR}/boot.sh`;
@@ -51,22 +53,38 @@ const BOOT_LOG_PATH = `${BR_DIR}/boot.log`;
 const INSTALL_LOG_PATH = `${BR_DIR}/boot-install.log`;
 const BOOT_FAIL_PATH = `${BR_DIR}/.boot-failed`;
 
+/** Build-time configurable ceilings (PRD §9 — every wait in this file is
+ * tunable). Next.js inlines these process.env reads at build time for the
+ * client bundle; self-hosters set them in the build/deploy environment. */
+function envInt(name: string, dflt: number): number {
+  const v = typeof process !== "undefined" ? process.env?.[name] : undefined;
+  const n = v ? parseInt(v, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+
 /** First action ceiling — with the boot-time PREBOOT (see BOOT_SH_SOURCE)
  *  the browser is already up when the driver reports READY, so this is a
  *  safety net, not the expected path. */
-const FIRST_BOOT_TIMEOUT_MS = 6 * 60_000;
+const FIRST_BOOT_TIMEOUT_MS = envInt("ONYX_BROWSER_FIRST_ACTION_MS", 6 * 60_000);
 /** Detached-boot polling ceiling when the runtime must be installed first
  *  (cold pip install + ~200 MB binary pre-fetch legitimately takes minutes
  *  on a slow sandbox network; each poll is a short request, the install
  *  itself runs in the sandbox). */
-const BOOT_POLL_TIMEOUT_MS = 10 * 60_000;
+const BOOT_POLL_TIMEOUT_MS = envInt("ONYX_BROWSER_BOOT_COLD_MS", 10 * 60_000);
 /** Polling ceiling when the runtime is ALREADY importable (the
  *  onyx-cloakbrowser template, or a warm sandbox that installed it
  *  earlier) — the driver starts in seconds and the preboot browser launch
  *  in a few more; anything past this window means the sandbox is wedged. */
-const FAST_BOOT_POLL_TIMEOUT_MS = 2 * 60_000;
-/** Usual per-action ceiling. */
-const DEFAULT_ACTION_TIMEOUT_MS = 90_000;
+const FAST_BOOT_POLL_TIMEOUT_MS = envInt("ONYX_BROWSER_BOOT_FAST_MS", 2 * 60_000);
+/** Usual per-action ceiling. The DRIVER's own watchdog (CMD_DEADLINE_S,
+ *  default 75s) always settles a stuck action before this expires, so a
+ *  timeout here means transport trouble, not a hung page. */
+const DEFAULT_ACTION_TIMEOUT_MS = envInt("ONYX_BROWSER_ACTION_MS", 90_000);
+/** Heavy-operation ceiling (screenshot / download / recording assembly). */
+const HEAVY_ACTION_TIMEOUT_MS = envInt("ONYX_BROWSER_HEAVY_MS", 8 * 60_000);
+/** Grace window for a live driver's watchdog result to land after the
+ * client-side action ceiling expires (never reboot over a live driver). */
+const LIVE_DRIVER_GRACE_MS = envInt("ONYX_BROWSER_GRACE_MS", 30_000);
 /** Consecutive failed polls before declaring the sandbox unreachable. A
  *  dead/paused/out-of-quota sandbox used to spin the FULL boot window with
  *  every poll silently swallowed (`.catch(() => null)`) and then time out
@@ -129,12 +147,51 @@ export function browserFirstActionDone(): boolean {
 }
 
 async function driverAlive(client: BrowserSandboxClient): Promise<boolean> {
+  // HEARTBEAT LIVENESS (the double-boot fix): bare pgrep reported a
+  // wedged-but-alive driver as healthy while a CPU-starved-but-fine one
+  // looked dead — both sent the client into the wrong branch. The driver
+  // stamps .heartbeat every second; fresh stamp + live process + .ready is
+  // the only combination counted as alive.
   const r = await execInSandbox(
     client,
-    `test -f ${READY_PATH} && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO`,
+    `hb=$(stat -c %Y ${HEARTBEAT_PATH} 2>/dev/null || echo 0); now=$(date +%s); test -f ${READY_PATH} && test $((now - hb)) -lt 60 && pgrep -f "[d]river.py" >/dev/null && echo READY || echo NO`,
     30,
   );
   return r.ok && r.output.trim() === "READY";
+}
+
+/**
+ * COOPERATIVE SINGLE-OWNER SHUTDOWN (the 'Page.goto: Target page, context or
+ * browser has been closed' fix): kill the driver FIRST, WAIT for it to be
+ * gone, THEN reap its Chromium, THEN clear the markers — only then may a
+ * new boot start. The old path launched boot.sh while a live driver still
+ * owned the sandbox: boot.sh rm -f'd the LIVE driver's .ready and started a
+ * second driver whose orphan-reaper SIGKILLed the first one's browser
+ * mid-navigation. Between the pkill and the Chromium reap the flock inside
+ * driver.py is the backstop: a second driver simply exits.
+ */
+async function stopDriverAndBrowser(
+  client: BrowserSandboxClient,
+  waitSec = 25,
+): Promise<void> {
+  await execInSandbox(client, `pkill -f "[d]river.py" 2>/dev/null; sleep 1; true`, 20).catch(
+    () => null,
+  );
+  const deadline = Date.now() + waitSec * 1000;
+  while (Date.now() < deadline) {
+    const r = await execInSandbox(
+      client,
+      `pgrep -f "[d]river.py" >/dev/null 2>&1 && echo UP || echo GONE`,
+      15,
+    ).catch(() => null);
+    if (r && r.output.trim() === "GONE") break;
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  await execInSandbox(
+    client,
+    `pkill -9 -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null; rm -f ${READY_PATH} ${VERSION_PATH} ${HEARTBEAT_PATH}; true`,
+    20,
+  ).catch(() => null);
 }
 
 /**
@@ -198,14 +255,26 @@ else
   PIP="\$PY -m pip"
 fi
 
-# One boot at a time: a still-running earlier boot (e.g. the client timed
-# out waiting and retried) owns this sandbox — let it finish; the client's
-# poll sees the same .ready either way.
-if [ -f .boot-lock ] && kill -0 "\$(cat .boot-lock 2>/dev/null)" 2>/dev/null; then
-  log "another boot is already running (pid \$(cat .boot-lock)) — exiting"
+# One boot at a time — a REAL flock (the old pid-file guard keyed on a pid
+# that had already exited when boot.sh finished, so a retried client could
+# double-boot: boot.sh rm -f'd the LIVE driver's .ready and launched a
+# second driver, whose orphan-reaper SIGKILLed the first driver's Chromium
+# mid-navigation — the live 'Page.goto: Target page, context or browser has
+# been closed' incident).
+exec 9>.boot-lock
+if ! flock -n 9; then
+  log "another boot is already running — exiting"
   exit 0
 fi
-echo \$\$ > .boot-lock
+# And never boot over a LIVE driver: when driver.py is running AND
+# heartbeating, this sandbox already owns a healthy browser session — touch
+# nothing (the old path deleted .ready out from under it).
+hb=$(stat -c %Y .heartbeat 2>/dev/null || echo 0)
+now=$(date +%s)
+if pgrep -f "[d]river.py" >/dev/null 2>&1 && [ \$((now - hb)) -lt 60 ]; then
+  log "a live driver already owns this sandbox (heartbeat fresh) — exiting without touching it"
+  exit 0
+fi
 
 log "checking the browser runtime…"
 fresh_install=0
@@ -243,22 +312,58 @@ else
   fi
 fi
 
-# BINARY PRE-FETCH (browser_startup_failed fix): after a FRESH install the
-# ~200 MB browser binaries are still missing — fetch them HERE (inside the
-# detached, narrated boot window) instead of letting the first use_browser
-# action pay the download behind its own action timeout. Best-effort: a
-# failed pre-fetch degrades to the old lazy-download behavior.
-if [ "\$fresh_install" = "1" ]; then
-  log "pre-fetching the browser binaries (~200 MB — the slow part of a cold boot)…"
+# BINARY + SYSTEM-LIB PRE-FETCH (browser_startup_failed fix): after a FRESH
+# install the ~200 MB browser binaries are still missing — fetch them HERE
+# (inside the detached, narrated boot window) instead of letting the first
+# use_browser action pay the download behind its own action timeout. The
+# SYSTEM LIBS get the same treatment: a lean base template ships neither
+# libnspr4/libnss3/… for the stealth Chromium nor apt layer — the live
+# 'cloakbrowser launch failed: libnspr4.so: cannot open shared object file'
+# incident. An ldd probe re-runs the lib install whenever a cached binary
+# still misses libraries (fresh sandbox on a warm volume, partial install).
+# Best-effort: a failed pre-fetch degrades to the honest BootFailure.
+CB_BIN=\$(ls /home/user/.cloakbrowser/chromium-*/chrome 2>/dev/null | head -n 1)
+need_libs=0
+if [ -n "\$CB_BIN" ] && ldd "\$CB_BIN" 2>/dev/null | grep -q "not found"; then
+  need_libs=1
+  log "cached stealth Chromium is missing system libraries — installing them…"
+fi
+if [ "\$fresh_install" = "1" ] || [ "\$need_libs" = "1" ]; then
+  log "pre-fetching the browser binaries + system libraries (~200 MB — the slow part of a cold boot)…"
+  # Chromium's shared-library set (both engines need it; debian 12 names).
+  BROWSER_LIBS="libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libatspi2.0-0 libdbus-1-3 libexpat1 libglib2.0-0 libpango-1.0-0 libcairo2 fonts-liberation"
+  if [ "\$(id -u)" = "0" ]; then
+    if "\$PY" -m playwright install --with-deps chromium >> boot-install.log 2>&1; then
+      log "chromium + system libraries installed (root) — the stealth Chromium will launch"
+    else
+      log "playwright --with-deps failed — trying the binary-only install"
+      "\$PY" -m playwright install chromium >> boot-install.log 2>&1 || log "playwright chromium pre-fetch failed"
+    fi
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    # USER SANDBOX with passwordless sudo (the default E2B template): install
+    # the lib set through sudo — the live cold-boot failure was exactly this
+    # ('libnspr4.so: cannot open shared object file', uid 1000, no root).
+    log "installing browser system libraries via sudo…"
+    sudo apt-get update -qq >> boot-install.log 2>&1 || true
+    if sudo apt-get install -y -qq \$BROWSER_LIBS >> boot-install.log 2>&1; then
+      log "browser system libraries installed (sudo) — the stealth Chromium will launch"
+    else
+      log "sudo lib install failed — the driver will report an honest launch error (build the onyx-cloakbrowser template)"
+    fi
+    "\$PY" -m playwright install chromium >> boot-install.log 2>&1 || log "playwright chromium pre-fetch failed"
+  else
+    # No root AND no sudo: binaries only — the driver reports the honest
+    # launch error with the template hint instead of hanging.
+    "\$PY" -m playwright install chromium >> boot-install.log 2>&1 || log "playwright chromium pre-fetch failed (no root/sudo — system libs unavailable)"
+  fi
   if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
     log "stealth Chromium binary cached — the browser will launch instantly"
   else
-    log "cloakbrowser binary pre-fetch failed — the driver will download it on first launch"
+    log "cloakbrowser binary pre-fetch failed — the driver will report an honest launch error"
   fi
-  if "\$PY" -m playwright install chromium >> boot-install.log 2>&1; then
-    log "stock Chromium (fallback runtime) cached"
-  else
-    log "playwright chromium pre-fetch failed — the fallback will self-install if needed"
+  # Re-probe: report the honest end state of the lib install.
+  if [ -n "\$CB_BIN" ] && ldd "\$CB_BIN" 2>/dev/null | grep -q "not found"; then
+    log "WARNING: system libraries are STILL missing after the pre-fetch — see boot-install.log"
   fi
 fi
 
@@ -311,15 +416,14 @@ export async function ensureBrowserDriver(
       try {
         if (await driverAlive(client)) {
           if (await driverUpToDate(client)) return { ok: true };
-          // Stale driver CODE is running in this sandbox. Kill it so the
-          // redeploy below installs the current source — the persistent
+          // Stale driver CODE is running in this sandbox. COOPERATIVE
+          // SINGLE-OWNER SWAP: kill it, WAIT for the exit, reap its Chromium,
+          // clear the markers — then deploy. (The old in-place pkill+sleep
+          // raced the live driver: it could still be mid-goto when the new
+          // boot's orphan-reaper SIGKILLed its browser.) The persistent
           // profile (cookies/localStorage) survives the swap.
           onProgress?.("Updating the sandbox browser driver…");
-          await execInSandbox(
-            client,
-            `pkill -f "[d]river.py"; sleep 1; rm -f ${READY_PATH} ${VERSION_PATH}`,
-            20,
-          );
+          await stopDriverAndBrowser(client, 25);
         } else {
           // Not alive — clear any stale stamps from a dead run so the
           // version check after boot compares against fresh state.
@@ -476,11 +580,19 @@ async function sendCommandOnce(
   client: BrowserSandboxClient,
   cmd: Record<string, unknown>,
   timeoutMs: number,
-): Promise<BrowserCommandResult | null> {
-  const id = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+): Promise<{ id: string; result: BrowserCommandResult | null }> {
+  // Monotonic + random: two commands in the same millisecond (retry + new
+  // call) must never collide on the same res-<id>.json.
+  const id =
+    "c" +
+    (++cmdSeq).toString(36) +
+    Date.now().toString(36) +
+    Math.random().toString(36).slice(2, 6);
   await client.writeFile(CMD_PATH, JSON.stringify({ id, ...cmd }));
-  return readResFile(client, id, timeoutMs);
+  return { id, result: await readResFile(client, id, timeoutMs) };
 }
+
+let cmdSeq = 0;
 
 /**
  * Execute one browser action with automatic reconnection: on a timed-out
@@ -503,32 +615,59 @@ export async function sendBrowserCommand(
         error: { type: "browser_startup_failed", message: booted.error, recoverable: true },
       } satisfies BrowserCommandResult;
     }
-    let result = await sendCommandOnce(client, cmd, timeoutMs);
-    if (result) {
+    let sent = await sendCommandOnce(client, cmd, timeoutMs);
+    if (sent.result) {
       firstActionDone = true;
-      return result;
+      return sent.result;
     }
-    // Timed out — is the driver still alive? (PRD §28 reconnection.)
-    opts?.onProgress?.("The browser driver stopped responding — reconnecting…");
+    // Timed out — check the DRIVER, not just the transport: a LIVE driver
+    // (fresh heartbeat) carries its own per-command watchdog that ALWAYS
+    // writes the result file (a stuck sync call gets unblocked by killing
+    // the browser process). Never blind-reboot over it — the old reboot is
+    // exactly what spawned the second driver that SIGKILLed the live
+    // browser mid-goto ('Target page, context or browser has been closed').
+    opts?.onProgress?.("The browser is taking longer than expected — checking the session…");
     const alive = await driverAlive(client).catch(() => false);
-    bootPromise = null; // force a re-boot path
-    if (!alive) {
-      const reboot = await ensureBrowserDriver(client, opts?.onProgress);
-      if (!reboot.ok) {
-        return {
-          success: false,
-          error: {
-            type: "browser_disconnected",
-            message: `The browser session was lost and could not be restored: ${reboot.error}`,
-            recoverable: true,
-          },
-        } satisfies BrowserCommandResult;
+    if (alive) {
+      // GRACE WINDOW on the ORIGINAL command id — re-READ its result file,
+      // never re-send it (a second write would execute the action twice:
+      // double navigation, double submit). The driver's watchdog settles
+      // the in-flight action and writes this very file.
+      const grace = await readResFile(client, sent.id, LIVE_DRIVER_GRACE_MS);
+      if (grace) {
+        firstActionDone = true;
+        return grace;
       }
+      return {
+        success: false,
+        error: {
+          type: "timeout",
+          message: `Browser action "${String(cmd.action)}" did not settle within ${Math.round(
+            (timeoutMs + LIVE_DRIVER_GRACE_MS) / 1000,
+          )}s (the driver is alive and its watchdog is armed). Retry the action — a retry reuses the warm session.`,
+          recoverable: true,
+        },
+      } satisfies BrowserCommandResult;
     }
-    result = await sendCommandOnce(client, cmd, DEFAULT_ACTION_TIMEOUT_MS);
-    if (result) {
+    // Driver really is dead — cooperative reboot + ONE replay (safe here:
+    // the original command never completed).
+    opts?.onProgress?.("The browser driver stopped responding — restarting it…");
+    bootPromise = null; // force the re-boot path
+    const reboot = await ensureBrowserDriver(client, opts?.onProgress);
+    if (!reboot.ok) {
+      return {
+        success: false,
+        error: {
+          type: "browser_disconnected",
+          message: `The browser session was lost and could not be restored: ${reboot.error}`,
+          recoverable: true,
+        },
+      } satisfies BrowserCommandResult;
+    }
+    const replay = await sendCommandOnce(client, cmd, DEFAULT_ACTION_TIMEOUT_MS);
+    if (replay.result) {
       firstActionDone = true;
-      return result;
+      return replay.result;
     }
     return {
       success: false,
@@ -539,6 +678,20 @@ export async function sendBrowserCommand(
       },
     } satisfies BrowserCommandResult;
   });
+}
+
+/** Operation-aware action ceiling (PRD §9): heavy operations get the long
+ * budget, everything else the default (or the first-action budget while
+ * the binary is still being fetched). Exported for the tool layer so the
+ * schema and the ceiling stay in one place. */
+const HEAVY_OPS = new Set(["screen_record", "screenshot", "download"]);
+
+export function browserActionTimeoutMs(action: string): number {
+  return HEAVY_OPS.has(action)
+    ? HEAVY_ACTION_TIMEOUT_MS
+    : firstActionDone
+      ? DEFAULT_ACTION_TIMEOUT_MS
+      : FIRST_BOOT_TIMEOUT_MS;
 }
 
 /** Reset the cached boot (sandbox rotation / new session). */

@@ -133,6 +133,68 @@ describe("browser-driver boot hardening (asyncio poisoning fix)", () => {
   });
 });
 
+describe("browser-driver no-infinite-pending guarantees (the 2→5→15 min escalation fix)", () => {
+  it("holds a single-instance flock — a second driver can never double-boot", () => {
+    const mainFn = section("def main():", 'if __name__ == "__main__":');
+    expect(mainFn).toContain("fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)");
+    // The lock is taken BEFORE anything else (preboot, .ready, threads).
+    expect(mainFn.indexOf("fcntl.flock")).toBeLessThan(mainFn.indexOf("if os.path.exists(PREBOOT)"));
+    // A lock holder collision exits instead of racing.
+    expect(mainFn).toContain("another driver instance already owns this sandbox");
+  });
+
+  it("runs a per-command watchdog that kills the BROWSER (never the driver) to unblock a hung sync call", () => {
+    expect(SRC).toContain("def _command_watchdog");
+    const wd = section("def _command_watchdog", "def main():");
+    expect(wd).toContain("CMD_DEADLINE_S");
+    expect(wd).toContain('"pkill", "-9", "-f", "user-data-dir=" + PROFILE');
+    // It NEVER kills driver.py itself.
+    expect(wd).not.toContain("driver.py");
+  });
+
+  it("a watchdog firing produces a structured timeout reply (every command settles)", () => {
+    const mainFn = section("def main():", 'if __name__ == "__main__":');
+    expect(mainFn).toContain("WATCHDOG[\"fired\"] == cid");
+    // The watchdog branch resets the dead browser so the NEXT command reboots.
+    const wdAt = mainFn.indexOf("WATCHDOG[\"fired\"] == cid");
+    expect(mainFn.indexOf("_reset_browser_state()", wdAt)).toBeGreaterThan(wdAt);
+    expect(mainFn.slice(wdAt, wdAt + 1200)).toContain("stopped responding mid-action");
+  });
+
+  it("NEVER installs browser binaries inside the command loop (the 15-min stall)", () => {
+    // The old fallback ran 'playwright install --with-deps chromium'
+    // (timeout=900s!) inside a handler while the client clock kept ticking.
+    // Assert the actual argv is gone (comments may still mention it).
+    expect(SRC).not.toContain('"install", "--with-deps"');
+    expect(SRC).not.toContain("timeout=900");
+    const boot = section("def boot_browser", "def ensure_pages");
+    expect(boot).toContain("no in-loop install");
+  });
+
+  it("self-heals a mid-action 'Target closed' with ONE in-driver reboot+replay", () => {
+    expect(SRC).toContain("def _conn_closed_error");
+    const mainFn = section("def main():", 'if __name__ == "__main__":');
+    expect(mainFn).toContain("_conn_closed_error(e)");
+    expect(mainFn).toContain("rebooting on the persistent profile and retrying once");
+    // Exactly one retry (a for-loop over two attempts), never an unbounded loop.
+    expect(mainFn).toContain("for attempt in (0, 1):");
+  });
+
+  it("writes a heartbeat the session manager's liveness check reads", () => {
+    expect(SRC).toContain("def _heartbeat_loop");
+    expect(SRC).toContain("HEARTBEAT = os.path.join(DIR, \".heartbeat\")");
+    const mainFn = section("def main():", 'if __name__ == "__main__":');
+    expect(mainFn).toContain("threading.Thread(target=_heartbeat_loop, daemon=True).start()");
+  });
+
+  it("navigation ceilings are env-configurable with a sane default", () => {
+    expect(SRC).toContain('os.environ.get("ONYX_NAV_TIMEOUT_MS") or "30000"');
+    expect(SRC).toContain('os.environ.get("ONYX_CMD_DEADLINE_S") or "75"');
+    const nav = section("def do_navigate", "def do_click");
+    expect(nav).toContain("timeout=NAV_TIMEOUT_MS");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // LIVE repro — runs the driver's ACTUAL _unpoison_asyncio source under a
 // real playwright install. Skipped when python3 or playwright is missing.
