@@ -84,21 +84,23 @@ type BrowserAction = (typeof ACTIONS)[number];
  * deadline stays the hard backstop that guarantees a result.
  */
 const ACTION_TIMEOUT_MS: Record<BrowserAction, number> = {
-  navigate: 85_000,
+  // navigate: 45 s goto + up to 30 s Cloudflare-settle cap (driver budget 80 s).
+  navigate: 105_000,
   screenshot: 65_000,
   snapshot: 50_000,
   click: 45_000,
   type: 50_000,
   scroll: 40_000,
-  extract_text: 50_000,
+  // read-path actions: includes the 12 s challenge-settle cap (driver budget 40 s).
+  extract_text: 60_000,
   inspect: 50_000,
   wait: 55_000,
   back: 45_000,
   forward: 45_000,
   close: 40_000,
   // compat aliases
-  read: 50_000,
-  get_page: 50_000,
+  read: 60_000,
+  get_page: 60_000,
   get_elements: 50_000,
   press: 35_000,
   evaluate: 65_000,
@@ -121,7 +123,7 @@ WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, log
 
 Pass \`action\` plus only the fields that action needs:
 
-- "navigate" (url) — open a URL (https://… or http://localhost:PORT for sandbox-local servers).
+- "navigate" (url) — open a URL (https://… or http://localhost:PORT for sandbox-local servers). Cloudflare "Just a moment..." interstitials are settled automatically: the passive check is waited out (default ≤ 18 s) and an escalated Turnstile checkbox is clicked humanized; the reply reports the challenge status.
 - "screenshot" (fullPage?) — capture a PNG of the page.
 - "snapshot" () — the page STRUCTURE: title, heading outline, element counts, top interactive elements + a text excerpt.
 - "extract_text" () — the visible page text.

@@ -257,3 +257,24 @@ DEPLOY NOTE: TaskSchedule gained the additive-nullable `encryptedApiKey` column 
 Stage Summary:
 - Every background agent run — chat handoff beacon, detached cloud turn, background_task tool, sub-agent chains, scheduled tasks — now executes on the USER's own provider gateway with the USER's key, or fails fast with instructions naming Settings → Agent Settings → AI Providers. The operator's credentials are unreachable from the background framework (bridge deleted; vision/classic-chat ZAI lanes are separate foreground features, untouched by design).
 - Verified: vitest 490 → 503 passing (13 new run-credentials tests, zero regressions); tsc --noEmit introduces no new src/ errors.
+
+## Task 12 — Cloudflare "Just a moment…" settle: the browser tool no longer reports the interstitial as the page
+
+Date: 2026-11-02
+Agent: main (Z.ai Code)
+Task: User report — "Browser saying just a moment… cloak browser never gets stuck on anti-bot." The use_browser tool returned "Just a moment…" content on Cloudflare-protected sites.
+
+Work Log:
+- ROOT CAUSE 1 (the real bug): do_navigate returns at domcontentloaded — the exact moment the Cloudflare interstitial is showing. The passive challenge auto-clears ~3-10 s LATER; nobody waited, so the agent read the interstitial and reported the page stuck. Grep-verified: ZERO challenge handling in browser-driver.ts (the challenge-aware code that existed — ddg-*, captcha_solver.ts — never touched the driver).
+- ROOT CAUSE 2 (why it escalates): the sandbox egress is a datacenter IP, so Cloudflare interstitials on IP reputation regardless of fingerprint. CloakBrowser defeats the fingerprint check (so the passive challenge CAN pass) but cannot change the IP. When the check escalates to an interactive Turnstile checkbox, nothing clicked it.
+- FIX (browser-driver.ts, DRIVER_VERSION 2026.11.02 — stale live drivers auto-redeploy):
+  - _challenge_level(page): 'interactive' | 'running' | 'clear' — title markers ("just a moment", "attention required", …) + full-page selectors (#challenge-running, #challenge-stage, …). A bare .cf-turnstile widget is deliberately NOT a challenge (login forms embed those on real pages).
+  - _settle_challenge(page, budget): polls until clear; on an escalated Turnstile it clicks the checkbox HUMANIZED (frame checkbox first, widget iframe fallback, MAX_TURNSTILE_CLICKS = 2). Returns an honest status: none | cleared | cleared_after_click | stuck. Bounded — never an infinite wait.
+  - do_navigate: settles AFTER goto (ONYX_CF_SETTLE_MS, default 18 s, cap 30 s); the reply carries challenge status + guidance when stuck.
+  - do_get_page / do_extract_text (read path): self-healing — settle BEFORE extracting (ONYX_CF_SETTLE_READ_MS, default 8 s, cap 12 s) so a read that lands mid-challenge waits it out instead of returning "Just a moment…"; a still-stuck read says so explicitly ("the text above is the interstitial, NOT the content").
+  - Budgets raised to cover goto + settle under the watchdog: navigate 60→80 s, read/get_page/extract_text 30→40 s (client deadlines navigate 85→105 s, reads 50→60 s — the 15-25 s transport margin preserved).
+- TESTS: browser-driver.test.ts +5 structural pins (28 total, all passing): marker/selector vocabulary (embedded widgets excluded), settle ordering (navigate after goto, reads before evaluate), bounded humanized Turnstile clicks, env-tunable capped budgets, honest challenge status in replies. tsc --noEmit: 0 errors in changed files, src/ baseline unchanged (133 pre-existing).
+- NOT DONE (context for the next session): Xvfb/headed-mode — on the DEFAULT e2b template the browser falls back to headless=True (weaker stealth → more interactive challenges). The fix is the e2b-template/ build (PRD roadmap #3), not driver code. captcha_solver.ts (2Captcha/AntiCaptcha hooks) remains unwired to use_browser — a manual fallback if a site never auto-clears.
+
+Stage Summary:
+- The browser tool now treats the Cloudflare interstitial as a transient state to WAIT OUT (and, when escalated, to CLICK THROUGH humanized) instead of a page result. Every reply says which happened; a genuinely stuck challenge surfaces as an honest "stuck" with next-step guidance instead of silently returning the interstitial text.

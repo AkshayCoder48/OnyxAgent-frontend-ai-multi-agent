@@ -56,7 +56,7 @@
  * stamp is killed and redeployed. Bump whenever the Python source changes
  * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.11.01";
+export const BROWSER_DRIVER_VERSION = "2026.11.02";
 
 /** Sandbox-side paths (shared by the client session manager and the
  *  server-side prepare hook — single source of truth). */
@@ -1342,6 +1342,100 @@ def playw_err(e):
     return err_payload("browser_error", msg, True)
 
 
+# ── Cloudflare challenge settle (the "Just a moment..." incident, 2026-11-02) ──
+# CloakBrowser defeats FINGERPRINT checks, but the sandbox egress is a
+# datacenter IP, so Cloudflare still interstitials on IP reputation. The
+# PASSIVE challenge auto-clears after ~3-10 s of JS — AFTER domcontentloaded,
+# the exact moment goto() returns; without a settle the agent reads the
+# interstitial and reports the page as stuck. An escalated Turnstile checkbox
+# needs one real click — humanize=True makes ours pass.
+CF_TITLE_MARKERS = (
+    "just a moment", "attention required", "checking your browser",
+    "verify you are human", "verifying you are human", "one more step",
+)
+CF_SELECTORS = (
+    "#challenge-running", "#challenge-stage", "#challenge-form",
+    "#challenge-error-text", "#cf-please-wait", "#cf-spinner-please-wait",
+)
+CF_IFRAME_SEL = "iframe[src*='challenges.cloudflare.com']"
+MAX_TURNSTILE_CLICKS = 2
+
+
+def _env_int(name, default, cap):
+    """Env-tunable milliseconds, clamped to a hard cap so goto + settle can
+    never exceed the action's watchdog budget."""
+    try:
+        raw = int(os.environ.get(name) or default)
+    except Exception:
+        raw = default
+    return max(0, min(raw, cap))
+
+
+def _challenge_level(p):
+    """'interactive' (Turnstile checkbox visible), 'running' (interstitial
+    shown / passive check in flight) or 'clear'. NOTE: a bare .cf-turnstile
+    widget is NOT treated as a challenge — login forms embed those on real
+    pages; waiting or clicking there would be wrong."""
+    try:
+        title = (p.title() or "").lower()
+    except Exception:
+        title = ""
+    marker = any(m in title for m in CF_TITLE_MARKERS)
+    widget = False
+    try:
+        widget = p.locator(CF_IFRAME_SEL).first.is_visible()
+    except Exception:
+        pass
+    if marker:
+        return "interactive" if widget else "running"
+    for sel in CF_SELECTORS:
+        try:
+            if p.locator(sel).first.is_visible():
+                return "interactive" if widget else "running"
+        except Exception:
+            pass
+    return "clear"
+
+
+def _click_turnstile(p):
+    """One HUMANIZED click attempt on the Turnstile checkbox. The widget is
+    cross-origin: try the checkbox inside the frame first, then the widget
+    iframe itself (its label wraps the checkbox)."""
+    try:
+        p.frame_locator(CF_IFRAME_SEL).locator("input[type='checkbox']").first.click(timeout=4000)
+        return True
+    except Exception:
+        pass
+    try:
+        p.locator(CF_IFRAME_SEL).first.click(timeout=4000)
+        return True
+    except Exception:
+        return False
+
+
+def _settle_challenge(p, budget_ms):
+    """Wait out a Cloudflare interstitial; click an escalated Turnstile
+    checkbox (bounded). Returns (level, status, waitedMs) where status is
+    'none' | 'cleared' | 'cleared_after_click' | 'stuck' — an honest answer
+    either way, never an infinite wait (budget_ms bounds the loop)."""
+    started = time.time()
+    clicks = 0
+    if _challenge_level(p) == "clear":
+        return ("clear", "none", 0)
+    while True:
+        level = _challenge_level(p)
+        if level == "clear":
+            return ("clear", "cleared" if clicks == 0 else "cleared_after_click", int((time.time() - started) * 1000))
+        if level == "interactive" and clicks < MAX_TURNSTILE_CLICKS:
+            clicks += 1
+            if _click_turnstile(p):
+                p.wait_for_timeout(2500)
+                continue
+        if (time.time() - started) * 1000 >= budget_ms:
+            return (level, "stuck", int((time.time() - started) * 1000))
+        p.wait_for_timeout(500)
+
+
 def do_navigate(cmd):
     url = str(cmd.get("url") or "").strip()
     if not url:
@@ -1351,13 +1445,24 @@ def do_navigate(cmd):
     p = active_page()
     publish_live("navigate")
     resp = p.goto(url, wait_until="domcontentloaded", timeout=45000)
+    # Cloudflare settle: the passive check runs AFTER domcontentloaded (the
+    # moment goto returns — exactly when the interstitial is showing). Wait
+    # it out; click a Turnstile checkbox if the check escalated.
+    level, status, waited = _settle_challenge(p, _env_int("ONYX_CF_SETTLE_MS", 18000, 30000))
     try:
         title = p.title()
     except Exception:
         title = ""
     out = state_payload({"success": True, "action": "navigate", "status": resp.status if resp else None})
     out["title"] = title
+    out["challenge"] = status
     out["output"] = "Navigated to %s (%s)%s." % (title or url, url, " — HTTP %s" % resp.status if resp and resp.status else "")
+    if status == "cleared":
+        out["output"] += " Cloudflare challenge auto-cleared in %.1fs." % (waited / 1000.0)
+    elif status == "cleared_after_click":
+        out["output"] += " Cloudflare Turnstile cleared after a humanized click (%.1fs)." % (waited / 1000.0)
+    elif status == "stuck":
+        out["output"] += " The page is STILL on a Cloudflare challenge after %.0fs — wait a few seconds and read again, retry navigate once, or click the verification checkbox." % (waited / 1000.0)
     return out
 
 
@@ -1707,13 +1812,21 @@ def do_screen_record(cmd):
 
 def do_get_page(cmd):
     p = active_page()
+    # Self-healing read: if the read lands mid-challenge, wait briefly for
+    # the interstitial to clear instead of returning "Just a moment..." as
+    # the page's content.
+    level, status, waited = _settle_challenge(p, _env_int("ONYX_CF_SETTLE_READ_MS", 8000, 12000))
     try:
         text = p.evaluate("() => document.body ? document.body.innerText : ''")
     except Exception:
         text = ""
     text = (text or "")[:6000]
-    out = state_payload({"success": True, "action": "get_page", "text": text})
+    out = state_payload({"success": True, "action": "get_page", "text": text, "challenge": status})
     out["output"] = "Read %d characters of page text." % len(text)
+    if status in ("cleared", "cleared_after_click"):
+        out["output"] += " (a Cloudflare challenge cleared first — %.1fs)" % (waited / 1000.0)
+    elif status == "stuck":
+        out["output"] += " — WARNING: the page still shows a Cloudflare challenge; the text above is the interstitial, NOT the content. Wait a few seconds and read again."
     return out
 
 
@@ -1729,6 +1842,9 @@ def do_extract_text(cmd):
     with an honest length + truncation flag. Same engine as read/get_page
     but the PRD-canonical name and a larger budget."""
     p = active_page()
+    # Self-healing read: settle a Cloudflare interstitial first (see
+    # do_get_page) so the extract never returns "Just a moment...".
+    level, status, waited = _settle_challenge(p, _env_int("ONYX_CF_SETTLE_READ_MS", 8000, 12000))
     try:
         text = p.evaluate("() => document.body ? document.body.innerText : ''")
     except Exception:
@@ -1742,8 +1858,11 @@ def do_extract_text(cmd):
         "text": excerpt,
         "textLength": len(text),
         "truncated": len(text) > limit,
+        "challenge": status,
     })
     out["output"] = "Extracted %d characters of visible text%s." % (len(text), " (truncated to %d)" % limit if len(text) > limit else "")
+    if status == "stuck":
+        out["output"] += " — WARNING: the page still shows a Cloudflare challenge; the text is the interstitial, NOT the content."
     return out
 
 
@@ -2128,9 +2247,13 @@ HANDLERS = {
 #   browser on the SAME persistent profile (cookies/localStorage kept).
 
 ACTION_BUDGETS = {
-    "navigate": 60, "click": 25, "type": 30, "press": 15, "scroll": 20,
-    "wait": 35, "screenshot": 40, "extract_text": 30, "read": 30,
-    "get_page": 30, "snapshot": 30, "inspect": 30, "get_elements": 30,
+    # navigate: 45 s goto + up to 30 s Cloudflare settle + margin — the
+    # settle (ONYX_CF_SETTLE_MS) is capped at 30 s for exactly this.
+    "navigate": 80, "click": 25, "type": 30, "press": 15, "scroll": 20,
+    # read-path actions: up to 12 s challenge settle (ONYX_CF_SETTLE_READ_MS
+    # cap) + the text extraction itself.
+    "wait": 35, "screenshot": 40, "extract_text": 40, "read": 40,
+    "get_page": 40, "snapshot": 30, "inspect": 30, "get_elements": 30,
     "forms": 30, "evaluate": 45, "select": 25, "upload": 60, "download": 90,
     "new_tab": 45, "switch_tab": 15, "close_tab": 15,
     "back": 30, "forward": 30, "go_back": 30, "go_forward": 30,

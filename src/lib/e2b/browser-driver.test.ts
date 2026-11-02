@@ -312,6 +312,71 @@ function probe(cmd: string[]): boolean {
 const hasPython = probe(["python3", "--version"]);
 const hasPlaywright = hasPython && probe(["python3", "-c", "import playwright"]);
 
+describe("browser-driver Cloudflare challenge settle (the 'Just a moment' incident)", () => {
+  it("detects the interstitial by title + full-page selectors — a bare embedded .cf-turnstile widget is NOT a challenge", () => {
+    expect(SRC).toContain("CF_TITLE_MARKERS");
+    expect(SRC).toContain("CF_SELECTORS");
+    expect(SRC).toContain("CF_IFRAME_SEL");
+    const markers = section("CF_TITLE_MARKERS = (", ")");
+    expect(markers).toContain('"just a moment"');
+    expect(markers).not.toContain("cf-turnstile");
+    const selectors = section("CF_SELECTORS = (", ")");
+    expect(selectors).toContain('"#challenge-running"');
+    expect(selectors).not.toContain("cf-turnstile");
+  });
+
+  it("navigate settles AFTER goto; reads settle BEFORE extracting text", () => {
+    const nav = section("def do_navigate", "def do_click");
+    const gotoAt = nav.indexOf("p.goto(url");
+    const settleAt = nav.indexOf("_settle_challenge(p,");
+    expect(gotoAt).toBeGreaterThan(-1);
+    expect(settleAt).toBeGreaterThan(gotoAt);
+
+    const read = section("def do_get_page", "def do_read");
+    const rSettleAt = read.indexOf("_settle_challenge(p,");
+    const rEvalAt = read.indexOf("document.body");
+    expect(rSettleAt).toBeGreaterThan(-1);
+    expect(rSettleAt).toBeLessThan(rEvalAt);
+
+    const ex = section("def do_extract_text", "def do_snapshot");
+    const eSettleAt = ex.indexOf("_settle_challenge(p,");
+    const eEvalAt = ex.indexOf("document.body");
+    expect(eSettleAt).toBeGreaterThan(-1);
+    expect(eSettleAt).toBeLessThan(eEvalAt);
+  });
+
+  it("Turnstile clicks are humanized locator clicks AND bounded", () => {
+    expect(SRC).toContain("MAX_TURNSTILE_CLICKS = 2");
+    const settle = section("def _settle_challenge", "def do_navigate");
+    expect(settle).toContain("clicks < MAX_TURNSTILE_CLICKS");
+    const turnstile = section("def _click_turnstile", "def _settle_challenge");
+    expect(turnstile).toContain(".first.click(timeout=4000)");
+  });
+
+  it("settle budgets are env-tunable and capped so goto + settle fits the watchdog budget", () => {
+    const nav = section("def do_navigate", "def do_click");
+    expect(nav).toContain('_env_int("ONYX_CF_SETTLE_MS", 18000, 30000)');
+    expect(SRC).toContain('_env_int("ONYX_CF_SETTLE_READ_MS", 8000, 12000)');
+    const budgets = section("ACTION_BUDGETS = {", "DEFAULT_ACTION_BUDGET");
+    expect(budgets).toContain('"navigate": 80'); // 45 s goto + 30 s settle cap
+    expect(budgets).toContain('"extract_text": 40');
+    expect(budgets).toContain('"read": 40');
+    expect(budgets).toContain('"get_page": 40'); // 12 s settle cap + extraction
+  });
+
+  it("the reply carries an honest challenge status, never a silent interstitial", () => {
+    const nav = section("def do_navigate", "def do_click");
+    expect(nav).toContain('out["challenge"] = status');
+    expect(nav).toContain("cleared_after_click");
+    expect(nav).toContain("STILL on a Cloudflare challenge");
+    const read = section("def do_get_page", "def do_read");
+    expect(read).toContain('"challenge": status');
+    expect(read).toContain("the interstitial, NOT the content");
+    const ex = section("def do_extract_text", "def do_snapshot");
+    expect(ex).toContain('"challenge": status');
+  });
+});
+
 describe.skipIf(!hasPython || !hasPlaywright)(
   "live repro: leaked sync_playwright poisons the thread; the driver's _unpoison_asyncio fixes it",
   () => {
