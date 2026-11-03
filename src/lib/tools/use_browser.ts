@@ -141,7 +141,7 @@ Pass \`action\` plus only the fields that action needs:
 - "download" (url? | target?) — capture a download into the workspace (~/downloads), returns the file path.
 - "new_tab" (url?) / "switch_tab" (tab: index or id) / "close_tab" (tab?) — tab management.
 
-TARGETING (prefer semantic): a target is EITHER a string selector (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]", "ref=e12") OR an object like {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
+TARGETING (prefer semantic): a target is EITHER a selector string (CSS like "#id", "button.primary", or Playwright forms "text=Sign in", "xpath=//a[3]") — an inspect ref works BARE ("e12") or prefixed ("ref=e12") — OR a semantic object, passed as an object or as its JSON string: {"role":"button","name":"Sign in"}, {"text":"Sign in"}, {"label":"Email"}, {"placeholder":"Search…"}, {"css":"#submit"}, {"xpath":"//button[1]"}, {"ref":"e12"}.
 
 DOCUMENTATION SITES: do NOT reach for the browser to read docs — use web_fetch on /llms.txt and .md pages first (it is the default reader); the browser is only for doc sites that need interaction to render.
 
@@ -166,7 +166,7 @@ registerTool(
       url: { type: "string", description: "URL to open (navigate / new_tab / download)." },
       target: {
         description:
-          "Element to act on (click / type / select / upload / download): a selector string or a semantic object ({role,name} / {text} / {label} / {placeholder} / {css} / {xpath} / {ref}).",
+          "Element to act on (click / type / select / upload / download): a selector string, an inspect ref (bare 'e12' or 'ref=e12'), or a semantic object — {role,name} / {text} / {label} / {placeholder} / {css} / {xpath} / {ref} — passed as an object or its JSON string.",
       },
       text: { type: "string", description: "Text to type (type action)." },
       submit: { type: "boolean", description: "Press Enter after typing (type action)." },

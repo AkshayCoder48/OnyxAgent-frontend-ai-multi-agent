@@ -377,6 +377,41 @@ describe("browser-driver Cloudflare challenge settle (the 'Just a moment' incide
   });
 });
 
+describe("browser-driver target resolution (the arena.ai 'e19' + stringified-JSON incident)", () => {
+  it("resolves BARE inspect refs — 'e19' routes to the ref map, not a CSS tag selector", () => {
+    const resolve = section("def resolve_target", "def target_label");
+    expect(resolve).toContain('if t.startswith("ref="):');
+    // The bare-ref branch: e + digits, BEFORE the CSS fallthrough.
+    const bareAt = resolve.indexOf('t[0] == "e" and t[1:].isdigit()');
+    const cssFallAt = resolve.indexOf('if t.startswith("xpath=")');
+    expect(bareAt).toBeGreaterThan(-1);
+    expect(cssFallAt).toBeGreaterThan(bareAt);
+    expect(resolve).toContain("_ref_locator(page, t)");
+  });
+
+  it("parses stringified JSON object targets instead of feeding them to CSS", () => {
+    const resolve = section("def resolve_target", "def target_label");
+    expect(resolve).toContain('t.startswith("{") and t.endswith("}")');
+    expect(resolve).toContain("json.loads(t)");
+    expect(resolve).toContain("return resolve_target(page, parsed)");
+    // The JSON branch must sit BEFORE the selector fallthrough.
+    const jsonAt = resolve.indexOf('t.startswith("{")');
+    const cssFallAt = resolve.indexOf('if t.startswith("xpath=")');
+    expect(jsonAt).toBeGreaterThan(-1);
+    expect(jsonAt).toBeLessThan(cssFallAt);
+  });
+
+  it("all three ref forms share _ref_locator, whose error lists the live valid refs", () => {
+    const refLoc = section("def _ref_locator", "def resolve_target");
+    expect(refLoc).toContain("ref_map.get(rid)");
+    expect(refLoc).toContain("Call inspect/get_elements again");
+    expect(refLoc).toContain("sorted(ref_map.keys())");
+    const resolve = section("def resolve_target", "def target_label");
+    // ref=e12 (string), e12 (bare), {"ref": "e12"} (object) — one resolver.
+    expect(resolve.match(/_ref_locator\(/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
 describe.skipIf(!hasPython || !hasPlaywright)(
   "live repro: leaked sync_playwright poisons the thread; the driver's _unpoison_asyncio fixes it",
   () => {

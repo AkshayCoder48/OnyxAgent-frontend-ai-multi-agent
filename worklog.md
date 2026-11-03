@@ -278,3 +278,22 @@ Work Log:
 
 Stage Summary:
 - The browser tool now treats the Cloudflare interstitial as a transient state to WAIT OUT (and, when escalated, to CLICK THROUGH humanized) instead of a page result. Every reply says which happened; a genuinely stuck challenge surfaces as an honest "stuck" with next-step guidance instead of silently returning the interstitial text.
+
+## Task 13 — Quote toolbar below the selection + use_browser target resolution (the arena.ai incident)
+
+Date: 2026-11-03
+Agent: main (Z.ai Code)
+Task: Two user asks: (1) "Make quote option to be below the text selected" — the floating Quote toolbar appeared ABOVE the selection. (2) The repeated arena.ai failure: Type on bare ref "e19" → 'waiting for locator(e19 >> nth=0)' 12 s timeout; Click on '{"label":"message"}' → 'Unsupported token "{"' CSS parse error.
+
+Work Log:
+- ROOT CAUSE (browser): resolve_target only accepted refs with the "ref=" prefix. The inspect output and tool docs show BARE refs ("e12"), so the model naturally sent "e19" — which fell through to CSS and waited 12 s for a nonexistent <e19> tag. Same class: semantic objects stringified by the model ('{"label":"message"}') reached Playwright as CSS and died on the "{" token. The model did nothing wrong per the tool's own docs.
+- FIX (browser-driver.ts, DRIVER_VERSION 2026.11.03 — stale live drivers auto-redeploy):
+  - _ref_locator(page, rid): one resolver for all three ref forms ("e12", "ref=e12", {"ref":"e12"}); unknown refs fail fast with an honest error that LISTS the currently valid refs and says to re-inspect (refs are per-inspect — the old error never explained that).
+  - Bare-ref branch: e + digits routes to the ref map BEFORE the CSS fallthrough.
+  - Stringified-JSON branch: '{"label":"message"}' is json.loads-ed and routed through the object branch; a JSON-shaped string with no supported keys fails honestly ("Unsupported target") instead of as a CSS parse error. Plain CSS / text= / xpath= selectors are untouched.
+  - use_browser.ts TARGETING + target param docs now bless all forms: bare ref, ref=, semantic object or its JSON string.
+- VERIFIED FUNCTIONALLY (scripts/check-resolve-target.mts, real driver source imported into Python): bare "e19"→ref map selector; "ref=e3"→ref map; '{"label":"message"}'→get_by_label; '{"placeholder":"Ask anything…"}'→get_by_placeholder; dict form; unknown ref lists valid refs; CSS/text= passthrough untouched; "{}"→honest error. 9/9 PASS. Structural pins +3 in browser-driver.test.ts (31 passing); full e2b suite 47/47; tsc: 0 errors in changed files, src/ baseline unchanged (133 pre-existing).
+- FIX (UI): quote-reply.tsx SelectionToolbar — anchor now carries the selection's bottom edge; placement is BELOW the selection by default (user directive 2026-11-03), flipping above only when below would overflow the viewport (first frame estimates toolbar height at ~32px, corrected by the measured clamp one frame later). New .quote-toolbar-below class (transform translate(-50%, 0)) + its keyframes + the prefers-reduced-motion entry in globals.css; .quote-toolbar-in kept as the above-fallback.
+
+Stage Summary:
+- The browser tool now accepts the target forms the model actually sends — bare refs and stringified JSON objects resolve semantically instead of dying as CSS — and a stale ref names the fix (re-inspect) in the error itself. The Quote toolbar appears below the selected text, flipping above only near the viewport bottom.

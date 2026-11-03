@@ -21,9 +21,13 @@ import { ghostButtonClass, monoLabelClass } from "./surfaces";
  * the runtime selection flow above is the whole feature.
  */
 
-/** Ideal toolbar anchor: the selection's top edge + the point to center on. */
+/** Ideal toolbar anchor: the selection's top + bottom edges and the point
+ *  to center on. `bottom` drives the preferred BELOW placement (user
+ *  directive 2026-11-03); `top` is kept for the above-fallback when the
+ *  selection sits too close to the viewport bottom. */
 interface ToolbarAnchor {
   top: number;
+  bottom: number;
   centerX: number;
 }
 
@@ -37,10 +41,13 @@ export function SelectionToolbar({ onQuote }: { onQuote?: (quotedText: string) =
   const [anchor, setAnchor] = React.useState<ToolbarAnchor | null>(null);
   // Measured, viewport-clamped placement, paired to the anchor it measured
   // (object identity) so a stale clamp never bleeds into a new position.
+  // `below` picks the transform variant: below the selection (preferred) or
+  // above it (fallback near the viewport bottom).
   const [placed, setPlaced] = React.useState<{
     for: ToolbarAnchor;
     top: number;
     left: number;
+    below: boolean;
   } | null>(null);
   const toolbarRef = React.useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = React.useState(false);
@@ -79,12 +86,14 @@ export function SelectionToolbar({ onQuote }: { onQuote?: (quotedText: string) =
       setAnchor(null);
       return;
     }
-    setAnchor({ top: rect.top, centerX: rect.left + rect.width / 2 });
+    setAnchor({ top: rect.top, bottom: rect.bottom, centerX: rect.left + rect.width / 2 });
   }, []);
 
   // Measure the rendered toolbar and clamp it into the viewport (8px
-  // margins), keeping it above the selection start. Paired to `anchor` so
-  // re-renders with an unchanged position keep their clamp.
+  // margins). Placement is BELOW the selection (user directive 2026-11-03);
+  // it flips above the selection only when below would overflow the
+  // viewport. Paired to `anchor` so re-renders with an unchanged position
+  // keep their clamp.
   React.useEffect(() => {
     const el = toolbarRef.current;
     if (!anchor || !el) {
@@ -95,8 +104,17 @@ export function SelectionToolbar({ onQuote }: { onQuote?: (quotedText: string) =
     const minLeft = VIEWPORT_MARGIN + half;
     const maxLeft = Math.max(window.innerWidth - VIEWPORT_MARGIN - half, minLeft);
     const left = Math.min(Math.max(anchor.centerX, minLeft), maxLeft);
-    const top = Math.max(anchor.top - VIEWPORT_MARGIN, VIEWPORT_MARGIN + el.offsetHeight);
-    setPlaced({ for: anchor, top, left });
+    const belowTop = anchor.bottom + VIEWPORT_MARGIN;
+    if (belowTop + el.offsetHeight <= window.innerHeight - VIEWPORT_MARGIN) {
+      setPlaced({ for: anchor, top: belowTop, left, below: true });
+    } else {
+      setPlaced({
+        for: anchor,
+        top: Math.max(anchor.top - VIEWPORT_MARGIN, VIEWPORT_MARGIN + el.offsetHeight),
+        left,
+        below: false,
+      });
+    }
   }, [anchor]);
 
   // Listeners: mouse + keyboard selection, debounced selectionchange, and
@@ -156,8 +174,16 @@ export function SelectionToolbar({ onQuote }: { onQuote?: (quotedText: string) =
 
   // Prefer the measured clamp; fall back to the ideal for the first frame
   // (identical whenever no clamping is needed, which is the common case).
+  // First-frame below-fit uses a toolbar height estimate (~32px) — the
+  // measurement effect corrects it one frame later if the guess was off.
   const measurement = placed !== null && placed.for === anchor ? placed : null;
-  const top = measurement ? measurement.top : Math.max(anchor.top - VIEWPORT_MARGIN, VIEWPORT_MARGIN);
+  const fallbackBelow = anchor.bottom + VIEWPORT_MARGIN + 32 <= window.innerHeight - VIEWPORT_MARGIN;
+  const below = measurement ? measurement.below : fallbackBelow;
+  const top = measurement
+    ? measurement.top
+    : below
+      ? anchor.bottom + VIEWPORT_MARGIN
+      : Math.max(anchor.top - VIEWPORT_MARGIN, VIEWPORT_MARGIN);
   const left = measurement ? measurement.left : anchor.centerX;
 
   return createPortal(
@@ -165,7 +191,10 @@ export function SelectionToolbar({ onQuote }: { onQuote?: (quotedText: string) =
       ref={toolbarRef}
       role="toolbar"
       aria-label="Quote selected text"
-      className="quote-toolbar-in fixed z-50 flex items-center rounded-lg border border-border bg-background px-1 py-0.5 shadow-lg"
+      className={cn(
+        "fixed z-50 flex items-center rounded-lg border border-border bg-background px-1 py-0.5 shadow-lg",
+        below ? "quote-toolbar-below" : "quote-toolbar-in",
+      )}
       style={{ top, left }}
     >
       <button

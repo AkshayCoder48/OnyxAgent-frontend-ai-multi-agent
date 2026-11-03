@@ -1222,7 +1222,8 @@
   .pulse-dot,
   .flow-dash,
   .comet,
-  .quote-toolbar-in {
+  .quote-toolbar-in,
+  .quote-toolbar-below {
     animation: none !important;
   }
   .reveal {
@@ -3368,10 +3369,13 @@ html.theme-transitioning .animate-backdrop {
 
 /* ===== Quote selection toolbar + link preview (assistant-ui elements) ===== */
 
-/* Floating quote toolbar — fades + scales in above the selected text. The
-   static transform mirrors the keyframes' end state, so killing the
-   animation under prefers-reduced-motion (the class list above) still lands
-   the toolbar exactly where it belongs. */
+/* Floating quote toolbar — fades + scales in. Two anchor variants:
+   -in = ABOVE the selected text (bottom edge at the anchor point),
+   -below = BELOW the selected text (top edge at the anchor point — the
+   default since 2026-11-03; -in remains the fallback near the viewport
+   bottom). The static transforms mirror each keyframes' end state, so
+   killing the animation under prefers-reduced-motion (the class list
+   above) still lands the toolbar exactly where it belongs. */
 .quote-toolbar-in {
   transform: translate(-50%, -100%);
   animation: quote-toolbar-in 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -3384,6 +3388,20 @@ html.theme-transitioning .animate-backdrop {
   to {
     opacity: 1;
     transform: translate(-50%, -100%) scale(1);
+  }
+}
+.quote-toolbar-below {
+  transform: translate(-50%, 0);
+  animation: quote-toolbar-below 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes quote-toolbar-below {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
   }
 }
 

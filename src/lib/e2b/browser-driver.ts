@@ -56,7 +56,7 @@
  * stamp is killed and redeployed. Bump whenever the Python source changes
  * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.11.02";
+export const BROWSER_DRIVER_VERSION = "2026.11.03";
 
 /** Sandbox-side paths (shared by the client session manager and the
  *  server-side prepare hook — single source of truth). */
@@ -1097,11 +1097,25 @@ def err_payload(etype, message, recoverable=True):
 
 # ── Element targeting (semantic first, CSS/XPath/ref fallback) ──
 
+def _ref_locator(page, rid):
+    """Resolve an inspect/get_elements ref ('e12') to its stored selector.
+    Shared by the 'ref=e12' string form, the bare 'e12' form and the
+    {"ref": "e12"} object form."""
+    sel = ref_map.get(rid)
+    if not sel:
+        raise RuntimeError(
+            "Unknown element ref: %s — the page changed since the last inspect (refs are per-inspect). "
+            "Valid refs right now: %s. Call inspect/get_elements again and use a fresh ref." % (
+                rid, (", ".join(sorted(ref_map.keys()))) or "none — inspect first"))
+    return page.locator(sel)
+
+
 def resolve_target(page, target):
     """Resolve a target spec into a Playwright locator.
     String: a selector Playwright understands (css, "text=…", "xpath=…",
-    "#id", ".cls"). Object: {role,name} | {text} | {label} | {placeholder}
-    | {css} | {xpath} | {ref}."""
+    "#id", ".cls"), an inspect ref — BARE ("e12") or prefixed ("ref=e12") —
+    or a stringified JSON object spec. Object: {role,name} | {text} | {label}
+    | {placeholder} | {css} | {xpath} | {ref}."""
     if target is None:
         return page.locator("body")
     if isinstance(target, str):
@@ -1109,19 +1123,31 @@ def resolve_target(page, target):
         if not t:
             return page.locator("body")
         if t.startswith("ref="):
-            sel = ref_map.get(t[4:])
-            if not sel:
-                raise RuntimeError("Unknown element ref: %s (call get_elements first)" % t)
-            return page.locator(sel)
+            return _ref_locator(page, t[4:])
+        # Bare inspect ref — "e19". The arena.ai incident (2026-11-03): the
+        # model sent the ref WITHOUT the ref= prefix (the inspect output and
+        # the tool docs show bare refs); it fell through to CSS, and
+        # locator('e19 >> nth=0') waited 12 s for a nonexistent <e19> tag.
+        if len(t) > 1 and t[0] == "e" and t[1:].isdigit():
+            return _ref_locator(page, t)
+        # Stringified JSON object spec — '{"label":"message"}'. The same
+        # incident: the model stringified the semantic object; Playwright
+        # died on 'Unsupported token "{"' parsing it as CSS. Parse it and
+        # route through the object branch; anything that is not a JSON
+        # object still falls through to the selector path below.
+        if t.startswith("{") and t.endswith("}"):
+            try:
+                parsed = json.loads(t)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return resolve_target(page, parsed)
         if t.startswith("xpath=") or t.startswith("text=") or t.startswith("css="):
             return page.locator(t)
         return page.locator(t)
     if isinstance(target, dict):
         if target.get("ref"):
-            sel = ref_map.get(str(target.get("ref")))
-            if not sel:
-                raise RuntimeError("Unknown element ref: %s (call get_elements first)" % target.get("ref"))
-            return page.locator(sel)
+            return _ref_locator(page, str(target.get("ref")))
         if target.get("role"):
             kw = {"name": target["name"]} if target.get("name") else {}
             return page.get_by_role(str(target["role"]), **kw)
