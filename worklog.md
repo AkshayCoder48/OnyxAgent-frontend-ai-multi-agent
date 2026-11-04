@@ -297,3 +297,17 @@ Work Log:
 
 Stage Summary:
 - The browser tool now accepts the target forms the model actually sends — bare refs and stringified JSON objects resolve semantically instead of dying as CSS — and a stale ref names the fix (re-inspect) in the error itself. The Quote toolbar appears below the selected text, flipping above only near the viewport bottom.
+
+## Task 14 — System prompt: no length cap + optional .md/.txt import
+
+Date: 2026-11-04
+Agent: main (Z.ai Code)
+Task: User directive — the custom system prompt input must (1) accept importing any .md or .txt file (optional) and (2) have NO length cap.
+
+Work Log:
+- CAP REMOVED (system-prompt-editor.tsx): the 8,000-char MAX_PROMPT_CHARS ceiling was UI-only (grep-verified: settings persist through the local-first settings service into IndexedDB with no length validation; the per-turn buildTurnOptions passes the prompt straight to the provider, whose own context window is the only real bound). maxLength dropped from the textarea; the counter now shows "N chars · no cap". The subagent prompt textarea never had a cap.
+- FILE IMPORT (same component, both lanes — Agent Settings form + /settings/config page): "Import .md / .txt" button next to "Insert default prompt" opens a hidden file input (accept .md/.markdown/.txt + text/markdown/text/plain). The file's text is read, CRLF-normalized, then FILLS the empty field or APPENDS below the current prompt — never silently replacing typed content; a toast reports the file, char count, and fill/append. Non-md/txt files and empty files are rejected with clear errors. Single-import sanity bound of 32 MB (browser responsiveness — the prompt content itself is uncapped). The import button disables together with the editor; the picker resets after each pick so the same file can be re-imported.
+- TESTS (system-prompt-editor.test.tsx, jsdom — the button.test.tsx pragma pattern): 7 pins — no maxlength + "no cap" counter, a 10,000-char prompt (past the old ceiling) renders with the full count, the hidden input's accept list, disabled-when-disabled, .md fill (CRLF→LF), .txt append-below-existing (order pinned), and non-md/txt rejection leaves the value untouched. Full suite 721/721; tsc: 0 errors in changed files, src/ baseline unchanged (133 pre-existing).
+
+Stage Summary:
+- The system prompt is now unbounded (the provider's context window is the only limit) and can be loaded from a .md/.txt file in either settings lane — appending below existing content, with honest errors for anything else.
