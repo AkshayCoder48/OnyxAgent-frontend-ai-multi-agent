@@ -3,7 +3,7 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { Download, ExternalLink, FileAudio, FileCode, FileImage, FileText, FileVideo, Loader2, X } from "lucide-react";
 
-import { useFilePreviewStore } from "@/stores";
+import { useFilePreviewStore, isSandboxPreview } from "@/stores";
 import { getFileUrl, loadFileUrl } from "@/lib/file-api";
 import { cn } from "@/lib/utils";
 import { FilePreviewCard, extOf, previewKind, type PreviewKind } from "./file-preview-card";
@@ -75,21 +75,43 @@ function FilePreviewContent() {
   const file = useFilePreviewStore((s) => s.file);
   const close = useFilePreviewStore((s) => s.close);
 
+  // Workspace-sourced previews carry their own blob URL (minted by the
+  // caller from sandbox bytes) — no OPFS lookup, and the URL is revoked
+  // when this content unmounts (close or open-another-file).
+  const sandbox = isSandboxPreview(file);
+
   // Lazy initializers — read localStorage / the blob-URL cache exactly once
   // per mounted file instead of syncing through an effect.
   const [width, setWidth] = useState<number>(initialWidth);
   const [isDragging, setIsDragging] = useState(false);
   const [inlineUrl, setInlineUrl] = useState<string>(() =>
-    file ? getFileUrl(file.id) : "",
+    file ? (isSandboxPreview(file) ? file.url : getFileUrl(file.id)) : "",
   );
   const [urlError, setUrlError] = useState<string | null>(null);
+
+  // Revoke the sandbox blob URL when the preview closes or is replaced
+  // (this content is remounted per file via the outer key).
+  useEffect(
+    () => () => {
+      if (sandbox && file && isSandboxPreview(file)) {
+        try {
+          URL.revokeObjectURL(file.url);
+        } catch {
+          /* already revoked */
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sandbox],
+  );
 
   // Load the blob URL when it isn't already cached. `getFileUrl` is
   // synchronous and returns "" when the URL isn't warm (e.g. when opening a
   // file from conversation history). `loadFileUrl` reads the file from OPFS
   // and caches a fresh blob URL — without this, the viewers get url="" and
-  // fetch("") throws "Failed to fetch".
-  const fileId = file?.id;
+  // fetch("") throws "Failed to fetch". Workspace files skip this — their
+  // URL is already resolved above.
+  const fileId = file && !isSandboxPreview(file) ? file.id : null;
   useEffect(() => {
     if (!fileId || getFileUrl(fileId)) return;
     let cancelled = false;
@@ -149,7 +171,7 @@ function FilePreviewContent() {
   // blob: URL makes it invalid and breaks the download.
   const downloadUrl = inlineUrl;
   const ext = extOf(file.filename);
-  const kind = previewKind(file.mime_type, ext);
+  const kind = previewKind(file.mime_type ?? undefined, ext);
 
   // Loading state while the blob URL is being fetched from OPFS.
   if (!inlineUrl && !urlError) {

@@ -366,3 +366,20 @@ Work Log:
 
 Stage Summary:
 - "Remember this page" is now ONE call: the agent (or the user, via the button on any read row) captures the live page — 40k chars, its URL, an optional curated note, and the session's browse history — into the Knowledge Base as a searchable document, with honest NOT_CONFIGURED/SAVE_FAILED answers when OnyxBase isn't ready.
+
+## Task 18 — Workspace File Manager: click-to-preview, per-chat targeting, new-folder, delete confirms
+
+Date: 2026-11-05
+Agent: main (Z.ai Code)
+Task: User feature batch, part 3 — "Workspace file manager: a proper file-browsing UI + preview (reuse the file-preview-panel)". (Branches + teams queued next.)
+
+Work Log:
+- DISCOVERY: the Files panel (FileSidebar) already listed/browsed/uploaded/downloaded/renamed/deleted — but (1) it HARDCODED getE2BClient(apiKey, null, "shared") while the agent's file tools resolve through chatSandboxForCtx, so in "separate" mode the sidebar showed a DIFFERENT (stale) workspace than the one the agent mutates (the same wrong-sandbox class Task 16 fixed for tools); (2) files could only be Downloaded — no preview, despite a full preview panel existing for chat attachments; (3) no folder creation; (4) deletes (recursive rm -rf) ran with NO confirmation.
+- PER-CHAT TARGETING (file-sidebar.tsx): the client-resolution effect now reads settingsService.getSandboxMode(user.id) and passes the ACTIVE conversation id (useConversationStore) in separate mode — exactly mirroring use-browser-live + chatSandboxForCtx — and re-resolves when the conversation switches.
+- CLICK-TO-PREVIEW: file-preview-store gained a SandboxPreviewFile variant (kind "sandbox", id/filename/path/url/size/mime) + openSandbox + isSandboxPreview; FilePreviewPanel uses the carried blob URL DIRECTLY (no OPFS lookup — sandbox files have no chat_files registry entry) and revokes it when the preview closes or is replaced (remount-keyed cleanup). FileSidebar mints the URL from client.readFileBytes (binary-safe) on row click — the SAME panel chat attachments use (image/pdf/csv/html/json/markdown/code/text/audio/video viewers all work on workspace files now). The persistent Uploads rows got the same treatment (readUploadBytes → blob URL).
+- NEW FOLDER: header FolderPlus button → inline input row (Enter creates, Esc cancels) → client.createFolder at the CURRENT path → refresh + toast.
+- DELETE CONFIRMS: both delete lanes (file + folder) now window.confirm first — the folder message says "and EVERYTHING inside it" (rm -rf is recursive + permanent). Rows stay one-click for preview; destruction is the only gated action.
+- TESTS (13 new, full suite 784/784): file-sidebar.test.tsx (9, jsdom — sandbox/mode/conversation mocked, REAL preview store): shared → (key, null, "shared"); separate → (key, conv-42, "separate"); SOURCE PIN no hardcoded shared client (the latency-fixes idiom); row click → readFileBytes → openSandbox with the minted blob URL + path; folders navigate not preview; unreadable file → honest error, no store write; inline new-folder flow; confirm-ordering source pins for both delete lanes. file-preview-sandbox.test.tsx (4, jsdom — preview card stubbed): direct blob URL renders synchronously (no OPFS, no Loading state), close revokes, switching files revokes the old URL, and registry-backed chat attachments STILL route through the OPFS loader (no regression). tsc: 0 errors in changed files, src/ baseline unchanged (128 pre-existing).
+
+Stage Summary:
+- The Files panel is now the workspace file manager: it targets the same per-chat sandbox the agent uses, every file (and upload) opens in the full preview panel with one click, folders can be created inline, and deletes ask before they rm -rf.

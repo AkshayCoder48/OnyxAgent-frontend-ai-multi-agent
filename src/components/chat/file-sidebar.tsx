@@ -6,7 +6,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input";
 import {
   Folder,
+  FolderPlus,
   Download,
+  Eye,
   MoreVertical,
   Pencil,
   Trash2,
@@ -35,6 +37,7 @@ import { useAuth } from "@/hooks";
 import { getE2BClient, E2BClient, type E2BFile } from "@/lib/e2b/client";
 import { settingsService } from "@/lib/services";
 import { uploadFile } from "@/lib/file-api";
+import { useConversationStore, useFilePreviewStore } from "@/stores";
 import {
   listUploads,
   deleteUpload,
@@ -182,6 +185,14 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   // re-fetches. Driven by both the parent's `onRefreshKey` prop and the
   // local WS-listener below.
   const [refreshTick, setRefreshTick] = useState(0);
+  // New-folder inline creation (header button → inline input row).
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [creatingFolderBusy, setCreatingFolderBusy] = useState(false);
+  // The active conversation — in "separate" sandbox mode the workspace is
+  // PER-CHAT, so the sidebar must target the same sandbox the agent's tools
+  // use (chatSandboxForCtx): conversationId when separate, shared otherwise.
+  const conversationId = useConversationStore((s) => s.currentConversationId);
 
   // ── PERSISTENT UPLOADS (File Persistence PRD §4) ─────────────────────
   // The Uploads section is backed by the canonical uploads registry
@@ -220,6 +231,12 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
   // longer used for the workspace. Paths in the sidebar are relative to
   // `/home/user` (the sandbox workspace root), which is exactly what the
   // E2B client expects.
+  //
+  // MODE-AWARE targeting (2026-11-05): the agent's file tools resolve their
+  // sandbox through chatSandboxForCtx — in "separate" mode that is a
+  // PER-CONVERSATION sandbox, and this sidebar used to hardcode the shared
+  // one, showing a DIFFERENT (stale) workspace than the agent was mutating.
+  // Mirror the tool resolution: getSandboxMode + the active conversation id.
   useEffect(() => {
     let cancelled = false;
     if (!user?.id) {
@@ -232,7 +249,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         const apiKey = await settingsService.getDecryptedSandboxKey(user.id);
         if (cancelled) return;
         if (apiKey) {
-          setClient(getE2BClient(apiKey, null, "shared"));
+          const mode = await settingsService.getSandboxMode(user.id);
+          if (cancelled) return;
+          setClient(
+            getE2BClient(apiKey, mode === "separate" ? conversationId : null, mode),
+          );
         } else {
           setClient(null);
         }
@@ -245,7 +266,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, conversationId]);
 
   const fetchListing = useCallback(
     async (path: string) => {
@@ -385,6 +406,65 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     }
   };
 
+  // ── PREVIEW (Workspace File Manager, 2026-11-05) ─────────────────────
+  // Click a workspace file → its bytes stream into the SAME preview panel
+  // chat attachments use (file-preview-panel), via a freshly-minted blob
+  // URL. No OPFS detour: sandbox files have no chat_files registry entry.
+  const openPreview = useFilePreviewStore((s) => s.openSandbox);
+  const [previewingPath, setPreviewingPath] = useState<string | null>(null);
+
+  const handlePreviewFile = async (entry: WorkspaceEntry) => {
+    if (entry.type !== "file" || !client) return;
+    const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
+    setPreviewingPath(fullPath);
+    try {
+      const blob = await client.readFileBytes(fullPath);
+      if (!blob) {
+        toast.error("Preview failed", { description: "The file could not be read from the sandbox." });
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      openPreview({
+        kind: "sandbox",
+        id: `sbx:${fullPath}:${Date.now()}`,
+        filename: entry.name,
+        path: fullPath,
+        url,
+        size: entry.size,
+        // No MIME from the sandbox listing — the preview card derives the
+        // viewer from the extension when mime is absent.
+        mime_type: null,
+      });
+    } catch (e) {
+      toast.error("Preview failed", {
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    } finally {
+      setPreviewingPath(null);
+    }
+  };
+
+  // ── NEW FOLDER ──────────────────────────────────────────────────────
+  const handleCreateFolder = async () => {
+    const name = newFolderName.trim();
+    if (!client || !name) return;
+    setCreatingFolderBusy(true);
+    try {
+      const fullPath = currentPath === "." ? name : `${currentPath}/${name}`;
+      await client.createFolder(fullPath);
+      toast.success(`Created folder: ${name}`);
+      setCreatingFolder(false);
+      setNewFolderName("");
+      fetchListing(currentPath);
+    } catch (e) {
+      toast.error("Create folder failed", {
+        description: e instanceof Error ? e.message : "Unknown error",
+      });
+    } finally {
+      setCreatingFolderBusy(false);
+    }
+  };
+
   const entries = listing?.entries || [];
   const searchLower = search.toLowerCase();
   const filtered = search
@@ -486,6 +566,18 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
             Files
           </h3>
           <div className="flex items-center gap-1">
+            {/* New folder button — opens the inline creation row */}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setCreatingFolder((v) => !v); setNewFolderName(""); }}
+              disabled={!client || creatingFolderBusy}
+              className="h-8 w-8 p-0"
+              title="New folder"
+              aria-label="New folder"
+            >
+              <FolderPlus className="h-4 w-4" />
+            </Button>
             {/* Upload button — opens the native file selector */}
             <Button
               size="sm"
@@ -554,6 +646,33 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
         </div>
       </div>
 
+      {/* New-folder inline creation row (header FolderPlus toggle). */}
+      {creatingFolder && (
+        <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 animate-fade-in">
+          <Folder className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+          <Input
+            autoFocus
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreateFolder();
+              if (e.key === "Escape") { setCreatingFolder(false); setNewFolderName(""); }
+            }}
+            placeholder={currentPath === "." ? "folder name…" : `${currentPath}/folder name…`}
+            className="h-7 text-xs"
+            aria-label="New folder name"
+          />
+          <Button
+            size="sm"
+            onClick={() => void handleCreateFolder()}
+            disabled={!newFolderName.trim() || creatingFolderBusy}
+            className="h-7 px-2 text-xs"
+          >
+            {creatingFolderBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "Create"}
+          </Button>
+        </div>
+      )}
+
       {/* ── PERSISTENT UPLOADS SECTION (File Persistence PRD §4) ──────────
        * Registry-backed (chat_files + OPFS) — reflects the canonical records,
        * survives refresh/navigation, works with or without a sandbox. */}
@@ -602,7 +721,36 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                     key={u.fileId}
                     className="group flex items-center hover:bg-foreground/5 transition-colors"
                   >
-                    <div className="flex flex-1 items-center gap-2 px-3 py-1.5 text-xs min-w-0">
+                    {/* Click the row → preview (same panel as chat attachments). */}
+                    <button
+                      type="button"
+                      className="flex flex-1 cursor-pointer items-center gap-2 px-3 py-1.5 text-xs min-w-0"
+                      title="Preview"
+                      onClick={async () => {
+                        try {
+                          const blob = await readUploadBytes(u);
+                          if (!blob) {
+                            toast.error("Preview failed", {
+                              description: "The stored file could not be read (it may have been deleted from this device).",
+                            });
+                            return;
+                          }
+                          openPreview({
+                            kind: "sandbox",
+                            id: `up:${u.fileId}:${Date.now()}`,
+                            filename: u.filename,
+                            path: u.filename,
+                            url: URL.createObjectURL(blob),
+                            size: u.size,
+                            mime_type: u.mimeType ?? null,
+                          });
+                        } catch (e) {
+                          toast.error("Preview failed", {
+                            description: e instanceof Error ? e.message : "Unknown error",
+                          });
+                        }
+                      }}
+                    >
                       <IconComp className={cn("h-3.5 w-3.5 shrink-0", iconColor)} />
                       <span className="truncate" title={u.filename}>
                         {u.filename}
@@ -610,7 +758,7 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                       <span className="text-muted-foreground text-[10px] shrink-0 ml-auto pr-1">
                         {formatSize(u.size)}
                       </span>
-                    </div>
+                    </button>
                     <UploadItemMenu
                       onDownload={async () => {
                         try {
@@ -726,6 +874,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                     onDownload={() => handleDownloadFolder(entry)}
                     onDelete={async () => {
                       if (!client) return;
+                      // Recursive + permanent — one honest confirmation.
+                      const ok = window.confirm(
+                        `Delete folder "${entry.name}" and EVERYTHING inside it? This cannot be undone.`,
+                      );
+                      if (!ok) return;
                       try {
                         // E2B's deleteFile is recursive (rm -rf), so it
                         // works on directories too.
@@ -784,28 +937,48 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
               const ext = fileExtension(entry.name);
               const IconComp = EXT_ICONS[ext] || FileIcon;
               const iconColor = FILE_ICON_COLORS[ext] || "text-muted-foreground";
+              const entryFullPath =
+                currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
+              const isPreviewing = previewingPath === entryFullPath;
               return (
                 <li
                   key={entry.name}
                   className="group flex items-center hover:bg-foreground/5 transition-colors"
                 >
-                  <div className="flex flex-1 items-center gap-2 px-3 py-1.5 text-xs min-w-0">
-                    <IconComp className={cn("h-3.5 w-3.5 shrink-0", iconColor)} />
-                    <span className="truncate" title={entry.name}>
+                  {/* Click the row → preview (the manager's primary action). */}
+                  <button
+                    type="button"
+                    onClick={() => void handlePreviewFile(entry)}
+                    disabled={!client || isPreviewing}
+                    title="Preview"
+                    className="flex flex-1 cursor-pointer items-center gap-2 px-3 py-1.5 text-xs min-w-0 disabled:cursor-default"
+                  >
+                    {isPreviewing ? (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+                    ) : (
+                      <IconComp className={cn("h-3.5 w-3.5 shrink-0", iconColor)} />
+                    )}
+                    <span className="truncate text-left" title={entry.name}>
                       {entry.name}
                     </span>
                     <span className="text-muted-foreground text-[10px] shrink-0 ml-auto pr-1">
                       {formatSize(entry.size)}
                     </span>
-                  </div>
+                  </button>
                   <FileItemMenu
                     entry={entry}
+                    onPreview={() => void handlePreviewFile(entry)}
                     onDownload={() => handleDownloadFile(entry)}
                     onDelete={async () => {
                       if (!client) return;
+                      // One honest confirmation — deletes are recursive and
+                      // permanent (rm -rf through the sandbox).
+                      const ok = window.confirm(
+                        `Delete "${entry.name}"? This cannot be undone.`,
+                      );
+                      if (!ok) return;
                       try {
-                        const fullPath = currentPath === "." ? entry.name : `${currentPath}/${entry.name}`;
-                        await client.deleteFile(fullPath);
+                        await client.deleteFile(entryFullPath);
                         toast.success(`Deleted: ${entry.name}`);
                         fetchListing(currentPath);
                       } catch (e) {
@@ -860,11 +1033,13 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
 // ---- File Item Menu (three-dot menu) ----
 function FileItemMenu({
   entry,
+  onPreview,
   onDownload,
   onDelete,
   onRename,
 }: {
   entry: WorkspaceEntry;
+  onPreview?: () => void;
   onDownload: () => void;
   onDelete: () => void;
   onRename: (newName: string) => void;
@@ -910,6 +1085,11 @@ function FileItemMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-40">
+        {onPreview && (
+          <DropdownMenuItem onClick={() => { setOpen(false); onPreview(); }}>
+            <Eye className="h-3.5 w-3.5 mr-2" /> Preview
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={() => { setOpen(false); onDownload(); }}>
           <Download className="h-3.5 w-3.5 mr-2" /> Download
         </DropdownMenuItem>
