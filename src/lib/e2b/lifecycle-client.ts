@@ -216,10 +216,24 @@ async function keepaliveKnownSandboxes(): Promise<void> {
  */
 export function SandboxLifecycleSync(): null {
   useEffect(() => {
-    void refreshLifecycleCache();
+    // WARM-UP ON OPEN (the "simple tools take 1-3 minutes" fix,
+    // 2026-11-05): the pagehide auto-pause freezes every known sandbox,
+    // and the old loop's FIRST tick was 4 minutes after mount — so the
+    // first tool call after reopening the app paid the full paused-sandbox
+    // resume (memory restore of a browser-heavy sandbox) INLINE. Resuming
+    // in the background the moment the app opens (and whenever the tab
+    // becomes visible again) means the user's first read_file lands on a
+    // RUNNING sandbox.
+    const warmUp = () => {
+      void refreshLifecycleCache().then(() => {
+        void keepaliveKnownSandboxes();
+      });
+    };
+    warmUp();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
       void refreshLifecycleCache();
+      void keepaliveKnownSandboxes();
     };
     document.addEventListener("visibilitychange", refresh);
     const uninstall = installSandboxAutoPause();

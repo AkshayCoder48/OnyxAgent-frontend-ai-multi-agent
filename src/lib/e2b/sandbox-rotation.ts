@@ -374,9 +374,16 @@ export interface ResolvedSandbox extends SandboxTarget {
 }
 
 /** Shared-surface tools (image path resolution, security audit, …):
- *  resolve the API key, ensure the user-level shared workspace sandbox is
- *  fresh, and return its client. Returns null when no sandbox key is
- *  configured (callers surface their own no-key error). */
+ *  resolve the API key, ensure the ctx-target sandbox is fresh, and return
+ *  its client. Returns null when no sandbox key is configured (callers
+ *  surface their own no-key error).
+ *
+ *  conversationId fix (the "simple tools take 1-3 minutes" report,
+ *  2026-11-05): the target now carries ctx.conversationId. It used to be
+ *  hardcoded null — in "separate" mode every file tool resolved the
+ *  (apiKey, null, separate) slot instead of THIS chat's, hit a dead or
+ *  missing sandbox, and paid the full dead-sandbox recovery (fresh create
+ *  + library attach ≈ a minute) on the WRONG target. */
 export async function chatSandboxForCtx(
   ctx: ToolContext,
 ): Promise<ResolvedSandbox | null> {
@@ -384,9 +391,16 @@ export async function chatSandboxForCtx(
   if (!apiKey) return null;
   const target: SandboxTarget = {
     apiKey,
-    conversationId: null,
+    conversationId: ctx.conversationId ?? null,
     mode: ctx.sandboxMode ?? "shared",
   };
   await ensureFreshSandbox(apiKey, target);
   return { ...target, client: targetE2BClient(target) };
 }
+
+/** Code-panel tools (code_app / code_preview / code_diagnostics /
+ *  code_web_session): the same ctx-resolved target as chatSandboxForCtx.
+ *  Historical name kept — the four code_* tools import this symbol (a
+ *  refactor removed it and left them type-broken on main; restored
+ *  2026-11-05 as a thin alias). */
+export const codeSandboxForCtx = chatSandboxForCtx;

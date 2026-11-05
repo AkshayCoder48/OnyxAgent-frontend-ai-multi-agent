@@ -32,7 +32,7 @@ import { Sandbox } from "@e2b/code-interpreter";
 // not a short stub.
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
-import { attachMasterSkills, ensureMasterSkills } from "@/lib/e2b/attach-master-skills";
+import { attachMasterSkills, ensureMasterSkillsInBackground } from "@/lib/e2b/attach-master-skills";
 // HEADLESS SANDBOX AGENT ("close and resume"): the detached Python
 // orchestration loop + its protocol file paths. See
 // src/lib/e2b/headless-agent.ts for the full architecture notes.
@@ -227,9 +227,16 @@ const ONYX_MD_STAMP_PATH = "/home/user/.onyx/onyx-md-version";
  *  Returns true when the document is current (either it already was, or the
  *  refresh succeeded). Cheap steady-state: one tiny file read. */
 async function ensureOnyxMdCurrent(sandbox: Sandbox): Promise<boolean> {
+  // BOUNDED stamp read (the "1-3 minute simple tools" fix): an unbounded
+  // files.read against a still-resuming sandbox hung for the SDK's whole
+  // retry window. On timeout treat the stamp as unknown — the 44 KB rewrite
+  // below is cheap enough to be idempotent.
   try {
-    const stamped = await sandbox.files.read(ONYX_MD_STAMP_PATH, { format: "text" });
-    if (stamped.trim() === String(AGENT_MD_VERSION)) return true;
+    const stamped = await Promise.race([
+      sandbox.files.read(ONYX_MD_STAMP_PATH, { format: "text" }).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+    ]);
+    if (stamped !== null && stamped.trim() === String(AGENT_MD_VERSION)) return true;
   } catch {
     // No stamp yet (pre-stamping sandbox or fresh state) — fall through and
     // (re)write the document + stamp. This is the one-time cost path.
@@ -1385,11 +1392,13 @@ async function getSandbox(
       }
     }
     // MASTER SKILL LIBRARY: re-attach when this cached sandbox predates
-    // the current library version (stamp-checked inside the sandbox — one
-    // tiny file read when already current, no 2MB write).
+    // the current library version — IN THE BACKGROUND (the "simple tools
+    // take 1-3 minutes" fix): the 2 MB write + 90 s-timeout extract must
+    // never sit between a tool call and its sandbox. Stamp-checked inside
+    // the sandbox (one tiny file read when already current).
     if (cached.masterSkillsVersion !== MASTER_SKILLS_VERSION) {
-      const res = await ensureMasterSkills(cached.sandbox);
-      if (res.attached) cached.masterSkillsVersion = MASTER_SKILLS_VERSION;
+      ensureMasterSkillsInBackground(cached.sandbox);
+      cached.masterSkillsVersion = MASTER_SKILLS_VERSION;
     }
     // ROTATION SAFETY NET: if the cached sandbox is >23h old, rotate it
     // (backup → kill → create → restore) before use. The client-side
@@ -1464,8 +1473,11 @@ async function getSandbox(
       // extract).
       const mdCurrent = await ensureOnyxMdCurrent(sandbox);
       if (mdCurrent) entry.agentMdVersion = AGENT_MD_VERSION;
-      const msRes = await ensureMasterSkills(sandbox);
-      if (msRes.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
+      // BACKGROUND (the "1-3 minute simple tools" fix): this reconnect path
+      // runs on EVERY serverless cold instance — the version-gated 2 MB
+      // library attach must not block the tool call that triggered it.
+      ensureMasterSkillsInBackground(sandbox);
+      entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
       return sandbox;
     } catch {
@@ -1509,8 +1521,8 @@ async function getSandbox(
       };
       const mdCurrent2 = await ensureOnyxMdCurrent(sandbox);
       if (mdCurrent2) entry.agentMdVersion = AGENT_MD_VERSION;
-      const msRes2 = await ensureMasterSkills(sandbox);
-      if (msRes2.attached) entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
+      ensureMasterSkillsInBackground(sandbox);
+      entry.masterSkillsVersion = MASTER_SKILLS_VERSION;
       getCache(mode).set(key, entry);
       return sandbox;
     }

@@ -54,6 +54,7 @@ import { BrowserResult, parseBrowserResult } from "./tool-results/use-browser";
 import { WebPageResult } from "./tool-results/web-page";
 import { ImageInspectionResult } from "./tool-results/image-inspection";
 import { MediaGenerationResult, mediaOperationLabel } from "./tool-results/media-generation";
+import { PreviewHtmlResult, parsePreviewHtmlResult } from "./tool-results/preview-html";
 import { deriveEditDiff } from "@/lib/agent-tool-steps";
 import { useAuthStore } from "@/stores/auth-store";
 import { isComposioToolName, useComposioBranding } from "@/lib/composio/branding";
@@ -419,6 +420,15 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
         : null,
     [toolCall.name, isCompleted, toolCall.result],
   );
+  // preview_html (user request 2026-11-05): a LIVE sandboxed render of a
+  // workspace HTML file — content, not chrome; always-on when completed.
+  const previewHtmlPayload = useMemo(
+    () =>
+      toolCall.name === "preview_html" && isCompleted
+        ? parsePreviewHtmlResult(toolCall.result)
+        : null,
+    [toolCall.name, isCompleted, toolCall.result],
+  );
   const imagePreviewSpec = useMemo(() => {
     if (toolCall.name !== "preview_image" || !isCompleted || !toolCall.result) return null;
     const extract = (obj: Record<string, unknown>): { url: string; alt?: string; error?: string } | null => {
@@ -608,6 +618,7 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
         <ImageInspectionResult result={toolCall.result} />
       )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
+      {previewHtmlPayload && <PreviewHtmlResult data={previewHtmlPayload} />}
       {/* web_fetch / fetch_url — the LIVE page preview is CONTENT, but it
           only renders AFTER the user enlarges the tool call (the preview
           lives behind the "Show page preview" disclosure — never

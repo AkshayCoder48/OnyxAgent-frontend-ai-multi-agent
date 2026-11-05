@@ -4,7 +4,6 @@ import { registerTool } from "./registry";
 import { getE2BClient } from "@/lib/e2b/client";
 import {
   chatSandboxForCtx,
-  ensureFreshSandboxForCtx,
 } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 import { zipSync } from "fflate";
@@ -29,9 +28,10 @@ import { zipSync } from "fflate";
  * The path is relative to `/home/user` (the sandbox workspace root). The
  * server-side `/api/sandbox` route normalizes relative paths to absolute.
  *
- * Auto-rotation: `ensureFreshSandboxForCtx(ctx)` is called before every
- * operation. If the sandbox is >23h old, it's rotated (backup → kill →
- * create → restore) transparently. Tools don't know it happened.
+ * Auto-rotation: `chatSandboxForCtx(ctx)` resolves the ctx-target sandbox
+ * (shared, or the chat's own in "separate" mode) and ensures it is fresh
+ * before every operation. If the sandbox is >23h old, it's rotated (backup
+ * → kill → create → restore) transparently. Tools don't know it happened.
  *
  * Tools (12):
  *   - list_folder
@@ -102,10 +102,10 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string | undefined, ".");
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const entries = await client.listFiles(path);
       return {
         entries: entries.map((e) => ({
@@ -142,10 +142,10 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       const content = await client.readFile(path);
       if (content.length > 256 * 1024) {
         return {
@@ -346,10 +346,10 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const _recursive = (args.recursive as boolean) ?? false;
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       await client.deleteFile(path);
       bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { deleted: true, path };
@@ -379,10 +379,10 @@ registerTool(
   },
   async (args, ctx) => {
     const path = safePath(args.path as string);
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       await client.createFolder(path);
       bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { created: true, path };
@@ -415,12 +415,12 @@ registerTool(
     if (path === "." || path === "" || path === "/") {
       throw new Error("Refusing to delete workspace root");
     }
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
       // The E2B SDK's `files.remove` works for both files AND directories
       // (it's effectively `rm -rf` under the hood — envd handles recursion).
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       await client.deleteFile(path);
       bumpWorkspaceVersion(); // workspace changed — invalidate snapshot cache
       return { deleted: true, path };
@@ -536,10 +536,10 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const name = path.split("/").pop() || path;
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
 
-    const client = getE2BClient(apiKey, null, "shared");
+    const client = sbx.client;
 
     // Check if the path is a directory. If so, auto-redirect to the folder
     // download flow (zip + download) instead of failing with "is a directory".
@@ -652,10 +652,10 @@ registerTool(
   async (args, ctx) => {
     const path = safePath(args.path as string);
     const folderName = path.split("/").pop() || path || "folder";
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
 
-    const client = getE2BClient(apiKey, null, "shared");
+    const client = sbx.client;
 
     // Gather { relativePath: Uint8Array } for fflate's zipSync.
     const files: Record<string, Uint8Array> = {};
@@ -727,10 +727,10 @@ registerTool(
     if (source === destination) {
       return { moved: true, source, destination, note: "Source and destination are the same." };
     }
-    const apiKey = await ensureFreshSandboxForCtx(ctx);
-    if (!apiKey) return { error: NO_KEY_ERROR };
+    const sbx = await chatSandboxForCtx(ctx);
+    if (!sbx) return { error: NO_KEY_ERROR };
     try {
-      const client = getE2BClient(apiKey, null, "shared");
+      const client = sbx.client;
       // Read the source file.
       let content: string;
       try {

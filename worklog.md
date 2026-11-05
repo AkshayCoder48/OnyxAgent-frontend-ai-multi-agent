@@ -327,3 +327,21 @@ Work Log:
 
 Stage Summary:
 - Approval cards now offer the full [Allow once] [Always for this tool] [Deny] decision set, and Approval Mode is one switch away in Settings → Tools — every destructive, external, expensive or unrestricted tool asks first until the user says otherwise, per-tool or wholesale.
+
+## Task 16 — "Simple tools take 1-3 minutes" (four-part latency fix) + the preview_html tool
+
+Date: 2026-11-05
+Agent: main (Z.ai Code)
+Task: User report — "read file and simple tools are taking 1-3 mins to complete, fix it" + "add option for AI to preview any codebase's html into gen ui with a tool".
+
+Work Log — THE LATENCY CHAIN (four compounding causes, all fixed):
+- CAUSE 1 (paused-sandbox resume, inline): the app AUTO-PAUSES every sandbox at pagehide (lifecycle-client). The keepalive loop's FIRST tick was 4 minutes after mount — so the first tool call after reopening the app paid the full paused-sandbox resume INLINE. FIX: SandboxLifecycleSync now warms up on mount + on every visibility regain (refreshLifecycleCache → keepaliveKnownSandboxes, fire-and-forget) — the resume happens in the background the moment the app opens.
+- CAUSE 2 (master-skills attach blocking tool calls): on EVERY serverless-cold-instance reconnect (nearly every call at real traffic), getSandbox awaited ensureMasterSkills — a version-gated 2 MB zip write + extract with a 90 s command timeout. A failed/absent stamp (resuming envd, disk pressure) made it re-pay that on EVERY call — the minute-scale stall. FIX: ensureMasterSkillsInBackground — fire-and-forget, per-sandbox in-flight dedup, 10-min failure backoff; the reconnect/metadata/cached paths use it (create keeps its one-time awaited attach). The stamp reads are bounded (5 s race) — an unbounded files.read against a still-resuming sandbox hung for the SDK's whole retry window. Onyx.md's stamp read got the same bound.
+- CAUSE 3 (wrong-sandbox routing in separate mode): 8 workspace file tools (read_file, list_folder, …) hardcoded getE2BClient(apiKey, null, "shared") while create_file & co. used chatSandboxForCtx — in "separate" mode they resolved the WRONG (dead) sandbox and paid the full dead-sandbox recovery (fresh create + library attach) on the wrong target. FIX: all 11 file tools resolve through chatSandboxForCtx.
+- CAUSE 4 (chatSandboxForCtx dropped the conversation id): its target hardcoded conversationId: null — per-chat tools in separate mode targeted the (apiKey, null, separate) slot instead of THIS chat's. FIX: ctx.conversationId flows through.
+- BONUS REPAIR: codeSandboxForCtx had been deleted from sandbox-rotation.ts leaving 4 code_* tools type-broken ON MAIN (pre-existing tsc errors) — restored as a thin alias of chatSandboxForCtx. src/ tsc baseline 133 → 128.
+- preview_html TOOL (user request): renders any workspace HTML file (or inline HTML) as a LIVE interactive preview card in the chat — through the GenUI custom_html machinery (sandboxed iframe, allow-scripts only, theme-synced). 2 MB cap, non-HTML rejection, height clamp 160-900, honest no-sandbox error; card adds Source disclosure + Open-in-tab (blob URL). Registered standalone (NOT umbrella-absorbed — model-visible), documented in Onyx.md's compendium (68 tools) + digest regenerated (scripts/gen-onyx-md.ts).
+- TESTS (latency-fixes.test.ts, 16 pins): no file tool hardcodes the shared client; every resolution goes through chatSandboxForCtx; conversationId flows; the route's reconnect paths use the BACKGROUND variant and no awaited ensureMasterSkills remains; the 5 s stamp-read race; warm-up on mount + visibility; background attach returns synchronously, dedupes and backs off (fake-timer driven against the real module); preview_html inline/file/error/cap/clamp lanes; card + index wiring; umbrella non-absorption. Full suite 746/746.
+
+Stage Summary:
+- Simple tools no longer pay paused-sandbox resumes, 2 MB library re-attaches, or wrong-sandbox dead-recoveries inline — the sandbox warms at app open, library attaches in the background, and every file tool talks to the right sandbox. And the agent can now SHOW its HTML work live with preview_html.

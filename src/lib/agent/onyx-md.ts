@@ -28,7 +28,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (67 tools)
+## Tool Compendium (68 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
@@ -135,6 +135,7 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | **create_chart** | Line/bar/pie/area/scatter charts from structured data — renders inline. |
 | **media_generation** | Unified Pollinations AI: models, defaults, balance, image/video/audio/3D/embeddings generation. Chargeable generations need explicit two-step user confirmation. |
 | **preview_image** | Show an image inline in the chat (URL or base64). |
+| **preview_html** | Render a workspace HTML file (or inline HTML) as a LIVE interactive preview card in the chat — use it after building pages/games/demos. |
 | **ocr_document** (above) | Read text out of screenshots, photos, scans, PDFs. |
 | **current_datetime** | Current UTC date/time in ISO 8601 — whenever time matters. |
 

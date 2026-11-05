@@ -27,6 +27,7 @@ import "./e2b_files";
 import "./e2b_exec";
 import "./e2b_rag";
 import "./file_writer";
+import "./preview_html";
 import "./local_chats";
 import "./todos";
 import "./dynamic_tools";
