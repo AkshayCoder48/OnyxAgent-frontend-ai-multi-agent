@@ -35,8 +35,10 @@ import {
   ListTree,
   Menu,
   ScrollText,
+  Users,
 } from "lucide-react";
 import { BrowserLivePanel } from "@/components/chat/browser-live-panel";
+import { TeamPanel } from "@/components/chat/team-panel";
 import { useActiveProject } from "@/lib/projects/store";
 import { ProjectChrome } from "@/components/projects/project-chrome";
 import { ProjectHistoryDrawer } from "@/components/projects/project-history-drawer";
@@ -46,7 +48,7 @@ import { useProjectSelectionSync } from "@/components/projects/project-conversat
 // Shift+F, drawer hits reuse its reveal helper).
 import { GlobalSearchDialog } from "@/components/search/global-search-dialog";
 
-type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | "browser" | null;
+type SidePanel = "platforms" | "files" | "timeline" | "logs" | "knowledge" | "browser" | "team" | null;
 
 /* ------------------------------------------------------------------
  * SPLIT WORKSPACE GEOMETRY (PRD §7/§8/§20)
@@ -86,6 +88,7 @@ const PANEL_WIDTH_PREFS = {
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
   knowledge: { storageKey: "kb-sidebar-width", defaultWidth: 380 },
   browser: { storageKey: "browser-live-width", defaultWidth: 460 },
+  team: { storageKey: "team-panel-width", defaultWidth: 420 },
 } as const;
 
 type DockedPanelId = keyof typeof PANEL_WIDTH_PREFS;
@@ -226,6 +229,7 @@ export function ChatWorkspace() {
   const logsOpen = sidePanel === "logs" && !subagentOpen;
   const knowledgeOpen = sidePanel === "knowledge" && !subagentOpen;
   const browserOpen = sidePanel === "browser" && !subagentOpen;
+  const teamOpen = sidePanel === "team" && !subagentOpen;
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
@@ -454,6 +458,15 @@ export function ChatWorkspace() {
                   <span className="flex-1">Subagent chat</span>
                   {subagentOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
                 </DropdownMenuItem>
+                {/* Agent teams — the arena roundtable. */}
+                <DropdownMenuItem
+                  onClick={() => toggleSidePanel("team")}
+                  className="gap-2.5"
+                >
+                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Agent teams</span>
+                  {teamOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
                 {/* Error logs (unseen-error dot mirrors the menu badge). */}
                 <DropdownMenuItem
                   onClick={() => toggleSidePanel("logs")}
@@ -555,6 +568,23 @@ export function ChatWorkspace() {
         sheetClassName="w-[90vw] max-w-md"
       >
         <SubAgentSidebar onClose={closeSubagent} />
+      </DockedPanel>
+
+      {/* Agent teams — the arena roundtable (arena-style swarm chat over
+          the workspace's subagents). */}
+      <DockedPanel
+        id="team-panel"
+        label="Agent teams"
+        open={teamOpen}
+        onClose={() => setSidePanel(null)}
+        storageKey="team-panel-width"
+        defaultWidth={420}
+        minWidth={300}
+        maxWidth={720}
+        sheetCloseButton
+        sheetClassName="w-[92vw] sm:max-w-md"
+      >
+        <TeamPanel />
       </DockedPanel>
 
       <DockedPanel
