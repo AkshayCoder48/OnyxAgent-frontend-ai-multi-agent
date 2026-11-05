@@ -19,11 +19,20 @@ export interface Conversation {
    *  conversation keeps its project association across navigation and
    *  refreshes. */
   project_id?: string | null;
+  /** CHAT BRANCHES (2026-11-05): the message id the conversation's ACTIVE
+   *  branch ends on. The painted view walks the parent chain from this
+   *  leaf; every other row belongs to a sibling branch (kept, not deleted).
+   *  Absent/null = legacy flat conversation (or newest-branch fallback). */
+  active_leaf_id?: string | null;
 }
 
 export interface ConversationMessage {
   id: string;
   conversation_id: string;
+  /** CHAT BRANCHES: the message this row forks from (its predecessor on the
+   *  SAME branch). Sibling rows share a parent — the ‹ i/n › picker switches
+   *  between them. Absent = legacy flat row (treated as the linear tail). */
+  parent_id?: string | null;
   role: "user" | "assistant" | "system";
   content: string;
   created_at: string;

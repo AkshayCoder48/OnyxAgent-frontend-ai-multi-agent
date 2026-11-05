@@ -242,6 +242,11 @@ export interface AddMessageInput {
   }>;
   fileIds?: string[];
   modelName?: string;
+  /** CHAT BRANCHES: the predecessor message this row forks from. The
+   *  runtime threads the turn's user-message id here for assistants, and
+   *  the fork flows (edit/regenerate) pass the ORIGINAL user message's
+   *  parent so the new row lands as its sibling. */
+  parentId?: string | null;
   /** Checkpoint flag — true while the turn is still in flight (see
    *  saveAgentCheckpoint). Omitted on the final save. */
   isStreaming?: boolean;
@@ -347,6 +352,31 @@ export const conversationService = {
 
   async archive(id: string, archived: boolean): Promise<void> {
     await this.update(id, { is_archived: archived });
+  },
+
+  /** CHAT BRANCHES: point the conversation's active branch at a new leaf
+   *  (branch switch, or a turn extending the branch). Non-indexed prop —
+   *  no schema change; absent = legacy flat conversation. */
+  async setActiveLeaf(conversationId: string, leafMessageId: string | null): Promise<void> {
+    await db.conversations.update(conversationId, {
+      active_leaf_id: leafMessageId,
+      updated_at: nowISO(),
+    });
+  },
+
+  /** CHAT BRANCHES: the conversation's active-branch leaf, user-AGNOSTIC
+   *  (same rationale as `exists` — transient/legacy auth identities must
+   *  not break fork parenting during hydration). */
+  async getActiveLeaf(conversationId: string): Promise<string | null> {
+    const row = await db.conversations.get(conversationId);
+    return row?.active_leaf_id ?? null;
+  },
+
+  /** CHAT BRANCHES: backfill a fork parent onto a LEGACY row (the original
+   *  user message gains its parent link at edit-time so the new sibling
+   *  and the original share a fork point). */
+  async setMessageParent(messageId: string, parentId: string | null): Promise<void> {
+    await db.messages.update(messageId, { parent_id: parentId });
   },
 
   async delete(id: string): Promise<void> {
@@ -478,6 +508,10 @@ export const conversationService = {
       reasoning: input.reasoning ?? null,
       parts: input.parts ?? null,
       generation: input.generation ?? null,
+      // CHAT BRANCHES fork linkage (absent on legacy rows).
+      ...(input.parentId !== undefined && input.parentId !== null
+        ? { parent_id: input.parentId }
+        : {}),
     };
     await db.messages.add(messageRow);
     await bumpConversationTimestamp(conversationId);
@@ -590,6 +624,10 @@ export const conversationService = {
       parts: input.parts ?? null,
       /** "Worked {time}" panel summary — persists with the settled row. */
       generation: input.generation ?? null,
+      /** CHAT BRANCHES fork linkage — a checkpoint put rewrites the whole
+       *  row, so an omitted parentId PRESERVES the link a previous
+       *  checkpoint wrote (never silently orphans the branch). */
+      parent_id: input.parentId ?? existing?.parent_id ?? null,
       /** Extra (non-indexed) property — marks an interrupted turn after a
        *  refresh. The final save omits it. */
       is_streaming: input.isStreaming ?? true,
@@ -775,6 +813,7 @@ function toConversation(row: {
   last_message_at?: string | null;
   mode?: "agent" | "code";
   project_id?: string | null;
+  active_leaf_id?: string | null;
 }): Conversation {
   const {
     id,
@@ -787,6 +826,7 @@ function toConversation(row: {
     active_knowledge_base_ids,
     mode,
     project_id,
+    active_leaf_id,
   } = row;
   return {
     id,
@@ -799,6 +839,8 @@ function toConversation(row: {
     active_knowledge_base_ids,
     ...(mode ? { mode } : {}),
     ...(project_id !== undefined && project_id !== null ? { project_id } : {}),
+    // CHAT BRANCHES: the active-branch leaf pointer (absent on legacy rows).
+    ...(active_leaf_id !== undefined && active_leaf_id !== null ? { active_leaf_id } : {}),
   };
 }
 

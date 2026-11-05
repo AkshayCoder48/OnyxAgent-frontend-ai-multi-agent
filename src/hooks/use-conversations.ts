@@ -198,6 +198,17 @@ export function useConversations() {
           }
         }
         setMessagesFor(id, msgs);
+        // CHAT BRANCHES: fetch the conversation's active-branch leaf so the
+        // paint path resolves the branch (a missing leaf falls back to the
+        // newest branch / legacy flat — never blocks the load).
+        try {
+          const leaf = await conversationService.getActiveLeaf(id);
+          if (!controller.signal.aborted && selectRequestIdRef.current === myRequestId) {
+            useConversationStore.getState().setActiveLeafFor(id, leaf);
+          }
+        } catch {
+          /* best-effort — resolveActiveBranch's fallbacks cover a missing leaf */
+        }
       } catch (err) {
         // Ignore aborted/superseded requests — they're expected on rapid switch.
         if (

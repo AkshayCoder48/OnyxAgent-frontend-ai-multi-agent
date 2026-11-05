@@ -6,6 +6,7 @@ import { MessageItem } from "./message-item";
 import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { SelectionToolbar } from "@/components/assistant-ui/elements";
 import { useQuoteStore } from "@/stores";
+import type { BranchPosition } from "@/lib/chat/branches";
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -16,6 +17,13 @@ interface MessageListProps {
   onRegenerate?: (assistantMessageId: string) => void;
   /** User-message actions: edit a sent prompt + re-run the turn from it. */
   onEditUserMessage?: (userMessageId: string, newContent: string) => void;
+  /** CHAT BRANCHES: per-message sibling positions for the ‹ i/n › pickers
+   *  (only messages with 2+ siblings appear in the map). */
+  branchInfo?: Map<string, BranchPosition>;
+  /** CHAT BRANCHES: switch a message to its prev/next sibling branch. */
+  onSwitchBranch?: (messageId: string, direction: -1 | 1) => void;
+  /** CHAT BRANCHES: disable switching while a turn is live. */
+  branchesDisabled?: boolean;
 }
 
 /**
@@ -177,7 +185,7 @@ function useProgressiveMount(
   return { visibleCount, total };
 }
 
-export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserMessage }: MessageListProps) {
+export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserMessage, branchInfo, onSwitchBranch, branchesDisabled }: MessageListProps) {
   const groupPositions = useGroupPositions(messages);
   const setQuote = useQuoteStore((s) => s.setQuote);
   // PROGRESSIVE MOUNT: the newest `visibleCount` rows render fully; older
@@ -268,6 +276,9 @@ export function MessageList({ messages, onTodoDismiss, onRegenerate, onEditUserM
                 onTodoDismiss={onTodoDismiss}
                 onRegenerate={onRegenerate}
                 onEditUserMessage={onEditUserMessage}
+                branch={branchInfo?.get(message.id)}
+                onSwitchBranch={onSwitchBranch}
+                branchesDisabled={branchesDisabled}
               />
             </div>
           </div>

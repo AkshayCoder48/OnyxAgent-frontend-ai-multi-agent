@@ -542,7 +542,19 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   const doSend = useCallback(
-    async (content: string, fileIds?: string[], files?: ChatMessageFile[]) => {
+    async (
+      content: string,
+      fileIds?: string[],
+      files?: ChatMessageFile[],
+      turnOpts?: {
+        /** CHAT BRANCHES — regenerate: fork from the EXISTING user message
+         *  (no new user row; the fresh reply lands as its sibling). */
+        reuseUserMessageId?: string;
+        /** CHAT BRANCHES — edit: the fork point the NEW user message
+         *  hangs from (the original's parent). */
+        parentMessageId?: string | null;
+      },
+    ) => {
       const userId = useAuthStore.getState().user?.id;
       if (!userId) {
         console.warn("[useChat] sendMessage called without an authenticated user.");
@@ -590,16 +602,24 @@ export function useChat(options: UseChatOptions = {}) {
       setActiveExecId(execution.id);
 
       const userMessageId = nanoid();
-      execution.processor.setUserMessageId(userMessageId);
-      execution.store.getState().addMessage({
-        id: userMessageId,
-        role: "user",
-        content,
-        timestamp: new Date(),
-        conversationId: convId || undefined,
-        fileIds,
-        files,
-      });
+      // CHAT BRANCHES — regenerate mode: the user message is ALREADY in the
+      // seeded view (the execution store mirrors the global store, which
+      // still holds it). Point the processor at the existing id (user_prompt
+      // becomes a no-op swap) and skip the optimistic duplicate bubble.
+      if (turnOpts?.reuseUserMessageId) {
+        execution.processor.setUserMessageId(turnOpts.reuseUserMessageId);
+      } else {
+        execution.processor.setUserMessageId(userMessageId);
+        execution.store.getState().addMessage({
+          id: userMessageId,
+          role: "user",
+          content,
+          timestamp: new Date(),
+          conversationId: convId || undefined,
+          fileIds,
+          files,
+        });
+      }
 
       // Mirror attached files into the E2B sandbox (best-effort, when a key
       // exists) so the sandbox-native tools (list_folder / read_file) see
@@ -656,6 +676,15 @@ export function useChat(options: UseChatOptions = {}) {
       // generation and reuse the SAME placeholder assistant message.
       const turnGenerationId = nanoid();
       opts.generationId = turnGenerationId;
+
+      // CHAT BRANCHES — thread the fork parameters into the runtime options
+      // (regenerate reuses the user row; edit forks at the original's parent).
+      if (turnOpts?.reuseUserMessageId) {
+        opts.reuseUserMessageId = turnOpts.reuseUserMessageId;
+      }
+      if (turnOpts?.parentMessageId !== undefined) {
+        opts.parentMessageId = turnOpts.parentMessageId;
+      }
 
       // ── DETACHED SANDBOX RUN MODE ("close and resume") ────────────────
       // When the toggle is on, the whole turn is dispatched to Trigger.dev
@@ -743,9 +772,14 @@ export function useChat(options: UseChatOptions = {}) {
   // any of those into a VISIBLE chat error and finishes the execution, so
   // the spinner always stops and the user always learns what to fix.
   const doSendGuarded = useCallback(
-    async (content: string, fileIds?: string[], files?: ChatMessageFile[]) => {
+    async (
+      content: string,
+      fileIds?: string[],
+      files?: ChatMessageFile[],
+      turnOpts?: { reuseUserMessageId?: string; parentMessageId?: string | null },
+    ) => {
       try {
-        await doSend(content, fileIds, files);
+        await doSend(content, fileIds, files, turnOpts);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error("[useChat] turn failed to start:", err);
@@ -798,9 +832,13 @@ export function useChat(options: UseChatOptions = {}) {
   }, []);
 
   /**
-   * REGENERATE (PRD §6) — re-run the turn that produced an assistant message.
-   * Blocked while an execution is live (same as before); reads the merged
-   * message view (execution store or global store — same content either way).
+   * REGENERATE (PRD §6) — re-run the turn that produced an assistant
+   * message. CHAT BRANCHES (2026-11-05): NON-DESTRUCTIVE — the original
+   * reply (and everything after it) stays saved as a sibling branch; the
+   * fresh reply forks from the SAME user message and becomes the new
+   * active branch (the ‹ i/n › picker appears on both). Blocked while an
+   * execution is live; reads the merged message view (execution store or
+   * global store — same content either way).
    */
   const regenerate = useCallback(
     (assistantMessageId: string) => {
@@ -825,38 +863,30 @@ export function useChat(options: UseChatOptions = {}) {
       const convId = targetMsg.conversationId ?? conversationId ?? null;
       if (!convId) return;
 
-      // 1. Drop both messages from the live store (the global store — no
-      //    execution is live here) + 2. delete both rows from Dexie.
+      // 1. Retire the old branch from the LIVE VIEW ONLY — the rows stay
+      //    in Dexie as the sibling branch (no deletes; the execution store
+      //    is seeded from this trimmed view below).
+      const doomed = msgs.slice(idx);
       const global = useChatStore.getState();
-      global.removeMessage(targetMsg.id);
-      global.removeMessage(userMsg.id);
-      void (async () => {
-        try {
-          const { conversationService } = await import("@/lib/services");
-          if (!targetMsg.isTemporaryId) {
-            await conversationService.deleteMessage(convId, targetMsg.id);
-          }
-          if (!userMsg.isTemporaryId) {
-            await conversationService.deleteMessage(convId, userMsg.id);
-          }
-        } catch (err) {
-          console.warn("[useChat] regenerate: failed to delete old rows from Dexie", err);
-        }
-      })();
+      for (const m of doomed) global.removeMessage(m.id);
 
-      // 3. Re-run the turn with the original prompt (guarded — a start
-      // failure surfaces as a chat error instead of a stuck spinner).
-      void doSendGuarded(userMsg.content, userMsg.fileIds, userMsg.files);
+      // 2. Re-run the turn reusing the EXISTING user message row (the
+      //    fresh reply lands as its child — a sibling of the retired one).
+      void doSendGuarded(userMsg.content, userMsg.fileIds, userMsg.files, {
+        reuseUserMessageId: userMsg.id,
+      });
     },
     [isProcessing, getMergedMessages, conversationId, doSendGuarded],
   );
 
   /**
    * EDIT USER MESSAGE (assistant-ui "Edit user message" flow) — re-run the
-   * conversation from an edited prompt. The edited user message and EVERY
-   * message after it are dropped from the live store + Dexie (no branching
-   * in this app — editing rewrites the timeline from that point), then the
-   * edited text is sent as a fresh turn with the same attachments.
+   * conversation from an edited prompt. CHAT BRANCHES (2026-11-05): NON-
+   * DESTRUCTIVE — the edited message and everything after it stay saved as
+   * a sibling branch; the edited text forks from the SAME parent and
+   * becomes the new active branch (the ‹ i/n › picker appears on both).
+   * The legacy rows are only retired from the LIVE VIEW (the execution
+   * store is seeded from the trimmed view).
    */
   const editUserMessage = useCallback(
     (userMessageId: string, newContent: string) => {
@@ -871,31 +901,37 @@ export function useChat(options: UseChatOptions = {}) {
       if (userMsg.role !== "user") return;
       const convId = userMsg.conversationId ?? conversationId ?? null;
 
-      // 1. Drop the edited message + everything after it from the live store.
+      // The fork point: the edited prompt hangs from its predecessor on the
+      // active branch (null when editing the first message — root fork).
+      const forkParentId = idx > 0 ? (msgs[idx - 1]?.id ?? null) : null;
+
+      // 1. Retire the old branch from the LIVE VIEW ONLY — the rows stay
+      //    in Dexie as the sibling branch (no deletes).
       const doomed = msgs.slice(idx);
       const global = useChatStore.getState();
       for (const m of doomed) global.removeMessage(m.id);
 
-      // 2. Delete the same rows from Dexie (best-effort — a failure only
-      //    means stale rows reappear on the next history load).
-      void (async () => {
-        if (!convId) return;
-        try {
-          const { conversationService } = await import("@/lib/services");
-          for (const m of doomed) {
-            if (!m.isTemporaryId) {
-              await conversationService.deleteMessage(convId, m.id);
-            }
+      // 2. Backfill the ORIGINAL row's fork parent (legacy rows have none)
+      //    so the original and the edited prompt are true siblings — the
+      //    ‹ i/n › picker then counts them together.
+      if (convId && !userMsg.isTemporaryId && userMsg.parent_id == null) {
+        void (async () => {
+          try {
+            const { conversationService } = await import("@/lib/services");
+            await conversationService.setMessageParent(userMsg.id, forkParentId);
+          } catch (err) {
+            console.warn("[useChat] editUserMessage: failed to backfill fork parent", err);
           }
-        } catch (err) {
-          console.warn("[useChat] editUserMessage: failed to delete old rows from Dexie", err);
-        }
-      })();
+        })();
+      }
 
-      // 3. Send the edited text as a fresh turn (doSend re-attaches the
-      //    upload tags from the original file set; guarded — a start
-      //    failure surfaces as a chat error instead of a stuck spinner).
-      void doSendGuarded(trimmed, userMsg.fileIds, userMsg.files);
+      // 3. Send the edited text as a fresh turn FORKED at the original's
+      //    parent (doSend re-attaches the upload tags from the original
+      //    file set; guarded — a start failure surfaces as a chat error
+      //    instead of a stuck spinner).
+      void doSendGuarded(trimmed, userMsg.fileIds, userMsg.files, {
+        parentMessageId: forkParentId,
+      });
     },
     [isProcessing, getMergedMessages, conversationId, doSendGuarded],
   );

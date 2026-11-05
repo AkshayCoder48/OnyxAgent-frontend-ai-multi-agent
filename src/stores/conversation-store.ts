@@ -16,6 +16,10 @@ interface ConversationState {
   *  consumer must check the pair before painting, so a stale fetch for
   *  conversation A can never overwrite the view of conversation B. */
   hydratedConversationId: string | null;
+  /** CHAT BRANCHES: the loaded conversation's active-branch leaf (the row
+   *  the painted view walks parents from). null = legacy flat conversation
+   *  or not-yet-fetched — resolveActiveBranch handles both. */
+  activeLeafId: string | null;
   isLoading: boolean;
   error: string | null;
 
@@ -25,6 +29,9 @@ interface ConversationState {
    *  from `selectConversation` so the message array can never leak across
    *  conversations between the id change and the fetch resolving. */
   selectConversation: (id: string | null, opts?: { loading?: boolean }) => void;
+  /** CHAT BRANCHES: store the active-branch leaf for the SELECTED
+   *  conversation (guarded like setMessagesFor). */
+  setActiveLeafFor: (id: string, leafId: string | null) => void;
   /** Attach a JUST-CREATED conversation (runtime `conversation_created`):
    *  switches the id WITHOUT clearing anything and marks it hydrated — the
    *  live streaming messages in the chat store are authoritative, so the
@@ -63,6 +70,7 @@ const initialState = {
   currentConversationId: getInitialConversationId(),
   currentMessages: [] as ConversationMessage[],
   hydratedConversationId: null as string | null,
+  activeLeafId: null as string | null,
   isLoading: false,
   error: null,
 };
@@ -79,7 +87,7 @@ export const useConversationStore = create<ConversationState>((set) => ({
   setCurrentConversationId: (id) =>
     set((state) => {
       if (state.currentConversationId === id) return state;
-      return { currentConversationId: id, currentMessages: [], hydratedConversationId: null };
+      return { currentConversationId: id, currentMessages: [], hydratedConversationId: null, activeLeafId: null };
     }),
 
   // Atomic select: id + clear messages + (optional) loading flag in one
@@ -95,6 +103,7 @@ export const useConversationStore = create<ConversationState>((set) => ({
         currentConversationId: id,
         currentMessages: [],
         hydratedConversationId: null,
+        activeLeafId: null,
         // Only flip loading when explicitly requested; the caller controls
         // the loading lifecycle (sets true before fetch, false after).
         isLoading: opts?.loading ?? state.isLoading,
@@ -127,6 +136,15 @@ export const useConversationStore = create<ConversationState>((set) => ({
         currentMessages: messages,
         hydratedConversationId: id,
       };
+    }),
+
+  /** CHAT BRANCHES: store the conversation's active-branch leaf alongside
+   *  its messages (guarded the same way — a stale leaf never crosses
+   *  conversations). null = legacy flat conversation. */
+  setActiveLeafFor: (id, leafId) =>
+    set((state) => {
+      if (state.currentConversationId !== id) return state;
+      return { activeLeafId: leafId };
     }),
 
   setCurrentMessages: (messages) => set({ currentMessages: messages }),

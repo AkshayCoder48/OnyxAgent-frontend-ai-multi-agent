@@ -24,6 +24,10 @@ export interface ChatMessageFile {
 export interface ChatMessage {
   id: string;
   role: MessageRole;
+  /** CHAT BRANCHES: predecessor on the same branch (fork linkage; see
+   *  ConversationMessage.parent_id). Optional on the live view — the paint
+   *  path resolves branches from the full row set. */
+  parent_id?: string | null;
   content: string;
   timestamp: Date;
   toolCalls?: ToolCall[];

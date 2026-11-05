@@ -6,6 +6,7 @@ import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
 import { BrowserUseGroup } from "./tool-results/use-browser";
+import { BranchPicker } from "./branch-picker";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
 import { deriveAgentPhase } from "@/lib/agent/timeline";
 import { useWordTypewriter } from "@/components/assistant-ui/elements/letter-stream";
@@ -442,6 +443,13 @@ interface MessageItemProps {
   onRegenerate?: (assistantMessageId: string) => void;
   /** User-message actions: edit a sent prompt + re-run the turn from it. */
   onEditUserMessage?: (userMessageId: string, newContent: string) => void;
+  /** CHAT BRANCHES: sibling position for the ‹ i/n › picker (present only
+   *  when this message has 2+ forked siblings). */
+  branch?: { index: number; count: number };
+  /** CHAT BRANCHES: switch this message to its prev/next sibling. */
+  onSwitchBranch?: (messageId: string, direction: -1 | 1) => void;
+  /** CHAT BRANCHES: switching is disabled while a turn is live. */
+  branchesDisabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1071,9 @@ export const MessageItem = React.memo(function MessageItem({
   onTodoDismiss,
   onRegenerate,
   onEditUserMessage,
+  branch,
+  onSwitchBranch,
+  branchesDisabled,
 }: MessageItemProps) {
   const isUser = message.role === "user";
   const openPreview = useFilePreviewStore((s) => s.open);
@@ -1561,6 +1572,22 @@ export const MessageItem = React.memo(function MessageItem({
           />
         )}
 
+        {/* CHAT BRANCHES — the ‹ i/n › variant picker on forked messages
+            (edited prompts + regenerated replies). Rendered for BOTH roles,
+            above the action rows; disabled while a turn is live. */}
+        {branch && branch.count > 1 && onSwitchBranch && !message.isStreaming && (
+          <div className={cn("mb-1 flex", isUser ? "justify-end" : "justify-start")}>
+            <BranchPicker
+              index={branch.index}
+              count={branch.count}
+              disabled={branchesDisabled}
+              onPrev={() => onSwitchBranch(message.id, -1)}
+              onNext={() => onSwitchBranch(message.id, 1)}
+              label={isUser ? "edit" : "response"}
+            />
+          </div>
+        )}
+
         {/* MESSAGE ACTION ROWS (assistant-ui "Message actions" + user
             edit/copy): always visible once the turn settles — each action
             confirms itself in place (copy → check + emerald, rating fills,
@@ -1614,7 +1641,12 @@ export const MessageItem = React.memo(function MessageItem({
     prev.animateEntrance === next.animateEntrance &&
     prev.onTodoDismiss === next.onTodoDismiss &&
     prev.onRegenerate === next.onRegenerate &&
-    prev.onEditUserMessage === next.onEditUserMessage
+    prev.onEditUserMessage === next.onEditUserMessage &&
+    // CHAT BRANCHES — the picker's position/count + switch wiring.
+    prev.branch?.index === next.branch?.index &&
+    prev.branch?.count === next.branch?.count &&
+    prev.onSwitchBranch === next.onSwitchBranch &&
+    prev.branchesDisabled === next.branchesDisabled
   );
 });
 

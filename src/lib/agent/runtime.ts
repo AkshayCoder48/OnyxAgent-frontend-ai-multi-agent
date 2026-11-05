@@ -145,6 +145,16 @@ export interface AgentTurnOptions {
    *  code paths keep working unchanged. Undefined / ≤1 candidate = today's
    *  single-provider behavior, byte for byte. */
   providerCandidates?: RouterCandidate[];
+  /** CHAT BRANCHES — fork an EXISTING user message instead of adding a new
+   *  row (the regenerate flow: the new assistant lands as a sibling of the
+   *  old reply, parented by this user message). Skips persistence of the
+   *  user message entirely — the row already exists. */
+  reuseUserMessageId?: string;
+  /** CHAT BRANCHES — explicit fork parent for the turn's NEW user message
+   *  (the edit flow: the edited text becomes a SIBLING of the original,
+   *  forked at this message). Undefined = extend the conversation's active
+   *  branch (its active_leaf_id). */
+  parentMessageId?: string | null;
 }
 
 export interface AgentTurnResult {
@@ -2053,6 +2063,10 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
   };
 
   // 1. Persist the user's message + create conversation if needed.
+  //    CHAT BRANCHES: every row gains a fork parent — a normal send extends
+  //    the conversation's active branch (parent = its active_leaf_id), the
+  //    edit flow passes an explicit fork point, and the regenerate flow
+  //    REUSES the existing user message (no new row).
   let conversationId = opts.conversationId;
   if (!conversationId) {
     const title =
@@ -2065,28 +2079,61 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
       timestamp: nowISO(),
     });
   }
-  const userMessageRow = await conversationService.addMessage(
-    conversationId,
-    opts.userId,
-    {
-      role: "user",
-      content: opts.userMessage,
-      fileIds: opts.fileIds,
-    },
-  );
+  let userMessageRowId: string;
+  if (opts.reuseUserMessageId) {
+    // REGENERATE: the user row already exists (and stays on its branch) —
+    // the new assistant reply will be its CHILD, a sibling of the old one.
+    userMessageRowId = opts.reuseUserMessageId;
+  } else {
+    // Fork parent: explicit (edit flow) → the conversation's active leaf.
+    let parentId: string | null = opts.parentMessageId ?? null;
+    if (opts.parentMessageId === undefined) {
+      try {
+        parentId = await conversationService.getActiveLeaf(conversationId);
+      } catch {
+        parentId = null;
+      }
+    }
+    const addedRow = await conversationService.addMessage(
+      conversationId,
+      opts.userId,
+      {
+        role: "user",
+        content: opts.userMessage,
+        fileIds: opts.fileIds,
+        ...(parentId ? { parentId } : {}),
+      },
+    );
+    userMessageRowId = addedRow.id;
+    // The turn extends the active branch from the new user message.
+    try {
+      await conversationService.setActiveLeaf(conversationId, userMessageRowId);
+    } catch {
+      /* non-fatal — the leaf falls back to the newest branch on read */
+    }
+  }
   emit({
     type: "user_prompt",
-    data: { message: opts.userMessage, message_id: userMessageRow.id },
+    data: { message: opts.userMessage, message_id: userMessageRowId },
     timestamp: nowISO(),
   });
   emit({
     type: "user_prompt_processed",
-    data: { message_id: userMessageRow.id },
+    data: { message_id: userMessageRowId },
     timestamp: nowISO(),
   });
 
   // 2. Load history from Dexie → ChatCompletionMessage[].
-  const history = await conversationService.getMessages(conversationId);
+  //    CHAT BRANCHES: only the ACTIVE branch (the path through this turn's
+  //    user message) becomes wire history — sibling branches stay saved but
+  //  never leak into the model's context.
+  let history = await conversationService.getMessages(conversationId);
+  try {
+    const { resolveActiveBranch } = await import("@/lib/chat/branches");
+    history = resolveActiveBranch(history, userMessageRowId);
+  } catch {
+    /* branch resolution is best-effort — flat history is the legacy behavior */
+  }
 
   // 2.5 HOT-LOAD DYNAMIC TOOLS BEFORE THE TOOLS SNAPSHOT. Custom tools
   // (IndexedDB) and MCP servers (session catalog + the mcp_search_tools /
@@ -2742,6 +2789,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             opts.userId,
             assistantMessageId,
             {
+              parentId: userMessageRowId,
               content: state.content,
               thinking: state.thinking || undefined,
               reasoning: state.reasoning || undefined,
@@ -3094,6 +3142,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
             opts.userId,
             assistantMessageId,
             {
+              parentId: userMessageRowId,
               role: "assistant",
               content: `(error: context limit reached. Full chat saved to /chats folder. ${retryMsg})`,
               toolCalls: allToolCalls,
@@ -3147,6 +3196,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           opts.userId,
           assistantMessageId,
           {
+            parentId: userMessageRowId,
             role: "assistant",
             content: lastAssistantContent || `(error: ${displayMessage})`,
             thinking: lastAssistantThinking || undefined,
@@ -3379,6 +3429,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         opts.userId,
         assistantMessageId,
         {
+          parentId: userMessageRowId,
           role: "assistant",
           content: finalContent,
           thinking: roundResult.thinking || undefined,
@@ -3390,6 +3441,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           generation: generationSummary(false),
         },
       );
+      // CHAT BRANCHES: the settled assistant message is the branch tip.
+      try {
+        await conversationService.setActiveLeaf(conversationId, savedMessage.id);
+      } catch {
+        /* non-fatal — the reader falls back to the newest branch */
+      }
       emit({
         type: "final_result",
         data: { output: finalContent, tool_events: allToolCalls },
@@ -3462,6 +3519,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         opts.userId,
         assistantMessageId,
         {
+          parentId: userMessageRowId,
           role: "assistant",
           content: finalContent,
           thinking: roundResult.thinking || lastAssistantThinking || undefined,
@@ -3473,6 +3531,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           generation: generationSummary(false),
         },
       );
+      // CHAT BRANCHES: the settled assistant message is the branch tip.
+      try {
+        await conversationService.setActiveLeaf(conversationId, savedMessage.id);
+      } catch {
+        /* non-fatal — the reader falls back to the newest branch */
+      }
       emit({
         type: "final_result",
         data: { output: finalContent, tool_events: allToolCalls },
@@ -3881,6 +3945,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
               if (turnActive) {
                 void conversationService
                   .saveAgentCheckpoint(conversationId, opts.userId, assistantMessageId, {
+                    parentId: userMessageRowId,
                     content: lastAssistantContent || "",
                     thinking: lastAssistantThinking || undefined,
                     reasoning: lastAssistantReasoning || undefined,
@@ -4003,6 +4068,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         opts.userId,
         assistantMessageId,
         {
+          parentId: userMessageRowId,
           content: lastAssistantContent || roundResult.textBeforeTools || "",
           thinking: lastAssistantThinking || undefined,
           reasoning: lastAssistantReasoning || undefined,
@@ -4036,6 +4102,7 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
     opts.userId,
     assistantMessageId,
     {
+      parentId: userMessageRowId,
       role: "assistant",
       content:
         lastAssistantContent ||
@@ -4056,6 +4123,12 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
       generation: generationSummary(true),
     },
   );
+  // CHAT BRANCHES: the ceiling-halted message is still the branch tip.
+  try {
+    await conversationService.setActiveLeaf(conversationId, savedMessage.id);
+  } catch {
+    /* non-fatal — the reader falls back to the newest branch */
+  }
   emit({
     type: "final_result",
     data: { output: lastAssistantContent, tool_events: allToolCalls },

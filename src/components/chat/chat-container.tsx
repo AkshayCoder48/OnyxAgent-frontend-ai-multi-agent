@@ -14,6 +14,13 @@ import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
+import {
+  buildBranchInfo,
+  deepestLeafOf,
+  resolveActiveBranch,
+  siblingGroup,
+  type BranchPosition,
+} from "@/lib/chat/branches";
 import { PendingMessages } from "./pending-messages";
 import { PollinationsConfirmDialog } from "./pollinations-confirm";
 import { QuestionPrompt } from "@/components/ui";
@@ -328,6 +335,7 @@ export function ChatContainer(
   const hydratedConversationId = useConversationStore(
     (s) => s.hydratedConversationId,
   );
+  const activeLeafId = useConversationStore((s) => s.activeLeafId);
   const isConversationLoading = useConversationStore((s) => s.isLoading);
   const replaceAllMessages = useChatStore((s) => s.replaceAllMessages);
   const restorePersisted = useChatStore((s) => s.restorePersisted);
@@ -416,6 +424,14 @@ export function ChatContainer(
   // DB fetch landing after the mount-refresh below, or server-appended
   // messages) repaints; an unchanged reference is a no-op.
   const paintedMessagesRef = useRef<unknown[] | null>(null);
+  // CHAT BRANCHES: the leaf the current paint was resolved from (a branch
+  // switch changes ONLY this — the messages array ref stays identical).
+  const paintedLeafRef = useRef<string | null | undefined>(undefined);
+  // CHAT BRANCHES: ‹ i/n › picker metadata for the painted path (per message
+  // id; only messages with 2+ forked siblings appear).
+  const [branchInfo, setBranchInfo] = useState<Map<string, BranchPosition>>(
+    () => new Map(),
+  );
 
   // Clear messages when conversation changes, but NOT when going from null to a new ID
   // (that happens when a new chat is saved - we want to keep the messages)
@@ -561,10 +577,12 @@ export function ChatContainer(
     // unchanged deps (or an unrelated store update) must not clear + re-add
     // the same messages. A NEW array reference for the same id (a fresh DB
     // fetch from the mount-refresh below, or server-appended messages)
-    // repaints with the newer copy.
+    // repaints with the newer copy. CHAT BRANCHES: a leaf change alone (a
+    // ‹ i/n › switch — same array, different branch) must ALSO repaint.
     if (
       loadedConvIdRef.current === currentConversationId &&
-      paintedMessagesRef.current === currentMessages
+      paintedMessagesRef.current === currentMessages &&
+      paintedLeafRef.current === activeLeafId
     ) {
       return;
     }
@@ -599,6 +617,13 @@ export function ChatContainer(
     // double-apply.
     loadedConvIdRef.current = currentConversationId;
     paintedMessagesRef.current = currentMessages;
+    paintedLeafRef.current = activeLeafId;
+
+    // CHAT BRANCHES: resolve the ACTIVE branch (parent-chain walk from the
+    // conversation's leaf — sibling branches stay in Dexie, never painted)
+    // + build the ‹ i/n › picker metadata from the FULL row set.
+    const resolvedRows = resolveActiveBranch(currentMessages, activeLeafId);
+    setBranchInfo(buildBranchInfo(currentMessages, resolvedRows));
 
     // BATCHED PAINT (perf PRD §6): the old path issued clearMessages() + N
     // sequential addChatMessage() store writes — each one a full
@@ -607,7 +632,7 @@ export function ChatContainer(
     // froze low-end devices). One replaceAllMessages write lands the
     // entire array in a single pass.
     const painted: import("@/types").ChatMessage[] = [];
-    currentMessages.forEach((msg) => {
+    resolvedRows.forEach((msg) => {
       // Use the shared helper that preserves thinking, reasoning, parts,
       // and tool calls — the manual rebuild below discarded thinking and
       // reasoning, causing them to vanish after page reload.
@@ -631,7 +656,7 @@ export function ChatContainer(
       painted.push(chatMsg);
     });
     replaceAllMessages(painted);
-  }, [currentMessages, hydratedConversationId, replaceAllMessages, currentConversationId]);
+  }, [currentMessages, hydratedConversationId, replaceAllMessages, currentConversationId, activeLeafId]);
 
   // ── MOUNT REFRESH ─────────────────────────────────────────────────────
   // Once per mount: when the selected conversation is ALREADY marked
@@ -725,6 +750,40 @@ export function ChatContainer(
     [editUserMessage],
   );
 
+  // ── CHAT BRANCHES: the ‹ i/n › switch ─────────────────────────────────
+  // Switch the forked message to its prev/next sibling, land on that
+  // branch's DEEPEST message, and let the paint effect repaint (the store's
+  // leaf change drives it — the messages array ref is unchanged).
+  const handleSwitchBranch = useCallback(
+    (messageId: string, direction: -1 | 1) => {
+      const convState = useConversationStore.getState();
+      const convId = convState.currentConversationId;
+      if (!convId) return;
+      const all = convState.currentMessages;
+      const target = all.find((m) => m.id === messageId);
+      if (!target) return;
+      const group = siblingGroup(all, target);
+      const idx = group.findIndex((g) => g.id === messageId);
+      if (idx < 0) return;
+      const next = group[idx + direction];
+      if (!next) return;
+      const leaf = deepestLeafOf(all, next.id);
+      const newLeafId = leaf?.id ?? next.id;
+      // Optimistic store update → the paint effect repaints the branch.
+      convState.setActiveLeafFor(convId, newLeafId);
+      // Persist the pointer so the choice survives refresh.
+      void (async () => {
+        try {
+          const { conversationService } = await import("@/lib/services");
+          await conversationService.setActiveLeaf(convId, newLeafId);
+        } catch (err) {
+          console.warn("[chat] branch switch: failed to persist active leaf", err);
+        }
+      })();
+    },
+    [],
+  );
+
   // Slash command handlers — passed down to ChatInput so the / palette can
   // run them locally without going through the agent.
   //
@@ -805,6 +864,9 @@ export function ChatContainer(
       onStop={stopGeneration}
       onRegenerate={handleRegenerate}
       onEditUserMessage={handleEditUserMessage}
+      branchInfo={branchInfo}
+      onSwitchBranch={handleSwitchBranch}
+      branchesDisabled={isProcessing}
       rateLimitStatus={rateLimitStatus}
       conversationId={currentConversationId}
     />
@@ -849,6 +911,12 @@ interface ChatUIProps {
   onRegenerate?: (assistantMessageId: string) => void;
   /** User-message actions: edit a sent prompt + re-run the turn from it. */
   onEditUserMessage?: (userMessageId: string, newContent: string) => void;
+  /** CHAT BRANCHES: ‹ i/n › picker metadata (per message id). */
+  branchInfo?: Map<string, BranchPosition>;
+  /** CHAT BRANCHES: switch a message to its prev/next sibling branch. */
+  onSwitchBranch?: (messageId: string, direction: -1 | 1) => void;
+  /** CHAT BRANCHES: disable switching while a turn is live. */
+  branchesDisabled?: boolean;
   /** Rate-limit backoff note (PRD §7) — shown instead of a dead-looking turn. */
   rateLimitStatus?: string | null;
 }
@@ -879,6 +947,9 @@ function ChatUI({
   onStop,
   onRegenerate,
   onEditUserMessage,
+  branchInfo,
+  onSwitchBranch,
+  branchesDisabled,
   rateLimitStatus,
 }: ChatUIProps) {
   const tc = useTranslations("common");
@@ -935,6 +1006,9 @@ function ChatUI({
                 onTodoDismiss={onTodoAction ? handleTodoDismiss : undefined}
                 onRegenerate={onRegenerate}
                 onEditUserMessage={onEditUserMessage}
+                branchInfo={branchInfo}
+                onSwitchBranch={onSwitchBranch}
+                branchesDisabled={branchesDisabled}
               />
             </div>
           )}

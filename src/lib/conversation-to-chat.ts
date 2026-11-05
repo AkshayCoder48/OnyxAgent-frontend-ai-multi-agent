@@ -144,6 +144,8 @@ export function conversationMessageToChatMessage(msg: RawMessage): ChatMessage {
     content: msg.content,
     timestamp: new Date(msg.created_at),
     conversationId: msg.conversation_id,
+    // CHAT BRANCHES fork linkage (absent on legacy rows).
+    parent_id: (msg as { parent_id?: string | null }).parent_id ?? undefined,
     toolCalls,
     parts,
     thinking,
