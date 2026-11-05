@@ -35,6 +35,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -50,6 +51,11 @@ import "@/lib/tools";
 import { listTools, type ToolDefinition } from "@/lib/tools/registry";
 import { loadDynamicTools } from "@/lib/tools/dynamic_tools";
 import {
+  APPROVAL_MODE_CATEGORIES,
+  APPROVAL_MODE_TOOL_NAMES,
+  APPROVAL_MODE_TOOLS,
+  approvalModeGatedCount,
+  buildApprovalModeEntries,
   defaultPermissionFor,
   loadGlobalPolicy,
   PERMISSION_LABELS,
@@ -62,6 +68,110 @@ import { toolDisplayName } from "@/lib/tool-display-names";
 import { db } from "@/lib/db";
 import { cn, timeAgo } from "@/lib/utils";
 import type { ApprovalRequest, ApprovalStatus } from "@/types";
+
+// ---------------------------------------------------------------------------
+// Approval Mode — the one-click preset (user directive 2026-11-05)
+// ---------------------------------------------------------------------------
+
+/** Gates the destructive / external / expensive / powerful categories with
+ *  one switch: ON writes approval_required for every preset tool, OFF
+ *  removes the preset entries. Individual tools can still be tuned in the
+ *  PolicyEditor below or un-asked forever via [Always for this tool] on an
+ *  approval card. */
+function ApprovalModeCard({ userId }: { userId: string }) {
+  const [policy, setPolicy] = useState<Record<string, ResourcePermission>>({});
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    loadGlobalPolicy(userId)
+      .then((p) => {
+        if (alive) setPolicy(p);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [userId]);
+
+  const gatedCount = approvalModeGatedCount(policy);
+  const total = APPROVAL_MODE_TOOL_NAMES.length;
+  // The switch reflects the PRESET as a whole: every preset tool gated.
+  const active = gatedCount === total;
+
+  async function handleToggle(next: boolean) {
+    setBusy(true);
+    try {
+      const merged = await setGlobalPolicy(buildApprovalModeEntries(next));
+      setPolicy(merged);
+      toast.success(
+        next
+          ? `Approval Mode on — ${total} sensitive tools will ask first`
+          : "Approval Mode off — preset tools restored to their defaults",
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not save Approval Mode",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard
+      title="Approval Mode"
+      description={'Pause the agent for your decision before destructive, external, expensive or unrestricted actions. Every approval card also has "Always for this tool".'}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-foreground">
+            Ask before acting
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            {loading
+              ? "Loading your policy…"
+              : gatedCount > 0
+                ? `${gatedCount} of ${total} sensitive tools currently ask for approval${gatedCount < total ? " (customized below)" : ""}.`
+                : "All tools currently run without asking (your standing default)."}
+          </p>
+        </div>
+        <Switch
+          checked={active}
+          disabled={loading || busy}
+          onCheckedChange={(v) => void handleToggle(v)}
+          aria-label="Toggle Approval Mode"
+        />
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {APPROVAL_MODE_CATEGORIES.map((cat) => (
+          <div
+            key={cat.id}
+            className="rounded-lg border border-border/60 bg-background/60 p-3"
+          >
+            <p className="text-xs font-semibold text-foreground/90">
+              {cat.label}
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                ({APPROVAL_MODE_TOOLS[cat.id].length} tools)
+              </span>
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              {cat.description}
+            </p>
+          </div>
+        ))}
+      </div>
+      <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+        Tuning an individual tool below or picking "Always for this tool" on a
+        card customizes the set — the switch then shows the customized state
+        until you re-toggle it.
+      </p>
+    </SectionCard>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Policy editor
@@ -503,6 +613,7 @@ export function SectionApprovals() {
   }
   return (
     <div className="space-y-6">
+      <ApprovalModeCard userId={user.id} />
       <PolicyEditor userId={user.id} />
       <ApprovalQueue />
     </div>

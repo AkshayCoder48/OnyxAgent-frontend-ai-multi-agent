@@ -143,6 +143,79 @@ export function strictestPermission(
 }
 
 // ---------------------------------------------------------------------------
+// Approval Mode preset (user directive 2026-11-05: "the agent pauses with an
+// approval card before destructive/expensive actions"). One-click gating for
+// the sensitive CATEGORIES; every entry is an ordinary global-policy write,
+// so the PolicyEditor and [Always for this tool] interact with it normally.
+// ---------------------------------------------------------------------------
+
+/** Tool-level categories Approval Mode gates. Every name is a REGISTERED
+ *  tool (pinned by approval-mode.test.tsx). Deliberately absent:
+ *  - `manage_env_var` / the storage & kv umbrellas — their deletes are
+ *    ACTION-level, and a tool-level entry would over-gate the reads; gate
+ *    them in the PolicyEditor if wanted.
+ *  - use_browser's download action — action-level, same reason. */
+export const APPROVAL_MODE_TOOLS = {
+  destructive: ["delete_file", "delete_folder"],
+  external: ["composio_execute_tool", "send_file", "send_folder"],
+  expensive: ["media_generation"],
+  powerful: ["run_terminal"],
+} as const satisfies Record<string, readonly string[]>;
+
+/** Flat tool list the mode covers. */
+export const APPROVAL_MODE_TOOL_NAMES: readonly string[] = Object.values(
+  APPROVAL_MODE_TOOLS,
+).flat();
+
+/** Category labels for the settings card. */
+export const APPROVAL_MODE_CATEGORIES: ReadonlyArray<{
+  id: keyof typeof APPROVAL_MODE_TOOLS;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "destructive",
+    label: "Destructive",
+    description: "Permanently deletes workspace files, folders, storage and data",
+  },
+  {
+    id: "external",
+    label: "External & publishing",
+    description: "Sends files out, pushes code, acts in connected apps",
+  },
+  {
+    id: "expensive",
+    label: "Expensive",
+    description: "Spends provider credits (image/video generation)",
+  },
+  {
+    id: "powerful",
+    label: "Powerful",
+    description: "Arbitrary terminal commands — can do anything, including all of the above",
+  },
+];
+
+/** The policy write for the mode toggle. ON gates every preset tool;
+ *  OFF removes the preset entries (falling back to the argument-aware
+ *  defaults — the standing "allowed by default" directive). */
+export function buildApprovalModeEntries(enabled: boolean): GlobalPolicyEntries {
+  const entries: GlobalPolicyEntries = {};
+  for (const tool of APPROVAL_MODE_TOOL_NAMES) {
+    entries[tool] = enabled ? "approval_required" : null;
+  }
+  return entries;
+}
+
+/** How many preset tools are currently gated (drives the toggle's caption). */
+export function approvalModeGatedCount(
+  policy: Record<string, ResourcePermission>,
+): number {
+  return APPROVAL_MODE_TOOL_NAMES.filter(
+    (tool) => policy[tool] === "approval_required",
+  ).length;
+}
+
+// ---------------------------------------------------------------------------
 // Project resource-rule lookup
 // ---------------------------------------------------------------------------
 

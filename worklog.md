@@ -311,3 +311,19 @@ Work Log:
 
 Stage Summary:
 - The system prompt is now unbounded (the provider's context window is the only limit) and can be loaded from a .md/.txt file in either settings lane — appending below existing content, with honest errors for anything else.
+
+## Task 15 — Agent Approval Mode: the [Always for this tool] decision + the one-click preset
+
+Date: 2026-11-05
+Agent: main (Z.ai Code)
+Task: User feature batch, part 1 — "Agent Approval Mode: before destructive/expensive actions the agent pauses with an approval card: [Allow once] [Always for this tool] [Deny]". (KB auto-ingest, file manager, branches, teams queued as the next parts.)
+
+Work Log:
+- DISCOVERY: the HITL machinery already existed end-to-end (Task 2-d) — maybeGateToolCall at every dispatch site (runtime, subagents, browser bridge), ApprovalRequest rows bound to exact params via params_hash, the ApprovalCard + ApprovalQueue UIs, a PolicyEditor, resolvePermission (global entry ?? argument-aware default, project rules only tighten). Two gaps vs the user's spec: the card had only Approve/Reject (no persistent decision), and every sensitive-tool default had been flipped to "allowed" by an earlier "no tool-call approvals" directive — nothing gated out of the box.
+- [Always for this tool] (ApprovalCard, tool-call.tsx): third button writes {tool: "allowed"} via setGlobalPolicy and THEN approves the current request; a failed policy write never approves (card re-arms, honest error); when a project rule is involved the toast warns it may still ask (strictest-wins — the "never asks again" promise stays honest). Buttons renamed to the user's spec: Allow once / Always for this tool / Deny.
+- APPROVAL MODE PRESET (permissions.ts): APPROVAL_MODE_TOOLS + buildApprovalModeEntries(on) + approvalModeGatedCount. ON gates 7 verified tools — destructive (delete_file, delete_folder), external (composio_execute_tool, send_file, send_folder), expensive (media_generation), powerful (run_terminal); OFF removes the entries (back to the standing allowed-by-default directive). Deliberately NOT gated: generate_image (free + unlimited — asking protects nothing), manage_env_var/storage/kv umbrellas and use_browser's download action (their deletes are ACTION-level; a tool-level entry would over-gate reads — PolicyEditor is the right place).
+- APPROVAL MODE CARD (section-approvals.tsx): top of Settings → Tools — one switch materializing the preset, a live "N of 7 tools gated" caption, the four category cards, and honest copy about customization interplay.
+- TESTS (approval-mode.test.tsx, jsdom): 9 pins — the registration check CAUGHT 5 phantom tool names before shipping (storage_delete, kv_delete, env_delete, push_workspace, generate_image are action strings inside umbrella tools, not registered tools); the honest 7-tool set is now pinned; ON/OFF entry shapes; gated-count; the card's three buttons render; Always writes policy THEN approves; failed write never approves; Deny responds without touching policy. Full suite 730/730; tsc: 0 errors in changed files, src/ baseline unchanged (133 pre-existing).
+
+Stage Summary:
+- Approval cards now offer the full [Allow once] [Always for this tool] [Deny] decision set, and Approval Mode is one switch away in Settings → Tools — every destructive, external, expensive or unrestricted tool asks first until the user says otherwise, per-tool or wholesale.

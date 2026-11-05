@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Check, ChevronRight, Clock, ShieldAlert } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { chipClass, CollapsePanel, fieldBlockClass, ShimmerLabel } from "./surfaces";
 import {
@@ -9,6 +10,7 @@ import {
   selectPendingForToolCall,
   usePendingApprovals,
 } from "@/lib/agent/approval-gate";
+import { setGlobalPolicy } from "@/lib/projects/permissions";
 
 /**
  * ToolCall — one tool invocation with its request and result tucked behind
@@ -130,7 +132,10 @@ function summarizeValue(value: unknown): string {
  * fabricated): operation label, the REAL parameters (credential-like values
  * redacted), the risk note, and a full-params disclosure.
  *
- * Approve/Reject dispatch the exact CustomEvent the gate waits on
+ * Three decisions (user directive 2026-11-05): [Allow once] [Always for
+ * this tool] [Deny]. "Always" persists an "allowed" global-policy entry for
+ * the tool (Settings → Tools can re-gate it) and then approves this call;
+ * the others dispatch the exact CustomEvent the gate waits on
  * (`agent:approval-response` with `{ approval_id, decision }`) via
  * `respondToApproval`; the gate then resolves the request row, and the
  * subsequent tool_result event replaces this card's state.
@@ -169,6 +174,32 @@ export function ApprovalCard({
     setDecision(choice);
     // The EXACT event the gate's waitForApprovalDecision listens for.
     respondToApproval(pending.approval_id, choice);
+  };
+
+  /** [Always for this tool] — persist an "allowed" global-policy entry for
+   *  this tool, then approve the current request. A project rule can still
+   *  tighten (resolvePermission: strictest wins) — the toast says so when a
+   *  project is involved so the promise "never asks again" stays honest. */
+  const handleAlwaysAllow = async () => {
+    if (!pending || decision !== null) return;
+    setDecision("approved");
+    try {
+      await setGlobalPolicy({ [pending.tool_name]: "allowed" });
+      respondToApproval(pending.approval_id, "approved");
+      toast.success(
+        pending.project_id
+          ? `Saved: ${pending.tool_name} is always allowed — but a project rule may still ask.`
+          : `Saved: ${pending.tool_name} will not ask again (re-gate it in Settings → Tools).`,
+      );
+    } catch (err) {
+      // The policy write failed — do NOT approve silently; re-arm the card.
+      setDecision(null);
+      toast.error(
+        err instanceof Error
+          ? `Could not save the policy: ${err.message}`
+          : "Could not save the policy — approve once instead.",
+      );
+    }
   };
 
   if (!pending) {
@@ -283,7 +314,16 @@ export function ApprovalCard({
           disabled={decision !== null}
           className="inline-flex h-9 items-center justify-center rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Reject
+          Deny
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleAlwaysAllow()}
+          disabled={decision !== null}
+          title="Approve this call and never ask again for this tool"
+          className="inline-flex h-9 items-center justify-center rounded-lg border border-primary/40 bg-primary/5 px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          Always for this tool
         </button>
         <button
           type="button"
@@ -291,7 +331,7 @@ export function ApprovalCard({
           disabled={decision !== null}
           className="inline-flex h-9 items-center justify-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Approve
+          Allow once
         </button>
       </div>
     </div>
