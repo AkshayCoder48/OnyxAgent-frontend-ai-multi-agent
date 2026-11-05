@@ -233,6 +233,37 @@ describe("browser-driver guaranteed output + structured events (PRD §5/§11)", 
   });
 });
 
+describe("browser-driver remember_page (KB auto-ingest, 2026-11-05)", () => {
+  it("do_remember_page captures title/url/40k text + the nav log", () => {
+    const fn = section("def do_remember_page(cmd):", "def do_snapshot(cmd):");
+    // settle the challenge first (the read path), like extract_text
+    expect(fn.indexOf("_settle_challenge")).toBeLessThan(fn.indexOf("document.body"));
+    // generous budget — far beyond the read excerpt budgets
+    expect(fn).toContain("limit = 40000");
+    // the capture payload carries the browse history for KB ingestion
+    expect(fn).toContain('"navLog": list(nav_log)');
+    expect(fn).toContain('"title"');
+    expect(fn).toContain('"text"');
+    // honest stuck-challenge warning, same as extract_text
+    expect(fn).toContain("the text is the interstitial, NOT the content");
+  });
+
+  it("every successful navigate appends to the nav log (browse history)", () => {
+    const fn = section("def do_navigate(cmd):", "def do_click(cmd):");
+    expect(fn).toContain('nav_log.append({"url": p.url, "title": title, "ts":');
+    // the log is bounded
+    expect(fn).toContain("del nav_log[:-NAV_LOG_MAX]");
+    expect(SRC).toContain("NAV_LOG_MAX = 120");
+  });
+
+  it("remember_page is handler-registered and budgeted", () => {
+    const handlers = section("HANDLERS = {", "# ── PER-ACTION WATCHDOG");
+    expect(handlers).toContain('"remember_page": do_remember_page');
+    const budgets = section("ACTION_BUDGETS = {", "DEFAULT_ACTION_BUDGET");
+    expect(budgets).toContain('"remember_page": 40');
+  });
+});
+
 describe("browser-driver boot.sh (creation-time parallel prepare)", () => {
   it("is valid bash with no backticks (command substitution uses $(…))", () => {
     expect(BOOT).toContain("#!/bin/bash");

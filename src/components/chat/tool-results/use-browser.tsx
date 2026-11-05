@@ -1,11 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, ChevronRight, Globe, Loader2, X } from "lucide-react";
+import { BookmarkPlus, Check, ChevronRight, Globe, Loader2, X } from "lucide-react";
+import { toast } from "sonner";
 import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { chipClass, CollapsePanel } from "@/components/assistant-ui/elements";
 import { ToolDurationBadge, ToolLiveElapsed } from "../tool-duration";
+import { useAuthStore } from "@/stores";
+import { rememberPageToKB } from "@/lib/kb/remember-page";
 
 /**
  * use_browser results — BASIC TOOL CALL + OUTPUT (user directive
@@ -40,6 +43,14 @@ export interface BrowserPayload {
   text?: string;
   textLength?: number;
   truncated?: boolean;
+  /** remember_page: the session's navigation log (browse history). */
+  navLog?: Array<{ url: string; title?: string | null; ts?: number }>;
+  /** remember_page: the client-side Knowledge Base save outcome. */
+  saved?: boolean;
+  kbId?: string;
+  kbTitle?: string;
+  contentChars?: number;
+  historyIncluded?: boolean;
   headings?: Array<{ level: number; text: string }>;
   counts?: { links?: number; buttons?: number; inputs?: number; images?: number };
   interactive?: Array<{ tag: string; text?: string | null; href?: string; id?: string }>;
@@ -90,6 +101,7 @@ const OP_LABELS: Record<string, string> = {
   read: "Read",
   get_page: "Read",
   extract_text: "Extract",
+  remember_page: "Remember",
   // snapshot was removed 2026-10-21, then RE-ADDED by the 2026-11-01
   // CloakBrowser reimplementation (real page-structure capture).
   snapshot: "Snapshot",
@@ -125,6 +137,7 @@ const ACTION_LABELS: Record<string, string> = {
   read: "Read page",
   get_page: "Read page",
   extract_text: "Extracted text",
+  remember_page: "Remembered page",
   // snapshot was removed 2026-10-21, then RE-ADDED by the 2026-11-01
   // CloakBrowser reimplementation (real page-structure capture).
   snapshot: "Page snapshot",
@@ -246,6 +259,11 @@ function opResultSummary(action: string, payload: BrowserPayload | null): string
       return typeof payload.text === "string" && payload.text
         ? `${(payload.textLength ?? payload.text.length).toLocaleString()} chars`
         : null;
+    case "remember_page":
+      if (payload.saved) return payload.kbId ? `saved to KB · ${payload.kbId}` : "saved to KB";
+      return typeof payload.text === "string" && payload.text
+        ? `${(payload.textLength ?? payload.text.length).toLocaleString()} chars`
+        : null;
     case "inspect":
     case "get_elements":
       return typeof count === "number" ? `${count} elements` : null;
@@ -302,10 +320,16 @@ function opOutput(action: string, payload: BrowserPayload | null, toolCall: Tool
 
 /* ── One operation row ───────────────────────────────────────────────────── */
 
+/** Read-path actions whose settled payload carries page text + a URL — the
+ *  rows that get the manual "Remember this page" affordance. */
+const REMEMBERABLE_ACTIONS = new Set(["read", "get_page", "extract_text"]);
+
 /**
  * BrowserOpRow — `→ navigate  example.com  ✓ 0.8s`. Compact, mono,
  * event-driven (the row exists because the backend emitted the call).
  * Click toggles the plain output block — the raw result text, nothing more.
+ * Read rows additionally offer "Remember this page" (saves the captured
+ * page to the Knowledge Base — the manual twin of the remember_page action).
  */
 function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
   const [open, setOpen] = useState(false);
@@ -319,6 +343,34 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
   const summary = opResultSummary(action, payload);
   const isWaiting = isRunning && action === "wait";
   const output = opOutput(action, payload, toolCall);
+
+  // Manual "Remember this page" — the user saves the page the agent just
+  // read (source "user"; the AI path is the remember_page action).
+  const user = useAuthStore((s) => s.user);
+  const canRemember =
+    !isRunning && !isError && REMEMBERABLE_ACTIONS.has(action) && !!(payload?.text && payload.url);
+  const [remembering, setRemembering] = useState(false);
+  const [remembered, setRemembered] = useState(false);
+  const onRemember = async () => {
+    if (!payload || remembering) return;
+    setRemembering(true);
+    try {
+      const res = await rememberPageToKB(user?.id ?? "", {
+        url: payload.url ?? "",
+        title: payload.title ?? "",
+        text: payload.text ?? "",
+        source: "user",
+      });
+      if (res.ok) {
+        setRemembered(true);
+        toast.success(`Remembered “${res.item.title}” — saved to the Knowledge Base.`);
+      } else {
+        toast.error(res.message);
+      }
+    } finally {
+      setRemembering(false);
+    }
+  };
 
   return (
     <div className="rounded-md text-xs">
@@ -398,6 +450,26 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
               {output.slice(0, 2000)}
               {output.length > 2000 ? "\n…" : ""}
             </pre>
+            {canRemember ? (
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={onRemember}
+                  disabled={remembering || remembered}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-foreground/[0.03] px-2 py-1 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground disabled:cursor-default disabled:opacity-70"
+                  title={remembered ? "Saved to the Knowledge Base" : "Save this page to the Knowledge Base"}
+                >
+                  {remembering ? (
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                  ) : remembered ? (
+                    <Check className="h-3 w-3 text-primary" aria-hidden />
+                  ) : (
+                    <BookmarkPlus className="h-3 w-3" aria-hidden />
+                  )}
+                  {remembered ? "Saved to KB" : "Remember this page"}
+                </button>
+              </div>
+            ) : null}
           </div>
         </CollapsePanel>
       ) : null}

@@ -31,6 +31,7 @@
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { sendBrowserCommand, type BrowserCommandResult } from "@/lib/e2b/browser-session";
+import { rememberPageToKB } from "@/lib/kb/remember-page";
 
 const NO_KEY_ERROR =
   "The browser requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";
@@ -44,6 +45,7 @@ const CORE_ACTIONS = [
   "type",
   "scroll",
   "extract_text",
+  "remember_page",
   "inspect",
   "wait",
   "back",
@@ -92,7 +94,9 @@ const ACTION_TIMEOUT_MS: Record<BrowserAction, number> = {
   type: 50_000,
   scroll: 40_000,
   // read-path actions: includes the 12 s challenge-settle cap (driver budget 40 s).
+  // remember_page: same read path + the client-side OnyxBase KB save.
   extract_text: 60_000,
+  remember_page: 75_000,
   inspect: 50_000,
   wait: 55_000,
   back: 45_000,
@@ -127,6 +131,7 @@ Pass \`action\` plus only the fields that action needs:
 - "screenshot" (fullPage?) — capture a PNG of the page.
 - "snapshot" () — the page STRUCTURE: title, heading outline, element counts, top interactive elements + a text excerpt.
 - "extract_text" () — the visible page text.
+- "remember_page" (note?, include_history?) — one-shot “remember this page”: captures the current page (title, URL, up to 40k chars of text) AND saves it to the workspace Knowledge Base as a searchable document. Use whenever the user says "remember this page / save this" while browsing, or a page is clearly worth keeping (a key reference, a decision, research material). "note" (optional) is your curated note — WHY the page matters, what to remember about it — stored alongside the page. "include_history" (default true) also appends this session's navigation log (the browse history) to the saved item. Returns the saved item's id + title.
 - "inspect" (filter?, limit?) — the interactive elements (buttons, links, inputs) with refs + selectors; the returned "ref" (e.g. "e12") or selector works in subsequent actions.
 - "click" (target) — click a link/button/element.
 - "type" (target, text, submit?, clear?) — fill an input; submit:true presses Enter after typing.
@@ -186,6 +191,8 @@ registerTool(
         items: { type: "string" },
         description: "Workspace file paths to upload (upload action).",
       },
+      note: { type: "string", description: "Curated note stored with the page (remember_page action) — why this page matters / what to remember." },
+      include_history: { type: "boolean", description: "Also save this session's navigation log with the page (remember_page action, default true)." },
       tab: { description: "Tab index (number) or tab id like 'tab_2' (switch_tab / close_tab)." },
     },
     required: ["action"],
@@ -309,6 +316,59 @@ registerTool(
       typeof result.durationMs === "number"
         ? result.durationMs
         : Date.now() - startedAt;
+
+    // ── remember_page: the driver CAPTURED the page — now save it to the
+    // Knowledge Base (the sandbox cannot reach OnyxBase; the save is
+    // client-side). The capture text rides along either way so the model
+    // sees what was captured even when the save fails honestly.
+    if (action === "remember_page" && result.success !== false) {
+      const saved = await rememberPageToKB(ctx.userId, {
+        url: String(result.url ?? ""),
+        title: String(result.title ?? ""),
+        text: typeof result.text === "string" ? result.text : "",
+        note: typeof args.note === "string" ? args.note : null,
+        navLog: Array.isArray(result.navLog)
+          ? (result.navLog as Array<{ url: string; title?: string | null; ts?: number }>)
+          : [],
+        includeHistory: args.include_history !== false,
+        source: "ai",
+      });
+      if (!saved.ok) {
+        return {
+          ...result,
+          kind: "browser" as const,
+          action,
+          success: false,
+          url: (result.url as string | undefined) ?? null,
+          title: (result.title as string | undefined) ?? null,
+          output: `remember_page: ${saved.message}`,
+          screenshot: null,
+          error: {
+            type: saved.code === "NOT_CONFIGURED" ? "kb_not_configured" : "kb_save_failed",
+            message: saved.message,
+            recoverable: saved.code === "NOT_CONFIGURED",
+          },
+          durationMs: Date.now() - startedAt,
+        };
+      }
+      return {
+        ...result,
+        kind: "browser" as const,
+        action,
+        success: true,
+        url: (result.url as string | undefined) ?? null,
+        title: (result.title as string | undefined) ?? null,
+        saved: true,
+        kbId: saved.item.id,
+        kbTitle: saved.item.title,
+        contentChars: saved.contentChars,
+        historyIncluded: saved.historyIncluded,
+        output: `Remembered “${saved.item.title}” — saved to the Knowledge Base as a searchable document (id ${saved.item.id}${saved.historyIncluded ? ", browse history included" : ""}).`,
+        screenshot: null,
+        error: null,
+        durationMs: Date.now() - startedAt,
+      };
+    }
 
     // ── structured pass-through (PRD §5 contract) ───────────────────
     // success / action / url / title / output / screenshot / error /

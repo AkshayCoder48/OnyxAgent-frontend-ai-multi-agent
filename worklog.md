@@ -345,3 +345,24 @@ Work Log — THE LATENCY CHAIN (four compounding causes, all fixed):
 
 Stage Summary:
 - Simple tools no longer pay paused-sandbox resumes, 2 MB library re-attaches, or wrong-sandbox dead-recoveries inline — the sandbox warms at app open, library attaches in the background, and every file tool talks to the right sandbox. And the agent can now SHOW its HTML work live with preview_html.
+
+## Task 17 — KB auto-ingest: "remember this page" (one-shot capture → Knowledge Base)
+
+Date: 2026-11-05
+Agent: main (Z.ai Code)
+Task: User feature batch, part 2 — "KB deepening: browse history auto-ingest ('remember this page') + agent-curated notes". (File manager, branches, teams queued next.)
+
+Work Log:
+- DISCOVERY: nothing bridged browser output → KB. The agent COULD compose use_browser read + knowledge_base save manually, but "remember this page" deserves a one-shot verb; the browser read paths cap at 6k/8k chars — too thin for a KB document; and the session's browse history was never tracked anywhere (do_history is the go_back/reload handler — a different thing).
+- DRIVER (browser-driver.ts, DRIVER_VERSION 2026.11.03 → 2026.11.05 — stale live drivers auto-redeploy):
+  - nav_log: every successful do_navigate appends {url, title, ts} (bounded, NAV_LOG_MAX 120) — the browse history.
+  - do_remember_page: settles a Cloudflare challenge first (the read path), then captures title + final URL + the visible text with a GENEROUS 40,000-char budget (5x extract_text) + the nav log. The sandbox cannot reach OnyxBase, so the driver only CAPTURES — the save is client-side.
+  - HANDLERS + ACTION_BUDGETS entries ("remember_page": 40, same read-path budget); packaging constraint respected (no backticks / no dollar-brace in the embedded Python — the no-backtick pin still passes).
+- SHARED PIPELINE (src/lib/kb/remember-page.ts, new): buildRememberedPageContent (curated note as a leading blockquote + URL + capture date + truncation flag + "## Page content" + "## Pages visited this session" footer, history capped at the 30 most recent), rememberPageTags (browser + saved-page + clean hostname), and rememberPageToKB — resolveKBClients → kbSave (type "document", category "web", source ai|user). NEVER throws: NOT_CONFIGURED / EMPTY_CAPTURE / SAVE_FAILED all resolve honestly.
+- TOOL (use_browser.ts): "remember_page" joins CORE_ACTIONS (model-visible enum + docs); note + include_history params (client-side only — not sent to the driver); ACTION_TIMEOUT_MS 75s (driver 40s + the OnyxBase save). The handler post-processes the capture: OK → saved/kbId/kbTitle/contentChars + "Remembered …" output; failure → success:false with kb_not_configured / kb_save_failed while the captured text still rides along for the model.
+- UI (tool-results/use-browser.tsx): settled read/get_page/extract_text rows with page text + URL now show a "Remember this page" button (inside the expanded output — no nested-button HTML) → same pipeline with source "user", sonner toast, one-shot saved state. remember_page rows show "saved to KB · <id>" in the row summary.
+- DOCS: Onyx.md — use_browser row + the Knowledge Base policy paragraph now bless remember_page ("remember/save this page" → one-shot capture+save, curated note). Digest regenerated (scripts/gen-onyx-md.ts; 22 model-visible tools unchanged — an action, not a new tool).
+- TESTS (25 new, full suite 771/771): remember-page.test.ts (16) — content shape (note-first blockquote, history default-on, 30-entry cap, 40k truncation flag, empty-capture placeholder), hostname/tags hygiene, and every pipeline failure lane; use_browser.test.ts (+4) — the save call's exact shape (ai source, note, navLog, history default), include_history:false, honest-failure passthrough with the capture, schema surface; browser-driver.test.ts (+3 structural pins) — do_remember_page settles-then-captures with navLog, navigate appends to the bounded nav_log, handler+budget registration; use-browser-remember.test.tsx (5, jsdom) — the manual button saves with source "user", flips to the saved state, failures stay retryable, never on navigate/running rows, and agent-saved rows show the KB id. tsc: 0 errors in changed files, src/ baseline unchanged (128 pre-existing).
+
+Stage Summary:
+- "Remember this page" is now ONE call: the agent (or the user, via the button on any read row) captures the live page — 40k chars, its URL, an optional curated note, and the session's browse history — into the Knowledge Base as a searchable document, with honest NOT_CONFIGURED/SAVE_FAILED answers when OnyxBase isn't ready.

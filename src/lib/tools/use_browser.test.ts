@@ -254,3 +254,105 @@ describe("use_browser — schema surface (PRD §5 + compat aliases)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// remember_page — the KB auto-ingest action (KB deepening, 2026-11-05).
+// The driver captures the page; the CLIENT handler saves it to the OnyxBase
+// Knowledge Base through the shared remember-page pipeline.
+// ---------------------------------------------------------------------------
+
+vi.mock("@/lib/kb/remember-page", () => ({
+  rememberPageToKB: vi.fn(),
+}));
+
+import { rememberPageToKB } from "@/lib/kb/remember-page";
+
+const REMEMBER_PAYLOAD = {
+  success: true,
+  action: "remember_page",
+  url: "https://docs.example.com/guide",
+  title: "The Guide",
+  text: "Page body text worth keeping.",
+  textLength: 29,
+  truncated: false,
+  navLog: [{ url: "https://docs.example.com/", title: "Home", ts: 1730000000000 }],
+  output: "Captured \"The Guide\" (https://docs.example.com/guide) — 29 chars of page text, 1 pages in this session's history.",
+};
+
+describe("use_browser — remember_page (KB auto-ingest)", () => {
+  it("captures the page and saves it to the KB (ai source, note + history defaults)", async () => {
+    hoisted.client = makeFakeClient({ onCommand: () => ({ ...REMEMBER_PAYLOAD }) });
+    const saved = vi.mocked(rememberPageToKB).mockResolvedValueOnce({
+      ok: true,
+      item: { id: "kb_abc123", title: "The Guide" } as never,
+      contentChars: 4200,
+      historyIncluded: true,
+    });
+    const tool = getTool("use_browser")!;
+    const res = (await tool.handler(
+      { action: "remember_page", note: "The canonical guide — decision made from it" },
+      makeCtx(),
+    )) as Record<string, unknown>;
+
+    // the save call carries the capture + the curated note
+    expect(saved).toHaveBeenCalledWith("test-user", {
+      url: "https://docs.example.com/guide",
+      title: "The Guide",
+      text: "Page body text worth keeping.",
+      note: "The canonical guide — decision made from it",
+      navLog: REMEMBER_PAYLOAD.navLog,
+      includeHistory: true,
+      source: "ai",
+    });
+    // the result announces the saved item
+    expect(res.success).toBe(true);
+    expect(res.saved).toBe(true);
+    expect(res.kbId).toBe("kb_abc123");
+    expect(res.kbTitle).toBe("The Guide");
+    expect(res.historyIncluded).toBe(true);
+    expect((res.output as string)).toContain("kb_abc123");
+    expect((res.output as string)).toContain("browse history included");
+  });
+
+  it("include_history:false flows through to the save", async () => {
+    hoisted.client = makeFakeClient({ onCommand: () => ({ ...REMEMBER_PAYLOAD }) });
+    const saved = vi.mocked(rememberPageToKB).mockResolvedValueOnce({
+      ok: true,
+      item: { id: "kb_nohist", title: "The Guide" } as never,
+      contentChars: 10,
+      historyIncluded: false,
+    });
+    const tool = getTool("use_browser")!;
+    await tool.handler({ action: "remember_page", include_history: false }, makeCtx());
+    const call = saved.mock.calls.at(-1)![1]!;
+    expect(call).toMatchObject({ includeHistory: false });
+  });
+
+  it("an honest KB failure fails the tool with the message — the capture rides along", async () => {
+    hoisted.client = makeFakeClient({ onCommand: () => ({ ...REMEMBER_PAYLOAD }) });
+    vi.mocked(rememberPageToKB).mockResolvedValueOnce({
+      ok: false,
+      code: "NOT_CONFIGURED",
+      message: "Remembering pages needs an OnyxBase key.",
+    });
+    const tool = getTool("use_browser")!;
+    const res = (await tool.handler({ action: "remember_page" }, makeCtx())) as Record<string, unknown>;
+    expect(res.success).toBe(false);
+    expect((res.error as { type: string }).type).toBe("kb_not_configured");
+    expect((res.error as { message: string }).message).toContain("OnyxBase key");
+    expect((res.output as string)).toContain("OnyxBase key");
+    // the captured page text still reaches the model
+    expect(res.text).toBe("Page body text worth keeping.");
+  });
+
+  it("the schema exposes remember_page + note + include_history", () => {
+    const tool = getTool("use_browser")!;
+    const params = tool.parameters as {
+      properties: Record<string, { enum?: string[]; type?: string }>;
+    };
+    expect(params.properties.action.enum).toContain("remember_page");
+    expect(params.properties.note?.type).toBe("string");
+    expect(params.properties.include_history?.type).toBe("boolean");
+  });
+});
+

@@ -56,7 +56,7 @@
  * stamp is killed and redeployed. Bump whenever the Python source changes
  * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.11.03";
+export const BROWSER_DRIVER_VERSION = "2026.11.05";
 
 /** Sandbox-side paths (shared by the client session manager and the
  *  server-side prepare hook — single source of truth). */
@@ -341,9 +341,13 @@ console_log = []
 network_log = []
 seen_console = set()
 ref_map = {}          # element ref -> CSS/XPath selector (from get_elements)
+# Navigation log — every successful do_navigate (url + title + ts), the
+# browse history the remember_page action ingests into the Knowledge Base.
+nav_log = []
 
 CONSOLE_MAX = 80
 NETWORK_MAX = 60
+NAV_LOG_MAX = 120
 
 # ── STRUCTURED EVENTS (PRD §11) ─────────────────────────────────────────────
 # One JSON object per line in events.jsonl: ts + event + fields. Never
@@ -1479,6 +1483,12 @@ def do_navigate(cmd):
         title = p.title()
     except Exception:
         title = ""
+    # Browse-history tracking (remember_page ingests this log into the KB).
+    try:
+        nav_log.append({"url": p.url, "title": title, "ts": int(time.time() * 1000)})
+        del nav_log[:-NAV_LOG_MAX]
+    except Exception:
+        pass
     out = state_payload({"success": True, "action": "navigate", "status": resp.status if resp else None})
     out["title"] = title
     out["challenge"] = status
@@ -1892,6 +1902,47 @@ def do_extract_text(cmd):
     return out
 
 
+def do_remember_page(cmd):
+    """remember_page — capture the CURRENT page for the Knowledge Base:
+    title, final URL, the visible text (generous 40k budget — the KB gets
+    far more than a read excerpt) and the session's navigation log. The
+    CLIENT-side use_browser handler saves it to the OnyxBase KB (the
+    sandbox cannot reach OnyxBase); this action only captures honestly."""
+    p = active_page()
+    level, status, waited = _settle_challenge(p, _env_int("ONYX_CF_SETTLE_READ_MS", 8000, 12000))
+    try:
+        text = p.evaluate("() => document.body ? document.body.innerText : ''")
+    except Exception:
+        text = ""
+    text = (text or "").strip()
+    limit = 40000
+    excerpt = text[:limit]
+    try:
+        title = p.title()
+    except Exception:
+        title = ""
+    try:
+        url = p.url
+    except Exception:
+        url = ""
+    out = state_payload({
+        "success": True,
+        "action": "remember_page",
+        "title": title,
+        "text": excerpt,
+        "textLength": len(text),
+        "truncated": len(text) > limit,
+        "navLog": list(nav_log),
+        "challenge": status,
+    })
+    out["output"] = "Captured \"%s\" (%s) — %d chars of page text%s, %d pages in this session's history." % (
+        title or url or "untitled", url or "?", len(text),
+        " (truncated to %d)" % limit if len(text) > limit else "", len(nav_log))
+    if status == "stuck":
+        out["output"] += " — WARNING: the page still shows a Cloudflare challenge; the text is the interstitial, NOT the content."
+    return out
+
+
 def do_snapshot(cmd):
     """snapshot (PRD §5): the page STRUCTURE — title, heading outline,
     element counts, top interactive elements, and a compact text excerpt."""
@@ -2236,6 +2287,7 @@ HANDLERS = {
     "read": do_read,
     "get_page": do_get_page,
     "extract_text": do_extract_text,
+    "remember_page": do_remember_page,
     "snapshot": do_snapshot,
     "inspect": do_inspect,
     "get_elements": do_get_elements,
@@ -2278,7 +2330,9 @@ ACTION_BUDGETS = {
     "navigate": 80, "click": 25, "type": 30, "press": 15, "scroll": 20,
     # read-path actions: up to 12 s challenge settle (ONYX_CF_SETTLE_READ_MS
     # cap) + the text extraction itself.
-    "wait": 35, "screenshot": 40, "extract_text": 40, "read": 40,
+    # remember_page: same read path as extract_text (12 s settle cap) but a
+    # 40k-char extraction — same 40 s budget covers it.
+    "wait": 35, "screenshot": 40, "extract_text": 40, "read": 40, "remember_page": 40,
     "get_page": 40, "snapshot": 30, "inspect": 30, "get_elements": 30,
     "forms": 30, "evaluate": 45, "select": 25, "upload": 60, "download": 90,
     "new_tab": 45, "switch_tab": 15, "close_tab": 15,
