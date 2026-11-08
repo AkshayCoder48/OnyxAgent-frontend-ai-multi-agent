@@ -20,7 +20,7 @@
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
-import { OnyxBaseKV, ONYXBASE_DEFAULT_BASE_URL, looksLikeOnyxBaseKey } from "@/lib/onyxbase/kv-client";
+import { OnyxBaseKV, resolveOnyxBaseUrl, looksLikeOnyxBaseKey } from "@/lib/onyxbase/kv-client";
 import {
   pushWorkspace,
   retrieveWorkspace,
@@ -57,10 +57,10 @@ async function resolveOnyxBase(ctx: { userId?: string }): Promise<OnyxBaseRuntim
     if (!userId) return null;
     const key = await settingsService.getDecryptedOnyxBaseApiKey(userId);
     if (!key || !key.trim()) return null;
-    // Base URL: user-configured instance or the default OnyxBase deployment.
+    // Base URL: user-configured instance or the default OnyxBase deployment
+    // (https://onyxbase-chi.vercel.app) — one resolution rule, see kv-client.
     const settings = await settingsService.get(userId).catch(() => null);
-    const baseUrl = settings?.onyxbase_base_url || ONYXBASE_DEFAULT_BASE_URL;
-    return { kv: new OnyxBaseKV(key, baseUrl), userId };
+    return { kv: new OnyxBaseKV(key, resolveOnyxBaseUrl(settings?.onyxbase_base_url)), userId };
   } catch {
     return null;
   }

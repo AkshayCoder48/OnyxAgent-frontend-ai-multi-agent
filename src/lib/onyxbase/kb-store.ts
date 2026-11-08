@@ -44,7 +44,7 @@
  * data is always an explicit store operation.
  */
 
-import { OnyxBaseError, OnyxBaseKV } from "./kv-client";
+import { OnyxBaseError, OnyxBaseKV, resolveOnyxBaseUrl } from "./kv-client";
 import { OnyxBaseFiles, type OnyxBaseFile } from "./files-client";
 
 // ---------------------------------------------------------------------------
@@ -680,11 +680,11 @@ export async function resolveKBClients(userId: string): Promise<KBClients | null
     const uid = userId || useAuthStore.getState().user?.id;
     if (!uid) return null;
     const settings = await settingsService.get(uid).catch(() => null);
-    const baseUrl = settings?.onyxbase_base_url ?? null;
+    const baseUrl = resolveOnyxBaseUrl(settings?.onyxbase_base_url);
     return {
       kv: new OnyxBaseKV(key, baseUrl),
       files: new OnyxBaseFiles(key, baseUrl),
-      baseUrl: (baseUrl ?? "https://onyxbase-chi.vercel.app").replace(/\/+$/, ""),
+      baseUrl,
     };
   } catch {
     return null;

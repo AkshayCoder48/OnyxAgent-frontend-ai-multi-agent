@@ -1131,8 +1131,8 @@ export async function resolveSkillsKVClient(userId: string): Promise<OnyxBaseKV 
     const key = await settingsService.getDecryptedOnyxBaseApiKey(userId);
     if (!key || !key.trim()) return null;
     const settings = await settingsService.get(userId).catch(() => null);
-    const { ONYXBASE_DEFAULT_BASE_URL } = await import("./kv-client");
-    const baseUrl = settings?.onyxbase_base_url || ONYXBASE_DEFAULT_BASE_URL;
+    const { resolveOnyxBaseUrl } = await import("./kv-client");
+    const baseUrl = resolveOnyxBaseUrl(settings?.onyxbase_base_url);
     const { OnyxBaseKV: Ctor } = await import("./kv-client");
     return new Ctor(key, baseUrl);
   } catch {

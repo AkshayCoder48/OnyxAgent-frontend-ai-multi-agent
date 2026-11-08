@@ -9,11 +9,15 @@
  * arbitrary origins), so no proxy is needed — the key NEVER crosses our
  * server, the LLM, the system prompt, or the E2B sandbox.
  *
- * Endpoints (per https://onyxbase-chi.vercel.app/docs):
- *   POST   /v1/set            { collection?, key, value }
- *   GET    /v1/get/{key}      404 when missing
- *   DELETE /v1/delete/{key}
- *   GET    /v1/list?prefix=…  paginated key listing
+ * Endpoints (per https://onyxbase-chi.vercel.app/api/openapi.json — verified
+ *  live 2026-11-08):
+ *   POST   /v1/set            { collection?, key, value } → { durable, throttle? }
+ *   GET    /v1/get/{key}      404 when missing (collection query param)
+ *   DELETE /v1/delete/{key}   (collection query param)
+ *   GET    /v1/list           PAGINATED: limit + offset, response carries
+ *                              __pagination { total, limit, offset, hasMore }.
+ *                              There is NO server-side `prefix` param — callers
+ *                              pass one for CLIENT-side filtering.
  *   GET    /v1/whoami         key verification / account info
  *   GET    /v1/health         per-subsystem status
  *
@@ -82,6 +86,20 @@ function normalizeBaseUrl(raw: string): string {
   let url = (raw || ONYXBASE_DEFAULT_BASE_URL).trim();
   if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
   return url.replace(/\/+$/, "");
+}
+
+/**
+ * The ONE base-URL resolution rule for the whole app (Task 21): a stored
+ * custom `onyxbase_base_url` (already legacy-normalized by settingsService —
+ * retired defaults like phi read back as undefined) wins; anything empty or
+ * missing falls back to the CURRENT default, https://onyxbase-chi.vercel.app.
+ * Every OnyxBase client (KV, Files, KB, workspace sync, skills sync, the
+ * code database) resolves through this helper — no call site may hardcode
+ * an instance URL again.
+ */
+export function resolveOnyxBaseUrl(stored?: string | null | undefined): string {
+  const trimmed = (stored ?? "").trim();
+  return normalizeBaseUrl(trimmed || ONYXBASE_DEFAULT_BASE_URL);
 }
 
 /** Per-request hard timeout. A stalled connection must FAIL into the retry
@@ -314,32 +332,78 @@ export class OnyxBaseKV {
   /** Write a value under a key. Values here are always plain strings
    *  (base64 payload slices) kept well under OnyxBase's ~4 KB record limit.
    *  NOTE: /v1/set reads `collection` from the BODY only (verified against
-   *  the live API — the query param is ignored for POST). */
+   *  the live API — the query param is ignored for POST).
+   *
+   *  DURABILITY CONTRACT (live incident 2026-11-08, reproduced end-to-end):
+   *  the server can answer 200 with `"durable": false` + `throttle
+   *  .retryAfterSecs` — the record was kept in the instance's IN-MEMORY
+   *  index only and the durable mirror deferred it. Such records VANISH
+   *  (later reads 404) once the instance rotates. A 200-without-durability
+   *  is therefore NOT a success: we pace down, wait the server's retry
+   *  window, and re-write until the server confirms `durable: true`. If it
+   *  never confirms, we fail HONESTLY — a caller must never believe a write
+   *  the backend itself says it may lose. */
+  private static readonly DURABILITY_MAX_ATTEMPTS = 5;
+
   async set(key: string, value: string): Promise<void> {
-    const r = await this.req<{ error?: string }>("POST", "/v1/set", {
-      collection: ONYXBASE_COLLECTION,
-      key,
-      value,
-    });
-    if (!r.ok) {
-      if (r.status === 401) {
-        throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
-      }
-      // 503 = "durable backend temporarily unreachable" — retryable, not a
-      // write failure. Anything else is a real write failure with the
-      // server's reason attached.
-      if (r.status === 503) {
+    for (let attempt = 0; ; attempt++) {
+      const r = await this.req<{
+        error?: string;
+        durable?: unknown;
+        throttle?: { retryAfterSecs?: unknown } | null;
+      }>("POST", "/v1/set", {
+        collection: ONYXBASE_COLLECTION,
+        key,
+        value,
+      });
+      if (!r.ok) {
+        if (r.status === 401) {
+          throw new OnyxBaseError("ONYXBASE_UNAUTHORIZED", "OnyxBase rejected the API key", 401);
+        }
+        // 503 = "durable backend temporarily unreachable" — retryable, not a
+        // write failure. Anything else is a real write failure with the
+        // server's reason attached.
+        if (r.status === 503) {
+          throw new OnyxBaseError(
+            "ONYXBASE_UNAVAILABLE",
+            `OnyxBase is temporarily unreachable${this.reason(r)}`,
+            503,
+          );
+        }
         throw new OnyxBaseError(
-          "ONYXBASE_UNAVAILABLE",
-          `OnyxBase is temporarily unreachable${this.reason(r)}`,
-          503,
+          "KV_WRITE_FAILED",
+          `KV write failed for ${key} (HTTP ${r.status})${this.reason(r)}`,
+          r.status,
         );
       }
-      throw new OnyxBaseError(
-        "KV_WRITE_FAILED",
-        `KV write failed for ${key} (HTTP ${r.status})${this.reason(r)}`,
-        r.status,
-      );
+
+      // 200 — inspect the durability flag. `durable` absent (older
+      // deployments) is treated as a success; `durable: true` is a success;
+      // `durable: false` means the mirror is throttled — NOT a success.
+      const data = (r.data ?? {}) as {
+        durable?: unknown;
+        throttle?: { retryAfterSecs?: unknown } | null;
+      };
+      const durable = data.durable;
+      if (durable === undefined || durable === true) return;
+
+      // The server says it may LOSE this write. Slow the shared pacer (a
+      // durability throttle is exactly like a 429) and retry after the
+      // server's own retry window.
+      const rawRetry = data.throttle?.retryAfterSecs;
+      const retryAfterSec =
+        typeof rawRetry === "number" && Number.isFinite(rawRetry) && rawRetry > 0
+          ? rawRetry
+          : 5;
+      this.pacer.noteThrottled(retryAfterSec);
+      if (attempt >= OnyxBaseKV.DURABILITY_MAX_ATTEMPTS - 1) {
+        throw new OnyxBaseError(
+          "KV_WRITE_FAILED",
+          `OnyxBase accepted the write for ${key} in memory but could not persist it durably (mirror throttled) — the record may not survive. Retry later.`,
+          200,
+        );
+      }
+      await new Promise((res) => setTimeout(res, Math.min(retryAfterSec * 1000, 15_000)));
     }
   }
 
@@ -390,17 +454,31 @@ export class OnyxBaseKV {
   }
 
   /**
-   * List all keys under a prefix, following whatever pagination shape
-   * OnyxBase returns (defensively parsed — the docs describe pagination
-   * without pinning the exact response fields).
+   * List all keys under a prefix.
+   *
+   * The live API (verified 2026-11-08) has NO server-side prefix param — a
+   * bare /v1/list returns ONE page of the WHOLE collection (default page
+   * ~10 keys) plus `__pagination { total, limit, offset, hasMore }`. So:
+   *   1. page through limit/offset until hasMore is false (bounded);
+   *   2. filter by the prefix CLIENT-side — the documented contract of this
+   *      method: callers pass a namespace prefix and must never see foreign
+   *      keys from the shared "onyxagent" collection.
+   * Defensive parsing kept: keys/records/items/data envelopes and
+   * string-or-{key} entries are all accepted, and the legacy cursor fields
+   * still drive pagination on deployments that predate __pagination.
    */
+  private static readonly LIST_PAGE_LIMIT = 500;
+  private static readonly LIST_MAX_PAGES = 60;
+
   async listKeys(prefix: string): Promise<string[]> {
     const out: string[] = [];
-    let cursor: string | null = null;
-    // Hard cap to avoid infinite pagination loops.
-    for (let page = 0; page < 100; page++) {
-      const query: Record<string, string> = { prefix };
-      if (cursor) query.cursor = cursor;
+    let offset = 0;
+    // Hard cap to avoid infinite pagination loops (server bugs, drift).
+    for (let page = 0; page < OnyxBaseKV.LIST_MAX_PAGES; page++) {
+      const query: Record<string, string> = {
+        limit: String(OnyxBaseKV.LIST_PAGE_LIMIT),
+        offset: String(offset),
+      };
       const r = await this.req<Record<string, unknown>>("GET", "/v1/list", undefined, query);
       if (!r.ok) {
         if (r.status === 401) {
@@ -424,20 +502,37 @@ export class OnyxBaseKV {
       // may be strings or { key } objects.
       const raw: unknown =
         Array.isArray(d) ? d : d.keys ?? d.records ?? d.items ?? d.data ?? [];
+      let got = 0;
       if (Array.isArray(raw)) {
         for (const entry of raw) {
-          if (typeof entry === "string") out.push(entry);
-          else if (entry && typeof entry === "object" && typeof (entry as { key?: unknown }).key === "string") {
+          if (typeof entry === "string") {
+            out.push(entry);
+            got++;
+          } else if (entry && typeof entry === "object" && typeof (entry as { key?: unknown }).key === "string") {
             out.push((entry as { key: string }).key);
+            got++;
           }
         }
       }
-      const next = d.cursor ?? d.nextCursor ?? d.next ?? d.page;
-      if (typeof next !== "string" || !next || next === cursor) break;
-      cursor = next;
-      if (!Array.isArray(raw) || raw.length === 0) break;
+      // Pagination: the documented shape is __pagination.hasMore; the legacy
+      // cursor fields remain a fallback for deployments without it.
+      const pag = (d.__pagination ?? {}) as { hasMore?: unknown };
+      const legacyNext = d.cursor ?? d.nextCursor ?? d.next ?? d.page;
+      const hasMore =
+        pag.hasMore === true ||
+        (pag.hasMore === undefined && typeof legacyNext === "string" && !!legacyNext);
+      if (!hasMore || got === 0) break;
+      offset += Math.max(got, 1);
     }
-    return Array.from(new Set(out));
+    const seen = new Set<string>();
+    const filtered: string[] = [];
+    for (const k of out) {
+      if (k.startsWith(prefix) && !seen.has(k)) {
+        seen.add(k);
+        filtered.push(k);
+      }
+    }
+    return filtered;
   }
 
   // ---------------------------------------------------------------------

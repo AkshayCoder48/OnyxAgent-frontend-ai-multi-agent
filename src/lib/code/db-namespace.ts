@@ -38,7 +38,7 @@
 import {
   OnyxBaseKV,
   OnyxBaseError,
-  ONYXBASE_DEFAULT_BASE_URL,
+  resolveOnyxBaseUrl,
 } from "@/lib/onyxbase/kv-client";
 import { settingsService } from "@/lib/services";
 import { useAuthStore } from "@/stores";
@@ -90,8 +90,7 @@ export async function resolveCodeDbClient(userId?: string): Promise<CodeDbClient
     const key = await settingsService.getDecryptedOnyxBaseApiKey(uid);
     if (!key || !key.trim()) return { kind: "not_configured" };
     const settings = await settingsService.get(uid).catch(() => null);
-    const baseUrl = settings?.onyxbase_base_url || ONYXBASE_DEFAULT_BASE_URL;
-    return { kv: new OnyxBaseKV(key, baseUrl) };
+    return { kv: new OnyxBaseKV(key, resolveOnyxBaseUrl(settings?.onyxbase_base_url)) };
   } catch {
     return { kind: "not_configured" };
   }
