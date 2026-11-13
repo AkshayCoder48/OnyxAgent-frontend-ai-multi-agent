@@ -1,0 +1,173 @@
+/* =========================================================================
+   ONYX MOTION SYSTEM — unified motion language for OnyxAgent (Task 24)
+   =========================================================================
+   One coherent motion layer per the "Complete Premium UI Motion & Interaction
+   System" spec: every element enters, moves, transforms and disappears
+   naturally. Linear's interaction polish + Apple's fluidity + ChatGPT's clean
+   conversational surface.
+
+   Layer order: globals.css → orange-glass.css → THIS FILE (motion has the
+   final word on animation properties).
+
+   Design rules (spec §19):
+   - Transform/opacity dominant; blur is ONE-SHOT and small (≤6px) on
+     entrances only — never continuous on large surfaces.
+   - No fill-forwards on filtered entrances: settled elements carry no
+     filter, so nothing retains a render surface (the word-stream paint
+     storm can never recur anywhere else either).
+   - prefers-reduced-motion kills every animation in this layer.
+   - No bouncing/elastic; the spring curve settles, never overshoots hard.
+   ========================================================================= */
+
+/* ---- 1 · Motion tokens (spec §15) ------------------------------------- */
+:root {
+  /* Easing library — one curve per intent, never one curve for everything. */
+  --ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);   /* micro, hovers */
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);       /* entrances, reveals */
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);           /* dismissals */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);     /* panels, drawers */
+
+  /* Duration scale (ms). */
+  --dur-micro: 120ms;      /* icon swaps, chips */
+  --dur-press: 140ms;      /* button feedback */
+  --dur-reveal: 200ms;     /* small components, rows */
+  --dur-appear: 280ms;     /* cards, gen UI, sources, tool output */
+  --dur-panel: 320ms;      /* modals, drawers, page transitions */
+}
+
+/* ---- 2 · Object entrances — fade in with motion blur ------------------
+   The signature "appearing object" animation (gen UI blocks, tool output
+   UIs, sources organizers, panels, strips): the element materializes from
+   a soft 6px blur + 8px rise into perfect clarity. ONE-SHOT, `backwards`
+   fill only — after the animation the element carries no filter. */
+@keyframes mb-object-in {
+  0% {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translate3d(0, 8px, 0);
+  }
+  55% {
+    opacity: 0.8;
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translate3d(0, 0, 0);
+  }
+}
+.mb-object-in {
+  animation: mb-object-in var(--dur-appear) var(--ease-enter) backwards;
+}
+
+/* Row variant — lighter (4px blur, 4px rise, 180ms): for list rows and
+   chips where many siblings appear near-simultaneously. */
+@keyframes mb-row-in {
+  0% {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translate3d(0, 4px, 0);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translate3d(0, 0, 0);
+  }
+}
+.mb-row-in {
+  animation: mb-row-in 180ms var(--ease-enter) backwards;
+}
+
+/* Stagger — children of a .mb-stagger reveal in sequence (first 8 rows
+   get a 26ms cascade; deeper rows arrive together so long lists never
+   feel slow). Apply to the CONTAINER. */
+.mb-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.mb-stagger > *:nth-child(2) { animation-delay: 26ms; }
+.mb-stagger > *:nth-child(3) { animation-delay: 52ms; }
+.mb-stagger > *:nth-child(4) { animation-delay: 78ms; }
+.mb-stagger > *:nth-child(5) { animation-delay: 104ms; }
+.mb-stagger > *:nth-child(6) { animation-delay: 130ms; }
+.mb-stagger > *:nth-child(7) { animation-delay: 156ms; }
+.mb-stagger > *:nth-child(8) { animation-delay: 182ms; }
+
+/* ---- 3 · Disclosure content — blur-to-sharp while the grid expands ---
+   Upgrade for .mb-collapse's inner content: while the 0fr→1fr height
+   transition plays, the freshly revealed content also settles from a
+   small blur. Scoped to data-open ONLY (the close path stays a plain
+   fade — blurring on exit is wasted raster). */
+.mb-collapse[data-open="true"] > * {
+  animation: mb-row-in 220ms var(--ease-enter) 40ms backwards;
+}
+
+/* ---- 4 · Press feedback (spec §8 — tactile, restrained) --------------
+   Compression on activation for the primary touch targets. Pure
+   transform: compositor-only, zero layout. */
+.mb-press {
+  transition: transform var(--dur-press) var(--ease-standard);
+}
+.mb-press:active {
+  transform: scale(0.97);
+}
+button:active:not(:disabled):not([role="menuitem"]) {
+  transform: scale(0.985);
+  transition: transform var(--dur-micro) var(--ease-standard);
+}
+
+/* ---- 5 · Composer morphing ---------------------------------------------
+   The prompt dock's height changes (textarea growth, attachment rows,
+   quote previews) interpolate instead of snapping. */
+.mb-morph {
+  transition:
+    height 220ms var(--ease-standard),
+    border-color 200ms var(--ease-standard),
+    box-shadow 240ms var(--ease-standard),
+    background-color 240ms var(--ease-standard);
+}
+
+/* ---- 6 · Chat underlay (Task 24 glass fix) ----------------------------
+   The composer OVERLAYS the scroll area (chat scrolls beneath it). The
+   scroll container pads its content clear of the overlay via this var;
+   a ResizeObserver keeps it equal to the live composer-stack height. */
+.chat-underlay {
+  --chat-underlay-h: 168px;
+}
+
+/* ---- 7 · Stacked tool calls (Task 24) ----------------------------------
+   A tool-execution sequence renders as ONE compact vertical stack of
+   minimal rows: consistent icon sizing, alignment and tight spacing —
+   no per-call cards, borders or backgrounds. Rows carry their own
+   hover + press states (see .tool-call-row utilities in the components). */
+.tool-call-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Tool status colors (Task 24 — "don't limit colours / grey only works on
+   white"): the mint success tone is BRIGHT on every warm-black canvas
+   (both .light and .dark are warm black per Orange Glass §2.5); custom
+   schemes with real light backgrounds flip to a deep olive that reads on
+   white. Failure stays the semantic destructive token everywhere. */
+:root {
+  --tool-ok: #8FE3AE;
+}
+.custom-scheme:not(.dark) {
+  --tool-ok: #2e6b1e;
+}
+
+/* ---- 8 · Reduced motion (spec §17) ------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .mb-object-in,
+  .mb-row-in,
+  .mb-collapse[data-open="true"] > *,
+  .mb-stagger > *,
+  .mb-press {
+    animation: none;
+    transition: none;
+  }
+  button:active:not(:disabled):not([role="menuitem"]) {
+    transform: none;
+  }
+}

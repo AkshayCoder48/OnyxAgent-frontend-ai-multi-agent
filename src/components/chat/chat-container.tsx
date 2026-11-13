@@ -12,7 +12,6 @@ import { ChatInput } from "./chat-input";
 import { BackgroundTasksLander } from "./background-tasks-strip";
 import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
-import { SourcesPanel } from "./sources-panel";
 import { MessageList } from "./message-list";
 import {
   buildBranchInfo,
@@ -968,20 +967,41 @@ function ChatUI({
     (p: { id: string } | null) => onProviderChange?.(p ? p.id : null),
     [onProviderChange],
   );
+
+  // COMPOSER UNDERLAY (Task 24 glass fix): the composer stack OVERLAYS the
+  // scroll area — the chat scrolls beneath the glass and shows through the
+  // real backdrop blur (the old layout sat the composer BELOW the scroll
+  // container, so it only ever "blurred" the static page gradient — the
+  // "prebuilt background" bug). This observer keeps --chat-underlay-h equal
+  // to the live composer-stack height so scrolled content never hides
+  // beneath the dock, and the jump pill floats just above it.
+  const composerUnderlayRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = composerUnderlayRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const sync = () => {
+      el.parentElement?.style.setProperty("--chat-underlay-h", `${el.offsetHeight}px`);
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   return (
     <div className="flex h-full w-full">
       {/* Centered ~760px message thread column (Terra editorial spec). The
           companion is the INLINE cursor riding the response stream
           (CompanionCursor in markdown-content) — no floating pet. */}
       <div className="mx-auto flex h-full w-full max-w-[760px] min-w-0 flex-1 flex-col">
-        {/* Relative wrapper hosts the "Jump to latest" pill — the explicit
-            re-engage affordance shown while auto-follow is disengaged (scroll
-            owner rev 2). Without it, leaving the stream mid-answer had no way
-            back except fighting the follow. */}
-        <div className="relative min-h-0 flex-1">
+        {/* Relative wrapper hosts BOTH the scroll area (absolute, full
+            height — the chat runs UNDER the composer) and the composer
+            underlay (absolute bottom). --chat-underlay-h pads the scroll
+            content clear of the dock (updated by the ResizeObserver). */}
+        <div className="chat-underlay relative min-h-0 flex-1">
         <div
           ref={scrollContainerRef}
-          className="scrollbar-thin h-full overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
+          className="scrollbar-thin absolute inset-0 overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
+          style={{ paddingBottom: "calc(var(--chat-underlay-h, 168px) + 20px)" }}
         >
           {isLoadingConversation ? (
             <ConversationSkeleton />
@@ -1049,13 +1069,15 @@ function ChatUI({
         {/* JUMP TO LATEST (scroll owner rev 2) — the explicit re-engage
             affordance while auto-follow is disengaged. The unread dot marks
             content that arrived while the view was parked; clicking smooth
-            scrolls to the very bottom and re-engages the follow. */}
+            scrolls to the very bottom and re-engages the follow. Floats
+            just ABOVE the composer overlay (driven by --chat-underlay-h). */}
         {showJumpToLatest && onJumpToLatest && (
           <button
             type="button"
             onClick={onJumpToLatest}
             aria-label="Jump to the latest messages"
-            className="border-border bg-background/85 text-foreground/85 hover:bg-accent hover:text-foreground absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors"
+            style={{ bottom: "calc(var(--chat-underlay-h, 168px) + 12px)" }}
+            className="border-border bg-background/85 text-foreground/85 hover:bg-accent hover:text-foreground absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors"
           >
             <ArrowDown className="h-3.5 w-3.5 shrink-0" aria-hidden />
             <span className="whitespace-nowrap">Jump to latest</span>
@@ -1067,25 +1089,32 @@ function ChatUI({
             )}
           </button>
         )}
-        </div>{" "}
-        {/* Pollinations media_generation two-step confirmation — the tool
-            BLOCKS until this dialog dispatches a response (same mount slot
-            as QuestionPrompt; self-subscribes to the Pollinations store). */}
-        <div className="px-2 sm:px-4">
-          <PollinationsConfirmDialog />
-        </div>
-        {pendingQuestions && pendingQuestions.length > 0 && onAnswerQuestions && (
-          <div className="px-2 pb-2 sm:px-4 sm:pb-2">
-            <QuestionPrompt
-              questions={pendingQuestions}
-              disabled={!isConnected}
-              onComplete={onAnswerQuestions}
-            />
+        {/* COMPOSER UNDERLAY — the overlay stack: confirmations, queued
+            messages and the prompt dock itself float above the scroll
+            area. The dock is TRUE GLASS (.composer-dock): the live chat
+            shows through its backdrop blur; no white outline, no prebuilt
+            opaque fill. */}
+        <div
+          ref={composerUnderlayRef}
+          className="absolute inset-x-0 bottom-0 z-10 px-2 pb-2 sm:px-4 sm:pb-4"
+        >
+          {/* Pollinations media_generation two-step confirmation — the tool
+              BLOCKS until this dialog dispatches a response (same mount slot
+              as QuestionPrompt; self-subscribes to the Pollinations store). */}
+          <div className="mb-object-in">
+            <PollinationsConfirmDialog />
           </div>
-        )}
-        {/* Queued messages live next to the composer; the todo plan panel
-            lives INSIDE the scroll container (inline in the response flow). */}
-        <div className="px-2 pb-2 sm:px-4 sm:pb-4">
+          {pendingQuestions && pendingQuestions.length > 0 && onAnswerQuestions && (
+            <div className="pb-2">
+              <QuestionPrompt
+                questions={pendingQuestions}
+                disabled={!isConnected}
+                onComplete={onAnswerQuestions}
+              />
+            </div>
+          )}
+          {/* Queued messages live next to the composer; the todo plan panel
+              lives INSIDE the scroll container (inline in the response flow). */}
           {/* Invisible background-run lander (USER DIRECTIVE: no strips above
               the composer) — polls Trigger.dev Cloud runs and lands finished
               results directly in their conversations' chat bubbles. */}
@@ -1093,7 +1122,7 @@ function ChatUI({
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}
-          <div className="glass-card border-border focus-within:border-primary/40 rounded-2xl border transition-[border-color,box-shadow] input-focus-glow">
+          <div className="composer-dock mb-morph rounded-2xl input-focus-glow">
             <div className="px-2.5 pt-2.5 sm:px-4 sm:pt-4">
               <ChatInput
                 key={conversationId ?? "new-chat"}
@@ -1142,10 +1171,12 @@ function ChatUI({
           <p className="text-muted-foreground/80 mt-2 text-center text-[11px]">
             OnyxAgent can make mistakes. Double-check important information.
           </p>
-        </div>
+        </div>{" "}
+        {/* /composer underlay */}
+        </div>{" "}
+        {/* /scroll owner (chat-underlay wrapper) */}
       </div>
       <FilePreviewPanel />
-      <SourcesPanel />
     </div>
   );
 }

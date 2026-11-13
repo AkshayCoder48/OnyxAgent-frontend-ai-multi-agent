@@ -154,16 +154,23 @@ const StreamFreshContext = React.createContext<{
   fadeMs: 0,
 });
 
-/** One streamed word — fades in once on mount over the stream engine's
- *  fade duration. The duration is baked into the inline style AT MOUNT;
- *  the memo comparator deliberately ignores `fadeMs` so later pace changes
- *  never re-time an already-running (or finished) fade — only genuinely
- *  NEW words animate. Text never changes for a mounted word (the reveal is
+/** One streamed word — settles in once on mount with the MOTION-BLUR
+ *  reveal (blur 5px→0 + opacity, the uploaded streaming-lab animation).
+ *  The animation duration is baked into the inline style AT MOUNT and
+ *  mapped from the engine's current pace — 180ms (fast cascade) to the
+ *  full luxurious 360ms (relaxed stream) — so concurrent blur surfaces
+ *  stay bounded no matter how fast tokens arrive. The memo comparator
+ *  deliberately ignores `fadeMs` so later pace changes never re-time an
+ *  already-running (or finished) settle — only genuinely NEW words
+ *  animate. Text never changes for a mounted word (the reveal is
  *  append-only), so the comparator's single check is sound. */
+const settleDuration = (fadeMs: number) =>
+  Math.max(180, Math.min(360, Math.round(fadeMs * 2)));
+
 const FadeWord = React.memo(
   function FadeWord({ text, fadeMs }: { text: string; fadeMs: number }) {
     return (
-      <span className="wf" style={{ animationDuration: `${fadeMs}ms` }}>
+      <span className="wf" style={{ animationDuration: `${settleDuration(fadeMs)}ms` }}>
         {text}
       </span>
     );

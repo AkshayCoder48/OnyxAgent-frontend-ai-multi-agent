@@ -353,7 +353,7 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
         )}
 
         {/* Prompt box — styled like the main chat input (glass card + rounded) */}
-        <div className="glass-card border-border focus-within:border-primary/40 rounded-2xl border transition-all input-focus-glow">
+        <div className="composer-dock mb-morph rounded-2xl input-focus-glow">
           <div className="px-2.5 pt-2.5">
             <div className="flex items-end gap-1.5">
               <Button

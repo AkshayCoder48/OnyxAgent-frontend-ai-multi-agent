@@ -3,11 +3,18 @@
 import { create } from "zustand";
 import type { SourceItem } from "@/lib/chat-sources";
 
+/**
+ * Sources organizer store (Task 24): the fixed sources SIDEBAR is gone —
+ * the CitationsFooter under each answer is now the organizer. `open`
+ * carries the message's sources array (BY IDENTITY — the footer whose
+ * `sources` prop === `store.sources` is the one that expands) plus the
+ * cited index to highlight + scroll to.
+ */
 interface SourcesPanelState {
   isOpen: boolean;
-  sources: SourceItem[];
+  sources: readonly SourceItem[];
   highlightedIndex: number | null;
-  open: (sources: SourceItem[], highlightedIndex?: number | null) => void;
+  open: (sources: readonly SourceItem[], highlightedIndex?: number | null) => void;
   close: () => void;
 }
 

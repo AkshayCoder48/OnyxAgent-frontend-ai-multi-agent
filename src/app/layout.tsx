@@ -3,6 +3,10 @@ import "./globals.css";
 // Orange Glass design layer (DESIGN.md spec) — one stylesheet appended
 // AFTER the app's own styles; wins the cascade without touching any JS.
 import "./orange-glass.css";
+// Motion system (Task 24) — the unified motion-blur language (object
+// entrances, stagger, press feedback, composer morphing). Final layer:
+// owns every animation property after the design layer.
+import "./motion.css";
 import { defaultLocale } from "@/i18n";
 import { SITE } from "@/lib/seo";
 

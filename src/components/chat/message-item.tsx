@@ -14,7 +14,7 @@ import { RESEARCH_TOOL_NAMES } from "./research-panel";
 import { MarkdownContent } from "./markdown-content";
 import { useFilePreviewStore } from "@/stores";
 import { useSourcesPanelStore } from "@/stores/sources-panel-store";
-import { ChevronRight, Copy, Check, CornerDownLeft, Pencil, Quote } from "lucide-react";
+import { Copy, Check, CornerDownLeft, Pencil, Quote } from "lucide-react";
 import { getFileUrl, loadFileUrls } from "@/lib/file-api";
 import { extractSources } from "@/lib/chat-sources";
 import type { SourceItem } from "@/lib/chat-sources";
@@ -1020,15 +1020,9 @@ function WorkingPanel({
           setUserToggled(true);
           setExpanded((o) => !o);
         }}
-        className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
+        className="mb-press flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-left text-sm transition-colors hover:bg-accent/50"
       >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-            expanded && "rotate-90",
-          )}
-          aria-hidden
-        />
+        {/* NO chevron (Task 24): the whole resting row is the toggle. */}
         {streaming ? (
           // THE CIRCLE + GENERATED CAPTION (user directives: the circle
           // stays for the whole stream; caption generation re-added into
@@ -1353,12 +1347,13 @@ export const MessageItem = React.memo(function MessageItem({
                   />
                 ) : null}
                 {message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="w-full space-y-2">
+                  <div className="tool-call-stack mb-stagger w-full space-y-0">
                     {(() => {
                       // Consecutive use_browser calls collapse into ONE
                       // BrowserUseGroup frame (run start renders the group,
                       // continuations render nothing); every other tool
-                      // keeps its own ToolCallCard.
+                      // keeps its own ToolCallCard. All stacked together
+                      // (Task 24: one compact section, not scattered cards).
                       const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
                       return (message.toolCalls ?? []).map((toolCall) => {
                         const run = browserRuns.runStartedBy(toolCall.id);
@@ -1493,6 +1488,48 @@ export const MessageItem = React.memo(function MessageItem({
             );
           };
 
+          // STACKED TOOL CALLS (Task 24 spec): consecutive tool items render
+          // as ONE compact stack of minimal rows — the whole tool-execution
+          // sequence grouped together with consistent alignment and spacing,
+          // not scattered standalone cards. Thinking runs and texts break a
+          // stack (strict chronological order is preserved). The stack grows
+          // live while streaming (rows carry their own running/done state)
+          // and rests as the finished stacked section after the sequence.
+          const renderGrouped = (list: FlowItem[], inPanel: boolean) => {
+            const out: React.ReactNode[] = [];
+            let stack: FlowItem[] = [];
+            const flushStack = () => {
+              if (stack.length === 0) return;
+              const first = stack[0]!;
+              out.push(
+                <div key={`stack-${first.partId}`} className="tool-call-stack mb-stagger">
+                  {stack.map((it) => (
+                    <React.Fragment key={it.partId}>{renderItem(it, inPanel)}</React.Fragment>
+                  ))}
+                </div>,
+              );
+              stack = [];
+            };
+            for (const it of list) {
+              if (todoSplice?.beforePartId === it.partId) {
+                // The inline plan panel splices at this item's position —
+                // flush the open stack so it lands BETWEEN blocks.
+                flushStack();
+                out.push(renderTodoPanel(`todo-${it.partId}`));
+              }
+              if (it.kind === "tool") {
+                stack.push(it);
+              } else {
+                flushStack();
+                out.push(
+                  <React.Fragment key={it.partId}>{renderItem(it, inPanel)}</React.Fragment>,
+                );
+              }
+            }
+            flushStack();
+            return out;
+          };
+
           // ── PANEL PATH: one WorkingPanel + the final answer below it. ──
           if (hasPanel) {
             // Deliverables (charts, downloads, previews, Q&A, live plan)
@@ -1510,23 +1547,9 @@ export const MessageItem = React.memo(function MessageItem({
                   hasDeliverables={hasDeliverables}
                   ranTools={ranTools}
                 >
-                  {processItems.map((it) => (
-                    <React.Fragment key={it.partId}>
-                      {todoSplice?.beforePartId === it.partId
-                        ? renderTodoPanel(`todo-${it.partId}`)
-                        : null}
-                      {renderItem(it, true)}
-                    </React.Fragment>
-                  ))}
+                  {renderGrouped(processItems, true)}
                 </WorkingPanel>
-                {trailingItems.map((it) => (
-                  <React.Fragment key={it.partId}>
-                    {todoSplice?.beforePartId === it.partId
-                      ? renderTodoPanel(`todo-${it.partId}`)
-                      : null}
-                    {renderItem(it, false)}
-                  </React.Fragment>
-                ))}
+                {renderGrouped(trailingItems, false)}
                 {todoSplice?.atEnd ? renderTodoPanel("todo-end") : null}
                 {/* NO AgentStatusLine — the WorkingPanel trigger IS the
                     live status for the whole turn. */}
@@ -1538,14 +1561,7 @@ export const MessageItem = React.memo(function MessageItem({
           // frameless editorial flow + the one status line. ──────────────
           return (
             <>
-              {items.map((it) => (
-                <React.Fragment key={it.partId}>
-                  {todoSplice?.beforePartId === it.partId
-                    ? renderTodoPanel(`todo-${it.partId}`)
-                    : null}
-                  {renderItem(it, false)}
-                </React.Fragment>
-              ))}
+              {renderGrouped(items, false)}
               {todoSplice?.atEnd ? renderTodoPanel("todo-end") : null}
               {/* ONE in-place status line — the model is generating. */}
               {!isUser && <AgentStatusLine message={message} />}
@@ -1557,7 +1573,7 @@ export const MessageItem = React.memo(function MessageItem({
             numbered `n · Title · host ↗` list under the answer. Web rows open
             the source directly; RAG rows open the sources panel. */}
         {hasSources && !isUser && (
-          <CitationsFooter sources={sources} onOpenPanel={(i) => openSources(sources, i)} />
+          <CitationsFooter sources={sources} />
         )}
 
         {/* FILES FOOTER — Beta V1.3: the compact end-of-turn "Files · N" card

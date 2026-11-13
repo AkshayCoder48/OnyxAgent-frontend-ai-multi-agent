@@ -340,6 +340,28 @@ div.fixed.inset-y-0.bg-background {
               0 10px 26px rgba(0,0,0,.28);
 }
 
+/* COMPOSER DOCK — TRUE GLASS over the live chat (Task 24): the composer
+   overlays the scroll area, so this pane blurs the REAL conversation
+   scrolling beneath it — not a prebuilt page gradient. Deep warm tint +
+   strong blur keeps the typed text readable over ANY content; the border
+   is a faint hairline (the old rgba(255,255,255,.24) read as a white
+   outline — gone). No ::after sheen: over live text it shimmers. */
+.composer-dock {
+  position: relative;
+  background: rgba(18, 8, 2, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  -webkit-backdrop-filter: var(--og-bf-drawer);
+  backdrop-filter: var(--og-bf-drawer);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42),
+              inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.composer-dock:focus-within {
+  border-color: color-mix(in srgb, var(--acc) 34%, transparent);
+  box-shadow: 0 0 0 2px var(--acc-glow),
+              0 18px 44px rgba(0, 0, 0, 0.42),
+              inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
 .bg-card {
   position: relative;
   background: rgba(255,255,255,.09);
@@ -552,7 +574,7 @@ input.bg-background:focus {
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .glass-header, .conv-sidebar, .glass-strong,
   div.fixed.inset-y-0.bg-background { background: rgba(20,10,5,.72); }
-  .glass-card, .bg-card { background: rgba(20,10,5,.72); }
+  .glass-card, .bg-card, .composer-dock { background: rgba(20,10,5,.72); }
   [role="dialog"], [data-radix-popper-content-wrapper] > *, [role="tooltip"] { background: rgba(20,10,5,.72); }
   button.bg-secondary, button.bg-background { background: rgba(20,10,5,.72); }
 }

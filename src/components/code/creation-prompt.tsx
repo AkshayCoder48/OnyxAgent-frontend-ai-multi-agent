@@ -158,7 +158,7 @@ export function CreationPrompt({ onSend, disabled }: CreationPromptProps) {
   return (
     <div className="w-full">
       {/* Big creation box */}
-      <div className="glass-card border-border focus-within:border-primary/40 rounded-2xl border transition-all input-focus-glow">
+      <div className="composer-dock mb-morph rounded-2xl input-focus-glow">
         <textarea
           ref={textareaRef}
           value={value}

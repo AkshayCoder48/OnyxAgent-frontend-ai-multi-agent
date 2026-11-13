@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ToolCall } from "@/types";
 import {
   ArrowRight,
@@ -8,7 +8,6 @@ import {
   Clock,
   Search,
   Globe,
-  ChevronRight,
   Code2,
   Download,
   FileMinus,
@@ -323,13 +322,6 @@ function SimpleWebPageDisclosure({ toolCall }: { toolCall: ToolCall }) {
         onClick={() => setOpen((v) => !v)}
         className="hover:bg-foreground/5 text-muted-foreground hover:text-foreground mb-1 inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium transition-colors"
       >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 transition-transform duration-200",
-            open && "rotate-90",
-          )}
-          aria-hidden
-        />
         <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden />
         {open ? "Hide page preview" : "Show page preview"}
       </button>
@@ -500,19 +492,43 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
   // never appears as a separate tool.
   const isKnowledgeBase = toolCall.name === "knowledge_base";
 
+  // ROW DISCLOSURE (Task 24): the simple line is now a full expandable row —
+  // tapping anywhere on it reveals the tool's details (name · status ·
+  // duration · arguments · output) exactly like the technical row, just
+  // with the friendly sentence as the label.
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   return (
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
-      {/* The line — NOT a button, NOT expandable. Plain sentence + status. */}
+      {/* The row — icon + friendly sentence + status. The WHOLE row toggles
+          the details (no chevron, no separate button). A div with
+          role="button" (NOT a native <button>): the running branch nests
+          SkipWaitButton, and HTML forbids button-in-button. */}
       <div
-        className="flex min-h-7 w-full items-center gap-2 rounded-lg px-1 py-1"
-        role="status"
-        aria-live="polite"
+        role="button"
+        tabIndex={0}
+        aria-expanded={detailsOpen}
+        onClick={(e) => {
+          if (e.target !== e.currentTarget && (e.target as HTMLElement).closest("button")) return;
+          setDetailsOpen((v) => !v);
+        }}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setDetailsOpen((v) => !v);
+          }
+        }}
+        className="mb-press flex min-h-7 w-full cursor-pointer select-none items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
       >
         {isComposio ? (
           <ComposioToolBadge branding={branding} size={14} />
         ) : (
           <ToolIcon
-            className={cn("h-3.5 w-3.5 shrink-0", isError ? "text-destructive/70" : "text-muted-foreground")}
+            className={cn(
+              "h-3.5 w-3.5 shrink-0",
+              isError ? "text-destructive/80" : "text-primary",
+            )}
             aria-hidden
           />
         )}
@@ -579,7 +595,10 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
             {isCompleted && (
               <>
                 <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} className="ml-1" />
-                <Check className="text-primary/70 ml-auto h-3.5 w-3.5 shrink-0" aria-label="Done" />
+                <Check
+                  className="ml-auto h-3.5 w-3.5 shrink-0 text-[var(--tool-ok)]"
+                  aria-label="Done"
+                />
               </>
             )}
           </>
@@ -646,6 +665,40 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
             : runPythonAnswer}
         </p>
       )}
+
+      {/* ROW DETAILS (Task 24) — the whole row toggles this disclosure:
+          tool name · status · duration · arguments · output. Same anatomy
+          as the technical row's expanded panel, in friendly-mode clothes. */}
+      <CollapsePanel open={detailsOpen}>
+        <div className="px-1.5 pb-2 sm:px-2">
+          <div className="mb-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-foreground/10 pb-1.5">
+            <span className="min-w-0 truncate font-mono text-[10.5px] text-foreground/55">
+              {toolCall.name || "tool"}
+            </span>
+            {isError ? (
+              <span className="text-[11px] font-medium text-destructive">Failed</span>
+            ) : isCompleted ? (
+              <span className="text-[11px] font-medium text-[var(--tool-ok)]">
+                Completed
+              </span>
+            ) : null}
+            <ToolDurationBadge
+              startedAt={toolCall.startedAt}
+              endedAt={toolCall.endedAt}
+            />
+          </div>
+          <GenericToolResult
+            toolCall={toolCall}
+            resultText={
+              toolCall.result !== undefined
+                ? typeof toolCall.result === "string"
+                  ? toolCall.result
+                  : JSON.stringify(toolCall.result, null, 2)
+                : ""
+            }
+          />
+        </div>
+      </CollapsePanel>
     </div>
   );
 }
@@ -1082,12 +1135,6 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
     });
   };
 
-  const toggleRaw = (e: MouseEvent) => {
-    e.stopPropagation();
-    setShowRaw((r) => !r);
-    setExpanded(true);
-  };
-
   // While still running: narrate what the agent is doing instead of the
   // finished label, and swap the chevron/raw toggle for a spinner — the
   // header becomes a step caption. (Note: `isRunning` is declared up top so
@@ -1114,11 +1161,10 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
       )}
     >
       {/* NOT a native <button>: the running branch nests interactive
-          children (SkipWaitButton renders a real <button>, the raw-toggle
-          span) and HTML forbids button-in-button — that exact nesting threw
-          the React hydration error. A div with role="button" + keyboard
-          activation keeps full a11y while allowing nested interactives
-          (same pattern as the raw-toggle span below). */}
+          children (SkipWaitButton renders a real <button>) and HTML
+          forbids button-in-button — that exact nesting threw a React
+          hydration error. A div with role="button" + keyboard activation
+          keeps full a11y while allowing nested interactives. */}
       <div
         role="button"
         tabIndex={0}
@@ -1134,29 +1180,23 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           }
         }}
         className={cn(
-          "flex min-h-7 w-full cursor-pointer select-none items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
-          isError && "bg-destructive/[0.05] hover:bg-destructive/10",
+          "mb-press flex min-h-7 w-full cursor-pointer select-none items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+          isError && "hover:bg-destructive/10",
         )}
       >
-        {/* Disclosure chevron */}
-        <ChevronRight
-          className={cn(
-            "text-muted-foreground h-3.5 w-3.5 shrink-0 transition-transform duration-200",
-            expanded && "rotate-90",
-          )}
-          aria-hidden
-        />
+        {/* NO chevron, NO expand button (Task 24 spec): the row is a bare
+            icon + label; the whole row is the disclosure control. */}
 
-        {/* Tool name — a small muted glyph for recognition, then the label.
-            NO icon box, NO card border: just the name on the line. The
-            running→completed swap cross-fades (.mb-fade-in-soft keyed on the
-            phase) instead of hard-cutting (PRD §20). */}
+        {/* Tool name — a small accent glyph for recognition, then the
+            label. NO icon box, NO card border: just the name on the line.
+            The running→completed swap cross-fades (.mb-fade-in-soft keyed
+            on the phase) instead of hard-cutting (PRD §20). */}
         {isRunning ? (
           <span key="running" className="mb-fade-in-soft flex min-w-0 items-center gap-2">
             {isComposio ? (
               <ComposioToolBadge branding={branding} size={16} />
             ) : (
-              <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
+              <ToolIcon className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden />
             )}
             {/* STATIC running caption (Realtime PRD §16) — no shimmer. */}
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
@@ -1171,12 +1211,17 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
               <ToolIcon
                 className={cn(
                   "h-3.5 w-3.5 shrink-0",
-                  hasSpecialRenderer ? "text-primary" : "text-muted-foreground",
+                  isError ? "text-destructive/80" : "text-primary",
                 )}
                 aria-hidden
               />
             )}
-            <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
+            <span
+              className={cn(
+                "min-w-0 truncate text-sm font-medium",
+                isError ? "text-destructive/90" : "text-foreground/90",
+              )}
+            >
               {friendlyName}
             </span>
           </span>
@@ -1194,8 +1239,9 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           <span className={cn(chipClass, "mb-fade-in-soft shrink truncate")}>{displayHint}</span>
         ) : null}
 
-        {/* Right actions — duration badge + settle state + raw toggle. The
-            running↔settled swap cross-fades with the label above. */}
+        {/* Right actions — duration badge + settle state. The running↔settled
+            swap cross-fades with the label above. NO raw toggle on the row
+            (Task 24): the `</>` view lives INSIDE the expanded details. */}
         <span
           key={isRunning ? "live" : "done"}
           className="mb-fade-in-soft ml-auto flex shrink-0 items-center gap-0.5"
@@ -1211,28 +1257,11 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
               {isError ? (
                 <span className="text-destructive text-xs font-medium">Failed</span>
               ) : (
-                <Check className="text-primary h-3.5 w-3.5" aria-label="Done" />
+                <Check
+                  className="h-3.5 w-3.5 text-[var(--tool-ok)]"
+                  aria-label="Done"
+                />
               )}
-              <span
-                role="button"
-                tabIndex={0}
-                onClick={toggleRaw}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    toggleRaw(e as unknown as MouseEvent);
-                  }
-                }}
-                title={showRaw ? "Show formatted view" : "Show details"}
-                aria-label={showRaw ? "Show formatted view" : "Show details"}
-                className={cn(
-                  "text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                  showRaw && "text-primary",
-                )}
-              >
-                <Code2 className="h-3.5 w-3.5" />
-              </span>
             </>
           )}
         </span>
@@ -1273,6 +1302,41 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           via the CollapsePanel grid trick. */}
       <CollapsePanel open={expanded}>
         <div className="px-1.5 pt-0.5 pb-2 sm:px-2">
+          {/* DETAILS HEADER (Task 24 spec: tool name · status · duration,
+              with the raw/formatted toggle INSIDE the details — never on
+              the row). Errors surface their status here too. */}
+          {!isRunning && (
+            <div className="mb-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-foreground/10 pb-1.5">
+              <span className="min-w-0 truncate font-mono text-[10.5px] text-foreground/55">
+                {toolCall.name || "tool"}
+              </span>
+              {isError ? (
+                <span className="text-[11px] font-medium text-destructive">Failed</span>
+              ) : (
+                <span className="text-[11px] font-medium text-[var(--tool-ok)]">
+                  Completed
+                </span>
+              )}
+              <ToolDurationBadge
+                startedAt={toolCall.startedAt}
+                endedAt={toolCall.endedAt}
+              />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowRaw((r) => !r);
+                }}
+                className={cn(
+                  "ml-auto rounded-md px-1.5 py-0.5 font-mono text-[10px] transition-colors hover:bg-foreground/10",
+                  showRaw ? "text-primary" : "text-muted-foreground hover:text-foreground",
+                )}
+                aria-pressed={showRaw}
+              >
+                {showRaw ? "formatted" : "raw"}
+              </button>
+            </div>
+          )}
           {showRaw ? (
             <RawToolView toolCall={toolCall} resultText={resultText} />
           ) : isRunning ? (
