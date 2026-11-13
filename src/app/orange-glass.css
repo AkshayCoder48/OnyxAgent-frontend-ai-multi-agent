@@ -1,0 +1,558 @@
+/* =========================================================================
+   ORANGE GLASS · design layer for OnyxAgent (webapp)
+   =========================================================================
+   Single stylesheet appended AFTER the app's own styles (layout.tsx import
+   order), per the "Orange Glass — Design System & Drop-In Style Spec v1"
+   integration contract (§0):
+
+   - ZERO scripts. No app JS edited, added or deleted; no behavior, routing
+     or data flow touched. This file + ONE import line in layout.tsx is the
+     entire footprint.
+   - Appendix A (the ready-made core layer) ships verbatim below, then the
+     §13 mapping table applied to THIS app's existing selectors — nothing
+     renamed, nothing re-authored.
+   - Everything derives from ONE accent variable. Default is orange
+     (#F07E12). The app's existing brand mechanism (Settings → Appearance
+     presets / custom scheme — inline styles on <html>) overrides
+     --color-primary, which --acc follows: the whole system (gradients,
+     glows, badges, bubbles, washes) re-derives itself. Theming without
+     scripts (§0).
+   - Both .light and .dark map to the same warm-black Orange Glass canvas —
+     §2.5: no white or light-gray page backgrounds anywhere in the app.
+   ========================================================================= */
+
+/* ============ ORANGE GLASS · CORE LAYER v1 (Appendix A) ============ */
+:root {
+  --acc: #F07E12;                                          /* brand accent (orange) — follows the app's brand picker via --color-primary */
+  --acc-hi:   color-mix(in srgb, var(--acc) 45%, #fff);     /* lighter, for gradient tops */
+  --acc-xh:   color-mix(in srgb, var(--acc) 25%, #fff);     /* extra-light: icons, links, text accents */
+  --acc-pale: color-mix(in srgb, var(--acc) 65%, #fff);     /* palest: sphere highlights */
+  --acc-glow: color-mix(in srgb, var(--acc) 45%, transparent); /* every glow/shadow halo */
+  --font-ui:  -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+              "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  /* Blur values routed through variables so the CSS compiler keeps BOTH
+     the standard and the -webkit- backdrop-filter declaration (a literal
+     blur() value gets minified to the -webkit- form only, which Firefox
+     drops — same fix glass-buttons.css documents). §3.2, §3.5. */
+  --og-bf-ctl:    blur(14px) saturate(1.35);   /* grade A controls, tooltips */
+  --og-bf-card:   blur(18px) saturate(1.4);    /* card surfaces / chips */
+  --og-bf-ogcard: blur(20px) saturate(1.4);    /* grade B cards, composer dock */
+  --og-bf-dock:   blur(26px) saturate(1.4);    /* docks, headers, strong panes */
+  --og-bf-drawer: blur(28px) saturate(1.45);   /* drawers, sidebars, sheets */
+  --og-bf-hero:   blur(20px) saturate(1.2);    /* hero glass over imagery */
+  --og-bf-pop:    blur(20px) saturate(1.3);    /* popper menus */
+}
+
+/* ---- page: orange fading to warm black (§2.2) ---- */
+.og-page, body {
+  background:
+    radial-gradient(70% 34% at 50% 6%, color-mix(in srgb, var(--acc) 15%, transparent), transparent 70%),
+    radial-gradient(100% 40% at 50% 100%,
+      color-mix(in srgb, var(--acc) 34%, transparent),
+      color-mix(in srgb, var(--acc) 12%, #140400) 45%, transparent 75%),
+    linear-gradient(180deg, #0b0200 0%,
+      color-mix(in srgb, var(--acc) 10%, #000) 30%,
+      color-mix(in srgb, var(--acc) 17%, #000) 60%,
+      color-mix(in srgb, var(--acc) 26%, #000) 85%,
+      color-mix(in srgb, var(--acc) 34%, #000) 100%);
+  color: rgba(255,255,255,.9);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+
+/* ---- glass grade A · controls (§3.2) ---- */
+.og-ctl {
+  background: rgba(255,255,255,.1);
+  border: 1px solid rgba(255,255,255,.2);
+  -webkit-backdrop-filter: var(--og-bf-ctl);
+  backdrop-filter: var(--og-bf-ctl);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+  color: rgba(255,255,255,.9);
+}
+.og-ctl:hover { background: rgba(255,255,255,.19); border-color: rgba(255,255,255,.34); }
+
+/* ---- glass grade B · cards (§3.1–3.2) ---- */
+.og-card {
+  position: relative; overflow: hidden; border-radius: 15px;
+  background: rgba(255,255,255,.09);
+  border: 1px solid rgba(255,255,255,.24);
+  -webkit-backdrop-filter: var(--og-bf-ogcard);
+  backdrop-filter: var(--og-bf-ogcard);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.26), 0 10px 26px rgba(0,0,0,.28);
+  padding: 9px 10px;
+}
+.og-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(115deg,
+    rgba(255,255,255,.12) 0%, rgba(255,255,255,0) 34%,
+    rgba(255,255,255,0) 70%, rgba(255,255,255,.05) 100%);
+}
+.og-card > * { position: relative; z-index: 1; }
+
+/* ---- glass grade C · docks & drawers (§3.2) ---- */
+.og-dock {
+  background: rgba(22,9,3,.34); border: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-dock);
+  backdrop-filter: var(--og-bf-dock);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 18px 44px rgba(0,0,0,.4);
+}
+.og-drawer {
+  background: rgba(30,13,4,.34);
+  border-right: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-drawer);
+  backdrop-filter: var(--og-bf-drawer);
+  box-shadow: inset -18px 0 34px -20px rgba(0,0,0,.6), inset 1px 0 0 rgba(255,255,255,.07);
+}
+
+/* ---- glass grade D · hero over imagery (§3.2) ---- */
+.og-hero {
+  position: relative; overflow: hidden; border-radius: 30px; padding: 16px;
+  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.3);
+  -webkit-backdrop-filter: var(--og-bf-hero);
+  backdrop-filter: var(--og-bf-hero);
+  box-shadow: 0 30px 70px rgba(0,0,0,.5),
+              inset 0 1.5px 0 rgba(255,255,255,.25),
+              inset 0 -1px 0 rgba(255,255,255,.06);
+  animation: rise .8s cubic-bezier(.2,.7,.2,1) both;
+}
+.og-hero::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(115deg,
+    rgba(255,255,255,.13) 0%, rgba(255,255,255,0) 32%,
+    rgba(255,255,255,0) 68%, rgba(255,255,255,.06) 100%);
+}
+
+/* ---- active glass (§3.3) ---- */
+.og-on {
+  background: linear-gradient(180deg, rgba(255,255,255,.4), rgba(255,255,255,.2));
+  border: 1.2px solid rgba(255,255,255,.92); color: #fff;
+  box-shadow: 0 0 22px rgba(255,255,255,.16), inset 0 1px 0 rgba(255,255,255,.5);
+}
+.og-on-hero {
+  background: linear-gradient(180deg, rgba(255,255,255,.42), rgba(255,255,255,.22));
+  border: 1.5px solid rgba(255,255,255,.95);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.22), 0 10px 26px rgba(0,0,0,.3),
+              0 0 36px rgba(255,255,255,.24),
+              inset 0 1px 0 rgba(255,255,255,.55), inset 0 0 18px rgba(255,255,255,.12);
+}
+
+/* ---- CTA gradient + glow (§4.3) ---- */
+.og-cta {
+  background: linear-gradient(135deg, var(--acc-hi), var(--acc));
+  color: #fff; font-weight: 600;
+  box-shadow: 0 6px 16px var(--acc-glow), inset 0 1px 0 rgba(255,255,255,.35);
+}
+
+/* ---- glow helpers (§4) ---- */
+.og-text-acc {
+  background: linear-gradient(90deg, var(--acc-hi), var(--acc));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.og-ic-glow { color: var(--acc-xh); filter: drop-shadow(0 0 6px var(--acc-glow)); }
+.og-orb {
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 25%, var(--acc-pale) 0%, var(--acc-hi) 18%,
+    var(--acc) 45%, color-mix(in srgb, var(--acc) 60%, #300) 72%,
+    color-mix(in srgb, var(--acc) 75%, #100) 100%);
+  box-shadow: 0 0 34px var(--acc-glow),
+              0 0 90px color-mix(in srgb, var(--acc) 25%, transparent),
+              inset -6px -8px 18px color-mix(in srgb, var(--acc) 40%, #000);
+  animation: breathe 4.5s ease-in-out infinite;
+}
+
+/* ---- wells: code, fields (§7.1, §8.3) ---- */
+.og-well {
+  border-radius: 10px; background: rgba(10,4,1,.55);
+  border: 1px solid rgba(255,255,255,.09); padding: 7px 9px;
+  font-family: var(--font-mono); font-size: 8.8px; line-height: 1.7;
+  color: color-mix(in srgb, var(--acc) 32%, #fff);
+}
+.og-field {
+  border-radius: 11px; background: rgba(0,0,0,.36);
+  border: 1px solid rgba(255,255,255,.12);
+  color: rgba(255,255,255,.55);
+}
+
+/* ---- chrome (§13 table) ---- */
+::selection { background: color-mix(in srgb, var(--acc) 30%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.15) transparent; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 99px; }
+:focus-visible { outline: none; box-shadow: 0 0 0 2.5px var(--acc-glow); }
+
+/* ---- motion (§10.2) ---- */
+@keyframes breathe { 0%,100% { transform: scale(1); }    50% { transform: scale(1.045); } }
+@keyframes pulse   { 0%,100% { opacity: 1; }             50% { opacity: .3; } }
+@keyframes rise    { from { opacity: 0; transform: translateY(14px) scale(.985); }
+                      to   { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  html { scroll-behavior: auto; }
+}
+
+/* ---- no-blur fallback (§3.5) ---- */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .og-ctl, .og-card, .og-dock, .og-drawer, .og-hero { background: rgba(20,10,5,.72); }
+}
+
+/* =========================================================================
+   §13 MAPPING — OnyxAgent's existing components → Orange Glass recipes.
+   Host fonts and layout metrics stay untouched (the spec's §13 table maps
+   components, not typography; sizes/spacing are the app's own).
+   Every rule below targets selectors the app ALREADY renders.
+   ========================================================================= */
+
+/* ---- 1 · Token remap — the whole app re-derives from --acc (§1) -------
+   The app's --color-* tokens (Tailwind @theme + .light/.dark mirrors in
+   globals.css) become the Orange Glass palette. Same selector shape and
+   guards as globals.css so this layer is simply the later word. The
+   app's inline brand/custom-scheme overrides keep winning (inline > any
+   sheet), so Settings → Appearance keeps re-theming the whole design. */
+:root,
+:root.light:not(.custom-scheme),
+:root.dark:not(.custom-scheme) {
+  /* accent chain: --acc follows --color-primary (§0 theming, no scripts) */
+  --acc: var(--color-primary);
+
+  /* canvas & ink (§1.2, §1.3) — warm black, never #000, never white */
+  --color-background: #0b0200;
+  --color-foreground: rgb(255 255 255 / 0.9);
+  --color-card: #150a04;
+  --color-card-foreground: rgb(255 255 255 / 0.85);
+  --color-popover: #140903;
+  --color-popover-foreground: rgb(255 255 255 / 0.85);
+  --color-secondary: #190b04;
+  --color-secondary-foreground: rgb(255 255 255 / 0.85);
+  --color-muted: #190b04;
+  --color-muted-foreground: rgb(255 255 255 / 0.5);
+  --color-accent: rgb(255 255 255 / 0.07);   /* hover surfaces: white wash, up on hover */
+  --color-accent-foreground: #ffffff;
+  --color-border: rgb(255 255 255 / 0.14);   /* glass hairline (§1.3 ladder) */
+  --color-input: rgb(255 255 255 / 0.12);
+
+  /* brand: orange drives primary/CTAs/rings/charts */
+  --color-primary: #F07E12;
+  --color-primary-foreground: #ffffff;
+  --color-brand: #F07E12;
+  --color-brand-hover: color-mix(in srgb, #F07E12 85%, #000);
+  --color-brand-foreground: #ffffff;
+  --color-brand-muted: color-mix(in srgb, #F07E12 55%, #000);
+  --color-ring: var(--acc);
+  --color-chart: var(--acc);
+
+  /* status colors — fixed, not accent-derived (§1.4) */
+  --color-destructive: #FFA9A9;
+  --color-destructive-foreground: #1c0605;
+
+  /* chat surfaces (globals.css §"Chat bubble colors") */
+  --chat-user-bg: var(--acc);                       /* inline bubble backgroundColor → orange */
+  --chat-user-fg: #ffffff;
+  --chat-user-border: color-mix(in srgb, var(--acc) 55%, transparent);
+  --chat-assistant-bg: transparent;                 /* assistant stays frameless (§8.8) */
+  --chat-assistant-fg: rgb(255 255 255 / 0.9);
+  --chat-code-bg: rgb(10 4 1 / 0.55);               /* §7.1 code well */
+  --chat-code-header-bg: rgb(10 4 1 / 0.72);
+  --chat-code-fg: color-mix(in srgb, var(--acc) 32%, #fff);
+
+  /* tactile primitives (globals.css) — "on" = CTA gradient, LED mint (§8.9, §1.4) */
+  --switch-track-active: var(--acc);
+  --switch-indicator-active: #8FE3AE;
+  --checkbox-checked: var(--acc);
+  --checkbox-checked-glow: var(--acc-glow);
+}
+
+/* ---- 2 · Page paint (§2.2 on body; §2.3 grades per screen) ---------- */
+html { background: #0b0200; }   /* no white flash / overscroll (§14) */
+
+/* Onboarding/welcome screens — center halo grade (§2.3 Onboard):
+   auth screens, onboarding flow, app loading state. */
+div.min-h-screen.bg-background {
+  background:
+    radial-gradient(90% 50% at 50% 26%,
+      color-mix(in srgb, var(--acc) 48%, transparent), transparent 72%),
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--acc) 30%, #000) 0%, #0a0300 55%, #050100 100%);
+}
+
+/* Utility screens — settings overlay (§2.3 Plain). */
+div.h-dvh.bg-background {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--acc) 24%, #000) 0%, color-mix(in srgb, var(--acc) 9%, #000) 18%,
+    #0a0301 46%, #050100 100%);
+}
+
+/* ---- 3 · Fixed chrome → glass grades (§13 table) --------------------- */
+
+/* Header — grade C dock glass over the hot top of the page (§3.2 C). */
+.glass-header {
+  background: rgba(22,9,3,.34);
+  border-bottom: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-dock);
+  backdrop-filter: var(--og-bf-dock);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 18px 44px rgba(0,0,0,.4);
+}
+
+/* Nav drawer / sidebar — grade C drawer glass (§8.6). */
+.conv-sidebar {
+  background: rgba(30,13,4,.34);
+  border-right: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-drawer);
+  backdrop-filter: var(--og-bf-drawer);
+  box-shadow: inset -18px 0 34px -20px rgba(0,0,0,.6), inset 1px 0 0 rgba(255,255,255,.07);
+}
+
+/* Mobile sheets — same drawer recipe (they anchor to an edge). */
+div.fixed.inset-y-0.bg-background {
+  background: rgba(30,13,4,.34);
+  border-right: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-drawer);
+  backdrop-filter: var(--og-bf-drawer);
+  box-shadow: inset -18px 0 34px -20px rgba(0,0,0,.6), inset 1px 0 0 rgba(255,255,255,.07);
+}
+
+/* Cards / panels / tiles — grade B card glass + sheen (§3.1 six layers).
+   .glass-card is the composer dock AND the floating strips; .bg-card is
+   every Card surface and chip tile. */
+.glass-card {
+  position: relative; overflow: hidden;
+  background: rgba(255,255,255,.09);
+  border: 1px solid rgba(255,255,255,.24);
+  -webkit-backdrop-filter: var(--og-bf-ogcard);
+  backdrop-filter: var(--og-bf-ogcard);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.26), 0 10px 26px rgba(0,0,0,.28);
+}
+.glass-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(115deg,
+    rgba(255,255,255,.12) 0%, rgba(255,255,255,0) 34%,
+    rgba(255,255,255,0) 70%, rgba(255,255,255,.05) 100%);
+}
+.glass-card > * { position: relative; z-index: 1; }
+
+/* Composer focus — the ring reads as a light source (§8.3). */
+.glass-card:focus-within {
+  border-color: color-mix(in srgb, var(--acc) 45%, transparent);
+  box-shadow: 0 0 0 2.5px var(--acc-glow),
+              inset 0 1px 0 rgba(255,255,255,.26),
+              0 10px 26px rgba(0,0,0,.28);
+}
+
+.bg-card {
+  position: relative;
+  background: rgba(255,255,255,.09);
+  border: 1px solid rgba(255,255,255,.2);
+  -webkit-backdrop-filter: var(--og-bf-card);
+  backdrop-filter: var(--og-bf-card);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.26), 0 10px 26px rgba(0,0,0,.28);
+}
+
+/* Strong pane (unused today, kept mapped) — deep tinted glass. */
+.glass-strong {
+  background: rgba(22,9,3,.34);
+  border: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: var(--og-bf-dock);
+  backdrop-filter: var(--og-bf-dock);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 18px 44px rgba(0,0,0,.4);
+}
+
+/* ---- 4 · Overlays — grade D hero glass + rise entrance (§3.2 D, §10) -
+   Radix dialogs / alert-dialogs carry role="dialog"; Radix popper-based
+   menus (dropdown, popover, select, hover-card, context-menu, palette)
+   render inside [data-radix-popper-content-wrapper]. */
+[role="dialog"] {
+  position: relative; overflow: hidden;
+  background: rgba(255,255,255,.14);
+  border: 1px solid rgba(255,255,255,.3);
+  -webkit-backdrop-filter: var(--og-bf-hero);
+  backdrop-filter: var(--og-bf-hero);
+  box-shadow: 0 30px 70px rgba(0,0,0,.5),
+              inset 0 1.5px 0 rgba(255,255,255,.25),
+              inset 0 -1px 0 rgba(255,255,255,.06);
+  animation: rise .8s cubic-bezier(.2,.7,.2,1) both;
+}
+[role="dialog"]::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(115deg,
+    rgba(255,255,255,.13) 0%, rgba(255,255,255,0) 32%,
+    rgba(255,255,255,0) 68%, rgba(255,255,255,.06) 100%);
+}
+[role="dialog"] > * { position: relative; z-index: 1; }
+
+[data-radix-popper-content-wrapper] > * {
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.26);
+  -webkit-backdrop-filter: var(--og-bf-pop);
+  backdrop-filter: var(--og-bf-pop);
+  box-shadow: 0 30px 70px rgba(0,0,0,.5),
+              inset 0 1.5px 0 rgba(255,255,255,.25);
+  animation: rise .8s cubic-bezier(.2,.7,.2,1) both;
+}
+
+/* Tooltips — small hero panes (§3.4: gets glass). */
+[role="tooltip"] {
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.26);
+  -webkit-backdrop-filter: var(--og-bf-ctl);
+  backdrop-filter: var(--og-bf-ctl);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22), 0 10px 26px rgba(0,0,0,.28);
+}
+
+/* ---- 5 · Buttons (§8.1) ----------------------------------------------
+   Primary CTA: the orange gradient, ALWAYS 135deg, with its halo.
+   Secondary/outline: grade A control glass. Ghost stays quiet. */
+button.bg-primary,
+a.bg-primary {
+  background: linear-gradient(135deg, var(--acc-hi), var(--acc));
+  color: #fff;
+  border: 1px solid transparent;
+  box-shadow: 0 6px 16px var(--acc-glow), inset 0 1px 0 rgba(255,255,255,.35);
+  transition: box-shadow .18s ease, filter .18s ease;
+}
+button.bg-primary:hover,
+a.bg-primary:hover {
+  filter: saturate(1.08) brightness(1.06);
+  box-shadow: 0 8px 20px var(--acc-glow), inset 0 1px 0 rgba(255,255,255,.35);
+}
+button.bg-primary:active,
+a.bg-primary:active { filter: brightness(.96); }
+
+/* Badge-family surfaces carrying the primary fill (div, not button):
+   tinted badge, not a CTA (§8.2). */
+div.bg-primary {
+  background: color-mix(in srgb, var(--acc) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--acc) 40%, transparent);
+  color: var(--acc-xh);
+}
+
+/* Secondary + outline buttons — control glass (§3.2 A). */
+button.bg-secondary,
+button.bg-background {
+  background: rgba(255,255,255,.1);
+  border: 1px solid rgba(255,255,255,.2);
+  -webkit-backdrop-filter: var(--og-bf-ctl);
+  backdrop-filter: var(--og-bf-ctl);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+  color: rgba(255,255,255,.9);
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+button.bg-secondary:hover,
+button.bg-background:hover {
+  background: rgba(255,255,255,.19);
+  border-color: rgba(255,255,255,.34);
+}
+
+/* ---- 6 · Inputs (§8.3) -----------------------------------------------
+   Resting = recessed dark well (NOT glass; wells sit in the screen).
+   Focus ring comes from the global :focus-visible rule (§12). The
+   composer textarea is untouched — its dock is the glass pane. */
+input.border-input,
+textarea.border-input {
+  background: rgba(0,0,0,.36);
+  border: 1px solid rgba(255,255,255,.12);
+  color: rgba(255,255,255,.76);
+  box-shadow: none;
+}
+input.border-input::placeholder,
+textarea.border-input::placeholder { color: rgb(255 255 255 / 0.42); }
+input.border-input:focus,
+textarea.border-input:focus {
+  background: rgba(0,0,0,.38);
+  border-color: color-mix(in srgb, var(--acc) 45%, transparent);
+  color: #fff;
+}
+
+/* The sidebar search field (bg-background class form input). */
+input.bg-background {
+  background: rgba(0,0,0,.36);
+  border: 1px solid rgba(255,255,255,.12);
+  color: rgba(255,255,255,.76);
+}
+input.bg-background:focus {
+  background: rgba(0,0,0,.38);
+  border-color: color-mix(in srgb, var(--acc) 45%, transparent);
+  color: #fff;
+}
+
+/* ---- 7 · Chat (§8.8) --------------------------------------------------
+   User turn: gradient bubble with the tail (inline backgroundColor is
+   covered by the --chat-user-bg remap; this adds the 135° gradient as a
+   background-image, which paints over the flat color). */
+[style*="--chat-user-bg"] {
+  background-image: linear-gradient(135deg, var(--acc-hi), var(--acc));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--acc) 35%, transparent);
+}
+
+/* Brand headline — the "O" in OnyxAgent gets the gradient glyphs (§4.1). */
+.onyx-logo-o {
+  background: linear-gradient(90deg, var(--acc-hi), var(--acc));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+
+/* Brand/AI orb (the assistant's lattice orb) — accent glow (§4.2).
+   CSS-module classes are matched by stable local-name substring. */
+[class*="Orb-module__root"] {
+  color: var(--acc-xh);
+  filter: drop-shadow(0 0 6px var(--acc-glow));
+}
+
+/* ---- 8 · Code surfaces (§7.1, §7.2) --------------------------------- */
+.chat-code {
+  border: 1px solid rgba(255,255,255,.09);
+}
+:root .hljs { color: color-mix(in srgb, var(--acc) 32%, #fff); }
+:root .hljs-comment,
+:root .hljs-quote { color: rgb(255 255 255 / 0.34); font-style: italic; }
+:root .hljs-keyword,
+:root .hljs-selector-tag,
+:root .hljs-literal,
+:root .hljs-section,
+:root .hljs-name,
+:root .hljs-tag,
+:root .hljs-string,
+:root .hljs-attr,
+:root .hljs-attribute,
+:root .hljs-selector-attr { color: color-mix(in srgb, var(--acc) 55%, #fff); }
+:root .hljs-number,
+:root .hljs-symbol,
+:root .hljs-bullet,
+:root .hljs-link { color: #8FE3AE; }
+:root .hljs-addition { color: #9FE8BB; background-color: rgb(110 220 150 / 0.11); }
+:root .hljs-deletion { color: #FFA9A9; background-color: rgb(255 110 110 / 0.1); }
+:root .hljs-title,
+:root .hljs-title.function_ { color: rgb(255 255 255 / 0.9); }
+
+/* ---- 9 · Progress (§8.9) --------------------------------------------- */
+[role="progressbar"] {
+  background: rgba(255,255,255,.12);
+  border: none;
+}
+[role="progressbar"] > * {
+  background: linear-gradient(90deg, var(--acc-hi), var(--acc));
+  box-shadow: 0 0 8px var(--acc-glow);
+}
+
+/* ---- 10 · Hairline rows (§8.5) — conversation rows already carry the
+   app's own hover treatment; the hairline lift: */
+.conv-sidebar .group:hover,
+.conv-sidebar a:hover {
+  border-color: rgba(255,255,255,.17);
+}
+
+/* ---- 11 · Ambient section dividers (§2.4) — rules that fade from accent */
+.group-label::before,
+.group-label::after { background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--acc) 45%, transparent)); }
+
+/* ---- 12 · No-blur fallback for every mapped surface (§3.5) ---------- */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-header, .conv-sidebar, .glass-strong,
+  div.fixed.inset-y-0.bg-background { background: rgba(20,10,5,.72); }
+  .glass-card, .bg-card { background: rgba(20,10,5,.72); }
+  [role="dialog"], [data-radix-popper-content-wrapper] > *, [role="tooltip"] { background: rgba(20,10,5,.72); }
+  button.bg-secondary, button.bg-background { background: rgba(20,10,5,.72); }
+}

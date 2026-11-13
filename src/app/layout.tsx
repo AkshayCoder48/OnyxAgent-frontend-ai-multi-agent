@@ -1,5 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+// Orange Glass design layer (DESIGN.md spec) — one stylesheet appended
+// AFTER the app's own styles; wins the cascade without touching any JS.
+import "./orange-glass.css";
 import { defaultLocale } from "@/i18n";
 import { SITE } from "@/lib/seo";
 
