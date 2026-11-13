@@ -26,12 +26,23 @@
 
 /** Persistence keys. */
 export const BACKGROUND_KEY = "onyx.app-background";
+export const GLOW_KEY = "onyx.app-glow";
 export const FONT_KEY = "settings.font-size";
 /** Legacy keys from the removed preset pickers — cleared at boot + reset. */
-const LEGACY_KEYS = ["settings.brand", "onyx-color-scheme"] as const;
+const LEGACY_KEYS = [
+  "settings.brand",
+  "onyx-color-scheme",
+  // The removed orb-customization picker (2026-11-14) — its persisted
+  // personality is wiped so the orb returns to its default reactions.
+  "onyx-orb-personality",
+] as const;
 
 /** The default canvas — the Orange Glass warm black (DESIGN.md §1). */
 export const DEFAULT_BACKGROUND = "#0b0200";
+/** The default glow-source colour — the brand orange. The two radial glow
+ *  washes painted on the page (top + bottom) use this hue; the picker in
+ *  Settings → Appearance can retint it (2026-11-14). */
+export const DEFAULT_GLOW = "#f07e12";
 
 /** Font-size map (Settings → Appearance → Advanced). */
 const FONT_SIZE_MAP: Record<string, string> = {
@@ -245,6 +256,43 @@ export function clearBackground(): void {
   root.classList.remove("custom-canvas");
 }
 
+/** Apply a custom glow-source colour: retints the page's radial glow
+ *  washes (top + bottom) without touching the canvas or any component.
+ *  Unset → the CSS falls back to the brand orange (--acc). */
+export function applyGlow(hex: string): void {
+  if (typeof document === "undefined") return;
+  const rgb = parseHex(hex);
+  if (!rgb) return;
+  document.documentElement.style.setProperty("--glow-color", toHex(rgb));
+}
+
+/** Remove the custom glow colour (back to the brand-orange glow). */
+export function clearGlow(): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.removeProperty("--glow-color");
+}
+
+/** Persist + apply a glow-colour choice. */
+export function selectGlow(hex: string): void {
+  applyGlow(hex);
+  try {
+    localStorage.setItem(GLOW_KEY, hex);
+  } catch {
+    /* storage unavailable — session-only */
+  }
+}
+
+/** The persisted glow colour, or null when the default orange is active. */
+export function readPersistedGlow(): string | null {
+  try {
+    const raw = localStorage.getItem(GLOW_KEY);
+    if (raw && parseHex(raw)) return raw;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 /** Persist + apply a background choice. */
 export function selectBackground(hex: string): void {
   applyBackground(hex);
@@ -304,6 +352,8 @@ export function applyPersistedAppearance(): void {
   clearLegacyKeys();
   const bg = readPersistedBackground();
   if (bg) applyBackground(bg);
+  const glow = readPersistedGlow();
+  if (glow) applyGlow(glow);
   applyPersistedFont();
 }
 
@@ -316,11 +366,13 @@ export function resetAppearance(): void {
   clearLegacyKeys();
   try {
     localStorage.removeItem(BACKGROUND_KEY);
+    localStorage.removeItem(GLOW_KEY);
     localStorage.removeItem(FONT_KEY);
   } catch {
     /* ignore */
   }
   clearBackground();
+  clearGlow();
   if (typeof document !== "undefined") {
     document.documentElement.style.removeProperty("font-size");
   }

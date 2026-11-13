@@ -8,16 +8,19 @@ import { cn } from "@/lib/utils";
 import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
 import {
   DEFAULT_BACKGROUND,
+  DEFAULT_GLOW,
   FONT_KEY,
   readPersistedBackground,
+  readPersistedGlow,
   resetAppearance,
   selectBackground,
+  selectGlow,
   clearBackground,
+  clearGlow,
   relativeLuminance,
 } from "@/lib/appearance";
 import { Label } from "@/components/ui/label";
 import { MoreOptions } from "@/components/settings/more-options";
-import { OrbPersonalitySettings } from "@/components/assistant-ui/elements";
 import {
   Select,
   SelectContent,
@@ -65,6 +68,18 @@ const CANVAS_SWATCHES: { label: string; hex: string }[] = [
   { label: "Cloud", hex: "#eef1f4" },
 ];
 
+/** Curated glow-source swatches — the brand orange first, then a few
+ *  hues that read well as washes (these tint the GLOW only; the canvas
+ *  and every component stay untouched). */
+const GLOW_SWATCHES: { label: string; hex: string }[] = [
+  { label: "Onyx orange (default)", hex: DEFAULT_GLOW },
+  { label: "Ember", hex: "#e5484d" },
+  { label: "Magenta", hex: "#d6409f" },
+  { label: "Violet", hex: "#8e4ec6" },
+  { label: "Cyan", hex: "#0091ff" },
+  { label: "Mint", hex: "#30a46c" },
+];
+
 function isValidHex(v: string): boolean {
   return /^#?[0-9a-f]{6}$/i.test(v.trim());
 }
@@ -80,6 +95,8 @@ export function SectionAppearance() {
   const [mounted, setMounted] = React.useState(false);
   const [background, setBackground] = React.useState<string | null>(null);
   const [hexDraft, setHexDraft] = React.useState("");
+  const [glow, setGlow] = React.useState<string | null>(null);
+  const [glowDraft, setGlowDraft] = React.useState("");
   const [fontSize, setFontSize] = React.useState<FontSize>("base");
   const [confirmReset, setConfirmReset] = React.useState(false);
 
@@ -88,6 +105,9 @@ export function SectionAppearance() {
     const savedBg = readPersistedBackground();
     setBackground(savedBg);
     setHexDraft(savedBg ?? DEFAULT_BACKGROUND);
+    const savedGlow = readPersistedGlow();
+    setGlow(savedGlow);
+    setGlowDraft(savedGlow ?? DEFAULT_GLOW);
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
     setFontSize(savedFont);
     if (savedFont !== "base") {
@@ -112,6 +132,28 @@ export function SectionAppearance() {
     setHexDraft(DEFAULT_BACKGROUND);
     clearBackground();
     toast.success("Default background restored");
+  }
+
+  function handleGlow(hex: string) {
+    const normalized = normalizeHex(hex);
+    setGlow(normalized);
+    setGlowDraft(normalized);
+    selectGlow(normalized);
+  }
+
+  function handleDefaultGlow() {
+    setGlow(null);
+    setGlowDraft(DEFAULT_GLOW);
+    clearGlow();
+    toast.success("Default glow restored");
+  }
+
+  function handleGlowDraftCommit() {
+    if (!isValidHex(glowDraft)) {
+      setGlowDraft(glow ?? DEFAULT_GLOW);
+      return;
+    }
+    handleGlow(glowDraft);
   }
 
   function handleHexDraftCommit() {
@@ -141,6 +183,8 @@ export function SectionAppearance() {
     resetAppearance();
     setBackground(null);
     setHexDraft(DEFAULT_BACKGROUND);
+    setGlow(null);
+    setGlowDraft(DEFAULT_GLOW);
     setFontSize("base");
     setConfirmReset(false);
     toast.success("Appearance reset to defaults");
@@ -294,6 +338,107 @@ export function SectionAppearance() {
         </p>
       </section>
 
+      {/* ── Background glow (the glow-source colour picker, 2026-11-14) ── */}
+      <section className="space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold">Background glow</h3>
+          <p className="text-muted-foreground text-xs">
+            The colour of the soft glow that washes over the canvas. Works with the default
+            and custom backgrounds — only the glow tints, nothing else.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {/* Live preview — the glow wash over the current canvas. */}
+          <div
+            aria-hidden
+            className="relative flex h-11 w-full max-w-[220px] items-center gap-2.5 overflow-hidden rounded-xl border px-3"
+            style={{
+              background: `radial-gradient(120% 80% at 80% 0%, ${(glow ?? DEFAULT_GLOW) + "55"}, transparent 70%), ${isDefaultBg ? DEFAULT_BACKGROUND : background ?? DEFAULT_BACKGROUND}`,
+              borderColor: "color-mix(in srgb, currentColor 14%, transparent)",
+              color: previewInk,
+            }}
+          >
+            <span className="text-xs font-semibold">Aa</span>
+            <span className="text-[11px] opacity-70">
+              {glow === null ? `Default · ${DEFAULT_GLOW}` : glow}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label
+              className="relative inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium transition-colors hover:bg-accent/50"
+              title="Pick a glow colour"
+            >
+              <span
+                aria-hidden
+                className="h-4 w-4 rounded-full border border-black/10"
+                style={{ background: `radial-gradient(circle, #fff2 20%, transparent), ${glow ?? DEFAULT_GLOW}` }}
+              />
+              Pick colour
+              <input
+                type="color"
+                value={glow ?? DEFAULT_GLOW}
+                onChange={(e) => handleGlow(e.target.value)}
+                className="absolute inset-0 cursor-pointer opacity-0"
+                aria-label="Glow colour picker"
+              />
+            </label>
+
+            <input
+              type="text"
+              value={glowDraft}
+              onChange={(e) => setGlowDraft(e.target.value)}
+              onBlur={handleGlowDraftCommit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleGlowDraftCommit();
+                }
+              }}
+              spellCheck={false}
+              maxLength={7}
+              aria-label="Glow hex colour"
+              className="border-input bg-background/40 h-9 w-[92px] rounded-lg border px-2.5 font-mono text-xs lowercase"
+            />
+          </div>
+        </div>
+
+        {/* Curated glow swatches. */}
+        <div className="flex flex-wrap gap-2">
+          {GLOW_SWATCHES.map((sw) => {
+            const selected = glow === sw.hex;
+            const isDefaultSwatch = sw.hex === DEFAULT_GLOW && glow === null;
+            return (
+              <button
+                key={sw.hex}
+                type="button"
+                onClick={() =>
+                  isDefaultSwatch ? handleDefaultGlow() : handleGlow(sw.hex)
+                }
+                aria-label={sw.label}
+                aria-pressed={selected || isDefaultSwatch}
+                title={sw.label}
+                className={cn(
+                  "relative flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors",
+                  selected || isDefaultSwatch
+                    ? "border-primary text-foreground"
+                    : "border-border hover:bg-accent/50",
+                )}
+              >
+                <span
+                  aria-hidden
+                  className="size-4 rounded-full border border-black/10"
+                  style={{ background: `radial-gradient(circle, #fff3 25%, transparent), ${sw.hex}` }}
+                />
+                {sw.label.replace(" (default)", "")}
+                {(selected || isDefaultSwatch) && <Check className="size-3.5" />}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
       {/* ── Reset appearance (PRD §1.3) ── */}
       <section className="space-y-3">
         <div>
@@ -346,8 +491,9 @@ export function SectionAppearance() {
         </section>
       </MoreOptions>
 
-      {/* Orb personalities (feature parity — same panel the chat orb uses). */}
-      <OrbPersonalitySettings />
+      {/* Orb customization removed (user directive 2026-11-14) — the orb
+          keeps its default reactions everywhere; the settings block and its
+          persisted key (onyx-orb-personality, wiped at boot) are gone. */}
     </div>
   );
 }

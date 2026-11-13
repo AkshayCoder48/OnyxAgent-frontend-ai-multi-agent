@@ -26,7 +26,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { chipClass, CollapsePanel, LetterStream, useTypewriter } from "@/components/assistant-ui/elements";
-import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { toolCaption } from "@/lib/agent-step-captions";
 import { friendlyStep } from "@/lib/agent-friendly-steps";
 import { toolDisplayName } from "@/lib/tool-display-names";
@@ -35,8 +34,8 @@ import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
 import { ToolDurationBadge, ToolLiveElapsed } from "./tool-duration";
-import { SkipWaitButton } from "./skip-wait-button";
 import { ChartMessage, parseChartResult } from "./chart-message";
+import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { DateTimeResult } from "./tool-results/datetime";
 import { RAGSearchResults } from "./tool-results/rag";
 import { WebSearchResults, parseWebSearch } from "./tool-results/web-search";
@@ -243,7 +242,6 @@ function LiveWritePreview({
       <div className="flex items-center justify-between gap-2 border-b border-foreground/8 px-2.5 py-1.5">
         <span className="flex min-w-0 items-center gap-1.5 text-[10px] font-medium tracking-wide uppercase text-muted-foreground">
           <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary/80" aria-hidden />
-          <span className="shrink-0">Writing</span>
           {label && (
             <span className="min-w-0 truncate font-mono normal-case tracking-normal text-foreground/60">{label}</span>
           )}
@@ -477,8 +475,8 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
     <div data-slot="tool-call" className="step-card-in min-w-0 max-w-full">
       {/* The row — icon + friendly sentence + status. The WHOLE row toggles
           the details (no chevron, no separate button). A div with
-          role="button" (NOT a native <button>): the running branch nests
-          SkipWaitButton, and HTML forbids button-in-button. */}
+          role="button" (NOT a native <button>): keeps full a11y while the
+          nested details may hold interactive elements. */}
       <div
         role="button"
         tabIndex={0}
@@ -517,24 +515,19 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
         {isRunning ? (
           <>
             {/* STATIC running caption (Realtime PRD §16): plain foreground
-                text — never a shimmer (the shimmer made the caption dull/
-                invisible on the black canvas). Liveness = the spinner glyph
-                + elapsed badge. */}
+                text — never a shimmer. Liveness = the elapsed badge. */}
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
               {liveCaption}
             </span>
             {/* Live streamed-arg hint (Runtime PRD §21–§23): the real
                 path/URL/key from the PARTIAL arguments — visible the moment
-                it exists in the arg stream, never a fabricated filename. */}
+                it exists in the arg stream, never a fabricated filename.
+                No "preparing arguments" filler while it hasn't arrived
+                (clean row, 2026-11-14). */}
             {liveHint ? (
               <span className="font-mono text-xs text-foreground/60 max-w-[45%] truncate">{liveHint}</span>
-            ) : (
-              <span className="text-xs text-muted-foreground/80">
-                {livePhase === "generating" ? "preparing arguments…" : ""}
-              </span>
-            )}
+            ) : null}
             <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
-            <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
           </>
         ) : (
           <>
@@ -1114,7 +1107,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   // Plain-language running caption (UI-only names — see tool-display-names).
   const liveCaption = toolCaption(toolCall.name);
   // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28).
-  const { hint: liveHint, phase: livePhase } = useMemo(
+  const { hint: liveHint } = useMemo(
     () => liveArgsPhase(toolCall),
     [toolCall],
   );
@@ -1131,11 +1124,9 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
         isError && "rounded-lg",
       )}
     >
-      {/* NOT a native <button>: the running branch nests interactive
-          children (SkipWaitButton renders a real <button>) and HTML
-          forbids button-in-button — that exact nesting threw a React
-          hydration error. A div with role="button" + keyboard activation
-          keeps full a11y while allowing nested interactives. */}
+      {/* NOT a native <button>: a div with role="button" + keyboard
+          activation keeps full a11y while allowing nested interactive
+          elements inside the details (button-in-button is invalid HTML). */}
       <div
         role="button"
         tabIndex={0}
@@ -1203,7 +1194,6 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
             stream); once settled it shows the final primary arg. */}
         {isRunning && liveHint ? (
           <span className={cn(chipClass, "shrink truncate font-mono")}>
-            <span className="text-muted-foreground/70">{livePhase === "generating" ? "· writing args ·" : "·"}</span>
             <span className="ml-1 truncate">{liveHint}</span>
           </span>
         ) : displayHint && !isRunning ? (
@@ -1220,7 +1210,6 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           {isRunning ? (
             <>
               <ToolLiveElapsed startedAt={toolCall.startedAt} />
-              <SkipWaitButton toolCall={toolCall} turnId={turnId} className="ml-1" />
             </>
           ) : (
             <>
@@ -1469,14 +1458,11 @@ function RunningToolPanel({
 
   return (
     <div className="space-y-3 py-2">
-      {/* Header — tool name + spinner + skip-wait */}
+      {/* Header — tool name + spinner. */}
       <div className="flex items-center gap-2.5">
         <Loader2 className="text-primary h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
         <span className="text-foreground/90 text-sm font-medium">
           {liveCaptionForPanel}
-        </span>
-        <span className="ml-auto">
-          <SkipWaitButton toolCall={toolCall} turnId={turnId} />
         </span>
       </div>
 

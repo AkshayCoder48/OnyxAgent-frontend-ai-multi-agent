@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { render, cleanup, fireEvent } from "@testing-library/react";
 import React from "react";
-import { ToolStackGroup } from "./tool-stack-group";
+import { ToolStackGroup, stackSummary } from "./tool-stack-group";
 import type { ToolCall } from "@/types";
 
 const tc = (id: string, status: ToolCall["status"], name = "web_search"): ToolCall =>
@@ -15,6 +15,18 @@ const tc = (id: string, status: ToolCall["status"], name = "web_search"): ToolCa
     args: {},
     status,
     result: "{}",
+    startedAt: 1000,
+    endedAt: 2000,
+  }) as unknown as ToolCall;
+
+/** A create_file call with a target path + a landed/error result. */
+const fileCreate = (id: string, path: string, ok = true): ToolCall =>
+  ({
+    id,
+    name: "create_file",
+    args: { path },
+    status: "completed",
+    result: ok ? '{"ok":true}' : '{"error":"disk full"}',
     startedAt: 1000,
     endedAt: 2000,
   }) as unknown as ToolCall;
@@ -163,6 +175,91 @@ describe("ToolStackGroup (combined tools UI)", () => {
       </ToolStackGroup>,
     );
     expect(getByText("Used 2 tools")).toBeTruthy();
+    cleanup();
+  });
+
+  // ── SMART CAPTIONS (2026-11-14 — "creating a file is saying used files 😂") ──
+
+  it("an all-creation stack reads 'Created N files' — never 'Used N tools'", () => {
+    const { container } = render(
+      <ToolStackGroup
+        toolCalls={[
+          fileCreate("a", "src/App.tsx"),
+          fileCreate("b", "src/lib.ts"),
+          fileCreate("c", "index.html"),
+        ]}
+      >
+        <Row label="x" />
+      </ToolStackGroup>,
+    );
+    expect(container.textContent).toContain("Created 3 files");
+    expect(container.textContent).not.toContain("Used 3 tools");
+    cleanup();
+  });
+
+  it("chunked writes to the same path count as ONE file", () => {
+    const { container } = render(
+      <ToolStackGroup
+        toolCalls={[
+          { ...fileCreate("a", "big.ts") },
+          { ...fileCreate("a2", "big.ts", true), name: "create_file_chunk" },
+          { ...fileCreate("a3", "big.ts", true), name: "create_file_chunk" },
+        ]}
+      >
+        <Row label="x" />
+      </ToolStackGroup>,
+    );
+    expect(container.textContent).toContain("Created 1 file");
+    cleanup();
+  });
+
+  it("error results are not counted as landed files", () => {
+    const { container } = render(
+      <ToolStackGroup
+        toolCalls={[fileCreate("a", "x.ts"), fileCreate("b", "y.ts", false)]}
+      >
+        <Row label="x" />
+      </ToolStackGroup>,
+    );
+    // Only 1 of 2 landed → mixed run phrasing (1 creation ≠ all units).
+    expect(container.textContent).toContain("Used 2 tools");
+    expect(container.textContent).toContain("created 1 file");
+    cleanup();
+  });
+
+  it("mixed runs read 'Used N tools · created N files · edited N file'", () => {
+    const calls = [
+      fileCreate("a", "src/App.tsx"),
+      fileCreate("b", "src/lib.ts"),
+      { ...tc("e", "completed", "edit_file"), args: { path: "README.md" } },
+      tc("w", "completed", "web_search"),
+    ];
+    const { container } = render(
+      <ToolStackGroup toolCalls={calls}>
+        <Row label="x" />
+      </ToolStackGroup>,
+    );
+    expect(container.textContent).toContain("Used 4 tools");
+    expect(container.textContent).toContain("created 2 files");
+    expect(container.textContent).toContain("edited 1 file");
+    cleanup();
+  });
+
+  it("the umbrella 'files' tool resolves to create_file for the caption", () => {
+    const umbrella = (id: string, path: string): ToolCall =>
+      ({
+        id,
+        name: "files",
+        args: { action: "create_file", path },
+        status: "completed",
+        result: '{"ok":true}',
+        startedAt: 1000,
+        endedAt: 2000,
+      }) as unknown as ToolCall;
+    // Two umbrella creates → all-creation run → "Created 2 files".
+    expect(stackSummary([umbrella("u1", "a.ts"), umbrella("u2", "b.ts")])).toBe(
+      "Created 2 files",
+    );
     cleanup();
   });
 });

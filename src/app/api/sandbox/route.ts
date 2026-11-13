@@ -32,7 +32,7 @@ import { Sandbox } from "@e2b/code-interpreter";
 // not a short stub.
 import { ONYX_MD } from "@/lib/agent/onyx-md";
 import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
-import { attachMasterSkills, ensureMasterSkillsInBackground } from "@/lib/e2b/attach-master-skills";
+import { ensureMasterSkillsInBackground } from "@/lib/e2b/attach-master-skills";
 // HEADLESS SANDBOX AGENT ("close and resume"): the detached Python
 // orchestration loop + its protocol file paths. See
 // src/lib/e2b/headless-agent.ts for the full architecture notes.
@@ -1301,14 +1301,13 @@ async function createAndCacheSandbox(
     // best-effort — file may already exist or write may fail
   }
 
-  // MASTER SKILL LIBRARY (user request 2026-10-19): attach the whole
-  // 55-skill library zip to EVERY fresh sandbox — extracted over
-  // /home/user/skills/ with MASTER-INDEX.md at its root. The AI's fixed
-  // startup rule (Onyx.md + system prompt) reads that index and picks
-  // skills BY NAME. Best-effort: a failed attach logs and continues; the
-  // version-gate paths in getSandbox retry on the next use.
-  await attachMasterSkills(sandbox);
-
+  // CACHE IMMEDIATELY after Onyx.md — the heavy extras below must NEVER
+  // sit between a tool call and its sandbox (the "simple tools take 2-3
+  // minutes" fix, cold-start edition 2026-11-14): the 2 MB master-skills
+  // write + extract (90 s ceiling) and the browser-runtime kick (~15 s)
+  // now land in the BACKGROUND while the user chats. A first `ls` /
+  // `verify_path` / `list_files` returns as soon as the sandbox exists
+  // with its workspace folders + Onyx.md — seconds, not minutes.
   const key = cacheKey(apiKey, conversationId, mode);
   const entry: CacheEntry = {
     sandbox,
@@ -1321,12 +1320,18 @@ async function createAndCacheSandbox(
   };
   getCache(mode).set(key, entry);
 
-  // BROWSER RUNTIME PREPARE — kicked AT CREATION so the CloakBrowser
-  // runtime + binary download install in the background while the user
-  // chats (best-effort + bounded; see prepareBrowserRuntime above). On the
-  // onyx-cloakbrowser template this only starts the driver + browser
-  // preboot — effectively instant.
-  await prepareBrowserRuntime(sandbox);
+  // MASTER SKILL LIBRARY — background attach (deduped + failure backoff
+  // inside ensureMasterSkillsInBackground). Same semantics as the
+  // reconnect paths: the library lands while the user chats, and the
+  // skill tools retry on next use if they beat it.
+  ensureMasterSkillsInBackground(sandbox);
+
+  // BROWSER RUNTIME PREPARE — best-effort background kick (CloakBrowser
+  // driver + boot.sh under the detached Popen launcher). The
+  // client-side ensureBrowserDriver path re-deploys on first use anyway.
+  void prepareBrowserRuntime(sandbox).catch(() => {
+    /* best-effort by design */
+  });
 
   return sandbox;
 }

@@ -48,7 +48,6 @@ export {
   usePrefersReducedMotion,
   type PersonalityOrbProps,
 } from "./personality-orb";
-export { OrbPersonalitySettings } from "./orb-personality-settings";
 export { InlineCitation, type Source } from "./inline-citation";
 export { DocumentReference, type DocumentAnchor } from "./document-reference";
 export { MemoryChips, type MemoryChip } from "./memory-chips";
@@ -65,6 +64,10 @@ export { ComposerVoice, ComposerVoiceButton } from "./dictation";
 export {
   useTypewriter,
   LetterStream,
+  useWordTypewriter,
+  FadeWords,
   type TypewriterOptions,
   type TypewriterState,
+  type WordTypewriterOptions,
+  type WordTypewriterState,
 } from "./letter-stream";

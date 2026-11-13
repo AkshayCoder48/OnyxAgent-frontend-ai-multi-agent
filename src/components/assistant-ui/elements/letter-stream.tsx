@@ -276,6 +276,51 @@ export function LetterStream({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FADE WORDS — the MIXED streaming reveal (user directive 2026-11-14: the
+// thinking block adopts the same animation as the chat answer, mixed with
+// the word-engine pacing). Each word mounts as a `.wf` span and settles
+// exactly once with the motion-blur reveal (opacity 0 → .72 → 1, blur
+// 5px → 2px → 0 — the same keyframes the main text stream uses); the
+// reveal pacing comes from useWordTypewriter, so the words cascade at the
+// engine's adaptive speed. Keys are the word's ordinal within the string:
+// the revealed text only ever grows by appending, so existing spans never
+// remount (previously settled words never re-animate). The memo
+// comparator ignores `dur` — a running settle is never re-timed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const fadeSettleDuration = (fadeMs: number) =>
+  Math.max(180, Math.min(360, Math.round(fadeMs * 2)));
+
+const FadeSettleWord = React.memo(
+  function FadeSettleWord({ text, dur }: { text: string; dur: number }) {
+    return (
+      <span className="wf" style={{ animationDuration: `${dur}ms` }}>
+        {text}
+      </span>
+    );
+  },
+  (prev, next) => prev.text === next.text,
+);
+
+/** Render a (growing) revealed string as settling word spans. */
+export function FadeWords({ text, fadeMs }: { text: string; fadeMs: number }) {
+  if (!/\S/.test(text)) return <>{text}</>; // pure whitespace — nothing to fade
+  const dur = fadeSettleDuration(fadeMs);
+  const out: React.ReactNode[] = [];
+  const re = /(\s+)|(\S+)/g;
+  let m: RegExpExecArray | null;
+  let w = 0;
+  while ((m = re.exec(text))) {
+    if (m[1] !== undefined) {
+      out.push(m[1]);
+    } else {
+      out.push(<FadeSettleWord key={`w${w++}`} text={m[2] as string} dur={dur} />);
+    }
+  }
+  return <>{out}</>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WORD-FADE STREAM — chained per-word fade synchronized with the AI's
 // streaming speed (user spec: "every word will stream and fade
 // synchronously — each word fades first, and the moment that fade ends the

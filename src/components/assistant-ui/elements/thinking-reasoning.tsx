@@ -2,7 +2,7 @@
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import styles from "./ThinkingReasoning.module.css";
-import { useTypewriter, LetterStream } from "./letter-stream";
+import { useWordTypewriter, FadeWords } from "./letter-stream";
 
 /**
  * ThinkingReasoning — an animated, collapsible thinking block (AICSS
@@ -55,14 +55,17 @@ const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
 const FADE = 16; // top/bottom fade once the viewport is capped
 
 /**
- * The sentences stream in LETTER BY LETTER — useTypewriter buffers each
- * growing sentence and reveals one character at a time at full ink (NO
- * per-letter fade/blur). The FIRST sentence of a thinking block holds the
- * stream-start delay (180ms); later sentences flow with a tiny 40ms
- * pacing gap. A caret rides at the end of the LIVE last sentence.
+ * The sentences stream WORD BY WORD with the MIXED reveal (user directive
+ * 2026-11-14: "add the same streaming animation inside thinking — mix the
+ * current one with the chat answer's"): useWordTypewriter paces the reveal
+ * (the same adaptive engine the main text uses) and FadeWords renders each
+ * newly mounted word with the motion-blur settle (.wf — opacity+blur
+ * blur-to-sharp). The first sentence holds the stream-start delay (180ms);
+ * later sentences flow with a tiny 40ms pacing gap. A caret rides at the
+ * end of the LIVE last sentence.
  *
  * NO INTER-SENTENCE DUMPS: every sentence of a live block keeps its own
- * typewriter (stable index keys), so when a NEW sentence starts, the
+ * word engine (stable index keys), so when a NEW sentence starts, the
  * previous one flips `active` → false and FINISHES its remaining reveal
  * at catch-up pace instead of snapping to full text (the round-end
  * "auto-throwing" rule, applied at sentence boundaries too).
@@ -78,12 +81,12 @@ function StreamingSentence({
    *  their reveal paced, then rest fully revealed. */
   active: boolean;
 }) {
-  const { text: revealed, animating } = useTypewriter(text, active, {
+  const { text: revealed, animating, fadeMs } = useWordTypewriter(text, active, {
     initialDelayMs: holdMs,
   });
   return (
     <>
-      <LetterStream text={revealed} />
+      <FadeWords text={revealed} fadeMs={fadeMs} />
       {active && animating && <span className={styles.trCaret} aria-hidden="true" />}
     </>
   );

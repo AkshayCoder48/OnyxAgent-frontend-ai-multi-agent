@@ -34,7 +34,13 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 shadow-lg duration-200 sm:rounded-lg",
+        "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed inset-x-0 bottom-0 z-50 grid max-h-[min(92dvh,92vh)] w-full gap-4 overflow-y-auto rounded-t-2xl border p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-lg duration-200",
+        // sm+ restores the classic centered card. On phones the dialog is a
+        // proper BOTTOM SHEET: pinned to the bottom edge, dvh-capped, with
+        // internal scrolling — the old centered `top-50%/-translate-y-50%
+        // w-full` placement overflowed BOTH screen edges on tall content
+        // ("stuck at the bottom, nothing visible").
+        "sm:top-[50%] sm:bottom-auto sm:left-1/2 sm:max-h-[min(85vh,85dvh)] sm:w-full sm:max-w-lg sm:translate-x-[-50%] sm:translate-y-[-50%] sm:rounded-lg sm:p-6 sm:pb-6",
         className,
       )}
       {...props}

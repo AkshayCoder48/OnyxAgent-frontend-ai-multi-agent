@@ -45,13 +45,16 @@
   --og-bf-pop:    blur(20px) saturate(1.3);    /* popper menus */
 }
 
-/* ---- page: orange fading to warm black (§2.2) ---- */
+/* ---- page: orange fading to warm black (§2.2) ----
+   The two radial GLOW WASHES use --glow-color (the user-tintable glow
+   source, Settings → Appearance; falls back to the brand orange) —
+   retinting the glow never touches the warm-black gradient below it. */
 .og-page, body {
   background:
-    radial-gradient(70% 34% at 50% 6%, color-mix(in srgb, var(--acc) 15%, transparent), transparent 70%),
+    radial-gradient(70% 34% at 50% 6%, color-mix(in srgb, var(--glow-color, var(--acc)) 15%, transparent), transparent 70%),
     radial-gradient(100% 40% at 50% 100%,
-      color-mix(in srgb, var(--acc) 34%, transparent),
-      color-mix(in srgb, var(--acc) 12%, #140400) 45%, transparent 75%),
+      color-mix(in srgb, var(--glow-color, var(--acc)) 34%, transparent),
+      color-mix(in srgb, var(--glow-color, var(--acc)) 12%, #140400) 45%, transparent 75%),
     linear-gradient(180deg, #0b0200 0%,
       color-mix(in srgb, var(--acc) 10%, #000) 30%,
       color-mix(in srgb, var(--acc) 17%, #000) 60%,
@@ -609,9 +612,12 @@ input.bg-background:focus {
   --focus-ring: var(--color-ring);
 }
 
-/* ---- 15.2 · Custom canvas — flat paint, contrast-aware glass ---------
-   Under a user background the §2.2 gradient identity is replaced by the
-   FLAT canvas (the user's colour, unmodified), and every glass pane
+/* ---- 15.2 · Custom canvas — glow PRESERVED over the flat canvas -------
+   Under a user background the warm-black gradient identity is replaced
+   by the FLAT canvas (the user's colour, unmodified) — but the radial
+   GLOW WASHES survive, retinted by --glow-color (the fix for "changing
+   colours deletes the background glow", 2026-11-14: the old rule
+   painted body flat and the glow simply vanished). Every glass pane
    re-derives its fill from canvas + ink via color-mix so text carved
    from --text-primary (set inline, WCAG-validated) always reads. The
    accent chain stays orange — the picker never repaints components. */
@@ -619,7 +625,10 @@ html.custom-canvas { background: var(--app-background); }
 
 html.custom-canvas body,
 html.custom-canvas .og-page {
-  background: var(--app-background);
+  background:
+    radial-gradient(70% 34% at 50% 6%, color-mix(in srgb, var(--glow-color, var(--acc)) 15%, transparent), transparent 70%),
+    radial-gradient(120% 45% at 50% 100%, color-mix(in srgb, var(--glow-color, var(--acc)) 26%, transparent), transparent 75%),
+    var(--app-background);
   color: var(--text-primary);
 }
 

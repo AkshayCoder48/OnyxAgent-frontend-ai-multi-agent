@@ -1727,18 +1727,25 @@
     }
   }
 
-  /* Allow text selection but prevent callout popup on long press */
-  * {
+  /* TEXT SELECTION ON PHONES (fix 2026-11-14: "can't copy / long-press
+     doesn't select"): the old blanket `* { user-select: none }` made every
+     message uncopyable — long-press did nothing outside inputs. Now only
+     interactive CHROME (buttons, disclosure rows, links, explicit
+     .select-none) suppresses selection + the iOS callout popup; all
+     message text — assistant markdown AND the user's own bubbles — is
+     selectable by default, so long-press → select → copy works. */
+  button:not([role="switch"]):not(.cite-chip):not(.dot-nav),
+  [role="button"]:not(.cite-chip):not(.dot-nav),
+  a,
+  .select-none {
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;
   }
-  
-  /* Allow text selection in message content and input fields */
+
+  /* Inputs keep native selection + callout. */
   input,
   textarea,
-  .prose-sm,
-  .prose,
   [contenteditable] {
     -webkit-user-select: text;
     user-select: text;

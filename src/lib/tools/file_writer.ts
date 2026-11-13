@@ -67,6 +67,63 @@ function splitPath(p: string): { parent: string; name: string } {
   return { parent: cleaned.slice(0, idx), name: cleaned.slice(idx + 1) };
 }
 
+/** Parse `mkdir: created directory '…'` lines (GNU mkdir -v output) into
+ * the created-dirs report verify_path returns to the model. */
+function parseMkdirCreated(out: string): string[] {
+  const dirs: string[] = [];
+  for (const m of out.matchAll(/mkdir: created directory '(.+?)'/g)) {
+    dirs.push(m[1]!);
+  }
+  return dirs;
+}
+
+/** LEGACY type probe (transport fallback when the one-shot shell probe
+ * fails): listFiles succeeds on directories, readFile on files. */
+async function probeTypeLegacy(
+  client: { listFiles(p: string): Promise<unknown>; readFile(p: string): Promise<unknown> },
+  rawPath: string,
+): Promise<"file" | "directory" | null> {
+  try {
+    await client.listFiles(rawPath);
+    return "directory";
+  } catch {
+    try {
+      await client.readFile(rawPath);
+      return "file";
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** LEGACY per-segment walk (transport fallback): probe + createFolder for
+ * every ancestor, reporting what was created. */
+async function createDirWalkLegacy(
+  client: {
+    listFiles(p: string): Promise<unknown>;
+    createFolder(p: string): Promise<void>;
+  },
+  dirPath: string,
+  createdDirs: string[],
+): Promise<void> {
+  const segments = dirPath.split("/").filter(Boolean);
+  let acc = "";
+  for (const seg of segments) {
+    acc = acc ? `${acc}/${seg}` : seg;
+    let exists = false;
+    try {
+      await client.listFiles(acc);
+      exists = true;
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      await client.createFolder(acc);
+      createdDirs.push(acc);
+    }
+  }
+}
+
 /** Heuristic: does this path "look like" a directory?
  *  - Trailing slash → directory.
  *  - Last segment has no `.` (no extension) → directory.
@@ -139,22 +196,27 @@ registerTool(
       const client = sbx.client;
       const createdDirs: string[] = [];
 
-      // Detect existing type by probing. `listFiles` succeeds on directories,
-      // throws on files / missing paths. `readFile` succeeds on files, throws
-      // on directories / missing paths. Probing both tells us unambiguously
-      // what's on disk right now.
-      let existingType: "file" | "directory" | null = null;
-      try {
-        await client.listFiles(rawPath);
-        existingType = "directory";
-      } catch {
-        try {
-          await client.readFile(rawPath);
-          existingType = "file";
-        } catch {
-          existingType = null;
-        }
-      }
+      // ONE-ROUND-TRIP PROBE (the "2-3 minute simple tools" companion fix):
+      // a single shell probe replaces the listFiles→readFile fallback pair,
+      // and the missing-path walk replaces the per-segment
+      // listFiles+createFolder loop with one `mkdir -p -v` (its stderr
+      // lists every directory it actually created). On a warm sandbox this
+      // turns 7-10 sequential HTTP round trips into 1-2.
+      const shPath = `'${rawPath.replace(/'/g, `'\\''`)}'`;
+      const probe = await client.exec(
+        `p=${shPath}; if [ -d "$p" ]; then echo "TYPE=directory"; elif [ -f "$p" ]; then echo "TYPE=file"; else echo "TYPE=missing"; fi`,
+        { timeout: 20 },
+      );
+      const probeOk = probe.exit_code === 0;
+      const probeOut = probe.stdout ?? "";
+      const existingType: "file" | "directory" | null = probeOk
+        ? probeOut.includes("TYPE=directory")
+          ? "directory"
+          : probeOut.includes("TYPE=file")
+            ? "file"
+            : null
+        : // Transport hiccup — fall back to the legacy two-probe shape.
+          await probeTypeLegacy(client, rawPath);
 
       if (existingType !== null) {
         return {
@@ -170,23 +232,13 @@ registerTool(
 
       if (wantDir) {
         if (createDirs) {
-          // Build the list of ancestor directories that need to be created so
-          // we can report them. Walk top-down, creating each missing piece.
-          const segments = rawPath.split("/").filter(Boolean);
-          let acc = "";
-          for (const seg of segments) {
-            acc = acc ? `${acc}/${seg}` : seg;
-            let exists = false;
-            try {
-              await client.listFiles(acc);
-              exists = true;
-            } catch {
-              exists = false;
-            }
-            if (!exists) {
-              await client.createFolder(acc);
-              createdDirs.push(acc);
-            }
+          if (probeOk) {
+            // One `mkdir -p -v` for the whole chain; `-v` reports each
+            // directory GNU mkdir actually created.
+            const res = await client.exec(`mkdir -p -v -- ${shPath} 2>&1`, { timeout: 20 });
+            createdDirs.push(...parseMkdirCreated(res.stdout + "\n" + (res.stderr ?? "")));
+          } else {
+            await createDirWalkLegacy(client, rawPath, createdDirs);
           }
           if (createdDirs.length > 0) bumpWorkspaceVersion(); // workspace changed
         } else {
@@ -209,32 +261,38 @@ registerTool(
       // File case — ensure parent directory exists, then create empty file.
       const { parent } = splitPath(rawPath);
       if (parent && parent !== "." && createDirs) {
-        const segments = parent.split("/").filter(Boolean);
-        let acc = "";
-        for (const seg of segments) {
-          acc = acc ? `${acc}/${seg}` : seg;
-          let exists = false;
-          try {
-            await client.listFiles(acc);
-            exists = true;
-          } catch {
-            exists = false;
-          }
-          if (!exists) {
-            await client.createFolder(acc);
-            createdDirs.push(acc);
-          }
+        if (probeOk) {
+          const d = `'${parent.replace(/'/g, `'\\''`)}'`;
+          const res = await client.exec(`mkdir -p -v -- ${d} 2>&1`, { timeout: 20 });
+          createdDirs.push(...parseMkdirCreated(res.stdout + "\n" + (res.stderr ?? "")));
+        } else {
+          await createDirWalkLegacy(client, parent, createdDirs);
         }
       }
       if (createdDirs.length > 0) bumpWorkspaceVersion(); // workspace changed
 
-      // Create the empty file if missing.
-      try {
-        await client.readFile(rawPath);
-        // File exists already — no-op.
-      } catch {
+      if (!probeOk) {
+        // Legacy path for the file probe too (transport fallback).
+        try {
+          await client.readFile(rawPath);
+        } catch {
+          if (createDirs) {
+            await client.writeFile(rawPath, "");
+            bumpWorkspaceVersion(); // workspace changed
+          } else {
+            return {
+              exists: false,
+              type: "file" as const,
+              created_dirs: createdDirs,
+              path: rawPath,
+              error: `File does not exist and create_dirs is false: ${rawPath}`,
+            };
+          }
+        }
+      } else {
+        // The probe already told us the file is missing — create it.
         if (createDirs) {
-          await client.writeFile(rawPath, "");
+          await client.exec(`[ -f ${shPath} ] || touch -- ${shPath}`, { timeout: 20 });
           bumpWorkspaceVersion(); // workspace changed
         } else {
           return {
