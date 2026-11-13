@@ -17,7 +17,7 @@ import {
   PenLine,
   Plug,
   Search,
-  Terminal,
+  SquareTerminal,
   Wrench,
 } from "lucide-react";
 import type { ToolCall } from "@/types";
@@ -106,8 +106,8 @@ const RULES: Record<string, TenseRule> = {
   create_file_chunk: { past: "Created a file", present: "Creating a file", icon: FilePlus },
   delete_file: { past: "Removed a file", present: "Removing a file", icon: FileMinus },
   create_folder: { past: "Created a folder", present: "Creating a folder", icon: FolderOpen },
-  run_terminal: { past: "Ran a command", present: "Running a command", icon: Terminal },
-  run_python: { past: "Ran a calculation", present: "Doing a calculation", icon: Terminal },
+  run_terminal: { past: "Ran a command", present: "Running a command", icon: SquareTerminal },
+  run_python: { past: "Ran Python code", present: "Executing Python code", icon: SquareTerminal },
 
   // ── Charts, questions, plans ───────────────────────────────────────────
   create_chart: { past: "Made a chart", present: "Making a chart", icon: BarChart3 },

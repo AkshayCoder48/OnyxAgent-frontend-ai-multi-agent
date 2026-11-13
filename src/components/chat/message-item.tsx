@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
+import { ToolStackGroup } from "./tool-stack-group";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { BranchPicker } from "./branch-picker";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
@@ -1115,21 +1116,24 @@ export const MessageItem = React.memo(function MessageItem({
                   />
                 ) : null}
                 {message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="tool-call-stack mb-stagger w-full space-y-0">
-                    {(() => {
-                      // Consecutive use_browser calls collapse into ONE
-                      // BrowserUseGroup frame (run start renders the group,
-                      // continuations render nothing); every other tool
-                      // keeps its own ToolCallCard. All stacked together
-                      // (Task 24: one compact section, not scattered cards).
-                      const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
-                      return (message.toolCalls ?? []).map((toolCall) => {
-                        const run = browserRuns.runStartedBy(toolCall.id);
-                        if (run) return <BrowserUseGroup key={toolCall.id} toolCalls={run} />;
-                        if (browserRuns.isContinuation(toolCall.id)) return null;
-                        return <ToolCallCard key={toolCall.id} toolCall={toolCall} />;
-                      });
-                    })()}
+                  <div className="mb-stagger w-full">
+                    <ToolStackGroup toolCalls={message.toolCalls}>
+                      {(() => {
+                        // Consecutive use_browser calls collapse into ONE
+                        // BrowserUseGroup frame (run start renders the group,
+                        // continuations render nothing); every other tool
+                        // keeps its own ToolCallCard. The whole stack rests
+                        // as ONE combined "Used N tools" disclosure row
+                        // (ToolStackGroup — combined tools UI, 2026-11-13).
+                        const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
+                        return (message.toolCalls ?? []).map((toolCall) => {
+                          const run = browserRuns.runStartedBy(toolCall.id);
+                          if (run) return <BrowserUseGroup key={toolCall.id} toolCalls={run} />;
+                          if (browserRuns.isContinuation(toolCall.id)) return null;
+                          return <ToolCallCard key={toolCall.id} toolCall={toolCall} />;
+                        });
+                      })()}
+                    </ToolStackGroup>
                   </div>
                 )}
                 {/* ONE in-place status line — the model is generating. */}
@@ -1243,10 +1247,20 @@ export const MessageItem = React.memo(function MessageItem({
               if (stack.length === 0) return;
               const first = stack[0]!;
               out.push(
-                <div key={`stack-${first.partId}`} className="tool-call-stack mb-stagger">
-                  {stack.map((it) => (
-                    <React.Fragment key={it.partId}>{renderItem(it)}</React.Fragment>
-                  ))}
+                <div key={`stack-${first.partId}`} className="mb-stagger">
+                  {/* COMBINED TOOLS ROW (user screenshots 2026-11-13): the
+                      whole consecutive-tool sequence rests as ONE "Used N
+                      tools ›" disclosure; live runs keep their rows
+                      visible until the stack settles. */}
+                  <ToolStackGroup
+                    toolCalls={stack
+                      .filter((it): it is Extract<FlowItem, { kind: "tool" }> => it.kind === "tool")
+                      .map((it) => it.toolCall)}
+                  >
+                    {stack.map((it) => (
+                      <React.Fragment key={it.partId}>{renderItem(it)}</React.Fragment>
+                    ))}
+                  </ToolStackGroup>
                 </div>,
               );
               stack = [];

@@ -15,7 +15,7 @@ const EXACT_CAPTIONS: Record<string, string> = {
   fetch_url: "Reading a web page",
   get_current_datetime: "Checking the date and time",
   current_datetime: "Checking the date and time",
-  run_python: "Running calculations",
+  run_python: "Executing Python code",
   create_chart_tool: "Creating a chart",
   create_map_tool: "Drawing a map",
   ask_user: "Asking you a question",

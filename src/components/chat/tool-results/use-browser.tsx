@@ -559,8 +559,15 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
         onClick={() => setExpanded((v) => !v)}
         className="flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40"
       >
-        <Globe className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
-        <span className="min-w-0 shrink-0 truncate text-sm font-medium text-foreground/90">Use Browser</span>
+        <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span
+          className={cn(
+            "min-w-0 shrink-0 truncate text-sm font-medium",
+            anyActive ? "text-foreground/90" : "text-foreground/75",
+          )}
+        >
+          Use Browser
+        </span>
         {currentUrl ? (
           <span className={cn(chipClass, "hidden shrink truncate sm:inline-flex")}>
             {clip(hostnameOf(currentUrl) || currentUrl, 30)}
@@ -571,7 +578,7 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
           {anyActive ? (
             <>
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground/80">
-                <Loader2 className="h-3 w-3 animate-spin text-primary" aria-hidden />
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" aria-hidden />
                 {statusLabel}
               </span>
               <ToolLiveElapsed startedAt={startedAt} />
@@ -588,7 +595,7 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
                 {anyError ? (
                   <X className="h-3.5 w-3.5" aria-hidden />
                 ) : (
-                  <Check className="h-3.5 w-3.5 text-primary" aria-hidden />
+                  <Check className="h-3.5 w-3.5 text-[var(--tool-ok)]" aria-hidden />
                 )}
                 {statusLabel}
               </span>

@@ -2,6 +2,11 @@
 // DOM probe: the inline flow (PRD §3.1) — no "Worked Ns" trigger line, no
 // separator rail; thinking rows + tool stacks render naturally; the
 // streaming status line is the ONE live indicator.
+//
+// COMBINED TOOLS ROW (user screenshots 2026-11-13): a settled multi-tool
+// stack now rests as ONE "Used N tools ›" disclosure (chevron included —
+// the summary row is the one place a chevron lives); the individual rows
+// stay mounted inside the folded panel.
 import { describe, it, expect, vi } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import React from "react";
@@ -38,7 +43,7 @@ const streamingMsg = {
 } as unknown as ChatMessage;
 
 describe("inline flow (PRD §3.1)", () => {
-  it("settled tool turn: NO Worked summary line, NO rail; rows + thought row render", () => {
+  it("settled tool turn: NO Worked line, NO rail; combined rows + thought row render", () => {
     const { container } = render(
       React.createElement(MessageItem, { message: settledMsg }),
     );
@@ -46,11 +51,14 @@ describe("inline flow (PRD §3.1)", () => {
     expect(text).not.toContain("Worked");
     expect(container.querySelector(".border-l.border-border\\/70")).toBeNull();
     expect(text).toContain("Thought"); // the thinking row keeps its own summary
-    expect(text).toContain("Searched the web"); // tool row 1
-    expect(text).toContain("Read a web page"); // tool row 2
+    // The two-tool stack rests as the combined "Used 2 tools" summary row…
+    expect(text).toContain("Used 2 tools");
+    // …with the individual rows folded behind it (still mounted).
+    expect(text).toContain("Searched the web");
+    expect(text).toContain("Read a web page");
     expect(container.querySelector(".tool-call-stack")).toBeTruthy();
-    // No chevron glyphs anywhere.
-    expect(container.querySelector("svg.lucide-chevron-right")).toBeNull();
+    // The combined row carries the chevron (the ONLY chevron in the flow).
+    expect(container.querySelector("svg.lucide-chevron-right")).not.toBeNull();
     cleanup();
   });
 
@@ -62,6 +70,8 @@ describe("inline flow (PRD §3.1)", () => {
     expect(status).toBeTruthy();
     expect(status!.textContent).toMatch(/Searching|Writing|Thinking|Working/);
     expect(container.textContent).not.toContain("Worked");
+    // A single settled tool renders as its bare row — no group summary.
+    expect(container.textContent).not.toContain("Used 1 tool");
     cleanup();
   });
 });

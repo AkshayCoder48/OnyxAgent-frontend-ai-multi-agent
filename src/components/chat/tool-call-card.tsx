@@ -8,7 +8,7 @@ import {
   Clock,
   Search,
   Globe,
-  Code2,
+  SquareTerminal,
   Download,
   FileMinus,
   FilePlus,
@@ -502,7 +502,7 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
           <ToolIcon
             className={cn(
               "h-3.5 w-3.5 shrink-0",
-              isError ? "text-destructive/80" : "text-primary",
+              isError ? "text-destructive/80" : "text-muted-foreground",
             )}
             aria-hidden
           />
@@ -541,7 +541,7 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
             <span
               className={cn(
                 "min-w-0 truncate text-sm font-medium",
-                isError ? "text-destructive/90" : "text-foreground/90",
+                isError ? "text-destructive/90" : "text-foreground/75",
               )}
             >
               {isError
@@ -1045,7 +1045,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
                                 : toolCall.name === "web_fetch" || toolCall.name === "fetch_url"
                                   ? "Web Page"
                                   : toolCall.name === "run_python"
-                    ? "Run Python"
+                    ? "Execute Python code"
                     : !toolCall.name || toolCall.name.startsWith("pending-")
                       ? "Composing…"
                       : // UI-ONLY plain display name (user directive 2026-11-01):
@@ -1081,7 +1081,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
                 : isFileDownload
                   ? Download
                   : isRunPython
-                    ? Code2
+                    ? SquareTerminal
                     : toolCall.name === "create_file" || toolCall.name === "write_file" || toolCall.name === "create_file_chunk"
                       ? FilePlus
                       : toolCall.name === "read_file" || toolCall.name === "read_file_section" || toolCall.name === "verify_path"
@@ -1167,7 +1167,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
             {isComposio ? (
               <ComposioToolBadge branding={branding} size={16} />
             ) : (
-              <ToolIcon className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden />
+              <ToolIcon className="text-muted-foreground h-3.5 w-3.5 shrink-0" aria-hidden />
             )}
             {/* STATIC running caption (Realtime PRD §16) — no shimmer. */}
             <span className="text-foreground/90 min-w-0 truncate text-sm font-medium">
@@ -1182,7 +1182,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
               <ToolIcon
                 className={cn(
                   "h-3.5 w-3.5 shrink-0",
-                  isError ? "text-destructive/80" : "text-primary",
+                  isError ? "text-destructive/80" : "text-muted-foreground",
                 )}
                 aria-hidden
               />
@@ -1190,7 +1190,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
             <span
               className={cn(
                 "min-w-0 truncate text-sm font-medium",
-                isError ? "text-destructive/90" : "text-foreground/90",
+                isError ? "text-destructive/90" : "text-foreground/75",
               )}
             >
               {friendlyName}
