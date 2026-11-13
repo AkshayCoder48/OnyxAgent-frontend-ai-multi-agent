@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Check, ChevronDown, Cpu, FlaskConical, Search, Server, Settings2, Sliders } from "lucide-react";
+import { Check, ChevronDown, Cpu, FlaskConical, Search, Server, Settings2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components/ui";
@@ -250,16 +250,19 @@ export const ChatControls = memo(function ChatControls({
 
   const isAutoRouter = selectedProviderId === AUTO_ROUTER_PROVIDER_ID;
 
-  const triggerSummary = useMemo(() => {
-    const parts: string[] = [];
-    // Auto Router active → the chip names the router, not a single model
-    // (the actual model differs per round; the served model shows in the
-    // message's model badge instead).
-    if (isAutoRouter) parts.push(AUTO_ROUTER_LABEL);
-    else if (selectedModel) parts.push(selectedModel);
-    if (settingsOverridden) parts.push("Custom");
-    return parts.length ? parts.join(" · ") : "Controls";
-  }, [isAutoRouter, selectedModel, settingsOverridden]);
+  // TRIGGER LABEL (PRD §5.4): show the CURRENTLY SELECTED MODEL clearly —
+  // the model name (or "Auto Router") is the primary text, never a vague
+  // "Controls". Long names truncate inside the trigger; the popover
+  // carries the full provider + routing detail.
+  const modelLabel = useMemo(() => {
+    if (isAutoRouter) return AUTO_ROUTER_LABEL;
+    if (selectedModel) return selectedModel;
+    // No explicit pick — the first active provider's default rides the
+    // trigger so the user always sees WHAT will answer.
+    const active = providers.find((p) => p.is_active) || providers[0];
+    if (active?.models?.length) return active.models[0]!;
+    return "Default";
+  }, [isAutoRouter, selectedModel, providers]);
 
   const hasOverrides =
     isAutoRouter || (selectedModel != null && selectedModel !== "") || settingsOverridden;
@@ -269,25 +272,26 @@ export const ChatControls = memo(function ChatControls({
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="Chat controls"
+          aria-label={`Model selector — currently ${modelLabel}`}
+          title={modelLabel}
           className={cn(
-            "border-foreground/10 bg-card hover:border-foreground/25 hover:bg-foreground/[0.04] inline-flex items-center gap-1.5 rounded-full border py-1 pr-2 pl-2.5 font-mono text-[11px] tracking-wider uppercase transition-colors",
+            "border-border/70 bg-card/60 hover:border-foreground/25 hover:bg-foreground/[0.05] inline-flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors",
             hasOverrides ? "text-foreground" : "text-foreground/65",
           )}
         >
-          <Sliders className="h-3 w-3" />
-          <span className="max-w-[200px] truncate">{triggerSummary}</span>
-          {hasOverrides && (
-            <span aria-hidden className="bg-foreground inline-block h-1 w-1 rounded-full" />
+          <Cpu className="text-primary h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 max-w-[36vw] truncate sm:max-w-[220px]">{modelLabel}</span>
+          {settingsOverridden && (
+            <span aria-hidden className="bg-primary inline-block h-1 w-1 shrink-0 rounded-full" />
           )}
-          <ChevronDown className="text-foreground/45 h-3 w-3" />
+          <ChevronDown className="text-foreground/45 h-3 w-3 shrink-0" aria-hidden />
         </button>
       </PopoverTrigger>
 
       <PopoverContent
         align="end"
         sideOffset={8}
-        className="border-border bg-popover relative w-[380px] overflow-hidden rounded-2xl border p-0 shadow-md"
+        className="border-border bg-popover relative w-[min(380px,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border p-0 shadow-md"
       >
         <div className="border-foreground/10 flex items-center gap-1 border-b p-2">
           {onModelChange && (

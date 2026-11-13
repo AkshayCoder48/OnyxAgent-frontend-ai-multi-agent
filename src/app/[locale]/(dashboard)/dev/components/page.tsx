@@ -45,7 +45,6 @@ import { EmptyState } from "@/components/states";
 import { MessageItem } from "@/components/chat/message-item";
 import { BrowserUseGroup } from "@/components/chat/tool-results/use-browser";
 import { FilesFooter } from "@/components/chat/streaming-file-tree";
-import { LivePageFrame } from "@/components/chat/tool-results/live-page-frame";
 import type { ChatMessage, ToolCall as ToolCallData } from "@/types";
 import {
   Alert,
@@ -300,26 +299,6 @@ function AgentElementsShowcase() {
         <div className="space-y-2">
           <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Use Browser — unified tool-call UI (settled run)</p>
           <BrowserToolPreview />
-        </div>
-
-        <div className="space-y-2">
-          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Live page frame — blocked embedding + unreachable fallbacks</p>
-          {/* github.com sends X-Frame-Options: deny — the frame-check guard
-              auto-switches to the reader snapshot (never the browser's
-              "refused to connect" error page). */}
-          <LivePageFrame
-            url="https://github.com"
-            title="GitHub"
-            badge="Web Page"
-            heightClass="h-64"
-          />
-          {/* Unreachable host — the honest "Site not accessible" card with
-              retry + new-tab escape. */}
-          <LivePageFrame
-            url="https://onyx-frame-check-test.invalid"
-            badge="Web Page"
-            heightClass="h-48"
-          />
         </div>
 
         <div className="space-y-2">

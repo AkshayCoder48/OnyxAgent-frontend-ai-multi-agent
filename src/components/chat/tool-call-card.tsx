@@ -307,32 +307,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({
 // SIMPLE MODE — one non-expandable friendly line per tool call.
 // ---------------------------------------------------------------------------
 
-/** SIMPLE MODE web-page disclosure: the live page preview is NOT always-on —
- *  a quiet "Show page preview" toggle row reveals the WebPageResult through
- *  the same grid 0fr→1fr animation every disclosure uses. The preview
- *  becomes visible only after the user enlarges the tool call (user
- *  directive: "visible after we enlarge the tool call, not always visible"). */
-function SimpleWebPageDisclosure({ toolCall }: { toolCall: ToolCall }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="px-1.5 sm:px-2">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="hover:bg-foreground/5 text-muted-foreground hover:text-foreground mb-1 inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium transition-colors"
-      >
-        <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        {open ? "Hide page preview" : "Show page preview"}
-      </button>
-      <CollapsePanel open={open}>
-        <div className="pb-1">
-          <WebPageResult toolCall={toolCall} />
-        </div>
-      </CollapsePanel>
-    </div>
-  );
-}
+
 
 function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps) {
   // UMBRELLA RESOLUTION (tool consolidation): an umbrella call like
@@ -638,13 +613,9 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
       )}
       {fileDownloadSpec && <FileDownloadResult payload={fileDownloadSpec} />}
       {previewHtmlPayload && <PreviewHtmlResult data={previewHtmlPayload} />}
-      {/* web_fetch / fetch_url — the LIVE page preview is CONTENT, but it
-          only renders AFTER the user enlarges the tool call (the preview
-          lives behind the "Show page preview" disclosure — never
-          always-on in the chat flow). */}
-      {(toolCall.name === "web_fetch" || toolCall.name === "fetch_url") && isCompleted && (
-        <SimpleWebPageDisclosure toolCall={toolCall} />
-      )}
+      {/* web_fetch / fetch_url — NO page preview (PRD §6): Web Fetch
+          retrieves content; visual browsing belongs to the Browser tool.
+          The row's own details disclosure shows args + output. */}
       {isAskUser && (
         <AskUserResult
           args={toolCall.args}
@@ -852,9 +823,9 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   const isMediaGeneration = toolCall.name === "media_generation";
   const isLoadSkill = toolCall.name === "load_skill";
   const isListSkills = toolCall.name === "list_skills" || (toolCall.name === "manage_skill" && toolCall.args?.action === "list");
-  // web_fetch / fetch_url — the tool card carries a REAL live preview of the
-  // fetched site (sandboxed iframe, optional interactivity) instead of the
-  // raw args/output dump.
+  // web_fetch / fetch_url — the retrieved content summary (host, title,
+  // extracted text) renders inside the disclosure; no iframe preview
+  // (PRD §6 — the Browser tool owns visual browsing).
   const isWebFetch =
     (toolCall.name === "web_fetch" || toolCall.name === "fetch_url") &&
     toolCall.status === "completed";
@@ -1366,10 +1337,9 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           ) : toolCall.status === "completed" && isFileDownload && fileDownloadSpec ? (
             <FileDownloadResult payload={fileDownloadSpec} />
           ) : isWebFetch ? (
-            // web_fetch / fetch_url — the LIVE page preview (sandboxed
-            // iframe of the fetched site, interactivity opt-in) renders
-            // INSIDE the disclosure: enlarging the tool call reveals the
-            // page; the `</>` toggle still swaps to the raw view.
+            // web_fetch / fetch_url — the retrieved content (host, title,
+            // extracted text) renders inside the disclosure. No webpage
+            // preview (PRD §6) — the Browser tool owns visual browsing.
             <WebPageResult toolCall={toolCall} />
           ) : toolCall.status === "completed" && isDDGWebSearch ? (
             <DDGWebResults result={toolCall.result} />

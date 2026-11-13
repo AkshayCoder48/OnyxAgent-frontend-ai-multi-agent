@@ -2,7 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
-import { ArrowUp, Loader2, Paperclip, Square, Sparkles } from "lucide-react";
+import { ArrowUp, Loader2, Paperclip, Square } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {
   BUILTIN_COMMANDS,
@@ -20,6 +20,7 @@ import {
   ComposerVoice,
   ComposerVoiceButton,
 } from "@/components/assistant-ui/elements";
+import { ChatControls } from "./chat-controls";
 import { useDictation } from "@/hooks/use-dictation";
 import { useQuoteStore } from "@/stores";
 
@@ -33,26 +34,42 @@ interface ChatInputProps {
   slashContext?: SlashCommandContext;
   /** Effective slash commands (built-ins + user customs, after overrides). */
   commands?: SlashCommand[];
+  /** Live-connection state — surfaces an offline chip when disconnected. */
+  isConnected?: boolean;
+  /** Model routing (composer bottom bar). Provider is structurally the
+   *  custom-provider row — at minimum its routing id. */
+  onModelChange?: (model: string | null) => void;
+  onProviderSelect?: (provider: { id: string } | null) => void;
+  onTemperatureChange?: (value: number | null) => void;
+  onThinkingEffortChange?: (value: "low" | "medium" | "high" | null) => void;
 }
 
 /**
- * Modern chat input — inspired by prompt-kit's architecture.
+ * Composer (PRD §5 — complete redesign):
  *
- * Features:
- * - Auto-resizing textarea (min 40px, max 200px)
- * - File attachments with image previews
- * - Slash command palette
- * - Send / Stop button with smooth state transition
- * - Keyboard shortcuts: Enter to send, Shift+Enter for newline
- * - Focus glow effect via parent wrapper
- * - Fully theme-aware (uses semantic color tokens)
- */
-/**
+ *   ┌───────────────────────────────────────┐
+ *   │ quote / attachment previews            │
+ *   │ multiline textarea (auto-expand)       │
+ *   ├───────────────────────────────────────┤
+ *   │ [📎] [🎤]  …offline  ⟨model ▾⟩  [➤/⏹] │  ← bottom control bar
+ *   └───────────────────────────────────────┘
+ *
+ *  · ONE unified container (the .composer-dock) — no nested borders, no
+ *    white outline, no double focus rings; the dock owns the border + the
+ *    acc focus glow.
+ *  · The old bottom strip (Live pill · Context N% · ⏎ hint + its
+ *    separator line) is REMOVED (§5.1) — controls live in the composer's
+ *    own bottom bar now; the connection surfaces ONLY as an offline chip.
+ *  · Textarea gets the full width; height animates (mb-height) between
+ *    40px and 200px, internal scroll beyond.
+ *  · Send ⇄ Stop morph through the icon-swap cross-fade (§5.4).
+ *  · Attachment previews stagger in and animate out (§5.5).
+ *
  * PERF (streaming PRD): memoized — ChatUI re-renders on every store flush
- *  while a turn streams; with stable props (sendMessage, onStop, memoized
- *  slashContext, query-cached commands) the composer skips per-token
- *  re-renders entirely, so typing stays responsive during active streaming.
- *  Its own local state (text, attachments) still updates normally.
+ * while a turn streams; with stable props (sendMessage, onStop, memoized
+ * slashContext, query-cached commands) the composer skips per-token
+ * re-renders entirely, so typing stays responsive during active streaming.
+ * Its own local state (text, attachments) still updates normally.
  */
 export const ChatInput = memo(function ChatInput({
   onSend,
@@ -61,12 +78,16 @@ export const ChatInput = memo(function ChatInput({
   onStop,
   slashContext,
   commands,
+  isConnected = true,
+  onModelChange,
+  onProviderSelect,
+  onTemperatureChange,
+  onThinkingEffortChange,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [paletteIndex, setPaletteIndex] = useState(0);
-  const [isFocused, setIsFocused] = useState(false);
   const [sendPulse, setSendPulse] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -256,9 +277,21 @@ export const ChatInput = memo(function ChatInput({
     }
   };
 
-  const removeFile = (fileId: string) => {
-    setAttachedFiles((prev) => prev.filter((f) => f.id !== fileId));
-  };
+  // ATTACHMENT REMOVAL (PRD §5.5): the card first animates out (a 160ms
+  // scale/fade), then leaves the list — the remaining cards reflow inside
+  // the same layout transition instead of snapping.
+  const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
+  const removeFile = useCallback((fileId: string) => {
+    setRemovingIds((prev) => new Set(prev).add(fileId));
+    window.setTimeout(() => {
+      setAttachedFiles((prev) => prev.filter((f) => f.id !== fileId));
+      setRemovingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(fileId);
+        return next;
+      });
+    }, 170);
+  }, []);
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileInput = e.target;
@@ -316,43 +349,74 @@ export const ChatInput = memo(function ChatInput({
           (assistant-ui "Quote" element) until sent or dismissed. */}
       {quote && <ComposerQuotePreview quote={quote} onDismiss={clearQuote} className="pb-2" />}
 
-      {/* Attachment preview row */}
+      {/* Attachment preview row — staggered entrance (PRD §5.5), animated
+          removal, responsive wrap; never overflows the composer. */}
       {attachedFiles.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pb-2.5 animate-fade-in">
+        <div className="mb-stagger flex flex-wrap items-center gap-2 pb-2.5">
           {attachedFiles.map((file) => {
             const previewUrl = getFileUrl(file.id);
             const isImage = file.file_type === "image" && previewUrl;
-            return isImage ? (
-              <FileCardImage
+            return (
+              <div
                 key={file.id}
-                filename={file.filename}
-                previewUrl={previewUrl}
-                size={file.size}
-                onRemove={() => removeFile(file.id)}
-              />
-            ) : (
-              <FileCard
-                key={file.id}
-                filename={file.filename}
-                size={file.size}
-                mimeType={file.mime_type}
-                onRemove={() => removeFile(file.id)}
-              />
+                className={cn(
+                  "mb-row-in transition-all duration-150",
+                  removingIds.has(file.id) && "pointer-events-none scale-90 opacity-0",
+                )}
+              >
+                {isImage ? (
+                  <FileCardImage
+                    filename={file.filename}
+                    previewUrl={previewUrl}
+                    size={file.size}
+                    onRemove={() => removeFile(file.id)}
+                  />
+                ) : (
+                  <FileCard
+                    filename={file.filename}
+                    size={file.size}
+                    mimeType={file.mime_type}
+                    onRemove={() => removeFile(file.id)}
+                  />
+                )}
+              </div>
             );
           })}
         </div>
       )}
 
-      {/* Main input row */}
-      <div className="flex items-end gap-1.5 sm:gap-2">
-        {/* Left: Attach button */}
+      {/* MAIN INPUT AREA — clean multiline text, full width (§5.3). The
+          dock owns the border + focus glow; the textarea itself is bare. */}
+      {dictation.active ? (
+        <ComposerVoice
+          recording={dictation.recording}
+          seconds={dictation.seconds}
+          interim={dictation.interim}
+        />
+      ) : (
+        <textarea
+          ref={textareaRef}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Reply to OnyxAgent… or type / for commands"
+          disabled={disabled}
+          rows={1}
+          className="mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed text-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]"
+        />
+      )}
+
+      {/* BOTTOM CONTROL BAR (§5.3): attachments + voice on the left, the
+          model selector + send/stop on the right. Consistent icon sizes,
+          one row, no separators. */}
+      <div className="flex items-center gap-1 pt-1.5">
         <Button
           type="button"
           size="icon"
           variant="ghost"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabled || uploadingCount > 0}
-          className="h-9 w-9 shrink-0 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/60"
+          className="text-muted-foreground hover:text-foreground hover:bg-muted/60 h-8 w-8 shrink-0 rounded-lg"
           title="Attach file"
           aria-label="Attach file"
         >
@@ -363,92 +427,84 @@ export const ChatInput = memo(function ChatInput({
           )}
         </Button>
 
-        {/* Center: Textarea — replaced by the dictation voice surface
-            while a session is live (assistant-ui "Dictation" element swap). */}
-        <div className="relative min-w-0 flex-1">
-          {dictation.active ? (
-            <ComposerVoice
-              recording={dictation.recording}
-              seconds={dictation.seconds}
-              interim={dictation.interim}
-            />
-          ) : (
-            <textarea
-              ref={textareaRef}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onFocus={() => setIsFocused(true)}
-              onBlur={() => setIsFocused(false)}
-              placeholder="Reply to OnyxAgent… or type / for commands"
-              disabled={disabled}
-              rows={1}
-              className={cn(
-                "placeholder:text-muted-foreground/60 mb-height min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
-                isFocused && "placeholder:text-muted-foreground/40",
-              )}
-            />
-          )}
-        </div>
+        {/* Mic hidden entirely where the Web Speech API is absent
+            (PRD §24 approved behavior — nothing to explain). While a
+            session is LIVE the stop button is NEVER disabled — the user
+            must always be able to stop a recording (a socket drop or a
+            pending question must not lock the waveform in place). */}
+        {dictation.supported && (
+          <ComposerVoiceButton
+            active={dictation.active}
+            onClick={dictation.active ? dictation.stop : dictation.start}
+            disabled={disabled && !dictation.active}
+            aria-label={dictation.active ? "Stop dictation" : "Start voice dictation"}
+          />
+        )}
 
-        {/* Right: Dictation mic + Send/Stop */}
-        <div className="flex shrink-0 items-center gap-1 pb-0.5">
-          {/* Mic hidden entirely where the Web Speech API is absent
-              (PRD §24 approved behavior — nothing to explain). While a
-              session is LIVE the stop button is NEVER disabled — the user
-              must always be able to stop a recording (a socket drop or a
-              pending question must not lock the waveform in place). */}
-          {dictation.supported && (
-            <ComposerVoiceButton
-              active={dictation.active}
-              onClick={dictation.active ? dictation.stop : dictation.start}
-              disabled={disabled && !dictation.active}
-              aria-label={dictation.active ? "Stop dictation" : "Start voice dictation"}
-            />
-          )}
-          {isProcessing && onStop ? (
-            <Button
-              type="button"
-              size="icon"
-              onClick={onStop}
-              className="h-9 w-9 shrink-0 rounded-full"
-              title="Stop generating"
-              aria-label="Stop generating"
-            >
-              <Square className="h-3.5 w-3.5 fill-current" />
-            </Button>
-          ) : (
-            /* Round terracotta send button with arrow-up (Terra spec). */
-            <Button
-              type="submit"
-              size="icon"
-              disabled={disabled || !canSend}
-              className={cn(
-                "h-9 w-9 shrink-0 rounded-full bg-primary text-primary-foreground transition-all hover:bg-brand-hover disabled:opacity-40",
-                canSend && !disabled && "shadow-sm",
-              )}
-              title="Send message"
-              aria-label="Send message"
-            >
-              <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
-            </Button>
-          )}
+        {/* OFFLINE CHIP — the only connection surface left (§5.1 removed
+            the always-on "Live" pill): appears ONLY when the socket is
+            down, so the state can never hide in plain sight. */}
+        {!isConnected && (
+          <span
+            role="status"
+            className="text-destructive ml-1 inline-flex min-w-0 items-center gap-1.5 rounded-full border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium tracking-wide"
+          >
+            <span className="bg-destructive inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full" />
+            Offline
+          </span>
+        )}
+
+        <div className="ml-auto flex min-w-0 shrink items-center gap-1.5">
+          {/* MODEL SELECTOR (§5.4) — shows the active model; the popover
+              keeps provider + routing, temperature and effort. */}
+          <ChatControls
+            onModelChange={onModelChange}
+            onProviderSelect={onProviderSelect}
+            onTemperatureChange={onTemperatureChange}
+            onThinkingEffortChange={onThinkingEffortChange}
+          />
+
+          {/* SEND ⇄ STOP MORPH (§5.4): one fixed slot, key-swapped glyph —
+              the icon-swap-in cross-fade morphs idle → active → generating
+              instead of abruptly replacing buttons. */}
+          <span className="relative inline-flex h-9 w-9 shrink-0 items-center justify-center">
+            {isProcessing && onStop ? (
+              <Button
+                key="stop"
+                type="button"
+                size="icon"
+                onClick={onStop}
+                className="icon-swap-in h-9 w-9 rounded-full"
+                title="Stop generating"
+                aria-label="Stop generating"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                key="send"
+                type="submit"
+                size="icon"
+                disabled={disabled || !canSend}
+                className={cn(
+                  "icon-swap-in bg-primary text-primary-foreground hover:bg-brand-hover h-9 w-9 rounded-full transition-all disabled:opacity-40",
+                  canSend && !disabled && "shadow-sm",
+                )}
+                title="Send message"
+                aria-label="Send message"
+              >
+                <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+              </Button>
+            )}
+          </span>
         </div>
       </div>
 
       {/* Dictation failure hint — inline, auto-dismisses (~4s) */}
       {dictation.error && (
-        <p role="alert" className="animate-fade-in pt-1 text-[10px] text-muted-foreground/70">
+        <p role="alert" className="animate-fade-in text-muted-foreground/70 pt-1 text-[10px]">
           {dictation.error}
         </p>
-      )}
-
-      {/* Subtle hint row — shows when input is focused and empty */}
-      {isFocused && !message && attachedFiles.length === 0 && (
-        <div className="flex items-center gap-1.5 pt-1 text-[10px] text-muted-foreground/50 animate-fade-in">
-          <Sparkles className="h-2.5 w-2.5" />
-          <span>Enter to send • Shift+Enter for newline • / for commands</span>
-        </div>
       )}
     </form>
   );

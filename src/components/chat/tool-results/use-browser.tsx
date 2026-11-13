@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { BookmarkPlus, Check, ChevronRight, Globe, Loader2, X } from "lucide-react";
+import { BookmarkPlus, Check, Globe, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
 import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
@@ -415,22 +415,11 @@ function BrowserOpRow({ toolCall }: { toolCall: ToolCall }) {
           ) : null}
         </span>
 
-        {/* Duration + disclosure chevron. */}
+        {/* Duration (the whole row is the disclosure — no chevron). */}
         {isRunning ? (
           <ToolLiveElapsed startedAt={toolCall.startedAt} />
         ) : (
           <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} />
-        )}
-        {output ? (
-          <ChevronRight
-            className={cn(
-              "h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200",
-              open && "rotate-90",
-            )}
-            aria-hidden
-          />
-        ) : (
-          <span className="w-3 shrink-0" aria-hidden />
         )}
       </button>
 
@@ -561,22 +550,16 @@ export function BrowserUseGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
       role="group"
       aria-label={`Use Browser — ${statusLabel}`}
     >
-      {/* The tool line — same anatomy as every other tool call: chevron ·
-          glyph · name · chip · status. */}
+      {/* The tool line — same anatomy as every other tool call row
+          (Task 24 + PRD §3.2): glyph · name · chip · status. NO chevron —
+          the whole row is the toggle. */}
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
         className="flex min-h-7 w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/40"
       >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-            expanded && "rotate-90",
-          )}
-          aria-hidden
-        />
-        <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <Globe className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
         <span className="min-w-0 shrink-0 truncate text-sm font-medium text-foreground/90">Use Browser</span>
         {currentUrl ? (
           <span className={cn(chipClass, "hidden shrink truncate sm:inline-flex")}>

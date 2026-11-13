@@ -578,3 +578,135 @@ input.bg-background:focus {
   [role="dialog"], [data-radix-popper-content-wrapper] > *, [role="tooltip"] { background: rgba(20,10,5,.72); }
   button.bg-secondary, button.bg-background { background: rgba(20,10,5,.72); }
 }
+
+/* =========================================================================
+   §15 · SEMANTIC TOKEN BRIDGE + CUSTOM CANVAS (Appearance PRD §1–§2)
+   The default paint above IS the app identity; this layer exposes it as
+   the PRD §2.2 semantic token set and re-derives every surface when the
+   user picks a custom background (@/lib/appearance writes the tokens
+   inline on <html> and adds .custom-canvas — inline wins over this sheet).
+   ========================================================================= */
+
+/* ---- 15.1 · Semantic tokens (default paint) --------------------------
+   One place where the app-wide contract from PRD §2.2 lives; components
+   may consume these directly, while the Tailwind --color-* bridge keeps
+   every existing component working unchanged. */
+:root {
+  --app-background: #0b0200;
+  --surface-primary: var(--color-card);
+  --surface-secondary: var(--color-muted);
+  --text-primary: var(--color-foreground);
+  --text-secondary: rgb(255 255 255 / 0.75);
+  --text-muted: var(--color-muted-foreground);
+  --border-default: var(--color-border);
+  --border-subtle: rgb(255 255 255 / 0.08);
+  --accent-primary: var(--color-primary);
+  --icon-primary: rgb(255 255 255 / 0.75);
+  --button-background: var(--color-primary);
+  --button-foreground: var(--color-primary-foreground);
+  --input-background: rgb(0 0 0 / 0.36);
+  --input-foreground: var(--color-foreground);
+  --focus-ring: var(--color-ring);
+}
+
+/* ---- 15.2 · Custom canvas — flat paint, contrast-aware glass ---------
+   Under a user background the §2.2 gradient identity is replaced by the
+   FLAT canvas (the user's colour, unmodified), and every glass pane
+   re-derives its fill from canvas + ink via color-mix so text carved
+   from --text-primary (set inline, WCAG-validated) always reads. The
+   accent chain stays orange — the picker never repaints components. */
+html.custom-canvas { background: var(--app-background); }
+
+html.custom-canvas body,
+html.custom-canvas .og-page {
+  background: var(--app-background);
+  color: var(--text-primary);
+}
+
+/* Screen grades → flat canvas (onboard halo + settings overlay). */
+html.custom-canvas div.min-h-screen.bg-background,
+html.custom-canvas div.h-dvh.bg-background {
+  background: var(--app-background);
+  color: var(--text-primary);
+}
+
+/* Fixed chrome → canvas-derived glass (translucent lift of the canvas,
+   hairline from the derived border ladder — readable on any colour). */
+html.custom-canvas .glass-header {
+  background: color-mix(in srgb, var(--app-background) 68%, transparent);
+  border-bottom-color: var(--border-default);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 18px 44px rgb(0 0 0 / 0.35);
+}
+html.custom-canvas .conv-sidebar,
+html.custom-canvas div.fixed.inset-y-0.bg-background {
+  background: color-mix(in srgb, var(--app-background) 80%, transparent);
+  border-color: var(--border-default);
+  box-shadow: inset -18px 0 34px -20px rgb(0 0 0 / 0.5), inset 1px 0 0 rgb(255 255 255 / 0.04);
+}
+html.custom-canvas .glass-card,
+html.custom-canvas .bg-card,
+html.custom-canvas .composer-dock {
+  background: color-mix(in srgb, var(--app-background) 58%, transparent);
+  border-color: var(--border-default);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 10px 26px rgb(0 0 0 / 0.24);
+}
+html.custom-canvas .glass-card::after { background: none; }
+html.custom-canvas .composer-dock:focus-within {
+  border-color: color-mix(in srgb, var(--focus-ring) 34%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus-ring) 45%, transparent),
+              0 10px 26px rgb(0 0 0 / 0.24), inset 0 1px 0 rgb(255 255 255 / 0.07);
+}
+html.custom-canvas .glass-strong {
+  background: color-mix(in srgb, var(--app-background) 88%, transparent);
+  border-color: var(--border-default);
+}
+html.custom-canvas [role="dialog"],
+html.custom-canvas [data-radix-popper-content-wrapper] > * {
+  background: color-mix(in srgb, var(--app-background) 88%, transparent);
+  border-color: var(--border-default);
+  box-shadow: 0 30px 70px rgb(0 0 0 / 0.45), inset 0 1.5px 0 rgb(255 255 255 / 0.08);
+}
+html.custom-canvas [role="tooltip"] {
+  background: color-mix(in srgb, var(--app-background) 82%, transparent);
+  border-color: var(--border-default);
+}
+
+/* Wells + fields — recessed against ANY canvas (darker than the canvas
+   keeps the "well" reading while ink stays token-driven). */
+html.custom-canvas .og-well {
+  background: color-mix(in srgb, var(--app-background) 70%, #000);
+  border-color: var(--border-subtle);
+}
+html.custom-canvas .og-field,
+html.custom-canvas input.bg-background,
+html.custom-canvas textarea.border-input,
+html.custom-canvas input.border-input {
+  background: color-mix(in srgb, var(--app-background) 62%, #000);
+  border-color: var(--border-default);
+  color: var(--input-foreground);
+}
+
+/* User bubble + code wells keep their accent identity but soften onto the
+   custom canvas so long threads still feel intentional. */
+html.custom-canvas .chat-code {
+  background: color-mix(in srgb, var(--app-background) 55%, #000);
+}
+
+/* Hairline rows + separators follow the derived ladder. */
+html.custom-canvas .conv-sidebar .group:hover,
+html.custom-canvas .conv-sidebar a:hover { border-color: var(--border-default); }
+
+/* No-blur fallback: near-opaque canvas mixes instead of glass. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html.custom-canvas .glass-header,
+  html.custom-canvas .conv-sidebar,
+  html.custom-canvas div.fixed.inset-y-0.bg-background,
+  html.custom-canvas .glass-card,
+  html.custom-canvas .bg-card,
+  html.custom-canvas .composer-dock,
+  html.custom-canvas [role="dialog"],
+  html.custom-canvas [data-radix-popper-content-wrapper] > *,
+  html.custom-canvas [role="tooltip"] {
+    background: color-mix(in srgb, var(--app-background) 94%, var(--text-primary) 6%);
+  }
+}

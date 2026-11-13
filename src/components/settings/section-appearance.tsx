@@ -2,21 +2,20 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Check, Monitor, Moon, Sun } from "lucide-react";
+import { Check, Monitor, Moon, RotateCcw, Sun } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useThemeStore, type Theme as ThemeChoice } from "@/stores/theme-store";
 import {
-  applyBrandPreset as applyBrandPresetFromLib,
-  readPersistedBrandId,
-  selectBrandPreset,
-  BRAND_PRESETS,
+  DEFAULT_BACKGROUND,
   FONT_KEY,
-  type BrandPreset,
-} from "@/lib/brand";
-import { Button } from "@/components/ui/button";
+  readPersistedBackground,
+  resetAppearance,
+  selectBackground,
+  clearBackground,
+  relativeLuminance,
+} from "@/lib/appearance";
 import { Label } from "@/components/ui/label";
-import { ShinyButton, ShinyButtonEmerald } from "@/components/ui";
 import { MoreOptions } from "@/components/settings/more-options";
 import { OrbPersonalitySettings } from "@/components/assistant-ui/elements";
 import {
@@ -27,12 +26,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type FontSize = "sm" | "base" | "lg";
+/**
+ * Appearance — the ONE appearance surface (Appearance PRD §1).
+ *
+ *  · Theme: light / dark / system (mode only — the palette is the single
+ *    default Orange Glass identity on both).
+ *  · Background: the canvas colour picker (§1.2) — default keeps the
+ *    black + orange identity; every pick is contrast-validated by
+ *    @/lib/appearance so text/icons/borders always read (§2).
+ *  · Reset appearance (§1.3): restores the default background, component
+ *    colours and font size in place.
+ *
+ * The old brand-preset grid and the 50-scheme "color combinations" picker
+ * are gone (§1.1 — one default theme, no competing accent presets).
+ */
 
-// Brand presets + persistence live in @/lib/brand — the ONE source of truth,
-// applied at app boot too (the pick survives reloads; it used to revert to
-// cyan on every load because applyBrand only ran while this settings
-// section was mounted — the “highlighted text is always cyan” bug).
+type FontSize = "sm" | "base" | "lg";
 
 const FONT_SIZE_MAP: Record<FontSize, string> = {
   sm: "14px",
@@ -40,32 +49,50 @@ const FONT_SIZE_MAP: Record<FontSize, string> = {
   lg: "18px",
 };
 
-function applyFont(size: FontSize) {
-  document.documentElement.style.fontSize = FONT_SIZE_MAP[size];
+/** Curated canvas swatches — the default identity first, then a few
+ *  sensible warm/cool/neutral canvases (these are BACKGROUNDS, not accent
+ *  themes; the accent stays orange regardless). */
+const CANVAS_SWATCHES: { label: string; hex: string }[] = [
+  { label: "Onyx (default)", hex: DEFAULT_BACKGROUND },
+  { label: "Ember", hex: "#1a0a02" },
+  { label: "Charcoal", hex: "#16161a" },
+  { label: "Deep Sea", hex: "#04121c" },
+  { label: "Forest", hex: "#0a1508" },
+  { label: "Plum", hex: "#170a1c" },
+  { label: "Wine", hex: "#1c070d" },
+  { label: "Slate", hex: "#101418" },
+  { label: "Paper", hex: "#f7f2ec" },
+  { label: "Cloud", hex: "#eef1f4" },
+];
+
+function isValidHex(v: string): boolean {
+  return /^#?[0-9a-f]{6}$/i.test(v.trim());
+}
+
+function normalizeHex(v: string): string {
+  const t = v.trim();
+  return t.startsWith("#") ? t.toLowerCase() : `#${t.toLowerCase()}`;
 }
 
 export function SectionAppearance() {
-  // The zustand theme store is the app's SINGLE source of truth (the custom
-  // ThemeProvider + ThemeToggle use it). next-themes' useTheme silently
-  // no-ops here because its provider was never mounted — these buttons did
-  // nothing until this swap.
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
   const [mounted, setMounted] = React.useState(false);
-  const [brand, setBrand] = React.useState<string>("cyan");
+  const [background, setBackground] = React.useState<string | null>(null);
+  const [hexDraft, setHexDraft] = React.useState("");
   const [fontSize, setFontSize] = React.useState<FontSize>("base");
+  const [confirmReset, setConfirmReset] = React.useState(false);
 
   React.useEffect(() => {
     setMounted(true);
-    // Validated persisted ids (unknown/legacy ids map onto cyan) — the
-    // SAME normalization the boot applier uses (@/lib/brand).
-    const savedBrand = readPersistedBrandId();
+    const savedBg = readPersistedBackground();
+    setBackground(savedBg);
+    setHexDraft(savedBg ?? DEFAULT_BACKGROUND);
     const savedFont = (localStorage.getItem(FONT_KEY) as FontSize | null) ?? "base";
-    setBrand(savedBrand);
     setFontSize(savedFont);
-    const preset = BRAND_PRESETS.find((p) => p.id === savedBrand) ?? BRAND_PRESETS[0]!;
-    applyBrandPresetFromLib(preset);
-    applyFont(savedFont);
+    if (savedFont !== "base") {
+      document.documentElement.style.fontSize = FONT_SIZE_MAP[savedFont];
+    }
   }, []);
 
   function handleTheme(value: string) {
@@ -73,29 +100,65 @@ export function SectionAppearance() {
     toast.success(`Theme set to ${value}`);
   }
 
-  function handleBrand(preset: BrandPreset) {
-    setBrand(preset.id);
-    // selectBrandPreset applies the preset AND clears the competing custom
-    // color-scheme — the LAST choice is the one that survives reloads.
-    selectBrandPreset(preset);
-    toast.success(`Brand color: ${preset.label}`);
+  function handleBackground(hex: string) {
+    const normalized = normalizeHex(hex);
+    setBackground(normalized);
+    setHexDraft(normalized);
+    selectBackground(normalized);
+  }
+
+  function handleDefaultBackground() {
+    setBackground(null);
+    setHexDraft(DEFAULT_BACKGROUND);
+    clearBackground();
+    toast.success("Default background restored");
+  }
+
+  function handleHexDraftCommit() {
+    if (!isValidHex(hexDraft)) {
+      setHexDraft(background ?? DEFAULT_BACKGROUND);
+      return;
+    }
+    handleBackground(hexDraft);
   }
 
   function handleFont(value: string) {
     const size = value as FontSize;
     setFontSize(size);
-    applyFont(size);
+    if (size === "base") {
+      document.documentElement.style.removeProperty("font-size");
+    } else {
+      document.documentElement.style.fontSize = FONT_SIZE_MAP[size];
+    }
     localStorage.setItem(FONT_KEY, size);
-    toast.success(`Font size: ${size}`);
   }
+
+  function handleReset() {
+    if (!confirmReset) {
+      setConfirmReset(true);
+      return;
+    }
+    resetAppearance();
+    setBackground(null);
+    setHexDraft(DEFAULT_BACKGROUND);
+    setFontSize("base");
+    setConfirmReset(false);
+    toast.success("Appearance reset to defaults");
+  }
+
+  const isDefaultBg = background === null;
+  const previewLuminance = relativeLuminance(isDefaultBg ? DEFAULT_BACKGROUND : background ?? DEFAULT_BACKGROUND);
+  const previewInk = previewLuminance < 0.35 ? "#ffffff" : "#0b0200";
 
   return (
     <div className="space-y-8">
-      {/* Theme */}
+      {/* ── Theme (mode only — the palette is the single default identity) ── */}
       <section className="space-y-3">
         <div>
           <h3 className="text-sm font-semibold">Theme</h3>
-          <p className="text-muted-foreground text-xs">Choose how the app looks.</p>
+          <p className="text-muted-foreground text-xs">
+            Light, dark, or follow your system. The palette stays Onyx — warm black with orange accents.
+          </p>
         </div>
         <div className="grid grid-cols-3 gap-2 sm:max-w-md">
           <ThemeOption
@@ -117,75 +180,145 @@ export function SectionAppearance() {
             onClick={() => handleTheme("system")}
           />
         </div>
-
-        {/* The two shiny gleam buttons — one-tap theme setters. The
-            gleam-edge button paints the default black canvas (white ink,
-            cyan accents); the emerald button flips to the light canvas. */}
-        <div className="flex flex-wrap items-center gap-3 pt-1">
-          <ShinyButton
-            label="Black canvas"
-            onClick={() => handleTheme("dark")}
-            fillColor="#000000"
-            labelColor="#ffffff"
-            accentColor="#22d3ee"
-            accentSoftColor="#67e8f9"
-            cornerRadius={10}
-            sweepDuration={2.6}
-            style={{ padding: "0.55rem 1.15rem", fontSize: "0.8rem" }}
-          />
-          <ShinyButtonEmerald
-            className="inline-flex h-9 items-center gap-2 px-4 text-xs"
-            onClick={() => handleTheme("light")}
-          >
-            <Sun className="h-3.5 w-3.5" aria-hidden />
-            Light canvas
-          </ShinyButtonEmerald>
-        </div>
       </section>
 
-      {/* Brand */}
+      {/* ── Background customization (PRD §1.2) ── */}
       <section className="space-y-3">
         <div>
-          <h3 className="text-sm font-semibold">Brand color</h3>
+          <h3 className="text-sm font-semibold">Background</h3>
           <p className="text-muted-foreground text-xs">
-            Applied to primary buttons, badges, and the active accent.
+            The app canvas colour. Text, icons and borders adapt automatically to stay readable.
           </p>
         </div>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {/* Live preview chip — the canvas with its derived ink. */}
+          <div
+            aria-hidden
+            className="flex h-11 w-full max-w-[220px] items-center gap-2.5 rounded-xl border px-3"
+            style={{
+              background: isDefaultBg ? DEFAULT_BACKGROUND : (background ?? DEFAULT_BACKGROUND),
+              borderColor: "color-mix(in srgb, currentColor 14%, transparent)",
+              color: previewInk,
+            }}
+          >
+            <span className="text-xs font-semibold">Aa</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-[#f07e12]" />
+            <span className="text-[11px] opacity-70">
+              {isDefaultBg ? "Default · Onyx" : background}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Native colour picker — proper picker, immediate apply. */}
+            <label
+              className="relative inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-border px-3 text-xs font-medium transition-colors hover:bg-accent/50"
+              title="Pick a background colour"
+            >
+              <span
+                aria-hidden
+                className="h-4 w-4 rounded-full border border-black/10"
+                style={{
+                  background: isDefaultBg ? DEFAULT_BACKGROUND : (background ?? DEFAULT_BACKGROUND),
+                }}
+              />
+              Pick colour
+              <input
+                type="color"
+                value={isDefaultBg ? DEFAULT_BACKGROUND : (background ?? DEFAULT_BACKGROUND)}
+                onChange={(e) => handleBackground(e.target.value)}
+                className="absolute inset-0 cursor-pointer opacity-0"
+                aria-label="Background colour picker"
+              />
+            </label>
+
+            {/* Hex entry for exact colours. */}
+            <input
+              type="text"
+              value={hexDraft}
+              onChange={(e) => setHexDraft(e.target.value)}
+              onBlur={handleHexDraftCommit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleHexDraftCommit();
+                }
+              }}
+              spellCheck={false}
+              maxLength={7}
+              aria-label="Background hex colour"
+              className="border-input bg-background/40 h-9 w-[92px] rounded-lg border px-2.5 font-mono text-xs lowercase"
+            />
+          </div>
+        </div>
+
+        {/* Curated canvas swatches. */}
         <div className="flex flex-wrap gap-2">
-          {BRAND_PRESETS.map((preset) => {
-            const selected = brand === preset.id;
+          {CANVAS_SWATCHES.map((sw) => {
+            const selected = !isDefaultBg && background === sw.hex;
+            const isDefaultSwatch = sw.hex === DEFAULT_BACKGROUND && isDefaultBg;
             return (
               <button
-                key={preset.id}
+                key={sw.hex}
                 type="button"
-                onClick={() => handleBrand(preset)}
-                aria-label={preset.label}
-                aria-pressed={selected}
+                onClick={() =>
+                  sw.hex === DEFAULT_BACKGROUND && isDefaultBg
+                    ? handleDefaultBackground()
+                    : handleBackground(sw.hex)
+                }
+                aria-label={sw.label}
+                aria-pressed={selected || isDefaultSwatch}
+                title={sw.label}
                 className={cn(
-                  "relative flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors",
-                  selected
-                    ? "border-foreground/30 bg-accent text-accent-foreground"
+                  "relative flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors",
+                  selected || isDefaultSwatch
+                    ? "border-primary text-foreground"
                     : "border-border hover:bg-accent/50",
                 )}
               >
                 <span
-                  className="size-4 rounded-full border border-black/10 dark:border-white/20"
-                  style={{ background: preset.swatch }}
+                  aria-hidden
+                  className="size-4 rounded-full border border-black/10"
+                  style={{ background: sw.hex }}
                 />
-                {preset.label}
-                {selected && <Check className="size-3.5" />}
+                {sw.label}
+                {(selected || isDefaultSwatch) && <Check className="size-3.5" />}
               </button>
             );
           })}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleBrand(BRAND_PRESETS[0]!)}
-          disabled={brand === "cyan"}
-        >
-          Reset to default
-        </Button>
+
+        <p className="text-muted-foreground/70 text-[11px] leading-relaxed">
+          Applies instantly and persists across sessions. Components keep their own
+          contrast-aware surfaces — your colour never repaints buttons or icons.
+        </p>
+      </section>
+
+      {/* ── Reset appearance (PRD §1.3) ── */}
+      <section className="space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold">Reset appearance</h3>
+          <p className="text-muted-foreground text-xs">
+            Restore the default background, component colours and text size.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleReset}
+            onBlur={() => setConfirmReset(false)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
+              confirmReset
+                ? "border-destructive/50 bg-destructive/10 text-destructive"
+                : "border-border hover:bg-accent/50",
+            )}
+            aria-live="polite"
+          >
+            <RotateCcw className="size-3.5" aria-hidden />
+            {confirmReset ? "Tap again to confirm" : "Reset appearance"}
+          </button>
+        </div>
       </section>
 
       {/* ── Advanced: interface scaling ── */}
@@ -213,10 +346,7 @@ export function SectionAppearance() {
         </section>
       </MoreOptions>
 
-      {/* Orb personalities (PRD §10 — Feature Two): presets with live
-          mini-orb previews, custom tuning, per-state variant editor. Same
-          panel the /settings/appearance page mounts — one component, one
-          persisted store, every surface in sync. */}
+      {/* Orb personalities (feature parity — same panel the chat orb uses). */}
       <OrbPersonalitySettings />
     </div>
   );

@@ -57,7 +57,7 @@
   }
 }
 .mb-object-in {
-  animation: mb-object-in var(--dur-appear) var(--ease-enter) backwards;
+  animation: mb-object-in var(--mb-dur, var(--dur-appear)) var(--ease-enter) backwards;
 }
 
 /* Row variant — lighter (4px blur, 4px rise, 180ms): for list rows and
@@ -75,7 +75,7 @@
   }
 }
 .mb-row-in {
-  animation: mb-row-in 180ms var(--ease-enter) backwards;
+  animation: mb-row-in var(--mb-dur, 180ms) var(--ease-enter) backwards;
 }
 
 /* Stagger — children of a .mb-stagger reveal in sequence (first 8 rows
@@ -161,6 +161,10 @@ button:active:not(:disabled):not([role="menuitem"]) {
 @media (prefers-reduced-motion: reduce) {
   .mb-object-in,
   .mb-row-in,
+  .mb-fade-in,
+  .mb-spring-in,
+  .mb-scale-in,
+  .mb-fade-out,
   .mb-collapse[data-open="true"] > *,
   .mb-stagger > *,
   .mb-press {
@@ -170,4 +174,43 @@ button:active:not(:disabled):not([role="menuitem"]) {
   button:active:not(:disabled):not([role="menuitem"]) {
     transform: none;
   }
+}
+
+/* ── PRIMITIVE EXTRAS (motion/ React layer) ─────────────────────────────
+   Entrances the React primitives (src/components/motion) compose beyond
+   the object/row reveals: a pure opacity fade and a spring-settled rise.
+   Same token timings; fill `backwards` so settled elements carry no
+   filter/transform surface. */
+@keyframes mb-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.mb-fade-in {
+  animation: mb-fade-in var(--mb-dur, 160ms) var(--ease-standard, cubic-bezier(.2,.8,.2,1)) backwards;
+}
+
+@keyframes mb-spring-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+.mb-spring-in {
+  animation: mb-spring-in var(--mb-dur, 220ms) var(--ease-spring, cubic-bezier(.22,1,.36,1)) backwards;
+}
+
+@keyframes mb-scale-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+.mb-scale-in {
+  animation: mb-scale-in var(--mb-dur, 180ms) var(--ease-enter, cubic-bezier(.16,1,.3,1)) backwards;
+}
+
+/* PresenceTransition exit — the element plays this once the parent flags
+   removal, then unmounts (the primitive holds it mounted for the exit). */
+@keyframes mb-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.mb-fade-out {
+  animation: mb-fade-out var(--mb-dur, 130ms) var(--ease-exit, cubic-bezier(.4,0,1,1)) forwards;
 }

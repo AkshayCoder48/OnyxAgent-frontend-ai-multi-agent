@@ -1,16 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
 import { useChat } from "@/hooks";
-import { ChatControls } from "./chat-controls";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
 // USER DIRECTIVE: the strips that used to sit above the composer are GONE —
 // background-run progress + results land directly in the chat bubbles.
 // The invisible lander keeps the polling + auto-landing machinery alive.
 import { BackgroundTasksLander } from "./background-tasks-strip";
-import { ContextIndicator } from "./context-indicator";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { MessageList } from "./message-list";
 import {
@@ -124,8 +121,6 @@ function useChatScrollController(
 ) {
   /** True once the user takes the viewport; false again on explicit re-engage. */
   const userTookScrollRef = useRef(false);
-  /** Pending rAF handle for the coalesced follow-bottom write. */
-  const scrollRafRef = useRef<number | null>(null);
   /** Stable handle to the frame-scheduled follow (set once on mount). */
   const scheduleFollowRef = useRef<(() => void) | null>(null);
   /** Timestamp of the last PROGRAMMATIC scroll write (ours). */
@@ -169,33 +164,70 @@ function useChatScrollController(
     const distFromBottom = () =>
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    const clearRaf = () => {
-      if (scrollRafRef.current !== null) {
-        cancelAnimationFrame(scrollRafRef.current);
-        scrollRafRef.current = null;
-      }
-    };
-
     /** Mark a scroll write as OURS so the scroll event it fires is ignored. */
     const writeScrollTop = (top: number) => {
       lastProgrammaticWriteRef.current = performance.now();
       container.scrollTop = top;
     };
 
-    // The ONE scroll write path: container-scoped, instant, frame-scheduled,
-    // and re-checked inside the frame (a user scroll arriving mid-frame wins).
-    const scheduleFollowBottom = () => {
-      if (scrollRafRef.current !== null) return; // already scheduled this frame
-      scrollRafRef.current = requestAnimationFrame(() => {
-        scrollRafRef.current = null;
+    // ── CONTROLLED SCROLL INTERPOLATION (PRD §4 — smooth streaming
+    // auto-scroll, rev 3): follow-bottom runs as a CONTINUOUS rAF loop
+    // that eases scrollTop toward the live target (scrollHeight) — never
+    // a per-token instant snap, never CSS scroll-behavior:smooth (repeated
+    // smooth-scroll commands stutter). Rules inside the loop:
+    //   · one write per animation frame (batched by definition);
+    //   · huge distances (history mount / big GenUI card) snap directly —
+    //     no long catch-up flight;
+    //   · normal streaming distances approach with a damped ratio + a
+    //     floor speed, so the viewport glides behind the growing content
+    //     without lag, jerk or start-stop;
+    //   · the loop self-terminates at the bottom (dist ≤ 0.5px) — the next
+    //     content flush restarts it, so idle turns cost zero frames;
+    //   · a user taking the viewport (disengage) or reduced-motion stops
+    //     the glide immediately.
+    const followAnimRef = { current: null as number | null };
+    const stopFollowAnim = () => {
+      if (followAnimRef.current !== null) {
+        cancelAnimationFrame(followAnimRef.current);
+        followAnimRef.current = null;
+      }
+    };
+    const startFollowAnim = () => {
+      if (followAnimRef.current !== null) return; // already gliding
+      const reduced =
+        typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      const step = () => {
+        followAnimRef.current = null;
         if (userTookScrollRef.current) {
           // Disengaged and content still arriving → unread marker on the pill.
           setHasNewBelow(true);
           return;
         }
-        genuiPerfLog("Scroll", "follow-bottom");
-        writeScrollTop(container.scrollHeight);
-      });
+        const dist = distFromBottom();
+        if (dist <= 0.5) return; // settled at the bottom — loop ends
+        if (reduced || dist > container.clientHeight) {
+          // Reduced motion or a mount-sized jump: land immediately.
+          genuiPerfLog("Scroll", "follow-bottom-snap");
+          writeScrollTop(container.scrollHeight);
+          return;
+        }
+        // Damped approach: ~16% of the remaining distance per frame with a
+        // 24px floor — fluid at any token rate, no repeated start-stop.
+        const move = Math.max(dist * 0.16, Math.min(dist, 24));
+        writeScrollTop(container.scrollTop + move);
+        followAnimRef.current = requestAnimationFrame(step);
+      };
+      followAnimRef.current = requestAnimationFrame(step);
+    };
+
+    // The ONE follow path: frame-scheduled, container-scoped, interpolated.
+    const scheduleFollowBottom = () => {
+      if (userTookScrollRef.current) {
+        setHasNewBelow(true);
+        return;
+      }
+      startFollowAnim();
     };
     scheduleFollowRef.current = scheduleFollowBottom;
 
@@ -258,7 +290,7 @@ function useChatScrollController(
     window.addEventListener("keydown", onKeyDown);
 
     return () => {
-      clearRaf();
+      stopFollowAnim();
       clearRearmTimer();
       scheduleFollowRef.current = null;
       container.removeEventListener("scroll", onScroll);
@@ -951,7 +983,6 @@ function ChatUI({
   branchesDisabled,
   rateLimitStatus,
 }: ChatUIProps) {
-  const tc = useTranslations("common");
   // PROJECTS: while a project workspace is open, the zero-message screen is
   // the PROJECT's own empty state (orb + name + goal + suggestions that
   // populate THIS composer) instead of the generic welcome.
@@ -1122,8 +1153,13 @@ function ChatUI({
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}
+          {/* COMPOSER DOCK — ONE unified container (PRD §5.2): the dock owns
+              the border + the acc focus glow; no nested borders, no bottom
+              strip, no separator. The composer's own bottom control bar
+              carries attachments, voice, the model selector and send/stop
+              (the old Live · Context% · ⏎ row is gone — §5.1). */}
           <div className="composer-dock mb-morph rounded-2xl input-focus-glow">
-            <div className="px-2.5 pt-2.5 sm:px-4 sm:pt-4">
+            <div className="px-2.5 py-2.5 sm:px-4 sm:py-3.5">
               <ChatInput
                 key={conversationId ?? "new-chat"}
                 onSend={sendMessage}
@@ -1135,36 +1171,12 @@ function ChatUI({
                 onStop={onStop}
                 slashContext={slashContext}
                 commands={slashCommands}
+                isConnected={isConnected}
+                onModelChange={onModelChange}
+                onProviderSelect={handleProviderSelect}
+                onTemperatureChange={onTemperatureChange}
+                onThinkingEffortChange={onThinkingEffortChange}
               />
-            </div>
-            <div className="border-foreground/8 flex items-center justify-between gap-2 border-t px-2.5 py-1.5 sm:px-4 sm:py-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <span
-                  className={`inline-flex shrink-0 items-center gap-1.5 font-mono text-[10px] tracking-wider uppercase ${isConnected ? "text-muted-foreground" : "text-destructive"}`}
-                >
-                  <span
-                    className={`inline-block h-1.5 w-1.5 rounded-full ${
-                      isConnected ? "bg-primary" : "bg-destructive"
-                    }`}
-                  />
-                  {isConnected ? tc("live") : tc("offline")}
-                </span>
-                {/* Context usage pill (Onyx Infinite Context PRD §29) — opens
-                    the inspector popover on click. */}
-                <ContextIndicator />
-              </div>
-              <div className="flex min-w-0 items-center gap-1">
-                {/* "⏎ to send" hint (Terra spec) */}
-                <kbd className="mr-1 hidden select-none font-mono text-[10px] text-muted-foreground/60 sm:inline-flex">
-                  ⏎ to send
-                </kbd>
-                <ChatControls
-                  onModelChange={onModelChange}
-                  onProviderSelect={handleProviderSelect}
-                  onTemperatureChange={onTemperatureChange}
-                  onThinkingEffortChange={onThinkingEffortChange}
-                />
-              </div>
             </div>
           </div>
           {/* Centered disclaimer below the composer card (Terra spec). */}
