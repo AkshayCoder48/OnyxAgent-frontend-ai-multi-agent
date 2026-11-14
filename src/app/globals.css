@@ -3496,10 +3496,11 @@ html.theme-transitioning .animate-backdrop {
   }
 }
 
-/* Container helpers — used IN PLACE of ad-hoc rounded-*/p-* utilities in the
-   settings components. Unlayered, so they beat Tailwind utilities when both
-   land on the same element (components keep border/bg/spacing utilities and
-   swap only their geometry to these tokens). */
+/* Container helpers — used IN PLACE of the ad-hoc rounded and padding
+   utilities in the settings components. Unlayered, so they beat Tailwind
+   utilities when both land on the same element (components keep their
+   border and background utilities and swap only their geometry to these
+   tokens). */
 .settings-main {
   border-radius: var(--settings-radius-main);
   padding: var(--settings-padding-main);

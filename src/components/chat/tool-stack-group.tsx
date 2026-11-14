@@ -6,7 +6,7 @@ import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { CollapsePanel } from "@/components/assistant-ui/elements";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
-import { stackSummaryLabel, stackSummarySegments } from "@/lib/tool-stack-summaries";
+import { stackSummaryLabel } from "@/lib/tool-stack-summaries";
 
 /**
  * ToolStackGroup — the COMBINED TOOLS row (user screenshots 2026-11-13 +

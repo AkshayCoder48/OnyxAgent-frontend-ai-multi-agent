@@ -48,11 +48,22 @@ import type { Todo } from "@/types";
 /** The vanish exit duration — matches .mb-object-out's default 300ms. */
 const VANISH_MS = 320;
 
+/**
+ * STABLE EMPTY LIST (the 2026-11-14 production crash, minified React #301 /
+ * dev "Too many re-renders"): `turn?.agentTodos ?? []` allocates a NEW
+ * array every render while the turn bucket is absent (the mobile chat loads
+ * before any todo exists), so the render-time `items !== prevItems`
+ * comparison never converged and the panel re-render looped until React
+ * threw — mobile only, because the dock mounts just there. One shared
+ * frozen reference lets the comparison settle on the first render.
+ */
+const NO_TODOS: Todo[] = Object.seal([]) as Todo[];
+
 export function ComposerTodoPanel() {
   const currentTurnId = useResearchStore((s) => s.currentTurnId);
   const activeTurnId = currentTurnId ?? "default";
   const turn = useResearchStore((s) => s.byTurn[activeTurnId]);
-  const items: Todo[] = turn?.agentTodos ?? [];
+  const items: Todo[] = turn?.agentTodos ?? NO_TODOS;
 
   const total = items.length;
   const doneCount = items.filter((t) => t.status === "done").length;

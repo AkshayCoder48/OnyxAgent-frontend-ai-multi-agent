@@ -54,6 +54,23 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
     expect(getByText("Sync repo + verify test baseline")).toBeTruthy();
   });
 
+  it("REGRESSION (prod #301, mobile): an ABSENT turn bucket must not re-render loop", () => {
+    // The 2026-11-14 production crash: with NO bucket for the active turn,
+    // `turn?.agentTodos ?? []` allocated a fresh [] every render, so the
+    // render-time prevItems comparison never settled and React threw
+    // "Too many re-renders" (minified: #301) until the dashboard error
+    // boundary caught it — mobile only, where the dock mounts. The stable
+    // NO_TODOS reference must converge; rendering here throws if it doesn't.
+    useResearchStore.setState({ byTurn: {}, currentTurnId: null });
+    const { container } = render(<ComposerTodoPanel />);
+    expect(container.firstElementChild).toBeNull();
+    // And with a turn id that has no bucket either.
+    useResearchStore.setState({ byTurn: {}, currentTurnId: "never-seen" });
+    const second = render(<ComposerTodoPanel />);
+    expect(second.container.firstElementChild).toBeNull();
+    cleanup();
+  });
+
   it("rows are READ-ONLY — no toggle buttons, clicks never flip the store", () => {
     seed(PLAN);
     const { getByText, getAllByRole } = render(<ComposerTodoPanel />);

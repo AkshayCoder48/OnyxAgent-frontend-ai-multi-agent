@@ -665,3 +665,18 @@ Stage Summary:
 - Shared containers (SectionCard, SettingsSection) rebuilt on the tokens — header gets real breathing room via negative-margin band inside the card padding; sweep replaced ad-hoc `rounded-lg/md/xl border p-*` boxes across every settings section + route page.
 
 **Tests**: vitest 946/946 (63 files) — new: tool-stack-summaries (10), todo inference + clear_todo (6), rewritten composer-panel (9) + stack-group (9) suites. tsc: only pre-existing vendored `public/skill-repos/**` asset errors (unchanged from main).
+
+## 2026-11-14 (hotfix) — production crash fix (React #301) + CSS parse bug + repo hygiene
+
+**THE CRASH (user-reported: "This section failed to load … Minified React error #301")**
+- Reproduced locally: MOBILE viewport only (`agent-browser` + iPhone emulation on `next dev`); desktop rendered clean, which is why the earlier session missed it. Dev error: "Too many re-renders. React limits the number of renders to prevent an infinite loop." (the minified #301 flavor of the same render-loop abort).
+- Root cause: ComposerTodoPanel's new vanish-tracking compared `items !== prevItems` at render time, but `turn?.agentTodos ?? []` allocates a FRESH empty array on every render while the turn bucket is absent — which is exactly the mobile chat's state at load. The comparison never settled → setState-during-render loop → React abort → dashboard error boundary. The panel mounts only in the mobile composer dock, hence "mobile only".
+- Fix: one stable frozen `NO_TODOS` reference for the absent-bucket case (comparison settles on the first render). REGRESSION test added that renders the panel with NO bucket — the old tests seeded an existing bucket with a stable empty array, which is why they never caught it. The production bundle was re-verified at 390×844 via headless browser after `next build && next start`: full page renders, zero console errors.
+
+**CSS parse bug (found while reproducing)**
+- The settings-geometry comment in globals.css contained the literal sequence `rounded-*/p-*` — the `*/` TERMINATED the CSS comment early, leaving raw tokens (fatal in Turbopack dev; production recovered). Reworded. Lesson applied: the verification for this hotfix includes `next build`, not just vitest + tsc — neither parses app CSS.
+
+**Repo hygiene (the `git add -A` slip in f243ec1)**
+- f243ec1 accidentally committed 98 files of Expo build output (`mobile/dist-web/**`, `mobile/.expo/`) that were left untracked after the expo app was removed from the repo (29d0e7e). Untracked + gitignored both paths.
+
+**Tests**: vitest 947/947 (63 files — +1 regression test). `next build` clean. Production server verified at mobile viewport in a real browser.

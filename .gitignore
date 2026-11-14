@@ -87,3 +87,7 @@ mock-llm/
 
 # Trigger.dev Cloud master key (AES-256-GCM sealing for TaskCloudConfig)
 db/cloud-config.key
+
+# Expo mobile exports — build output, never tracked (accidentally added in f243ec1)
+mobile/dist-web/
+mobile/.expo/
