@@ -1,33 +1,13 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { CloudCog } from "lucide-react";
-
-import { SectionCard } from "@/components/settings/settings-section";
-import { SectionCloudWorkspace } from "@/components/settings/section-cloud-workspace";
+import { ROUTES } from "@/lib/constants";
 
 /**
- * Cloud settings route — the OnyxBase API key for the OnyxBase-backed
- * cloud features: skills cloud backup (Settings → Skills) and the
- * durable skill backups.
- *
- * The OnyxBase `kv_live_…` key is vault-encrypted at rest and NEVER reaches
- * the LLM, the system prompt, tool arguments, or the E2B sandbox.
+ * Cloud settings route — REDIRECTED to API Keys (2026-11-14: the
+ * Sandbox (E2B), Cloud and Schedules tabs were removed from Settings —
+ * their key + connection surfaces live in the ONE API Keys tab). The
+ * route stays as a redirect so old links and bookmarks keep working.
  */
 export default function CloudWorkspaceSettingsPage() {
-  return (
-    <div className="space-y-6">
-      <SectionCard
-        title="Cloud"
-        description="OnyxBase cloud backup — your API key powers skill backups and durable workspace snapshots."
-        action={
-          <span className="border-border text-muted-foreground inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs">
-            <CloudCog className="size-3.5" />
-            OnyxBase KV
-          </span>
-        }
-      >
-        <SectionCloudWorkspace />
-      </SectionCard>
-    </div>
-  );
+  redirect(ROUTES.SETTINGS_API_KEYS);
 }

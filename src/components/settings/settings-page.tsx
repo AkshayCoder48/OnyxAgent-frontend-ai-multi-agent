@@ -5,9 +5,6 @@ import dynamic from "next/dynamic";
 import {
   ArrowLeft,
   Bot,
-  CalendarClock,
-  Cloud,
-  CloudCog,
   Flower2,
   KeyRound,
   Moon,
@@ -60,14 +57,6 @@ const SectionSlashCommands = dynamic(
   () => import("./section-slash-commands").then((m) => m.SectionSlashCommands),
   { ssr: false, loading: SectionSkeleton },
 );
-const SectionE2B = dynamic(
-  () => import("./section-e2b").then((m) => m.SectionE2B),
-  { ssr: false, loading: SectionSkeleton },
-);
-const SectionCloudWorkspace = dynamic(
-  () => import("./section-cloud-workspace").then((m) => m.SectionCloudWorkspace),
-  { ssr: false, loading: SectionSkeleton },
-);
 const SectionCustomTools = dynamic(
   () => import("./section-custom-tools").then((m) => m.SectionCustomTools),
   { ssr: false, loading: SectionSkeleton },
@@ -80,10 +69,11 @@ const SectionAppearance = dynamic(
   () => import("./section-appearance").then((m) => m.SectionAppearance),
   { ssr: false, loading: SectionSkeleton },
 );
-const SectionSchedules = dynamic(
-  () => import("./section-schedules").then((m) => m.SectionSchedules),
-  { ssr: false, loading: SectionSkeleton },
-);
+
+// 2026-11-14: the Sandbox (E2B) / Cloud Workspace / Schedules sections are
+// GONE — their key + connection surfaces live in the ONE API Keys tab
+// (SectionApiKeys), so they were three tabs to the same credentials. The
+// /settings/e2b|cloud|schedules routes redirect to /settings/api-keys.
 
 export type SettingsSectionId =
   | "apikeys"
@@ -91,11 +81,8 @@ export type SettingsSectionId =
   | "pollinations"
   | "agent"
   | "slash"
-  | "e2b"
-  | "cloud"
   | "tools"
   | "skills"
-  | "schedules"
   | "appearance";
 
 interface SettingsPageProps {
@@ -190,24 +177,6 @@ const NAV_GROUPS: NavGroup[] = [
     id: "workspace",
     label: "Workspace",
     items: [
-      {
-        id: "e2b",
-        label: "Sandbox (E2B)",
-        description: "Remote code execution sandbox",
-        icon: Cloud,
-      },
-      {
-        id: "cloud",
-        label: "Cloud Workspace",
-        description: "OnyxBase persistent workspace sync",
-        icon: CloudCog,
-      },
-      {
-        id: "schedules",
-        label: "Schedules",
-        description: "Cron background tasks",
-        icon: CalendarClock,
-      },
       {
         id: "appearance",
         label: "Appearance",
@@ -387,7 +356,7 @@ export function SettingsPage({ onClose, initialSection = "apikeys" }: SettingsPa
         </div>
 
         {/* Right content */}
-        <main className="bg-background min-h-0 flex-1 overflow-y-auto">
+        <main className="bg-background settings-scope min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-4xl px-4 py-6 md:px-8 md:py-8">
             <div className="mb-6 flex items-center gap-2.5">
               <activeItem.icon className="text-primary size-5" />
@@ -402,11 +371,8 @@ export function SettingsPage({ onClose, initialSection = "apikeys" }: SettingsPa
             {active === "pollinations" && <SectionPollinations />}
             {active === "agent" && <SectionAgentSettings />}
             {active === "slash" && <SectionSlashCommands />}
-            {active === "e2b" && <SectionE2B />}
-            {active === "cloud" && <SectionCloudWorkspace />}
             {active === "tools" && <SectionCustomTools />}
             {active === "skills" && <SectionSkills />}
-            {active === "schedules" && <SectionSchedules />}
             {active === "appearance" && <SectionAppearance />}
           </div>
         </main>

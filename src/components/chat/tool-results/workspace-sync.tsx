@@ -110,9 +110,9 @@ function reasonLabel(reason: string | undefined): string {
 function friendlyError(code: string | undefined, message: string | undefined): string {
   switch (code) {
     case "ONYXBASE_NOT_CONFIGURED":
-      return "Cloud workspace isn't configured yet. Add your OnyxBase API key in Settings → Cloud Workspace.";
+      return "Cloud workspace isn't configured yet. Add your OnyxBase API key in Settings → API Keys.";
     case "ONYXBASE_UNAUTHORIZED":
-      return "OnyxBase rejected the API key. Check it in Settings → Cloud Workspace.";
+      return "OnyxBase rejected the API key. Check it in Settings → API Keys.";
     case "ONYXBASE_UNAVAILABLE":
       return "Couldn't reach OnyxBase. It may be down — try again shortly.";
     case "WORKSPACE_NOT_FOUND":

@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
  * a rolling `done/total` count and a state icon (list → dashed pie ring →
  * filled check), and one row per step with three glyph states:
  *
- *   pending  dashed circle
+ *   pending  striped loading ring (2026-11-14 directive)
  *   active   arrow in the accent colour (gently nudging)
  *   done     filled check + growing strike line
  *   failed   crossed circle (app-specific 4th state)
@@ -58,10 +58,16 @@ const ArrowIcon = ({ on }: { on?: boolean }) => (
   </svg>
 );
 
-const DashedIcon = ({ on }: { on?: boolean }) => (
-  <svg className={cls(styles.todoIcon, on)} viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1.8 3.6" strokeLinecap="round" />
-  </svg>
+/**
+ * StripedIcon — the pending glyph as a striped loading ring (2026-11-14
+ * directive: "show a striped loading icon when the AI sets a todo to
+ * pending"), reusing the global .striped-spinner motion primitive. The
+ * todoIcon wrapper keeps it inside the glyph cross-fade.
+ */
+const StripedIcon = ({ on }: { on?: boolean }) => (
+  <span className={cls(styles.todoIcon, on)} aria-hidden="true">
+    <span className="striped-spinner" style={{ width: 13, height: 13 }} />
+  </span>
 );
 
 const FailedIcon = ({ on }: { on?: boolean }) => (
@@ -231,7 +237,7 @@ export function TodoListBeta({
                   style={{ "--i": i, paddingLeft: item.depth ? `${0.3 + item.depth * 0.9}rem` : undefined } as React.CSSProperties}
                 >
                   <span className={styles.todoIconWrap}>
-                    <DashedIcon on={!done && !active && !failed} />
+                    <StripedIcon on={!done && !active && !failed} />
                     {failed ? <FailedIcon on={failed} /> : <ArrowIcon on={active} />}
                     <CheckIcon on={done} />
                   </span>

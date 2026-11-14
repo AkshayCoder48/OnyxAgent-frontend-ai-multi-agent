@@ -214,7 +214,7 @@ export function SectionMcp() {
           <Loader2 className="size-4 animate-spin" /> Loading servers…
         </div>
       ) : servers.length === 0 ? (
-        <div className="text-muted-foreground rounded-md border border-dashed p-6 text-center text-sm">
+        <div className="text-muted-foreground settings-nested border border-dashed text-center text-sm">
           <Server className="mx-auto mb-2 size-6 opacity-50" />
           No MCP servers yet.
         </div>
@@ -364,7 +364,7 @@ export function SectionMcp() {
                 )}
               </div>
 
-              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2 settings-nested border">
                 <div>
                   <Label htmlFor="mcp-active">Active</Label>
                   <p className="text-muted-foreground text-xs">Inactive servers are skipped at runtime.</p>

@@ -55,12 +55,22 @@ export function Sheet({
   keepMountedOnceOpen = false,
 }: SheetProps) {
   // `rendered` keeps the tree mounted through the exit animation; `closing`
-  // flips the entrance classes to their exit counterparts. With
-  // keepMountedOnceOpen, `rendered` additionally NEVER flips back to false
-  // once the sheet has opened — the settled-closed state hides the wrapper
-  // with the `hidden` attribute instead (see `settledClosed`).
+  // flips the entrance classes to their exit counterparts; `settled` marks
+  // the fully-closed state of a keepMountedOnceOpen sheet (hidden via the
+  // `hidden` attribute, tree stays alive).
+  //
+  // HIDDEN-FLASH BUG (2026-11-14, "closing chat sidebar has no animation"):
+  // `settledClosed` used to be DERIVED as `keepMounted && !open && !closing`
+  // — but `closing` only flips in the effect AFTER the open→false render,
+  // so that first render already computed settledClosed = true and painted
+  // ONE FRAME with the wrapper at display:none. The exit animation then
+  // either restarted from a hidden element or read as an instant vanish.
+  // `settled` is now a STATE set only by the exit timeout — the wrapper
+  // stays visible through the whole exit, and `hidden = settled && !open`
+  // can never fire mid-animation.
   const [rendered, setRendered] = React.useState(open);
   const [closing, setClosing] = React.useState(false);
+  const [settled, setSettled] = React.useState(!open);
   // Latch: once the sheet has opened at least once, a keepMountedOnceOpen
   // sheet never unmounts again (state, not a ref — ref writes during render
   // are forbidden by react-hooks/refs and this must be readable in the
@@ -74,27 +84,30 @@ export function Sheet({
     if (open) {
       setRendered(true);
       setClosing(false);
+      setSettled(false);
       return;
     }
     // Nothing was shown — nothing to animate out.
     if (!rendered) return;
-    // Play the reversed animation, then unmount — unless the caller asked
-    // for the mounted-keepalive, in which case the wrapper stays mounted
-    // (and gets hidden by `settledClosed` below) and only the closing flag
-    // resets.
+    // Already fully closed — nothing to do.
+    if (settled) return;
+    // Play the reversed animation, then settle: unmount, or (for the
+    // keepalive) hide the wrapper and keep the tree mounted.
     setClosing(true);
     const t = window.setTimeout(() => {
       setClosing(false);
-      if (!keepMountedOnceOpen || !everOpened) {
+      if (keepMountedOnceOpen && everOpened) {
+        setSettled(true);
+      } else {
         setRendered(false);
       }
     }, SHEET_EXIT_MS);
     return () => window.clearTimeout(t);
-  }, [open, rendered, keepMountedOnceOpen, everOpened]);
+  }, [open, rendered, settled, keepMountedOnceOpen, everOpened]);
 
   // Body scroll lock while the sheet VISIBLE (enter + exit) — NOT while a
-  // keepMounted sheet is settled-closed (rendered && !open && !closing).
-  const visible = rendered && (open || closing);
+  // keepMounted sheet is settled-closed (hidden && !closing).
+  const visible = rendered && (open || closing || !settled);
   React.useEffect(() => {
     if (!visible) return;
     document.body.style.overflow = "hidden";
@@ -107,7 +120,7 @@ export function Sheet({
 
   // Settled-closed keepMounted state: exit animation finished, wrapper
   // hidden from layout/paint/a11y but the React tree stays alive.
-  const settledClosed = keepMountedOnceOpen && !open && !closing;
+  const settledClosed = settled && !open && !closing;
 
   return (
     <SheetClosingContext.Provider value={closing}>

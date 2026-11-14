@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { persistTodos } from "@/lib/tools/todos";
 import { useResearchStore } from "@/stores";
 import type { Todo } from "@/types";
 
@@ -17,8 +16,8 @@ import type { Todo } from "@/types";
  *
  *   ┌─────────────────────────────┐
  *   │ ✓ Todos       2 of 5 done ⌄ │  ← this panel (z-1, border-b-0)
- *   │ ○ Sync repo…                 │
- *   │ ● Fix python output          │  ← scrollable (max-h, thin bar)
+ *   │ ◐ Sync repo…                 │
+ *   │ ◑ Fix python output          │  ← scrollable (max-h, thin bar)
  *   ├─────────────────────────────┤
  *   │ Reply to OnyxAgent…      ↑  │  ← composer-dock (z-2, overlaps 14px)
  *   └─────────────────────────────┘
@@ -26,23 +25,56 @@ import type { Todo } from "@/types";
  * ONE data source (2026-11-14: "it's all todos, not a separate plan
  * thing"): the agent Todo system (`manage_todo` / `todo_event` snapshots)
  * — the same `byTurn[turnId].agentTodos` bucket the inline TodoPreview
- * tables read, rehydrated from Dexie across refreshes. Rows are LIVE:
- * tapping one flips its status in the store + persists the snapshot.
+ * tables read, rehydrated from Dexie across refreshes.
+ *
+ * AGENT-OWNED STATUSES (2026-11-14 directive: "remove manually ticking
+ * option in todo — show a striped loading icon when the AI sets pending,
+ * a tick when it sets completed"): rows are READ-ONLY — the agent flips
+ * statuses through manage_todo. pending/not_planned → muted striped
+ * spinner · in_progress → accent striped spinner · done → accent tick ·
+ * not_done → destructive cross.
+ *
+ * VANISH ON CLEAR (2026-11-14 directive: clear_todo "clears from the ui
+ * with a vanish animation, motion blur"): when the list transitions
+ * non-empty → empty (clear_todo, manage_todo clear, or every todo
+ * deleted), the panel plays `.mb-object-out` — the motion-blur vanish —
+ * on a frozen snapshot of the last state, then unmounts.
  *
  * Settle contract (same as ToolStackGroup / "Thought for Ns"): the panel
  * auto-expands while any step is active and folds itself when the list
  * completes; a manual toggle between transitions always wins.
  */
+
+/** The vanish exit duration — matches .mb-object-out's default 300ms. */
+const VANISH_MS = 320;
+
 export function ComposerTodoPanel() {
   const currentTurnId = useResearchStore((s) => s.currentTurnId);
   const activeTurnId = currentTurnId ?? "default";
   const turn = useResearchStore((s) => s.byTurn[activeTurnId]);
-  const setAgentTodos = useResearchStore((s) => s.setAgentTodos);
   const items: Todo[] = turn?.agentTodos ?? [];
 
   const total = items.length;
   const doneCount = items.filter((t) => t.status === "done").length;
   const anyActive = doneCount < total;
+
+  // ── VANISH SNAPSHOT — freeze the last non-empty state when the list is
+  // cleared, play .mb-object-out on it, then unmount (render-time adjust
+  // pattern, same as the expand/collapse state below — no effect needed
+  // for the transition itself; one timeout effect settles the snapshot).
+  const [vanishing, setVanishing] = useState<Todo[] | null>(null);
+  const [prevItems, setPrevItems] = useState<Todo[]>(items);
+  if (items !== prevItems) {
+    setPrevItems(items);
+    if (items.length === 0 && prevItems.length > 0) {
+      setVanishing(prevItems);
+    }
+  }
+  useEffect(() => {
+    if (!vanishing) return;
+    const t = window.setTimeout(() => setVanishing(null), VANISH_MS);
+    return () => window.clearTimeout(t);
+  }, [vanishing]);
 
   // Auto-expand on activity, auto-fold on settle (render-time adjust —
   // no effect, no cascading renders; manual toggles in between persist).
@@ -53,25 +85,14 @@ export function ComposerTodoPanel() {
     setExpanded(anyActive);
   }
 
-  if (total === 0) return null; // no todos yet → no chrome above the composer
+  // No todos and nothing vanishing → no chrome above the composer.
+  if (total === 0 && !vanishing) return null;
 
-  const toggle = (id: string) => {
-    const next = items.map((t) =>
-      t.id === id
-        ? {
-            ...t,
-            status: t.status === "done" ? ("not_planned" as const) : ("done" as const),
-            updatedAt: Date.now(),
-          }
-        : t,
-    );
-    setAgentTodos(activeTurnId, next);
-    if (activeTurnId !== "default") {
-      void persistTodos(activeTurnId, next).catch(() => {
-        /* IndexedDB unavailable — the store update already landed */
-      });
-    }
-  };
+  // While vanishing, render the frozen snapshot with the exit class.
+  const isVanishing = total === 0 && vanishing !== null;
+  const shown = isVanishing ? vanishing! : items;
+  const shownTotal = shown.length;
+  const shownDone = shown.filter((t) => t.status === "done").length;
 
   const onHeaderKey = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -83,7 +104,11 @@ export function ComposerTodoPanel() {
   return (
     <section
       aria-label="Todos"
-      className="mb-object-in relative z-[1] mx-auto mb-[-14px] w-[calc(100%-24px)] rounded-t-[19px] rounded-b-[14px] border border-b-0 pb-[14px] pt-[2px] sm:w-[calc(100%-32px)]"
+      aria-hidden={isVanishing || undefined}
+      className={cn(
+        "mb-object-in relative z-[1] mx-auto mb-[-14px] w-[calc(100%-24px)] rounded-t-[19px] rounded-b-[14px] border border-b-0 pb-[14px] pt-[2px] sm:w-[calc(100%-32px)]",
+        isVanishing && "mb-object-out",
+      )}
       style={{
         backgroundColor: "var(--glass-frost-fill)",
         borderColor: "var(--glass-border)",
@@ -103,7 +128,7 @@ export function ComposerTodoPanel() {
         <ListChecks className="h-[18px] w-[18px] shrink-0 text-muted-foreground" />
         <span className="text-sm font-semibold tracking-tight text-foreground/90">Todos</span>
         <span className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
-          {doneCount} of {total} complete
+          {shownDone} of {shownTotal} complete
         </span>
         <ChevronDown
           aria-hidden
@@ -114,7 +139,8 @@ export function ComposerTodoPanel() {
         />
       </button>
 
-      {/* EXPANDABLE LIST — grid-rows 0fr→1fr height animation */}
+      {/* EXPANDABLE LIST — grid-rows 0fr→1fr height animation. Rows are
+          READ-ONLY status readouts (the agent owns the statuses). */}
       <div
         className={cn(
           "grid transition-[grid-template-rows] duration-300 [transition-timing-function:cubic-bezier(.2,.8,.2,1)] motion-reduce:transition-none",
@@ -123,53 +149,69 @@ export function ComposerTodoPanel() {
       >
         <div className="min-h-0 overflow-hidden">
           <ul className="scrollbar-thin max-h-[205px] list-none overflow-y-auto overscroll-contain px-3 pb-2">
-            {items.map((item) => {
+            {shown.map((item) => {
               const isDone = item.status === "done";
               const isActive = item.status === "in_progress";
+              const isFailed = item.status === "not_done";
               return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => toggle(item.id)}
-                    aria-pressed={isDone}
-                    className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2 py-1 text-left text-[13px] text-foreground/80 transition-colors hover:bg-foreground/[0.05]"
+                <li
+                  key={item.id}
+                  className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2 py-1 text-left text-[13px] text-foreground/80"
+                >
+                  {/* STATUS GLYPH — done: accent tick · in_progress: accent
+                      striped spinner · pending: muted striped spinner ·
+                      not_done: destructive cross. Agent-driven only. */}
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "grid h-[17px] w-[17px] shrink-0 place-items-center rounded-full border-[1.5px] transition-colors duration-200",
+                      isDone
+                        ? "border-primary bg-primary"
+                        : isActive
+                          ? "border-primary/60"
+                          : isFailed
+                            ? "border-destructive/50"
+                            : "border-muted-foreground/30",
+                    )}
                   >
-                    {/* STATUS CIRCLE — done: accent + check · active: pulsing
-                        accent dot · pending: quiet hairline ring */}
-                    <span
-                      aria-hidden
-                      className={cn(
-                        "grid h-[17px] w-[17px] shrink-0 place-items-center rounded-full border-[1.5px] transition-colors duration-200",
-                        isDone
-                          ? "border-primary bg-primary"
-                          : isActive
-                            ? "border-primary/60"
-                            : "border-muted-foreground/40",
-                      )}
-                    >
-                      {isDone ? (
-                        <svg viewBox="0 0 10 6" className="h-[6px] w-[9px] fill-none">
-                          <path
-                            d="M1 3l2.6 2.4L9 1"
-                            stroke="var(--button-foreground, #fff)"
-                            strokeWidth="1.6"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      ) : isActive ? (
-                        <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-primary [animation-duration:2s]" />
-                      ) : null}
-                    </span>
-                    <span
-                      className={cn(
-                        "min-w-0 flex-1",
-                        isDone && "text-muted-foreground/70 line-through",
-                      )}
-                    >
-                      {item.title}
-                    </span>
-                  </button>
+                    {isDone ? (
+                      <svg viewBox="0 0 10 6" className="h-[6px] w-[9px] fill-none" data-glyph="done">
+                        <path
+                          d="M1 3l2.6 2.4L9 1"
+                          stroke="var(--button-foreground, #fff)"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    ) : isFailed ? (
+                      <svg viewBox="0 0 10 10" className="h-[7px] w-[7px] fill-none" data-glyph="failed">
+                        <path
+                          d="M2 2l6 6M8 2l-6 6"
+                          stroke="var(--color-destructive, #e5484d)"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    ) : (
+                      <span
+                        role="img"
+                        aria-label={isActive ? "In progress" : "Pending"}
+                        className="striped-spinner block"
+                        data-accent={isActive || undefined}
+                        style={{ width: 10, height: 10 }}
+                      />
+                    )}
+                  </span>
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1",
+                      isDone && "text-muted-foreground/70 line-through",
+                      isFailed && "text-muted-foreground/80",
+                    )}
+                  >
+                    {item.title}
+                  </span>
                 </li>
               );
             })}

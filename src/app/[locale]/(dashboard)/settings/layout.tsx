@@ -5,9 +5,6 @@ import Link from "next/link";
 import {
   Bot,
   Braces,
-  CalendarClock,
-  Cloud,
-  CloudCog,
   Flower2,
   KeyRound,
   Palette,
@@ -28,6 +25,12 @@ import type { PageTab } from "@/components/dashboard/page-tabs";
  * one and make it less messy" — Terra redesign). Routes are unchanged so
  * existing links keep working; the nav just presents them grouped with
  * tracked-caps section labels.
+ *
+ * 2026-11-14: the Sandbox (E2B) / Cloud / Schedules tabs are GONE — their
+ * key + connection surfaces live in the ONE API Keys tab, so the separate
+ * tabs were three ways to reach the same credentials. Their /settings/*
+ * routes redirect to /settings/api-keys (see those page files).
+ * "Env vars" was renamed to "Environment" (professional naming).
  */
 const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
   {
@@ -54,16 +57,10 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
     id: "workspace",
     label: "Workspace",
     tabs: [
-      // Env vars gets `Braces` (its ${VAR} syntax) so the adjacent API Keys
-      // tab can own the KeyRound glyph without the two reading as one.
-      { label: "Env vars", href: ROUTES.SETTINGS_ENV, icon: Braces },
+      // Environment gets `Braces` (its ${VAR} syntax) so the adjacent API
+      // Keys tab can own the KeyRound glyph without the two reading as one.
+      { label: "Environment", href: ROUTES.SETTINGS_ENV, icon: Braces },
       { label: "API Keys", href: ROUTES.SETTINGS_API_KEYS, icon: KeyRound },
-      // E2B sandbox — the key + the workspace lifecycle (pause/resume
-      // persistency + live sandbox states).
-      { label: "Sandbox (E2B)", href: ROUTES.SETTINGS_E2B, icon: Cloud },
-      { label: "Cloud", href: ROUTES.SETTINGS_CLOUD, icon: CloudCog },
-      // Cron background tasks (Background Task Execution Framework FR-2.1).
-      { label: "Schedules", href: ROUTES.SETTINGS_SCHEDULES, icon: CalendarClock },
       { label: "Integrations", href: ROUTES.SETTINGS_INTEGRATIONS, icon: Plug },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },
     ],
@@ -112,7 +109,7 @@ function GroupedSettingsTabs() {
 
 export default function SettingsLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="h-full overflow-y-auto px-3 py-4 sm:px-6 sm:py-8">
+    <div className="settings-scope h-full overflow-y-auto px-3 py-4 sm:px-6 sm:py-8">
       <div className="mx-auto max-w-4xl space-y-6 pb-8">
         <PageHeader
           eyebrow="Settings"

@@ -373,7 +373,7 @@ export function SectionProviders() {
               dialog points there instead of duplicating the input.
             */}
             {editing ? (
-              <div className="text-muted-foreground flex items-start gap-2.5 rounded-md border border-dashed px-3 py-2.5 text-xs leading-relaxed">
+              <div className="text-muted-foreground flex items-start gap-2.5 settings-nested border border-dashed text-xs leading-relaxed">
                 <KeyRound className="text-foreground/70 mt-0.5 size-3.5 shrink-0" />
                 <span>
                   Replace or clear this provider&apos;s key in{" "}
@@ -440,7 +440,7 @@ export function SectionProviders() {
                   Pick <code className="text-[10px]">responses</code> only for OpenAI direct.
                 </p>
               </div>
-              <div className="flex flex-col gap-3 rounded-md border p-3">
+              <div className="flex flex-col gap-3 settings-nested border">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <Label htmlFor="p-tools">Tools enabled</Label>
@@ -477,7 +477,7 @@ export function SectionProviders() {
                   />
                 </div>
               </div>
-              <div className="space-y-3 rounded-md border p-3">
+              <div className="space-y-3 settings-nested border">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <Label>Request parameters</Label>

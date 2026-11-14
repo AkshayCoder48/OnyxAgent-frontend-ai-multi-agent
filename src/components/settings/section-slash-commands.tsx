@@ -198,7 +198,7 @@ export function SectionSlashCommands() {
         </div>
 
         {customs.length === 0 ? (
-          <div className="text-muted-foreground rounded-md border border-dashed p-6 text-center text-sm">
+          <div className="text-muted-foreground settings-nested border border-dashed text-center text-sm">
             No custom commands yet. Create one to reuse prompts across chats.
           </div>
         ) : (
@@ -294,7 +294,7 @@ export function SectionSlashCommands() {
               />
             </div>
             <MoreOptions defaultOpen={!!editing && !editing.is_enabled}>
-              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2 settings-nested border">
                 <div>
                   <Label htmlFor="cmd-enabled">Enabled</Label>
                   <p className="text-muted-foreground text-xs">

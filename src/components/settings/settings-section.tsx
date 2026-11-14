@@ -11,11 +11,12 @@ interface SectionCardProps {
 
 export function SectionCard({ title, description, action, children }: SectionCardProps) {
   return (
-    <section className="border-border bg-card rounded-xl border">
+    <section className="border-border bg-card settings-card border">
       {/* items-center: the action button is vertically balanced against the
           title + description column instead of hugging the top edge. The
-          header wraps on narrow screens so the action never overflows. */}
-      <header className="border-border flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
+          header wraps on narrow screens so the action never overflows.
+          Geometry (radius + padding) comes from the settings token system. */}
+      <header className="border-border -mx-[var(--settings-padding-card)] -mt-[var(--settings-padding-card)] mb-[var(--settings-padding-card)] flex flex-wrap items-center justify-between gap-3 border-b px-[var(--settings-padding-card)] py-4">
         <div className="min-w-0 flex-1">
           <h2 className="text-foreground text-sm leading-snug font-semibold">{title}</h2>
           {description && (
@@ -24,7 +25,7 @@ export function SectionCard({ title, description, action, children }: SectionCar
         </div>
         {action && <div className="shrink-0">{action}</div>}
       </header>
-      {children && <div className="px-5 py-5">{children}</div>}
+      {children && <div>{children}</div>}
     </section>
   );
 }
@@ -51,15 +52,19 @@ export function SettingsSection({
   return (
     <section
       className={cn(
-        "bg-card rounded-2xl border p-5 sm:p-6",
+        "bg-card settings-main border",
         danger ? "border-destructive/30 bg-destructive/[0.03]" : "border-foreground/10",
         className,
       )}
     >
       {/* items-center keeps the action vertically balanced against the
-          title + description column; flex-wrap degrades gracefully. */}
+          title + description column; flex-wrap degrades gracefully.
+          Header/body separation comes from the settings gap token. */}
       <header
-        className={cn("flex flex-wrap items-center justify-between gap-3", children ? "mb-5" : "")}
+        className={cn(
+          "flex flex-wrap items-center justify-between gap-3",
+          children ? "mb-[var(--settings-gap-card)]" : "",
+        )}
       >
         <div className="min-w-0 flex-1">
           <h2

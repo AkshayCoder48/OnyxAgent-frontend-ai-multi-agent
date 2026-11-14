@@ -112,14 +112,52 @@ export const useProjectsStore = create<ProjectsState>()(
       setSortMode: (mode) => set({ sortMode: mode }),
 
       createProject: async (input) => {
+        // OPTIMISTIC CREATE (2026-11-14 directive — "fake the UI that it's
+        // instant, it takes its time in the background"): a temp project
+        // card appears immediately; the service write runs behind it; on
+        // resolve the temp is swapped for the real row (then a background
+        // refresh reconciles ordering); on failure the temp vanishes.
+        const userId = input.user_id ?? useAuthStore.getState().user?.id;
+        if (!userId) {
+          set({ error: "You must be signed in to create a project." });
+          return null;
+        }
+        const now = new Date().toISOString();
+        const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const optimistic: Project = {
+          id: tempId,
+          user_id: userId,
+          name: input.name,
+          description: input.description ?? null,
+          goal: input.goal,
+          instructions: input.instructions ?? "",
+          icon: input.icon ?? null,
+          accent_color: input.accent_color ?? null,
+          status: "active",
+          pinned: input.pinned,
+          sort_order: input.sort_order,
+          memory_settings: (input.memory_settings ?? {}) as Project["memory_settings"],
+          model_preferences: input.model_preferences,
+          resources: input.resources ?? [],
+          instructions_history: [],
+          created_at: now,
+          updated_at: now,
+        };
+        set((s) => ({ projects: [optimistic, ...s.projects] }));
         try {
-          const userId = input.user_id ?? useAuthStore.getState().user?.id;
-          if (!userId) throw new Error("You must be signed in to create a project.");
           const project = await projectService.createProject({ ...input, user_id: userId });
-          await get().refresh();
+          set((s) => ({
+            projects: [project, ...s.projects.filter((p) => p.id !== tempId)],
+          }));
+          // Background reconcile (ordering, computed fields) — the UI
+          // already shows the real row; this never blocks the return.
+          void get().refresh();
           return project;
         } catch (err) {
-          set({ error: errorMessage(err) });
+          set((s) => ({
+            projects: s.projects.filter((p) => p.id !== tempId),
+            error: errorMessage(err),
+          }));
           return null;
         }
       },
@@ -136,14 +174,21 @@ export const useProjectsStore = create<ProjectsState>()(
       },
 
       deleteProject: async (id) => {
+        // OPTIMISTIC DELETE (2026-11-14 directive): the card vanishes
+        // instantly; the service delete runs in the background; on failure
+        // the snapshot is restored.
+        const snapshot = get().projects;
+        set((s) => ({
+          projects: s.projects.filter((p) => p.id !== id),
+          // The deleted project can no longer be the active workspace.
+          activeProjectId: s.activeProjectId === id ? null : s.activeProjectId,
+        }));
         try {
           const summary = await projectService.deleteProject(id);
-          // The deleted project can no longer be the active workspace.
-          if (get().activeProjectId === id) set({ activeProjectId: null });
-          await get().refresh();
+          void get().refresh();
           return summary;
         } catch (err) {
-          set({ error: errorMessage(err) });
+          set({ projects: snapshot, error: errorMessage(err) });
           return null;
         }
       },

@@ -214,11 +214,16 @@ export function KnowledgeBasePanel() {
   const deleteItem = React.useCallback(
     async (item: KBItemSummary) => {
       if (!clients || !userId) return;
+      // OPTIMISTIC DELETE (2026-11-14 directive — instant UI, background
+      // work): the item disappears from the list immediately; the OnyxBase
+      // delete runs behind it; on failure it is restored.
+      setAllItems((prev) => prev.filter((i) => i.id !== item.id));
       try {
         await kbDelete(clients.kv, userId, item.id);
         toast.success("Knowledge deleted", { description: item.title });
         refresh();
       } catch (e) {
+        setAllItems((prev) => (prev.some((i) => i.id === item.id) ? prev : [...prev, item]));
         toast.error("Could not delete knowledge", { description: kbErrorMessage(e) });
       }
     },
@@ -828,7 +833,7 @@ function NotConfiguredCard() {
         restarts.
       </p>
       <Button asChild size="sm" className="mt-4">
-        <Link href={ROUTES.SETTINGS_CLOUD}>
+        <Link href={ROUTES.SETTINGS_API_KEYS}>
           Connect OnyxBase
           <ArrowRight aria-hidden />
         </Link>

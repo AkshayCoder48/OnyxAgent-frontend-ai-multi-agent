@@ -252,7 +252,7 @@ export function SectionCustomTools() {
           <Loader2 className="size-4 animate-spin" /> Loading tools…
         </div>
       ) : tools.length === 0 ? (
-        <div className="text-muted-foreground rounded-md border border-dashed p-6 text-center text-sm">
+        <div className="text-muted-foreground settings-nested border border-dashed text-center text-sm">
           No custom tools yet.
         </div>
       ) : (
@@ -361,7 +361,7 @@ export function SectionCustomTools() {
               />
             </div>
             {form.impl_kind === "http_webhook" ? (
-              <div className="space-y-3 rounded-md border p-3">
+              <div className="space-y-3 settings-nested border">
                 <div className="space-y-1.5">
                   <Label htmlFor="t-url">Webhook URL</Label>
                   <Input
@@ -374,7 +374,7 @@ export function SectionCustomTools() {
                 </div>
               </div>
             ) : (
-              <div className="space-y-1.5 rounded-md border p-3">
+              <div className="space-y-1.5 settings-nested border">
                 <Label htmlFor="t-py">Python source</Label>
                 <Textarea
                   id="t-py"
@@ -455,7 +455,7 @@ export function SectionCustomTools() {
                 </div>
               )}
 
-              <div className="flex items-center justify-between gap-2 rounded-md border p-3">
+              <div className="flex items-center justify-between gap-2 settings-nested border">
                 <div>
                   <Label htmlFor="t-active">Active</Label>
                   <p className="text-muted-foreground text-xs">Inactive tools are hidden from the model.</p>

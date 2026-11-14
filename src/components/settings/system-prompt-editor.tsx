@@ -110,7 +110,7 @@ export function SystemPromptEditor({
         onChange={(e) => onValueChange(e.target.value)}
         disabled={!enabled}
         placeholder="Leave empty to use the built-in Onyx prompt, insert the default and tweak it, or import a .md / .txt file."
-        className="bg-background focus:border-primary/50 min-h-[140px] w-full resize-y rounded-md border p-3 font-mono text-xs leading-relaxed outline-none transition-colors disabled:opacity-60"
+        className="bg-background focus:border-primary/50 min-h-[140px] w-full resize-y settings-nested border font-mono text-xs leading-relaxed outline-none transition-colors disabled:opacity-60"
       />
       <input
         ref={fileInputRef}

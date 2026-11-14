@@ -6,19 +6,22 @@ import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { CollapsePanel } from "@/components/assistant-ui/elements";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
+import { stackSummaryLabel, stackSummarySegments } from "@/lib/tool-stack-summaries";
 
 /**
  * ToolStackGroup — the COMBINED TOOLS row (user screenshots 2026-11-13 +
- * directive 2026-11-14). A run of consecutive tool calls rests as ONE
+ * directives 2026-11-14). A run of consecutive tool calls rests as ONE
  * compact disclosure row,
  *
- *     [doc icon] Tools                                     ›
+ *     [doc icon] Created 3 Files · Created 5 Todos · Used 2 Tools   ›
  *
- * CLEAN ROW (2026-11-14 directive — "remove showing Ns from tools and
- * ticks, keep clean"): no counts, no file tallies, no duration badges, no
- * ✓ ticks. Just the glyph, the word "Tools", and the chevron. Failures
- * are the one number that stays (a silently-failed run must never read as
- * success); everything else is detail the expanded rows carry.
+ * CAPTION (2026-11-14 directive — "docs icon + 'Created N Files, Used N
+ * Tools, Created N Todos' … for every tool; custom tools show Used N
+ * Tools"): the doc glyph stays, the word "Tools" is replaced by per-tool
+ * summaries of what the run actually DID — each tool family aggregates to
+ * "Verb N Noun(s)" (Created 3 Files, Created 5 Todos, Ran 2 Searches…),
+ * unknown names (custom/MCP tools) fold into the "Used N Tools" bucket.
+ * Failures stay visible as the one destructive number ("· N failed").
  *
  * Tapping anywhere on the row expands the individual stacked tool rows
  * underneath. While ANY tool in the stack is still live the rows stay
@@ -50,13 +53,13 @@ export function isStackLive(toolCalls: readonly ToolCall[]): boolean {
 
 // ── summary derivation ────────────────────────────────────────────────────
 
-/** The combined summary line for a settled stack — the CLEAN caption
- *  ("Tools", plus "· N failed" only when something broke). Tool counts,
- *  file tallies and durations intentionally never appear (2026-11-14
- *  directive: "remove showing Ns from tools and ticks — keep clean"). */
+/** The combined summary line for a settled stack — per-tool captions
+ *  ("Created 3 Files · Created 5 Todos · Used 2 Tools") from
+ *  tool-stack-summaries, plus "· N failed" when something broke. */
 export function stackSummary(toolCalls: readonly ToolCall[]): string {
   const failed = toolCalls.filter((tc) => tc.status === "error").length;
-  return failed > 0 ? `Tools · ${failed} failed` : "Tools";
+  const label = stackSummaryLabel(toolCalls);
+  return failed > 0 ? `${label} · ${failed} failed` : label;
 }
 
 export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
@@ -78,8 +81,10 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
     [toolCalls],
   );
 
-  // The clean caption — memoized like the counts above.
-  const summary = useMemo(() => stackSummary(toolCalls), [toolCalls]);
+  // The caption — per-tool summaries ("Created 3 Files · Created 5 Todos"),
+  // memoized like the counts above. The failure suffix is appended in the
+  // JSX so it keeps its destructive tint.
+  const summary = useMemo(() => stackSummaryLabel(toolCalls), [toolCalls]);
 
   const live = isStackLive(toolCalls);
 
@@ -129,7 +134,7 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 truncate text-sm font-medium text-muted-foreground">
-          Tools
+          {summary}
           {failedCount > 0 && (
             <span className="text-destructive/90"> · {failedCount} failed</span>
           )}

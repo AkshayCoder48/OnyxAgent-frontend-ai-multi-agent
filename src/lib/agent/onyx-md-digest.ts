@@ -8,8 +8,8 @@
 // know their complete tool surface, and the availability rules make
 // "I don't have that tool" claims about registered tools a prompt violation.
 //
-// UMBRELLA CONSOLIDATION: the surface is 22 tools — 12 action-based
-// umbrella tools + 10 standalone keepers. Each umbrella takes ONE
+// UMBRELLA CONSOLIDATION: the surface is 23 tools — 12 action-based
+// umbrella tools + 11 standalone keepers. Each umbrella takes ONE
 // required `action` argument whose value is the exact granular operation
 // name. The granular tools remain REGISTERED + callable (umbrella dispatch,
 // legacy calls) but are hidden from the model-visible list. The generator
@@ -24,7 +24,7 @@
 // UMBRELLAS map + src/lib/agent/tool-umbrella.ts, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (22 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (23 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -43,12 +43,13 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - custom_tools [create_custom_tool / manage_custom_tool] — Build reusable tools: http_webhook or python_snippet.
 
 ### Single-purpose tools
+- clear_todo — One-shot wipe of the ENTIRE todo list — every todo vanishes from the user's panel with an animation. Takes NO arguments. Use it when the user says "clear the todos", when the plan…
 - knowledge_base [search / get / save / update / delete / list / file hosting] — Workspace Knowledge Base (OnyxBase) — survives chats. search when prior knowledge helps.
 - manage_skill [list / read / create / edit / delete / catalog / search_marketplace / install_from_marketplace] — Skills — list shows ALL (55-skill library + user's); search_marketplace/install_from_marketplace = live SkillsMP directory.
 - manage_mcp [list / create / edit / delete / market] — Remote MCP server configs (HTTP/SSE — via mcp_search_tools; sandbox stdio: run its CLI there). market = MCPMarket catalog.
 - workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
 - use_browser — ONLY for pages needing real interaction (click, type, login, JS): navigate, click, type, extract_text, inspect, snapshot, screenshot, wait, back/forward, close +…
-- ask_user — Ask a clarifying question when context is missing — never guess user intent.
+- ask_user — When the user says "ask me …", "quiz me" or wants ANY questions (MCQ, survey, checklist), ALWAYS call ask_user and GENERATE the questions yourself — never as plain text. Supply…
 - counterfactual — Structured "what if X had been different" analysis.
 - decision — Structured decision engine (JEV systemone): pass a state + queries (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip.
 - preview_html — Render a workspace HTML file (or inline HTML) as a LIVE interactive preview card in the chat — use it after building pages/games/demos.
@@ -60,7 +61,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Be honest BOTH ways: never deny a tool you have; never claim or call a tool that is absent from your definitions this turn.
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — read it (the files umbrella's read_file action) when you need more than this digest.`;
 
-/** Every model-visible tool name: the 12 umbrellas + 10 keepers
+/** Every model-visible tool name: the 12 umbrellas + 11 keepers
  * (digest ⇄ registry parity is test-enforced against listTools() — hidden
  * granular tools are excluded by design). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","counterfactual","decision","preview_html","current_datetime"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","clear_todo","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","counterfactual","decision","preview_html","current_datetime"];

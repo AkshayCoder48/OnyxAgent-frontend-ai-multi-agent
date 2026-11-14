@@ -1,0 +1,1 @@
+__d(function(g,r,i,a,m,e,d){"use strict";Object.defineProperty(e,'__esModule',{value:!0}),Object.defineProperty(e,"default",{enumerable:!0,get:function(){return u}});var n=r(d[0]),t=r(d[1]),o=r(d[2]);function u(){return(0,o.jsx)(n.ClonePage,{kind:"onboard",children:(0,o.jsx)(t.S5Onboarding,{})})}},776,[798,808,6]);

@@ -3465,3 +3465,72 @@ html.theme-transitioning .animate-backdrop {
    — a child can never be full-white under a faded parent. */
 
 /* css-rev: word-fade-1 */
+
+/* =========================================================================
+   SETTINGS GEOMETRY SYSTEM (PRD: Global Settings UI — Container Spacing,
+   Padding & Rounded Geometry, 2026-11-14)
+   One token set for EVERY settings surface (route pages + overlay): smooth
+   consistent radii, real internal breathing room, and nested spacing that
+   never lets content stick to a container edge. Responsive at <640px.
+   ========================================================================= */
+:root {
+  --settings-radius-main: 20px;    /* main settings containers */
+  --settings-radius-card: 16px;    /* individual setting cards */
+  --settings-radius-nested: 12px;  /* nested boxes, tables, model rows */
+  --settings-radius-control: 12px; /* inputs, dropdowns, small controls */
+
+  --settings-padding-main: 28px;   /* main section padding */
+  --settings-padding-card: 22px;   /* card padding */
+  --settings-padding-nested: 16px; /* nested box padding */
+
+  --settings-gap-section: 24px;    /* between top-level sections */
+  --settings-gap-card: 16px;       /* between cards / rows inside a card */
+}
+@media (max-width: 639px) {
+  :root {
+    --settings-padding-main: 20px;
+    --settings-padding-card: 18px;
+    --settings-padding-nested: 14px;
+    --settings-gap-section: 18px;
+    --settings-gap-card: 14px;
+  }
+}
+
+/* Container helpers — used IN PLACE of ad-hoc rounded-*/p-* utilities in the
+   settings components. Unlayered, so they beat Tailwind utilities when both
+   land on the same element (components keep border/bg/spacing utilities and
+   swap only their geometry to these tokens). */
+.settings-main {
+  border-radius: var(--settings-radius-main);
+  padding: var(--settings-padding-main);
+}
+.settings-card {
+  border-radius: var(--settings-radius-card);
+  padding: var(--settings-padding-card);
+}
+.settings-nested {
+  border-radius: var(--settings-radius-nested);
+  padding: var(--settings-padding-nested);
+}
+/* Section rhythm for the page stack (route pages + overlay main). */
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--settings-gap-section);
+}
+
+/* Scoped control geometry: inside a settings surface every input, textarea,
+   select and non-pill button takes the control radius — consistent 12px
+   corners without touching each component. :where() keeps specificity at
+   zero, so intentional pill/full-radius utilities still win. */
+.settings-scope :where(input, textarea, select):not([class*="rounded-full"]) {
+  border-radius: var(--settings-radius-control);
+}
+.settings-scope :where(button, [role="button"], [role="switch"]):not([class*="rounded-full"]):not([class*="rounded-none"]) {
+  border-radius: var(--settings-radius-control);
+}
+/* Layout safety (PRD §7): padding can never cause horizontal overflow. */
+.settings-scope *, .settings-scope *::before, .settings-scope *::after {
+  box-sizing: border-box;
+  min-width: 0;
+}

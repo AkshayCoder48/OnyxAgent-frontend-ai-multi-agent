@@ -9,7 +9,7 @@
  *   1. **Image captchas** — POST the image to a free OCR endpoint
  *      (https://api.ocr.space/parse/image). The free public key (`helloworld`)
  *      works for low-volume use; users can configure `OCR_SPACE_API_KEY` in
- *      Settings → Config → Env Vars for higher limits / better accuracy.
+ *      Settings → Environment for higher limits / better accuracy.
  *      Runs directly from the browser (ocr.space sends CORS headers).
  *
  *   2. **hCaptcha / reCAPTCHA v2-v3 / Turnstile** — these token-based
@@ -204,7 +204,7 @@ async function solveTokenCaptcha(
       captcha_type: args.captcha_type,
       hint:
         "Token-based captchas (hCaptcha / reCAPTCHA / Turnstile) require a paid solver. " +
-        "Configure TWOCAPTCHA_API_KEY or ANTICAPTCHA_API_KEY in Settings → Config → Env Vars. " +
+        "Configure TWOCAPTCHA_API_KEY or ANTICAPTCHA_API_KEY in Settings → Environment. " +
         "For Cloudflare challenges specifically, prefer the bypass_cloudflare tool which " +
         "returns headers + a browser-automation recipe instead of a token.",
     };

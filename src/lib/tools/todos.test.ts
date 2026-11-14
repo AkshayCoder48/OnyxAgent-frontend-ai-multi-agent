@@ -98,6 +98,86 @@ describe("manage_todo · list / clear", () => {
   });
 });
 
+describe("manage_todo · simplified calling (action inferred from the payload)", () => {
+  beforeEach(async () => {
+    await run("manage_todo", { action: "clear" }, "infer-conv");
+  });
+
+  it("{id, status} updates — the exact reported failure shape", async () => {
+    const created = await run(
+      "manage_todo",
+      { operation: "create", title: "Inferred update" },
+      "infer-conv",
+    );
+    const id = (created.output as { todo: { id: string } }).todo.id;
+    const res = await run("manage_todo", { id, status: "pending" }, "infer-conv");
+    expect(res.success).toBe(true);
+    expect(res.output).toMatchObject({ todo: { id, status: "not_planned" } });
+  });
+
+  it("{title} alone creates", async () => {
+    const res = await run("manage_todo", { title: "Web dev todo" }, "infer-conv");
+    expect(res.success).toBe(true);
+    expect(res.output).toMatchObject({ todo: { title: "Web dev todo", status: "not_planned" } });
+  });
+
+  it("{id} alone deletes", async () => {
+    const created = await run("manage_todo", { title: "Doomed" }, "infer-conv");
+    const id = (created.output as { todo: { id: string } }).todo.id;
+    const res = await run("manage_todo", { id }, "infer-conv");
+    expect(res.success).toBe(true);
+    expect(res.output).toMatchObject({ deleted: { id } });
+  });
+
+  it("{} lists", async () => {
+    await run("manage_todo", { title: "Listed" }, "infer-conv");
+    const res = await run("manage_todo", {}, "infer-conv");
+    expect(res.success).toBe(true);
+    expect((res.output as { todos: unknown[] }).todos.length).toBe(1);
+  });
+
+  it("update with only a title matches the existing todo by title", async () => {
+    await run("manage_todo", { title: "Match me" }, "infer-conv");
+    const res = await run(
+      "manage_todo",
+      { title: "Match me", status: "completed" },
+      "infer-conv",
+    );
+    expect(res.success).toBe(true);
+    expect(res.output).toMatchObject({ todo: { title: "Match me", status: "done" } });
+  });
+
+  it("verb aliases map to canonical actions (add → create, set_status → update)", async () => {
+    const res = await run("manage_todo", { action: "add", title: "Aliased" }, "infer-conv");
+    expect(res.success).toBe(true);
+    const id = (res.output as { todo: { id: string } }).todo.id;
+    const upd = await run(
+      "manage_todo",
+      { action: "set_status", id, status: "done" },
+      "infer-conv",
+    );
+    expect(upd.success).toBe(true);
+    expect(upd.output).toMatchObject({ todo: { status: "done" } });
+  });
+});
+
+describe("clear_todo · the one-shot wipe sub-tool", () => {
+  it("clears every todo with no arguments", async () => {
+    await run("manage_todo", { action: "clear" }, "clear-tool-conv");
+    await run("manage_todo", { title: "One" }, "clear-tool-conv");
+    await run("manage_todo", { title: "Two" }, "clear-tool-conv");
+    const res = await run("clear_todo", {}, "clear-tool-conv");
+    expect(res.success).toBe(true);
+    expect(res.output).toMatchObject({ cleared: true });
+    const list = await run("manage_todo", { action: "list" }, "clear-tool-conv");
+    expect((list.output as { todos: unknown[] }).todos.length).toBe(0);
+  });
+
+  it("is registered next to manage_todo", () => {
+    expect(getTool("clear_todo")).toBeDefined();
+  });
+});
+
 describe("show_todo", () => {
   it("all: true returns the full list", async () => {
     await run("manage_todo", { operation: "clear" }, "show-conv");

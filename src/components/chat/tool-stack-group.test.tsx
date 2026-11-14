@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 // ToolStackGroup — the COMBINED TOOLS row (user screenshots 2026-11-13;
-// CLEAN ROW directive 2026-11-14: "remove showing Ns from tools and ticks,
-// keep clean"): a settled run of consecutive tool calls rests as ONE
-// "Tools ›" disclosure with NO counts; live runs and single-tool stacks
-// render their rows bare.
+// caption directive 2026-11-14: "docs icon + 'Created N Files, Used N
+// Tools, Created N Todos' — for every tool; custom tools show Used N
+// Tools"): a settled run of consecutive tool calls rests as ONE disclosure
+// row whose caption aggregates WHAT the run did; live runs and single-tool
+// stacks render their rows bare.
 import { describe, it, expect } from "vitest";
 import { render, cleanup, fireEvent } from "@testing-library/react";
 import React from "react";
@@ -33,25 +34,36 @@ const fileCreate = (id: string, path: string, ok = true): ToolCall =>
     endedAt: 2000,
   }) as unknown as ToolCall;
 
+/** A manage_todo create call — the user's "Created N Todos" example. */
+const todoCreate = (id: string): ToolCall =>
+  ({
+    id,
+    name: "manage_todo",
+    args: { title: `Step ${id}` },
+    status: "completed",
+    result: '{"success":true}',
+    startedAt: 1000,
+    endedAt: 2000,
+  }) as unknown as ToolCall;
+
 const Row = ({ label }: { label: string }) => <div data-testid="row">{label}</div>;
 
 describe("ToolStackGroup (combined tools UI)", () => {
-  it("settled multi-tool stack rests as the collapsed clean 'Tools' row with a chevron", () => {
+  it("settled multi-tool stack rests as the collapsed summary row with a chevron", () => {
     const { container, getByText } = render(
       <ToolStackGroup toolCalls={[tc("a", "completed"), tc("b", "completed")]}>
         <Row label="Searched the web" />
         <Row label="Read a web page" />
       </ToolStackGroup>,
     );
-    expect(getByText("Tools")).toBeTruthy();
-    // CLEAN ROW: no counts, no "Used N tools".
+    expect(getByText("Ran 2 Web Searches")).toBeTruthy();
+    // Known tools never fall into the generic "Used" bucket.
     expect(container.textContent).not.toContain("Used");
-    expect(container.textContent).not.toMatch(/\d+ tools/);
     // The chevron disclosure indicator — rotates when expanded.
     const chevron = container.querySelector("svg.lucide-chevron-right");
     expect(chevron).not.toBeNull();
     // Folded by default: the panel is closed and aria-expanded is false.
-    const trigger = getByText("Tools").closest('[role="button"]')!;
+    const trigger = getByText("Ran 2 Web Searches").closest('[role="button"]')!;
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     const panel = container.querySelector(".mb-collapse") as HTMLElement;
     expect(panel.getAttribute("data-open")).toBe("false");
@@ -67,7 +79,7 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="Read a web page" />
       </ToolStackGroup>,
     );
-    const trigger = getByText("Tools").closest('[role="button"]')!;
+    const trigger = getByText("Ran 2 Web Searches").closest('[role="button"]')!;
     fireEvent.click(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     const panel = container.querySelector(".mb-collapse") as HTMLElement;
@@ -82,7 +94,7 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="B" />
       </ToolStackGroup>,
     );
-    const trigger = getByText("Tools").closest('[role="button"]')!;
+    const trigger = getByText("Ran 2 Web Searches").closest('[role="button"]')!;
     fireEvent.keyDown(trigger, { key: "Enter" });
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     fireEvent.keyDown(trigger, { key: " " });
@@ -99,7 +111,7 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="Reading a page" />
       </ToolStackGroup>,
     );
-    expect(container.textContent).not.toContain("Tools");
+    expect(container.textContent).not.toContain("Web Searches");
     expect(container.querySelector(".tool-call-stack")).toBeTruthy();
     expect(container.textContent).toContain("Reading a page");
     cleanup();
@@ -111,7 +123,7 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="Approve me" />
       </ToolStackGroup>,
     );
-    expect(container.textContent).not.toContain("Tools");
+    expect(container.textContent).not.toContain("Web Searches");
     expect(container.textContent).toContain("Approve me");
     cleanup();
   });
@@ -134,7 +146,7 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="Working" />
       </ToolStackGroup>,
     );
-    expect(container.textContent).not.toContain("Tools");
+    expect(container.textContent).not.toContain("Web Searches");
 
     // The run settles → the stack folds into the summary.
     const settled = [tc("a", "completed"), tc("b", "completed")];
@@ -143,40 +155,47 @@ describe("ToolStackGroup (combined tools UI)", () => {
         <Row label="Working" />
       </ToolStackGroup>,
     );
-    expect(getByText("Tools")).toBeTruthy();
-    let trigger = getByText("Tools").closest('[role="button"]')!;
+    expect(getByText("Ran 2 Web Searches")).toBeTruthy();
+    let trigger = getByText("Ran 2 Web Searches").closest('[role="button"]')!;
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
 
     // Manual expand wins after the fold.
     fireEvent.click(trigger);
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    trigger = getByText("Tools").closest('[role="button"]')!;
+    trigger = getByText("Ran 2 Web Searches").closest('[role="button"]')!;
     cleanup();
   });
 
-  it("failed calls surface on the summary line — the ONE number that stays", () => {
+  it("failed calls surface on the summary line — the one destructive number", () => {
     const { container } = render(
       <ToolStackGroup toolCalls={[tc("a", "completed"), tc("b", "error"), tc("c", "completed")]}>
         <Row label="A" />
       </ToolStackGroup>,
     );
-    expect(container.textContent).toContain("Tools");
+    expect(container.textContent).toContain("Ran 2 Web Searches");
     expect(container.textContent).toContain("1 failed");
     cleanup();
   });
 
-  it("stackSummary: clean caption, no tool/file counts ever", () => {
-    expect(stackSummary([tc("a", "completed"), tc("b", "completed")])).toBe("Tools");
-    // All-creation stacks read "Tools" too — no "Created N files".
+  it("stackSummary: per-tool captions (the 2026-11-14 directive)", () => {
+    // File work aggregates per verb.
     expect(
       stackSummary([
         fileCreate("a", "src/App.tsx"),
         fileCreate("b", "src/lib.ts"),
         { ...tc("e", "completed", "edit_file"), args: { path: "README.md" } },
       ]),
-    ).toBe("Tools");
-    // Failures keep their count.
-    expect(stackSummary([tc("a", "completed"), tc("b", "error")])).toBe("Tools · 1 failed");
+    ).toBe("Created 2 Files · Edited 1 File");
+    // The user's exact example — todo creations read "Created N Todos".
+    expect(stackSummary([todoCreate("a"), todoCreate("b"), todoCreate("c")])).toBe(
+      "Created 3 Todos",
+    );
+    // Failures keep their count and never read as work done.
+    expect(stackSummary([tc("a", "completed"), tc("b", "error")])).toBe(
+      "Ran 1 Web Search · 1 failed",
+    );
+    // Nothing landed at all → the plain label + failures.
+    expect(stackSummary([tc("a", "error"), tc("b", "error")])).toBe("Tools · 2 failed");
     cleanup();
   });
 });

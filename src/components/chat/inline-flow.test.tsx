@@ -51,8 +51,9 @@ describe("inline flow (PRD §3.1)", () => {
     expect(text).not.toContain("Worked");
     expect(container.querySelector(".border-l.border-border\\/70")).toBeNull();
     expect(text).toContain("Thought"); // the thinking row keeps its own summary
-    // The two-tool stack rests as the combined clean "Tools" summary row…
-    expect(text).toContain("Tools");
+    // The two-tool stack rests as the combined per-tool summary row
+    // (web_search + web_fetch → "Ran 1 Web Search · Fetched 1 Page")…
+    expect(text).toContain("Ran 1 Web Search · Fetched 1 Page");
     // …with the individual rows folded behind it (still mounted).
     expect(text).toContain("Searched the web");
     expect(text).toContain("Read a web page");

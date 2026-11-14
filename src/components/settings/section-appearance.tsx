@@ -71,10 +71,13 @@ const CANVAS_SWATCHES: { label: string; hex: string }[] = [
 ];
 
 /** Curated glow-source swatches — the brand orange first, then a few
- *  hues that read well as accents. The glow colour IS the accent: picking
- *  one retints the glow washes AND every accent-driven element (buttons,
- *  bubbles, switches, rings) — the canvas and component surfaces stay
- *  contrast-derived from the background. */
+ *  hues that read well as accents, then a row of LIGHT accents (2026-11-14
+ *  directive: "add more light colours to select"). The glow colour IS the
+ *  accent: picking one retints the glow washes AND every accent-driven
+ *  element (buttons, bubbles, switches, rings) — the canvas and component
+ *  surfaces stay contrast-derived from the background. Light accents get
+ *  dark ink on primary surfaces automatically (accentForeground picks by
+ *  contrast ratio). */
 const GLOW_SWATCHES: { label: string; hex: string }[] = [
   { label: "Onyx orange (default)", hex: DEFAULT_GLOW },
   { label: "Ember", hex: "#e5484d" },
@@ -82,6 +85,13 @@ const GLOW_SWATCHES: { label: string; hex: string }[] = [
   { label: "Violet", hex: "#8e4ec6" },
   { label: "Cyan", hex: "#0091ff" },
   { label: "Mint", hex: "#30a46c" },
+  // Light accents — soft pastel glows for the dark canvases.
+  { label: "Peach", hex: "#ffb26b" },
+  { label: "Blush", hex: "#f7a4c4" },
+  { label: "Lilac", hex: "#c9a6f5" },
+  { label: "Sky", hex: "#8ecbff" },
+  { label: "Seafoam", hex: "#7fe0bd" },
+  { label: "Butter", hex: "#ffd98a" },
 ];
 
 function isValidHex(v: string): boolean {
@@ -521,7 +531,7 @@ function ThemeOption({ label, icon: Icon, active, onClick }: ThemeOptionProps) {
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "flex flex-col items-center justify-center gap-1.5 rounded-md border p-3 text-xs font-medium transition-colors",
+        "flex flex-col items-center justify-center gap-1.5 settings-nested border text-xs font-medium transition-colors",
         active
           ? "bg-accent text-accent-foreground border-foreground/30"
           : "border-border hover:bg-accent/50",

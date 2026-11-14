@@ -157,25 +157,6 @@ button:active:not(:disabled):not([role="menuitem"]) {
   --tool-ok: #2e6b1e;
 }
 
-/* ---- 8 · Reduced motion (spec §17) ------------------------------------ */
-@media (prefers-reduced-motion: reduce) {
-  .mb-object-in,
-  .mb-row-in,
-  .mb-fade-in,
-  .mb-spring-in,
-  .mb-scale-in,
-  .mb-fade-out,
-  .mb-collapse[data-open="true"] > *,
-  .mb-stagger > *,
-  .mb-press {
-    animation: none;
-    transition: none;
-  }
-  button:active:not(:disabled):not([role="menuitem"]) {
-    transform: none;
-  }
-}
-
 /* ── PRIMITIVE EXTRAS (motion/ React layer) ─────────────────────────────
    Entrances the React primitives (src/components/motion) compose beyond
    the object/row reveals: a pure opacity fade and a spring-settled rise.
@@ -213,4 +194,87 @@ button:active:not(:disabled):not([role="menuitem"]) {
 }
 .mb-fade-out {
   animation: mb-fade-out var(--mb-dur, 130ms) var(--ease-exit, cubic-bezier(.4,0,1,1)) forwards;
+}
+
+/* ---- 9 · Object exit — the vanish with motion blur (Task: clear todos) --
+   The deliberate BLURRED exit the todo panel plays when the agent clears
+   the list: the reverse of mb-object-in — clarity dissolves into a 7px
+   blur while the surface sinks 6px and fades. ONE-SHOT, `forwards` (the
+   element unmounts right after; nothing retains a filter surface). */
+@keyframes mb-object-out {
+  0% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  45% {
+    opacity: 0.7;
+    filter: blur(2.5px);
+  }
+  100% {
+    opacity: 0;
+    filter: blur(7px);
+    transform: translate3d(0, 6px, 0) scale(0.985);
+  }
+}
+.mb-object-out {
+  animation: mb-object-out var(--mb-dur, 300ms) var(--ease-exit, cubic-bezier(.4,0,1,1)) forwards;
+  pointer-events: none;
+}
+
+/* ---- 10 · Striped spinner — the pending-status glyph ---------------------
+   A ring of rotating conic stripes (the "striped loading icon" for todos
+   the AI marked pending): reads as continuous background work without a
+   literal indeterminate progress bar. Color via --ss-color; size via
+   width/height on the element. Masked to a 2px ring so it stays a GLYPH,
+   not a filled disc. */
+@keyframes mb-striped-spin {
+  to { transform: rotate(360deg); }
+}
+.striped-spinner {
+  --ss-color: var(--color-muted-foreground, currentColor);
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: repeating-conic-gradient(
+    var(--ss-color) 0deg 22%,
+    transparent 22% 45%
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2.6px),
+    #000 calc(100% - 2.2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2.6px),
+    #000 calc(100% - 2.2px)
+  );
+  animation: mb-striped-spin 0.9s linear infinite;
+}
+.striped-spinner[data-accent="true"] {
+  --ss-color: var(--color-primary, var(--glow-color, #f07e12));
+}
+
+/* ---- 8 · Reduced motion (spec §17) — keep last, overrides everything --- */
+@media (prefers-reduced-motion: reduce) {
+  .mb-object-in,
+  .mb-row-in,
+  .mb-fade-in,
+  .mb-spring-in,
+  .mb-scale-in,
+  .mb-fade-out,
+  .mb-object-out,
+  .mb-collapse[data-open="true"] > *,
+  .mb-stagger > *,
+  .mb-press {
+    animation: none;
+    transition: none;
+  }
+  .striped-spinner {
+    animation: none;
+  }
+  button:active:not(:disabled):not([role="menuitem"]) {
+    transform: none;
+  }
 }

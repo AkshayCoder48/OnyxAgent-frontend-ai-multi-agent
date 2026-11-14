@@ -550,7 +550,7 @@ export function SectionIntegrationsComposio() {
             This page keeps the live status, platform catalog and per-platform
             connections.
           */}
-          <div className="text-muted-foreground flex items-start gap-3 rounded-lg border border-dashed p-4">
+          <div className="text-muted-foreground flex items-start gap-3 settings-nested border border-dashed">
             <KeyRound className="text-foreground/70 mt-0.5 size-4 shrink-0" />
             <div className="min-w-0">
               <p className="text-sm font-medium">The key moved to Settings → API Keys</p>
@@ -807,7 +807,7 @@ export function SectionIntegrationsComposio() {
 
                 {/* Reconnect-all links */}
                 {reconnectLinks.length > 0 && (
-                  <div className="rounded-lg border p-3">
+                  <div className="settings-nested border">
                     <span className="text-xs font-medium text-muted-foreground">Fresh authorization links</span>
                     <ul className="mt-2 space-y-1.5">
                       {reconnectLinks.map((l) => (

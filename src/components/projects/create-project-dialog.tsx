@@ -508,8 +508,12 @@ export function CreateProjectDialog({
           // max-height (keyboard + browser-chrome aware), rounded-2xl so the
           // lifted sheet reads as a floating card, gap-0 + p-0 because the
           // header / tabs / scroll body / footer own their own spacing.
-          "flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] w-[min(94vw,600px)] flex-col gap-0 overflow-hidden rounded-2xl p-0 "
-          + "sm:w-[min(94vw,600px)] sm:max-w-none sm:max-h-[min(88dvh,calc(var(--vvh,100dvh)-32px))]",
+          // NO overflow-hidden override: the base keeps overflow-y-auto as
+          // the clip safety net — the internal scroll area handles the
+          // designed scrolling, the outer box only scrolls if that chain
+          // ever breaks (no field can end up unreachable again).
+          "flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] w-[min(94vw,600px)] flex-col gap-0 rounded-2xl p-0 "
+            + "sm:w-[min(94vw,600px)] sm:max-w-none sm:max-h-[min(88dvh,calc(var(--vvh,100dvh)-32px))]",
         )}
       >
         <DialogHeader className="border-b px-5 pt-4 pb-3 text-left">

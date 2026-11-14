@@ -449,14 +449,25 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
     const name = newFolderName.trim();
     if (!client || !name) return;
     setCreatingFolderBusy(true);
+    const fullPath = currentPath === "." ? name : `${currentPath}/${name}`;
+    // OPTIMISTIC (2026-11-14 directive — instant UI, background work): the
+    // folder appears in the list immediately; the E2B mkdir runs behind it;
+    // on failure the entry is removed again.
+    setListing((prev) =>
+      prev && !prev.entries.some((e) => e.name === name)
+        ? { ...prev, entries: [{ name, type: "dir", size: 0 }, ...prev.entries] }
+        : prev,
+    );
     try {
-      const fullPath = currentPath === "." ? name : `${currentPath}/${name}`;
       await client.createFolder(fullPath);
       toast.success(`Created folder: ${name}`);
       setCreatingFolder(false);
       setNewFolderName("");
       fetchListing(currentPath);
     } catch (e) {
+      setListing((prev) =>
+        prev ? { ...prev, entries: prev.entries.filter((e) => e.name !== name) } : prev,
+      );
       toast.error("Create folder failed", {
         description: e instanceof Error ? e.message : "Unknown error",
       });
@@ -879,6 +890,14 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                         `Delete folder "${entry.name}" and EVERYTHING inside it? This cannot be undone.`,
                       );
                       if (!ok) return;
+                      // OPTIMISTIC DELETE (2026-11-14 directive): the entry
+                      // vanishes instantly; the recursive E2B delete runs in
+                      // the background; on failure it is restored.
+                      setListing((prev) =>
+                        prev
+                          ? { ...prev, entries: prev.entries.filter((e) => e.name !== entry.name) }
+                          : prev,
+                      );
                       try {
                         // E2B's deleteFile is recursive (rm -rf), so it
                         // works on directories too.
@@ -886,6 +905,11 @@ export function FileSidebar({ onRefreshKey }: { onRefreshKey?: string }) {
                         toast.success(`Deleted folder: ${entry.name}`);
                         fetchListing(currentPath);
                       } catch (e) {
+                        setListing((prev) =>
+                          prev && !prev.entries.some((x) => x.name === entry.name)
+                            ? { ...prev, entries: [...prev.entries, entry] }
+                            : prev,
+                        );
                         toast.error(`Delete failed: ${e instanceof Error ? e.message : "Unknown"}`);
                       }
                     }}

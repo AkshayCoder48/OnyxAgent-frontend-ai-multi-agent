@@ -160,14 +160,24 @@ function withTodoLock<T>(convId: string, fn: () => Promise<T>): Promise<T> {
 // (the model may call either singular or plural; both must work).
 // ---------------------------------------------------------------------------
 
-const MANAGE_DESCRIPTION = `Manage the todo list for the current task.
-Actions (pass as "action" — "operation" is accepted as an alias):
-- create: add a todo (requires title). Returns the todo with its stable ID, e.g. {"success":true,"todo":{"id":"todo_8f42","title":"...","status":"not_planned"}}. ALWAYS quote this ID in later calls.
-- update: change status/content of a todo by its ID (requires todo_id). status must be one of: not_planned, in_progress, done, not_done.
-- delete: remove a todo by its ID.
-- list: return all todos with their IDs.
-- clear: remove all todos.
-Statuses: "not_planned" (not started), "in_progress" (actively working), "done" (completed), "not_done" (attempted but not completed).
+// SIMPLIFIED CALLING CONTRACT (2026-11-14 directive — "simplify the todo
+// tool"): `action` is OPTIONAL. The handler infers the intent from the
+// payload shape, so every natural call the model emits just works:
+//
+//   { "id": "todo_cccc", "status": "pending" }   → update that todo's status
+//   { "title": "Web dev todo" }                  → create
+//   { "id": "todo_cccc" }                        → delete
+//   { "action": "list" } / {}                    → list
+//
+// Explicit `action`/`operation` still wins when present. No call ever fails
+// with "Unknown action" again — the only errors left are the honest ones
+// (missing title, todo not found, invalid status).
+const MANAGE_DESCRIPTION = `Manage the todo list for the current task. SIMPLEST CALLING — the action is INFERRED from what you pass, you rarely need to name it:
+- {"title": "..."} → CREATE a todo (returns a stable ID like {"id":"todo_8f42"} — quote it in later calls).
+- {"id": "todo_8f42", "status": "..."} → UPDATE that todo's status (or title). status: not_planned | in_progress | done | not_done (plain words like "pending"/"completed" are auto-mapped).
+- {"id": "todo_8f42"} → DELETE that todo.
+- {} → LIST all todos with their IDs.
+- {"action":"clear"} (or the clear_todo tool) → remove ALL todos.
 After creating or updating the FULL todo list, ALWAYS call show_todo with all: true so the user sees the live todo panel.`;
 
 const MANAGE_SCHEMA = {
@@ -176,7 +186,8 @@ const MANAGE_SCHEMA = {
     action: {
       type: "string",
       enum: ["create", "update", "delete", "list", "clear"],
-      description: "The action to perform.",
+      description:
+        "Optional — inferred from the payload when omitted: id+status/title → update, title only → create, id only → delete, nothing → list.",
     },
     operation: {
       type: "string",
@@ -185,7 +196,7 @@ const MANAGE_SCHEMA = {
     },
     title: {
       type: "string",
-      description: "Todo title text (for 'create', or to rename on 'update').",
+      description: "Todo title text (creates a todo, or renames on update).",
     },
     content: {
       type: "string",
@@ -197,7 +208,7 @@ const MANAGE_SCHEMA = {
     },
     todo_id: {
       type: "string",
-      description: "The todo ID, e.g. todo_8f42 (for 'update' or 'delete').",
+      description: "The todo ID, e.g. todo_8f42 (to update or delete).",
     },
     todoId: {
       type: "string",
@@ -209,8 +220,8 @@ const MANAGE_SCHEMA = {
     },
     status: {
       type: "string",
-      enum: ["not_planned", "in_progress", "done", "not_done"],
-      description: "New status (for 'update').",
+      description:
+        "New status (for update). not_planned | in_progress | done | not_done — common words (pending, completed, …) are auto-mapped.",
     },
   },
   required: [],
@@ -226,16 +237,66 @@ async function manageTodoHandler(
   );
 }
 
+/** Action-key aliases the model might reach for. */
+const ACTION_ALIASES: Record<string, string> = {
+  add: "create",
+  new: "create",
+  make: "create",
+  insert: "create",
+  set: "update",
+  set_status: "update",
+  mark: "update",
+  rename: "update",
+  change: "update",
+  edit: "update",
+  complete: "update",
+  remove: "delete",
+  destroy: "delete",
+  get: "list",
+  show: "list",
+  read: "list",
+  all: "list",
+  reset: "clear",
+  clear_all: "clear",
+  clear_todos: "clear",
+  delete_all: "clear",
+  wipe: "clear",
+};
+
+/**
+ * Derive the action from the payload — the heart of the simplified calling
+ * contract. Explicit `action`/`operation` wins; otherwise the SHAPE of the
+ * call decides, so the model never has to remember a verb:
+ *   id + (status | title | description) → update
+ *   id only                            → delete
+ *   title (no id)                      → create
+ *   nothing recognizable               → list
+ */
+function inferAction(args: Record<string, unknown>): string {
+  const explicit = String(args.action ?? args.operation ?? args.op ?? args.mode ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (explicit) return ACTION_ALIASES[explicit] ?? explicit;
+
+  const hasId = Boolean(String(args.todo_id ?? args.todoId ?? args.id ?? "").trim());
+  const hasTitle = Boolean(String(args.title ?? args.content ?? "").trim());
+  const hasDescription = args.description !== undefined;
+  if (hasId && (args.status !== undefined || hasTitle || hasDescription)) return "update";
+  if (hasId) return "delete";
+  // title + status, no id → an update-by-title (the update handler matches
+  // the title); title alone is a create.
+  if (hasTitle && args.status !== undefined) return "update";
+  if (hasTitle) return "create";
+  return "list";
+}
+
 async function manageTodoLocked(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const convId = ctx.conversationId ?? "";
-  // "operation" is a widely-used alias for "action" (models mix the two —
-  // media_generation/use_browser gate on "operation"); accept either.
-  const action = String(args.action ?? args.operation ?? "")
-    .trim()
-    .toLowerCase();
+  const action = inferAction(args);
   const todoId = () => String(args.todo_id ?? args.todoId ?? args.id ?? "");
 
   let todos = await loadTodos(convId);
@@ -266,8 +327,21 @@ async function manageTodoLocked(
     }
 
     case "update": {
-      const id = todoId();
-      const idx = todos.findIndex((t) => t.id === id);
+      let id = todoId();
+      let idx = id ? todos.findIndex((t) => t.id === id) : -1;
+      // No id (or an id that matches nothing) + a title → fall back to
+      // matching the title, so {"title":"Fix bug","status":"done"} also
+      // updates instead of failing or duplicating.
+      if (idx === -1) {
+        const byTitle = String(args.title ?? args.content ?? "").trim().toLowerCase();
+        if (byTitle) {
+          const matches = todos.filter((t) => t.title.toLowerCase() === byTitle);
+          if (matches.length === 1) {
+            id = matches[0]!.id;
+            idx = todos.findIndex((t) => t.id === id);
+          }
+        }
+      }
       if (idx === -1) {
         return { success: false, output: null, error: `todo not found: ${id || "(missing todo_id)"}` };
       }
@@ -310,7 +384,7 @@ async function manageTodoLocked(
     case "clear": {
       todos = [];
       await saveTodos(convId, todos);
-      await emitTodoEvent(ctx, todos, "reset");
+      await emitTodoEvent(ctx, todos, "cleared");
       return { success: true, output: { cleared: true } };
     }
 
@@ -324,6 +398,27 @@ async function manageTodoLocked(
 // in Settings → Tools AND a wasted tool slot against the model's tool-count
 // cap. Removed; `manage_todo` is the one true name.
 registerTool("manage_todo", MANAGE_DESCRIPTION, MANAGE_SCHEMA, manageTodoHandler);
+
+// ---------------------------------------------------------------------------
+// clear_todo — the dedicated one-shot "wipe the list" sub-tool of the
+// manage_todo family (2026-11-14 directive: "add a sub tool inside manage
+// todo called clear todo to clear from ui with a vanish animation"). It
+// needs NO arguments at all — the model can't get it wrong — and the
+// `cleared` todo_event it emits drives the vanish-with-motion-blur exit of
+// the composer todo panel.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "clear_todo",
+  `Clear the ENTIRE todo list for this conversation in one shot — every todo vanishes from the user's todo panel with a dismiss animation. Takes NO arguments; just call it. Use it when the user says "clear the todos", when a plan is finished and the panel should be dismissed, or when starting fresh. (Equivalent to manage_todo action "clear".)`,
+  {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  } as const,
+  async (_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> =>
+    manageTodoHandler({ action: "clear" }, ctx),
+);
 
 // ---------------------------------------------------------------------------
 // show_todo — display todos to the user. Accepts specific todo IDs (the

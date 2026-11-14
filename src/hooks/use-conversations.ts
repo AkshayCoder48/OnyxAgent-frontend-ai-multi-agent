@@ -324,6 +324,23 @@ export function useConversations() {
     async (title?: string, opts?: CreateConversationOpts): Promise<Conversation | null> => {
       setLoading(true);
       setError(null);
+      // OPTIMISTIC CREATE (2026-11-14 directive — the UI fakes instant, the
+      // network works in the background): a temp row appears in the list the
+      // moment the user asks for a chat; when the service resolves it is
+      // swapped for the real row; on failure the temp vanishes again.
+      const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      const optimistic: Conversation = {
+        id: tempId,
+        title: title ?? "New chat",
+        created_at: now,
+        updated_at: now,
+        is_archived: false,
+        is_demo: false,
+        mode: "agent",
+        ...(opts?.projectId ? { project_id: opts.projectId } : {}),
+      };
+      writeCache((prev) => [optimistic, ...prev]);
       try {
         const userId = getUserId();
         const newConversation = await conversationService.create(userId, title, undefined, {
@@ -339,11 +356,16 @@ export function useConversations() {
             // opportunistic — ignore
           }
         }
-        writeCache((prev) => [newConversation, ...prev]);
+        writeCache((prev) => [
+          newConversation,
+          ...prev.filter((c) => c.id !== tempId),
+        ]);
         return newConversation;
       } catch (err) {
         const message = getErrorMessage(err, "Failed to create conversation");
         setError(message);
+        writeCache((prev) => prev.filter((c) => c.id !== tempId));
+        toast.error(message);
         return null;
       } finally {
         setLoading(false);
@@ -384,18 +406,26 @@ export function useConversations() {
 
   const deleteConversation = useCallback(
     async (id: string) => {
+      // OPTIMISTIC DELETE (2026-11-14 directive — instant UI, background
+      // work): the row disappears immediately; the service call runs behind
+      // it. On failure the row is restored with an apology toast.
+      let snapshot: Conversation[] | undefined;
+      writeCache((prev) => {
+        snapshot = prev;
+        return prev.filter((c) => c.id !== id);
+      });
+      // Mirror the old store behavior: clear the active selection if it was
+      // the conversation we just removed.
+      if (useConversationStore.getState().currentConversationId === id) {
+        setCurrentConversationId(null);
+      }
       try {
         await conversationService.delete(id);
-        writeCache((prev) => prev.filter((c) => c.id !== id));
-        // Mirror the old store behavior: clear the active selection if it was
-        // the conversation we just removed.
-        if (useConversationStore.getState().currentConversationId === id) {
-          setCurrentConversationId(null);
-        }
         toast.success("Conversation deleted");
       } catch (err) {
         const message = getErrorMessage(err, "Failed to delete conversation");
         setError(message);
+        if (snapshot) writeCache(() => snapshot!);
         toast.error(message);
       }
     },

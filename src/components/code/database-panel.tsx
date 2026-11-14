@@ -601,10 +601,10 @@ export function DatabasePanel() {
         <EmptyState
           icon={<Database className="h-5 w-5" aria-hidden />}
           title="OnyxBase is not connected"
-          body="Add your OnyxBase API key in Settings → Cloud to give this app (and the agent) a persistent cloud database."
+          body="Add your OnyxBase API key in Settings → API Keys to give this app (and the agent) a persistent cloud database."
           action={
-            <Button size="sm" variant="outline" onClick={() => router.push(ROUTES.SETTINGS_CLOUD)}>
-              Open Settings → Cloud
+            <Button size="sm" variant="outline" onClick={() => router.push(ROUTES.SETTINGS_API_KEYS)}>
+              Open Settings → API Keys
             </Button>
           }
         />

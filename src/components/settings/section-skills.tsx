@@ -269,7 +269,7 @@ export function SectionSkills() {
     if (!userId) return;
     if (!cloudConfigured) {
       toast.error("Add your OnyxBase API key first", {
-        description: "Settings → Cloud Workspace.",
+        description: "Settings → API Keys.",
       });
       return;
     }
@@ -453,7 +453,7 @@ export function SectionSkills() {
             onClick={handlePushSkills}
             size="sm"
             disabled={pushing || !cloudConfigured}
-            title={cloudConfigured ? "Push every installed skill to OnyxBase cloud backup" : "Add an OnyxBase API key in Cloud Workspace first"}
+            title={cloudConfigured ? "Push every installed skill to OnyxBase cloud backup" : "Add an OnyxBase API key in API Keys first"}
           >
             {pushing ? <Loader2 className="size-4 animate-spin" /> : <Cloud className="size-4" />}
             Push skills to cloud
@@ -660,7 +660,7 @@ export function SectionSkills() {
           description={
             cloudConfigured
               ? "Per-skill OnyxBase sync bookkeeping. Badges are re-derived from content hashes on every load."
-              : "Add an OnyxBase API key (Settings → Cloud Workspace) to sync skills to your private cloud."
+              : "Add an OnyxBase API key (Settings → API Keys. to sync skills to your private cloud."
           }
         >
           {rows.length === 0 ? (

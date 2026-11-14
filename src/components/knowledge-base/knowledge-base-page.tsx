@@ -743,7 +743,7 @@ function NotConfiguredCard() {
         chats, sessions and restarts.
       </p>
       <Button asChild className="mt-6">
-        <Link href={ROUTES.SETTINGS_CLOUD}>
+        <Link href={ROUTES.SETTINGS_API_KEYS}>
           Connect OnyxBase
           <ArrowRight aria-hidden />
         </Link>

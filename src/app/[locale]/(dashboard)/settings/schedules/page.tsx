@@ -1,16 +1,13 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { SectionSchedules } from "@/components/settings/section-schedules";
+import { ROUTES } from "@/lib/constants";
 
 /**
- * Schedules settings route (Background Task Execution Framework FR-2.1) —
- * cron-driven background tasks: create/edit/pause/delete schedules, next-run
- * previews, and recent firing history. Runs fire durably on the operator's
- * Trigger.dev Cloud project once a key is connected (Settings → API Keys).
- *
- * SectionSchedules carries its own SettingsSection card + header (unlike
- * section-e2b, which is headerless), so this route renders it bare.
+ * Schedules settings route — REDIRECTED to API Keys (2026-11-14: the
+ * Sandbox (E2B), Cloud and Schedules tabs were removed from Settings —
+ * their key + connection surfaces live in the ONE API Keys tab). The
+ * route stays as a redirect so old links and bookmarks keep working.
  */
 export default function SchedulesSettingsPage() {
-  return <SectionSchedules />;
+  redirect(ROUTES.SETTINGS_API_KEYS);
 }

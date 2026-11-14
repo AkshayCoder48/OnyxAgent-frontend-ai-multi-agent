@@ -269,7 +269,7 @@ export function ProviderDiagnosticsDialog({
                 <div
                   key={slot.id}
                   className={cn(
-                    "rounded-md border p-3 transition-colors",
+                    "settings-nested border transition-colors",
                     r?.status === "fail" && "border-destructive/40",
                     r?.status === "warn" && "border-amber-300",
                     r?.status === "pass" && "border-emerald-200",

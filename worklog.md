@@ -622,3 +622,46 @@ Work Log:
 
 Stage Summary:
 - No modal can leave the viewport anymore: one shared viewport engine caps every dialog to the visual viewport, lifts bottom sheets above the keyboard, shifts centered cards into the visible half, locks body scroll, and gives every dialog a pinned header / scrolling body / reachable footer — Create Project and Save to Files (the two screenshots) plus all 20+ other dialogs migrated, and the desktop width bug (non-sm overrides losing to sm:max-w-lg) fixed. Changing the glow colour now repaints every accent element in the app (buttons, bubbles, switches, rings, charts) with contrast-aware ink; the question card and the Pollinations confirm are real see-through glass. The todo tool accepts operation/action (+ todoId aliases) so {"operation":"create"} works, the AI is instructed to show_todo right after generating the list, plans and todos are ONE pipeline with ONE label, and the tool rows are clean: "Tools ›", no counts, no ticks.
+
+## 2026-11-14 — Simplified todo tool, per-tool stack captions, settings geometry PRD
+
+**Todo tool (the recurring `Unknown action: ` failure)**
+- `manage_todo` now INFERS the action from the payload shape — `{"id","status"}` → update, `{"title"}` → create, `{"id"}` → delete, `{}` → list; verb aliases (`add`, `set_status`, `mark`, `reset`…) map to canonical actions; update-by-title fallback. Explicit `action`/`operation` still wins. Schema + Onyx.md compendium rewritten around the simplest calling contract. 15 tool tests.
+- NEW `clear_todo` sub-tool — zero-argument one-shot wipe of the whole list; emits the `cleared` todo_event that drives the vanish exit.
+
+**Todo UI (agent-owned statuses)**
+- Manual ticking REMOVED from the composer todo panel — rows are read-only readouts.
+- Status glyphs: pending → muted striped spinner, in_progress → accent striped spinner, done → tick, not_done → cross. New `.striped-spinner` motion primitive (rotating conic stripes masked to a ring); TodoListBeta's pending glyph swapped to it too.
+- VANISH ON CLEAR: non-empty → empty transition freezes a snapshot, plays new `.mb-object-out` (motion-blur + sink + fade, the reverse of `mb-object-in`), then unmounts.
+
+**Tool rows (docs-icon caption directive)**
+- The combined tools row now reads `[docs icon] Created 3 Files · Created 5 Todos · Used 2 Tools` — new `src/lib/tool-stack-summaries.ts` maps EVERY registered tool to {verb, singular, plural} (umbrella calls resolved to granular rules; manage_todo/knowledge_base action-aware, mirroring the tool's own inference); unknown names (custom + MCP tools) fold into `Used N Tools`, always last; failures keep the `· N failed` suffix. 10 unit + 9 component tests.
+
+**ask_user ("ask me …" directive)**
+- Onyx.md: when the user says "ask me …" / "quiz me" / wants ANY questions (MCQ, survey, checklist), the agent MUST call `ask_user` and generate the questions itself (options = multiple choice, allow_custom = free-form) — never a plain-text wall. Digest regenerated; directive survives the 180-char digest cap.
+
+**Dialogs (bottom-sheet clip fix — all dialog boxes)**
+- `DialogContent` is now `overflow-y-auto overscroll-contain` — the clip safety net: dialogs that don't route through DialogBody can never trap fields below the fold again. Create Project's own `overflow-hidden` override removed for the same reason. AlertDialog already scrolled.
+
+**Chat sidebar close animation**
+- Sheet hidden-flash bug fixed: `settledClosed` was DERIVED (`!open && !closing`) and painted one display:none frame before the exit effect ran — now a `settled` STATE set only by the exit timeout, so the slide-out plays every time.
+
+**Optimistic create/delete (instant UI, background work)**
+- Conversations: create inserts a temp row instantly (swapped for the real one on resolve, rolled back + toast on failure); delete filters instantly with snapshot restore on failure.
+- Projects: same pattern in the zustand store (temp card → real swap / snapshot restore), background refresh reconcile.
+- Workspace files: new-folder appears instantly (removed on failure); folder delete removes instantly (restored on failure).
+- Knowledge Base: item delete optimistic with restore.
+
+**Appearance**
+- 6 new LIGHT glow accents: Peach, Blush, Lilac, Sky, Seafoam, Butter (ink contrast on primary surfaces is already derived by accentForeground).
+
+**Settings — tab cleanup**
+- Sandbox (E2B) / Cloud / Schedules tabs removed from BOTH navs (route tab bar + overlay); their routes redirect to /settings/api-keys; deep links repointed; section-e2b / section-cloud-workspace / section-schedules + test deleted; dead ROUTES constants removed; stale "Settings → Cloud" strings updated.
+- "Env vars" tab renamed to "Environment".
+
+**Settings — Global Container Spacing, Padding & Rounded Geometry PRD**
+- New token set in globals.css: `--settings-radius-main/card/nested/control` (20/16/12/12), `--settings-padding-main/card/nested` (28/22/16), `--settings-gap-section/card` (24/16), with <640px responsive overrides.
+- `.settings-main/.settings-card/.settings-nested/.settings-stack` container classes; `.settings-scope` on both surfaces scopes input/select/button geometry to the 12px control radius (zero-specificity :where() so intentional pills still win) + box-sizing/min-width layout safety.
+- Shared containers (SectionCard, SettingsSection) rebuilt on the tokens — header gets real breathing room via negative-margin band inside the card padding; sweep replaced ad-hoc `rounded-lg/md/xl border p-*` boxes across every settings section + route page.
+
+**Tests**: vitest 946/946 (63 files) — new: tool-stack-summaries (10), todo inference + clear_todo (6), rewritten composer-panel (9) + stack-group (9) suites. tsc: only pre-existing vendored `public/skill-repos/**` asset errors (unchanged from main).

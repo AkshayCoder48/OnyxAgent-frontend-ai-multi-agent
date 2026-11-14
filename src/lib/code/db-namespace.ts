@@ -141,7 +141,7 @@ export function makeRecord(key: string, value: string): CodeDbRecord {
 /** Human-friendly message for OnyxBase failures (panel + tool share this). */
 export function codeDbFailureMessage(failure: CodeDbFailure): string {
   if (failure.kind === "not_configured") {
-    return "No OnyxBase API key configured. Add one in Settings → Cloud to use the Code Mode database.";
+    return "No OnyxBase API key configured. Add one in Settings → API Keys to use the Code Mode database.";
   }
   return failure.message ?? "OnyxBase request failed.";
 }

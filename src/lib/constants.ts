@@ -32,12 +32,9 @@ export const ROUTES = {
   SETTINGS_TOOLS: "/settings/tools",
   SETTINGS_ENV: "/settings/env",
   SETTINGS_API_KEYS: "/settings/api-keys",
-  SETTINGS_CLOUD: "/settings/cloud",
   SETTINGS_INTEGRATIONS: "/settings/integrations",
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
-  SETTINGS_E2B: "/settings/e2b",
-  SETTINGS_SCHEDULES: "/settings/schedules",
   // Trigger.dev Cloud orchestration (Background Task Execution Framework).
   RAG: "/rag",
   ORGS: "/orgs",
