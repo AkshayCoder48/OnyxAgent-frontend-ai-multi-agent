@@ -22,9 +22,10 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-import { useAuth } from "@/hooks";
+import { useAuth, useConversations } from "@/hooks";
 import { apiClient } from "@/lib/api-client";
 import { ROUTES } from "@/lib/constants";
+import { startNewChatSession } from "@/lib/chat/new-chat";
 // (admin menu items removed — the app no longer ships admin surfaces)
 
 interface ConversationItem {
@@ -37,6 +38,7 @@ export function CommandPalette() {
   const router = useRouter();
   const t = useTranslations("nav");
   const { logout } = useAuth();
+  const { selectConversation } = useConversations();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -104,7 +106,15 @@ export function CommandPalette() {
           <PaletteItem
             icon={Plus}
             label="Start new chat"
-            onSelect={() => go(ROUTES.CHAT)}
+            onSelect={() => {
+              // FULL reset, not a bare navigation: `router.push(ROUTES.CHAT)`
+              // alone is a NO-OP when already on /chat (nothing watches the
+              // ?id= query), and even from elsewhere it would land the user
+              // back on the still-selected conversation. The canonical reset
+              // detaches the old chat everywhere (selection, ?id=, todo dock).
+              startNewChatSession();
+              go(ROUTES.CHAT);
+            }}
             shortcut="⌘N"
           />
           <PaletteItem
@@ -121,7 +131,17 @@ export function CommandPalette() {
                 key={c.id}
                 icon={MessageSquare}
                 label={c.title?.trim() || "Untitled conversation"}
-                onSelect={() => go(`${ROUTES.CHAT}?id=${c.id}`)}
+                onSelect={() => {
+                  // Select THROUGH the store, not just the URL: a bare
+                  // router.push(`${ROUTES.CHAT}?id=…`) is a no-op when the
+                  // palette opens on /chat — the chat surface never watches
+                  // the query param. loadConversationMessages swaps the
+                  // selection + loads that conversation's messages wherever
+                  // the user currently is (invalid ids land in the honest
+                  // not-found state, never another chat).
+                  void selectConversation(c.id);
+                  go(`${ROUTES.CHAT}?id=${c.id}`);
+                }}
               />
             ))}
           </Group>

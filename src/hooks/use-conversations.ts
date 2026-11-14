@@ -9,6 +9,7 @@ import { useAuthStore } from "@/stores";
 import { qk } from "@/lib/query-keys";
 import { getErrorMessage, setUrlParam } from "@/lib/utils";
 import { useConversationStore, useChatStore } from "@/stores";
+import { startNewChatSession } from "@/lib/chat/new-chat";
 import type { Conversation } from "@/types";
 
 const PAGE_SIZE = 30;
@@ -466,23 +467,18 @@ export function useConversations() {
   );
 
   const startNewChat = useCallback(async () => {
-    // If current conversation is empty (no messages), just reuse it
-    const currentId = useConversationStore.getState().currentConversationId;
-    if (currentId) {
-      const msgs = useConversationStore.getState().currentMessages;
-      if (msgs.length === 0) {
-        clearMessages();
-        return;
-      }
-    }
-    clearMessages();
-    // Atomically reset: id -> null, messages -> [], hydrated -> null.
-    useConversationStore.getState().selectConversation(null, { loading: false });
-    // Strip the stale ?id= immediately so a refresh mid-flight lands on a
-    // fresh /chat instead of the old conversation. The new id will be set
-    // by the agent runtime's `conversation_created` event on first message.
-    setUrlParam("id", null);
-  }, [clearMessages]);
+    // FULL RESET via the ONE canonical new-chat session reset (lib/chat/
+    // new-chat.ts). The old "reuse the current conversation when it looks
+    // empty" shortcut is GONE: `currentMessages` is [] not only for
+    // genuinely-empty chats but also for every chat the runtime attached
+    // mid-first-message (its history lives in the live execution store +
+    // the DB, not this array) — the shortcut kept the view pointed at the
+    // PREVIOUS chat's identity (selection, ?id=, last-active, DB writes)
+    // while showing an empty thread, which is exactly the reported
+    // corruption: "new chat with the old title, old context, and the
+    // message lands in the old chat after refresh".
+    startNewChatSession();
+  }, []);
 
   return {
     conversations,

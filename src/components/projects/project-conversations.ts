@@ -31,10 +31,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { db } from "@/lib/db";
-import { setUrlParam } from "@/lib/utils";
+import { startNewChatSession } from "@/lib/chat/new-chat";
 import { touchProjectActivity } from "@/lib/projects/service";
 import { notifyConversationsChanged, CONVERSATIONS_CHANGED_EVENT } from "@/lib/chat-events";
-import { useAuthStore, useChatStore, useConversationStore } from "@/stores";
+import { useAuthStore, useConversationStore } from "@/stores";
 import { useConversations } from "@/hooks";
 import type { Conversation } from "@/types";
 import { useProjectsStore } from "@/lib/projects/store";
@@ -45,17 +45,14 @@ import { setLastProjectConversation } from "./project-identity";
 // ---------------------------------------------------------------------------
 
 /**
- * Atomically reset the chat surface to "nothing selected" (id → null, chat
- * store cleared, ?id= stripped). This is the FULL reset path of the sidebar's
- * `startNewChat` — deliberately without its "reuse the current conversation
- * when it has no messages" shortcut, because entering a project workspace
- * with a selected-but-empty GENERAL conversation would otherwise keep that
- * general chat selected under the project chrome.
+ * Atomically reset the chat surface to "nothing selected" — now a thin
+ * delegate to the ONE canonical new-chat session reset (lib/chat/new-chat)
+ * so the sidebar button, project workspaces, command palette and ⌘N can
+ * never drift apart again. The canonical reset additionally wipes the
+ * prompt-box todo dock (PRD §10: temporary todos never leak across chats).
  */
 export function resetToNewChatState(): void {
-  useChatStore.getState().clearMessages();
-  useConversationStore.getState().selectConversation(null, { loading: false });
-  setUrlParam("id", null);
+  startNewChatSession();
 }
 
 // ---------------------------------------------------------------------------

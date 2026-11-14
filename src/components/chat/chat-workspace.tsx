@@ -14,7 +14,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useChatSidebarStore, useChatStore, useConversationStore } from "@/stores";
+import { useChatSidebarStore, useConversationStore } from "@/stores";
 import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
 import { useSettings } from "@/hooks/use-data";
@@ -22,7 +22,6 @@ import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
 import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
-import { setUrlParam } from "@/lib/utils";
 import {
   AppWindow,
   Bot,
@@ -149,10 +148,24 @@ export function ChatWorkspace() {
   // entire chat-sidebar store).
   const openChatSidebar = useChatSidebarStore((s) => s.open);
   const currentConversationId = useConversationStore((s) => s.currentConversationId);
-  const { conversations, isLoading: conversationsLoading, selectConversation } =
+  const { conversations, isLoading: conversationsLoading, selectConversation, startNewChat } =
     useConversations();
   const conversationTitle =
     conversations.find((c) => c.id === currentConversationId)?.title ?? null;
+
+  // GLOBAL ⌘N / Ctrl+N — "New conversation" (the sidebar button and the
+  // command palette both advertise the shortcut). Mounts with the chat
+  // workspace only, so it never fires over dashboards or settings.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        void startNewChat();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [startNewChat]);
 
   // Export conversation dialog (PRD §12) — opened from the chat top bar.
   const [exportOpen, setExportOpen] = useState(false);
@@ -175,11 +188,11 @@ export function ChatWorkspace() {
     if (latestAgent) {
       void selectConversation(latestAgent.id);
     } else {
-      useChatStore.getState().clearMessages();
-      store.selectConversation(null, { loading: false });
-      setUrlParam("id", null);
+      // The canonical full reset (same path as the New Chat button) — the
+      // legacy pointer must not leave any of the previous chat's state.
+      void startNewChat();
     }
-  }, [conversations, conversationsLoading, selectConversation]);
+  }, [conversations, conversationsLoading, selectConversation, startNewChat]);
 
   // HYDRATION-SAFE TITLE (fixes the "Hydration failed" mismatch on ?id=
   // reloads): the conversation store rehydrates SYNCHRONOUSLY from

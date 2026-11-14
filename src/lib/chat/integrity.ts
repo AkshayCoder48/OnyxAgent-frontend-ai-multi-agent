@@ -13,7 +13,6 @@ export function logChatIntegrity(
   payload: Record<string, unknown>,
 ): void {
   if (process.env.NODE_ENV === "production") return;
-  // eslint-disable-next-line no-console -- dev-time integrity tracing
   console.debug(`[chat-integrity] ${event}`, payload);
 }
 
