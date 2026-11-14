@@ -13,7 +13,7 @@
 // Next 16 dynamic-route handler signature: params is a Promise.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
 import { deleteCloudSchedule, getCloudConfig, sealSecret, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
 import { isAbsoluteHttpUrl, isAppBridgeUrl, NO_PROVIDER_CREDENTIALS_ERROR } from "@/lib/tasks/run-credentials";
@@ -90,6 +90,9 @@ export async function PATCH(
   request: NextRequest,
   ctx: RouteContext,
 ): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   const { id } = await ctx.params;
 
   let body: Partial<TaskScheduleInput>;
@@ -242,6 +245,9 @@ export async function DELETE(
   _request: NextRequest,
   ctx: RouteContext,
 ): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   const { id } = await ctx.params;
   const existing = await prisma.taskSchedule.findUnique({ where: { id }, select: { id: true } });
   if (!existing) return notFound();

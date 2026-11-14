@@ -23,7 +23,7 @@
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
 import type { TaskRun } from "@prisma/client";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
 import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
 import { healStaleCloudRuns } from "@/lib/tasks/trigger-cloud";
@@ -114,6 +114,9 @@ function toArtifactSummary(row: ArtifactSummaryRow): TaskArtifactSummary {
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   const params = request.nextUrl.searchParams;
 
   // ── list view ───────────────────────────────────────────────────────────

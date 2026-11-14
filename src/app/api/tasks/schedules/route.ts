@@ -13,7 +13,7 @@
 // Body-logging discipline mirrors /api/chat-proxy.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { armDueSchedules, armSchedule, toScheduleRecord } from "@/lib/tasks/cron-scheduler";
 import { getCloudConfig, sealSecret, upsertCloudSchedule } from "@/lib/tasks/trigger-cloud";
 import { isAbsoluteHttpUrl, isAppBridgeUrl, NO_PROVIDER_CREDENTIALS_ERROR } from "@/lib/tasks/run-credentials";
@@ -113,6 +113,9 @@ async function mirrorScheduleToCloud(
 }
 
 export async function GET(): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   // Recovery pass: arm fresh/recovered schedules that never got a nextRunAt
   // (cheap when nothing needs it), then list.
   await armDueSchedules().catch(() => {
@@ -126,6 +129,9 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   let body: Partial<TaskScheduleInput>;
   try {
     body = (await request.json()) as Partial<TaskScheduleInput>;

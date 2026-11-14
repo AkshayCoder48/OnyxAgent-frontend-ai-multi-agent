@@ -20,7 +20,7 @@ import type { TaskSchedule } from "@prisma/client";
 import { nextCronRun, type BackgroundTaskType, type TaskRunConfig, type TaskScheduleRecord } from "./protocol";
 import { getCloudConfig, openSecret } from "./trigger-cloud";
 import { dispatchCloudRun } from "./trigger-cloud";
-import { prisma } from "./prisma";
+import { ensureTasksSchema, prisma } from "./prisma";
 import { keyring } from "./keyring";
 import { parseConfig } from "./run-store";
 import { EMPTY_PAYLOAD_JSON } from "./run-store";
@@ -98,6 +98,10 @@ export async function armDueSchedules(): Promise<number> {
  * fires (cloud-only execution by design).
  */
 export async function sweepSchedules(): Promise<number> {
+  // The scheduler runs standalone (interval loop, not inside a route handler)
+  // — apply the fresh-DB DDL guard itself (memoized; free after the first
+  // call). See src/lib/tasks/prisma.ts.
+  await ensureTasksSchema().catch(() => {});
   const cloud = await getCloudConfig();
   if (!cloud) {
     // Nothing executes without the cloud — still keep nextRunAt fresh so a

@@ -13,7 +13,7 @@
 // Body-logging discipline mirrors /api/chat-proxy: tokens are never logged.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { sha256Hex, tokensEqual } from "@/lib/tasks/keyring";
 
 export const runtime = "nodejs";
@@ -28,6 +28,9 @@ export async function GET(
   request: NextRequest,
   ctx: RouteContext,
 ): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   const { id } = await ctx.params;
   const token = request.nextUrl.searchParams.get("token") ?? "";
 

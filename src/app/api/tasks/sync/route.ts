@@ -10,7 +10,7 @@
 // the stored sha256 hash.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { sha256Hex, tokensEqual } from "@/lib/tasks/keyring";
 import type { ClientSyncState } from "@/lib/tasks/protocol";
 
@@ -25,6 +25,9 @@ function unauthorized(): NextResponse {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   let body: { runId?: unknown; taskToken?: unknown; state?: unknown };
   try {
     body = (await request.json()) as { runId?: unknown; taskToken?: unknown; state?: unknown };

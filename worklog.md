@@ -752,3 +752,23 @@ Stage Summary:
 - The interruption note is gone from the product at every layer; a UI cut either keeps the turn alive on the cloud or settles it silently.
 - The background agent task = the app's real agent: full skills library (55 skills, fetched from the app at runtime), the synced browser-capable Python runner, E2B sandbox (+ optional browser template), hour-scale durable execution, HITL waitpoints, per-user concurrency caps.
 - App startup warms the entire path (config cache, worker liveness, scheduler) so the first background dispatch has no cold-start delay.
+---
+
+## 2026-11-14 (evening) — Fix "Failed to start the background cloud run: failed to create the run" on the Vercel deployment
+
+Task ID: 12
+Agent: main (Z.ai Code)
+Task: User report — starting a background cloud run on the deployed app answers `❌ Failed to start the background cloud run: failed to create the run`.
+
+Work Log:
+- DIAGNOSIS: the string is POST /api/tasks/trigger's catch-all 500 — everything inside the try that THROWS lands there (dispatchCloudRun failures are internally caught and settle the run instead). Reproduced EXACTLY locally (DATABASE_URL pointed at a chmod'd read-only db copy → the byte-identical 500); the server log showed the swallowed truth: `prisma.taskRun.create()` → SQLite extended_code 8 (SQLITE_READONLY). Root cause: the repo SHIPS db/custom.db and `resolveDatabaseUrl()`'s fallback anchors it at process.cwd()/db/custom.db — on Vercel that is /var/task/**, the READ-ONLY serverless filesystem. Every background-run dispatch died creating its TaskRun row; local dev worked because the sandbox FS is writable (why yesterday's E2E tests passed).
+- FIX (src/lib/tasks/prisma.ts rewritten):
+  · Resolution order: DATABASE_URL env (operator's explicit choice, NEVER overridden) → cwd-anchored repo db WHEN its file+directory are writable (fs.accessSync probe — SQLite needs the dir for journal/WAL) → /tmp/onyx-tasks.db (writable, per-instance, the documented "ephemeral on serverless" behavior; runs stay durable on Trigger.dev Cloud, this DB is only the local index).
+  · A fresh fallback file has NO tables — new schema-sql.ts embeds the exact DDL (generated via `prisma migrate diff --from-empty`), and ensureTasksSchema() applies it at runtime when the TaskRun table is missing (sqlite_master probe; memoized singleton promise; split/scrubbed statements via $executeRawUnsafe).
+  · ensureTasksSchema() is awaited at the top of ALL 10 handlers across the 8 /api/tasks routes (scripts/patch-ensure-schema.py did the mechanical insertion) + sweepSchedules() (the standalone scheduler loop) — a route or sweep can never hit a table-less fresh DB.
+  · The trigger route's 500 now surfaces the REAL underlying error (truncated, key-scrubbed): an operator pointing DATABASE_URL at a bad location sees SQLITE_READONLY-class reasons instead of the generic string.
+- VERIFICATION: tsc 216 before = 216 after (stash-baselined; the single "new" line is the pre-existing loopTimer.unref error at a shifted line). TEST 1 (explicit read-only DATABASE_URL): 500 now says `failed to create the run: … SqliteError { extended_code: 8 … }` — real reason surfaced. TEST 2 (the Vercel condition: read-only repo db/, NO DATABASE_URL): resolver fell back to /tmp/onyx-tasks.db, "schema initialized (10 statements)" logged, dispatch → `{"ok":true,"runId":"cmwgi6smn…","orchestrator":"triggerdev"}` (real cloud run), terminal state synced back through the fallback DB. db/ permissions restored. Vitest 841/841 green (52 files; the pre-recycle tree also counted gitignored/ephemeral test artifacts — git status confirms zero missing tracked files).
+- NOTE for serverless operators: the /tmp index is per-instance; with multiple warm instances the Background-tasks list shows only runs created on the serving instance. Set DATABASE_URL to a shared DB for a cross-instance list. Runs themselves are always durable on Trigger.dev Cloud.
+
+Stage Summary:
+- The user's exact error is fixed at the root: dispatch works on read-only-filesystem deployments (auto-deploys to Vercel with this push); when a DB is genuinely unusable the API now reports WHY.

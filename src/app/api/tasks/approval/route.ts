@@ -18,7 +18,7 @@
 // dispatched the run.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { keyring, sha256Hex, tokensEqual } from "@/lib/tasks/keyring";
 import { mergeProgressIntoRun } from "@/lib/tasks/run-store";
 import { getCloudConfig, completeCloudWaitpoint } from "@/lib/tasks/trigger-cloud";
@@ -38,6 +38,9 @@ interface ApprovalRequestBody {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   let body: ApprovalRequestBody;
   try {
     body = (await request.json()) as ApprovalRequestBody;

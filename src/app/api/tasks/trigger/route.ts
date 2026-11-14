@@ -13,7 +13,7 @@
 // carry keys + tokens) are NEVER logged.
 // ============================================================================
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/tasks/prisma";
+import { ensureTasksSchema, prisma } from "@/lib/tasks/prisma";
 import { keyring, sha256Hex } from "@/lib/tasks/keyring";
 import { startSchedulerLoop, touch } from "@/lib/tasks/cron-scheduler";
 import { getOrchestrationMode } from "@/lib/tasks/orchestration-mode";
@@ -173,6 +173,9 @@ function validate(body: unknown): { error: string } | { value: NormalizedTrigger
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Fresh per-instance serverless DBs have no tables until the DDL runs
+  // (memoized singleton — free after the first call).
+  await ensureTasksSchema();
   let body: unknown;
   try {
     body = await request.json();
@@ -266,6 +269,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[tasks] trigger failed to create a run: ${message.slice(0, 200)}`);
-    return NextResponse.json({ ok: false, error: "failed to create the run" }, { status: 500 });
+    // Surface the REAL reason (user report 2026-11-14: the generic string
+    // hid a read-only-database SQLITE_READONLY failure on serverless). The
+    // message is truncated + scrubbed of anything key-shaped.
+    const scrubbed = message
+      .slice(0, 200)
+      .replace(/tr_[A-Za-z0-9_\-]+/g, "tr_•••••")
+      .replace(/\s+/g, " ")
+      .trim();
+    return NextResponse.json(
+      { ok: false, error: `failed to create the run: ${scrubbed || "unknown error"}` },
+      { status: 500 },
+    );
   }
 }
