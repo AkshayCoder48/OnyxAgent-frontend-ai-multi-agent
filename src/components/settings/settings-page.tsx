@@ -9,6 +9,7 @@ import {
   Cloud,
   CloudCog,
   Flower2,
+  KeyRound,
   Moon,
   Palette,
   Plug,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { motion } from "@/components/motion";
 import { getResolvedTheme, useThemeStore } from "@/stores/theme-store";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -38,6 +40,10 @@ const SectionSkeleton = () => (
   <div className="h-64 w-full animate-pulse rounded-lg bg-muted/40" aria-hidden />
 );
 
+const SectionApiKeys = dynamic(
+  () => import("./section-api-keys").then((m) => m.SectionApiKeys),
+  { ssr: false, loading: SectionSkeleton },
+);
 const SectionProviders = dynamic(
   () => import("./section-providers").then((m) => m.SectionProviders),
   { ssr: false, loading: SectionSkeleton },
@@ -80,6 +86,7 @@ const SectionSchedules = dynamic(
 );
 
 export type SettingsSectionId =
+  | "apikeys"
   | "providers"
   | "pollinations"
   | "agent"
@@ -110,11 +117,27 @@ interface NavGroup {
 }
 
 /**
- * Settings consolidated into three tidy groups (task requirement: "sort all
+ * Settings consolidated into tidy groups (task requirement: "sort all
  * similar settings into one and make it less messy"). NAV_ITEMS stays flat
  * for lookups; NAV_GROUPS drives the grouped nav rendering.
+ *
+ * API Keys is its own FIRST group (task 2026-11-14): every key input in the
+ * app lives in that one tab — the other sections keep their non-key
+ * settings and point there for credentials.
  */
 const NAV_GROUPS: NavGroup[] = [
+  {
+    id: "credentials",
+    label: "Credentials",
+    items: [
+      {
+        id: "apikeys",
+        label: "API Keys",
+        description: "Every key in one place, with platform logos",
+        icon: KeyRound,
+      },
+    ],
+  },
   {
     id: "ai",
     label: "AI & Models",
@@ -217,8 +240,22 @@ function ThemeToggle() {
   );
 }
 
-export function SettingsPage({ onClose, initialSection = "providers" }: SettingsPageProps) {
+export function SettingsPage({ onClose, initialSection = "apikeys" }: SettingsPageProps) {
   const [active, setActive] = React.useState<SettingsSectionId>(initialSection);
+
+  // REDUCED MOTION for the JS-driven (framer) layout animations — the CSS
+  // kill switch in motion.css cannot reach them, so the glide durations
+  // collapse to 0 here (Motion spec §17 accessibility).
+  const [reduceMotion, setReduceMotion] = React.useState(false);
+  React.useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduceMotion(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  const glide = { duration: reduceMotion ? 0 : 0.28, ease: [0.22, 1, 0.36, 1] as const };
 
   const activeItem = NAV_ITEMS.find((n) => n.id === active)!;
 
@@ -259,20 +296,39 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
                           <button
                             type="button"
                             onClick={() => setActive(item.id)}
+                            aria-current={isActive ? "page" : undefined}
                             className={cn(
-                              "group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
+                              "group relative flex w-full items-start gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors",
                               isActive
-                                ? "bg-accent text-accent-foreground border border-primary/50 dark:border-primary/40"
-                                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground border border-transparent",
+                                ? "text-accent-foreground"
+                                : "text-muted-foreground hover:text-foreground",
                             )}
                           >
+                            {/*
+                              GLIDING ACTIVE INDICATOR (Motion spec §3.2,
+                              2026-11-14): the selected nav pill no longer
+                              pops per button — ONE shared-layout layer
+                              (layoutId) travels smoothly to whichever item is
+                              active. framer-motion handles the position
+                              interpolation; reduced-motion users get an
+                              instant swap (the `glide` durations collapse
+                              to 0 — see reduceMotion above).
+                            */}
+                            {isActive && (
+                              <motion.span
+                                layoutId="settings-nav-active-pill"
+                                transition={glide}
+                                className="bg-accent absolute inset-0 rounded-md border border-primary/50 dark:border-primary/40"
+                                aria-hidden
+                              />
+                            )}
                             <Icon
                               className={cn(
-                                "mt-0.5 size-4 shrink-0",
+                                "relative mt-0.5 size-4 shrink-0",
                                 isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
                               )}
                             />
-                            <span className="flex min-w-0 flex-col">
+                            <span className="relative flex min-w-0 flex-col">
                               <span className="font-medium leading-tight">{item.label}</span>
                               <span className="text-muted-foreground truncate text-xs leading-tight">
                                 {item.description}
@@ -301,15 +357,26 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
                     key={item.id}
                     type="button"
                     onClick={() => setActive(item.id)}
+                    aria-current={isActive ? "page" : undefined}
                     className={cn(
-                      "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
+                      "relative inline-flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                       isActive
-                        ? "bg-accent text-accent-foreground border-transparent"
+                        ? "text-accent-foreground border-transparent"
                         : "bg-transparent text-muted-foreground border-border hover:bg-accent/50 hover:text-foreground",
                     )}
                   >
-                    <Icon className="size-3.5" />
-                    {item.label}
+                    {/* Same glide, own layoutId (both navs stay mounted —
+                        CSS-hidden per breakpoint — so the ids must not mix). */}
+                    {isActive && (
+                      <motion.span
+                        layoutId="settings-nav-active-pill-mobile"
+                        transition={{ duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] }}
+                        className="bg-accent absolute inset-0 rounded-md"
+                        aria-hidden
+                      />
+                    )}
+                    <Icon className="relative size-3.5" />
+                    <span className="relative">{item.label}</span>
                   </button>
                 );
               })}
@@ -330,6 +397,7 @@ export function SettingsPage({ onClose, initialSection = "providers" }: Settings
               </div>
             </div>
             <Separator className="mb-6" />
+            {active === "apikeys" && <SectionApiKeys />}
             {active === "providers" && <SectionProviders />}
             {active === "pollinations" && <SectionPollinations />}
             {active === "agent" && <SectionAgentSettings />}

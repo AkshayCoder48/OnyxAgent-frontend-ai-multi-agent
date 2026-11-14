@@ -1,5 +1,6 @@
 import { Header } from "@/components/layout";
 import { AuthGuard } from "@/components/layout/auth-guard";
+import { PageTransition } from "@/components/layout/page-transition";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -18,7 +19,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           tabIndex={-1}
           className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          {children}
+          {/*
+            PAGE TRANSITIONS (Motion spec §3.3, mounted 2026-11-14): the
+            component existed but was never wired into any layout — every
+            dashboard route changed with a hard cut. One mount here covers
+            every page: subtle fade + 6px rise, keyed on pathname (query
+            params excluded, so conversation switches inside /chat do NOT
+            re-key), disabled under prefers-reduced-motion via .page-enter.
+          */}
+          <PageTransition>{children}</PageTransition>
         </main>
       </div>
     </AuthGuard>

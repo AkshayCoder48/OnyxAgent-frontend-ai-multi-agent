@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  KeyRound,
   Loader2,
   Pencil,
   PlugZap,
@@ -337,7 +338,7 @@ export function SectionProviders() {
             <DialogTitle>{editing ? "Edit Provider" : "Add Provider"}</DialogTitle>
             <DialogDescription>
               {editing
-                ? "Update provider details. Leave the API key blank to keep the existing one."
+                ? "Update provider details. Keys live in Settings → API Keys."
                 : "Configure a new OpenAI-compatible provider."}
             </DialogDescription>
           </DialogHeader>
@@ -363,29 +364,46 @@ export function SectionProviders() {
                 required
               />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="p-key">API Key</Label>
-              <div className="relative">
-                <Input
-                  id="p-key"
-                  type={showKey ? "text" : "password"}
-                  value={form.api_key}
-                  onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                  placeholder={editing ? "•••••••• (leave blank to keep)" : "sk-..."}
-                  autoComplete="off"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute top-1/2 right-1 h-7 w-7 -translate-y-1/2"
-                  onClick={() => setShowKey((v) => !v)}
-                  aria-label={showKey ? "Hide key" : "Show key"}
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </Button>
+            {/*
+              KEY FIELD (task 2026-11-14): kept ONLY for CREATE — a brand-new
+              provider needs its key up front. When EDITING, key management
+              lives in Settings → API Keys (the one home for every key); the
+              dialog points there instead of duplicating the input.
+            */}
+            {editing ? (
+              <div className="text-muted-foreground flex items-start gap-2.5 rounded-md border border-dashed px-3 py-2.5 text-xs leading-relaxed">
+                <KeyRound className="text-foreground/70 mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  Replace or clear this provider&apos;s key in{" "}
+                  <span className="text-foreground font-medium">Settings → API Keys</span> — every
+                  credential lives in that one tab.
+                </span>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="p-key">API Key</Label>
+                <div className="relative">
+                  <Input
+                    id="p-key"
+                    type={showKey ? "text" : "password"}
+                    value={form.api_key}
+                    onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                    placeholder="sk-..."
+                    autoComplete="off"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-1/2 right-1 h-7 w-7 -translate-y-1/2"
+                    onClick={() => setShowKey((v) => !v)}
+                    aria-label={showKey ? "Hide key" : "Show key"}
+                  >
+                    {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </Button>
+                </div>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="p-models">Models (comma-separated)</Label>
               <Input

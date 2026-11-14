@@ -100,7 +100,7 @@ registerTool(
 
 registerTool(
   "run_terminal",
-  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second timeout, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed. For jobs that would exceed the 120-second budget, pass background=true to run the command as a durable background task instead (up to 30 minutes, survives tab close) — the tool returns a run_id immediately, the output and any files it writes come back as artifacts (track it in the background tasks strip; poll with the background_task tool).",
+  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second foreground budget, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed. Commands that outlive the 120-second budget are AUTOMATICALLY moved to a durable background run (up to 30 minutes, survives tab close) — the tool then returns a run_id; track it in the background tasks strip. You can also pass background=true up front for jobs you know are long — it returns a run_id immediately and the output/files come back as artifacts (poll with the background_task tool).",
   {
     type: "object",
     properties: {
@@ -198,6 +198,44 @@ registerTool(
       // Cap output at 256 KB
       if (stdout.length > 256 * 1024) stdout = stdout.slice(0, 256 * 1024) + "\n... (truncated)";
       if (stderr.length > 256 * 1024) stderr = stderr.slice(0, 256 * 1024) + "\n... (truncated)";
+
+      // ── TIMEOUT AUTO-ESCALATION (fix 2026-11-14: "this simple command
+      // taking 5 mins") ─────────────────────────────────────────────────
+      // The foreground budget is 120s. When a command outlives it, the old
+      // behavior returned a bare timeout error — and the model re-ran the
+      // SAME slow command over and over, each attempt paying the full
+      // budget (minutes of dead air for the user). A timeout means "this
+      // job is long", not "it is broken": re-dispatch it to the durable
+      // background lane right here (up to 30 min, survives tab close) and
+      // return the run_id. The agent stops burning retries; the background
+      // strip shows live progress and syncs the output/files back.
+      const timedOut =
+        exitCode === 124 ||
+        /exceeding 'timeoutMs'|TimeoutError|command timed out|timed out/i.test(stderr);
+      if (timedOut && ctx.userId) {
+        try {
+          const res = await triggerBackgroundTask({
+            userId: ctx.userId,
+            conversationId: ctx.conversationId ?? null,
+            type: "terminal_command",
+            prompt: `Terminal: ${command.slice(0, 200)}`,
+            title: `Terminal: ${command.slice(0, 60)}`,
+            config: { command, cwd },
+            includeWorkspace: false,
+            sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
+          });
+          return {
+            background: true,
+            run_id: res.runId,
+            timed_out: true,
+            stdout: stdout.slice(0, 8192),
+            note: "The command outlived the 120-second foreground budget — it was automatically moved to a durable background run (up to 30 minutes, survives tab close). Track it in the background strip; the output and any files it writes sync back as artifacts.",
+          };
+        } catch {
+          // Background lane unavailable (no cloud key, dispatch refused) —
+          // fall through to the honest timeout result below.
+        }
+      }
 
       // No reverse sync — files created/modified by the command are
       // already in the sandbox (the single source of truth).

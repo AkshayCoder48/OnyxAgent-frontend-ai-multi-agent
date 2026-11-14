@@ -5,14 +5,11 @@ import { toast } from "sonner";
 import {
   CheckCircle2,
   Cloud,
-  Eye,
-  EyeOff,
   ExternalLink,
   KeyRound,
   Loader2,
   RotateCcw,
   Save,
-  Trash2,
   XCircle,
 } from "lucide-react";
 
@@ -21,33 +18,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
 import {
-  OnyxBaseKV,
   ONYXBASE_DEFAULT_BASE_URL,
   resolveOnyxBaseUrl,
-  looksLikeOnyxBaseKey,
 } from "@/lib/onyxbase/kv-client";
 
 /**
  * OnyxBase settings — one simple screen (Task 21):
- *   1. the API key (vault-encrypted, never sent to the model);
- *   2. the base URL — the custom-instance override, PROMOTED out of the old
+ *   1. the base URL — the custom-instance override, PROMOTED out of the old
  *      "More options" drawer. Default https://onyxbase-chi.vercel.app, a
  *      one-click reset, live "effective endpoint" display, and the same
  *      normalization the app uses at call time (resolveOnyxBaseUrl).
+ *   2. the API key itself MOVED to Settings → API Keys (task 2026-11-14) —
+ *      every key input in the app lives in that one tab.
  *
  * The key is vault-encrypted at rest and NEVER reaches the LLM, the system
  * prompt, tool arguments, or the E2B sandbox.
@@ -59,19 +45,13 @@ function normalizeForStore(raw: string): string {
 }
 
 export function SectionCloudWorkspace() {
-  const { settings, loading, setOnyxBaseApiKey, update } = useSettings();
+  const { settings, loading, update } = useSettings();
   // useAuth (not the raw store) — its mount effect runs authStore.init(),
   // which rehydrates the real user + vault on a cold direct navigation to
   // /settings/cloud. Without it the store stays on the default local-user
   // and key saves land on the wrong row (auth-hydration race).
-  const { user } = useAuth();
-  const userId = user?.id;
+  useAuth();
 
-  const [key, setKey] = React.useState("");
-  const [show, setShow] = React.useState(false);
-  const [saving, setSaving] = React.useState(false);
-  const [testing, setTesting] = React.useState(false);
-  const [clearOpen, setClearOpen] = React.useState(false);
   const [baseUrl, setBaseUrl] = React.useState("");
 
   const hasStored = !!settings?.onyxbase_api_key_present;
@@ -85,91 +65,6 @@ export function SectionCloudWorkspace() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings?.onyxbase_base_url]);
-
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = key.trim();
-    if (!trimmed) {
-      toast.error("Enter an API key first");
-      return;
-    }
-    if (!looksLikeOnyxBaseKey(trimmed)) {
-      toast.error("Key format looks invalid", {
-        description: "OnyxBase keys look like kv_live_… (16+ URL-safe characters).",
-        icon: <XCircle className="size-4" />,
-      });
-      return;
-    }
-    setSaving(true);
-    try {
-      await setOnyxBaseApiKey(trimmed);
-      setKey("");
-      // Persist a custom base URL alongside the key if one was entered.
-      if (baseUrl.trim() && normalizeForStore(baseUrl) !== ONYXBASE_DEFAULT_BASE_URL) {
-        await update({ onyxbase_base_url: normalizeForStore(baseUrl) });
-      }
-      toast.success("OnyxBase API key saved", {
-        description: "Encrypted at rest with AES-GCM in your browser.",
-        icon: <CheckCircle2 className="size-4" />,
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save key");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleTest() {
-    if (!userId) {
-      toast.error("Sign in first");
-      return;
-    }
-    setTesting(true);
-    try {
-      // Prefer the key typed into the field; fall back to the stored one.
-      let candidate = key.trim();
-      if (!candidate) {
-        const { settingsService } = await import("@/lib/services");
-        candidate = (await settingsService.getDecryptedOnyxBaseApiKey(userId)) ?? "";
-      }
-      if (!candidate) {
-        toast.error("Add your OnyxBase API key first", {
-          description: "Enter a kv_live_… key, then test the connection.",
-          icon: <XCircle className="size-4" />,
-        });
-        return;
-      }
-      const kv = new OnyxBaseKV(candidate, effectiveBaseUrl);
-      const who = await kv.whoami();
-      const name =
-        (typeof who.apiKey?.name === "string" && who.apiKey.name) ||
-        (typeof who.user === "string" && who.user) ||
-        "your account";
-      toast.success("Connected to OnyxBase", {
-        description: `Verified as ${name} · ${effectiveBaseUrl}`,
-        icon: <CheckCircle2 className="size-4" />,
-      });
-    } catch (err) {
-      toast.error("Unable to connect", {
-        description: err instanceof Error ? err.message : "Connection failed",
-        icon: <XCircle className="size-4" />,
-      });
-    } finally {
-      setTesting(false);
-    }
-  }
-
-  async function handleClear() {
-    if (!userId) return;
-    try {
-      await setOnyxBaseApiKey(null);
-      toast.success("OnyxBase API key removed");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to clear key");
-    } finally {
-      setClearOpen(false);
-    }
-  }
 
   async function handleBaseUrlSave() {
     const raw = baseUrl.trim();
@@ -264,71 +159,22 @@ export function SectionCloudWorkspace() {
         </AlertDescription>
       </Alert>
 
-      {/* API key */}
-      <form onSubmit={handleSave} className="space-y-3">
-        <div className="space-y-2">
-          <Label htmlFor="onyxbase-key">OnyxBase API Key</Label>
-          <div className="relative">
-            <KeyRound className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              id="onyxbase-key"
-              type={show ? "text" : "password"}
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={hasStored ? "•••••••••••• (a key is stored)" : "kv_live_…"}
-              autoComplete="off"
-              spellCheck={false}
-              className="pl-9 pr-10 font-mono"
-            />
-            <button
-              type="button"
-              onClick={() => setShow((s) => !s)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground"
-              aria-label={show ? "Hide key" : "Show key"}
-            >
-              {show ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-            </button>
-          </div>
-          <p className="text-xs text-muted-foreground">
+      {/*
+        KEY MANAGEMENT MOVED (task 2026-11-14): every key input lives in
+        Settings → API Keys. This section keeps the endpoint (base URL)
+        configuration and the sync surfaces.
+      */}
+      <div className="text-muted-foreground flex items-start gap-3 rounded-lg border border-dashed p-4">
+        <KeyRound className="text-foreground/70 mt-0.5 size-4 shrink-0" />
+        <div className="min-w-0">
+          <p className="text-sm font-medium">The key moved to Settings → API Keys</p>
+          <p className="mt-0.5 text-xs leading-relaxed">
             {hasStored
-              ? "A key is stored, encrypted. Type a new one to replace it."
-              : "Stored encrypted (AES-GCM) in your browser."}
+              ? "A key is stored (encrypted). Replace, test or clear it in the API Keys tab — the single home for every credential."
+              : "No key stored yet. Add one in the API Keys tab — the single home for every credential."}
           </p>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button type="submit" size="sm" disabled={saving || !key.trim()}>
-            {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-            {hasStored ? "Replace key" : "Save key"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleTest}
-            disabled={testing}
-          >
-            {testing ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Cloud className="size-4" />
-            )}
-            Test Connection
-          </Button>
-          {hasStored && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setClearOpen(true)}
-              className="text-destructive hover:text-destructive"
-            >
-              <Trash2 className="size-4" />
-              Remove
-            </Button>
-          )}
-        </div>
-      </form>
+      </div>
 
       {/* ── Base URL — custom endpoint, in the open (Task 21) ── */}
       <div className="space-y-3 rounded-lg border p-4">
@@ -407,27 +253,6 @@ export function SectionCloudWorkspace() {
         </div>
       </div>
 
-      {/* Clear-key confirmation */}
-      <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove OnyxBase API key?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Cloud storage will stop working until a new key is added. Everything already
-              stored in your OnyxBase account stays there.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleClear}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

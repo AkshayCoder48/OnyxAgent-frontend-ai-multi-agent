@@ -36,6 +36,7 @@ import {
 import {
   clearChatHandoffMeta,
   cloudHandoffActive,
+  ensureCloudHandoffActive,
   readCloudHandoffMeta,
 } from "@/lib/agent/turn-cloud-handoff";
 import { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } from "@/lib/agent/provider-resolution";
@@ -474,9 +475,15 @@ export function useChat(options: UseChatOptions = {}) {
 
       // Background turns run EXCLUSIVELY on Trigger.dev Cloud now — the
       // legacy E2B headless-runner lane was removed (user directive).
-      if (!cloudHandoffActive()) {
+      // DECISION-POINT FRESHNESS (fix 2026-11-14: "Even if key is added"):
+      // the gate used to read a prewarm snapshot up to 60s stale, so a key
+      // connected moments before kept failing until the next tick.
+      // ensureCloudHandoffActive() re-verifies against the server first
+      // whenever the snapshot is stale, so a JUST-CONNECTED key works on
+      // the very next send.
+      if (!(await ensureCloudHandoffActive(userId))) {
         failTurn(
-          "Background runs need a connected Trigger.dev Cloud key — add one in Settings → Config (the turn was not sent).",
+          "Background runs need a connected Trigger.dev Cloud key — add one in Settings → API Keys (the turn was not sent).",
         );
         return;
       }

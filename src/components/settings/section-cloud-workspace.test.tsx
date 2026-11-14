@@ -5,6 +5,10 @@
  * drawer), the effective endpoint is always visible, saving normalizes the
  * URL exactly like the app does at call time (resolveOnyxBaseUrl), and a
  * one-click reset returns to the default https://onyxbase-chi.vercel.app.
+ *
+ * Task 2026-11-14: the API key form MOVED to Settings → API Keys — this
+ * section owns the endpoint only, so the key-input/test flows are asserted
+ * by absence here (they live in section-api-keys now).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -129,28 +133,16 @@ describe("SectionCloudWorkspace — base URL, simple and in the open", () => {
     expect(update).toHaveBeenCalledWith({ onyxbase_base_url: undefined });
   });
 
-  it("Test Connection verifies against the effective endpoint and names it", async () => {
-    // jsdom predates AbortSignal.timeout on some versions — the client only
-    // uses it as the fetch signal, so a no-op stub is enough here.
-    if (typeof (AbortSignal as unknown as { timeout?: unknown }).timeout !== "function") {
-      vi.stubGlobal("AbortSignal", { ...AbortSignal, timeout: () => undefined });
-    }
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        headers: { get: () => null },
-        text: async () =>
-          JSON.stringify({ ok: true, user: "usr_x", apiKey: { name: "Zai Test" } }),
-      })),
-    );
-    render(<SectionCloudWorkspace />);
-    await userEvent.click(screen.getByRole("button", { name: /Test Connection/i }));
-    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
-    expect(toastSuccess).toHaveBeenCalledWith(
-      "Connected to OnyxBase",
-      expect.objectContaining({ description: expect.stringContaining("onyxbase-chi.vercel.app") }),
-    );
+  it("the API key form is GONE — the section points at Settings → API Keys", () => {
+    const { rerender } = render(<SectionCloudWorkspace />);
+    // No key input, no Test Connection — those live in the API Keys tab now.
+    expect(screen.queryByLabelText(/OnyxBase API Key/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Test Connection/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Replace key|Save key/i })).not.toBeInTheDocument();
+    // The honest hand-off pointer is present, in both stored and unstated states.
+    expect(screen.getByText(/moved to Settings → API Keys/i)).toBeInTheDocument();
+    storedKeyPresent = true;
+    rerender(<SectionCloudWorkspace />);
+    expect(screen.getByText(/A key is stored \(encrypted\)/i)).toBeInTheDocument();
   });
 });

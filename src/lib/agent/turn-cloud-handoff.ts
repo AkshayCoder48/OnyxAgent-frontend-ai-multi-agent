@@ -89,6 +89,28 @@ export function cloudHandoffActive(): boolean {
   return g.__onyxCloudHandoffPrewarm?.cloudOn === true;
 }
 
+/** Freshness horizon for the prewarm cache at DECISION points. The
+ *  background prewarm loop (turn-handoff.ts) only ticks every 60s + on
+ *  visibility, so a key connected moments ago in Settings → Cloud can be
+ *  invisible to a gate that reads the cache directly — the exact
+ *  "Even if key is added" failure (fix 2026-11-14): the detached turn
+ *  refused with "Background runs need a connected Trigger.dev Cloud key"
+ *  while the key was demonstrably connected. Decision points now go
+ *  through ensureCloudHandoffActive(), which re-fetches /api/tasks/cloud
+ *  first whenever the snapshot is older than PREWARM_STALE_MS. */
+const PREWARM_STALE_MS = 15_000;
+
+/** Decision-point gate: cloud-mode verified against a cache no older than
+ *  PREWARM_STALE_MS (refreshes first when stale, then answers). */
+export async function ensureCloudHandoffActive(userId?: string): Promise<boolean> {
+  const cached = g.__onyxCloudHandoffPrewarm;
+  const fresh = cached !== null && cached !== undefined && Date.now() - cached.checkedAt < PREWARM_STALE_MS;
+  if (!fresh) {
+    await prewarmCloudHandoff(userId);
+  }
+  return cloudHandoffActive();
+}
+
 /** The prewarmed rotational key pool (may be empty — the run then calls
  *  the pinned user gateway keylessly; the app's own model is never a
  *  fallback under the BYOK policy). */

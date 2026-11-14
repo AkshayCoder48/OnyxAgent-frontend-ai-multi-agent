@@ -622,19 +622,23 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
         />
       )}
       {isMediaGeneration && <MediaGenerationResult toolCall={toolCall} />}
-      {runPythonAnswer && (
-        <p className="text-foreground/80 px-1.5 py-1.5 text-[13px] leading-relaxed break-words whitespace-pre-wrap sm:px-2">
-          {runPythonAnswer.length > 600
-            ? `${runPythonAnswer.slice(0, 600).trimEnd()}…`
-            : runPythonAnswer}
-        </p>
-      )}
+      {/* run_python output lives INSIDE the disclosure (fix 2026-11-14:
+          "python tool output is visible even if collapsed") — the friendly
+          answer is content the user summons by tapping the row, never an
+          always-on block beneath the collapsed line. */}
 
       {/* ROW DETAILS (Task 24) — the whole row toggles this disclosure:
           tool name · status · duration · arguments · output. Same anatomy
           as the technical row's expanded panel, in friendly-mode clothes. */}
       <CollapsePanel open={detailsOpen}>
         <div className="px-1.5 pb-2 sm:px-2">
+          {runPythonAnswer && (
+            <p className="text-foreground/80 px-0.5 pb-2 pt-1 text-[13px] leading-relaxed break-words whitespace-pre-wrap">
+              {runPythonAnswer.length > 600
+                ? `${runPythonAnswer.slice(0, 600).trimEnd()}…`
+                : runPythonAnswer}
+            </p>
+          )}
           <div className="mb-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-foreground/10 pb-1.5">
             <span className="min-w-0 truncate font-mono text-[10.5px] text-foreground/55">
               {toolCall.name || "tool"}
@@ -692,7 +696,6 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
 
   const [expanded, setExpanded] = useState(
     toolCall.name === "ask_user" ||
-      (isRunPython && toolCall.status === "completed") ||
       // media_generation — the generated media / balance card is the
       // payload; expand the disclosure when it lands.
       (toolCall.name === "media_generation" && toolCall.status === "completed") ||
@@ -715,22 +718,29 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   const [showRaw, setShowRaw] = useState(false);
 
   // Auto-expand while a long-running tool (run_terminal, run_python, etc.)
-  // is in flight so the user can see the "Running…" body without having to
-  // click. Collapse it again when the tool completes so the final view
-  // matches the original "collapsed summary bar" default — but only if the
-  // user hasn't manually expanded it in the meantime (which would override
-  // the auto-collapse).
+  // is in flight so the user can see the live output without having to
+  // click — then FOLD BACK to the compact row when it settles (fix
+  // 2026-11-14: "python tool output is visible even if collapsed" — the
+  // settle used to leave the card stuck open). A manual toggle during the
+  // run is honored: the settle only collapses cards the auto-expand opened.
   //
   // Implemented with the render-time "adjust state when a prop changes"
   // pattern from the React docs instead of a useEffect + setState (which
   // triggers cascading renders and is flagged by the React Compiler lint).
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
   const [prevIsRunning, setPrevIsRunning] = useState(isRunning);
+  const [manualDuringRun, setManualDuringRun] = useState(false);
   if (isRunning !== prevIsRunning) {
     setPrevIsRunning(isRunning);
     // Auto-expand on running transition (idle → running).
     if (isRunning) {
+      setManualDuringRun(false);
       setExpanded(true);
+    } else if (!manualDuringRun) {
+      // Settle (running → completed/error): collapse back to the compact
+      // row so the finished stack stays minimal. A user who opened it
+      // themselves keeps it open (manualDuringRun).
+      setExpanded(false);
     }
   }
 
@@ -1092,6 +1102,7 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
                                   : Wrench;
 
   const toggleExpanded = () => {
+    if (isRunning) setManualDuringRun(true);
     setExpanded((prev) => {
       const next = !prev;
       if (!next) setShowRaw(false);

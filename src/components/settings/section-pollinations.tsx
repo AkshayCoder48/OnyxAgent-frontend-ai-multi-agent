@@ -562,10 +562,6 @@ export function SectionPollinations() {
   const [oauthExchanging, setOauthExchanging] = React.useState(false);
   const [oauthError, setOauthError] = React.useState<string | null>(null);
   const [clientKeyNote, setClientKeyNote] = React.useState<string | null>(null);
-  const [showKeyForm, setShowKeyForm] = React.useState(false);
-  const [keyInput, setKeyInput] = React.useState("");
-  const [showKey, setShowKey] = React.useState(false);
-  const [savingKey, setSavingKey] = React.useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = React.useState(false);
 
   // Provider usage (fetched live whenever the disclosure opens).
@@ -661,7 +657,7 @@ export function SectionPollinations() {
         // manual key path instead.
         setOauthStarting(false);
         setClientKeyNote(
-          `OAuth isn't configured on this deployment yet — the app owner must set POLLINATIONS_CLIENT_ID (a Pollinations App Key, pk_…) and register this exact redirect URI with it: ${start.redirectUri} (in production: https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app/api/auth/pollinations/callback). Until then, connect by pasting your own API key below — get one at enter.pollinations.ai/keys.`,
+          `OAuth isn't configured on this deployment yet — the app owner must set POLLINATIONS_CLIENT_ID (a Pollinations App Key, pk_…) and register this exact redirect URI with it: ${start.redirectUri} (in production: https://onyx-agent-frontend-ai-multi-agent-wine.vercel.app/api/auth/pollinations/callback). Until then, connect with your own API key in Settings → API Keys — get one at enter.pollinations.ai/keys.`,
         );
         return;
       }
@@ -669,43 +665,6 @@ export function SectionPollinations() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not start the connection flow.");
       setOauthStarting(false);
-    }
-  }
-
-  // ── Manual key (sk_/pk_) — vault-encrypted via store.connect. ───────────
-  async function handleKeySubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = keyInput.trim();
-    if (!trimmed) {
-      toast.error("Enter an API key first");
-      return;
-    }
-    if (!KEY_RE.test(trimmed)) {
-      toast.error("Key format looks invalid", {
-        description: "Pollinations keys start with sk_ (secret) or pk_ (publishable).",
-        icon: <XCircle className="size-4" />,
-      });
-      return;
-    }
-    setSavingKey(true);
-    try {
-      await usePollinationsStore.getState().connect(trimmed, {
-        method: "manual",
-        connectedAt: new Date().toISOString(),
-        expiresAt: undefined,
-      });
-      setKeyInput("");
-      setShowKeyForm(false);
-      toast.success("Pollinations API key saved", {
-        description: usePollinationsStore.getState().textProviderError
-          ? "Encrypted at rest (AES-GCM) in your browser — but the AI Providers sync failed (see the status note)."
-          : "Encrypted at rest (AES-GCM) in your browser — “Pollinations” was also added to AI Providers for chat.",
-        icon: <CheckCircle2 className="size-4" />,
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save key");
-    } finally {
-      setSavingKey(false);
     }
   }
 
@@ -901,58 +860,6 @@ export function SectionPollinations() {
             </Alert>
           )}
 
-          {/* Inline paste-key form */}
-          {showKeyForm && (
-            <form onSubmit={handleKeySubmit} className="space-y-2">
-              <Label htmlFor="pollinations-key" className="sr-only">
-                Pollinations API key
-              </Label>
-              <div className="relative">
-                <KeyRound className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
-                <Input
-                  id="pollinations-key"
-                  type={showKey ? "text" : "password"}
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  placeholder="sk_… or pk_…"
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="pr-10 pl-9 font-mono"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="absolute top-1/2 right-1 size-7 -translate-y-1/2"
-                  onClick={() => setShowKey((v) => !v)}
-                  aria-label={showKey ? "Hide key" : "Show key"}
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </Button>
-              </div>
-              <p className="text-muted-foreground text-xs">
-                Keys start with sk_ (secret) or pk_ (publishable). Stored encrypted in your browser only.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Button type="submit" size="sm" disabled={savingKey || !keyInput.trim()}>
-                  {savingKey ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                  Save key
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setShowKeyForm(false);
-                    setKeyInput("");
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
-
           {/* Actions */}
           <div className="flex flex-wrap gap-2">
             {!connected && (
@@ -961,16 +868,15 @@ export function SectionPollinations() {
                 {connectionStatus === "expired" ? "Reconnect" : "Connect account"}
               </Button>
             )}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setShowKeyForm((v) => !v)}
-              disabled={savingKey}
-            >
-              <KeyRound className="size-4" />
-              Paste API key
-            </Button>
+            {/*
+              KEY INPUT MOVED (task 2026-11-14): the paste-key field lives in
+              Settings → API Keys with every other credential. OAuth (the
+              account-level flow) stays here.
+            */}
+            <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
+              <KeyRound className="size-3.5" />
+              API key: Settings → API Keys
+            </span>
             {(connected || connectionStatus === "expired") && (
               <Button
                 type="button"

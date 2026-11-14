@@ -39,7 +39,6 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -58,13 +57,11 @@ import { GlassSquircleIcon } from "@/components/chat/tool-results/composio-brand
 import { useSettings } from "@/hooks/use-data";
 import { useAuth } from "@/hooks";
 import {
-  apiComposioConnect,
   apiComposioConnectPlatform,
   apiComposioConnections,
   apiComposioSessionAction,
   apiComposioStatus,
   apiComposioToolkits,
-  looksLikeComposioKey,
   persistComposioSessionId,
   resolveComposioHeaders,
   type ComposioConnectionItem,
@@ -140,9 +137,6 @@ export function SectionIntegrationsComposio() {
   const hasStoredKey = !!settings?.composio_api_key_present;
 
   // ── connection lifecycle state ──────────────────────────────────────────
-  const [keyInput, setKeyInput] = React.useState("");
-  const [showKey, setShowKey] = React.useState(false);
-  const [connecting, setConnecting] = React.useState(false);
   const [status, setStatus] = React.useState<ComposioStatus | null>(null);
   const [statusError, setStatusError] = React.useState<string | null>(null);
 
@@ -339,55 +333,6 @@ export function SectionIntegrationsComposio() {
   }, [awaitingAuth]);
 
   // ── handlers ────────────────────────────────────────────────────────────
-
-  async function handleConnect(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = keyInput.trim();
-    if (!trimmed) {
-      toast.error("Enter your Composio API key first");
-      return;
-    }
-    if (!looksLikeComposioKey(trimmed)) {
-      toast.error("Key format looks invalid", {
-        description: "Composio keys are 10+ alphanumeric characters from your dashboard.",
-        icon: <XCircle className="size-4" />,
-      });
-      return;
-    }
-    if (!userId) {
-      toast.error("Sign in first");
-      return;
-    }
-    setConnecting(true);
-    try {
-      // REAL verification — Composio answers 401 for bad keys; we only store
-      // the key + session after a successful validation (PRD §38: no fake
-      // success states).
-      const r = await apiComposioConnect({ apiKey: trimmed, userId });
-      await setComposioApiKey(trimmed);
-      await update({ composio_session_id: r.session.sessionId });
-      setKeyInput("");
-      toast.success("Composio connected", {
-        description: `Verified against ${r.totalToolkits}+ available platforms. Session created.`,
-        icon: <CheckCircle2 className="size-4" />,
-      });
-      setStatus({
-        connected: true,
-        totalToolkits: r.totalToolkits,
-        session: { sessionId: r.session.sessionId, mcpUrl: r.session.mcpUrl },
-        connections: { total: 0, active: 0, items: [] },
-      });
-      await refreshConnections();
-      await loadCatalog();
-    } catch (err) {
-      toast.error("Could not connect to Composio", {
-        description: err instanceof Error ? err.message : "Connection failed",
-        icon: <XCircle className="size-4" />,
-      });
-    } finally {
-      setConnecting(false);
-    }
-  }
 
   async function handleDisconnectKey() {
     if (!userId) return;
@@ -599,70 +544,51 @@ export function SectionIntegrationsComposio() {
             </AlertDescription>
           </Alert>
 
-          {/* API key form — stays visible; entering a new key replaces the stored one */}
-          <form onSubmit={handleConnect} className="space-y-3">
-            <div className="space-y-2">
-              <Label htmlFor="composio-key">Composio API key</Label>
-              <div className="relative">
-                <KeyRound className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  id="composio-key"
-                  type={showKey ? "text" : "password"}
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  placeholder={hasStoredKey ? "•••••••• (a key is stored) — enter new to replace" : "Your Composio project API key"}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="pl-9 pr-10 font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey((s) => !s)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground"
-                  aria-label={showKey ? "Hide key" : "Show key"}
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground">
+          {/*
+            KEY INPUT MOVED (task 2026-11-14): the Composio key lives in
+            Settings → API Keys (verified connect + session creation there).
+            This page keeps the live status, platform catalog and per-platform
+            connections.
+          */}
+          <div className="text-muted-foreground flex items-start gap-3 rounded-lg border border-dashed p-4">
+            <KeyRound className="text-foreground/70 mt-0.5 size-4 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium">The key moved to Settings → API Keys</p>
+              <p className="mt-0.5 text-xs leading-relaxed">
                 {hasStoredKey
-                  ? "A key is stored, encrypted. Type a new one to replace it — the key is never shown again after saving."
-                  : "Stored encrypted (AES-GCM) in your browser. Never sent to the AI model."}
+                  ? "A verified key + session are stored. Replace or clear them in the API Keys tab."
+                  : "No key stored yet. Connect in the API Keys tab — verification and session creation run there."}
               </p>
             </div>
+          </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" size="sm" disabled={connecting || !keyInput.trim()}>
-                {connecting ? <Loader2 className="size-4 animate-spin" /> : <Plug className="size-4" />}
-                {hasStoredKey ? "Replace key" : "Connect"}
-              </Button>
-              {connected && (
-                <>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void refreshStatus()}
-                    disabled={busyAction === "refresh"}
-                  >
-                    <RefreshCw className="size-4" />
-                    Refresh status
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setConfirmDialog("disconnect_key")}
-                    className="text-destructive hover:text-destructive"
-                    disabled={busyAction === "disconnect_key"}
-                  >
-                    <Trash2 className="size-4" />
-                    Disconnect
-                  </Button>
-                </>
-              )}
-            </div>
-          </form>
+          <div className="flex flex-wrap items-center gap-2">
+            {connected && (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void refreshStatus()}
+                  disabled={busyAction === "refresh"}
+                >
+                  <RefreshCw className="size-4" />
+                  Refresh status
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDialog("disconnect_key")}
+                  className="text-destructive hover:text-destructive"
+                  disabled={busyAction === "disconnect_key"}
+                >
+                  <Trash2 className="size-4" />
+                  Disconnect
+                </Button>
+              </>
+            )}
+          </div>
 
           {/* Live status (only after real verification) */}
           {connected && status && (
