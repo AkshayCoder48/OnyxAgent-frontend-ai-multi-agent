@@ -13,8 +13,8 @@ import type {
   ChatMessage,
   ChatMessageFile,
 } from "@/types";
-import { restoreTodos } from "@/lib/tools/todos";
 import { useConversationStore, useResearchStore } from "@/stores";
+import { messageOwnershipVerified, logChatIntegrity } from "@/lib/chat/integrity";
 import { useDetachedRunStore } from "@/stores/detached-run-store";
 import {
   AUTO_ROUTER_PROVIDER_ID,
@@ -135,9 +135,24 @@ export function useChat(options: UseChatOptions = {}) {
   const [activeExecId, setActiveExecId] = useState<string | null>(null);
 
   // ── EXECUTION SUBSCRIPTION ─────────────────────────────────────────────
-  const convExec = useExecutionFor(currentConversationIdFromStore ?? conversationId ?? null);
-  const activeExec = useExecutionById(activeExecId);
-  const execSummary = convExec ?? activeExec;
+  const viewConversationId = currentConversationIdFromStore ?? conversationId ?? null;
+  const convExec = useExecutionFor(viewConversationId);
+  const activeExecSummary = useExecutionById(activeExecId);
+  // STREAMING ISOLATION (PRD §7): this hook's OWN execution may only render
+  // while the view is the genuine NEW-CHAT state (null) AND the execution
+  // itself has no conversation identity yet — the first-turn window before
+  // `conversation_created` re-keys it. Once the user leaves (switched to
+  // another conversation, or hit New Chat), the old conversation's live
+  // stream must NOT render under the new view's header/sidebar/URL — it
+  // keeps streaming + persisting to ITS OWN conversation in the background
+  // (the hub never aborts on navigation). Before this guard, switching to a
+  // conversation with no running execution made the fallback render the
+  // previous chat's stream under the new chat's chrome.
+  const execSummary =
+    convExec ??
+    (viewConversationId === null && (activeExecSummary?.conversationId ?? null) === null
+      ? activeExecSummary
+      : undefined);
   const messages = useExecutionMessages(execSummary?.id ?? null);
   const execPendingQuestions = useExecutionChatValue<AskUserQuestion[] | null>(
     execSummary?.id ?? null,
@@ -183,26 +198,18 @@ export function useChat(options: UseChatOptions = {}) {
   const thinkingEffortRef = useRef<"low" | "medium" | "high" | null>(null);
 
   // Track the active conversation id in the research store so todo events
-  // route to the right turn bucket. Reset the bucket when going to a new chat.
-  // ALSO rehydrate persisted agent todos (Dexie) so the TodoPreview tables
-  // survive page refreshes and conversation switches (PRD §24).
+  // route to the right turn bucket. The prompt-box todo dock is TEMPORARY
+  // and chat-scoped (PRD §10): entering ANY conversation state — switching
+  // A → B, opening a chat, or starting a new chat — starts with an EMPTY
+  // dock, so the previous chat's todos can never bleed into the view and
+  // stale todos from a previous session are never rehydrated into it.
+  // (Dexie todo_lists stays untouched — it is the model's own cross-refresh
+  // plan state for its manage_todo rounds, and the message-embedded
+  // TodoPreview tables render from their own per-message snapshots.)
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     setCurrentTodoTurnId(turnId);
-    if (turnId === null) resetTodoTurn();
-    if (turnId) {
-      let cancelled = false;
-      restoreTodos(turnId).then((todos) => {
-        if (!cancelled && todos.length > 0) {
-          useResearchStore.getState().setAgentTodos(turnId, todos);
-        }
-      }).catch(() => {
-        // IndexedDB unavailable — live events will populate the store.
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
+    resetTodoTurn(turnId ?? undefined);
   }, [currentConversationIdFromStore, conversationId, setCurrentTodoTurnId, resetTodoTurn]);
 
   // Tell the hub which conversation this UI is viewing (persist-snapshot
@@ -234,6 +241,11 @@ export function useChat(options: UseChatOptions = {}) {
       message: string,
       fileIds?: string[],
       emit?: (event: import("@/types").WSEvent) => void,
+      /** SUBMIT-TIME conversation identity (PRD §6/§8): captured by the
+       *  caller AT SEND TIME from the selection SSOT — never re-derived
+       *  from render scope here, where a switch mid-await would silently
+       *  re-aim the turn at another conversation. */
+      convId?: string | null,
     ): Promise<AgentTurnOptions | null> => {
       // Provider resolution — the SAME shared contract as subagents
       // (resolveApiConfig), via
@@ -401,10 +413,9 @@ export function useChat(options: UseChatOptions = {}) {
           "@/lib/projects/context-package"
         );
         const { useProjectsStore } = await import("@/lib/projects/store");
-        const convId = currentConversationIdFromStore ?? conversationId ?? null;
         const activeProjectId = useProjectsStore.getState().activeProjectId;
         const contextPackage = await buildProjectContextPackage(
-          convId,
+          convId ?? null,
           message,
           activeProjectId ? { projectId: activeProjectId } : {},
         );
@@ -417,7 +428,9 @@ export function useChat(options: UseChatOptions = {}) {
 
       return {
         userId,
-        conversationId: currentConversationIdFromStore ?? conversationId ?? null,
+        // The submit-time identity threaded in by the caller — immutable for
+        // the whole turn no matter how the selection changes mid-await.
+        conversationId: convId ?? null,
         userMessage: message,
         fileIds,
         // AUTO ROUTER: when candidates exist, the fallback `provider` IS the
@@ -446,7 +459,7 @@ export function useChat(options: UseChatOptions = {}) {
         emit: emit ?? (() => {}),
       };
     },
-    [conversationId, currentConversationIdFromStore],
+    [],
   );
 
   /**
@@ -568,6 +581,36 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
+      // ── SUBMIT-TIME OWNERSHIP (PRD §6) ───────────────────────────────────
+      // ONE conversation identity for the whole turn, read from the
+      // selection SSOT AT SEND TIME — never the render-scope value (the
+      // render can lag a switch/New-Chat by a frame; the old closure capture
+      // is what shipped messages into the previous conversation).
+      const activeChatId = useConversationStore.getState().currentConversationId ?? null;
+      // The composer that captured this click renders `conversationId`
+      // (its own view of the selection). A disagreement with the store
+      // means this send came from a STALE view — block it honestly instead
+      // of guessing; the very next click lands on the fresh view. All-null
+      // is the legitimate new-chat case (the create path below owns it).
+      if (
+        activeChatId !== null &&
+        !messageOwnershipVerified({
+          activeChatId,
+          composerChatId: conversationId ?? null,
+          contextChatId: activeChatId,
+        })
+      ) {
+        const { toast } = await import("sonner");
+        toast.error("The chat just changed — send your message again.");
+        return;
+      }
+      let convId = activeChatId;
+      logChatIntegrity("message_submitted", {
+        activeChatId,
+        composerChatId: conversationId ?? null,
+        contextChatId: convId,
+      });
+
       // ── /image — DIRECT IMAGE GENERATION (no text-LLM round-trip) ──────
       // `/image <prompt>` (alias `/img`) bypasses the agent runtime entirely:
       // the prompt goes straight to the Pollinations image endpoint through
@@ -580,7 +623,7 @@ export function useChat(options: UseChatOptions = {}) {
         await runDirectImageTurn({
           userId,
           prompt: imageMatch[1]!,
-          conversationId: currentConversationIdFromStore ?? conversationId ?? null,
+          conversationId: convId,
           onConversationCreated,
         });
         return;
@@ -596,8 +639,10 @@ export function useChat(options: UseChatOptions = {}) {
       // The hub owns it from here on: its headless store carries the
       // optimistic user message + every agent event, its consumer/checkpoint
       // loop keeps running no matter where the user navigates. This hook
-      // merely subscribes (already done via execSummary above).
-      let convId = currentConversationIdFromStore ?? conversationId ?? null;
+      // merely subscribes (already done via execSummary above). `convId` is
+      // the submit-time identity captured above — immutable for the whole
+      // turn (re-keyed by the hub only when the runtime creates the
+      // conversation mid-turn).
       const execution: ExecutionRecord = executionHub.createExecution({
         conversationId: convId,
         mode: "foreground",
@@ -672,7 +717,15 @@ export function useChat(options: UseChatOptions = {}) {
         const { buildUploadTags } = await import("@/lib/uploads/registry");
         aiContent = `${content}\n\n${buildUploadTags(files)}`;
       }
-      const opts = await buildTurnOptions(userId, aiContent, fileIds, execution.processor.handle);
+      // Submit-time convId threaded in (5th arg) so the turn's context +
+      // persistence target can never drift from the verified identity.
+      const opts = await buildTurnOptions(
+        userId,
+        aiContent,
+        fileIds,
+        execution.processor.handle,
+        convId,
+      );
       if (!opts) {
         executionHub.finishExecution(execution.id, "failed");
         return;
@@ -765,7 +818,7 @@ export function useChat(options: UseChatOptions = {}) {
       // on completion or explicit Stop. (Browser refresh closes fg turns.)
       executionHub.runForeground(execution.id, opts);
     },
-    [buildTurnOptions, conversationId, currentConversationIdFromStore, onConversationCreated, runDetachedTurn],
+    [buildTurnOptions, conversationId, onConversationCreated, runDetachedTurn],
   );
 
   // ── HONEST TURN-START FAILURE (the eternal "Thinking" fix) ─────────────
@@ -1269,7 +1322,7 @@ export function useChat(options: UseChatOptions = {}) {
         // fires — the run then fails honestly at dispatch with the
         // actionable BYOK message ("add your provider"), which lands in the
         // chat when it syncs back (the app's own model is never a fallback).
-        const opts = await buildTurnOptions(userId, prompt);
+        const opts = await buildTurnOptions(userId, prompt, undefined, undefined, turnId);
         const systemPrompt =
           opts?.systemPrompt?.trim() || `${ONYX_AI_SYSTEM_PROMPT}\n\n${WEB_RESEARCH_DIRECTIVE}`;
         let dispatched: Awaited<ReturnType<typeof dispatchDetachedCloudTurn>>;
