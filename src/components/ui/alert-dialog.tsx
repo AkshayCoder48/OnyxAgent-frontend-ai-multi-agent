@@ -58,7 +58,7 @@ const AlertDialogContent = React.forwardRef<
           // capped to the viewport minus gutters, height capped to the
           // visual viewport minus breathing room and both safe-area insets,
           // --kb-shift re-centering while the keyboard is up.
-          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-[calc(-50%-var(--kb-shift,0px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200",
+          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 translate-y-[calc(-50%_-_var(--kb-shift,0px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200",
           "sm:p-6 sm:pb-6",
           className,
         )}

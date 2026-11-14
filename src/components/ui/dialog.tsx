@@ -82,7 +82,7 @@ const DialogContent = React.forwardRef<
           // safe-area insets (centered, so the clearance is symmetric).
           // While the keyboard is up, --kb-shift re-centers the card in
           // the visible area above it.
-          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-[calc(-50%-var(--kb-shift,0px))] flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200 [-webkit-overflow-scrolling:touch]",
+          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 translate-y-[calc(-50%_-_var(--kb-shift,0px))] flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200 [-webkit-overflow-scrolling:touch]",
           // sm+: the same centered card with roomier padding.
           "sm:p-6 sm:pb-6",
           className,

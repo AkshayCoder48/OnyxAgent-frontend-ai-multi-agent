@@ -1678,9 +1678,17 @@
 
 /* ==================== Mobile UX Improvements ==================== */
 
-/* Safe area insets for notch / home indicator */
+/* Safe area insets for notch / home indicator.
+   Scoped to the headers actually pinned to the viewport TOP (sticky or
+   fixed app bars) — the previous blanket `header` selector zeroed the top
+   padding of EVERY <header> in the app (an unlayered rule beats every
+   Tailwind pt-* utility), collapsing all settings card headers onto the
+   card's top edge on desktop and inflating them by the notch height on
+   phones. Card/section headers (SectionCard, dashboard, file previews)
+   are not pinned to the screen and must keep their own rhythm. */
 @supports (padding: env(safe-area-inset-top)) {
-  header {
+  header.sticky,
+  header.fixed {
     padding-top: env(safe-area-inset-top);
   }
   .safe-area-bottom {
