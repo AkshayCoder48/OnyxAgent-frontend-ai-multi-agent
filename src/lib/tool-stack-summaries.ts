@@ -90,7 +90,6 @@ export const TOOL_SUMMARY_RULES: Readonly<Record<string, SummaryRule>> = {
   code_preview: rule("Previewed", "App"),
   start_preview: rule("Started", "Preview"),
   manage_preview: rule("Previewed", "App"),
-  preview_html: rule("Previewed", "HTML Page", "HTML Pages"),
   preview_image: rule("Previewed", "Image"),
   inspect_image: rule("Inspected", "Image"),
 
@@ -153,8 +152,6 @@ export const TOOL_SUMMARY_RULES: Readonly<Record<string, SummaryRule>> = {
   generate_image: rule("Generated", "Image"),
   create_chart: rule("Created", "Chart"),
   ask_user: rule("Asked", "Question"),
-  counterfactual: rule("Ran", "Counterfactual"),
-  decision: rule("Ran", "Decision Analysis", "Decision Analyses"),
   current_datetime: rule("Checked", "Date"),
 
   // Custom tools management (the tools that CREATE custom tools)

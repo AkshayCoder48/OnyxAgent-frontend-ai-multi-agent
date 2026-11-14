@@ -27,7 +27,6 @@ import "./e2b_files";
 import "./e2b_exec";
 import "./e2b_rag";
 import "./file_writer";
-import "./preview_html";
 import "./local_chats";
 import "./todos";
 import "./dynamic_tools";
@@ -43,7 +42,6 @@ import "./memory";
 import "./project_memory";
 import "./knowledge_base";
 import "./use_browser";
-import "./counterfactual";
 import "./subagents";
 import "./chat_inspect";
 import "./workspace_analysis";
@@ -54,11 +52,6 @@ import "./uploaded_files";
 import "./media_generation";
 import "./sandbox_schedule";
 import "./background_task";
-// decision (JEV systemone) — a standalone keeper, NOT absorbed by any
-// umbrella: it's a first-class ESSENTIAL capability (see ESSENTIAL_TOOLS).
-// Must register before ./consolidated (which only hides the granular tools
-// it absorbs — decision isn't one of them, but the ordering rule stands).
-import "./decision";
 import "./consolidated";
 
 export {};

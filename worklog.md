@@ -793,3 +793,22 @@ Work Log:
 Stage Summary:
 - A cold serverless instance with NO server-side key now accepts a background turn in under a second when the browser mirror holds the key (self-provisioning), and the API Keys tab answers in milliseconds with liveness filling in on the next poll.
 - The committed db row stays useful for operators with a stable TASKS_CLOUD_MASTER_KEY; without one, the browser mirror + per-instance self-provisioning is the working chain (by design, documented).
+
+---
+
+## 2026-11-14 (evening) — Remove counterfactual / decision / preview_html tools; app-side HTML preview on chat code blocks
+
+Task ID: 24
+Agent: main (Z.ai Code)
+Task: User request — remove the three agent tools (counterfactual = structured "what-if" analysis, decision = probability-backed verdicts, preview_html = live HTML preview card in chat); instead the APP itself detects HTML code blocks in chat and shows a **Preview** button right before the existing **Save** button, opening a small popup box that renders the HTML live; tapping the center of the page goes fullscreen; a cross button closes.
+
+Work Log:
+- REMOVAL — deleted src/lib/tools/{counterfactual,decision,preview_html}.ts, the preview_html result card (tool-results/preview-html.tsx) and the orphaned /api/jev-decide proxy route (only the decision tool called it). Cleaned every reference: tools/index.ts (3 registrations + the decision keeper comment), request-scoping.ts (decision in ESSENTIAL_TOOLS, counterfactual in CORE_EXTRA_TOOLS, both intent rules, header comments), onyx-md.ts + onyx-md-digest.ts (tool tables + ONYX_MD_DIGEST_TOOLS), tool-stack-summaries.ts (3 stack rules), tool-call-card.tsx (payload useMemo + render + import), and the tests (latency-fixes.test.ts kept its latency pins, excised the preview_html sections; display-names + request-scoping expectations updated — the name-word intent test now uses the chats umbrella, a true name-word-only case).
+- FEATURE — new src/components/chat/html-preview.tsx: `isPreviewableHtml(lang, code)` (html/htm/xhtml fences, or untagged blocks shaped like documents/page fragments — never random text or XML), `HtmlPreviewButton` (header affordance, same chrome as Save) and `HtmlPreviewCard` (small ~560×416 popup over a dimmed backdrop; SANDBOXED iframe — allow-scripts/forms/popups/modals, explicitly NO allow-same-origin so untrusted HTML cannot touch the app; center tap zone with a hover "Tap to fullscreen" hint; expand/shrink icons; X button + backdrop click + Esc close).
+- Wired into markdown-content.impl.tsx: the Preview button renders just BEFORE SaveCodeButton, HTML blocks only; header comment updated.
+- BUG CAUGHT IN E2E (agent-browser on the running app): the popup initially rendered INSIDE the message bubble — the chat's stream-fade animations put transformed ancestors around the code block, and inside a transform box `position: fixed` is relative to that box (backdrop measured 728×476 instead of the viewport). Fixed by rendering the card through a React PORTAL to document.body; re-verified: backdrop full-viewport, small card exactly 560×416, fullscreen card 1246×866.
+- E2E (real UI, injected ```html chat message): header order Preview → Save → Copy; popup opens; the iframe live-rendered the demo page (screenshot pixel sample = the page's purple gradient + white button); center tap flipped data-fullscreen and removed the zone (shrink icon appears); X closed; Esc closed.
+- VERIFICATION: html-preview.test.tsx 9/9 (detection incl. negative XML/plain cases, sandbox/srcDoc pins, center-tap→fullscreen, shrink, X + Esc close); full vitest 969/969 (68 files); production build exit 0.
+
+Stage Summary:
+- The agent toolset is 3 tools lighter; HTML previewing is now an app capability that works on ANY html-fenced (or HTML-shaped) code block in chat — including messages from before this change — with zero agent involvement, and the render is sandboxed against the app.

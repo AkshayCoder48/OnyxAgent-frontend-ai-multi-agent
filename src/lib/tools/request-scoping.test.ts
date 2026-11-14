@@ -55,8 +55,8 @@ describe("filterToolsForRequest — surfaces", () => {
     // integrations without the user naming them.
     for (const n of DISCOVERY_TOOLS) expect(got.has(n)).toBe(true);
     // CORE extras (chats / schedule / subagents / custom_tools /
-    // counterfactual / workflow) ship on every NORMAL-context turn — they
-    // are only intent-gated on small models.
+    // workflow) ship on every NORMAL-context turn — they are only
+    // intent-gated on small models.
     expect(got.has("workflow")).toBe(true);
     // Hidden granular names never leak into the wire list — they dispatch
     // through their umbrella (manage_env_var → workspace).
@@ -82,7 +82,6 @@ describe("filterToolsForRequest — surfaces", () => {
     expect(got.has("use_browser")).toBe(true);
     expect(got.has("web")).toBe(true); // the umbrella carrying web_search/image_search/video_search/web_fetch
     expect(got.has("code_exec")).toBe(true); // the umbrella carrying run_python/run_terminal
-    expect(got.has("decision")).toBe(true); // first-class ESSENTIAL capability
   });
 });
 
@@ -121,10 +120,10 @@ describe("filterToolsForRequest — intent routing", () => {
 
   it("generic name-word matching catches uncategorized mentions", () => {
     const got = new Set(nameOf(filterToolsForRequest(listTools(), {
-      lastUserText: "run the counterfactual analysis",
-      modelContextWindow: 32_000, // small model — counterfactual is CORE EXTRA, so ONLY the name-word match ships it
+      lastUserText: "show me my past chats",
+      modelContextWindow: 32_000, // small model — chats is a CORE EXTRA and "past chats" hits none of the intent rules, so ONLY the name-word match ships it
     })));
-    expect(got.has("counterfactual")).toBe(true);
+    expect(got.has("chats")).toBe(true);
   });
 });
 

@@ -25,12 +25,12 @@
  *      the general-assistant toolset — web/research, code/exec, files,
  *      todos, memory, knowledge, media, chats, schedules, subagents and
  *      workspace ops, PLUS the CORE extras (custom-tool authoring,
- *      counterfactual, workflow).
+ *      workflow).
  *   3. Small-context models (<128K, incl. the 32K safe-fallback) get the
  *      tighter ESSENTIAL surface instead — the same core minus the
  *      long-tail extras which stay reachable through intent matching.
- *   4. The CORE extras (custom-tool authoring, counterfactual, workflow,
- *      …) are intent-matched on small models and latched when already used.
+ *   4. The CORE extras (custom-tool authoring, workflow, …) are
+ *      intent-matched on small models and latched when already used.
  *   5. Tools used earlier in THIS turn (the runtime latches live tool
  *      calls into usedToolNames) are never scoped out mid-turn.
  *
@@ -115,8 +115,6 @@ export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   // Workspace ops (umbrella: analyze_workspace / security_audit / manage_env_var)
   // — analyze_workspace is the "run FIRST on every task" meta-tool.
   "workspace",
-  // Structured decision engine (JEV systemone) — a first-class capability
-  "decision",
   // Capability discovery (always on — see DISCOVERY_TOOLS)
   ...DISCOVERY_TOOLS,
 ]);
@@ -128,7 +126,6 @@ export const CORE_EXTRA_TOOLS: ReadonlySet<string> = new Set([
   "schedule", // sandbox cron (schedule/list/remove)
   "subagents", // full subagent orchestration suite
   "custom_tools", // custom-tool authoring
-  "counterfactual", // structured "what if" analysis
   "workflow", // multi-step pipelines
 ]);
 
@@ -183,11 +180,6 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
     tools: ["custom_tools"],
   },
   {
-    // Counterfactual analysis.
-    re: /counterfactual|what\s*-?\s*if|alternate scenario|hypothetical/i,
-    tools: ["counterfactual"],
-  },
-  {
     // Sub-agent orchestration (essential on small models via this rule).
     re: /sub[- ]?agent|delegate|delegation|orchestrat|specialist|worker agent|spawn/i,
     tools: ["subagents"],
@@ -225,11 +217,6 @@ const INTENT_RULES: ReadonlyArray<{ re: RegExp; tools: readonly string[] }> = [
     // Scheduled tasks (sandbox cron).
     re: /\bschedul(e|ed|ing)\b|\bcron\b|recurring|run (it |this )?(later|tonight|overnight|every)|(nightly|hourly|daily|weekly|monthly)\b|every (day|hour|minute|week|morning|evening|night)|at midnight|in the (morning|evening)|background job/i,
     tools: ["schedule"],
-  },
-  {
-    // Decision/judgment requests — surface the decision engine.
-    re: /decide|decision|should we|is this good|rate this|which option|worth it|verdict/i,
-    tools: ["decision"],
   },
 ];
 

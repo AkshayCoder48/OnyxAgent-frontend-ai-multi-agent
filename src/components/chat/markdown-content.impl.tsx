@@ -12,6 +12,7 @@ import { CopyButton } from "./copy-button";
 import { CompanionCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
 import { SaveCodeButton } from "./code-save-dialog";
+import { HtmlPreviewButton, isPreviewableHtml } from "./html-preview";
 import type { SourceItem } from "@/lib/chat-sources";
 
 /** Parse `language-xyz` from a fenced-code `<code>` className. */
@@ -412,8 +413,9 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
   }
 
   // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
-  // strip with language/filename on the left and Save + Copy affordances on
-  // the right; muted warm syntax tones come from the `.chat-code` hljs scope.
+  // strip with language/filename on the left and (HTML blocks only) Preview
+  // + Save + Copy affordances on the right; muted warm syntax tones come
+  // from the `.chat-code` hljs scope.
   return (
     <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
       {(lang || codeContent) && (
@@ -424,6 +426,16 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
           <span>{lang ?? "code"}</span>
           {codeContent && (
             <span className="flex shrink-0 items-center gap-1">
+              {/* HTML Preview (user request 2026-11-14, replacing the removed
+                  preview_html agent tool): the APP detects HTML blocks and
+                  renders them live in a sandboxed popup card — just before
+                  the Save affordance. */}
+              {isPreviewableHtml(lang, codeContent) && (
+                <HtmlPreviewButton
+                  code={codeContent}
+                  className="text-[#a5947c] hover:text-[#e8decc]"
+                />
+              )}
               {/* Save to Files — asks for location / name / extension. */}
               <SaveCodeButton
                 code={codeContent}

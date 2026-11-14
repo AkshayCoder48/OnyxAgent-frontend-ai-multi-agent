@@ -50,9 +50,6 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - workflow [create / list / get / edit / delete / run] — Multi-step pipelines where each step is an AI prompt or a tool call.
 - use_browser — ONLY for pages needing real interaction (click, type, login, JS): navigate, click, type, extract_text, inspect, snapshot, screenshot, wait, back/forward, close +…
 - ask_user — When the user says "ask me …", "quiz me" or wants ANY questions (MCQ, survey, checklist), ALWAYS call ask_user and GENERATE the questions yourself — never as plain text. Supply…
-- counterfactual — Structured "what if X had been different" analysis.
-- decision — Structured decision engine (JEV systemone): pass a state + queries (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip.
-- preview_html — Render a workspace HTML file (or inline HTML) as a LIVE interactive preview card in the chat — use it after building pages/games/demos.
 - current_datetime — Current UTC date/time in ISO 8601 — whenever time matters.
 
 ### Availability rules (anti-hallucination)
@@ -64,4 +61,4 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 /** Every model-visible tool name: the 12 umbrellas + 11 keepers
  * (digest ⇄ registry parity is test-enforced against listTools() — hidden
  * granular tools are excluded by design). */
-export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","clear_todo","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","counterfactual","decision","preview_html","current_datetime"];
+export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","clear_todo","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","current_datetime"];
