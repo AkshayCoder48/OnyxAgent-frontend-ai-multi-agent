@@ -10,6 +10,7 @@ import type {
 } from "@/types";
 import { getGenerationId } from "@/types";
 import { setUrlParam } from "@/lib/utils";
+import { logChatIntegrity } from "@/lib/chat/integrity";
 import { persistTodos } from "@/lib/tools/todos";
 import {
   markerHoldbackIndex,
@@ -483,7 +484,9 @@ export class AgentEventProcessor {
         // state — if they already switched to another conversation, a late
         // attach would hijack the view. The hub re-keys the execution
         // regardless (below).
-        if (useConversationStore.getState().currentConversationId === null) {
+        const attachToView =
+          useConversationStore.getState().currentConversationId === null;
+        if (attachToView) {
           // `attachConversation` switches the id WITHOUT clearing anything
           // and marks the conversation hydrated — the live streaming
           // messages are authoritative, no DB reload may fire for this id.
@@ -491,6 +494,12 @@ export class AgentEventProcessor {
           // Reflect the new ID in the URL so the page is refreshable.
           setUrlParam("id", conversation_id);
         }
+        // Dev-time integrity tracing (PRD §14 chat_created envelope).
+        logChatIntegrity("chat_created", {
+          chatId: conversation_id,
+          attachedToView: attachToView,
+          viewedChatId: useConversationStore.getState().currentConversationId,
+        });
         // CRITICAL: associate the persisted (sessionStorage) messages with
         // the new conversation ID (refresh would otherwise wipe them).
         if (typeof window !== "undefined") {

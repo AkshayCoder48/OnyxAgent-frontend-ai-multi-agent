@@ -104,6 +104,25 @@ async function bumpConversationTimestamp(conversationId: string): Promise<void> 
   await db.conversations.update(conversationId, { updated_at: ts });
 }
 
+/**
+ * REFERENTIAL INTEGRITY GUARD (Global Chat State Isolation PRD §8): every
+ * message write must reference an EXISTING conversation row. A write with a
+ * nonexistent id (stale closure, ghost temp id, just-deleted conversation)
+ * used to silently produce an ORPHAN message — the exact way "the message
+ * appears under the WRONG chat after refresh" corruption reported. Throwing
+ * is the correct failure surface: the throw rejects the write BEFORE anything
+ * is half-persisted, the caller surfaces the honest error in the turn's UI.
+ * One cheap get-by-key per write — negligible against the checkpoint cadence.
+ */
+async function assertConversationExists(conversationId: string): Promise<void> {
+  const conv = await db.conversations.get(conversationId);
+  if (!conv) {
+    throw new Error(
+      `Refusing to persist a message under conversation "${conversationId}" — that conversation does not exist (chat integrity guard).`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // authService — register / login / logout / profile.
 // ---------------------------------------------------------------------------
@@ -491,6 +510,9 @@ export const conversationService = {
     userId: string,
     input: AddMessageInput,
   ): Promise<ConversationMessage> {
+    // Integrity guard FIRST — nothing is half-persisted when the target
+    // conversation does not exist (see assertConversationExists).
+    await assertConversationExists(conversationId);
     const id = nanoid();
     const ts = nowISO();
     // Persist message row.
@@ -607,6 +629,9 @@ export const conversationService = {
     messageId: string,
     input: Omit<AddMessageInput, "role"> & { role?: "assistant" },
   ): Promise<ConversationMessage> {
+    // Integrity guard FIRST — a checkpoint for a nonexistent conversation is
+    // an orphan write (see assertConversationExists).
+    await assertConversationExists(conversationId);
     const existing = await db.messages.get(messageId);
     const ts = nowISO();
     const row = {

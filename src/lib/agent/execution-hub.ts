@@ -8,6 +8,7 @@ import {
   createExecutionChatStore,
   useChatStore,
   setPersistedConversationId,
+  getPersistedConversationId,
   persistChatSnapshot,
   type ExecutionChatStore,
 } from "@/stores/chat-store";
@@ -209,8 +210,19 @@ export const executionHub = {
       processor,
       abortController: new AbortController(),
     });
-    // Seed: the conversation's current messages (user is viewing it).
-    store.getState().replaceAllMessages(useChatStore.getState().messages);
+    // Seed: the conversation's current messages (the user is viewing it) —
+    // but ONLY when the global store actually belongs to this execution's
+    // conversation (PRD §4/§12: seeding a fresh execution with another
+    // conversation's painted view is exactly the "Chat A's messages appear
+    // inside Chat B" pathway). The sessionStorage marker is maintained by
+    // the container on every selection change and by the hub's own
+    // finish-time sync-back, so a mismatch always means a stale global
+    // store — seed empty rather than contaminate.
+    const globalConvId = getPersistedConversationId();
+    const execConvId = opts.conversationId ?? null;
+    store.getState().replaceAllMessages(
+      globalConvId === execConvId ? useChatStore.getState().messages : [],
+    );
     records.set(id, record);
     useHubStore.getState().upsert(recordToSummary(record));
     store.getState().setProcessing(true);
