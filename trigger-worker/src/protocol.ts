@@ -155,6 +155,13 @@ export interface TaskRunProgress {
     filesVerified: number;
     missing: string[];
   };
+  /** Master skill library attach report (set right after the sandbox
+   *  boots — the background agent runs with the full skill surface). */
+  skills?: {
+    attached: boolean;
+    count: number;
+    version: string;
+  };
   logTail?: string;
   lastUpdate: number;
 }
@@ -250,6 +257,19 @@ export interface AgentRunPayload {
   credentials: {
     /** E2B API key for this run (app-resolved; no server env required). */
     e2bApiKey: string;
+    /** Optional E2B sandbox template id (e.g. the CloakBrowser durable
+     *  template "onyx-cloakbrowser" from scripts/build-browser-sandbox-
+     *  template.sh) — when the app server has E2B_TEMPLATE_ID set, task
+     *  sandboxes boot browser-ready in seconds instead of installing the
+     *  driver at runtime (user directive 2026-11-14: the background agent
+     *  gets the full app surface — skills + browser). */
+    templateId?: string;
+    /** The app's public origin (the dispatching request's origin, or the
+     *  server's APP_URL env) — the worker fetches the master skill library
+     *  zip from `${appUrl}/api/skills/master-library` at runtime instead of
+     *  bundling the ~2 MB payload (which crashed the trigger.dev build
+     *  service; serving it from the app also keeps one source of truth). */
+    appUrl?: string;
     /** The USER'S OWN OpenAI-compatible chat endpoint (BYOK — user
      *  directive 2026-10-31; the app's keyless bridge was removed). */
     chatUrl: string;

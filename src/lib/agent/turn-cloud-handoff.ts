@@ -67,6 +67,12 @@ const g = globalThis as unknown as { __onyxCloudHandoffPrewarm?: CloudPrewarmSta
 /** Refresh the cached cloud-mode flag + rotational key pool. Called while
  *  visible (mount + visibilitychange) so pagehide never has to await. */
 export async function prewarmCloudHandoff(userId?: string): Promise<void> {
+  // Startup warm (user directive 2026-11-14 "no delay"): fire-and-forget —
+  // the server primes its config cache + probes the deployed worker's
+  // liveness (throttled server-side) so the first real dispatch is hot.
+  void fetch("/api/tasks/prewarm", { cache: "no-store" }).catch(() => {
+    /* best-effort warm */
+  });
   try {
     const res = await fetch("/api/tasks/cloud", { cache: "no-store" });
     const data = (res.ok ? await res.json() : null) as { mode?: string } | null;

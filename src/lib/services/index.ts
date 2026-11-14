@@ -712,16 +712,15 @@ export const conversationService = {
 
   /** SETTLE ORPHANED STREAMING MESSAGES: a browser refresh kills an
    *  in-flight turn mid-stream — its Dexie row keeps is_streaming=true and
-   *  the conversation would render that frozen partial state FOREVER with
-   *  no error and no way forward. This pass finds every still-streaming
-   *  assistant row in a conversation, marks it settled (is_streaming=false)
-   *  and appends an honest note part telling the user the task was
-   *  interrupted and how to continue. Idempotent — settled rows are
-   *  skipped. Returns the ids that were settled. */
-  async settleInterruptedMessages(
-    conversationId: string,
-    note = "This task was interrupted before it finished — its completed work is saved above. Send a message to continue.",
-  ): Promise<string[]> {
+   *  the conversation would render that frozen partial state FOREVER.
+   *  This pass finds every still-streaming assistant row in a conversation
+   *  and marks it settled (is_streaming=false) SILENTLY — the completed
+   *  partial work stays visible and the user can simply continue with a
+   *  new message. (User directive 2026-11-14: the old appended note
+   *  "This task was interrupted…" was removed from the product — a UI cut
+   *  no longer produces commentary in the chat.) Idempotent — settled
+   *  rows are skipped. Returns the ids that were settled. */
+  async settleInterruptedMessages(conversationId: string): Promise<string[]> {
     try {
       const rows = (await db.messages
         .where("conversation_id")
@@ -730,35 +729,17 @@ export const conversationService = {
         id: string;
         role: string;
         is_streaming?: boolean;
-        parts?: Array<{ id?: string; type: string; content?: string }> | null;
       }>;
       const settled: string[] = [];
       for (const row of rows) {
         if (row.role !== "assistant" || row.is_streaming !== true) continue;
-        const parts = Array.isArray(row.parts) ? [...row.parts] : [];
-        // Idempotency guard — never double-append the note.
-        const alreadySettled = parts.some(
-          (p) => p && p.type === "text" && typeof p.content === "string" && p.content.includes("task was interrupted"),
-        );
-        if (alreadySettled) {
-          const existing = await db.messages.get(row.id);
-          if (!existing) continue;
-          // MessageRow doesn't DECLARE the non-indexed is_streaming column
-          // (it rides the row like saveAgentCheckpoint's put) — the full-row
-          // put through a variable skips the excess-property check.
-          const flagOnly = { ...existing, is_streaming: false };
-          await db.messages.put(flagOnly);
-          continue;
-        }
-        parts.push({
-          id: `${row.id}:settled:${Date.now().toString(36)}`,
-          type: "text",
-          content: note,
-        });
         const existing = await db.messages.get(row.id);
         if (!existing) continue;
-        const patch = { ...existing, is_streaming: false, parts };
-        await db.messages.put(patch);
+        // MessageRow doesn't DECLARE the non-indexed is_streaming column
+        // (it rides the row like saveAgentCheckpoint's put) — the full-row
+        // put through a variable skips the excess-property check.
+        const flagOnly = { ...existing, is_streaming: false };
+        await db.messages.put(flagOnly);
         settled.push(row.id);
       }
       return settled;

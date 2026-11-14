@@ -43,6 +43,7 @@ import type {
 import { TASK_PAYLOAD_BUDGET } from "../protocol.js";
 import { Sandbox } from "@e2b/code-interpreter";
 import {
+  attachMasterSkills,
   collectArtifacts,
   createTaskSandbox,
   killQuiet,
@@ -333,7 +334,7 @@ export const agentRun = task({
       let lastCreateError = "";
       for (let attempt = 0; attempt < 3 && !box; attempt++) {
         try {
-          box = await createTaskSandbox(run, credentials.e2bApiKey);
+          box = await createTaskSandbox(run, credentials.e2bApiKey, credentials.templateId);
         } catch (err) {
           lastCreateError = errorMessage(err);
           // A missing key is permanent — don't burn retries on it.
@@ -351,6 +352,28 @@ export const agentRun = task({
       state.progress.stage = "sandbox-ready";
       flush();
       logger.info(`[agent-run ${runId}] sandbox ${box.sandboxId} created`);
+
+      // ---- Phase: attach the MASTER SKILL LIBRARY (user directive ----------
+      // 2026-11-14 — the background agent gets the app's FULL surface).
+      // Best-effort: a failed attach never fails the run.
+      setStage("init", "attaching-skills");
+      const skills = await attachMasterSkills(box, { appUrl: credentials.appUrl });
+      state.progress.skills = {
+        attached: skills.attached,
+        count: skills.count,
+        version: skills.version,
+      };
+      pushChunk({
+        kind: "log",
+        content: skills.attached
+          ? `Master skill library attached (${skills.count} skills, ${skills.version}) — /home/user/skills`
+          : `Skill library attach skipped: ${skills.error ?? "unknown reason"} — the run continues without it`,
+        ts: Date.now(),
+      });
+      flush();
+      logger.info(
+        `[agent-run ${runId}] master skills ${skills.attached ? `attached (${skills.count}, ${skills.version})` : `attach failed: ${skills.error ?? "?"}`}`,
+      );
 
       // ---- Phase: mount client workspace (FR-1.1 / FR-4.1) ----------------
       setStage("mount", "files-mounting");

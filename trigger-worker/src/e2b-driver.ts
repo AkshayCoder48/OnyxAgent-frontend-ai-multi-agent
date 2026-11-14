@@ -10,6 +10,7 @@
 // output. Mirrors the app's local driver semantics.
 // ============================================================================
 
+import { logger } from "@trigger.dev/sdk";
 import { Sandbox } from "@e2b/code-interpreter";
 import type {
   AgentRunPayload,
@@ -47,10 +48,13 @@ export interface MountReport {
  *  (PRD §4 timeout freedom — up to TASK_MAX_DURATION_MS = 2h); when the
  *  account's tier rejects the larger window the create is retried once at
  *  the legacy 30-minute cap so long-horizon runs still execute, just with a
- *  shorter live window. */
+ *  shorter live window. credentials.templateId (the server's
+ *  E2B_TEMPLATE_ID, e.g. the CloakBrowser durable template) switches sandbox
+ *  creation to that template so task sandboxes boot browser-ready. */
 export async function createTaskSandbox(
   run: AgentRunPayload["run"],
   e2bApiKey: string,
+  templateId?: string,
 ): Promise<Sandbox> {
   const apiKey = e2bApiKey.trim();
   if (!apiKey) {
@@ -66,6 +70,7 @@ export async function createTaskSandbox(
     Sandbox.create({
       apiKey,
       timeoutMs,
+      ...(templateId?.trim() ? { template: templateId.trim() } : {}),
       metadata: {
         "onyx-app": "onyx",
         "onyx-scope": "background-task-worker",
@@ -88,6 +93,148 @@ export async function killQuiet(sandbox: Sandbox | null): Promise<void> {
     await sandbox.kill();
   } catch {
     // Already dead / network blip — nothing to do.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Master skill library (fetched from the app at runtime)
+// ---------------------------------------------------------------------------
+
+const SKILLS_ZIP_PATH = `${HOME}/.onyx/master-skills.zip`;
+
+/** Extract command for a given library version (mirrors the app's
+ *  attach-master-skills.ts: idempotent `unzip -o`, python zipfile fallback,
+ *  stamp the version, remove the zip payload). */
+const skillsExtractCmd = (version: string) =>
+  [
+    "mkdir -p /home/user/skills",
+    `cd /home/user/skills`,
+    `(unzip -oq '${SKILLS_ZIP_PATH}' 2>/dev/null || python3 -m zipfile -e '${SKILLS_ZIP_PATH}' .)`,
+    `rm -f '${SKILLS_ZIP_PATH}'`,
+    `printf '%s' '${version}' > /home/user/.onyx/master-skills-version`,
+  ].join(" && ");
+
+export interface SkillsAttachResult {
+  attached: boolean;
+  count: number;
+  version: string;
+  source: string;
+  error?: string;
+}
+
+/** Per-instance library cache: version → zip bytes. The library is ~2 MB;
+ *  keeping it in memory means one fetch per cold worker, not per run. */
+const gCache = globalThis as unknown as {
+  __onyxSkillsLibrary?: Map<string, { bytes: Uint8Array; count: number }>;
+};
+
+async function fetchSkillLibrary(
+  appUrl: string,
+): Promise<{ bytes: Uint8Array; count: number; version: string } | null> {
+  const base = appUrl.replace(/\/+$/, "");
+  const url = `${base}/api/skills/master-library`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      logger.warn(`[e2b-driver] skill library fetch ${res.status} from ${base}`);
+      return null;
+    }
+    const version = res.headers.get("x-onyx-skills-version") ?? "unknown";
+    const count = Number(res.headers.get("x-onyx-skills-count") ?? "0") || 0;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength < 1024) {
+      logger.warn(`[e2b-driver] skill library payload suspiciously small (${bytes.byteLength}B)`);
+      return null;
+    }
+    if (!gCache.__onyxSkillsLibrary) gCache.__onyxSkillsLibrary = new Map();
+    gCache.__onyxSkillsLibrary.set(version, { bytes, count });
+    return { bytes, count, version };
+  } catch (err) {
+    logger.warn(
+      `[e2b-driver] skill library fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Attach the MASTER SKILL LIBRARY to a task sandbox (user directive
+ * 2026-11-14: the background agent gets the app's FULL surface — all
+ * skills). The library is FETCHED FROM THE APP at runtime (per-run appUrl —
+ * the dispatching request's origin — or the deployed APP_URL env): bundling
+ * the ~2 MB zip into the worker crashed the trigger.dev build service, and
+ * serving it from the app keeps a single source of truth (skills update
+ * with the app, no worker re-deploy). Best-effort by design: no reachable
+ * app → the run continues without the library and says so in the log chunk.
+ */
+export async function attachMasterSkills(
+  sandbox: Sandbox,
+  opts: { appUrl?: string } = {},
+): Promise<SkillsAttachResult> {
+  const base: SkillsAttachResult = {
+    attached: false,
+    count: 0,
+    version: "unknown",
+    source: "app",
+  };
+  const appUrl = (opts.appUrl?.trim() || process.env.APP_URL?.trim() || "").trim();
+  if (!appUrl) {
+    return {
+      ...base,
+      error: "no app origin available (neither payload appUrl nor APP_URL env)",
+    };
+  }
+
+  try {
+    // Cache probe: reuse the bytes when this instance already fetched the
+    // current version (still re-reads the version header via a HEAD-ish
+    // GET — cheap; a 404/timeout below just falls through to the cache).
+    let library: { bytes: Uint8Array; count: number; version: string } | null =
+      await fetchSkillLibrary(appUrl);
+    if (!library) {
+      // Fall back to ANY cached version — a stale library beats none.
+      const cached = [...(gCache.__onyxSkillsLibrary?.entries() ?? [])];
+      if (cached.length > 0) {
+        const [version, entry] = cached[cached.length - 1]!;
+        library = { bytes: entry.bytes, count: entry.count, version };
+      }
+    }
+    if (!library) {
+      return { ...base, error: `library unreachable at ${appUrl.replace(/\/\/.*@/, "//")}` };
+    }
+
+    const arrayBuffer = library.bytes.buffer.slice(
+      library.bytes.byteOffset,
+      library.bytes.byteOffset + library.bytes.byteLength,
+    ) as ArrayBuffer;
+    await sandbox.files.write(SKILLS_ZIP_PATH, arrayBuffer);
+    const result = await sandbox.commands.run(skillsExtractCmd(library.version), {
+      timeoutMs: 90_000,
+    });
+    if (result.exitCode !== 0) {
+      const msg = `exit ${result.exitCode}: ${(result.stderr ?? "").slice(0, 200)}`;
+      logger.warn(`[e2b-driver] master-skills attach failed — ${msg}`);
+      return {
+        ...base,
+        count: library.count,
+        version: library.version,
+        error: msg,
+      };
+    }
+    return {
+      ...base,
+      attached: true,
+      count: library.count,
+      version: library.version,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[e2b-driver] master-skills attach failed — ${msg}`);
+    return { ...base, error: msg };
   }
 }
 

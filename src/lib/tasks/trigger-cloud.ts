@@ -1034,6 +1034,19 @@ export async function dispatchCloudRun(
     },
     credentials: {
       e2bApiKey,
+      // Durable browser template (CloakBrowser) — when the app server has
+      // E2B_TEMPLATE_ID set, every task sandbox boots browser-ready in
+      // seconds (the runner's use_browser tool works immediately instead of
+      // degrading gracefully to "driver not deployed").
+      ...(process.env.E2B_TEMPLATE_ID?.trim()
+        ? { templateId: process.env.E2B_TEMPLATE_ID.trim() }
+        : {}),
+      // App origin for the runtime skill-library fetch (keyring captures the
+      // dispatching request's origin; APP_URL env is the fallback — proxies
+      // can make the request origin internal).
+      ...(entry?.appUrl?.trim() || process.env.APP_URL?.trim()
+        ? { appUrl: (entry?.appUrl?.trim() || process.env.APP_URL!.trim()).replace(/\/+$/, "") }
+        : {}),
       chatUrl,
       chatToken,
       keyPool,

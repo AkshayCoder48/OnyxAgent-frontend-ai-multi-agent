@@ -726,3 +726,29 @@ Stage Summary:
 - its entrance replaced by an 800ms rise-from-below (violating the 180–240ms fade+zoom-from-centered spec).
 Fix: the sheet now carries ONLY the visual glass skin (fill/border/backdrop-filter/shadow + ::after sheen + child stacking); geometry, scrolling and animation belong to the shared components. Verified live on the production build at 360×800, 390×844, 412×915 and 1280×800: `position: fixed`, `overflow-y: auto`, perfectly centered, tabs + footer reachable.
 Same forensics pass confirmed the OTHER unlayered global (`header{padding-top:env(safe-area-inset-top)}`) — already scoped to `header.sticky, header.fixed` earlier in this task — was the Part A card-header collapse.
+
+---
+
+## 2026-11-14 — Remove the "task was interrupted" note; full-agent background runs on the REAL Trigger.dev worker; startup prewarm
+
+Task ID: 11
+Agent: main (Z.ai Code)
+Task: User directive — (a) remove everything related to the "This task was interrupted before it finished — its completed work is saved above. Send a message to continue." error note; (b) add REAL trigger.dev: wrap the full app agent (all skills + E2B + everything) as the background task and make it run in the background; (c) test with the operator's production trigger key; (d) "make it loading on app or web startup so no delay" — warm the whole path at app startup.
+
+Work Log:
+- NOTE-REMOVAL (a): `conversationService.settleInterruptedMessages` no longer takes a note parameter and no longer appends ANY text part — orphaned streaming rows are flipped `is_streaming=false` SILENTLY (the partial work stays visible; the user continues with a new message). The three producing branches in the use-chat orphan effect (no-cloud/no-fresh-prompt settle, dispatch-refused settle, run-unreadable settle) all now settle silently; the dispatch-refused reason goes to console.warn only. Sibling note in terra/store.ts ("This reply was interrupted and could not be recovered") is a DIFFERENT subsystem (legacy SSE turn-jobs) and was intentionally left. Verified: the string is absent from the served JS chunks.
+- WORKER UPGRADE (b) — the deployed agent-run task now runs the app's FULL background surface:
+  · runner-source.ts had DRIFTED (an older 6-tool runner) — re-synced byte-identical from src/lib/e2b/headless-agent.ts via the new scripts/sync-trigger-worker-assets.ts (runner v2 with the native use_browser CloakBrowser bridge, api_key_pool rotation, todo manifest).
+  · MASTER SKILLS: first attempt mirrored the ~2 MB base64 zip into the worker — trigger.dev's build service DIED on it ("The service was stopped"; bisected with a stub: original code deploys, stub+all-other-changes deploys, so the 2 MB literal was the killer). Final design: the worker FETCHES the library at RUNTIME from the app — new public route GET /api/skills/master-library (zip bytes + x-onyx-skills-version/count headers, per-instance byte cache) — attachMasterSkills() in the worker writes+unzips it over /home/user/skills/ (unzip → python zipfile fallback → version stamp, mirroring the app's attach), best-effort with a log chunk either way, per-instance library cache, stale-cache fallback. Single source of truth: skills update with the app, no worker re-deploy.
+  · protocol (both copies): credentials.templateId? (server E2B_TEMPLATE_ID passthrough → Sandbox.create({template}) so task sandboxes boot CloakBrowser-ready when the durable template exists) + credentials.appUrl? (the dispatching request's origin from the keyring, else APP_URL env) + progress.skills? attach report. dispatchCloudRun fills both.
+- STARTUP PREWARM (d): new GET /api/tasks/prewarm — primes the cloud config cache, probes worker liveness via the real `health` task (THROTTLED to one probe per 10 min per instance), re-arms the scheduler; prewarmCloudHandoff fires it first thing (TurnHandoffController mount + every 60s + visibilitychange). Browser-verified: /api/tasks/prewarm is the FIRST API call on app load.
+- TESTS WITH THE OPERATOR'S KEY (c) — key in .env.local (gitignored, never committed/printed) + TRIGGER_PROJECT_REF resolved after the first deploy attempt failed to infer it from whoami:
+  · Cloud status: mode=cloud, keySource=env, worker LIVE on proj_hrhpqztgulssacmpehmg.
+  · Dispatch E2E ×2 (before + after the new deploy): POST /api/tasks/trigger (userId + agent_run) → 200 + cloudRunId → cloud run executes on the operator's project → honest BYOK refusal ("add your provider in Settings → AI Providers") synced back through /api/tasks/status — the whole app→cloud→worker→sync loop verified with the real key. Full LLM-completing runs need the operator's provider + E2B key configured (BYOK by design — the app's own model is never a fallback); those legs were compile-verified only (no gateway/E2B key in this sandbox).
+  · DEPLOY: trigger.dev CLI accepts the operator's key as TRIGGER_ACCESS_TOKEN with TRIGGER_PROJECT_REF set. Version 20261114.3 deployed successfully (bisect deploys 20261114.1/.2 along the way) — the upgraded worker (runtime skills fetch + use_browser runner + template passthrough) is LIVE.
+- VERIFICATION: trigger-worker tsc clean; app tsc 200 pre-existing / 0 new (baseline diff); next build green; vitest 969/969 (green, exit 0); browser: app loads, prewarm first call, note text absent from chunks.
+
+Stage Summary:
+- The interruption note is gone from the product at every layer; a UI cut either keeps the turn alive on the cloud or settles it silently.
+- The background agent task = the app's real agent: full skills library (55 skills, fetched from the app at runtime), the synced browser-capable Python runner, E2B sandbox (+ optional browser template), hour-scale durable execution, HITL waitpoints, per-user concurrency caps.
+- App startup warms the entire path (config cache, worker liveness, scheduler) so the first background dispatch has no cold-start delay.

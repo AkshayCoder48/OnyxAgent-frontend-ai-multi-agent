@@ -257,6 +257,13 @@ export interface TaskRunProgress {
     filesVerified: number;
     missing: string[];
   };
+  /** Master skill library attach report (worker sets it right after the
+   *  sandbox boots — the background agent runs with the full skill surface). */
+  skills?: {
+    attached: boolean;
+    count: number;
+    version: string;
+  };
   logTail?: string;
   lastUpdate: number;
   /**
@@ -472,6 +479,13 @@ export interface CloudAgentRunPayload {
   };
   credentials: {
     e2bApiKey: string;
+    /** Optional E2B sandbox template id (server E2B_TEMPLATE_ID) — passed
+     *  through to the worker so task sandboxes boot browser-ready. */
+    templateId?: string;
+    /** The app's public origin (per-run: the dispatching request's origin
+     *  from the keyring, else APP_URL env) — the worker fetches the master
+     *  skill library from ${appUrl}/api/skills/master-library at runtime. */
+    appUrl?: string;
     chatUrl: string;
     chatToken: string;
     keyPool: string[];

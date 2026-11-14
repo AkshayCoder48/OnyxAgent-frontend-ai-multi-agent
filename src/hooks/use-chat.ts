@@ -1285,8 +1285,11 @@ export function useChat(options: UseChatOptions = {}) {
           Date.parse(rows[lastOrphanIdx]!.created_at) > Date.now() - 6 * 60 * 60 * 1000;
 
         if (!cloudHandoffActive() || !orphanFresh || !prompt) {
-          // No cloud lane (or nothing re-runnable / too stale) — the honest
-          // settle note. This is the ONLY remaining path that produces it.
+          // No cloud lane (or nothing re-runnable / too stale) — settle
+          // SILENTLY: stop the streaming flag, keep the partial work, no
+          // note in the chat (user directive 2026-11-14 — the
+          // "This task was interrupted…" commentary is gone from the
+          // product; the user just continues with a new message).
           const settledIds = await conversationService.settleInterruptedMessages(turnId);
           if (settledIds.length > 0) {
             await refreshRows();
@@ -1343,12 +1346,12 @@ export function useChat(options: UseChatOptions = {}) {
           });
         } catch (err) {
           // Cloud dispatch refused (mode flipped off, network) — settle
-          // honestly WITH the reason so the user knows why it didn't move.
+          // SILENTLY (user directive 2026-11-14: no interruption note in
+          // the chat). The reason is logged for diagnostics; the run's
+          // fate stays visible in Background tasks.
           const reason = err instanceof Error ? err.message : String(err);
-          const settledIds = await conversationService.settleInterruptedMessages(
-            turnId,
-            `This task was interrupted before it finished and could not be moved to the background (${reason.slice(0, 200)}). Its completed work is saved above. Send a message to continue.`,
-          );
+          console.warn("[chat] orphaned turn could not move to the background:", reason);
+          const settledIds = await conversationService.settleInterruptedMessages(turnId);
           if (settledIds.length > 0) await refreshRows();
           return;
         }
@@ -1360,8 +1363,8 @@ export function useChat(options: UseChatOptions = {}) {
         if (run) {
           await adopt(dispatched, run);
         } else {
-          // Trigger accepted but the run row is unreadable — settle with
-          // the honest note (the run stays visible in Background tasks).
+          // Trigger accepted but the run row is unreadable — settle
+          // silently (the run stays visible in Background tasks).
           const settledIds = await conversationService.settleInterruptedMessages(turnId);
           if (settledIds.length > 0) await refreshRows();
         }
