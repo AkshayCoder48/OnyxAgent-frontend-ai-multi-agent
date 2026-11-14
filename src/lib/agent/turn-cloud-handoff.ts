@@ -105,9 +105,19 @@ export async function prewarmCloudHandoff(userId?: string): Promise<void> {
   }
 }
 
-/** True when a Trigger.dev Cloud key is connected (last prewarm). */
+/** True when a Trigger.dev Cloud key is available for this dispatch: the
+ *  server says cloud-mode, OR the browser mirror holds a key. MIRROR-AWARE
+ *  (fix 2026-11-14 #1, "Even if added the key"): on serverless the
+ *  server-side config is PER-INSTANCE (read-only filesystems, random
+ *  per-instance master keys) — "this instance has no config" is NOT "the
+ *  user has no key". Every dispatch body carries the mirror's key and
+ *  /api/tasks/trigger re-verifies + re-applies it (cold-instance
+ *  self-provisioning), so the gate must let those dispatches through
+ *  instead of refusing the turn client-side. */
 export function cloudHandoffActive(): boolean {
-  return g.__onyxCloudHandoffPrewarm?.cloudOn === true;
+  const prewarm = g.__onyxCloudHandoffPrewarm;
+  if (prewarm?.cloudOn === true) return true;
+  return typeof prewarm?.cloudKey === "string" && prewarm.cloudKey.trim().length > 0;
 }
 
 /** Freshness horizon for the prewarm cache at DECISION points. The

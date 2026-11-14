@@ -33,8 +33,10 @@ import {
   invalidateCloudConfigCache,
   maskSecret,
   probeWorkerLiveness,
+  readWorkerBootstrapState,
   refreshCloudAccount,
   saveCloudConfig,
+  startWorkerBootstrapProbe,
   updateCloudTaskSlug,
   verifyCloudKey,
   type WorkerBootstrapState,
@@ -44,6 +46,7 @@ import {
   invalidateOrchestrationModeCache,
 } from "@/lib/tasks/orchestration-mode";
 import { startSchedulerLoop } from "@/lib/tasks/cron-scheduler";
+import { ensureTasksSchema } from "@/lib/tasks/prisma";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,11 +75,13 @@ async function statusPayload(
   request: NextRequest,
   bootstrap?: WorkerBootstrapState,
 ): Promise<Record<string, unknown>> {
-  const [mode, config, state] = await Promise.all([
-    getOrchestrationMode(),
-    getCloudConfig(),
-    bootstrap ? Promise.resolve(bootstrap) : getWorkerBootstrapState().catch(() => null),
-  ]);
+  const [mode, config] = await Promise.all([getOrchestrationMode(), getCloudConfig()]);
+  // Liveness NEVER blocks the status anymore (fix 2026-11-14 #2): serve the
+  // cached value; on a cold instance kick a deduped background probe and
+  // omit bootstrap — the next poll picks the fresh value up. This is what
+  // made the Settings → API Keys tab sit 30-40s before showing the key.
+  const state = bootstrap ?? readWorkerBootstrapState();
+  if (!bootstrap && !state) startWorkerBootstrapProbe();
   const appUrl =
     process.env.APP_URL?.trim() || new URL(request.url).origin.replace(/\/+$/, "");
 
@@ -119,6 +124,7 @@ async function statusPayload(
 // ---------------------------------------------------------------------------
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  await ensureTasksSchema();
   return NextResponse.json(await statusPayload(request));
 }
 
@@ -127,6 +133,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  await ensureTasksSchema();
   let body: { action?: unknown; apiKey?: unknown; taskSlug?: unknown };
   try {
     body = (await request.json()) as {
@@ -216,26 +223,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   invalidateOrchestrationModeCache();
   startSchedulerLoop(); // re-arm the schedule loop under the new mode
 
-  // 3) Bootstrap: probe the deployed worker; auto-deploy it when missing
-  //    (writable server filesystems only — deployments persist server-side
-  //    on the cloud, so serverless instances ride the existing deployment).
-  let bootstrap: WorkerBootstrapState | null = null;
-  try {
-    const config = await getCloudConfig();
-    if (config) {
+  // 3) Bootstrap the worker in the BACKGROUND: the liveness probe triggers a
+  //    real health run and polls (~seconds), and auto-deploy takes minutes —
+  //    blocking the connect response on either made Settings feel frozen
+  //    (30-40s). The status poll (client invalidates on success) picks the
+  //    liveness result up; deploy progress lives in its own state file/panel.
+  const bootstrapOrigin = request.nextUrl.origin;
+  void (async () => {
+    try {
+      const config = await getCloudConfig();
+      if (!config) return;
       const liveness = await probeWorkerLiveness(config, { skipCache: true });
       if (liveness === "undeployed" || liveness === "unknown") {
-        await autoDeployWorker(config, { appUrl: request.nextUrl.origin });
+        await autoDeployWorker(config, { appUrl: bootstrapOrigin });
       }
-      bootstrap = await getWorkerBootstrapState().catch(() => null);
+    } catch (err) {
+      console.warn(
+        `[tasks] background worker bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-  } catch (err) {
-    console.warn(
-      `[tasks] worker bootstrap check failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  })();
 
-  const status = await statusPayload(request, bootstrap ?? undefined);
+  const status = await statusPayload(request);
   console.log(
     status.cloud && typeof status.cloud === "object" && (status.cloud as { ephemeral?: boolean }).ephemeral
       ? `[tasks] Trigger.dev Cloud connected in SESSION mode (read-only filesystem — key lives in the operator's browser) (${maskSecret(apiKey)}, task "${taskSlug}")`
@@ -250,6 +259,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 // ---------------------------------------------------------------------------
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
+  await ensureTasksSchema();
   let body: { taskSlug?: unknown };
   try {
     body = (await request.json()) as { taskSlug?: unknown };
@@ -280,6 +290,7 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
 // ---------------------------------------------------------------------------
 
 export async function DELETE(request: NextRequest): Promise<NextResponse> {
+  await ensureTasksSchema();
   const config = await getCloudConfig();
   if (config && config.keySource === "settings") {
     try {

@@ -66,17 +66,42 @@ function isWritableSqliteLocation(dbPath: string): boolean {
 function resolveDatabaseUrl(): string {
   const fromEnv = process.env.DATABASE_URL?.trim();
   if (fromEnv) return fromEnv;
-  const repoDb = `file:${path.join(process.cwd(), "db", "custom.db")}`;
-  if (isWritableSqliteLocation(path.join(process.cwd(), "db", "custom.db"))) {
+  const repoDbPath = path.join(process.cwd(), "db", "custom.db");
+  const repoDb = `file:${repoDbPath}`;
+  if (isWritableSqliteLocation(repoDbPath)) {
     return repoDb;
   }
   // Read-only filesystem (Vercel & friends) — fall back to the writable
   // per-instance tmpfs. Runs are durable on Trigger.dev Cloud; this DB is
   // the local index only (DEPLOY.md: "ephemeral on serverless — fine").
+  // SEED from the read-only repo db first (fix 2026-11-14 #2): the committed
+  // file carries the operator's sealed Trigger.dev Cloud key (TaskCloudConfig)
+  // and schedules — a fresh empty fallback silently disconnected every
+  // instance ("Background runs need a connected Trigger.dev Cloud key").
+  seedTmpDbFromRepo(repoDbPath);
   console.warn(
     `[tasks] db at ${repoDb} is on a read-only filesystem — using ${TMP_DB_PATH} (per-instance, ephemeral)`,
   );
   return `file:${TMP_DB_PATH}`;
+}
+
+/** Copy the read-only repo db into the /tmp fallback location (once per
+ *  instance) so the sealed cloud key + schedules survive the fallback.
+ *  Atomic: copy to a staging name, then rename. Best-effort — on any
+ *  failure the DDL guard below builds a fresh schema instead. */
+function seedTmpDbFromRepo(repoDbPath: string): void {
+  try {
+    if (fs.existsSync(TMP_DB_PATH) || !fs.existsSync(repoDbPath)) return;
+    fs.copyFileSync(repoDbPath, `${TMP_DB_PATH}.seed`);
+    // copyFileSync preserves the source mode — the read-only repo db would
+    // make the SEEDED copy unwritable too (SQLITE_READONLY on first write).
+    fs.chmodSync(`${TMP_DB_PATH}.seed`, 0o644);
+    fs.renameSync(`${TMP_DB_PATH}.seed`, TMP_DB_PATH);
+    console.log(`[tasks] seeded ${TMP_DB_PATH} from the read-only repo db`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[tasks] seeding ${TMP_DB_PATH} failed: ${message.slice(0, 120)}`);
+  }
 }
 
 export const prisma: PrismaClient =
@@ -91,21 +116,27 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 /**
- * Apply the embedded DDL when the target database has no TaskRun table
- * (a fresh /tmp fallback file on serverless, or a fresh clone). Idempotent
- * and cheap after the first call — the work is memoized in a singleton
- * promise, so awaiting it on every route handler is effectively free.
- * Failures are logged, not thrown: the subsequent query then surfaces its
- * own (real) error, which the routes report honestly.
+ * Apply the embedded DDL for any object the target database is missing —
+ * a fresh /tmp fallback file, a fresh clone, or a SEEDED file whose committed
+ * schema predates a new table (per-statement idempotency: each CREATE
+ * TABLE/INDEX is skipped when its object already exists). Cheap after the
+ * first call — the work is memoized in a singleton promise, so awaiting it
+ * on every route handler is effectively free. Failures are logged, not
+ * thrown: the subsequent query then surfaces its own (real) error, which
+ * the routes report honestly.
  */
 export function ensureTasksSchema(): Promise<void> {
   globalForPrisma.__onyxTasksSchemaReady ??= (async () => {
     try {
-      const rows = (await prisma.$queryRawUnsafe(
-        "SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name='TaskRun'",
-      )) as Array<{ c?: number | bigint }>;
-      const existing = Number(rows[0]?.c ?? 0);
-      if (existing > 0) return;
+      const existing = new Set(
+        (
+          (await prisma.$queryRawUnsafe(
+            "SELECT type || ':' || name AS k FROM sqlite_master WHERE type IN ('table','index')",
+          )) as Array<{ k?: string }>
+        )
+          .map((r) => r.k ?? "")
+          .filter(Boolean),
+      );
       const statements = TASKS_SCHEMA_SQL.split(";")
         .map((s) =>
           s
@@ -115,10 +146,18 @@ export function ensureTasksSchema(): Promise<void> {
             .trim(),
         )
         .filter(Boolean);
+      let applied = 0;
       for (const statement of statements) {
+        // "CREATE TABLE \"X\" …" / "CREATE [UNIQUE] INDEX \"Y\" ON …" — skip
+        // when the object already exists (seeded dbs keep their rows).
+        const target = /^CREATE (?:UNIQUE )?(?:TABLE|INDEX) "([^"]+)"/.exec(statement);
+        if (!target?.[1]) continue;
+        const kind = /^CREATE UNIQUE INDEX|^CREATE INDEX/.test(statement) ? "index" : "table";
+        if (existing.has(`${kind}:${target[1]}`)) continue;
         await prisma.$executeRawUnsafe(statement);
+        applied += 1;
       }
-      console.log(`[tasks] schema initialized (${statements.length} statements)`);
+      if (applied > 0) console.log(`[tasks] schema initialized (${applied} statements)`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[tasks] schema init failed: ${message.slice(0, 200)}`);

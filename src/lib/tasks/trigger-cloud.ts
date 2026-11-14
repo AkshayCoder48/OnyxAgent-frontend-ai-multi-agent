@@ -1352,6 +1352,8 @@ const DEPLOY_STATE_FILE = join(process.cwd(), "db", "cloud-worker-deploy.json");
 
 const gBoot = globalThis as unknown as {
   __onyxWorkerLiveness?: { value: WorkerLiveness; at: number } | null;
+  /** In-flight worker liveness probes (dedup — see probeWorkerLiveness). */
+  __onyxWorkerLivenessProbe?: Record<string, Promise<WorkerLiveness>>;
   __onyxWorkerDeploy?: NonNullable<WorkerBootstrapState["deploy"]> | null;
 };
 
@@ -1367,38 +1369,77 @@ export async function probeWorkerLiveness(
   if (!opts?.skipCache && cached && Date.now() - cached.at < 60_000) {
     return cached.value;
   }
-  const cfg = config ?? (await getCloudConfig());
-  if (!cfg) return "unknown";
+  // In-flight dedup (fix 2026-11-14 #2): the status GET, the prewarm and the
+  // settings connect can all cold-start a probe together — share ONE health
+  // run instead of triggering a stampede.
+  const key = opts?.skipCache ? "force" : "cached";
+  const inflight = gBoot.__onyxWorkerLivenessProbe?.[key];
+  if (inflight) return inflight;
+  const probe = (async (): Promise<WorkerLiveness> => {
+    const cfg = config ?? (await getCloudConfig());
+    if (!cfg) return "unknown";
 
-  const setCache = (value: WorkerLiveness) => {
-    gBoot.__onyxWorkerLiveness = { value, at: Date.now() };
-    return value;
-  };
+    const setCache = (value: WorkerLiveness) => {
+      gBoot.__onyxWorkerLiveness = { value, at: Date.now() };
+      return value;
+    };
 
-  try {
-    const runId = await triggerCloudTaskRun({ ...cfg, taskSlug: "health" }, {});
-    // Poll briefly — the health task completes in ~1-3s.
-    for (let i = 0; i < 10; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      const view = await fetchCloudRunView(cfg, runId).catch(() => null);
-      if (!view) continue;
-      if (view.state.status === "completed") return setCache("live");
-      if (view.state.status === "failed") return setCache("live"); // deployed but the probe failed — still deployed
-      if (view.state.status === "live") {
-        const raw = await cloudRequest(cfg.apiKey, `/api/v3/runs/${encodeURIComponent(runId)}`)
-          .then((r) => (r as { status?: string }).status ?? "")
-          .catch(() => "");
-        if (raw === "PENDING_VERSION" || raw === "WAITING_FOR_DEPLOY") {
-          return setCache("undeployed");
+    try {
+      const runId = await triggerCloudTaskRun({ ...cfg, taskSlug: "health" }, {});
+      // Poll briefly — the health task completes in ~1-3s.
+      for (let i = 0; i < 10; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        const view = await fetchCloudRunView(cfg, runId).catch(() => null);
+        if (!view) continue;
+        if (view.state.status === "completed") return setCache("live");
+        if (view.state.status === "failed") return setCache("live"); // deployed but the probe failed — still deployed
+        if (view.state.status === "live") {
+          const raw = await cloudRequest(cfg.apiKey, `/api/v3/runs/${encodeURIComponent(runId)}`)
+            .then((r) => (r as { status?: string }).status ?? "")
+            .catch(() => "");
+          if (raw === "PENDING_VERSION" || raw === "WAITING_FOR_DEPLOY") {
+            return setCache("undeployed");
+          }
         }
       }
+      // Still executing after the window — a deployment exists (undeployed
+      // runs resolve to PENDING_VERSION immediately, which we check above).
+      return setCache("unknown");
+    } catch {
+      return setCache("unknown");
     }
-    // Still executing after the window — a deployment exists (undeployed
-    // runs resolve to PENDING_VERSION immediately, which we check above).
-    return setCache("unknown");
-  } catch {
-    return setCache("unknown");
-  }
+  })();
+  gBoot.__onyxWorkerLivenessProbe = {
+    ...(gBoot.__onyxWorkerLivenessProbe ?? {}),
+    [key]: probe.finally(() => {
+      const map = gBoot.__onyxWorkerLivenessProbe;
+      if (map) {
+        delete map[key];
+        if (Object.keys(map).length === 0) gBoot.__onyxWorkerLivenessProbe = undefined;
+      }
+    }),
+  };
+  return probe;
+}
+
+/** Cached bootstrap state WITHOUT probing — null when never probed in this
+ *  process. Lets the status endpoints answer instantly (fix 2026-11-14 #2:
+ *  the API Keys tab blocked 30-40s on a cold probe) while a background
+ *  probe (startWorkerBootstrapProbe) refreshes the value for the next poll. */
+export function readWorkerBootstrapState(): WorkerBootstrapState | null {
+  const cached = gBoot.__onyxWorkerLiveness;
+  if (!cached) return null;
+  return {
+    liveness: cached.value,
+    probedAt: new Date(cached.at).toISOString(),
+    deploy: loadDeployState(),
+  };
+}
+
+/** Fire-and-forget worker liveness probe (deduped in-flight — see
+ *  probeWorkerLiveness). Errors are logged, never thrown. */
+export function startWorkerBootstrapProbe(opts?: { skipCache?: boolean }): void {
+  probeWorkerLiveness(undefined, opts).catch(() => {});
 }
 
 /** Load (or initialize) the deploy-subprocess state. */

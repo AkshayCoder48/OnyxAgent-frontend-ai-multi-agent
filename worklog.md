@@ -772,3 +772,24 @@ Work Log:
 
 Stage Summary:
 - The user's exact error is fixed at the root: dispatch works on read-only-filesystem deployments (auto-deploys to Vercel with this push); when a DB is genuinely unusable the API now reports WHY.
+
+---
+
+## 2026-11-14 (late) — Fix "Background runs need a connected Trigger.dev Cloud key (the turn was not sent)" + the 30-40s API Keys tab delay
+
+Task ID: 13
+Agent: main (Z.ai Code)
+Task: User report after the read-only-db fix — (1) background turns refuse with "need a connected Trigger.dev Cloud key" even though the key was added; (2) the Settings → API Keys tab only shows the key/connection 30-40s after opening.
+
+Work Log:
+- DIAGNOSIS (1): the refusal fires CLIENT-side (use-chat.ts:497 ensureCloudHandoffActive → "the turn was not sent") — the gate reads GET /api/tasks/cloud `mode`, and on serverless the server-side config is PER-INSTANCE. The full chain: the user's key is sealed in the browser mirror (Dexie, vault-sealed) and every dispatch body carries it (`cloudKey`) — /api/tasks/trigger even has cold-instance self-provisioning (re-verify + save + retry, added earlier today) — but the gate refused the turn BEFORE the dispatch could self-provision. Root-cause of the visible regression: fix #12's /tmp fallback abandoned the committed db (whose TaskCloudConfig row carried the key pre-fix). Deeper: that sealed row can no longer be decrypted ANYWAY (sealed 2026-10-25 with a master key that no longer exists — verified empirically: openSecret fails even with the sandbox's db/cloud-config.key), so the browser-mirror self-provisioning IS the durable chain on serverless.
+- FIX (1a) src/lib/tasks/prisma.ts: the /tmp fallback now SEEDS from the read-only repo db (atomic copy → staging name + rename, once per instance) so whatever the committed db carries (config rows, schedules, the run index) survives the fallback; copyFileSync's preserved read-only file mode caused SQLITE_READONLY on the seeded copy — chmod 0644 after the copy (caught by E2E T2, fixed). ensureTasksSchema() is now per-statement idempotent (each CREATE TABLE/INDEX skipped when its object exists — works for fresh AND seeded-but-drifted dbs).
+- FIX (1b) src/lib/agent/turn-cloud-handoff.ts: cloudHandoffActive() is MIRROR-AWARE — passes when the server says cloud OR the browser mirror holds a key. Rationale: "this instance has no config" ≠ "the user has no key" on serverless; the dispatch re-applies the mirror key server-side. All three call sites benefit (detached-turn gate, pagehide beacon, orphan self-heal) — each carries the mirror key.
+- FIX (1c) /api/tasks/cloud route: ensureTasksSchema() guard on all four handlers.
+- DIAGNOSIS (2): the tab's GET /api/tasks/cloud blocked on getWorkerBootstrapState() → probeWorkerLiveness() (triggers a REAL health run + polls up to 10×600ms+latency ≈ 10-16s cold); because (1) made the tab show unconfigured, the browser-mirror reconnect effect then POSTed the key (verify + ANOTHER skipCache probe + possible auto-deploy ≈ 10-30s) before invalidate+refetch — 30-40s total, exactly the user's observation.
+- FIX (2): statusPayload now serves the CACHED liveness instantly and kicks a deduped background probe (readWorkerBootstrapState + startWorkerBootstrapProbe, new exports); the connect POST bootstraps the worker in the background (probe + auto-deploy no longer block the response — liveness lands on the next poll); probeWorkerLiveness() gained in-flight dedup (concurrent cold callers share ONE health run). The explicit retest/deploy actions still block by design.
+- VERIFICATION (Vercel sim: read-only repo db/, no env key, fresh /tmp): T1 cold status GET = 62ms (mode off, honest, no probe block — was 10-40s). T2 the user's exact scenario — dispatch with the mirror key on the cold instance → self-provision (verifyCloudKey vs the real API → saveCloudConfig sealed to the seeded writable db → mode cloud) → `{"ok":true,"runId":"cmwgk599w…","orchestrator":"triggerdev"}` in 710ms. T3 status after = mode cloud / keySource settings / ephemeral false in 5.6ms. Run lifecycle synced to terminal through the seeded db; /tmp file mode 644. tsc: 0 errors in touched files (total 200 vs the pre-rebase 216 baseline — the drop is the other session's rebased fixes, none in my files); vitest 969/969 (67 files). db/ permissions restored; repo db/custom.db untouched (git status clean apart from the 4 fix files).
+
+Stage Summary:
+- A cold serverless instance with NO server-side key now accepts a background turn in under a second when the browser mirror holds the key (self-provisioning), and the API Keys tab answers in milliseconds with liveness filling in on the next poll.
+- The committed db row stays useful for operators with a stable TASKS_CLOUD_MASTER_KEY; without one, the browser mirror + per-instance self-provisioning is the working chain (by design, documented).
