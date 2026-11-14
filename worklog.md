@@ -680,3 +680,19 @@ Stage Summary:
 - f243ec1 accidentally committed 98 files of Expo build output (`mobile/dist-web/**`, `mobile/.expo/`) that were left untracked after the expo app was removed from the repo (29d0e7e). Untracked + gitignored both paths.
 
 **Tests**: vitest 947/947 (63 files — +1 regression test). `next build` clean. Production server verified at mobile viewport in a real browser.
+
+---
+Task ID: 42
+Agent: main (Z.ai Code)
+Task: Global Card Header Spacing & Dialog Positioning PRD — shared-component fixes (no per-instance overrides)
+
+Work Log:
+- Audit: every named card (AI Providers, Composio, Popular Platforms, Platform & App Keys, API Keys, E2B/Trigger/Pollinations/OnyxBase/Composio/LangSearch/SkillsMP key cards, env page cards, pollinations cards) renders through the ONE shared `SectionCard`; every dialog (incl. Create/Edit Project + its 600px variant, confirmations, provider forms) renders through `DialogContent`/`AlertDialogContent` — both of which anchored mobile as a BOTTOM SHEET, exactly the PRD's defect.
+- globals.css: new card-header tokens on the settings token system — `--card-header-pt/pb/gap` (20/18/8 desktop, 17/15/6 mobile ≤639px).
+- settings-section.tsx (SectionCard): header rhythm now token-driven (py-4 → pt/pb tokens, gap-3 → gap token, description mt-1 → gap token); card gets `overflow-hidden` so any header background clips to the rounded corners (bleed header's border-b still spans full width). SettingsSection: same description/action gap token.
+- dialog.tsx + alert-dialog.tsx: mobile bottom-sheet REPLACED by the centered geometry for EVERY viewport — `top-1/2 left-1/2 -translate-x-1/2 -translate-y-[calc(-50%-var(--kb-shift,0px))]`, width `calc(100vw-2rem)`, height capped to the VISUAL viewport (`--vvh` → 100dvh fallback) minus 2rem breathing room and BOTH safe-area insets; `rounded-2xl` on mobile too; keyboard re-centering via `--kb-shift` (useModalViewport, rAF-coalesced, listeners only while mounted — no polling); flex-column anatomy + DialogBody + the clip safety net (content-level overflow-y-auto) unchanged; entrance stays fade+zoom-in-95 @200ms from the centered position.
+- create-project-dialog.tsx: stale "mobile bottom sheet" comment rewritten; redundant rounded-2xl override dropped. use-modal-viewport.ts: doc updated (--kb-shift is what centered dialogs consume; --kb-lift kept as the raw value it derives from).
+
+Stage Summary:
+- One shared header rhythm + one centered modal geometry for the whole app; consumers only override width/max-h as before. Drawers (vaul) remain the intentional bottom sheets.
+- Verification: vitest 947/947, `next build` clean, tsc error count unchanged from main (200 pre-existing, none in touched files).

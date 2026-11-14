@@ -28,26 +28,28 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
 /**
  * GLOBAL MODAL POSITIONING SYSTEM — every dialog in the app renders through
- * this one component (Modal Viewport & Responsive Positioning PRD):
+ * this one component:
  *
+ *  · CENTERED ON EVERY VIEWPORT (Dialog Positioning PRD, 2026-11-14): the
+ *    old mobile bottom-sheet behavior is gone — standard dialogs open at
+ *    the center of the VISIBLE viewport on mobile too, never anchored to
+ *    the bottom edge (bottom sheets are the Drawer's job, and they stay).
  *  · NEVER outside the visible viewport: the height cap is the VISUAL
  *    viewport (`--vvh`, written by useModalViewport; CSS falls back to
- *    100dvh → 100vh chain when JS is unavailable).
- *  · Mobile (<sm): a BOTTOM SHEET anchored above the keyboard
- *    (`bottom: var(--kb-lift, 0px)`), safe-area padded, never wider than
- *    the screen.
- *  · sm+: the classic centered card, capped at 85% of the visual viewport
- *    and shifted up by half the keyboard gap while typing.
+ *    100dvh → 100vh chain when JS is unavailable) minus a breathing margin
+ *    AND both safe-area insets — centered, so clearance is symmetric.
+ *  · Keyboard-aware while centered: `translate-y(-50% - --kb-shift/2)` keeps
+ *    the card centered in the area ABOVE the on-screen keyboard (the hook
+ *    halves the lift), and tall content scrolls inside (DialogBody) — the
+ *    dialog never ends up underneath the keyboard.
  *  · flex-column anatomy: header (shrink-0) · DialogBody (flex-1, the ONLY
- *    scroll region) · footer (shrink-0) — long content scrolls INSIDE the
- *    dialog, the header and footer stay reachable.
- *  · CLIP SAFETY NET (2026-11-14, "dialogs at the bottom are not
- *    accessible"): the content element itself is overflow-y-auto. Dialogs
- *    that route their content through DialogBody never overflow the outer
- *    box (the inner region scrolls first), but dialogs with raw children
- *    used to get their tall content CLIPPED by overflow-hidden with no way
- *    to reach the fields below the fold. Now ANY content taller than the
- *    cap scrolls — no dialog can trap a field off-screen again.
+ *    designed scroll region) · footer (shrink-0) — long content scrolls
+ *    INSIDE the dialog, the header and footer stay reachable.
+ *  · CLIP SAFETY NET: the content element itself is overflow-y-auto. Raw
+ *    (non-DialogBody) content that outgrows the cap scrolls instead of
+ *    being clipped — no dialog can trap a field off-screen.
+ *  · Entrance: fade + zoom-in-95 over 200ms from the CENTERED position
+ *    (never animating up from the bottom edge).
  *  · Body scroll is locked while open; background never scrolls behind.
  */
 const DialogContent = React.forwardRef<
@@ -73,14 +75,16 @@ const DialogContent = React.forwardRef<
       <DialogPrimitive.Content
         ref={setRefs}
         className={cn(
-          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed inset-x-0 z-50 flex w-full flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain rounded-t-2xl border shadow-lg duration-200 [-webkit-overflow-scrolling:touch]",
-          // Mobile bottom sheet: capped to the VISUAL viewport (keyboard +
-          // address-bar aware), lifted above the keyboard while typing,
-          // safe-area padded at the bottom edge.
-          "bottom-[var(--kb-lift,0px)] max-h-[min(92dvh,calc(var(--vvh,100dvh)-12px))] p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]",
-          // sm+: centered card with horizontal breathing room, capped at
-          // 85% of the visual viewport, shifted up by half the keyboard gap.
-          "sm:top-[50%] sm:bottom-auto sm:left-1/2 sm:w-[calc(100vw-2rem)] sm:max-w-lg sm:max-h-[min(85vh,calc(var(--vvh,100dvh)-32px))] sm:translate-x-[-50%] sm:translate-y-[calc(-50%-var(--kb-shift,0px))] sm:rounded-2xl sm:p-6 sm:pb-6",
+          // Base chrome + CENTERED geometry on EVERY viewport (mobile
+          // included — no bottom sheet): left/top 50% + negative translates,
+          // width capped to viewport minus 2rem gutters, height capped to
+          // the VISUAL viewport minus a 2rem breathing margin and both
+          // safe-area insets (centered, so the clearance is symmetric).
+          // While the keyboard is up, --kb-shift re-centers the card in
+          // the visible area above it.
+          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-[calc(-50%-var(--kb-shift,0px))] flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200 [-webkit-overflow-scrolling:touch]",
+          // sm+: the same centered card with roomier padding.
+          "sm:p-6 sm:pb-6",
           className,
         )}
         {...props}

@@ -3485,6 +3485,15 @@ html.theme-transitioning .animate-backdrop {
 
   --settings-gap-section: 24px;    /* between top-level sections */
   --settings-gap-card: 16px;       /* between cards / rows inside a card */
+
+  /* CARD-HEADER SPACING (Global Card Header Spacing PRD §2.1, 2026-11-14):
+     one rhythm for every shared card header (SectionCard + SettingsSection).
+     Top 20–24 / bottom 18–20 on desktop; 17–20 / 15–18 on mobile. Horizontal
+     padding stays the card's own --settings-padding-card so a header always
+     aligns with its body content (one source of truth for the x axis). */
+  --card-header-pt: 20px;
+  --card-header-pb: 18px;
+  --card-header-gap: 8px;          /* title ↔ description / action spacing */
 }
 @media (max-width: 639px) {
   :root {
@@ -3493,6 +3502,9 @@ html.theme-transitioning .animate-backdrop {
     --settings-padding-nested: 14px;
     --settings-gap-section: 18px;
     --settings-gap-card: 14px;
+    --card-header-pt: 17px;
+    --card-header-pb: 15px;
+    --card-header-gap: 6px;
   }
 }
 

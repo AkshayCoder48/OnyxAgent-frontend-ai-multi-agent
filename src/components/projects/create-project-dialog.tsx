@@ -502,17 +502,19 @@ export function CreateProjectDialog({
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent
         className={cn(
-          // The global modal system provides the chrome: mobile bottom
-          // sheet (keyboard-lifted, safe-area padded), sm+ centered card.
-          // Here: 600px width un-capped from the base 512px, visual-viewport
-          // max-height (keyboard + browser-chrome aware), rounded-2xl so the
-          // lifted sheet reads as a floating card, gap-0 + p-0 because the
-          // header / tabs / scroll body / footer own their own spacing.
+          // The global modal system provides the chrome: a centered card on
+          // EVERY viewport (mobile included — no bottom sheet), visual-
+          // viewport max-height (keyboard + browser-chrome aware) with
+          // safe-area clearance, keyboard-shift re-centering while typing.
+          // Here: 600px width un-capped from the base 512px, gap-0 + p-0
+          // because the header / tabs / scroll body / footer own their own
+          // spacing — the Basics / Memory / Resources tabs stay reachable,
+          // the footer actions never leave the visible area.
           // NO overflow-hidden override: the base keeps overflow-y-auto as
           // the clip safety net — the internal scroll area handles the
           // designed scrolling, the outer box only scrolls if that chain
           // ever breaks (no field can end up unreachable again).
-          "flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] w-[min(94vw,600px)] flex-col gap-0 rounded-2xl p-0 "
+          "flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] w-[min(94vw,600px)] flex-col gap-0 p-0 "
             + "sm:w-[min(94vw,600px)] sm:max-w-none sm:max-h-[min(88dvh,calc(var(--vvh,100dvh)-32px))]",
         )}
       >

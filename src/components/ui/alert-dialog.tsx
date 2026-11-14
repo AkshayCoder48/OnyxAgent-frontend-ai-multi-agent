@@ -25,11 +25,12 @@ const AlertDialogOverlay = React.forwardRef<
 ));
 AlertDialogOverlay.displayName = AlertDialogPrimitive.Overlay.displayName;
 
-// Same GLOBAL MODAL POSITIONING SYSTEM as DialogContent (visual-viewport
-// capped, keyboard-lifted bottom sheet on mobile, centered card on sm+,
-// body scroll locked). Alert dialogs are short confirmations by design, so
-// the whole card scrolls as one unit when a pathological description
-// overflows — the footer stays reachable inside the scroll region.
+// Same GLOBAL MODAL POSITIONING SYSTEM as DialogContent (centered on every
+// viewport, visual-viewport capped with safe-area clearance, keyboard-shift
+// aware, body scroll locked). Alert dialogs are short confirmations by
+// design, so the whole card scrolls as one unit when a pathological
+// description overflows — the footer stays reachable inside the scroll
+// region.
 const AlertDialogContent = React.forwardRef<
   React.ComponentRef<typeof AlertDialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Content>
@@ -52,9 +53,13 @@ const AlertDialogContent = React.forwardRef<
       <AlertDialogPrimitive.Content
         ref={setRefs}
         className={cn(
-          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed inset-x-0 z-50 flex w-full flex-col gap-4 overflow-y-auto overscroll-contain rounded-t-2xl border shadow-lg duration-200",
-          "bottom-[var(--kb-lift,0px)] max-h-[min(92dvh,calc(var(--vvh,100dvh)-12px))] p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]",
-          "sm:top-[50%] sm:bottom-auto sm:left-1/2 sm:w-[calc(100vw-2rem)] sm:max-w-lg sm:max-h-[min(85vh,calc(var(--vvh,100dvh)-32px))] sm:translate-x-[-50%] sm:translate-y-[calc(-50%-var(--kb-shift,0px))] sm:rounded-2xl sm:p-6 sm:pb-6",
+          // CENTERED on every viewport (no mobile bottom sheet) — same
+          // geometry as DialogContent: 50%/50% + negative translates, width
+          // capped to the viewport minus gutters, height capped to the
+          // visual viewport minus breathing room and both safe-area insets,
+          // --kb-shift re-centering while the keyboard is up.
+          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-1/2 left-1/2 z-50 flex max-h-[calc(var(--vvh,100dvh)-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-[calc(-50%-var(--kb-shift,0px))] flex-col gap-4 overflow-y-auto overscroll-contain rounded-2xl border p-5 shadow-lg duration-200",
+          "sm:p-6 sm:pb-6",
           className,
         )}
         {...props}

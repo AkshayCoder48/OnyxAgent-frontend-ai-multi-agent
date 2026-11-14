@@ -11,11 +11,15 @@ import * as React from "react";
  *
  *   --vvh       the visual viewport height in px (falls back to 100dvh in
  *               CSS when unset — SSR, no-JS, older browsers).
- *   --kb-lift   the px a BOTTOM-ANCHORED sheet must rise so it sits above
- *               the on-screen keyboard (0 when no keyboard / no focused
- *               text field inside this modal).
- *   --kb-shift  half the lift, for CENTERED dialogs (keeps the card centered
- *               in the VISIBLE area, not the layout viewport).
+ *   --kb-shift  half the keyboard gap, for the CENTERED dialog geometry:
+ *               the card's translate-y subtracts it, keeping the card
+ *               centered in the VISIBLE area above the on-screen keyboard
+ *               (0 when no keyboard / no focused text field inside this
+ *               modal). Written only while a text field inside the modal
+ *               holds focus and the viewport gap is really a keyboard.
+ *   --kb-lift   the full keyboard gap in px — kept as the raw value
+ *               --kb-shift derives from (and for debugging); the centered
+ *               dialogs consume only --kb-shift.
  *
  * Listeners: visualViewport resize/scroll + window resize + focusin/focusout,
  * all coalesced into ONE requestAnimationFrame per burst. The listeners live

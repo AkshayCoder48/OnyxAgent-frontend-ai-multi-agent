@@ -11,16 +11,25 @@ interface SectionCardProps {
 
 export function SectionCard({ title, description, action, children }: SectionCardProps) {
   return (
-    <section className="border-border bg-card settings-card border">
+    // overflow-hidden: the header bleeds to the card's edges (negative
+    // margins) so its border-b spans the full width — any header background
+    // now clips to the card's rounded corners (PRD §2.3: no sharp
+    // rectangles inside rounded cards). Portaled popovers/selects are
+    // unaffected (they render at the body level).
+    <section className="border-border bg-card settings-card overflow-hidden border">
       {/* items-center: the action button is vertically balanced against the
           title + description column instead of hugging the top edge. The
           header wraps on narrow screens so the action never overflows.
-          Geometry (radius + padding) comes from the settings token system. */}
-      <header className="border-border -mx-[var(--settings-padding-card)] -mt-[var(--settings-padding-card)] mb-[var(--settings-padding-card)] flex flex-wrap items-center justify-between gap-3 border-b px-[var(--settings-padding-card)] py-4">
+          Geometry (radius + padding) comes from the settings token system;
+          header rhythm from the card-header tokens (PRD §2.1: 20/18 desktop,
+          17/15 mobile — titles never touch the card boundary). */}
+      <header className="border-border -mx-[var(--settings-padding-card)] -mt-[var(--settings-padding-card)] mb-[var(--settings-padding-card)] flex flex-wrap items-center justify-between gap-[var(--card-header-gap)] border-b px-[var(--settings-padding-card)] pt-[var(--card-header-pt)] pb-[var(--card-header-pb)]">
         <div className="min-w-0 flex-1">
           <h2 className="text-foreground text-sm leading-snug font-semibold">{title}</h2>
           {description && (
-            <p className="text-muted-foreground mt-1 text-xs leading-relaxed">{description}</p>
+            <p className="text-muted-foreground mt-[var(--card-header-gap)] text-xs leading-relaxed">
+              {description}
+            </p>
           )}
         </div>
         {action && <div className="shrink-0">{action}</div>}
@@ -59,10 +68,12 @@ export function SettingsSection({
     >
       {/* items-center keeps the action vertically balanced against the
           title + description column; flex-wrap degrades gracefully.
-          Header/body separation comes from the settings gap token. */}
+          Header/body separation comes from the settings gap token; the
+          description gap from the card-header token (same rhythm as
+          SectionCard headers). */}
       <header
         className={cn(
-          "flex flex-wrap items-center justify-between gap-3",
+          "flex flex-wrap items-center justify-between gap-[var(--card-header-gap)]",
           children ? "mb-[var(--settings-gap-card)]" : "",
         )}
       >
@@ -76,7 +87,9 @@ export function SettingsSection({
             {title}
           </h2>
           {description && (
-            <p className="text-foreground/65 mt-1 text-sm leading-relaxed">{description}</p>
+            <p className="text-foreground/65 mt-[var(--card-header-gap)] text-sm leading-relaxed">
+              {description}
+            </p>
           )}
         </div>
         {action && <div className="shrink-0">{action}</div>}
