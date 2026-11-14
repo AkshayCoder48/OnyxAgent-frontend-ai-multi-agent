@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -266,7 +267,7 @@ export function SaveCodeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-1">
+        <DialogBody className="space-y-4 py-1">
           {/* Location */}
           <div className="space-y-1.5">
             <Label htmlFor="save-location">Location</Label>
@@ -328,7 +329,7 @@ export function SaveCodeDialog({
             {noSandbox ? "uploads/" : location === "/" ? "/" : `/${location}/`}
             <span className="text-foreground font-semibold">{fullName}</span>
           </p>
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>

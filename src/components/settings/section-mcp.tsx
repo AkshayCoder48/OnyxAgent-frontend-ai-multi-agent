@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -276,7 +277,8 @@ export function SectionMcp() {
               Configure an HTTP/SSE transport server. Headers are sent on every request.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+            <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="mcp-name">Name</Label>
               <Input
@@ -374,8 +376,8 @@ export function SectionMcp() {
                 />
               </div>
             </MoreOptions>
-
-            <DialogFooter>
+            </DialogBody>
+          <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>

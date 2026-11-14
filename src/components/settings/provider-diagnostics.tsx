@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -210,8 +211,9 @@ export function ProviderDiagnosticsDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <DialogBody className="flex flex-col gap-4">
         {/* Model picker + run controls */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {provider.models.length > 1 ? (
             <Select value={model} onValueChange={setModel} disabled={running}>
               <SelectTrigger className="w-[240px]">
@@ -258,7 +260,7 @@ export function ProviderDiagnosticsDialog({
         )}
 
         {/* Results list */}
-        <ScrollArea className="max-h-[46vh] pr-3">
+        <ScrollArea className="min-h-0 flex-1 pr-3">
           <div className="space-y-2">
             {TEST_SLOTS.map((slot) => {
               const r = byId.get(slot.id);
@@ -378,6 +380,7 @@ export function ProviderDiagnosticsDialog({
             </p>
           </>
         )}
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

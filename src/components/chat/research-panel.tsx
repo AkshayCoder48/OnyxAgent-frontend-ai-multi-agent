@@ -2,13 +2,13 @@
 
 import { useState } from "react";
 import { useResearchStore } from "@/stores";
-import type { ResearchTodo } from "@/types";
+import type { Todo, TodoStatus } from "@/types";
 import { TodoList, type TodoItem } from "@/components/assistant-ui/elements";
 import { CheckCircle2, Loader2, Scissors } from "lucide-react";
 
 /**
- * Deep-research / todo tool names that should be hidden from the message
- * transcript and surfaced in this panel instead. Mirrors the backend
+ * Deep-research / legacy todo tool names that should be hidden from the
+ * message transcript and surfaced in this panel instead. Mirrors the backend
  * `pydantic_ai_todo` toolset names.
  */
 export const RESEARCH_TOOL_NAMES = new Set([
@@ -23,7 +23,7 @@ export const RESEARCH_TOOL_NAMES = new Set([
   "get_available_tasks",
 ]);
 
-const EMPTY_TODOS: ResearchTodo[] = [];
+const EMPTY_TODOS: Todo[] = [];
 
 interface ResearchPanelProps {
   /** Optional turn id (defaults to the store's currentTurnId). */
@@ -33,10 +33,10 @@ interface ResearchPanelProps {
   onDismiss?: () => void;
 }
 
-/** Map the agent's todo statuses onto the TodoList element's three states. */
-function todoItemStatus(status: ResearchTodo["status"]): TodoItem["status"] {
+/** Map the agent todo statuses onto the TodoList element's three states. */
+function todoItemStatus(status: TodoStatus): TodoItem["status"] {
   switch (status) {
-    case "completed":
+    case "done":
       return "done";
     case "in_progress":
       return "active";
@@ -46,36 +46,31 @@ function todoItemStatus(status: ResearchTodo["status"]): TodoItem["status"] {
 }
 
 /**
- * Live plan panel for the todo tool, rendered INLINE IN THE MESSAGE THREAD
- * (on the assistant's response flow — NOT a stuck card above the prompt
- * box). Built on the assistant-ui "TodoList" element: a "Todos n/m · rev r"
- * header, one row per step with a checked box (done), spinner (active), or
- * empty outlined box (pending); done rows dim and strike through, subtasks
- * indent under their parent.
- *
- * The agent emits `todo_event` WS frames for every mutation (created /
- * updated / status_changed / completed / deleted); the `use-chat` hook
- * forwards them to `useResearchStore.applyTodoEvent`, which this panel
- * reads. The header row carries a progress bar and the "Cut" (dismiss)
- * affordance.
+ * Live todo panel, rendered INLINE IN THE MESSAGE THREAD (on the assistant's
+ * response flow — NOT a stuck card above the prompt box). ONE data source
+ * with the Todos dock: both read the same `byTurn[turnId].agentTodos`
+ * bucket (the single todo pipeline — manage_todo / show_todo snapshots and
+ * mapped legacy todo_events all land there), so this panel and the dock
+ * above the composer are always in sync. It mounts where a legacy research
+ * todo tool ran inside the message flow.
  */
 export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
   const currentTurnId = useResearchStore((s) => s.currentTurnId);
   const activeTurnId = turnId ?? currentTurnId ?? "default";
   const turn = useResearchStore((s) => s.byTurn[activeTurnId]);
-  const todos = turn?.todos ?? EMPTY_TODOS;
+  const todos = turn?.agentTodos ?? EMPTY_TODOS;
   const dismissed = turn?.dismissed ?? false;
 
   const todoTotal = todos.length;
-  const todoDone = todos.filter((t) => t.status === "completed").length;
+  const todoDone = todos.filter((t) => t.status === "done").length;
   const anyTodoActive = todos.some(
-    (t) => t.status === "in_progress" || t.status === "pending",
+    (t) => t.status === "in_progress" || t.status === "not_planned" || t.status === "not_done",
   );
   const done = todoTotal > 0 && !anyTodoActive;
   const busy = !done;
 
-  // Collapse the panel when the plan finishes and re-expand when new active
-  // todos appear. Uses the render-time "adjust state when derived values
+  // Collapse the panel when the todos finish and re-expand when new active
+  // items appear. Uses the render-time "adjust state when derived values
   // change" pattern from the React docs (no effect → no cascading render).
   const [expanded, setExpanded] = useState(true);
   const [prevDone, setPrevDone] = useState(done);
@@ -90,32 +85,14 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
 
   const pct = Math.round((todoDone / todoTotal) * 100);
 
-  // Flatten the todo tree into TodoList rows — subtasks carry their depth so
-  // they indent under their parent. Revision is derived from the plan state
-  // (done count + total + statuses hash) as a light proxy for the
-  // reference's `rev` counter.
-  const revision = todos.length
-    ? todoDone * 1000 + todoTotal + todos.filter((t) => t.status === "in_progress").length * 7
-    : undefined;
-  const rows: TodoItem[] = [];
-  const walk = (list: ResearchTodo[], depth: number) => {
-    for (const t of list) {
-      rows.push({
-        id: t.id,
-        text: t.status === "in_progress" && t.active_form ? t.active_form : t.content,
-        status: todoItemStatus(t.status),
-        depth,
-      });
-      walk(
-        todos.filter((c) => c.parent_id === t.id),
-        depth + 1,
-      );
-    }
-  };
-  walk(
-    todos.filter((t) => !t.parent_id),
-    0,
-  );
+  const revision =
+    todoDone * 1000 + todoTotal + todos.filter((t) => t.status === "in_progress").length * 7;
+  const rows: TodoItem[] = todos.map((t) => ({
+    id: t.id,
+    text: t.title,
+    status: todoItemStatus(t.status),
+    depth: 0,
+  }));
 
   return (
     <div className="step-card-in my-2 min-w-0 max-w-full">
@@ -127,7 +104,7 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
           ) : (
             <CheckCircle2 className="text-primary h-3 w-3" aria-hidden />
           )}
-          Plan
+          Todos
         </span>
         <span className="shrink-0 font-mono text-[10px] tabular-nums text-foreground/70">
           {todoDone}/{todoTotal} steps
@@ -138,7 +115,7 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
           aria-valuenow={pct}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-label="Plan progress"
+          aria-label="Todo progress"
         >
           <div
             className="h-full rounded-full bg-primary transition-[width] duration-300"
@@ -150,7 +127,7 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
           onClick={() => setExpanded((e) => !e)}
           aria-expanded={expanded}
           className="text-muted-foreground hover:bg-foreground/10 hover:text-foreground shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] transition-colors"
-          title={expanded ? "Collapse plan" : "Expand plan"}
+          title={expanded ? "Collapse todos" : "Expand todos"}
         >
           {expanded ? "hide" : "show"}
         </button>
@@ -158,15 +135,14 @@ export function ResearchPanel({ turnId, onDismiss }: ResearchPanelProps) {
           type="button"
           className="text-muted-foreground hover:bg-foreground/10 hover:text-foreground inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors"
           onClick={() => onDismiss?.()}
-          title="Cut (dismiss plan panel)"
-          aria-label="Dismiss plan panel"
+          title="Cut (dismiss todo panel)"
+          aria-label="Dismiss todo panel"
         >
           <Scissors className="h-3.5 w-3.5" />
         </button>
       </div>
 
-      {/* The TodoList element — assistant-ui recipe. Subtask rows indent by
-          their depth (optional field on TodoItem). */}
+      {/* The TodoList element — assistant-ui recipe. */}
       {expanded ? (
         <TodoList items={rows} revision={revision} className="max-w-none" />
       ) : (

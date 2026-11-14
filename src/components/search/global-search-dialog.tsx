@@ -375,7 +375,7 @@ export function GlobalSearchDialog() {
   return (
     <Dialog open={open} onOpenChange={(o) => (o ? undefined : closeDialog())}>
       <DialogContent
-        className="top-[8vh] flex max-h-[84vh] w-[calc(100vw-1.5rem)] translate-y-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        className="top-[8vh] flex max-h-[calc(var(--vvh,100dvh)-9vh)] w-[calc(100vw-1.5rem)] translate-y-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
         onOpenAutoFocus={(e) => e.preventDefault()}
         onKeyDown={onKeyDown}
         aria-describedby={undefined}

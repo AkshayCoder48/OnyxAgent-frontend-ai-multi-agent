@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -342,7 +343,8 @@ export function SectionProviders() {
                 : "Configure a new OpenAI-compatible provider."}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+            <DialogBody className="space-y-4">
             {/* ── Essentials: everything needed to get a provider running ── */}
             <div className="space-y-1.5">
               <Label htmlFor="p-name">Name</Label>
@@ -551,7 +553,8 @@ export function SectionProviders() {
                 </div>
               </div>
             </MoreOptions>
-            <DialogFooter>
+            </DialogBody>
+          <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>

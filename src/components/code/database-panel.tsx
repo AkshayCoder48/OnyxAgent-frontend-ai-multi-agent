@@ -40,6 +40,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -1194,7 +1195,7 @@ function KvEditorDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{mode === "new" ? "New record" : `Edit "${entry?.name}"`}</DialogTitle>
           <DialogDescription>
@@ -1204,7 +1205,7 @@ function KvEditorDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <DialogBody className="space-y-3">
           <div>
             <Label htmlFor="code-db-kv-key" className="mb-1 block text-xs">
               Key
@@ -1309,7 +1310,7 @@ function KvEditorDialog({
               {saveError}
             </p>
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>
@@ -2063,7 +2064,7 @@ function UploadFileDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <DialogBody className="space-y-3">
           <div className="bg-muted/50 rounded-lg px-3 py-2 text-[11px]">
             <p className="truncate font-medium">{file.name}</p>
             <p className="text-muted-foreground mt-0.5">
@@ -2091,7 +2092,7 @@ function UploadFileDialog({
               {error}
             </p>
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>
@@ -2309,7 +2310,7 @@ function SchemaEditorDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{entity ? `Edit entity "${entity.name}"` : "New schema entity"}</DialogTitle>
           <DialogDescription>
@@ -2318,7 +2319,7 @@ function SchemaEditorDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <DialogBody className="space-y-3">
           <div>
             <Label htmlFor="code-db-entity-name" className="mb-1 block text-xs">
               Entity name
@@ -2402,7 +2403,7 @@ function SchemaEditorDialog({
               {error}
             </p>
           )}
-        </div>
+        </DialogBody>
 
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>

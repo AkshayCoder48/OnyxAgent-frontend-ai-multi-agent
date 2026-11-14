@@ -71,8 +71,10 @@ const CANVAS_SWATCHES: { label: string; hex: string }[] = [
 ];
 
 /** Curated glow-source swatches — the brand orange first, then a few
- *  hues that read well as washes (these tint the GLOW only; the canvas
- *  and every component stay untouched). */
+ *  hues that read well as accents. The glow colour IS the accent: picking
+ *  one retints the glow washes AND every accent-driven element (buttons,
+ *  bubbles, switches, rings) — the canvas and component surfaces stay
+ *  contrast-derived from the background. */
 const GLOW_SWATCHES: { label: string; hex: string }[] = [
   { label: "Onyx orange (default)", hex: DEFAULT_GLOW },
   { label: "Ember", hex: "#e5484d" },
@@ -250,7 +252,7 @@ export function SectionAppearance() {
             }}
           >
             <span className="text-xs font-semibold">Aa</span>
-            <span className="h-1.5 w-1.5 rounded-full bg-[#f07e12]" />
+            <span className="bg-primary h-1.5 w-1.5 rounded-full" />
             <span className="text-[11px] opacity-70">
               {isDefaultBg ? "Default · Onyx" : background}
             </span>
@@ -346,8 +348,9 @@ export function SectionAppearance() {
         <div>
           <h3 className="text-sm font-semibold">Background glow</h3>
           <p className="text-muted-foreground text-xs">
-            The colour of the soft glow that washes over the canvas. Works with the default
-            and custom backgrounds — only the glow tints, nothing else.
+            The glow-source colour — it tints the canvas glow washes AND every
+            accent element (buttons, links, chat bubbles, switches, rings).
+            Default: Onyx orange.
           </p>
         </div>
 

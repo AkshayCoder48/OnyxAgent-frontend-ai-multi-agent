@@ -7,7 +7,6 @@ import { Button, Textarea } from "@/components/ui";
 import {
   chipClass,
   monoLabelClass,
-  paperCardClass,
 } from "@/components/assistant-ui/elements";
 import { formatEstimate } from "@/lib/pollinations/capabilities";
 import {
@@ -232,7 +231,14 @@ export const PollinationsConfirmDialog = memo(function PollinationsConfirmDialog
     <div
       role="dialog"
       aria-label={`Pollinations ${kind.toLowerCase()} generation confirmation`}
-      className={cn(paperCardClass, "step-card-in mb-2 w-full max-w-xl overflow-hidden")}
+      className="step-card-in mb-2 w-full max-w-xl overflow-hidden rounded-xl border"
+      style={{
+        backgroundColor: "var(--glass-frost-fill)",
+        borderColor: "var(--glass-border)",
+        backdropFilter: "var(--glass-blur-frost)",
+        WebkitBackdropFilter: "var(--glass-blur-frost)",
+        boxShadow: "var(--glass-shadow-2)",
+      }}
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-3 px-4 pt-3">

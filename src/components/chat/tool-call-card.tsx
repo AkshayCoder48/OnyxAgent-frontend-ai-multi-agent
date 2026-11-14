@@ -4,7 +4,6 @@ import type { ToolCall } from "@/types";
 import {
   ArrowRight,
   Wrench,
-  Check,
   Clock,
   Search,
   Globe,
@@ -33,7 +32,7 @@ import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 import { useToolDisplayStore } from "@/stores/tool-display-store";
 import { OrbCursor } from "@/components/assistant-ui/elements";
 import { TodoPreview, parseTodoResult } from "./todo-preview";
-import { ToolDurationBadge, ToolLiveElapsed } from "./tool-duration";
+import { ToolDurationBadge } from "./tool-duration";
 import { ChartMessage, parseChartResult } from "./chart-message";
 import { ApprovalCard } from "@/components/assistant-ui/elements/tool-call";
 import { DateTimeResult } from "./tool-results/datetime";
@@ -527,7 +526,6 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
             {liveHint ? (
               <span className="font-mono text-xs text-foreground/60 max-w-[45%] truncate">{liveHint}</span>
             ) : null}
-            <ToolLiveElapsed startedAt={toolCall.startedAt} className="ml-1" />
           </>
         ) : (
           <>
@@ -560,14 +558,8 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
                 {toolCall.args.toolName.trim()}
               </span>
             ) : null}
-            {isCompleted && (
-              <>
-                <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} className="ml-1" />
-                <Check
-                  className="ml-auto h-3.5 w-3.5 shrink-0 text-[var(--tool-ok)]"
-                  aria-label="Done"
-                />
-              </>
+            {isCompleted && isError && (
+              <span className="text-destructive/90 ml-auto shrink-0 text-xs font-medium">Failed</span>
             )}
           </>
         )}
@@ -1211,31 +1203,16 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
           <span className={cn(chipClass, "mb-fade-in-soft shrink truncate")}>{displayHint}</span>
         ) : null}
 
-        {/* Right actions — duration badge + settle state. The running↔settled
-            swap cross-fades with the label above. NO raw toggle on the row
-            (Task 24): the `</>` view lives INSIDE the expanded details. */}
-        <span
-          key={isRunning ? "live" : "done"}
-          className="mb-fade-in-soft ml-auto flex shrink-0 items-center gap-0.5"
-        >
-          {isRunning ? (
-            <>
-              <ToolLiveElapsed startedAt={toolCall.startedAt} />
-            </>
-          ) : (
-            <>
-              <ToolDurationBadge startedAt={toolCall.startedAt} endedAt={toolCall.endedAt} />
-              {isError ? (
-                <span className="text-destructive text-xs font-medium">Failed</span>
-              ) : (
-                <Check
-                  className="h-3.5 w-3.5 text-[var(--tool-ok)]"
-                  aria-label="Done"
-                />
-              )}
-            </>
-          )}
-        </span>
+        {/* Right side — CLEAN ROW (2026-11-14): no elapsed ticker while
+            running, no duration badge, no ✓ tick when settled. Errors keep
+            their quiet "Failed" chip; timing detail lives in the expanded
+            details panel. NO raw toggle on the row (Task 24): the `</>`
+            view lives INSIDE the expanded details. */}
+        {!isRunning && isError ? (
+          <span className="mb-fade-in-soft text-destructive ml-auto shrink-0 text-xs font-medium">
+            Failed
+          </span>
+        ) : null}
       </div>
 
       {/* INLINE TODO PLAN (show_todo): the todo list UI renders directly in

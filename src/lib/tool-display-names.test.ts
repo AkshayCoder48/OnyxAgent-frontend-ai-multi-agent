@@ -35,8 +35,8 @@ describe("toolDisplayName — merged manage_* families get plain nouns", () => {
     expect(toolDisplayName("manage_env_var")).toBe("Environment Variables");
     expect(toolDisplayName("manage_chats")).toBe("Past Chats");
     expect(toolDisplayName("manage_subagent_chat")).toBe("Subagent Chats");
-    expect(toolDisplayName("show_todo")).toBe("Plan");
-    expect(toolDisplayName("manage_todo")).toBe("Plan");
+    expect(toolDisplayName("show_todo")).toBe("Todos");
+    expect(toolDisplayName("manage_todo")).toBe("Todos");
   });
 });
 

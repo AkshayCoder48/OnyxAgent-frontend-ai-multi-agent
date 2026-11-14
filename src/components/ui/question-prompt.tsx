@@ -55,7 +55,20 @@ export function QuestionPrompt({ questions, disabled = false, onComplete }: Ques
   };
 
   return (
-    <div className="bg-muted/40 border-foreground/10 overflow-hidden rounded-2xl border">
+    // TRUE GLASS — the adaptive frost material (same tokens as the composer
+    // dock / plan panel): translucent fill + backdrop blur so the live chat
+    // shows THROUGH the card, hairline glass border, elevation-2 shadow.
+    // Never an opaque slab floating over the conversation.
+    <div
+      className="overflow-hidden rounded-2xl border"
+      style={{
+        backgroundColor: "var(--glass-frost-fill)",
+        borderColor: "var(--glass-border)",
+        backdropFilter: "var(--glass-blur-frost)",
+        WebkitBackdropFilter: "var(--glass-blur-frost)",
+        boxShadow: "var(--glass-shadow-2)",
+      }}
+    >
       <div className="flex items-center justify-between gap-3 px-4 pt-2.5 pb-0.5">
         {total > 1 ? (
           <span className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">

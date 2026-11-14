@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -113,7 +114,7 @@ export function ShareDialog({ conversationId, open, onOpenChange }: ShareDialogP
           <DialogDescription>{t("shareDescription")}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <DialogBody className="space-y-4">
           <div className="flex gap-2">
             <Input
               placeholder={t("userIdOrEmail")}
@@ -208,7 +209,7 @@ export function ShareDialog({ conversationId, open, onOpenChange }: ShareDialogP
               ))}
             </div>
           )}
-        </div>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

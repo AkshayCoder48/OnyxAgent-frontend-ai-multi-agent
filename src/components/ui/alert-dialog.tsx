@@ -4,6 +4,7 @@ import * as React from "react";
 import * as AlertDialogPrimitive from "@radix-ui/react-alert-dialog";
 import { cn } from "@/lib/utils";
 import { buttonVariants } from "./button";
+import { useModalViewport } from "@/hooks/use-modal-viewport";
 
 const AlertDialog = AlertDialogPrimitive.Root;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
@@ -24,37 +25,55 @@ const AlertDialogOverlay = React.forwardRef<
 ));
 AlertDialogOverlay.displayName = AlertDialogPrimitive.Overlay.displayName;
 
+// Same GLOBAL MODAL POSITIONING SYSTEM as DialogContent (visual-viewport
+// capped, keyboard-lifted bottom sheet on mobile, centered card on sm+,
+// body scroll locked). Alert dialogs are short confirmations by design, so
+// the whole card scrolls as one unit when a pathological description
+// overflows — the footer stays reachable inside the scroll region.
 const AlertDialogContent = React.forwardRef<
   React.ComponentRef<typeof AlertDialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Content>
->(({ className, ...props }, ref) => (
-  <AlertDialogPortal>
-    <AlertDialogOverlay />
-    <AlertDialogPrimitive.Content
-      ref={ref}
-      className={cn(
-        // Mobile: bottom sheet (dvh-capped, internal scroll — the old
-        // centered placement overflowed both edges on tall content).
-        "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed inset-x-0 bottom-0 z-50 grid max-h-[min(92dvh,92vh)] w-full gap-4 overflow-y-auto rounded-t-2xl border p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-lg duration-200",
-        "sm:top-[50%] sm:bottom-auto sm:left-1/2 sm:max-h-[min(85vh,85dvh)] sm:w-full sm:max-w-lg sm:translate-x-[-50%] sm:translate-y-[-50%] sm:rounded-lg sm:p-6 sm:pb-6",
-        className,
-      )}
-      {...props}
-    />
-  </AlertDialogPortal>
-));
+>(({ className, ...props }, forwardedRef) => {
+  const innerRef = React.useRef<HTMLDivElement | null>(null);
+  const setRefs = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      innerRef.current = node;
+      if (typeof forwardedRef === "function") forwardedRef(node);
+      else if (forwardedRef)
+        (forwardedRef as React.MutableRefObject<HTMLDivElement | null>).current =
+          node;
+    },
+    [forwardedRef],
+  );
+  useModalViewport(innerRef);
+  return (
+    <AlertDialogPortal>
+      <AlertDialogOverlay />
+      <AlertDialogPrimitive.Content
+        ref={setRefs}
+        className={cn(
+          "bg-background text-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed inset-x-0 z-50 flex w-full flex-col gap-4 overflow-y-auto overscroll-contain rounded-t-2xl border shadow-lg duration-200",
+          "bottom-[var(--kb-lift,0px)] max-h-[min(92dvh,calc(var(--vvh,100dvh)-12px))] p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]",
+          "sm:top-[50%] sm:bottom-auto sm:left-1/2 sm:w-[calc(100vw-2rem)] sm:max-w-lg sm:max-h-[min(85vh,calc(var(--vvh,100dvh)-32px))] sm:translate-x-[-50%] sm:translate-y-[calc(-50%-var(--kb-shift,0px))] sm:rounded-2xl sm:p-6 sm:pb-6",
+          className,
+        )}
+        {...props}
+      />
+    </AlertDialogPortal>
+  );
+});
 AlertDialogContent.displayName = AlertDialogPrimitive.Content.displayName;
 
 function AlertDialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn("flex flex-col space-y-2 text-center sm:text-left", className)} {...props} />
+    <div className={cn("flex shrink-0 flex-col space-y-2 text-center sm:text-left", className)} {...props} />
   );
 }
 
 function AlertDialogFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2", className)}
+      className={cn("flex shrink-0 flex-col-reverse gap-2 sm:flex-row sm:justify-end", className)}
       {...props}
     />
   );
@@ -98,7 +117,7 @@ const AlertDialogCancel = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Cancel
     ref={ref}
-    className={cn(buttonVariants({ variant: "outline" }), "mt-2 sm:mt-0", className)}
+    className={cn(buttonVariants({ variant: "outline" }), "sm:mt-0", className)}
     {...props}
   />
 ));

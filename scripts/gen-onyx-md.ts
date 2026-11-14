@@ -132,7 +132,7 @@ const UMBRELLAS: ReadonlyArray<{ name: string; actions: readonly string[]; blurb
   {
     name: "todos",
     actions: ["manage_todo", "show_todo"],
-    blurb: "Plan multi-step work. create returns a stable ID like todo_8f42 — quote it later.",
+    blurb: "Plan multi-step work. create returns a stable ID like todo_8f42 — quote it later. ALWAYS call show_todo (all: true) right after creating or updating the full list so the user sees the live todo panel.",
   },
   {
     name: "media",

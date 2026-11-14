@@ -161,13 +161,14 @@ function withTodoLock<T>(convId: string, fn: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 
 const MANAGE_DESCRIPTION = `Manage the todo list for the current task.
-Actions:
+Actions (pass as "action" — "operation" is accepted as an alias):
 - create: add a todo (requires title). Returns the todo with its stable ID, e.g. {"success":true,"todo":{"id":"todo_8f42","title":"...","status":"not_planned"}}. ALWAYS quote this ID in later calls.
 - update: change status/content of a todo by its ID (requires todo_id). status must be one of: not_planned, in_progress, done, not_done.
 - delete: remove a todo by its ID.
 - list: return all todos with their IDs.
 - clear: remove all todos.
-Statuses: "not_planned" (not started), "in_progress" (actively working), "done" (completed), "not_done" (attempted but not completed).`;
+Statuses: "not_planned" (not started), "in_progress" (actively working), "done" (completed), "not_done" (attempted but not completed).
+After creating or updating the FULL todo list, ALWAYS call show_todo with all: true so the user sees the live todo panel.`;
 
 const MANAGE_SCHEMA = {
   type: "object",
@@ -176,6 +177,11 @@ const MANAGE_SCHEMA = {
       type: "string",
       enum: ["create", "update", "delete", "list", "clear"],
       description: "The action to perform.",
+    },
+    operation: {
+      type: "string",
+      enum: ["create", "update", "delete", "list", "clear"],
+      description: "Alias for action (accepted for compatibility).",
     },
     title: {
       type: "string",
@@ -193,13 +199,21 @@ const MANAGE_SCHEMA = {
       type: "string",
       description: "The todo ID, e.g. todo_8f42 (for 'update' or 'delete').",
     },
+    todoId: {
+      type: "string",
+      description: "Alias for todo_id.",
+    },
+    id: {
+      type: "string",
+      description: "Alias for todo_id.",
+    },
     status: {
       type: "string",
       enum: ["not_planned", "in_progress", "done", "not_done"],
       description: "New status (for 'update').",
     },
   },
-  required: ["action"],
+  required: [],
   additionalProperties: false,
 } as const;
 
@@ -217,7 +231,12 @@ async function manageTodoLocked(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const convId = ctx.conversationId ?? "";
-  const action = String(args.action ?? "").toLowerCase();
+  // "operation" is a widely-used alias for "action" (models mix the two —
+  // media_generation/use_browser gate on "operation"); accept either.
+  const action = String(args.action ?? args.operation ?? "")
+    .trim()
+    .toLowerCase();
+  const todoId = () => String(args.todo_id ?? args.todoId ?? args.id ?? "");
 
   let todos = await loadTodos(convId);
 
@@ -247,7 +266,7 @@ async function manageTodoLocked(
     }
 
     case "update": {
-      const id = String(args.todo_id ?? "");
+      const id = todoId();
       const idx = todos.findIndex((t) => t.id === id);
       if (idx === -1) {
         return { success: false, output: null, error: `todo not found: ${id || "(missing todo_id)"}` };
@@ -276,7 +295,7 @@ async function manageTodoLocked(
     }
 
     case "delete": {
-      const id = String(args.todo_id ?? "");
+      const id = todoId();
       const idx = todos.findIndex((t) => t.id === id);
       if (idx === -1) {
         return { success: false, output: null, error: `todo not found: ${id || "(missing todo_id)"}` };
@@ -317,7 +336,7 @@ registerTool(
   "show_todo",
   `Display todos to the user as a visual todo table preview in the chat.
 Pass todo IDs (from manage_todo results, e.g. ["todo_8f42","todo_91ac"]) to show specific todos, or all=true (or an empty list) to show every todo.
-Use after creating or updating todos so the user can see the current plan and statuses (Not planned / In progress / Done / Not done).`,
+ALWAYS call this with all: true right after you finish creating or updating the full todo list — and after meaningful status changes — so the user can see the live todo panel with every step (Not planned / In progress / Done / Not done).`,
   {
     type: "object",
     properties: {

@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -319,7 +320,8 @@ export function SectionCustomTools() {
               Tools expose additional capabilities to the agent. The schema must be valid JSON.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+            <DialogBody className="space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="t-name">Name</Label>
@@ -465,8 +467,8 @@ export function SectionCustomTools() {
                 />
               </div>
             </MoreOptions>
-
-            <DialogFooter>
+            </DialogBody>
+          <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>

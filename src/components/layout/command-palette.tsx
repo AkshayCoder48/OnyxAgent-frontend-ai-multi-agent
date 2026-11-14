@@ -79,9 +79,9 @@ export function CommandPalette() {
       label="Command palette"
       shouldFilter
       overlayClassName="fixed inset-0 z-[60] [background-color:var(--glass-scrim)]"
-      contentClassName="border-foreground/15 bg-card text-foreground fixed left-1/2 top-[12vh] z-[61] w-[min(92vw,640px)] -translate-x-1/2 overflow-hidden rounded-2xl border shadow-2xl"
+      contentClassName="border-foreground/15 bg-card text-foreground fixed left-1/2 top-[12vh] z-[61] flex w-[min(92vw,640px)] max-h-[calc(var(--vvh,100dvh)-14vh)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border shadow-2xl"
     >
-      <div className="border-foreground/10 flex items-center gap-3 border-b px-4 py-3">
+      <div className="border-foreground/10 flex shrink-0 items-center gap-3 border-b px-4 py-3">
         <Search className="text-foreground/45 h-4 w-4" />
         <Command.Input
           autoFocus
@@ -95,7 +95,7 @@ export function CommandPalette() {
         </kbd>
       </div>
 
-      <Command.List className="max-h-[60vh] overflow-y-auto px-2 py-2">
+      <Command.List className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
         <Command.Empty className="text-foreground/55 px-4 py-10 text-center text-sm">
           No matches.
         </Command.Empty>

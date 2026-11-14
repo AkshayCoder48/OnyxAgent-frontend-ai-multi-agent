@@ -8,6 +8,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  DialogBody,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -240,7 +241,7 @@ export function SlashCommandsManager() {
               {editingId === "new" ? "New custom command" : `Edit /${draftName}`}
             </DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <DialogBody className="space-y-4">
             <div>
               <Label htmlFor="cmd-name">Name</Label>
               <div className="mt-1.5 flex items-center gap-2">
@@ -281,7 +282,7 @@ export function SlashCommandsManager() {
                 </Label>
               </div>
             )}
-          </div>
+          </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={closeDialog} disabled={submitting}>
               Cancel

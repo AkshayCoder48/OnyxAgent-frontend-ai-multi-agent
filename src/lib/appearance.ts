@@ -152,8 +152,8 @@ function readableInk(bg: string, ink: string, startAlpha: number, min = 4.5): st
   return mix(bg, ink, hi);
 }
 
-/** The app's orange identity accent (DESIGN.md §1). */
-const ACCENT = "#f07e12";
+// (The accent constant now lives as DEFAULT_GLOW — the glow-source colour
+// IS the brand colour; every accent element follows it.)
 
 export interface CanvasTokens {
   /** Raw + derived CSS custom properties for :root. */
@@ -162,12 +162,25 @@ export interface CanvasTokens {
   isDark: boolean;
 }
 
+/** The ink that reads on top of an accent (buttons, bubbles, switches). */
+function accentForeground(accent: string): string {
+  return contrastRatio("#000000", accent) > contrastRatio("#ffffff", accent)
+    ? "#1a0d02"
+    : "#ffffff";
+}
+
 /**
  * Derive the full semantic token set (PRD §2.2) for a custom background.
  * Every value is a CONTRAST-AWARE derivation — never the raw canvas colour
  * on component surfaces that must hold readable text.
+ *
+ * `glow` is the GLOW-SOURCE colour (Settings → Appearance). It drives the
+ * whole accent chain — buttons, CTAs, chat bubbles, switches, focus rings,
+ * charts — so retinting the glow retints every accent-driven element while
+ * surfaces/borders stay derived from the canvas (2026-11-14 directive:
+ * "changing glow source colour changes everything with orange in it").
  */
-export function deriveCanvasTokens(bg: string): CanvasTokens {
+export function deriveCanvasTokens(bg: string, glow: string = DEFAULT_GLOW): CanvasTokens {
   const ink = inkFor(bg);
   const isDark = ink === "#ffffff";
 
@@ -191,18 +204,17 @@ export function deriveCanvasTokens(bg: string): CanvasTokens {
   }
   const borderSubtle = mix(bg, borderTint, isDark ? 0.08 : 0.07);
 
-  // Accent + ring — the orange identity, but if it VANISHES on this canvas
-  // (a bright orange background, say) the focus ring switches to the ink
-  // so keyboard focus is always visible (§2.1 "invisible icons corrected").
-  const accentPrimary = ACCENT;
-  const accentOnBg = contrastRatio(ACCENT, bg);
-  const focusRing = accentOnBg >= 1.6 ? ACCENT : ink;
-  // Button foreground: white ink on orange clears 2.9:1 for large/UI, but
-  // for small button labels prefer black when it reads better.
-  const buttonForeground =
-    contrastRatio("#000000", ACCENT) > contrastRatio("#ffffff", ACCENT)
-      ? "#1a0d02"
-      : "#ffffff";
+  // Accent + ring — the glow-source colour is the accent: if it VANISHES
+  // on this canvas (a glow close to the background colour) the focus ring
+  // switches to the ink so keyboard focus is always visible (§2.1
+  // "invisible icons corrected"). The accent itself is still applied
+  // verbatim — the user picked it.
+  const accentPrimary = glow;
+  const accentOnBg = contrastRatio(glow, bg);
+  const focusRing = accentOnBg >= 1.6 ? glow : ink;
+  // Button foreground: white ink on the accent clears 2.9:1 for large/UI,
+  // but for light accents (yellow, cream) black reads better.
+  const buttonForeground = accentForeground(glow);
   // Icons follow the primary ink so glyphs never disappear.
   const iconPrimary = textSecondary;
 
@@ -331,6 +343,14 @@ export function deriveCanvasTokens(bg: string): CanvasTokens {
       "--color-border": borderDefault,
       "--color-input": borderDefault,
       "--color-ring": focusRing,
+      // ── accent bridge: the glow colour IS the brand colour ───────────
+      "--color-primary": accentPrimary,
+      "--color-primary-foreground": buttonForeground,
+      "--color-brand": accentPrimary,
+      "--color-brand-hover": mix(glow, "#000000", 0.15),
+      "--color-brand-foreground": buttonForeground,
+      "--color-brand-muted": mix(glow, "#000000", 0.45),
+      "--color-chart": accentPrimary,
     },
   };
 }
@@ -342,19 +362,25 @@ const CANVAS_VARS = [
   "--color-primary-foreground",
   "--color-brand",
   "--color-brand-hover",
+  "--color-brand-foreground",
   "--color-chart",
 ];
 
+/** The inline vars applyGlow writes (for clean removal). */
+const GLOW_VARS = ["--glow-color", "--color-primary-foreground", "--button-foreground"];
+
 // ── application ─────────────────────────────────────────────────────────────
 
-/** Apply a custom background: derive + write tokens, flag the canvas. */
+/** Apply a custom background: derive + write tokens, flag the canvas. The
+ *  persisted glow (if any) rides along so the accent chain follows it. */
 export function applyBackground(hex: string): void {
   if (typeof document === "undefined") return;
   const rgb = parseHex(hex);
   if (!rgb) return;
   const bg = toHex(rgb);
   const root = document.documentElement;
-  const { vars } = deriveCanvasTokens(bg);
+  const glow = readPersistedGlow() ?? DEFAULT_GLOW;
+  const { vars } = deriveCanvasTokens(bg, glow);
   for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
   root.classList.add("custom-canvas");
 }
@@ -369,20 +395,42 @@ export function clearBackground(): void {
   root.classList.remove("custom-canvas");
 }
 
-/** Apply a custom glow-source colour: retints the page's radial glow
- *  washes (top + bottom) without touching the canvas or any component.
- *  Unset → the CSS falls back to the brand orange (--acc). */
+/** Apply a custom glow-source colour: retints the page's radial glow washes
+ *  AND the whole accent chain — buttons, CTAs, chat bubbles, switches,
+ *  checkboxes, focus rings, charts — every element that carries the brand
+ *  colour (2026-11-14 directive). Unset → the CSS falls back to the brand
+ *  orange. When a custom background is active, its accent-derived tokens
+ *  are re-derived against the new glow so contrast guarantees survive. */
 export function applyGlow(hex: string): void {
   if (typeof document === "undefined") return;
   const rgb = parseHex(hex);
   if (!rgb) return;
-  document.documentElement.style.setProperty("--glow-color", toHex(rgb));
+  const glow = toHex(rgb);
+  const root = document.documentElement;
+  root.style.setProperty("--glow-color", glow);
+  root.style.setProperty("--color-primary-foreground", accentForeground(glow));
+  root.style.setProperty("--button-foreground", accentForeground(glow));
+  // Re-derive the canvas tokens (focus ring, accent bridge) against the
+  // new glow when a custom canvas is live.
+  const bg = readPersistedBackground();
+  if (bg && parseHex(bg)) {
+    const { vars } = deriveCanvasTokens(toHex(parseHex(bg)!), glow);
+    for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+  }
 }
 
 /** Remove the custom glow colour (back to the brand-orange glow). */
 export function clearGlow(): void {
   if (typeof document === "undefined") return;
-  document.documentElement.style.removeProperty("--glow-color");
+  const root = document.documentElement;
+  for (const prop of GLOW_VARS) root.style.removeProperty(prop);
+  // Restore the canvas tokens' accent to the default orange when a custom
+  // background is active.
+  const bg = readPersistedBackground();
+  if (bg && parseHex(bg)) {
+    const { vars } = deriveCanvasTokens(toHex(parseHex(bg)!), DEFAULT_GLOW);
+    for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+  }
 }
 
 /** Persist + apply a glow-colour choice. */

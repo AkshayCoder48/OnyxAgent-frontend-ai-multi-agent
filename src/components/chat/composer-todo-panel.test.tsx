@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// ComposerTodoPanel — the connected "Plan" dock above the prompt box
+// ComposerTodoPanel — the connected "Todos" dock above the prompt box
 // (user-uploaded design): progress header, live status rows, expand /
 // collapse, and the settle contract (auto-expand on activity, auto-fold
 // when the plan completes).
@@ -27,7 +27,7 @@ const todo = (id: string, title: string, status: Todo["status"]): Todo => ({
 const seed = (todos: Todo[], turnId = "conv-1") => {
   useResearchStore.setState({
     currentTurnId: turnId,
-    byTurn: { [turnId]: { todos: [], agentTodos: todos } },
+    byTurn: { [turnId]: { agentTodos: todos } },
   });
 };
 
@@ -53,7 +53,7 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
   it("shows the plan rows + 'N of M complete' progress", () => {
     seed(PLAN);
     const { getByText, getAllByRole } = render(<ComposerTodoPanel />);
-    expect(getByText("Plan")).toBeTruthy();
+    expect(getByText("Todos")).toBeTruthy();
     expect(getByText("1 of 3 complete")).toBeTruthy();
     expect(getByText("Sync repo + verify test baseline")).toBeTruthy();
     // Every todo row is a toggle button.
@@ -66,7 +66,7 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
   it("active plan mounts EXPANDED; header collapses on click", () => {
     seed(PLAN);
     const { getByRole } = render(<ComposerTodoPanel />);
-    const header = getByRole("button", { name: /plan/i }) as HTMLElement;
+    const header = getByRole("button", { name: /todos/i }) as HTMLElement;
     expect(header.getAttribute("aria-expanded")).toBe("true");
     fireEvent.click(header);
     expect(header.getAttribute("aria-expanded")).toBe("false");
@@ -75,7 +75,7 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
   it("header toggles via keyboard (Enter + Space)", () => {
     seed(PLAN);
     const { getByRole } = render(<ComposerTodoPanel />);
-    const header = getByRole("button", { name: /plan/i });
+    const header = getByRole("button", { name: /todos/i });
     fireEvent.keyDown(header, { key: "Enter" });
     expect(header.getAttribute("aria-expanded")).toBe("false");
     fireEvent.keyDown(header, { key: " " });
@@ -126,7 +126,7 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
   it("SETTLE CONTRACT: activity after settle re-expands the panel", () => {
     seed([todo("a", "Only step", "done")]);
     const { getByRole } = render(<ComposerTodoPanel />);
-    const header = getByRole("button", { name: /plan/i });
+    const header = getByRole("button", { name: /todos/i });
     expect(header.getAttribute("aria-expanded")).toBe("false");
 
     // The agent starts a new step → the panel re-opens.
@@ -139,7 +139,7 @@ describe("ComposerTodoPanel (connected plan dock)", () => {
   it("no turn id → buckets into 'default' without persisting", () => {
     useResearchStore.setState({
       currentTurnId: null,
-      byTurn: { default: { todos: [], agentTodos: PLAN } },
+      byTurn: { default: { agentTodos: PLAN } },
     });
     const { getByText } = render(<ComposerTodoPanel />);
     fireEvent.click(getByText("Sync repo + verify test baseline"));

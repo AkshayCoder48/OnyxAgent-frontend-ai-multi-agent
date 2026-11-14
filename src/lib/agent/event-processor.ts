@@ -1190,27 +1190,53 @@ export class AgentEventProcessor {
       }
 
       case "todo_event": {
-        const { event_type, todo, all_todos } = wsEvent.data as {
+        // ONE TODO PIPELINE (2026-11-14 directive: "it's all todos, not a
+        // separate plan thing"): every todo_event — new shape (title +
+        // 4 statuses from manage_todo/show_todo) OR legacy backend shape
+        // (content/active_form + pending/in_progress/completed/blocked) —
+        // lands in the SAME agentTodos bucket that the Todos dock above
+        // the composer and the TodoPreview tables read. There is no second
+        // "plan" data path anymore.
+        const { all_todos } = wsEvent.data as {
           event_type: string;
           todo: ResearchTodo | null;
           all_todos?: ResearchTodo[] | null;
         };
-        if (Array.isArray(all_todos)) {
-          const isNewShape = (all_todos as unknown[]).some(
-            (t) => t && typeof t === "object" && "title" in (t as Record<string, unknown>),
-          );
-          if (isNewShape) {
-            // The EXECUTION's conversation is the todo bucket — read at
-            // event time (the hub re-keys on conversation_created).
-            const turnId = this.opts.getConversationId() || "default";
-            useResearchStore.getState().setAgentTodos(turnId, all_todos as unknown as Todo[]);
-            if (turnId !== "default") {
-              void persistTodos(turnId, all_todos as unknown as Todo[]).catch(() => {});
-            }
-            break;
-          }
+        if (!Array.isArray(all_todos)) break;
+
+        const turnId = this.opts.getConversationId() || "default";
+        const isNewShape = (all_todos as unknown[]).some(
+          (t) => t && typeof t === "object" && "title" in (t as Record<string, unknown>),
+        );
+
+        let todos: Todo[];
+        if (isNewShape) {
+          todos = all_todos as unknown as Todo[];
+        } else {
+          // Legacy shape → mapped onto the Todo contract (statuses folded
+          // onto the 4 user-facing ones; subtask/dependency fields dropped).
+          todos = (all_todos as ResearchTodo[])
+            .filter((t) => t && typeof t === "object" && (t.content || t.active_form))
+            .map((t) => ({
+              id: t.id,
+              title: t.content || t.active_form || "Task",
+              status:
+                t.status === "completed"
+                  ? ("done" as const)
+                  : t.status === "in_progress"
+                    ? ("in_progress" as const)
+                    : t.status === "blocked"
+                      ? ("not_done" as const)
+                      : ("not_planned" as const),
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            }));
         }
-        useResearchStore.getState().applyTodoEvent(event_type, todo, all_todos);
+
+        useResearchStore.getState().setAgentTodos(turnId, todos);
+        if (turnId !== "default") {
+          void persistTodos(turnId, todos).catch(() => {});
+        }
         break;
       }
 

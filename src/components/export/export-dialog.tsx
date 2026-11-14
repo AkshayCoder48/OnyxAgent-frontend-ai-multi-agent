@@ -259,7 +259,7 @@ export function ExportDialog({
         onOpenChange(next);
       }}
     >
-      <DialogContent className="flex max-h-[88vh] w-[calc(100vw-2rem)] max-w-lg flex-col gap-0 p-0 sm:max-w-lg">
+      <DialogContent className="flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] sm:max-h-[min(88dvh,calc(var(--vvh,100dvh)-32px))] w-[calc(100vw-2rem)] max-w-lg flex-col gap-0 p-0 sm:max-w-lg">
         <DialogHeader className="shrink-0 px-6 pt-6 pb-3">
           <DialogTitle>Export conversation</DialogTitle>
           <DialogDescription>

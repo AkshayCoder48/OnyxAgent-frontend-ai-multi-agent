@@ -1123,7 +1123,7 @@ export const MessageItem = React.memo(function MessageItem({
                         // BrowserUseGroup frame (run start renders the group,
                         // continuations render nothing); every other tool
                         // keeps its own ToolCallCard. The whole stack rests
-                        // as ONE combined "Used N tools" disclosure row
+                        // as ONE combined "Tools" disclosure row
                         // (ToolStackGroup — combined tools UI, 2026-11-13).
                         const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
                         return (message.toolCalls ?? []).map((toolCall) => {
@@ -1249,7 +1249,7 @@ export const MessageItem = React.memo(function MessageItem({
               out.push(
                 <div key={`stack-${first.partId}`} className="mb-stagger">
                   {/* COMBINED TOOLS ROW (user screenshots 2026-11-13): the
-                      whole consecutive-tool sequence rests as ONE "Used N
+                      whole consecutive-tool sequence rests as ONE "Tools
                       tools ›" disclosure; live runs keep their rows
                       visible until the stack settles. */}
                   <ToolStackGroup

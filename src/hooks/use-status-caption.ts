@@ -113,8 +113,9 @@ function toolCaption(name: string, args: Record<string, unknown> | undefined): s
     case "ask_user":
       return "Waiting for your answer";
     case "manage_todo":
+      return "Updating the todos";
     case "show_todo":
-      return "Updating the plan";
+      return "Showing the todo list";
     case "manage_memory":
       return "Saving a memory";
     case "composio_execute_tool":

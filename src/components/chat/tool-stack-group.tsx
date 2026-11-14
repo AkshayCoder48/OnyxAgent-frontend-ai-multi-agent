@@ -6,28 +6,25 @@ import type { ToolCall } from "@/types";
 import { cn } from "@/lib/utils";
 import { CollapsePanel } from "@/components/assistant-ui/elements";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
-import { resolveEffectiveToolCall } from "@/lib/agent/tool-umbrella";
 
 /**
  * ToolStackGroup — the COMBINED TOOLS row (user screenshots 2026-11-13 +
  * directive 2026-11-14). A run of consecutive tool calls rests as ONE
  * compact disclosure row,
  *
- *     [doc icon] Used 10 tools · created 3 files          ›
+ *     [doc icon] Tools                                     ›
  *
- * and tapping anywhere on it expands the individual stacked tool rows
+ * CLEAN ROW (2026-11-14 directive — "remove showing Ns from tools and
+ * ticks, keep clean"): no counts, no file tallies, no duration badges, no
+ * ✓ ticks. Just the glyph, the word "Tools", and the chevron. Failures
+ * are the one number that stays (a silently-failed run must never read as
+ * success); everything else is detail the expanded rows carry.
+ *
+ * Tapping anywhere on the row expands the individual stacked tool rows
  * underneath. While ANY tool in the stack is still live the rows stay
  * fully visible so the run narrates itself; the moment the whole stack
  * settles it folds into the summary — the same auto-fold state machine
  * the "Thought for Ns" reasoning row uses.
- *
- * SMART CAPTION (2026-11-14 — "creating a file is saying used files 😂"):
- * the summary is derived from WHAT THE RUN DID, not a bare tool count.
- * A stack that only created files reads "Created 3 files"; mixed runs
- * read "Used 8 tools · created 3 files · edited 1 file"; anything else
- * falls back to "Used N tools". File counts dedupe by path (a file
- * written in 5 chunks is ONE file) and only count completed, error-free
- * calls.
  */
 
 interface ToolStackGroupProps {
@@ -51,89 +48,15 @@ export function isStackLive(toolCalls: readonly ToolCall[]): boolean {
   );
 }
 
-// ── smart-caption derivation ────────────────────────────────────────────────
+// ── summary derivation ────────────────────────────────────────────────────
 
-/** Tool names whose successful completion means "a file was created".
- *  create_file_chunk writes one chunk of one file — deduped by path. */
-const FILE_CREATE_NAMES = new Set(["create_file", "write_file", "create_file_chunk"]);
-
-/** A completed call whose parsed result carries an error is NOT a landed
- *  file ("3 files created" must never describe three error results). */
-function resultHasError(tc: ToolCall): boolean {
-  if (tc.result && typeof tc.result === "object") {
-    return Boolean((tc.result as Record<string, unknown>).error);
-  }
-  if (typeof tc.result === "string" && tc.result.startsWith('{"error"')) {
-    return true;
-  }
-  return false;
-}
-
-/** The units whose successful completion means "a file was created"
- *  (create_file / write_file / create_file_chunk, umbrella-resolved,
- *  completed, error-free — path dedupe happens separately). */
-function creationUnitsOf(units: readonly ToolCall[]): ToolCall[] {
-  return units.filter((raw) => {
-    if (raw.status !== "completed" || resultHasError(raw)) return false;
-    return FILE_CREATE_NAMES.has(resolveEffectiveToolCall(raw).name);
-  });
-}
-
-/** Dedupe landed file creations by target path (a file written in N
- *  chunks is ONE file). */
-function landedFileCount(creations: readonly ToolCall[]): number {
-  const paths = new Set<string>();
-  for (const raw of creations) {
-    const tc = resolveEffectiveToolCall(raw);
-    const path =
-      (typeof tc.args?.path === "string" && tc.args.path) ||
-      (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-      tc.id;
-    paths.add(path);
-  }
-  return paths.size;
-}
-
-function countName(calls: readonly ToolCall[], name: string): number {
-  let n = 0;
-  for (const raw of calls) {
-    const tc = resolveEffectiveToolCall(raw);
-    if (tc.name === name && raw.status === "completed") n += 1;
-  }
-  return n;
-}
-
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
-
-/** The combined summary line for a settled stack. */
+/** The combined summary line for a settled stack — the CLEAN caption
+ *  ("Tools", plus "· N failed" only when something broke). Tool counts,
+ *  file tallies and durations intentionally never appear (2026-11-14
+ *  directive: "remove showing Ns from tools and ticks — keep clean"). */
 export function stackSummary(toolCalls: readonly ToolCall[]): string {
-  // Units = run-starts + non-browser calls (matches the rows rendered).
-  const runs = mapBrowserRunStarts(toolCalls);
-  const units: ToolCall[] = [];
-  for (const tc of toolCalls) {
-    if (runs.isContinuation(tc.id)) continue;
-    units.push(tc);
-  }
-  const unitCount = units.length;
-
-  const creationUnits = creationUnitsOf(units);
-  const created = landedFileCount(creationUnits);
-  const edited = countName(units, "edit_file");
-  const failed = units.filter((tc) => tc.status === "error").length;
-
-  // EVERY unit a landed file creation → the whole run IS file creation
-  // ("Created 4 files", never "Used 4 tools" — the 😂 case). Chunked
-  // writes count as creation units too, deduped to their file count.
-  if (creationUnits.length > 0 && creationUnits.length === unitCount && failed === 0) {
-    return `Created ${created} ${plural(created, "file", "files")}`;
-  }
-
-  // Mixed run — lead with the tool count, then the notable actions.
-  const segments: string[] = [];
-  if (created > 0) segments.push(`created ${created} ${plural(created, "file", "files")}`);
-  if (edited > 0) segments.push(`edited ${edited} ${plural(edited, "file", "files")}`);
-  const head = `Used ${unitCount} ${plural(unitCount, "tool", "tools")}`;
-  return segments.length > 0 ? `${head} · ${segments.join(" · ")}` : head;
+  const failed = toolCalls.filter((tc) => tc.status === "error").length;
+  return failed > 0 ? `Tools · ${failed} failed` : "Tools";
 }
 
 export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
@@ -155,7 +78,7 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
     [toolCalls],
   );
 
-  // The smart caption — memoized like the counts above.
+  // The clean caption — memoized like the counts above.
   const summary = useMemo(() => stackSummary(toolCalls), [toolCalls]);
 
   const live = isStackLive(toolCalls);
@@ -185,7 +108,7 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
   // SETTLED multi-tool stack: the combined summary row + the folded rows.
   return (
     <div className="tool-call-stack step-card-in w-full">
-      {/* The combined row — doc glyph · smart summary · chevron. The
+      {/* The combined row — doc glyph · clean caption · chevron. The
           WHOLE row is the disclosure (same a11y pattern as every other
           tool row: div role=button so nested interactive rows stay
           legal). Muted monochrome per the screenshot — theme-aware
@@ -194,7 +117,7 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        aria-label={`${summary}${failedCount > 0 ? `, ${failedCount} failed` : ""}`}
+        aria-label={summary}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -206,7 +129,7 @@ export function ToolStackGroup({ toolCalls, children }: ToolStackGroupProps) {
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 truncate text-sm font-medium text-muted-foreground">
-          {summary}
+          Tools
           {failedCount > 0 && (
             <span className="text-destructive/90"> · {failedCount} failed</span>
           )}

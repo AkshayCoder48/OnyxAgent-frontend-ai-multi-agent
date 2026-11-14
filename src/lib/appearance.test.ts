@@ -15,6 +15,8 @@ import {
   readPersistedBackground,
   resetAppearance,
   applyPersistedAppearance,
+  applyGlow,
+  clearGlow,
 } from "@/lib/appearance";
 
 describe("appearance · WCAG colour math", () => {
@@ -213,6 +215,56 @@ describe("appearance · adaptive glass materials (glassmorphism overhaul)", () =
     for (const key of GLASS_KEYS) {
       expect(root.style.getPropertyValue(key)).toBe("");
     }
+  });
+});
+
+describe("appearance · glow-driven accent system (2026-11-14)", () => {
+  it("a custom glow drives the whole accent bridge — primary, brand, button, chart", () => {
+    const t = deriveCanvasTokens("#0b0200", "#0091ff");
+    expect(t.vars["--accent-primary"]).toBe("#0091ff");
+    expect(t.vars["--button-background"]).toBe("#0091ff");
+    expect(t.vars["--color-primary"]).toBe("#0091ff");
+    expect(t.vars["--color-brand"]).toBe("#0091ff");
+    expect(t.vars["--color-brand-hover"]).not.toBe("#0091ff"); // derived shade
+    expect(t.vars["--color-chart"]).toBe("#0091ff");
+  });
+
+  it("no glow argument → the default Onyx orange identity", () => {
+    const t = deriveCanvasTokens("#0b0200");
+    expect(t.vars["--color-primary"]).toBe("#f07e12");
+    expect(t.vars["--color-brand"]).toBe("#f07e12");
+  });
+
+  it("a light glow flips the accent foreground to dark ink (readable buttons)", () => {
+    const light = deriveCanvasTokens("#0b0200", "#ffe066");
+    expect(light.vars["--color-primary-foreground"]).toBe("#1a0d02");
+    // The computed path picks the higher-contrast ink for EVERY accent —
+    // on the brand orange, dark ink wins 7.7:1 over white's 2.7:1 (the
+    // pre-existing engine behavior for custom canvases; the no-custom-
+    // canvas paint keeps the stylesheet's white brand look).
+    const orange = deriveCanvasTokens("#0b0200");
+    expect(orange.vars["--color-primary-foreground"]).toBe("#1a0d02");
+    // Deep/vivid glows pick whichever ink contrasts more — the violet
+    // swatch is dark enough that white wins.
+    const violet = deriveCanvasTokens("#0b0200", "#8e4ec6");
+    expect(violet.vars["--color-primary-foreground"]).toBe("#ffffff");
+  });
+
+  it("a glow that vanishes on the canvas swaps the focus ring to ink", () => {
+    // glow == canvas → ring falls back to the readable ink.
+    const t = deriveCanvasTokens("#0091ff", "#0091ff");
+    expect(t.vars["--focus-ring"]).not.toBe("#0091ff");
+  });
+
+  it("applyGlow writes the glow + foreground vars; clearGlow strips them", () => {
+    applyGlow("#8e4ec6");
+    const root = document.documentElement;
+    expect(root.style.getPropertyValue("--glow-color")).toBe("#8e4ec6");
+    expect(root.style.getPropertyValue("--color-primary-foreground")).toBeTruthy();
+    expect(root.style.getPropertyValue("--button-foreground")).toBeTruthy();
+    clearGlow();
+    expect(root.style.getPropertyValue("--glow-color")).toBe("");
+    expect(root.style.getPropertyValue("--button-foreground")).toBe("");
   });
 });
 

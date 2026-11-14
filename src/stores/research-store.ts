@@ -1,13 +1,15 @@
 "use client";
 
 import { create } from "zustand";
-import type { ResearchTodo, Todo } from "@/types";
+import type { Todo } from "@/types";
 
 interface ResearchTurn {
-  todos: ResearchTodo[];
-  /** Agent Todo system (PRD): todos from manage_todo / show_todo with the
-   *  new 4-status shape. Read by the TodoPreview table attached to the
-   *  show_todo tool call — live updates flow in via todo_event snapshots. */
+  /** The ONE todo bucket (2026-11-14: "it's all todos, not a separate plan
+   *  thing"). manage_todo / show_todo snapshots AND legacy-backend
+   *  todo_events both land here (the event processor maps the legacy
+   *  shape). Read by the Todos dock above the composer and the TodoPreview
+   *  tables attached to tool rows — live updates arrive as todo_event
+   *  snapshots, and the list rehydrates from Dexie across refreshes. */
   agentTodos?: Todo[];
   /** User clicked the "Cut" button — panel stays hidden until the next event. */
   dismissed?: boolean;
@@ -19,27 +21,18 @@ interface ResearchState {
   /** The active conversation id (used as the turn key). */
   currentTurnId: string | null;
   setCurrentTurnId: (turnId: string | null) => void;
-  applyTodoEvent: (
-    eventType: string,
-    todo: ResearchTodo | null,
-    allTodos?: ResearchTodo[] | null,
-  ) => void;
-  /** Replace the agent todos for a turn (new 4-status Todo shape). */
+  /** Replace the agent todos for a turn. */
   setAgentTodos: (turnId: string, todos: Todo[]) => void;
   dismiss: () => void;
   reset: (turnId?: string) => void;
 }
 
 /**
- * Live TODO plan store. The agent emits `todo_event` WS frames for every
- * mutation (created / updated / status_changed / completed / deleted /
- * reset / snapshot); the hook in `use-chat.ts` forwards them here. The
- * `ResearchPanel` reads the active turn's todos and renders them with a
- * real-time progress bar, status icons, and a "Cut" button.
- *
- * The backend ships the full `all_todos` snapshot on every event (see
- * `app/agents/todo_integration.py:_make_handler`), so we don't need to
- * implement per-event merging logic — just replace the list.
+ * The live TODO store. The agent emits `todo_event` frames carrying a full
+ * `all_todos` snapshot for every mutation; the event processor forwards them
+ * here into `agentTodos` (the single todo pipeline — legacy shapes are
+ * mapped onto the Todo contract upstream). The Todos dock and the
+ * TodoPreview tables render from this one bucket.
  */
 export const useResearchStore = create<ResearchState>((set, get) => ({
   byTurn: {},
@@ -49,7 +42,7 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
 
   setAgentTodos: (turnId, todos) => {
     set((state) => {
-      const prevTurn = state.byTurn[turnId] ?? { todos: [] };
+      const prevTurn = state.byTurn[turnId] ?? {};
       return {
         byTurn: {
           ...state.byTurn,
@@ -59,47 +52,10 @@ export const useResearchStore = create<ResearchState>((set, get) => ({
     });
   },
 
-  applyTodoEvent: (eventType, todo, allTodos) => {
-    const turnId = get().currentTurnId ?? "default";
-
-    set((state) => {
-      const prevTurn = state.byTurn[turnId] ?? { todos: [] };
-      // "reset" clears; "snapshot" replaces; anything else also uses the
-      // shipped `allTodos` (with a fallback to the previous list so a stray
-      // event without snapshot doesn't blow away the panel).
-      let todos: ResearchTodo[];
-      if (eventType === "reset") {
-        todos = [];
-      } else if (allTodos && Array.isArray(allTodos)) {
-        todos = allTodos as ResearchTodo[];
-      } else if (todo) {
-        // Merge single-todo event into existing list.
-        const idx = prevTurn.todos.findIndex((t) => t.id === (todo as ResearchTodo).id);
-        if (idx >= 0) {
-          todos = [...prevTurn.todos];
-          if (eventType === "deleted") todos.splice(idx, 1);
-          else todos[idx] = todo as ResearchTodo;
-        } else if (eventType !== "deleted") {
-          todos = [...prevTurn.todos, todo as ResearchTodo];
-        } else {
-          todos = prevTurn.todos;
-        }
-      } else {
-        todos = prevTurn.todos;
-      }
-      return {
-        byTurn: {
-          ...state.byTurn,
-          [turnId]: { todos, dismissed: false },
-        },
-      };
-    });
-  },
-
   dismiss: () => {
     const turnId = get().currentTurnId ?? "default";
     set((state) => {
-      const prevTurn = state.byTurn[turnId] ?? { todos: [] };
+      const prevTurn = state.byTurn[turnId] ?? {};
       return {
         byTurn: {
           ...state.byTurn,

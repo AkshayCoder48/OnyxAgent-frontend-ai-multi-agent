@@ -33,6 +33,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -497,16 +498,18 @@ export function ConversationSidebar({
               e.preventDefault();
               submitRename();
             }}
-            className="space-y-3"
+            className="flex min-h-0 flex-1 flex-col gap-4"
           >
-            <Input
-              autoFocus
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              placeholder="Conversation title"
-              aria-label="Conversation title"
-              maxLength={120}
-            />
+            <DialogBody>
+              <Input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                placeholder="Conversation title"
+                aria-label="Conversation title"
+                maxLength={120}
+              />
+            </DialogBody>
             <DialogFooter>
               <Button
                 type="button"

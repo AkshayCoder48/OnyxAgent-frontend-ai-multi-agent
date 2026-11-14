@@ -185,7 +185,7 @@ export function SyncSourceWizard({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-hidden p-0 sm:max-w-2xl">
+      <DialogContent className="max-h-[min(90dvh,calc(var(--vvh,100dvh)-24px))] sm:max-h-[min(90dvh,calc(var(--vvh,100dvh)-32px))] overflow-hidden p-0 sm:max-w-2xl">
         <DialogHeader className="border-foreground/10 border-b px-6 py-4">
           <DialogTitle className="font-display text-base font-semibold">
             Add sync source
@@ -264,7 +264,7 @@ export function SyncSourceWizard({
           )}
         </DialogHeader>
 
-        <div className="max-h-[60vh] scrollbar-thin overflow-y-auto px-6 py-5">
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
           {mode === "clone" ? (
             <CloneStep
               integrations={orgIntegrations}

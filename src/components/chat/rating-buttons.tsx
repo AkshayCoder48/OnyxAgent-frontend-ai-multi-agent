@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -220,15 +221,16 @@ export function RatingButtons({
             <DialogTitle>{t("whatWentWrong")}</DialogTitle>
             <DialogDescription>{t("feedbackHelp")}</DialogDescription>
           </DialogHeader>
-          <textarea
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            placeholder={t("describeIssue")}
-            className="bg-background min-h-[100px] w-full rounded-md border p-2"
-            maxLength={2000}
-            autoFocus
-          />
-          <div className="flex items-center justify-between">
+          <DialogBody className="space-y-3">
+            <textarea
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              placeholder={t("describeIssue")}
+              className="bg-background min-h-[100px] w-full rounded-md border p-2"
+              maxLength={2000}
+              autoFocus
+            />
+            <div className="flex items-center justify-between">
             <span className="text-muted-foreground text-xs">{comment.length} / 2000</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={handleCloseDialog} disabled={isLoading}>
@@ -251,6 +253,7 @@ export function RatingButtons({
               </Button>
             </div>
           </div>
+          </DialogBody>
         </DialogContent>
       </Dialog>
     </>

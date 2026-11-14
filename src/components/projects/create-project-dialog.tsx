@@ -502,13 +502,14 @@ export function CreateProjectDialog({
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent
         className={cn(
-          // Centered on ALL viewports (the base dialog positioning) — mobile
-          // previously pinned this to the bottom edge as a sheet, which read
-          // as "stuck to the bottom". dvh-aware max-height keeps it clear of
-          // mobile browser chrome; rounded-2xl restores corners on mobile
-          // (the base only rounds at sm+); max-w-none un-caps the base
-          // max-w-lg (512px) so the intended 600px width applies.
-          "flex max-h-[min(88vh,88dvh)] w-[min(94vw,600px)] max-w-none flex-col gap-0 overflow-hidden rounded-2xl p-0",
+          // The global modal system provides the chrome: mobile bottom
+          // sheet (keyboard-lifted, safe-area padded), sm+ centered card.
+          // Here: 600px width un-capped from the base 512px, visual-viewport
+          // max-height (keyboard + browser-chrome aware), rounded-2xl so the
+          // lifted sheet reads as a floating card, gap-0 + p-0 because the
+          // header / tabs / scroll body / footer own their own spacing.
+          "flex max-h-[min(88dvh,calc(var(--vvh,100dvh)-24px))] w-[min(94vw,600px)] flex-col gap-0 overflow-hidden rounded-2xl p-0 "
+          + "sm:w-[min(94vw,600px)] sm:max-w-none sm:max-h-[min(88dvh,calc(var(--vvh,100dvh)-32px))]",
         )}
       >
         <DialogHeader className="border-b px-5 pt-4 pb-3 text-left">

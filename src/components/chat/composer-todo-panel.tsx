@@ -8,28 +8,29 @@ import { useResearchStore } from "@/stores";
 import type { Todo } from "@/types";
 
 /**
- * COMPOSER TODO PANEL — the connected "Plan" dock (user-uploaded design).
+ * COMPOSER TODO PANEL — the connected "Todos" dock (user-uploaded design).
  *
- * The live agent plan attaches DIRECTLY ABOVE the prompt box: a frosted
+ * The live todo list attaches DIRECTLY ABOVE the prompt box: a frosted
  * glass panel (the adaptive material tokens — never a hand-rolled glass)
  * that tucks under the composer with a negative margin so the two read as
  * ONE stack, exactly like the reference:
  *
  *   ┌─────────────────────────────┐
- *   │ ✓ Plan        2 of 5 done ⌄ │  ← this panel (z-1, border-b-0)
+ *   │ ✓ Todos       2 of 5 done ⌄ │  ← this panel (z-1, border-b-0)
  *   │ ○ Sync repo…                 │
  *   │ ● Fix python output          │  ← scrollable (max-h, thin bar)
  *   ├─────────────────────────────┤
  *   │ Reply to OnyxAgent…      ↑  │  ← composer-dock (z-2, overlaps 14px)
  *   └─────────────────────────────┘
  *
- * Data: the agent Todo system (`manage_todo` / `todo_event` snapshots) —
- * the same `byTurn[turnId].agentTodos` bucket the inline TodoPreview
+ * ONE data source (2026-11-14: "it's all todos, not a separate plan
+ * thing"): the agent Todo system (`manage_todo` / `todo_event` snapshots)
+ * — the same `byTurn[turnId].agentTodos` bucket the inline TodoPreview
  * tables read, rehydrated from Dexie across refreshes. Rows are LIVE:
  * tapping one flips its status in the store + persists the snapshot.
  *
  * Settle contract (same as ToolStackGroup / "Thought for Ns"): the panel
- * auto-expands while any step is active and folds itself when the plan
+ * auto-expands while any step is active and folds itself when the list
  * completes; a manual toggle between transitions always wins.
  */
 export function ComposerTodoPanel() {
@@ -52,7 +53,7 @@ export function ComposerTodoPanel() {
     setExpanded(anyActive);
   }
 
-  if (total === 0) return null; // no plan yet → no chrome above the composer
+  if (total === 0) return null; // no todos yet → no chrome above the composer
 
   const toggle = (id: string) => {
     const next = items.map((t) =>
@@ -81,7 +82,7 @@ export function ComposerTodoPanel() {
 
   return (
     <section
-      aria-label="Plan"
+      aria-label="Todos"
       className="mb-object-in relative z-[1] mx-auto mb-[-14px] w-[calc(100%-24px)] rounded-t-[19px] rounded-b-[14px] border border-b-0 pb-[14px] pt-[2px] sm:w-[calc(100%-32px)]"
       style={{
         backgroundColor: "var(--glass-frost-fill)",
@@ -100,7 +101,7 @@ export function ComposerTodoPanel() {
         className="flex min-h-[46px] w-full items-center gap-2.5 px-4 text-left outline-none transition-colors hover:bg-foreground/[0.035] focus-visible:ring-2 focus-visible:ring-primary/40"
       >
         <ListChecks className="h-[18px] w-[18px] shrink-0 text-muted-foreground" />
-        <span className="text-sm font-semibold tracking-tight text-foreground/90">Plan</span>
+        <span className="text-sm font-semibold tracking-tight text-foreground/90">Todos</span>
         <span className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
           {doneCount} of {total} complete
         </span>

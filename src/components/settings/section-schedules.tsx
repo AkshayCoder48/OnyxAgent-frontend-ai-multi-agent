@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -291,7 +292,7 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[520px]">
+      <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle>{editing ? "Edit schedule" : "New schedule"}</DialogTitle>
           <DialogDescription>
@@ -299,7 +300,8 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
             this app is closed.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+            <DialogBody className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="sched-name">Name</Label>
             <Input
@@ -406,7 +408,7 @@ function ScheduleDialog({ open, onOpenChange, editing }: ScheduleDialogProps) {
               </div>
             </MoreOptions>
           )}
-
+            </DialogBody>
           <DialogFooter>
             <Button
               type="button"

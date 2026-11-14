@@ -6,6 +6,7 @@ import { Button } from "./button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -67,7 +68,7 @@ export function ConfirmDialog({
         </DialogHeader>
 
         {confirmText && (
-          <div className="space-y-1.5">
+          <DialogBody className="space-y-1.5">
             <Label htmlFor="confirm-phrase" className="text-muted-foreground text-xs">
               Type <span className="text-foreground font-mono">{confirmText}</span> to confirm
             </Label>
@@ -78,7 +79,7 @@ export function ConfirmDialog({
               autoComplete="off"
               autoFocus
             />
-          </div>
+          </DialogBody>
         )}
 
         <DialogFooter>

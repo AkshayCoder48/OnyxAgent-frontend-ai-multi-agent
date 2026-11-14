@@ -238,13 +238,17 @@
   --color-border: rgb(255 255 255 / 0.14);   /* glass hairline (§1.3 ladder) */
   --color-input: rgb(255 255 255 / 0.12);
 
-  /* brand: orange drives primary/CTAs/rings/charts */
-  --color-primary: #F07E12;
+  /* brand: the GLOW-SOURCE colour drives primary/CTAs/bubbles/rings/charts.
+     --glow-color is written inline by the appearance engine when the user
+     retints the glow (Settings → Appearance); unset → brand orange. The
+     foreground flips to dark ink for light glows (contrast-aware, set
+     inline alongside --glow-color). */
+  --color-primary: var(--glow-color, #F07E12);
   --color-primary-foreground: #ffffff;
-  --color-brand: #F07E12;
-  --color-brand-hover: color-mix(in srgb, #F07E12 85%, #000);
+  --color-brand: var(--glow-color, #F07E12);
+  --color-brand-hover: color-mix(in srgb, var(--color-brand) 85%, #000);
   --color-brand-foreground: #ffffff;
-  --color-brand-muted: color-mix(in srgb, #F07E12 55%, #000);
+  --color-brand-muted: color-mix(in srgb, var(--color-brand) 55%, #000);
   --color-ring: var(--acc);
   --color-chart: var(--acc);
 
@@ -253,8 +257,8 @@
   --color-destructive-foreground: #1c0605;
 
   /* chat surfaces (globals.css §"Chat bubble colors") */
-  --chat-user-bg: var(--acc);                       /* inline bubble backgroundColor → orange */
-  --chat-user-fg: #ffffff;
+  --chat-user-bg: var(--acc);                       /* inline bubble backgroundColor → the glow colour */
+  --chat-user-fg: var(--color-primary-foreground, #ffffff);
   --chat-user-border: color-mix(in srgb, var(--acc) 55%, transparent);
   --chat-assistant-bg: transparent;                 /* assistant stays frameless (§8.8) */
   --chat-assistant-fg: rgb(255 255 255 / 0.9);
@@ -621,7 +625,9 @@ input.bg-background:focus {
    painted body flat and the glow simply vanished). Every glass pane
    re-derives its fill from canvas + ink via color-mix so text carved
    from --text-primary (set inline, WCAG-validated) always reads. The
-   accent chain stays orange — the picker never repaints components. */
+   accent chain follows the glow colour — deriveCanvasTokens() writes
+   the full --color-primary/--color-brand bridge inline, so buttons,
+   bubbles, switches and rings all retint with the glow (2026-11-14). */
 html.custom-canvas { background: var(--app-background); }
 
 html.custom-canvas body,

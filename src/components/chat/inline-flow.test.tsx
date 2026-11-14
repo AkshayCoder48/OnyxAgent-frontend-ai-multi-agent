@@ -51,8 +51,8 @@ describe("inline flow (PRD §3.1)", () => {
     expect(text).not.toContain("Worked");
     expect(container.querySelector(".border-l.border-border\\/70")).toBeNull();
     expect(text).toContain("Thought"); // the thinking row keeps its own summary
-    // The two-tool stack rests as the combined "Used 2 tools" summary row…
-    expect(text).toContain("Used 2 tools");
+    // The two-tool stack rests as the combined clean "Tools" summary row…
+    expect(text).toContain("Tools");
     // …with the individual rows folded behind it (still mounted).
     expect(text).toContain("Searched the web");
     expect(text).toContain("Read a web page");
@@ -71,7 +71,7 @@ describe("inline flow (PRD §3.1)", () => {
     expect(status!.textContent).toMatch(/Searching|Writing|Thinking|Working/);
     expect(container.textContent).not.toContain("Worked");
     // A single settled tool renders as its bare row — no group summary.
-    expect(container.textContent).not.toContain("Used 1 tool");
+    expect(container.textContent).not.toMatch(/\d+ tools/);
     cleanup();
   });
 });

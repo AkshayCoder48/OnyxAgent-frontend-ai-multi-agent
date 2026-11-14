@@ -44,9 +44,9 @@ export const TOOL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   manage_subagent_chat: "Subagent Chats",
   manage_web_session: "Web Session",
   start_web_session: "Web Session",
-  manage_todo: "Plan",
-  manage_todos: "Plan",
-  show_todo: "Plan",
+  manage_todo: "Todos",
+  manage_todos: "Todos",
+  show_todo: "Todos",
 
   // ── Scheduling / workspace / background ───────────────────────────────
   schedule_agent_task: "Scheduled Task",

@@ -500,13 +500,17 @@ def tool_use_browser(args):
 
 
 def tool_manage_todo(args):
-    action = str(args.get("action") or "list")
+    # "operation" is accepted as an alias for "action" (models mix the two);
+    # create/add and delete/remove are both valid; todo_id/todoId/id all work.
+    action = str(args.get("action") or args.get("operation") or "list").strip().lower()
+    def tid():
+        return str(args.get("todo_id") or args.get("todoId") or args.get("id") or "")
     todos = load_todos()
-    if action == "list":
+    if action in ("list", "read"):
         if not todos:
             return "(no todos)"
         return json.dumps(todos, ensure_ascii=False)
-    if action == "add":
+    if action in ("add", "create"):
         title = str(args.get("title") or "").strip()
         if not title:
             return "error: title is required for add"
@@ -522,9 +526,9 @@ def tool_manage_todo(args):
         save_todos(todos)
         return json.dumps(todo, ensure_ascii=False)
     if action == "update":
-        tid = str(args.get("id") or "")
+        target = tid()
         for todo in todos:
-            if todo.get("id") == tid:
+            if todo.get("id") == target:
                 if args.get("title") is not None:
                     todo["title"] = str(args.get("title"))
                 if args.get("description") is not None:
@@ -535,14 +539,14 @@ def tool_manage_todo(args):
                 todo["updated_at"] = int(now())
                 save_todos(todos)
                 return json.dumps(todo, ensure_ascii=False)
-        return "error: todo not found: " + tid
-    if action == "remove":
-        tid = str(args.get("id") or "")
-        remaining = [t for t in todos if t.get("id") != tid]
+        return "error: todo not found: " + target
+    if action in ("remove", "delete"):
+        target = tid()
+        remaining = [t for t in todos if t.get("id") != target]
         if len(remaining) == len(todos):
-            return "error: todo not found: " + tid
+            return "error: todo not found: " + target
         save_todos(remaining)
-        return "removed " + tid
+        return "removed " + target
     return "error: unknown action: " + action
 
 TOOL_HANDLERS = {

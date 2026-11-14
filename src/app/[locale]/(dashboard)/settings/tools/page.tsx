@@ -434,7 +434,7 @@ function ToolEditor({ open, tool, onClose, onSaved }: ToolEditorProps) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+      <DialogContent className="sm:max-w-3xl max-h-[min(90dvh,calc(var(--vvh,100dvh)-24px))] sm:max-h-[min(90dvh,calc(var(--vvh,100dvh)-32px))] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle>{tool ? "Edit tool" : "Create custom tool"}</DialogTitle>
           <DialogDescription>
@@ -443,7 +443,7 @@ function ToolEditor({ open, tool, onClose, onSaved }: ToolEditorProps) {
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-auto space-y-4 py-2">
+        <div className="min-h-0 flex-1 overflow-auto space-y-4 py-2">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="tool-name" className="text-xs uppercase">Name (snake_case)</Label>

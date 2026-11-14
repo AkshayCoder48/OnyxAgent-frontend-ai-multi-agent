@@ -21,6 +21,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -269,6 +270,7 @@ export function KBFilesView({ clients, refreshKey, onChanged }: KBFilesViewProps
               {linkFile ? fileLabel(linkFile) : "Hosted file"}
             </DialogDescription>
           </DialogHeader>
+          <DialogBody>
           {minting ? (
             <div className="flex items-center justify-center py-8 text-muted-foreground">
               <Loader2 aria-hidden className="mr-2 h-4 w-4 animate-spin" />
@@ -313,6 +315,7 @@ export function KBFilesView({ clients, refreshKey, onChanged }: KBFilesViewProps
               </div>
             </>
           ) : null}
+          </DialogBody>
         </DialogContent>
       </Dialog>
 

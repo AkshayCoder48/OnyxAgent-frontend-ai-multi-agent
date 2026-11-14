@@ -28,7 +28,7 @@ const PROMPTS = [
     icon: Brain,
     title: "Brainstorm ideas",
     prompt: "Give me 5 ideas for an onboarding email sequence for a developer tool.",
-    color: "text-orange-500",
+    color: "text-primary",
   },
 ];
 

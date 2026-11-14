@@ -114,10 +114,10 @@ const RULES: Record<string, TenseRule> = {
   create_chart_tool: { past: "Made a chart", present: "Making a chart", icon: BarChart3 },
   create_map_tool: { past: "Made a map", present: "Making a map", icon: Globe },
   ask_user: { past: "Asked you a question", present: "Asking you a question", icon: MessageCircleQuestion },
-  manage_todo: { past: "Updated the plan", present: "Updating the plan", icon: ListTodo },
-  manage_todos: { past: "Updated the plan", present: "Updating the plan", icon: ListTodo },
-  show_todo: { past: "Checked the plan", present: "Checking the plan", icon: ListChecks },
-  read_todos: { past: "Checked the plan", present: "Checking the plan", icon: ListChecks },
+  manage_todo: { past: "Updated the todos", present: "Updating the todos", icon: ListTodo },
+  manage_todos: { past: "Updated the todos", present: "Updating the todos", icon: ListTodo },
+  show_todo: { past: "Showed the todo list", present: "Showing the todo list", icon: ListChecks },
+  read_todos: { past: "Showed the todo list", present: "Showing the todo list", icon: ListChecks },
 
   // ── Memory & time (client-side tools — always available) ───────────────
   memory_save: {

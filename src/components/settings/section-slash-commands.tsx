@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -261,7 +262,8 @@ export function SectionSlashCommands() {
               hyphens, and must be unique.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+            <DialogBody className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="cmd-name">Name</Label>
               <Input
@@ -306,7 +308,8 @@ export function SectionSlashCommands() {
                 />
               </div>
             </MoreOptions>
-            <DialogFooter>
+            </DialogBody>
+          <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
                 Cancel
               </Button>

@@ -54,7 +54,7 @@ export function KBAddDialog({ open, onOpenChange, kv, userId, onSaved }: KBAddDi
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden p-0 sm:max-w-2xl">
+      <DialogContent className="flex max-h-[min(85dvh,calc(var(--vvh,100dvh)-24px))] sm:max-h-[min(85dvh,calc(var(--vvh,100dvh)-32px))] flex-col overflow-hidden p-0 sm:max-w-2xl">
         <DialogHeader className="border-b px-6 py-4">
           <DialogTitle>Add knowledge</DialogTitle>
           <DialogDescription>
