@@ -39,7 +39,6 @@ export const ROUTES = {
   SETTINGS_E2B: "/settings/e2b",
   SETTINGS_SCHEDULES: "/settings/schedules",
   // Trigger.dev Cloud orchestration (Background Task Execution Framework).
-  SETTINGS_CLOUD_TASKS: "/settings/cloud-tasks",
   RAG: "/rag",
   ORGS: "/orgs",
   ORGS_CREATE: "/orgs?create=1",

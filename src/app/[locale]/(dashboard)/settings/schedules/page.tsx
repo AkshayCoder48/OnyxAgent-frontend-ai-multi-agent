@@ -6,7 +6,7 @@ import { SectionSchedules } from "@/components/settings/section-schedules";
  * Schedules settings route (Background Task Execution Framework FR-2.1) —
  * cron-driven background tasks: create/edit/pause/delete schedules, next-run
  * previews, and recent firing history. Runs fire durably on the operator's
- * Trigger.dev Cloud project once a key is connected (Settings → Cloud Tasks).
+ * Trigger.dev Cloud project once a key is connected (Settings → API Keys).
  *
  * SectionSchedules carries its own SettingsSection card + header (unlike
  * section-e2b, which is headerless), so this route renders it bare.

@@ -36,7 +36,7 @@ import {
 } from "@/lib/onyxbase/skills-sync";
 
 const NO_KEY_MESSAGE =
-  "Cloud workspace isn't configured yet. Add your OnyxBase API key in Settings → Cloud Workspace.";
+  "Cloud workspace isn't configured yet. Add your OnyxBase API key in Settings → API Keys.";
 
 const NO_E2B_MESSAGE =
   "Workspace sync requires an E2B Sandbox API key. Add one in Settings → Config → E2B Sandbox.";

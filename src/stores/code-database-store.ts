@@ -54,7 +54,7 @@ export type CodeDatabasePhase =
   | "idle" // no refresh has run yet (no scope / auth still hydrating)
   | "loading"
   | "ready"
-  | "not-configured" // user has no OnyxBase key → Settings → Cloud
+  | "not-configured" // user has no OnyxBase key → Settings → API Keys
   | "error";
 
 export type CodeDatabaseSection = "overview" | "kv" | "env" | "storage" | "schema" | "activity";

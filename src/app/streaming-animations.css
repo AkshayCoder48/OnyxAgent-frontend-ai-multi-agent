@@ -1,0 +1,315 @@
+/* =========================================================================
+   STREAMING ANIMATIONS — the 24 selectable word-by-word reveals
+   (uploaded "Streaming Motion Lab" spec).
+   =========================================================================
+   HOW IT HOOKS IN
+   - The streaming engine renders every newly revealed word as a `.wf`
+     span whose animation DURATION is baked inline (180–360ms, pace-mapped
+     by the word engine — the inline value always wins over the durations
+     below, so every animation plays at the AI's actual streaming pace).
+   - The DEFAULT (no attribute) stays the app's own mixed blur settle
+     (word-settle-in in globals.css) — the identity.
+   - A selection is applied as `html[data-stream-anim="aN"]` (any ancestor
+     attribute works — the Settings preview uses its own container).
+   - PERFORMANCE CONTRACT (globals.css "WORD-FADE STREAM"): fill is
+     `backwards` ONLY — after the one-shot animation a settled span carries
+     NO filter/transform/shadow, so words never sit on their own render
+     surface and the paragraph paint never fragments. Transform-based
+     reveals switch the span to inline-block (atomic — required for
+     transforms; the box still shrink-to-fits + wraps internally, so long
+     words cannot overflow). No base opacity:0 — a span without a running
+     animation (reduced motion, hydrations) renders normally.
+   - REDUCED MOTION: the attribute selector (0,2,0) outranks the base
+     `.wf { animation: none }` kill (0,1,0), so this sheet carries its own.
+   ========================================================================= */
+
+/* The selected animation's word spans become atomic where the reveal
+   needs transforms (all of them, for consistency inside one stream). */
+html[data-stream-anim] .wf,
+[data-stream-anim] .wf {
+  display: inline-block;
+}
+
+/* 01 — Soft Dissolve */
+[data-stream-anim="a1"] .wf {
+  animation-name: sa-dissolve;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-dissolve {
+  from { opacity: 0; filter: blur(9px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+/* 02 — Velvet Fade */
+[data-stream-anim="a2"] .wf {
+  animation-name: sa-velvet;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-velvet {
+  from { opacity: 0; transform: translateY(7px); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+/* 03 — Cinematic Focus */
+[data-stream-anim="a3"] .wf {
+  animation-name: sa-focus;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-focus {
+  from { opacity: 0; transform: scale(0.96); filter: blur(12px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+
+/* 04 — Typewriter */
+[data-stream-anim="a4"] .wf {
+  animation-name: sa-typewriter;
+  animation-timing-function: steps(8, end);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-typewriter {
+  from { opacity: 0; clip-path: inset(0 100% 0 0); }
+  to { opacity: 1; clip-path: inset(0 0 0 0); }
+}
+
+/* 05 — Floating Rise */
+[data-stream-anim="a5"] .wf {
+  animation-name: sa-rise;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-rise {
+  from { opacity: 0; transform: translateY(14px); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+/* 06 — Right Drift */
+[data-stream-anim="a6"] .wf {
+  animation-name: sa-drift-right;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-drift-right {
+  from { opacity: 0; transform: translateX(-12px); filter: blur(3px); }
+  to { opacity: 1; transform: translateX(0); filter: blur(0); }
+}
+
+/* 07 — Satin Fade */
+[data-stream-anim="a7"] .wf {
+  animation-name: sa-satin;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-satin {
+  0% { opacity: 0; transform: translateY(3px); }
+  60% { opacity: 0.7; }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* 08 — Gentle Ripple */
+[data-stream-anim="a8"] .wf {
+  animation-name: sa-ripple;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-ripple {
+  from { opacity: 0; transform: translateY(5px) scale(0.97); filter: blur(5px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+/* 09 — Warm Glow */
+[data-stream-anim="a9"] .wf {
+  animation-name: sa-glow;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-glow {
+  0% { opacity: 0; text-shadow: 0 0 15px var(--acc, #f07e12); }
+  60% { opacity: 1; text-shadow: 0 0 8px var(--acc, #f07e12); }
+  100% { opacity: 1; text-shadow: none; }
+}
+
+/* 10 — Left Slide */
+[data-stream-anim="a10"] .wf {
+  animation-name: sa-left-slide;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-left-slide {
+  from { opacity: 0; transform: translateX(12px); filter: blur(4px); }
+  to { opacity: 1; transform: translateX(0); filter: blur(0); }
+}
+
+/* 11 — 3D Flip */
+[data-stream-anim="a11"] .wf {
+  animation-name: sa-flip;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation-fill-mode: backwards;
+  transform-origin: 50% 100%;
+}
+@keyframes sa-flip {
+  from { opacity: 0; transform: perspective(300px) rotateX(45deg) translateY(5px); }
+  to { opacity: 1; transform: perspective(300px) rotateX(0); }
+}
+
+/* 12 — Blur Wave */
+[data-stream-anim="a12"] .wf {
+  animation-name: sa-blur-wave;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-blur-wave {
+  from { opacity: 0; filter: blur(15px); transform: scale(1.04); }
+  to { opacity: 1; filter: blur(0); transform: scale(1); }
+}
+
+/* 13 — Micro Pop */
+[data-stream-anim="a13"] .wf {
+  animation-name: sa-micro-pop;
+  animation-timing-function: cubic-bezier(0.18, 0.89, 0.32, 1.28);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-micro-pop {
+  from { opacity: 0; transform: scale(0.88); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 14 — Light Sweep */
+[data-stream-anim="a14"] .wf {
+  animation-name: sa-sweep;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-sweep {
+  from { opacity: 0; filter: brightness(2.5) blur(4px); }
+  60% { opacity: 1; filter: brightness(1.4) blur(1px); }
+  to { opacity: 1; filter: brightness(1) blur(0); }
+}
+
+/* 15 — Weightless Float */
+[data-stream-anim="a15"] .wf {
+  animation-name: sa-float-in;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-float-in {
+  from { opacity: 0; transform: translateY(10px) rotateX(12deg); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0) rotateX(0); filter: blur(0); }
+}
+
+/* 16 — Horizontal Glide */
+[data-stream-anim="a16"] .wf {
+  animation-name: sa-glide;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-glide {
+  from { opacity: 0; transform: translateX(-7px) scaleX(0.96); filter: blur(2px); }
+  to { opacity: 1; transform: translateX(0) scaleX(1); filter: blur(0); }
+}
+
+/* 17 — Neon Resolve */
+[data-stream-anim="a17"] .wf {
+  animation-name: sa-neon;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-neon {
+  from { opacity: 0; text-shadow: 0 0 12px #fff, 0 0 25px var(--acc, #f07e12); filter: blur(5px); }
+  to { opacity: 1; text-shadow: none; filter: blur(0); }
+}
+
+/* 18 — Soft Scale */
+[data-stream-anim="a18"] .wf {
+  animation-name: sa-soft-scale;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-soft-scale {
+  from { opacity: 0; transform: scale(0.94); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 19 — Silk Wave */
+[data-stream-anim="a19"] .wf {
+  animation-name: sa-silk;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-silk {
+  from { opacity: 0; transform: translateY(8px) skewY(2deg); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0) skewY(0); filter: blur(0); }
+}
+
+/* 20 — Mist Clearing */
+[data-stream-anim="a20"] .wf {
+  animation-name: sa-mist;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-mist {
+  from { opacity: 0; filter: blur(18px); }
+  65% { opacity: 0.8; filter: blur(4px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+/* 21 — Gentle Spring */
+[data-stream-anim="a21"] .wf {
+  animation-name: sa-spring;
+  animation-timing-function: cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-spring {
+  from { opacity: 0; transform: translateY(9px) scale(0.97); }
+  75% { transform: translateY(-1px) scale(1.005); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 22 — Top Cascade */
+[data-stream-anim="a22"] .wf {
+  animation-name: sa-cascade;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-cascade {
+  from { opacity: 0; transform: translateY(-9px); filter: blur(3px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+/* 23 — Reading Scan */
+[data-stream-anim="a23"] .wf {
+  animation-name: sa-scan;
+  animation-timing-function: ease;
+  animation-fill-mode: backwards;
+}
+@keyframes sa-scan {
+  from { opacity: 0; filter: blur(2px); color: var(--acc, #f07e12); }
+  70% { opacity: 1; filter: blur(0); color: var(--acc, #f07e12); }
+  to { opacity: 1; color: currentColor; }
+}
+
+/* 24 — Breathing Text */
+[data-stream-anim="a24"] .wf {
+  animation-name: sa-breathe;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+  animation-fill-mode: backwards;
+}
+@keyframes sa-breathe {
+  from { opacity: 0; transform: scale(0.97); filter: blur(3px); }
+  65% { opacity: 1; transform: scale(1.008); filter: blur(0); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* REDUCED MOTION — the attribute selector outranks the base .wf kill in
+   globals.css, so this sheet must kill its own overrides too. */
+@media (prefers-reduced-motion: reduce) {
+  html[data-stream-anim] .wf,
+  [data-stream-anim] .wf {
+    display: inline;
+    animation: none !important;
+    clip-path: none;
+    text-shadow: none;
+  }
+}

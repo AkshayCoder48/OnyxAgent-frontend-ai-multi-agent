@@ -21,6 +21,8 @@ import {
 } from "@/lib/appearance";
 import { Label } from "@/components/ui/label";
 import { MoreOptions } from "@/components/settings/more-options";
+import { StreamingAnimPicker } from "@/components/settings/streaming-anim-picker";
+import { resetStreamingAnim } from "@/lib/streaming-motion";
 import {
   Select,
   SelectContent,
@@ -181,6 +183,7 @@ export function SectionAppearance() {
       return;
     }
     resetAppearance();
+    resetStreamingAnim();
     setBackground(null);
     setHexDraft(DEFAULT_BACKGROUND);
     setGlow(null);
@@ -261,7 +264,7 @@ export function SectionAppearance() {
             >
               <span
                 aria-hidden
-                className="h-4 w-4 rounded-full border border-black/10"
+                className="h-4 w-4 rounded-full border border-foreground/15"
                 style={{
                   background: isDefaultBg ? DEFAULT_BACKGROUND : (background ?? DEFAULT_BACKGROUND),
                 }}
@@ -322,7 +325,7 @@ export function SectionAppearance() {
               >
                 <span
                   aria-hidden
-                  className="size-4 rounded-full border border-black/10"
+                  className="size-4 rounded-full border border-foreground/15"
                   style={{ background: sw.hex }}
                 />
                 {sw.label}
@@ -372,7 +375,7 @@ export function SectionAppearance() {
             >
               <span
                 aria-hidden
-                className="h-4 w-4 rounded-full border border-black/10"
+                className="h-4 w-4 rounded-full border border-foreground/15"
                 style={{ background: `radial-gradient(circle, #fff2 20%, transparent), ${glow ?? DEFAULT_GLOW}` }}
               />
               Pick colour
@@ -428,7 +431,7 @@ export function SectionAppearance() {
               >
                 <span
                   aria-hidden
-                  className="size-4 rounded-full border border-black/10"
+                  className="size-4 rounded-full border border-foreground/15"
                   style={{ background: `radial-gradient(circle, #fff3 25%, transparent), ${sw.hex}` }}
                 />
                 {sw.label.replace(" (default)", "")}
@@ -438,6 +441,9 @@ export function SectionAppearance() {
           })}
         </div>
       </section>
+
+      {/* ── Streaming animation (the motion-lab picker, 2026-11-14) ── */}
+      <StreamingAnimPicker />
 
       {/* ── Reset appearance (PRD §1.3) ── */}
       <section className="space-y-3">

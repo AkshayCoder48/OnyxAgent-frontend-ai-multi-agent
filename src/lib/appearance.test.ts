@@ -94,6 +94,128 @@ describe("appearance · deriveCanvasTokens", () => {
   });
 });
 
+describe("appearance · adaptive glass materials (glassmorphism overhaul)", () => {
+  const GLASS_KEYS = [
+    "--glass-ink",
+    "--glass-soft-fill", "--glass-soft-fill-hover",
+    "--glass-frost-fill", "--glass-frost-fill-hover",
+    "--glass-dock-fill", "--glass-dock-fill-hover",
+    "--glass-float-fill", "--glass-float-fill-hover",
+    "--glass-solid-fill",
+    "--glass-well-fill", "--glass-well-fill-hover",
+    "--glass-code-fill", "--glass-composer-fill",
+    "--glass-border", "--glass-border-hover", "--glass-border-strong",
+    "--glass-edge-highlight",
+    "--glass-shadow-1", "--glass-shadow-2", "--glass-shadow-3",
+    "--glass-scrim",
+  ] as const;
+
+  // The canvases from the testing matrix (white, black, cream, dark gray,
+  // orange, blue, purple, green, pink).
+  const CANVASES = [
+    "#ffffff", "#000000", "#f5f2ed", "#2b2b2b",
+    "#f97316", "#2563eb", "#7c3aed", "#22c55e", "#ec4899",
+  ];
+
+  it("emits the full glass token contract on every canvas", () => {
+    for (const bg of CANVASES) {
+      const { vars } = deriveCanvasTokens(bg);
+      for (const key of GLASS_KEYS) {
+        expect(vars[key], `${key} missing for ${bg}`).toBeTruthy();
+      }
+    }
+  });
+
+  it("no shadow, border or scrim is EVER built from pure black", () => {
+    // #000000 itself is excluded: a pure-black canvas can only deepen
+    // toward itself (its ink IS the canvas, and shadows on black are
+    // imperceptible). Every OTHER canvas must derive non-black ink.
+    for (const bg of CANVASES.filter((c) => c !== "#000000")) {
+      const { vars } = deriveCanvasTokens(bg);
+      const surfaces = [
+        vars["--glass-shadow-1"]!, vars["--glass-shadow-2"]!,
+        vars["--glass-shadow-3"]!, vars["--glass-scrim"]!,
+        vars["--glass-border"]!, vars["--glass-well-fill"]!,
+      ];
+      for (const value of surfaces) {
+        expect(value, `${bg}: ${value}`).not.toMatch(/rgba?\(\s*0\s*,?\s*0\s*,?\s*0\s*[,/]/);
+        expect(value, `${bg}: ${value}`).not.toMatch(/rgb\(\s*0 0 0\s*\//);
+      }
+    }
+  });
+
+  it("light canvas (cream) → warm umbra ink, not flat black", () => {
+    const t = deriveCanvasTokens("#f5f2ed");
+    expect(t.isDark).toBe(false);
+    // The ink triplet parses to three channels in the soft-umbra band
+    // (like rgb(60,45,30) over cream — visible, never a black stamp).
+    const [r, g, b] = t.vars["--glass-ink"]!.split(" ").map(Number);
+    expect(r).toBeGreaterThan(30);
+    expect(r).toBeLessThan(120);
+    expect(g).toBeGreaterThan(25);
+    expect(b).toBeGreaterThan(10);
+    // Frost lifts toward white — the "warm translucent cream glass" case.
+    expect(t.vars["--glass-frost-fill"]!).toMatch(/^rgb\(2[0-9]{2} /);
+    // Lighter scrim than the dark family (no blackened overlays).
+    expect(t.vars["--glass-scrim"]!).toMatch(/\/ 0\.4\)$/);
+  });
+
+  it("dark canvas keeps the white-alpha translucent identity", () => {
+    const t = deriveCanvasTokens("#0b0200");
+    expect(t.isDark).toBe(true);
+    expect(t.vars["--glass-frost-fill"]!).toBe("rgb(255 255 255 / 0.09)");
+    expect(t.vars["--glass-border"]!).toBe("rgb(255 255 255 / 0.15)");
+  });
+
+  it("hue travels with the canvas (warm orange ink vs cool blue ink)", () => {
+    const inkOf = (bg: string) =>
+      deriveCanvasTokens(bg).vars["--glass-ink"]!.split(" ").map(Number);
+    // LIGHT warm canvas → warm brown umbra (R leads B).
+    const warm = inkOf("#f97316");
+    expect(warm[0]).toBeGreaterThan(warm[2]);
+    // DARK cool canvas → deep blue umbra (B leads R).
+    const cool = inkOf("#1e3a8a");
+    expect(cool[2]).toBeGreaterThan(cool[0]);
+  });
+
+  it("code wells stay deep on EVERY canvas (syntax colours need dark wells)", () => {
+    const tripletOf = (v: string) =>
+      (v.match(/^rgb\((\d+) (\d+) (\d+) \//) ?? []).slice(1).map(Number);
+    for (const bg of CANVASES) {
+      const t = deriveCanvasTokens(bg);
+      const channels = tripletOf(t.vars["--glass-code-fill"]!);
+      expect(channels.length).toBe(3);
+      if (!t.isDark) {
+        // Light canvases: a fixed deep well (each channel < 60).
+        for (const c of channels) expect(c).toBeLessThan(60);
+      } else {
+        // Dark canvases: the well deepens the canvas hue channel-wise.
+        const bgc = [1, 3, 5].map((i) => parseInt(bg.slice(i, i + 2), 16));
+        // (<= : a pure-black channel is already at the floor)
+        expect(channels[0]).toBeLessThanOrEqual(bgc[0]);
+        expect(channels[1]).toBeLessThanOrEqual(bgc[1]);
+        expect(channels[2]).toBeLessThanOrEqual(bgc[2]);
+      }
+    }
+  });
+
+  it("solid material is near-opaque on both families", () => {
+    for (const bg of ["#0b0200", "#f5f2ed"]) {
+      const { vars } = deriveCanvasTokens(bg);
+      expect(vars["--glass-solid-fill"]!).toMatch(/\/ 0\.97\)$/);
+    }
+  });
+
+  it("clearBackground strips every glass token (no stale materials)", () => {
+    applyBackground("#1a0a02");
+    clearBackground();
+    const root = document.documentElement;
+    for (const key of GLASS_KEYS) {
+      expect(root.style.getPropertyValue(key)).toBe("");
+    }
+  });
+});
+
 describe("appearance · apply / persist / reset", () => {
   beforeEach(() => {
     localStorage.clear();

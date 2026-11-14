@@ -124,7 +124,7 @@ export function LanguageSwitcherCompact() {
           className={cn(
             "border-foreground/10 bg-card text-card-foreground absolute top-full right-0",
             "mt-2 min-w-[180px] origin-top-right overflow-hidden rounded-2xl border",
-            "shadow-lg shadow-black/5 backdrop-blur",
+            "shadow-lg shadow-foreground/10 backdrop-blur",
           )}
           style={{
             animation: "lsFadeIn 140ms cubic-bezier(0.22, 1, 0.36, 1)",

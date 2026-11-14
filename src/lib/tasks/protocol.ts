@@ -193,6 +193,17 @@ export interface TaskTriggerRequest {
   scheduleId?: string;
   /** Human title for UI lists. */
   title?: string;
+  /**
+   * SERVERLESS SELF-PROVISIONING (fix 2026-11-14 "even if key is added"):
+   * the browser mirror's Trigger.dev Cloud key. On serverless the sealed
+   * config can live in ONE instance's memory while this POST lands on a
+   * COLD instance — the run was refused with "connect your API key" while
+   * the key was demonstrably connected. When the route finds no cloud
+   * config it re-verifies + re-applies THIS key before answering, so any
+   * instance can serve the dispatch. Only read server-side; NEVER logged,
+   * never persisted outside the existing seal.
+   */
+  cloudKey?: string;
 }
 
 export interface TaskTriggerResponse {

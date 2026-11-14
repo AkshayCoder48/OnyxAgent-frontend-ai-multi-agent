@@ -3,10 +3,19 @@ import "./globals.css";
 // Orange Glass design layer (DESIGN.md spec) — one stylesheet appended
 // AFTER the app's own styles; wins the cascade without touching any JS.
 import "./orange-glass.css";
+// Adaptive glass material system (glassmorphism overhaul) — the ONE token
+// contract (materials, elevation ladder, borders, scrim) every glass
+// surface consumes. After the design layer so its tokens + fallbacks are
+// the final word on surfaces; before motion so animations stay owned there.
+import "./glass.css";
 // Motion system (Task 24) — the unified motion-blur language (object
 // entrances, stagger, press feedback, composer morphing). Final layer:
 // owns every animation property after the design layer.
 import "./motion.css";
+// Streaming animations (motion lab) — the 24 selectable word-by-word
+// reveals, keyed off html[data-stream-anim]. After motion.css: it only
+// overrides the .wf word animation, never motion utilities.
+import "./streaming-animations.css";
 import { defaultLocale } from "@/i18n";
 import { SITE } from "@/lib/seo";
 

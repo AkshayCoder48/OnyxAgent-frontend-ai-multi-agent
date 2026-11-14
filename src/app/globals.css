@@ -32,6 +32,23 @@
    Section-level dark/light: wrap with `.theme-dark` or `.theme-light`.
    ========================================================================= */
 
+/* ADAPTIVE SHADOW LADDER (glassmorphism overhaul): re-maps Tailwind's
+   shadow utilities onto the glass material tokens (glass.css :root —
+   orange-glass identity defaults; appearance.ts re-derives them inline
+   for custom canvases). Shadow values reference the runtime vars, so a
+   background change re-inks every shadow app-wide with zero re-renders.
+   The --tw-shadow plumbing consumes these at utility generation. */
+@theme {
+  --shadow-2xs: 0 1px 2px rgb(var(--glass-ink) / 0.06);
+  --shadow-xs: 0 1px 2px rgb(var(--glass-ink) / 0.08);
+  --shadow-sm: 0 1px 3px rgb(var(--glass-ink) / 0.09), 0 1px 2px rgb(var(--glass-ink) / 0.06);
+  --shadow: var(--glass-shadow-1);
+  --shadow-md: var(--glass-shadow-1);
+  --shadow-lg: var(--glass-shadow-2);
+  --shadow-xl: var(--glass-shadow-2);
+  --shadow-2xl: var(--glass-shadow-3);
+}
+
 @theme {
   /* ============================================================
      Brand — "cyan on black" palette (the app DEFAULT).
@@ -927,7 +944,7 @@
   }
   .lift:hover {
     transform: translateY(-2px);
-    box-shadow: 0 12px 32px -16px oklch(0% 0 0 / 0.18);
+    box-shadow: 0 12px 32px -16px rgb(var(--glass-ink) / 0.16);
   }
 
   /* Reveal-on-mount (set via JS data attribute for stagger) */
@@ -1086,7 +1103,7 @@
   }
   .lift:hover {
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    box-shadow: var(--glass-shadow-1);
   }
 
   /* Smooth transition for sidebar / panel opening (not just the contents). */

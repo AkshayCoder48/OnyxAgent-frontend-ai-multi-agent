@@ -759,7 +759,7 @@ export function SectionPollinations() {
       {/* ── 1. Connection ────────────────────────────────────────────────── */}
       <SectionCard
         title="Connection"
-        description="Connect your Pollinations account via OAuth, or paste an API key. The key is encrypted (AES-GCM) and stored only in your browser."
+        description="Connect your Pollinations account via OAuth. API keys live in Settings → API Keys — encrypted (AES-GCM) and stored only in your browser."
         action={<ConnectionPill status={connectionStatus} method={connectionMeta?.method} />}
       >
         <div className="space-y-4">

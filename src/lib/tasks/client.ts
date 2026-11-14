@@ -203,6 +203,11 @@ export interface TriggerBackgroundTaskInput {
   sandboxApiKey?: string;
   /** Set when the run is fired by a schedule (pass-through). */
   scheduleId?: string;
+  /** The browser mirror's Trigger.dev Cloud key (serverless
+   *  self-provisioning — see TaskTriggerRequest.cloudKey). Sent so a COLD
+   *  lambda instance can re-apply the connected key instead of refusing
+   *  the run; ignored whenever the server already has a config. */
+  cloudApiKey?: string;
 }
 
 /**
@@ -254,6 +259,7 @@ export async function triggerBackgroundTask(
     ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
     ...(input.title ? { title: input.title } : {}),
+    ...(input.cloudApiKey ? { cloudKey: input.cloudApiKey } : {}),
   };
 
   const res = await fetch("/api/tasks/trigger", {

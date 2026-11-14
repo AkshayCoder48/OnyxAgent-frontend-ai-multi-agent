@@ -18,6 +18,7 @@ import {
   type BranchPosition,
 } from "@/lib/chat/branches";
 import { PendingMessages } from "./pending-messages";
+import { ComposerTodoPanel } from "./composer-todo-panel";
 import { PollinationsConfirmDialog } from "./pollinations-confirm";
 import { QuestionPrompt } from "@/components/ui";
 import type { AskUserQuestion, AskUserAnswer } from "@/types";
@@ -1144,8 +1145,7 @@ function ChatUI({
               />
             </div>
           )}
-          {/* Queued messages live next to the composer; the todo plan panel
-              lives INSIDE the scroll container (inline in the response flow). */}
+          {/* Queued messages live next to the composer. */}
           {/* Invisible background-run lander (USER DIRECTIVE: no strips above
               the composer) — polls Trigger.dev Cloud runs and lands finished
               results directly in their conversations' chat bubbles. */}
@@ -1153,12 +1153,19 @@ function ChatUI({
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}
+          {/* PLAN PANEL — the connected composer stack (uploaded design):
+              the live agent plan docks directly above the prompt box,
+              tucking 14px under it so the two read as ONE unit. Frosted
+              adaptive glass (material tokens) — auto-expands while the
+              plan runs, folds when it settles. */}
+          <ComposerTodoPanel />
           {/* COMPOSER DOCK — ONE unified container (PRD §5.2): the dock owns
               the border + the acc focus glow; no nested borders, no bottom
               strip, no separator. The composer's own bottom control bar
               carries attachments, voice, the model selector and send/stop
-              (the old Live · Context% · ⏎ row is gone — §5.1). */}
-          <div className="composer-dock mb-morph rounded-2xl input-focus-glow">
+              (the old Live · Context% · ⏎ row is gone — §5.1). z-2: the
+              dock overlaps the plan panel's tucked bottom edge. */}
+          <div className="composer-dock mb-morph relative z-[2] rounded-2xl input-focus-glow">
             <div className="px-2.5 py-2.5 sm:px-4 sm:py-3.5">
               <ChatInput
                 key={conversationId ?? "new-chat"}

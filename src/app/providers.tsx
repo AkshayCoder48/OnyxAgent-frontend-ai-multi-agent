@@ -8,6 +8,7 @@ import { ExperimentalUiSync } from "@/components/experimental/experimental-ui";
 import { TooltipProvider } from "@/components/ui";
 import { GlobalErrorCapture } from "@/components/dev/global-error-capture";
 import { applyPersistedAppearance } from "@/lib/appearance";
+import { applyPersistedStreamingAnim } from "@/lib/streaming-motion";
 import { SandboxLifecycleSync } from "@/lib/e2b/lifecycle-client";
 import { TurnHandoffController } from "@/lib/agent/turn-handoff";
 import { useAuthStore } from "@/stores/auth-store";
@@ -186,6 +187,7 @@ function ColorSchemeInitializer() {
     // This also WIPES the legacy brand/scheme preset keys, so users coming
     // from the old multi-preset system land on the unified default.
     applyPersistedAppearance();
+    applyPersistedStreamingAnim();
   }, []);
   return null;
 }

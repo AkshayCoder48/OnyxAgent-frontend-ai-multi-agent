@@ -15,7 +15,6 @@ import {
   Settings,
   Slash,
   Wrench,
-  Zap,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -65,8 +64,6 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
       { label: "Cloud", href: ROUTES.SETTINGS_CLOUD, icon: CloudCog },
       // Cron background tasks (Background Task Execution Framework FR-2.1).
       { label: "Schedules", href: ROUTES.SETTINGS_SCHEDULES, icon: CalendarClock },
-      // Trigger.dev Cloud — the background-task engine (direct cloud execution).
-      { label: "Cloud Tasks", href: ROUTES.SETTINGS_CLOUD_TASKS, icon: Zap },
       { label: "Integrations", href: ROUTES.SETTINGS_INTEGRATIONS, icon: Plug },
       { label: "Appearance", href: ROUTES.SETTINGS_APPEARANCE, icon: Palette },
     ],

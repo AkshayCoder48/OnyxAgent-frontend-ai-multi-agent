@@ -1,6 +1,6 @@
 // ============================================================================
 // useCloudOrchestrator — Trigger.dev Cloud connection state + mutations
-// (Settings → Cloud Tasks; Background Task Execution Framework).
+// (Settings → API Keys; Background Task Execution Framework).
 //
 // Follows the use-background-tasks.ts conventions: qk.* keys, mutation +
 // invalidate. All server round-trips go through /api/tasks/cloud.

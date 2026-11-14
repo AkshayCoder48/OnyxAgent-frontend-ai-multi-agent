@@ -150,7 +150,7 @@ export async function rememberPageToKB(
       ok: false,
       code: "NOT_CONFIGURED",
       message:
-        "Remembering pages needs an OnyxBase key — add one in Settings → Cloud Workspace (the Knowledge Base is OnyxBase-backed).",
+        "Remembering pages needs an OnyxBase key — add one in Settings → API Keys (the Knowledge Base is OnyxBase-backed).",
     };
   }
 

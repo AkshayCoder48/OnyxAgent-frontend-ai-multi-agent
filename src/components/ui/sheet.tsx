@@ -114,9 +114,10 @@ export function Sheet({
       <div className="fixed inset-0 z-50" hidden={settledClosed || undefined}>
         <div
           className={cn(
-            "fixed inset-0 bg-black/50 backdrop-blur-sm",
+            "fixed inset-0",
             closing ? "animate-out fade-out duration-300" : "animate-in fade-in duration-300",
           )}
+          style={{ backgroundColor: "var(--glass-scrim)" }}
           onClick={() => onOpenChange(false)}
           aria-hidden="true"
         />

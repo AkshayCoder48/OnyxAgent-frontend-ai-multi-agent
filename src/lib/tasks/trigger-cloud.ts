@@ -970,7 +970,7 @@ export async function dispatchCloudRun(
 ): Promise<CloudDispatchResult> {
   const config = await getCloudConfig();
   if (!config) {
-    return { ok: false, error: "Trigger.dev Cloud is not connected — add your API key in Settings → Cloud." };
+    return { ok: false, error: "Trigger.dev Cloud is not connected — add your API key in Settings → API Keys." };
   }
 
   const lockHolder = `cloud-dispatch:${randomUUID().slice(0, 8)}`;

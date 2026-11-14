@@ -56,6 +56,10 @@ interface CloudPrewarmState {
   cloudOn: boolean;
   keyPool: string[];
   checkedAt: number;
+  /** The browser mirror's Trigger.dev Cloud key (serverless
+   *  self-provisioning) — loaded async here so the SYNCHRONOUS pagehide
+   *  beacon can attach it to the dispatch body. */
+  cloudKey?: string;
 }
 
 const g = globalThis as unknown as { __onyxCloudHandoffPrewarm?: CloudPrewarmState | null };
@@ -75,7 +79,18 @@ export async function prewarmCloudHandoff(userId?: string): Promise<void> {
         pool = [];
       }
     }
-    g.__onyxCloudHandoffPrewarm = { cloudOn, keyPool: pool, checkedAt: Date.now() };
+    // Mirror key for the beacon lane (cold-instance self-provisioning).
+    let cloudKey: string | undefined;
+    if (userId) {
+      try {
+        const { loadClientCloudConfig } = await import("@/lib/tasks/cloud-config-store");
+        const mirror = await loadClientCloudConfig(userId);
+        if (mirror?.apiKey) cloudKey = mirror.apiKey;
+      } catch {
+        /* no mirror — the server config (or env) stands */
+      }
+    }
+    g.__onyxCloudHandoffPrewarm = { cloudOn, keyPool: pool, checkedAt: Date.now(), cloudKey };
   } catch {
     // offline/unreachable — keep the last cached value (null-safe)
     if (!g.__onyxCloudHandoffPrewarm) {
@@ -91,7 +106,7 @@ export function cloudHandoffActive(): boolean {
 
 /** Freshness horizon for the prewarm cache at DECISION points. The
  *  background prewarm loop (turn-handoff.ts) only ticks every 60s + on
- *  visibility, so a key connected moments ago in Settings → Cloud can be
+ *  visibility, so a key connected moments ago in Settings → API Keys can be
  *  invisible to a gate that reads the cache directly — the exact
  *  "Even if key is added" failure (fix 2026-11-14): the detached turn
  *  refused with "Background runs need a connected Trigger.dev Cloud key"
@@ -260,6 +275,9 @@ export function dispatchCloudAgentRunBeacon(input: CloudBeaconInput): {
       userId: input.userId,
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       ...(input.title ? { title: input.title } : {}),
+      ...(g.__onyxCloudHandoffPrewarm?.cloudKey
+        ? { cloudKey: g.__onyxCloudHandoffPrewarm.cloudKey }
+        : {}),
     });
     // Final guard — if even the clamped body overflows, drop history to the
     // bare prompt (the durable lane must always be able to fire).
@@ -522,6 +540,19 @@ export async function dispatchDetachedCloudTurn(input: {
   } catch {
     // no E2B key — the cloud worker uses the server env
   }
+  // SERVERLESS SELF-PROVISIONING (fix "even if key is added"): the sealed
+  // cloud config may live in ANOTHER instance's memory (read-only
+  // filesystems) — this POST can land on a cold lambda with no config and
+  // get refused. Attach the browser mirror's vault-sealed key so whichever
+  // instance receives the dispatch can re-verify + re-apply it first.
+  let cloudApiKey: string | undefined;
+  try {
+    const { loadClientCloudConfig } = await import("@/lib/tasks/cloud-config-store");
+    const mirror = await loadClientCloudConfig(input.userId);
+    if (mirror?.apiKey) cloudApiKey = mirror.apiKey;
+  } catch {
+    // no mirror — the server-side config (or env) must already be there
+  }
   const dispatched = await triggerBackgroundTask({
     userId: input.userId,
     conversationId: input.conversationId,
@@ -552,6 +583,7 @@ export async function dispatchDetachedCloudTurn(input: {
       ? { pinnedApiKey: input.apiKey.trim() }
       : {}),
     sandboxApiKey,
+    cloudApiKey,
   });
   return {
     runId: dispatched.runId,

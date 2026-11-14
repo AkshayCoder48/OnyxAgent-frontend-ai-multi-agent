@@ -30,7 +30,7 @@ import {
 } from "@/lib/onyxbase/kb-store";
 
 const NOT_CONFIGURED =
-  "The Knowledge Base isn't configured yet. Ask the user to add their OnyxBase API key in Settings → Cloud Workspace (the same key that powers the cloud workspace) — then workspace knowledge can persist across chats.";
+  "The Knowledge Base isn't configured yet. Ask the user to add their OnyxBase API key in Settings → API Keys (the same key that powers the cloud workspace) — then workspace knowledge can persist across chats.";
 
 const USAGE_RULES = `Save DELIBERATELY — only information that is important, persistent and likely to be useful later: project decisions, user preferences, architecture knowledge, coding conventions, safe API/config knowledge, research findings, task conclusions, important generated artifacts, or anything the user explicitly asks you to remember. Do NOT save temporary reasoning, ordinary conversation, ephemeral tool output, duplicates, or sensitive secrets. Search the Knowledge Base when prior workspace knowledge could materially improve your response.`;
 

@@ -2,7 +2,7 @@
 // Background Task Execution Framework — orchestration mode.
 //
 // ONE execution mode: "cloud" — the operator connected a Trigger.dev Cloud
-// key (Settings → Cloud) and every background task executes durably on
+// key (Settings → API Keys) and every background task executes durably on
 // their own trigger.dev Cloud project (the deployed agent-run task).
 // Without a connected key the app has NO background execution (the trigger
 // route answers with actionable guidance) — self-hosting and the in-process

@@ -1,0 +1,204 @@
+/* =========================================================================
+   ADAPTIVE GLASS · the unified material system (glassmorphism overhaul)
+   =========================================================================
+   CONTRACT (one place, consumed everywhere)
+
+   - FOUR MATERIALS + a dock variant, each a fill token + blur token:
+       SOFT   ·--glass-soft-fill    inline wells, tool detail blocks (elev 0)
+       FROST  ·--glass-frost-fill   cards, panels, popovers (elev 1)
+       DOCK   ·--glass-dock-fill    docked panes: header/sidebar/sheets
+       FLOAT  ·--glass-float-fill   elevated overlays: dialogs, menus (elev 2-3)
+       SOLID  ·--glass-solid-fill   readability fallback (no-blur / mobile)
+   - ELEVATION LADDER: --glass-shadow-1 (subtle) · 2 (floating) · 3 (modal).
+     Built ONLY from --glass-ink — the canvas-derived umbra. Never rgba(0,0,0).
+   - BORDERS: --glass-border / -hover / -strong (hairline ink, never black
+     outlines on light canvases, never white halos on dark ones).
+   - SCRIM: --glass-scrim for dialog overlays (neutral, luminance-derived).
+
+   WHERE VALUES COME FROM
+   - Default paint: the Orange Glass identity values below (the app's
+     default look is UNCHANGED — these literals match the previous recipes).
+   - Custom canvas: @/lib/appearance deriveCanvasTokens() re-derives every
+     token from the user's background (luminance + hue + saturation) and
+     writes them inline on <html> — glass adapts to cream, white, black,
+     orange, blue, purple, green, pink and gradients with no reload.
+   - Glass NEVER introduces a colour: fills/borders/shadows are all derived
+     from the canvas, so no black vignettes, muddy edges or dark gradients
+     can appear on light or coloured backgrounds.
+
+   RULES FOR NEW UI: use these tokens (or the .glass-* utility classes) —
+   never hand-roll a backdrop-filter + rgba(0,0,0,…) shadow again.
+   ========================================================================= */
+
+:root {
+  /* ── umbra + hairline inks (triplets for `rgb(var(--glass-ink) / a)`) ── */
+  --glass-ink: 10 4 1;              /* shadow umbra — warm near-black      */
+  --glass-line-ink: 255 255 255;    /* hairline ink (white on dark canvas) */
+
+  /* ── material fills (default = Orange Glass identity) ────────────────── */
+  --glass-soft-fill: rgb(255 255 255 / 0.05);
+  --glass-soft-fill-hover: rgb(255 255 255 / 0.08);
+  --glass-frost-fill: rgb(255 255 255 / 0.09);
+  --glass-frost-fill-hover: rgb(255 255 255 / 0.13);
+  --glass-dock-fill: rgb(22 9 3 / 0.4);
+  --glass-dock-fill-hover: rgb(22 9 3 / 0.5);
+  --glass-float-fill: rgb(255 255 255 / 0.12);
+  --glass-float-fill-hover: rgb(255 255 255 / 0.16);
+  --glass-solid-fill: rgb(21 10 4 / 0.97);
+  --glass-well-fill: rgb(10 4 1 / 0.36);
+  --glass-well-fill-hover: rgb(10 4 1 / 0.42);
+  --glass-code-fill: rgb(10 4 1 / 0.55);
+  --glass-composer-fill: rgb(18 8 2 / 0.6);
+
+  /* ── borders (hairlines, never loud) ─────────────────────────────────── */
+  --glass-border: rgb(255 255 255 / 0.15);
+  --glass-border-hover: rgb(255 255 255 / 0.24);
+  --glass-border-strong: rgb(255 255 255 / 0.3);
+  --glass-edge-highlight: rgb(255 255 255 / 0.22);
+
+  /* ── elevation ladder (spec §7) ──────────────────────────────────────── */
+  --glass-shadow-1: 0 1px 2px rgb(10 4 1 / 0.11), 0 4px 14px rgb(10 4 1 / 0.2);
+  --glass-shadow-2: 0 2px 6px rgb(10 4 1 / 0.15), 0 10px 28px rgb(10 4 1 / 0.3);
+  --glass-shadow-3: 0 4px 12px rgb(10 4 1 / 0.19), 0 18px 48px rgb(10 4 1 / 0.42);
+
+  /* ── modal scrim ─────────────────────────────────────────────────────── */
+  --glass-scrim: rgb(5 2 0 / 0.66);
+
+  /* ── blur grades (values kept from the Orange Glass core layer) ──────── */
+  --glass-blur-soft: blur(12px) saturate(1.25);
+  --glass-blur-frost: blur(18px) saturate(1.4);
+  --glass-blur-float: blur(20px) saturate(1.3);
+  --glass-blur-dock: blur(26px) saturate(1.4);
+}
+
+/* ── material utility classes (for NEW surfaces) ────────────────────────
+   Existing classes (.glass-card, .bg-card, .composer-dock, …) are
+   re-pointed at the same tokens in orange-glass.css — one system. */
+.glass-soft {
+  background: var(--glass-soft-fill);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur-soft);
+  backdrop-filter: var(--glass-blur-soft);
+}
+.glass-soft:hover { background: var(--glass-soft-fill-hover); }
+
+.glass-frost {
+  background: var(--glass-frost-fill);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur-frost);
+  backdrop-filter: var(--glass-blur-frost);
+  box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--glass-shadow-1);
+}
+.glass-frost:hover { background: var(--glass-frost-fill-hover); }
+
+.glass-dock {
+  background: var(--glass-dock-fill);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur-dock);
+  backdrop-filter: var(--glass-blur-dock);
+  box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--glass-shadow-1);
+}
+
+.glass-float {
+  background: var(--glass-float-fill);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur-float);
+  backdrop-filter: var(--glass-blur-float);
+  box-shadow: inset 0 1px 0 var(--glass-edge-highlight), var(--glass-shadow-2);
+}
+.glass-float:hover { background: var(--glass-float-fill-hover); }
+
+.glass-solid {
+  background: var(--glass-solid-fill);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-2);
+}
+
+/* Elevation helpers (compose with any material). */
+.elev-0 { box-shadow: none; }
+.elev-1 { box-shadow: var(--glass-shadow-1); }
+.elev-2 { box-shadow: var(--glass-shadow-2); }
+.elev-3 { box-shadow: var(--glass-shadow-3); }
+
+/* ── Tailwind shadow ladder → adaptive elevation ─────────────────────────
+   Registered in globals.css @theme (a bare @theme in a secondary sheet
+   does not merge into the utility generation under Turbopack). Every
+   legacy `shadow-sm/lg/2xl…` class resolves to the ink-derived ladder
+   there — same contract, single registration point. */
+
+/* ── smooth canvas transitions (spec §8 — restrained) ────────────────────
+   When the user picks a new background, material-bearing surfaces cross-
+   fade their fill/border/shadow instead of snapping. Only these surfaces
+   (not every element) carry the transition. */
+.glass-soft, .glass-frost, .glass-dock, .glass-float, .glass-solid,
+.glass-header, .conv-sidebar, .glass-card, .glass-strong, .composer-dock,
+.bg-card, [role="dialog"], [data-radix-popper-content-wrapper] > *,
+[role="tooltip"] {
+  transition:
+    background-color 0.28s var(--ease-standard, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    border-color 0.28s var(--ease-standard, cubic-bezier(0.2, 0.8, 0.2, 1)),
+    box-shadow 0.28s var(--ease-standard, cubic-bezier(0.2, 0.8, 0.2, 1));
+}
+
+/* ── tactile primitives: ink-derived insets on custom canvases ──────────
+   The switch/checkbox insets in globals.css are tuned for the dark
+   identity; under a custom canvas they follow the derived umbra instead
+   of flat black. */
+html.custom-canvas {
+  --switch-shadow-inset: inset 0 2px 5px rgb(var(--glass-ink) / 0.28),
+    inset 0 1px 0 var(--glass-edge-highlight);
+  --switch-shadow-thumb: 0 1px 3px rgb(var(--glass-ink) / 0.32),
+    0 0 1px rgb(var(--glass-ink) / 0.34),
+    inset 0 0 0 1px rgb(var(--glass-ink) / 0.1),
+    inset 0 1px 0 rgb(255 255 255 / 0.55);
+  --checkbox-shadow: inset 0 0 4px rgb(var(--glass-ink) / 0.22),
+    inset 0 0 0 0px var(--checkbox-checked),
+    inset 0 0 0 24px rgb(var(--glass-ink) / 0.12),
+    0 0 0 0 transparent, 0 1px 0 var(--glass-edge-highlight);
+}
+
+/* ── progressive enhancement (spec §10) ─────────────────────────────────
+   Phones: large overlay surfaces drop backdrop-filter (the expensive
+   effect) for the SOLID adaptive material; the sidebar's big blur is
+   halved. Desktops keep the full glass. */
+@media (max-width: 768px) {
+  [role="dialog"],
+  [data-radix-popper-content-wrapper] > * {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--glass-solid-fill);
+  }
+  .conv-sidebar,
+  .glass-header,
+  div.fixed.inset-y-0.bg-background {
+    -webkit-backdrop-filter: blur(14px) saturate(1.25);
+    backdrop-filter: blur(14px) saturate(1.25);
+  }
+  [data-radix-popper-content-wrapper] > * {
+    -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    backdrop-filter: blur(12px) saturate(1.2);
+    background: var(--glass-float-fill);
+  }
+}
+
+/* Users who ask the OS for less transparency get solid surfaces. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass-soft, .glass-frost, .glass-dock, .glass-float,
+  .glass-header, .conv-sidebar, .glass-card, .glass-strong,
+  .composer-dock, .bg-card, [role="dialog"],
+  [data-radix-popper-content-wrapper] > *, [role="tooltip"] {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--glass-solid-fill);
+  }
+}
+
+/* ── no-blur fallback (browsers without backdrop-filter) ──────────────── */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-soft, .glass-frost, .glass-dock, .glass-float,
+  .glass-header, .conv-sidebar, .glass-card, .glass-strong,
+  .composer-dock, .bg-card, [role="dialog"],
+  [data-radix-popper-content-wrapper] > *, [role="tooltip"] {
+    background: var(--glass-solid-fill);
+  }
+}

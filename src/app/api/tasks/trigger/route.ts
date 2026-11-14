@@ -43,6 +43,8 @@ interface NormalizedTrigger {
   keyPool: string[];
   config: TaskRunConfig;
   payload: TaskPayload;
+  /** Optional browser-mirror Trigger.dev Cloud key (self-provisioning). */
+  cloudKey?: string;
 }
 
 function bad(detail: string, status = 400): NextResponse {
@@ -139,6 +141,13 @@ function validate(body: unknown): { error: string } | { value: NormalizedTrigger
   }
   const keyPool = rawPool.filter((k): k is string => typeof k === "string" && k.trim().length > 0);
 
+  // Serverless self-provisioning: the browser mirror's Trigger.dev Cloud
+  // key (shape-checked only here; used solely when no config exists).
+  const cloudKey =
+    typeof b.cloudKey === "string" && b.cloudKey.trim().length > 0
+      ? b.cloudKey.trim()
+      : undefined;
+
   return {
     value: {
       req: {
@@ -158,6 +167,7 @@ function validate(body: unknown): { error: string } | { value: NormalizedTrigger
       keyPool,
       config,
       payload,
+      cloudKey,
     },
   };
 }
@@ -175,10 +185,33 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { req, keyPool, config } = checked.value;
 
   try {
-    const mode = await getOrchestrationMode();
+    let mode = await getOrchestrationMode();
+    if (mode !== "cloud" && checked.value.cloudKey) {
+      // COLD-INSTANCE SELF-PROVISIONING (fix 2026-11-14 "even if key is
+      // added"): on serverless the sealed config can live in one lambda's
+      // memory while THIS instance has none — the user connected the key,
+      // the UI says connected, yet the dispatch was refused. Re-verify +
+      // re-apply the browser mirror's key HERE, then re-check the mode.
+      // Failures fall through to the actionable refusal below (the key is
+      // never logged — only its verification outcome).
+      try {
+        const { verifyCloudKey, saveCloudConfig } = await import("@/lib/tasks/trigger-cloud");
+        const verified = await verifyCloudKey(checked.value.cloudKey);
+        if (verified.ok) {
+          await saveCloudConfig({ apiKey: checked.value.cloudKey, account: verified.account });
+          const { invalidateOrchestrationModeCache } = await import(
+            "@/lib/tasks/orchestration-mode"
+          );
+          invalidateOrchestrationModeCache();
+          mode = await getOrchestrationMode();
+        }
+      } catch {
+        // re-apply failed — the refusal below explains what to do
+      }
+    }
     if (mode !== "cloud") {
       return bad(
-        "Background tasks run on Trigger.dev Cloud — connect your API key in Settings → Cloud to activate (it takes a key and nothing else).",
+        "Background tasks run on Trigger.dev Cloud — connect your API key in Settings → API Keys to activate (it takes a key and nothing else).",
         409,
       );
     }

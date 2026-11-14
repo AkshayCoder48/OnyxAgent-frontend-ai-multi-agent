@@ -102,6 +102,29 @@ function mix(from: string, to: string, t: number): string {
   ]);
 }
 
+/** Desaturate a hex colour toward its own luminance (t = 0 none, 1 gray). */
+function desaturate(hex: string, t: number): string {
+  const c = parseHex(hex);
+  if (!c) return hex;
+  const l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  return toHex([
+    c[0] + (l - c[0]) * t,
+    c[1] + (l - c[1]) * t,
+    c[2] + (l - c[2]) * t,
+  ]);
+}
+
+/** Hex → "R G B" space-separated triplet (for `rgb(var(--x) / a)` tokens). */
+function triplet(hex: string): string {
+  const c = parseHex(hex);
+  return c ? `${c[0]} ${c[1]} ${c[2]}` : "0 0 0";
+}
+
+/** `rgb(R G B / A)` literal from a hex colour. */
+function rgba(hex: string, alpha: number): string {
+  return `rgb(${triplet(hex)} / ${alpha})`;
+}
+
 /**
  * The readable INK for a canvas: pure white or pure black — whichever
  * contrasts more. For any colour one side always clears 4.58:1, so WCAG
@@ -183,6 +206,73 @@ export function deriveCanvasTokens(bg: string): CanvasTokens {
   // Icons follow the primary ink so glyphs never disappear.
   const iconPrimary = textSecondary;
 
+  // ── GLASS MATERIAL SYSTEM (adaptive glassmorphism overhaul) ─────────
+  // Glass inherits the canvas character instead of importing black:
+  // every fill, border, shadow and scrim below is derived from the
+  // background's luminance + hue, so NO component can introduce an
+  // unwanted dark patch on cream/white/coloured canvases.
+
+  // Shadow ink — the ONLY colour shadows are built from. On a dark canvas
+  // it is the canvas hue deepened; on a light canvas it is a warm/cool
+  // mid-dark neutral (over cream this lands near rgb(60,45,30) — soft
+  // umbra, never pure black).
+  const shadowInk = isDark
+    ? mix(bg, "#000000", 0.55)
+    : desaturate(mix(bg, "#141210", 0.82), 0.35);
+  // Hairline ink — borders on light canvases (dark canvases use white).
+  const lineInk = isDark ? "#ffffff" : desaturate(mix(bg, "#141210", 0.72), 0.3);
+
+  // Elevation ladder (spec §7): 1 subtle · 2 floating · 3 modal. Two-layer
+  // ambient shadows from the ink — no pure black, no hard edges.
+  const a1 = isDark ? 0.2 : 0.08;
+  const a2 = isDark ? 0.3 : 0.12;
+  const a3 = isDark ? 0.42 : 0.17;
+  const shadow1 = `0 1px 2px rgb(${triplet(shadowInk)} / ${(a1 * 0.55).toFixed(3)}), 0 4px 14px rgb(${triplet(shadowInk)} / ${a1})`;
+  const shadow2 = `0 2px 6px rgb(${triplet(shadowInk)} / ${(a2 * 0.5).toFixed(3)}), 0 10px 28px rgb(${triplet(shadowInk)} / ${a2})`;
+  const shadow3 = `0 4px 12px rgb(${triplet(shadowInk)} / ${(a3 * 0.45).toFixed(3)}), 0 18px 48px rgb(${triplet(shadowInk)} / ${a3})`;
+
+  // Fills. Dark canvases keep the identity's white-alpha translucency
+  // (frosted lift); light canvases lift toward white so glass reads as a
+  // clean warm/cool pane of the canvas hue (cream → warm cream glass,
+  // orange → soft warm glass, blue → cool glass — automatically).
+  const liftTint = (t: number) => mix(bg, "#ffffff", t);
+  const softFill = isDark ? "rgb(255 255 255 / 0.05)" : rgba(liftTint(0.42), 0.5);
+  const softFillHover = isDark ? "rgb(255 255 255 / 0.08)" : rgba(liftTint(0.46), 0.58);
+  const frostFill = isDark ? "rgb(255 255 255 / 0.09)" : rgba(liftTint(0.6), 0.8);
+  const frostFillHover = isDark ? "rgb(255 255 255 / 0.13)" : rgba(liftTint(0.64), 0.86);
+  const dockFill = isDark
+    ? rgba(mix(bg, "#000000", 0.28), 0.5)
+    : rgba(liftTint(0.52), 0.88);
+  const dockFillHover = isDark
+    ? rgba(mix(bg, "#000000", 0.22), 0.56)
+    : rgba(liftTint(0.56), 0.92);
+  const floatFill = isDark ? "rgb(255 255 255 / 0.12)" : rgba(liftTint(0.66), 0.86);
+  const floatFillHover = isDark ? "rgb(255 255 255 / 0.16)" : rgba(liftTint(0.7), 0.9);
+  const solidFill = isDark
+    ? rgba(mix(bg, "#ffffff", 0.05), 0.97)
+    : rgba(liftTint(0.55), 0.97);
+  // Recessed wells (inputs, code) — sink with the ink, never with flat black.
+  const wellFill = isDark ? rgba(shadowInk, 0.34) : rgba(shadowInk, 0.05);
+  const wellFillHover = isDark ? rgba(shadowInk, 0.4) : rgba(shadowInk, 0.08);
+  // Code surfaces keep a deep well on EVERY canvas (syntax colours are
+  // tuned for dark wells — a dark code block on a cream canvas is
+  // intentional, like every mainstream editor).
+  const codeFill = isDark ? rgba(shadowInk, 0.52) : "rgb(24 20 16 / 0.92)";
+
+  // Borders — hairlines from the line ink, visible but never loud.
+  const glassBorder = isDark ? "rgb(255 255 255 / 0.15)" : rgba(lineInk, 0.2);
+  const glassBorderHover = isDark ? "rgb(255 255 255 / 0.24)" : rgba(lineInk, 0.3);
+  const glassBorderStrong = isDark ? "rgb(255 255 255 / 0.3)" : rgba(lineInk, 0.38);
+  // Top edge highlight — the "light from above" glass sheen.
+  const edgeHighlight = isDark ? "rgb(255 255 255 / 0.22)" : "rgb(255 255 255 / 0.55)";
+  // Modal scrim — dims the page behind dialogs without blackening light UIs.
+  const scrim = isDark ? rgba(shadowInk, 0.66) : rgba(shadowInk, 0.4);
+  // The composer pane sits over LIVE streaming text — it gets its own
+  // deeper mix so typed text stays readable over any content.
+  const composerFill = isDark
+    ? rgba(mix(bg, "#000000", 0.35), 0.62)
+    : rgba(liftTint(0.58), 0.9);
+
   return {
     isDark,
     vars: {
@@ -202,6 +292,29 @@ export function deriveCanvasTokens(bg: string): CanvasTokens {
       "--input-background": surfaceSecondary,
       "--input-foreground": textPrimary,
       "--focus-ring": focusRing,
+      // ── adaptive glass materials (the overhaul's token contract) ────
+      "--glass-ink": triplet(shadowInk),
+      "--glass-soft-fill": softFill,
+      "--glass-soft-fill-hover": softFillHover,
+      "--glass-frost-fill": frostFill,
+      "--glass-frost-fill-hover": frostFillHover,
+      "--glass-dock-fill": dockFill,
+      "--glass-dock-fill-hover": dockFillHover,
+      "--glass-float-fill": floatFill,
+      "--glass-float-fill-hover": floatFillHover,
+      "--glass-solid-fill": solidFill,
+      "--glass-well-fill": wellFill,
+      "--glass-well-fill-hover": wellFillHover,
+      "--glass-code-fill": codeFill,
+      "--glass-composer-fill": composerFill,
+      "--glass-border": glassBorder,
+      "--glass-border-hover": glassBorderHover,
+      "--glass-border-strong": glassBorderStrong,
+      "--glass-edge-highlight": edgeHighlight,
+      "--glass-shadow-1": shadow1,
+      "--glass-shadow-2": shadow2,
+      "--glass-shadow-3": shadow3,
+      "--glass-scrim": scrim,
       // ── bridge onto the Tailwind v4 tokens the components already use ─
       "--color-background": bg,
       "--color-foreground": textPrimary,

@@ -516,7 +516,7 @@ export function SectionSchedules() {
         {orchestration?.mode !== "cloud" && (
           <p className="text-muted-foreground -mt-3 mb-5 text-xs">
             Want your schedules to run even while this app is closed?{" "}
-            <Link href={ROUTES.SETTINGS_CLOUD_TASKS} className="text-foreground underline underline-offset-4">
+            <Link href={ROUTES.SETTINGS_API_KEYS} className="text-foreground underline underline-offset-4">
               Connect a Trigger.dev Cloud key →
             </Link>
           </p>

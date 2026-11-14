@@ -78,7 +78,7 @@ export function CommandPalette() {
       onOpenChange={setOpen}
       label="Command palette"
       shouldFilter
-      overlayClassName="bg-background/50 fixed inset-0 z-[60] backdrop-blur-sm"
+      overlayClassName="fixed inset-0 z-[60] [background-color:var(--glass-scrim)]"
       contentClassName="border-foreground/15 bg-card text-foreground fixed left-1/2 top-[12vh] z-[61] w-[min(92vw,640px)] -translate-x-1/2 overflow-hidden rounded-2xl border shadow-2xl"
     >
       <div className="border-foreground/10 flex items-center gap-3 border-b px-4 py-3">
