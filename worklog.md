@@ -891,3 +891,23 @@ Work Log:
 
 Stage Summary:
 - Background execution is E2B-only: whole-turn detached runs (close-and-resume with in-bubble landing + reattach-on-return) and detached terminal jobs (background:true + timeout escalation), both protected by the 24h pause-on-timeout sandbox window; Trigger.dev is gone end-to-end (code, key UI, routes, worker, docs, env, DB).
+
+---
+
+## 2026-11-15 (b) — fix: background runs "saving one round only"
+
+Task ID: 29
+Agent: main (Z.ai Code)
+Task: "It's saving one round only" — background (sandbox-resident) runs collapsed to a single text round.
+
+Work Log:
+- ROOT CAUSE (reproduced with a mock chat-completions gateway driving the REAL runner, extracted from headless-agent.ts): on a strict gateway the first tools request gets HTTP 400 → the runner's llm_chat_with_retries SILENTLY degraded to a tools-off retry → the model answered in ONE text round → status "completed". No tools, one round, zero explanation. (The foreground survives such gateways via the wire-compat ladder in src/lib/agent/wire-compat.ts; the runner had no equivalent.)
+- Fix (src/lib/e2b/headless-agent.ts, HEADLESS_RUNNER_VERSION 3→4 so long-lived sandboxes redeploy):
+  * GATEWAY COMPATIBILITY LADDER on 400-with-tools: step 1 drop tool_choice (keep tools) → step 2 keep tools but flatten role:tool traffic to plain user/assistant text (sanitize_messages_for_gateway — the 'Invalid role "tool"' gateways) → step 3 tools-off text-only degradation, now LOUD.
+  * LOUD degradation: global DEGRADED flag, "degraded" + "tools_wire_mode" fields in agent_status.json, and a visible note appended to the final message ("the model gateway rejected tool calls for this run — use a provider/model that supports function calling"), so a one-round answer is never a silent mystery. Every landing path (live adoption, reattach-on-return, append) shows it because it rides the final message content.
+- NEW scripts/verify-runner-ladder.py: extracts the real runner and runs it against a scripted mock gateway in three modes, asserting outcomes — normal (3 rounds, 3 tool calls, wire=full), reject-tool_choice (ladder step 1 SAVES the run: 3 rounds, 3 tool calls, wire=tools), reject-tools (loud degradation: 1 text round, degraded=true, note present). All three PASS.
+- Repo housekeeping this session: the local checkout was a stale diverged lineage (its history had the Trigger.dev lane + an Expo conversion; origin/main had moved to the E2B-lane lineage with the glass markdown kit). The fix commit was rebased onto origin/main (4bc7815): runner fix + verification harness only; the stale-lineage artifacts (trigger-worker runner mirror, sync script) dropped out during the rebase (deleted upstream). bun.lock re-synced to origin/main; deps reinstalled (the glass kit's remark-math/rehype-katex were missing from the stale install).
+- Verification on the final tree: 3-mode ladder harness PASS ×3; vitest 990/990 (70 files); next build exit 0 (also fixed a String.raw backtick-in-Python-docstring parse error caught by the build).
+
+Stage Summary:
+- Background runs on strict gateways no longer collapse into a single unexplained text round: the runner now retries with compatible tool wire formats first, and if a gateway truly cannot do function calling, the run completes with a clearly visible note instead of silently saving one round.
