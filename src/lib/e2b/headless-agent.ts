@@ -35,7 +35,7 @@
  *  v3: native use_browser — the background agent can drive the CloakBrowser
  *  driver through its file protocol (PRD §10: browser tasks survive the
  *  frontend disconnecting). */
-export const HEADLESS_RUNNER_VERSION = 3;
+export const HEADLESS_RUNNER_VERSION = 4;
 
 export const RUNNER_PATH = "/home/user/headless_runner.py";
 export const AGENT_DIR = "/home/user/.onyx/agent";
@@ -77,7 +77,7 @@ HISTORY_PATH = HOME + "/chat_history.json"
 STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
 
-RUNNER_VERSION = 2
+RUNNER_VERSION = 4
 # USER DIRECTIVE: "remove the limit of 24 rounds" — the round budget is now
 # effectively unlimited; the real bound is the wall-clock execution window.
 MAX_ROUNDS_DEFAULT = 400
@@ -574,6 +574,53 @@ class LlmError(Exception):
 # llm_chat_with_retries on 429 (and 401 with a multi-key pool).
 KEY_INDEX = 0
 
+# GATEWAY COMPATIBILITY STATE (mirrors the app runtime's wire-compat ladder —
+# see src/lib/agent/wire-compat.ts). Strict gateways 400 on OpenAI-standard
+# tool structures; the foreground survives by learning these steps per
+# provider. The runner learns them per RUN instead:
+#   TOOLS_WIRE_MODE — "full"  : tools + tool_choice:"auto"
+#                     "tools" : tools only (gateway rejects tool_choice)
+#                     "text"  : no tools params at all (DEGRADED text run)
+#   WIRE_SANITIZE    — flatten role:tool traffic to plain user/assistant
+#                      text (gateways that 400 on the tool role, e.g.
+#                      'Invalid role "tool"').
+#   DEGRADED         — the run lost tool calling; the final message carries
+#                      a visible note so a one-round text answer is never a
+#                      silent mystery again.
+TOOLS_WIRE_MODE = "full"
+WIRE_SANITIZE = False
+DEGRADED = False
+
+
+def sanitize_messages_for_gateway(messages):
+    """Flatten tool-role traffic to plain text (wire-compat step A).
+
+    Strict gateways 400 on role:"tool" entries and on tool_calls blocks.
+    Tool results become user-role '[tool result | name]' lines; assistant
+    tool_calls become '[used tool …]' text. The model still sees the full
+    conversation, just in plain-chat shape."""
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            name = m.get("name") or m.get("tool_call_id") or "tool"
+            out.append({
+                "role": "user",
+                "content": "[tool result | %s]: %s" % (name, m.get("content") or ""),
+            })
+        elif role == "assistant" and m.get("tool_calls"):
+            parts = []
+            if (m.get("content") or "").strip():
+                parts.append(m["content"])
+            for spec in m["tool_calls"]:
+                fn = (spec or {}).get("function") or {}
+                parts.append("[used tool %s with args %s]" % (
+                    fn.get("name") or "?", fn.get("arguments") or "{}"))
+            out.append({"role": "assistant", "content": "\n".join(parts)})
+        else:
+            out.append(m)
+    return out
+
 def llm_chat(cfg, messages, use_tools):
     url = str(cfg.get("chat_url") or "")
     if not url:
@@ -585,9 +632,12 @@ def llm_chat(cfg, messages, use_tools):
         api_key = api_keys[KEY_INDEX % len(api_keys)]
     model = str(cfg.get("model") or "")
 
+    # Wire-compat: flatten tool-role traffic for gateways that reject it.
+    send_messages = sanitize_messages_for_gateway(messages) if WIRE_SANITIZE else messages
+
     body = {
         "model": model,
-        "messages": messages,
+        "messages": send_messages,
         "stream": False,
     }
     temperature = cfg.get("temperature")
@@ -595,7 +645,8 @@ def llm_chat(cfg, messages, use_tools):
         body["temperature"] = temperature
     if use_tools:
         body["tools"] = TOOLS
-        body["tool_choice"] = "auto"
+        if TOOLS_WIRE_MODE == "full":
+            body["tool_choice"] = "auto"
 
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -633,12 +684,16 @@ def llm_chat(cfg, messages, use_tools):
 
 def llm_chat_with_retries(cfg, messages, use_tools):
     """Retry transient failures (429/5xx/network) with backoff. A 400 while
-    tools are enabled triggers ONE tools-off retry (strict gateways / models
-    without function support degrade to a text-only run). A 429 (or a 401
-    with a multi-key pool) rotates to the NEXT key in api_key_pool — up to 3
-    total rotations, 5s apart — before falling through to the transient
-    retry accounting."""
-    global KEY_INDEX
+    tools are enabled walks the GATEWAY COMPATIBILITY LADDER (mirrors the
+    app runtime's wire-compat; the old behavior degraded SILENTLY to a
+    text-only run on the FIRST 400, which turned every background run on a
+    strict gateway into a one-round text answer with no explanation):
+      step 1 — drop tool_choice, keep tools (gateways that reject it),
+      step 2 — keep tools, flatten tool-role messages ('Invalid role
+                "tool"' gateways),
+      step 3 — tools off (text-only DEGRADATION, loudly marked: the final
+                message + status both say the run lost tool calling)."""
+    global KEY_INDEX, TOOLS_WIRE_MODE, WIRE_SANITIZE, DEGRADED
     delay = 3.0
     last_error = None
     pool_raw = cfg.get("api_key_pool")
@@ -650,8 +705,18 @@ def llm_chat_with_retries(cfg, messages, use_tools):
         except LlmError as exc:
             last_error = exc
             if exc.http_status == 400 and use_tools:
-                log("gateway rejected the tools payload — degrading to a text-only run")
-                return llm_chat(cfg, messages, False)
+                if TOOLS_WIRE_MODE == "full":
+                    TOOLS_WIRE_MODE = "tools"
+                    log("gateway rejected the tool_choice param — retrying with tools only (tool_choice dropped)")
+                    return llm_chat_with_retries(cfg, messages, use_tools)
+                if not WIRE_SANITIZE and any(m.get("role") == "tool" for m in messages):
+                    WIRE_SANITIZE = True
+                    log("gateway rejected the tool-role messages — flattening tool traffic to plain text (tools kept)")
+                    return llm_chat_with_retries(cfg, messages, use_tools)
+                DEGRADED = True
+                TOOLS_WIRE_MODE = "text"
+                log("gateway rejected the tools payload — DEGRADING to a text-only run (the final message will say so)")
+                return llm_chat_with_retries(cfg, messages, False)
             if (
                 api_keys
                 and rotations < 3
@@ -694,6 +759,8 @@ def write_status(status, stage=None, round_no=None, total_rounds=None,
         "error": error,
         "prompt_preview": prompt_preview,
         "runner_version": RUNNER_VERSION,
+        "degraded": DEGRADED,
+        "tools_wire_mode": TOOLS_WIRE_MODE,
     }
     write_json(STATUS_PATH, payload)
 
@@ -815,6 +882,18 @@ def main():
             "role": "assistant",
             "content": "I reached the background run's round budget (%d rounds) while still working. Here is everything I completed so far — re-run me to continue." % total_rounds,
         })
+        write_json(HISTORY_PATH, messages)
+
+    if DEGRADED and final_text and messages and messages[-1].get("role") == "assistant":
+        # LOUD degradation — a one-round text answer must never land as a
+        # silent mystery ("it's saving one round only"). The note rides the
+        # final message content, so every landing path (live adoption,
+        # reattach-on-return, append) shows it with zero client changes.
+        note = ("\n\n_(Background-run note: the model gateway rejected tool calls for this"
+                " run, so it could only answer as plain text — no sandbox tools were executed."
+                " For full background runs, use a provider/model that supports function calling.)_")
+        messages[-1]["content"] = (messages[-1].get("content") or "") + note
+        final_text = messages[-1]["content"]
         write_json(HISTORY_PATH, messages)
 
     write_status("completed", stage="done", round_no=total_rounds, total_rounds=total_rounds,
