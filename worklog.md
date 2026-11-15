@@ -848,3 +848,22 @@ Work Log:
 
 Stage Summary:
 - Responses now open with the live "Using ………" caption and settle into the "Used N Tools · Created N Files" summary; chunked writes can no longer silently corrupt markup files (structural verification after every append + one-shot-first steering), and the glass shadows finally render on all four sides.
+
+---
+
+## 2026-11-15 (later) — Using indicator removed
+
+Task ID: 27
+Agent: main (Z.ai Code)
+Task: Remove the "Using ___" indicator entirely (the live caption at the top of responses and its collapsed "Used N Tools · Created N Files" summary), reverting the first half of Task 26. The chunked-writing fix and the glass shadow fix from Task 26 stay.
+
+Work Log:
+- Removed the UsingIndicator mount block (and its import) from message-item.tsx — assistant responses again start directly with their content (the pre-Task-26 PRD §3.1 inline flow).
+- Deleted src/components/chat/using-indicator.tsx.
+- Stripped the using-indicator pulse keyframes + reduced-motion guard block from globals.css.
+- Dropped the 5 UsingIndicator component tests from markup-integrity.test.tsx (the 13 markup-integrity analyzer tests stay — they cover the chunk fix, which remains).
+- Note: the sandbox was recycled between turns (node_modules wiped, /tmp cleared) — reinstalled deps with bun install and re-created the E2E injection script.
+- VERIFICATION — vitest 995/995 (70 files; 1000 minus the 5 removed indicator tests), next build exit 0; E2E in the running app with the same injected tool_calls data: 0 .using-indicator elements, 0 "Used N Tools" text, while the Web Search tool row, glass table, code block with foot, and "FILES 1 +3" footer all still render, and the scroll container still computes overflow-x: clip / clip-margin 100px (shadow fix untouched).
+
+Stage Summary:
+- Pure removal (204 deletions across 4 files, zero logic changes): responses no longer carry the Using caption or the Used-N summary; everything else from Task 26 is verified intact.
