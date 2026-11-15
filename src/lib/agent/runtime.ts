@@ -119,6 +119,14 @@ export interface AgentTurnOptions {
      *  also auto-learned at runtime when a provider rejects a param. */
     disabledParams?: string[];
   };
+  /**
+   * ZERO-CONFIG FLAG: true when `provider` is the built-in anonymous Kilo
+   * gateway default (the user has NO AI provider configured). The gateway
+   * is not browser-CORS-callable, so such turns MUST execute inside the
+   * E2B sandbox — doSend forces the detached lane for them whenever a
+   * sandbox key exists (personal key or the server's managed E2B_API_KEY).
+   */
+  providerIsAnonymous?: boolean;
   /** System prompt (already includes skills/MCP/custom-tools/env sections). */
   systemPrompt: string;
   /** Optional sampling temperature override. */

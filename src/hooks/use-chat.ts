@@ -388,18 +388,13 @@ export function useChat(options: UseChatOptions = {}) {
       // (obsolete/transient) user ids — deleted legacy seed rows could ride
       // a turn on the wrong provider. An honest empty list errors below.
       const providers = await listUsableProviders(userId);
-      if (providers.length === 0) {
-        // (The emitted error event is mirrored into the Logs store by the
-        // event processor — no double-logging here.)
-        emit?.({
-          type: "error",
-          data: {
-            message:
-              "No AI provider configured. Add one in Settings → Agent Settings → AI Providers.",
-          },
-        });
-        return null;
-      }
+      // ZERO-CONFIG DEFAULT (sandbox-native PRD): a user with NO AI provider
+      // no longer hits a hard refusal — the turn runs on the built-in
+      // ANONYMOUS KILO gateway, executed from INSIDE the E2B sandbox (the
+      // gateway is not browser-CORS-callable, so doSend's fork forces the
+      // detached lane whenever a sandbox key exists — personal or the
+      // server's managed E2B_API_KEY).
+      const zeroConfig = providers.length === 0 ? kiloAnonProvider() : null;
       // SINGLE SOURCE OF TRUTH (model-desync PRD): the chat store's
       // `selectedModel` / `selectedProviderId` are authoritative. The refs are
       // a fast mirror kept in sync by setModel/setProviderId — read both with
@@ -467,42 +462,67 @@ export function useChat(options: UseChatOptions = {}) {
       //   2. the chat store's selectedProviderId (no model picked).
       //   3. first ACTIVE provider → providers[0] (the previous
       //      activeOnly=list semantics).
-      const selectedProvider =
-        resolveProviderForModel(providers, modelOverride) ??
-        (providerOverrideId != null
-          ? providers.find((p) => p.id === providerOverrideId)
-          : undefined) ??
-        providers.find((p) => p.is_active) ??
-        providers[0];
-      if (!selectedProvider) {
-        emit?.({ type: "error", data: { message: "Selected AI provider not found." } });
-        return null;
-      }
-      const apiKey = await aiProviderService.getDecryptedApiKey(selectedProvider.id);
-      // Orphaned-selection recovery (shared contract): adopt the selected
-      // model only when the resolved provider OFFERS it — a model id whose
-      // provider was deleted/re-synced away falls to the provider's first
-      // model instead of a guaranteed-404 id. When the provider lists NO
-      // models, the explicit pick stays (best guess — never a hardcoded
-      // fallback model; endpoint-migration PRD §4).
-      let model = modelOverride ?? "";
-      if (model && !(selectedProvider.models ?? []).includes(model)) {
-        model = selectedProvider.models?.[0] ?? model;
-      }
-      if (!model) model = selectedProvider.models?.[0] ?? "";
-
-      // Dev instrumentation (PRD §15).
-      if (process.env.NODE_ENV !== "production") {
-        console.debug(
-          `[useChat] turn provider=${selectedProvider.name} model=${model || "(provider default)"}`,
-        );
-        if (routerCandidates) {
-          console.debug(
-            `[useChat] auto-router active: ${routerCandidates.length} candidates — ${routerCandidates
-              .map((c) => `${c.label}:${c.model}`)
-              .join(" | ")}`,
-          );
+      //   ZERO-CONFIG — no providers at all: the anonymous Kilo default
+      //   replaces the whole chain (model = the default free-tier id).
+      let resolvedProvider: AgentTurnOptions["provider"];
+      if (zeroConfig) {
+        resolvedProvider = {
+          baseUrl: zeroConfig.baseUrl,
+          apiKey: zeroConfig.apiKey,
+          model: zeroConfig.model,
+          toolsEnabled: true,
+        };
+      } else {
+        const selectedProvider =
+          resolveProviderForModel(providers, modelOverride) ??
+          (providerOverrideId != null
+            ? providers.find((p) => p.id === providerOverrideId)
+            : undefined) ??
+          providers.find((p) => p.is_active) ??
+          providers[0];
+        if (!selectedProvider) {
+          emit?.({ type: "error", data: { message: "Selected AI provider not found." } });
+          return null;
         }
+        const apiKey = await aiProviderService.getDecryptedApiKey(selectedProvider.id);
+        // Orphaned-selection recovery (shared contract): adopt the selected
+        // model only when the resolved provider OFFERS it — a model id whose
+        // provider was deleted/re-synced away falls to the provider's first
+        // model instead of a guaranteed-404 id. When the provider lists NO
+        // models, the explicit pick stays (best guess — never a hardcoded
+        // fallback model; endpoint-migration PRD §4).
+        let model = modelOverride ?? "";
+        if (model && !(selectedProvider.models ?? []).includes(model)) {
+          model = selectedProvider.models?.[0] ?? model;
+        }
+        if (!model) model = selectedProvider.models?.[0] ?? "";
+
+        // Dev instrumentation (PRD §15).
+        if (process.env.NODE_ENV !== "production") {
+          console.debug(
+            `[useChat] turn provider=${selectedProvider.name} model=${model || "(provider default)"}`,
+          );
+          if (routerCandidates) {
+            console.debug(
+              `[useChat] auto-router active: ${routerCandidates.length} candidates — ${routerCandidates
+                .map((c) => `${c.label}:${c.model}`)
+                .join(" | ")}`,
+            );
+          }
+        }
+
+        resolvedProvider = {
+          baseUrl: selectedProvider.base_url,
+          apiKey,
+          model,
+          modelType: selectedProvider.model_type,
+          toolsEnabled: selectedProvider.tools_enabled,
+          noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
+          thinkingEnabled:
+            (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
+          disabledParams:
+            (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
+        };
       }
 
       // Load user settings (system prompt, auto-approve, etc.)
@@ -558,18 +578,10 @@ export function useChat(options: UseChatOptions = {}) {
         // `providerCandidates`.
         provider: routerCandidates
           ? routerCandidates[0]!.provider
-          : {
-              baseUrl: selectedProvider.base_url,
-              apiKey,
-              model,
-              modelType: selectedProvider.model_type,
-              toolsEnabled: selectedProvider.tools_enabled,
-              noPrefix: (selectedProvider as { no_prefix?: boolean }).no_prefix ?? false,
-              thinkingEnabled:
-                (selectedProvider as { thinking_enabled?: boolean }).thinking_enabled ?? false,
-              disabledParams:
-                (selectedProvider as { disabled_params?: string[] }).disabled_params ?? [],
-            },
+          : resolvedProvider,
+        // ZERO-CONFIG: mark anonymous-default turns so the send fork routes
+        // them into the sandbox (the gateway rejects browser CORS).
+        ...(zeroConfig ? { providerIsAnonymous: true } : {}),
         ...(routerCandidates ? { providerCandidates: routerCandidates } : {}),
         systemPrompt: finalSystemPrompt,
         temperature: temperatureRef.current,
@@ -626,7 +638,16 @@ export function useChat(options: UseChatOptions = {}) {
       let runApiKey: string;
       let runModel: string;
       let runFallbackModels: readonly string[] = [];
-      if (provider.baseUrl?.trim()) {
+      if (opts.providerIsAnonymous) {
+        // The zero-config default (buildTurnOptions injected it): use the
+        // FULL kilo config including the concrete :free fallback models —
+        // the virtual tier id reroutes server-side and concrete ids rotate.
+        const kilo = kiloAnonProvider();
+        chatUrl = chatCompletionsUrl(kilo.baseUrl);
+        runApiKey = kilo.apiKey; // anonymous — no Authorization header
+        runModel = kilo.model;
+        runFallbackModels = kilo.fallbackModels;
+      } else if (provider.baseUrl?.trim()) {
         chatUrl = chatCompletionsUrl(provider.baseUrl, provider.noPrefix);
         runApiKey = provider.apiKey ?? "";
         runModel = provider.model;
@@ -981,7 +1002,29 @@ export function useChat(options: UseChatOptions = {}) {
       // immediately. The streaming placeholder is emitted AFTER a
       // successful dispatch (inside runDetachedTurn), and the live adoption
       // loop streams progress + the finished result into that bubble.
-      const detachedMode = useDetachedRunStore.getState().detachedMode;
+      let detachedMode = useDetachedRunStore.getState().detachedMode;
+      // ZERO-CONFIG FORCING: an anonymous-default turn (no user AI provider)
+      // can ONLY execute in the sandbox — the Kilo gateway is not
+      // browser-CORS-callable — so the detached lane is forced whenever a
+      // sandbox key exists (personal or managed env). Without any key the
+      // turn cannot run at all: fail honestly instead of a CORS 500 in the
+      // foreground loop.
+      if (!detachedMode && opts.providerIsAnonymous) {
+        const { getEffectiveE2BKey } = await import("@/lib/e2b/env-key");
+        if (await getEffectiveE2BKey(userId)) {
+          detachedMode = true;
+        } else {
+          execution.processor.handle({
+            type: "error",
+            data: {
+              message:
+                "No AI provider and no sandbox key configured. Zero-config runs execute inside the E2B sandbox — add an E2B key in Settings → API Keys (or set E2B_API_KEY on the server), or configure an AI provider in Settings → Agent Settings.",
+            },
+          });
+          executionHub.finishExecution(execution.id, "failed");
+          return;
+        }
+      }
       if (!detachedMode) {
         execution.processor.handle({
           type: "model_request_start",

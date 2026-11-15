@@ -160,6 +160,28 @@ async function reconcileProviderOwnership(userId: string): Promise<void> {
         `[auth] purged ${ghosts.length} legacy OnyxAI seed row(s)`,
       );
     }
+    // DETACHED-RUN ROW ADOPTION (the refresh auto-stop fix): runs dispatched
+    // under the transient pre-auth id must follow the resolved user, or the
+    // reattach-on-return lookup misses the row and a LIVE sandbox run
+    // settles as "interrupted" on reload. Adopt-only — running rows are
+    // never purged (a run's ownership is provable via its conversation id,
+    // which is nanoid-unique).
+    try {
+      const foreignRuns = (await db.detached_runs.toArray()).filter(
+        (r) => r.user_id !== userId,
+      );
+      if (foreignRuns.length > 0) {
+        await db.detached_runs.bulkPut(
+          foreignRuns.map((r) => ({ ...r, user_id: userId })),
+        );
+        console.info(
+          `[auth] adopted ${foreignRuns.length} detached-run row(s) across user ids`,
+        );
+      }
+    } catch {
+      // best-effort — getDetachedRunForConversation's conversation-scoped
+      // fallback covers the miss even when this adoption fails.
+    }
   } catch {
     // Dexie unavailable (private mode / SSR) — non-fatal; the reactive
     // loading fix alone already prevents the ghosts from rendering.

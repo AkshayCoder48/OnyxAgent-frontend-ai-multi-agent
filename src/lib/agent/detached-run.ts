@@ -289,7 +289,21 @@ export async function getDetachedRunForConversation(
       .equals(conversationId)
       .and((r) => r.user_id === userId)
       .sortBy("started_at");
-    return rows[rows.length - 1] ?? null;
+    let row = rows[rows.length - 1] ?? null;
+    if (!row) {
+      // USER-ID DRIFT FALLBACK (the refresh auto-stop bug): a run dispatched
+      // under the transient pre-auth id ("local-user") while this session
+      // resolved to the real id made the user-scoped miss fall through to
+      // the interrupted-settle path — a LIVE run landed as "interrupted" on
+      // every reload. Conversation ids are nanoid-unique, so a
+      // conversation-scoped match is provably this conversation's run.
+      const any = await db.detached_runs
+        .where("conversation_id")
+        .equals(conversationId)
+        .sortBy("started_at");
+      row = any[any.length - 1] ?? null;
+    }
+    return row;
   } catch {
     return null;
   }

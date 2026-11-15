@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SandboxHistoryMessage } from "@/lib/e2b/client";
 import {
   buildSeedMessages,
   convertHistoryToAssistantMessage,
+  getDetachedRunForConversation,
 } from "@/lib/agent/detached-run";
 
 describe("buildSeedMessages", () => {
@@ -102,5 +103,79 @@ describe("convertHistoryToAssistantMessage (the landing path)", () => {
       { role: "assistant", content: "final answer" },
     ];
     expect(convertHistoryToAssistantMessage(history).content).toBe("final answer");
+  });
+});
+
+// ── getDetachedRunForConversation — the refresh auto-stop regression ──────
+// A run dispatched under the transient pre-auth id ("local-user") while the
+// session later resolves to the real id must STILL be found by the
+// reattach-on-return path, or a live sandbox run settles as "interrupted"
+// on every reload (the reported "still auto stopping on refreshed").
+vi.mock("@/lib/db", () => ({
+  getDB: () => ({ detached_runs: { where: fakeDetachedWhere } }),
+}));
+
+type FakeRow = Record<string, unknown>;
+let fakeRows: FakeRow[] = [];
+
+function fakeDetachedWhere(_index: string) {
+  const byConversation = (rows: FakeRow[], conversationId: string) =>
+    rows.filter((r) => r.conversation_id === conversationId);
+  return {
+    equals: (conversationId: string) => ({
+      and: (pred: (r: FakeRow) => boolean) => ({
+        sortBy: async () =>
+          byConversation(fakeRows, conversationId)
+            .filter(pred)
+            .sort((a, b) => Number(a.started_at) - Number(b.started_at)),
+      }),
+      sortBy: async () =>
+        byConversation(fakeRows, conversationId).sort(
+          (a, b) => Number(a.started_at) - Number(b.started_at),
+        ),
+    }),
+  };
+}
+
+function row(over: Partial<FakeRow> & { id: string; conversation_id: string }): FakeRow {
+  return {
+    user_id: "local-user",
+    status: "running",
+    started_at: 1,
+    result_message_id: null,
+    ...over,
+  } as FakeRow;
+}
+
+describe("getDetachedRunForConversation (user-id drift fallback)", () => {
+  it("falls back to a conversation-scoped lookup when the user-scoped query misses", async () => {
+    fakeRows = [row({ id: "r1", conversation_id: "c1", user_id: "local-user", started_at: 5 })];
+    const found = await getDetachedRunForConversation("real-user", "c1");
+    expect(found?.id).toBe("r1"); // found despite the user-id drift
+  });
+
+  it("prefers the user-scoped match when one exists (and the LATEST by started_at)", async () => {
+    fakeRows = [
+      row({ id: "r-old", conversation_id: "c1", user_id: "real-user", started_at: 1 }),
+      row({ id: "r-foreign", conversation_id: "c1", user_id: "other", started_at: 9 }),
+      row({ id: "r-new", conversation_id: "c1", user_id: "real-user", started_at: 5 }),
+    ];
+    const found = await getDetachedRunForConversation("real-user", "c1");
+    expect(found?.id).toBe("r-new");
+  });
+
+  it("returns null when the conversation has no rows at all", async () => {
+    fakeRows = [row({ id: "r9", conversation_id: "other-conv" })];
+    expect(await getDetachedRunForConversation("real-user", "c1")).toBeNull();
+  });
+
+  it("survives a Dexie failure (returns null, never throws)", async () => {
+    const db = await import("@/lib/db");
+    const original = (db as unknown as { getDB: () => unknown }).getDB;
+    (db as unknown as { getDB: () => unknown }).getDB = () => {
+      throw new Error("dexie unavailable");
+    };
+    expect(await getDetachedRunForConversation("u", "c1")).toBeNull();
+    (db as unknown as { getDB: () => unknown }).getDB = original;
   });
 });

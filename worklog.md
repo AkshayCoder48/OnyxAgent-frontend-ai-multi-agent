@@ -939,3 +939,27 @@ Verification:
 
 Stage Summary:
 - The sandbox now owns the whole turn: AI called from inside it (Kilo anonymous by default — no user AI provider, no user E2B key needed), tokens + tool cards stream to the UI over a real SSE bridge, work caches to Dexie/localStorage every ~2.5s, a refresh mid-run reattaches to the same live stream, and the keep-alive + rotation guards keep an active run from ever being wiped mid-response (rotation + pause-resume within E2B's documented 24h cap — per the PRD's explicit "don't defeat provider limits; rotate instead" rule).
+
+## 2026-11-15 (d) — fix: "still auto stopping on refreshed" — zero-config dispatch unblocked + user-id-drift refresh survival (browser-verified)
+
+Task ID: 31
+Agent: main (Z.ai Code)
+Task: "Still auto stopping on refreshed" — background runs appeared to stop when the page refreshed mid-response.
+
+Work Log:
+- BROWSER REPRO (agent-browser against the production build, real managed-E2B key from .env.local): the FIRST send in a zero-config browser (no AI provider, no personal E2B key) failed instantly with "No AI provider configured. Add one in Settings → Agent Settings → AI Providers." — the kilo-anon default built last session was UNREACHABLE: buildTurnOptions hard-refused an empty provider list BEFORE the detached fork's provider resolution ever ran. That is the state the user hit.
+- ROOT CAUSES (2):
+  1. Zero-config dispatch gate: buildTurnOptions' providers.length===0 error branch ran before any lane choice. (Separately verified: the Kilo gateway is NOT browser-CORS-callable — fetch from the page fails — so a providerless turn can ONLY execute inside the sandbox.)
+  2. Refresh auto-stop: getDetachedRunForConversation filtered detached_runs rows by user_id. Runs dispatched under the transient pre-auth id ("local-user" — sessions start SYNCHRONOUSLY with it) while a later session resolves to the real id made the reattach miss the row → the effect fell through to settleInterruptedMessages → the bubble landed as "This task was interrupted" while the sandbox run was still alive = "auto stopping on refreshed". The auth reconcile only adopted ai_providers rows, never detached_runs.
+- FIXES:
+  * buildTurnOptions: empty provider list no longer errors — the turn resolves to the built-in anonymous Kilo gateway default (providerIsAnonymous flag threaded through AgentTurnOptions). User providers keep precedence; the whole resolution chain is untouched when providers exist.
+  * doSend fork: an anonymous-default turn FORCES the detached lane whenever a sandbox key exists (personal vault or the managed server E2B_API_KEY — CORS makes the foreground impossible); with no key either it fails honestly ("add an E2B key or configure a provider") instead of a browser CORS death.
+  * runDetachedTurn: opts.providerIsAnonymous uses the FULL kilo config (default tier model + concrete :free fallback ids).
+  * getDetachedRunForConversation: user-scoped miss falls back to a conversation-scoped lookup (conversation ids are nanoid-unique — a match is provably this conversation's run).
+  * auth reconcile: detached_runs rows are ADOPTED across user ids (adopt-only — running rows never purged); the conversation-scoped fallback covers the case even when adoption fails.
+- VERIFIED IN THE BROWSER (production build, localhost:3100, zero-config profile): send "3× sleep 12 → create refresh-test.txt" → dispatched with NO provider error, live SSE text ("I'll run the first sleep now") + a live run_terminal tool card → RELOAD mid-run (2nd sleep) → the reattach claimed the run ("Onyx is working in the background…" + the pre-reload partial text preserved) → the run CONTINUED and landed in the same bubble: final answer + tool cards + the sandbox file tree showing refresh-test.txt. No "interrupted" note, no duplicates. Network log: two /api/sandbox?stream=1 connections with key=USE_SERVER_ENV (managed sentinel) — pre- and post-reload.
+- Tests: 4 new regression tests (user-id drift fallback, latest-user-row preference, no-row null, Dexie-failure null); detached-run.test.ts 10/10; suite 1007/1007 (71 files); tsc clean on every touched file (runtime.ts's pre-existing baseline errors untouched).
+- E2B pause semantics re-verified from docs (docs.e2b.dev/sandbox/persistence): default pause preserves memory + filesystem INCLUDING processes; paused sandboxes are kept indefinitely; Hobby caps continuous runtime at 1h (the keepalive covers active sessions; pause+resume resets it). The pagehide auto-pause beacon + server guards remain correct.
+
+Stage Summary:
+- Zero-config users (no AI provider, no personal E2B key) now send successfully on the anonymous Kilo gateway inside the managed sandbox, and a page refresh mid-run reattaches to the SAME live run instead of settling it as interrupted.
