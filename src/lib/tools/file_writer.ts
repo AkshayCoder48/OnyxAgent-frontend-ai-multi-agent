@@ -7,6 +7,7 @@ import {
   type ResolvedSandbox,
 } from "@/lib/e2b/sandbox-rotation";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
+import { analyzeMarkupIntegrity, isMarkupPath } from "./markup-integrity";
 
 /**
  * Incremental File Writer & Safe Save System.
@@ -359,7 +360,7 @@ async function ensureParentDir(
 
 registerTool(
   "create_file_chunk",
-  "Append (or create) a chunk of content to a file in the user's workspace. For files >200 lines, call verify_path first, then call this with mode='create' for the first chunk (chunk_index=0) and mode='append' for subsequent chunks. Chunk size should be 2-4 KB (50-200 lines). Splits should occur at function/class/component boundaries — never inside JSON, function bodies, classes, or JSX elements. After writing, the file is read back to verify the write succeeded. Returns the chunk index, total chunks, bytes written, file size, and verification status.",
+  "Append (or create) a chunk of content to a file in the user's workspace. LAST RESORT for very large files only (over ~30 KB / ~800 lines): prefer ONE create_file / write_file call for anything smaller — single-shot writes keep tag balance and structure intact (chunked HTML/markup writes have produced broken documents: styles outside <head>, duplicated sections, unclosed tags). If you MUST chunk: call verify_path first, then mode='create' for chunk_index=0 and mode='append' after. SPLIT ONLY AT STRUCTURAL SEAMS — between top-level elements (a whole <section>…</section>, a whole function, a whole CSS rule block); NEVER inside a tag, attribute, JSON, CSS rule, function body or JSX element. Every append runs an automatic tag-balance check on the accumulated file and returns structure_issues when the document broke — repair them (or rewrite the file in one shot) before appending further. Returns the chunk index, total chunks, bytes written, file size, verification and structure status.",
   {
     type: "object",
     properties: {
@@ -490,8 +491,9 @@ registerTool(
       //    equals the chunk; for an append the tail ends with the chunk.
       let verified = false;
       let fileSize = 0;
+      let after = "";
       try {
-        const after = await client.readFile(rawPath);
+        after = await client.readFile(rawPath);
         fileSize = new TextEncoder().encode(after).length;
         if (shouldOverwrite) {
           verified = after === content;
@@ -515,6 +517,20 @@ registerTool(
         };
       }
 
+      // 5. STRUCTURAL verification for markup files (chunked-writing
+      //    postmortem, 2026-11-15): a byte-level tail check proves the chunk
+      //    LANDED, never that the document still parses. Appended chunks used
+      //    to split mid-tag, duplicate sections, orphan closers and drop
+      //    styles outside the document — the model saw "verified: true" and
+      //    marched on. Now every append to a markup file runs a tag-balance
+      //    walk on the WHOLE accumulated file and reports the seam defects
+      //    back, so the writer self-corrects before the next chunk (or
+      //    rewrites the file in one shot).
+      let structure: ReturnType<typeof analyzeMarkupIntegrity> | undefined;
+      if (isMarkupPath(rawPath)) {
+        structure = analyzeMarkupIntegrity(after);
+      }
+
       return {
         path: rawPath,
         chunk_index: chunkIndex,
@@ -523,6 +539,26 @@ registerTool(
         file_size: fileSize,
         created_dirs: createdDirs,
         verified,
+        ...(structure
+          ? {
+              structure_ok: structure.ok,
+              ...(structure.midTagTail
+                ? {
+                    structure_warning:
+                      "This chunk ENDS inside an unfinished tag/attribute — the boundary split a tag. The NEXT chunk must continue exactly at the break (finish the tag) and this split must not repeat; prefer splitting only at structural seams (between elements, never inside one).",
+                  }
+                : {}),
+              ...(structure.issues.length > 0
+                ? {
+                    structure_issues: structure.issues
+                      .slice(0, 8)
+                      .map((i) => (i.line ? `line ${i.line}: ` : "") + i.message),
+                    structure_fix:
+                      "Repair the reported defects before appending more chunks (or rewrite the whole file in ONE create_file/write_file call — single-shot writes are always preferred for files under ~30KB).",
+                  }
+                : {}),
+            }
+          : {}),
         ...(usedContentAlias
           ? { note: "Used the 'chunk' parameter as the content — the canonical parameter name is 'content'; use 'content' in future calls." }
           : {}),

@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
+import { UsingIndicator } from "./using-indicator";
 import { ToolStackGroup } from "./tool-stack-group";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { BranchPicker } from "./branch-picker";
@@ -1063,6 +1064,20 @@ export const MessageItem = React.memo(function MessageItem({
                 )}
               </div>
             );
+          })()}
+
+        {/* USING indicator (user request 2026-11-15): the caption at the
+            TOP of every response that ran tools — live it reads
+            "Using {current tool} ········" (dotted leader to the viewport
+            end, pulsing while work is in flight); once the response ends it
+            collapses to the compact "Used N Tools · Created N Files". */}
+        {!isUser &&
+          (() => {
+            const turnTools = message.parts?.length
+              ? message.parts.filter((p) => p.type === "tool" && p.toolCall).map((p) => p.toolCall!)
+              : (message.toolCalls ?? []);
+            if (turnTools.length === 0) return null;
+            return <UsingIndicator toolCalls={turnTools} streaming={Boolean(message.isStreaming)} />;
           })()}
 
         {(() => {

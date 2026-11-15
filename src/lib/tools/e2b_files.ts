@@ -170,7 +170,7 @@ registerTool(
 
 registerTool(
   "create_file",
-  "Create a new text file in the user's workspace. Refuses to overwrite an existing file unless `overwrite` is true. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.",
+  "Create a new text file in the user's workspace. Refuses to overwrite an existing file unless `overwrite` is true. For very large files (over ~30 KB / ~800 lines) use verify_path + create_file_chunk; anything smaller should be written in ONE call (single-shot writes keep structure intact).",
   {
     type: "object",
     properties: {
@@ -231,7 +231,7 @@ registerTool(
 
 registerTool(
   "write_file",
-  "Overwrite a text file in the user's workspace (creates it if missing). Use this when you know the file should exist or want to replace its contents entirely. For files >200 lines, use verify_path + create_file_chunk instead for incremental writing.",
+  "Overwrite a text file in the user's workspace (creates it if missing). Use this when you know the file should exist or want to replace its contents entirely. For very large files (over ~30 KB / ~800 lines) use verify_path + create_file_chunk; anything smaller should be written in ONE call (single-shot writes keep structure intact).",
   {
     type: "object",
     properties: {
@@ -269,7 +269,7 @@ registerTool(
 
 registerTool(
   "edit_file",
-  "Edit a text file by replacing a substring with a new string. By default replaces all occurrences; set `replace_all: false` to replace only the first. For large edits, use create_file_chunk with mode='append'.",
+  "Edit a text file by replacing a substring with a new string. By default replaces all occurrences; set `replace_all: false` to replace only the first. For large rewrites, prefer one write_file call over chunked appends (chunked markup writes break tag balance).",
   {
     type: "object",
     properties: {

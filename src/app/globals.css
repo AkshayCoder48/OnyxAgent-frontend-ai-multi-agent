@@ -3780,3 +3780,28 @@ hr.md-glass-hr {
     transform: none !important;
   }
 }
+
+/* USING indicator (2026-11-15) — the live "Using {tool} …" caption at the
+   top of a streaming response. The dotted leader stretches to the viewport
+   end; the dot + leader pulse softly while work is in flight. */
+.using-indicator-dot {
+  animation: using-indicator-pulse 1.4s ease-in-out infinite;
+}
+.using-indicator-leader {
+  animation: using-indicator-pulse 1.4s ease-in-out infinite;
+}
+@keyframes using-indicator-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .using-indicator-dot,
+  .using-indicator-leader {
+    animation: none !important;
+  }
+}

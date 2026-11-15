@@ -1032,7 +1032,15 @@ function ChatUI({
         <div className="chat-underlay relative min-h-0 flex-1">
         <div
           ref={scrollContainerRef}
-          className="scrollbar-thin absolute inset-0 overflow-y-auto px-2 py-4 sm:px-4 sm:py-6"
+          /* GLASS SHADOW FIX (user report 2026-11-15): `overflow-y-auto`
+             alone makes the other axis compute to `auto` — child box-
+             shadows (glass cards, code blocks) were clipped at the pane's
+             left/right edges (top/bottom kept painting). `overflow-x: clip`
+             keeps horizontal overflow clipped WITHOUT a scrollbar, and
+             `overflow-clip-margin` lets the ink flow ~100px past the edge
+             so the glass shadows render on all four sides. Browsers
+             without clip-margin degrade to the old clip — no regression. */
+          className="scrollbar-thin absolute inset-0 overflow-y-auto overflow-x-clip px-2 py-4 [overflow-clip-margin:100px] sm:px-4 sm:py-6"
           style={{ paddingBottom: "calc(var(--chat-underlay-h, 168px) + 20px)" }}
         >
           {isLoadingConversation ? (
