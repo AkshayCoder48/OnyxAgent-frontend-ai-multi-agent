@@ -3555,3 +3555,228 @@ html.theme-transitioning .animate-backdrop {
   box-sizing: border-box;
   min-width: 0;
 }
+
+/* ========================================================================= ==
+   GLASS MARKDOWN KIT (user upload 2026-11-15, onyxagent-glass-markdown-kit)
+   The AI-output markdown renderer (markdown-content.impl.tsx → md-glass.tsx)
+   speaks this design language. Implemented kit numbers: 01 code block,
+   08 table, 10 math, 18 link preview, 22 citation card, 27 key-value grid,
+   28 collapsible (the remaining kit numbers were excluded by request).
+
+   COLOUR-AWARE BY DERIVATION: every token is a color-mix() of the theme's
+   --color-foreground, so dark, light AND custom brand schemes each get a
+   correct glass without theme branching. Interactive accents ride
+   --color-brand / --color-primary. The code block keeps its always-dark
+   charcoal canvas (the app's existing design decision), so its chrome uses
+   fixed white-alpha hairlines that read correctly in every theme.
+   ========================================================================= */
+
+.md-glass {
+  display: contents; /* scope only — no layout box, vars/rules flow through */
+}
+
+:root {
+  --glass-line: color-mix(in srgb, var(--color-foreground) 11%, transparent);
+  --glass-line-2: color-mix(in srgb, var(--color-foreground) 17%, transparent);
+  --glass-surface: color-mix(in srgb, var(--color-foreground) 3.5%, transparent);
+  --glass-surface-2: color-mix(in srgb, var(--color-foreground) 6%, transparent);
+  --glass-highlight: color-mix(in srgb, var(--color-foreground) 4.5%, transparent);
+  --glass-shadow: 0 18px 60px color-mix(in srgb, var(--color-foreground) 13%, transparent);
+  /* Kit warm accent (table headers), lightness-flipped per theme: dark
+     foreground → warm sand (#e8c49d), light foreground → warm brown. */
+  --glass-warm: color-mix(in srgb, var(--color-foreground) 68%, #e8c49d);
+}
+
+/* The shared glass card surface (kit `.glass`): translucent gradient, lit
+   top edge, hairline borders, soft shadow. Used by 18/22 cards + 28. */
+.md-glass-card {
+  background: linear-gradient(145deg, var(--glass-surface-2), var(--glass-surface));
+  border: 1px solid var(--glass-line);
+  border-top-color: var(--glass-line-2);
+  border-radius: 15px;
+  box-shadow: var(--glass-shadow), inset 0 1px 0 0 var(--glass-highlight);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
+/* Kit 27 · key-value grid cell. */
+.md-glass-cell {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  transition: background 0.2s ease;
+}
+.md-glass-cell:hover {
+  background: var(--glass-surface-2);
+}
+
+/* Kit 10 · mathematical expression — display math on a glass surface.
+   remark-math ($$…$$ only — single-$ stays literal) + rehype-katex. */
+.md-glass .katex-display {
+  margin: 0.9rem 0;
+  padding: 14px 16px;
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-line);
+  border-radius: 13px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.md-glass .katex {
+  color: var(--color-foreground);
+  font-size: 1.08em;
+}
+.md-glass .katex-display > .katex {
+  font-size: 1.18em;
+}
+
+/* Cohesion · hairline rule fading in from both edges. */
+hr.md-glass-hr {
+  height: 1px;
+  border: 0;
+  padding: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--glass-line-2) 22%,
+    var(--glass-line-2) 78%,
+    transparent
+  );
+}
+
+/* Kit 08 · glass Markdown table — hairline wrap, warm uppercase header,
+   hover rows. */
+.md-glass-table {
+  border: 1px solid var(--glass-line);
+  background: var(--glass-surface);
+}
+.md-glass-thead {
+  background: linear-gradient(180deg, var(--glass-surface-2), transparent);
+}
+.md-glass-th {
+  color: var(--glass-warm);
+  border-bottom-color: var(--glass-line-2);
+}
+.md-glass-td {
+  border-bottom-color: var(--glass-line);
+}
+.md-glass-table tbody tr:hover {
+  background: var(--glass-surface-2);
+}
+.md-glass-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Kit 01 rules are prefixed `.md-glass .chat-code…` on purpose: the theme
+   layer (orange-glass.css) re-skins `:root .hljs-*` tokens with the brand
+   accent and re-borders `.chat-code` LATER in the cascade. The .md-glass
+   prefix (0-3-0) lets the AI-output markdown carry the kit palette while
+   any non-markdown code surfaces keep the theme's accent-driven look. */
+/* Kit 01 · glass code block chrome — the always-dark charcoal canvas gets
+   hairline borders with a lit top edge, a gradient blur header, glass
+   action buttons and a code FOOT (lines · UTF-8 · language). */
+.md-glass .chat-code {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-top-color: rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 18px 60px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+}
+.md-glass .chat-code-head {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.105);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+.md-glass .chat-code-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.105);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  color: #8d887f;
+}
+.md-glass .chat-code-foot-spacer {
+  flex: 1;
+}
+.md-glass .chat-code-btn {
+  border: 1px solid rgba(255, 255, 255, 0.105);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.055);
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease,
+    color 0.2s ease;
+}
+.md-glass .chat-code-btn:hover {
+  background: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+.md-glass .chat-code-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Kit 01 · syntax palette (lavender keywords, sage strings, sky functions,
+   amber numbers, ash comments) — scoped to the always-dark code canvas, so
+   one palette serves every theme. Unlayered on purpose: wins over the
+   @layer base hljs rules above. */
+.md-glass .chat-code .hljs-comment,
+.md-glass .chat-code .hljs-quote {
+  color: #85847f;
+  font-style: italic;
+}
+.md-glass .chat-code .hljs-keyword,
+.md-glass .chat-code .hljs-selector-tag,
+.md-glass .chat-code .hljs-selector-pseudo,
+.md-glass .chat-code .hljs-literal {
+  color: #c6a4ff;
+}
+.md-glass .chat-code .hljs-string,
+.md-glass .chat-code .hljs-symbol,
+.md-glass .chat-code .hljs-bullet,
+.md-glass .chat-code .hljs-regexp {
+  color: #a8d99c;
+}
+.md-glass .chat-code .hljs-title,
+.md-glass .chat-code .hljs-title.function_,
+.md-glass .chat-code .hljs-title.class_,
+.md-glass .chat-code .hljs-built_in,
+.md-glass .chat-code .hljs-meta,
+.md-glass .chat-code .hljs-type {
+  color: #83c9f4;
+}
+.md-glass .chat-code .hljs-number,
+.md-glass .chat-code .hljs-name,
+.md-glass .chat-code .hljs-tag {
+  color: #f2bd78;
+}
+.md-glass .chat-code .hljs-attr,
+.md-glass .chat-code .hljs-attribute,
+.md-glass .chat-code .hljs-variable,
+.md-glass .chat-code .hljs-template-variable,
+.md-glass .chat-code .hljs-params {
+  color: #a8b3c4;
+}
+.md-glass .chat-code .hljs-addition {
+  color: #a6e9b8;
+  background: rgba(83, 190, 124, 0.12);
+}
+.md-glass .chat-code .hljs-deletion {
+  color: #ffaaaa;
+  background: rgba(255, 100, 100, 0.12);
+}
+
+/* Kit reduce-motion guard: the glass surfaces animate only on hover. */
+@media (prefers-reduced-motion: reduce) {
+  .md-glass-card,
+  .md-glass-cell,
+  .chat-code-btn,
+  .md-glass .chat-code-head {
+    transition: none !important;
+    transform: none !important;
+  }
+}

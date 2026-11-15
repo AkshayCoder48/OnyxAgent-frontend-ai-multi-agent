@@ -3,6 +3,10 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import type { PluggableList } from "unified";
+import "katex/dist/katex.min.css";
 import { createLowlight, common as commonLangs } from "lowlight";
 import { toJsxRuntime } from "hast-util-to-jsx-runtime";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
@@ -13,6 +17,16 @@ import { CompanionCursor } from "@/components/assistant-ui/elements";
 import type { MarkdownContentProps } from "./markdown-content";
 import { SaveCodeButton } from "./code-save-dialog";
 import { HtmlPreviewButton, isPreviewableHtml } from "./html-preview";
+import {
+  CitationCard,
+  KvGrid,
+  LinkPreviewCard,
+  kvItemsFromListChildren,
+  parseCardTitle,
+  preprocessDisplayMath,
+  preprocessStandaloneLinks,
+  standaloneLinkCard,
+} from "./md-glass";
 import type { SourceItem } from "@/lib/chat-sources";
 
 /** Parse `language-xyz` from a fenced-code `<code>` className. */
@@ -93,12 +107,12 @@ function stripInlineHtmlTags(s: string): string {
     .trim();
 }
 
-/** Native <details> collapsible, Terra-styled — matches the tool-name
- *  disclosure anatomy (chevron · quiet label) and animates via the marker
- *  rotation. No JS state: the browser owns open/close. */
+/** Native <details> collapsible — GLASS KIT 28: translucent surface, hairline
+ *  border, soft radius and the chevron disclosure (the app's idiom). The
+ *  browser owns open/close; the glass surface rides the theme tokens. */
 function HtmlDetailsBlock({ summary, children }: { summary: string; children: React.ReactNode }) {
   return (
-    <details className="border-foreground/10 bg-foreground/[0.015] group my-3 rounded-xl border">
+    <details className="md-glass-card group my-3 overflow-hidden rounded-xl">
       <summary
         className="hover:text-foreground flex cursor-pointer list-none items-center gap-2 px-3.5 py-2.5 text-sm font-medium text-foreground/75 transition-colors [&::-webkit-details-marker]:hidden"
       >
@@ -108,7 +122,10 @@ function HtmlDetailsBlock({ summary, children }: { summary: string; children: Re
         />
         {summary || "Details"}
       </summary>
-      <div className="border-foreground/10 border-t px-3.5 pt-3 pb-3.5 text-[15px] leading-[1.68]">
+      <div
+        className="px-3.5 pt-3 pb-3.5 text-[15px] leading-[1.68]"
+        style={{ borderTop: "1px solid var(--glass-line)" }}
+      >
         {children}
       </div>
     </details>
@@ -272,10 +289,15 @@ function useStreamFadeChildren(children: React.ReactNode): React.ReactNode {
 /**
  * Paragraph renderer. While streaming, every word fades in through the
  * word-fade cascade (spans mounted here, paced by the engine upstream);
- * settled renders are plain prose. The defensive cursor-marker strip
- * remains on both paths.
+ * settled renders are plain prose.
+ *
+ * GLASS KIT 18/22: a paragraph that is JUST a standalone external link
+ * (preprocessed with a card marker title) renders as a link-preview or
+ * citation glass card instead of an inline link — see md-glass.tsx.
  */
 function StreamParagraph({ children, ...props }: React.ComponentPropsWithoutRef<"p">) {
+  const card = standaloneLinkCard(children);
+  if (card) return <>{card}</>;
   return (
     <p className="mb-3 leading-relaxed last:mb-0" {...props}>
       {useStreamFadeChildren(stripCursorMarkers(children))}
@@ -412,20 +434,23 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
     );
   }
 
-  // Warm charcoal code block (Terra spec): #262019 canvas, #1F1A15 header
-  // strip with language/filename on the left and (HTML blocks only) Preview
-  // + Save + Copy affordances on the right; muted warm syntax tones come
-  // from the `.chat-code` hljs scope.
+  // GLASS KIT 01 · Glass code block: warm charcoal canvas (dark in every
+  // theme — the existing design decision) inside glass chrome — hairline
+  // borders with a lit top edge, gradient header strip with the language
+  // label and (HTML blocks only) Preview + Save + Copy glass buttons, a
+  // 13px/1.8 body and a code FOOT (lines · UTF-8 · language). The kit's
+  // syntax palette rides the `.chat-code .hljs-*` scope (globals.css).
+  const lineCount = codeContent ? codeContent.replace(/\n+$/, "").split("\n").length : 0;
   return (
-    <div className="group chat-code my-4 max-w-full overflow-hidden rounded-xl" style={{ backgroundColor: "var(--chat-code-bg)" }}>
+    <div className="group chat-code my-4 max-w-full overflow-hidden rounded-[17px]" style={{ backgroundColor: "var(--chat-code-bg)" }}>
       {(lang || codeContent) && (
         <div
-          className="flex items-center justify-between px-3.5 py-2 font-mono text-[11px] normal-case tracking-normal"
-          style={{ backgroundColor: "var(--chat-code-header-bg)", color: "#a5947c" }}
+          className="chat-code-head flex items-center justify-between px-3.5 py-2 font-mono text-[11px] tracking-[0.04em] uppercase"
+          style={{ backgroundColor: "var(--chat-code-header-bg)", color: "#c8c3b9" }}
         >
           <span>{lang ?? "code"}</span>
           {codeContent && (
-            <span className="flex shrink-0 items-center gap-1">
+            <span className="flex shrink-0 items-center gap-1.5 normal-case">
               {/* HTML Preview (user request 2026-11-14, replacing the removed
                   preview_html agent tool): the APP detects HTML blocks and
                   renders them live in a sandboxed popup card — just before
@@ -433,31 +458,41 @@ function CodeBlock({ children, ...props }: React.ComponentPropsWithoutRef<"pre">
               {isPreviewableHtml(lang, codeContent) && (
                 <HtmlPreviewButton
                   code={codeContent}
-                  className="text-[#a5947c] hover:text-[#e8decc]"
+                  className="chat-code-btn text-[#a5947c] hover:text-[#e8decc]"
                 />
               )}
               {/* Save to Files — asks for location / name / extension. */}
               <SaveCodeButton
                 code={codeContent}
                 lang={lang}
-                className="text-[#a5947c] hover:text-[#e8decc]"
+                className="chat-code-btn text-[#a5947c] hover:text-[#e8decc]"
               />
               <CopyButton
                 text={codeContent}
                 label="Copy"
-                className="h-6 gap-1 rounded-md px-1.5 text-[11px] text-[#a5947c] hover:bg-white/5 hover:text-[#e8decc] bg-transparent"
+                className="chat-code-btn h-6 gap-1 px-1.5 text-[11px] text-[#a5947c] hover:text-[#e8decc]"
               />
             </span>
           )}
         </div>
       )}
       <pre
-        className="scrollbar-thin max-w-full overflow-x-auto p-3.5 text-[12.5px] leading-relaxed"
-        style={{ color: "var(--chat-code-fg)" }}
+        className="chat-code-body scrollbar-thin max-w-full overflow-x-auto px-[18px] py-[17px] text-[13px] leading-[1.8]"
+        style={{ color: "var(--chat-code-fg)", tabSize: 2 }}
         {...props}
       >
         {body}
       </pre>
+      {codeContent && (
+        <div className="chat-code-foot" aria-hidden>
+          <span>
+            {lineCount} {lineCount === 1 ? "line" : "lines"}
+          </span>
+          <span>UTF-8</span>
+          <span className="chat-code-foot-spacer" />
+          <span>{lang ?? "text"}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -550,7 +585,7 @@ function QuoteBlock({ children, ...props }: React.ComponentPropsWithoutRef<"bloc
 function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
   return (
     <th
-      className="border-foreground/10 border-b px-3 py-2 text-left font-mono text-[11px] font-semibold tracking-wider uppercase"
+      className="md-glass-th border-b px-3 py-2.5 text-left font-mono text-[11px] font-semibold tracking-[0.08em] uppercase"
       {...props}
     >
       {useStreamFadeChildren(children)}
@@ -560,7 +595,7 @@ function ThCell({ children, ...props }: React.ComponentPropsWithoutRef<"th">) {
 
 function TdCell({ children, ...props }: React.ComponentPropsWithoutRef<"td">) {
   return (
-    <td className="border-foreground/8 border-b px-3 py-2 last:border-0" {...props}>
+    <td className="md-glass-td border-b px-3 py-2.5 last:border-0" {...props}>
       {useStreamFadeChildren(children)}
     </td>
   );
@@ -605,13 +640,18 @@ const SHARED_COMPONENTS = {
       </code>
     );
   },
-  a({ href, children, ...props }: React.ComponentPropsWithoutRef<"a">) {
+  a({ href, children, title, ...props }: React.ComponentPropsWithoutRef<"a">) {
     if (href?.startsWith("#cite-")) {
       const n = parseInt(href.slice(6), 10);
       if (!Number.isNaN(n)) {
         return <CitationChip n={n}>{children}</CitationChip>;
       }
     }
+    // GLASS KIT 18/22: synthetic card-marker titles never leak into the DOM
+    // (the paragraph renderer routes marked links to glass cards; if one
+    // ever lands inline — merged paragraph, split edge — render it as the
+    // plain link it was written as).
+    if (parseCardTitle(title) != null) title = undefined;
     const isExternal = !!href && /^https?:\/\//i.test(href);
     return (
       <a
@@ -630,6 +670,12 @@ const SHARED_COMPONENTS = {
   },
   p: StreamParagraph,
   ul({ children, ...props }: React.ComponentPropsWithoutRef<"ul">) {
+    // GLASS KIT 27: a bullet list where EVERY item is "**Term:** value"
+    // renders as a key-value grid of glass cells (see md-glass.tsx). It
+    // flips from bullets to grid the moment the closing item completes —
+    // the same settle-into-final-form behavior as syntax highlighting.
+    const kv = kvItemsFromListChildren(children);
+    if (kv) return <KvGrid items={kv} />;
     return (
       <ul
         className="marker:text-foreground/40 mb-3 ml-5 list-disc space-y-1 last:mb-0"
@@ -655,9 +701,10 @@ const SHARED_COMPONENTS = {
   h3: Heading3,
   blockquote: QuoteBlock,
   table({ children, ...props }: React.ComponentPropsWithoutRef<"table">) {
+    // GLASS KIT 08: rounded hairline wrap, warm uppercase header, row hover.
     return (
-      <div className="border-foreground/10 my-3 overflow-x-auto rounded-lg border">
-        <table className="min-w-full text-sm" {...props}>
+      <div className="md-glass-table my-3 overflow-x-auto rounded-[15px]">
+        <table className="min-w-full text-[12.5px]" {...props}>
           {children}
         </table>
       </div>
@@ -665,7 +712,7 @@ const SHARED_COMPONENTS = {
   },
   thead({ children, ...props }: React.ComponentPropsWithoutRef<"thead">) {
     return (
-      <thead className="bg-foreground/[0.04]" {...props}>
+      <thead className="md-glass-thead" {...props}>
         {children}
       </thead>
     );
@@ -673,7 +720,8 @@ const SHARED_COMPONENTS = {
   th: ThCell,
   td: TdCell,
   hr({ ...props }: React.ComponentPropsWithoutRef<"hr">) {
-    return <hr className="border-foreground/10 my-4" {...props} />;
+    // GLASS KIT cohesion: hairline rule fading in from both edges.
+    return <hr className="md-glass-hr my-4" {...props} />;
   },
   img({ src, alt, ...props }: React.ComponentPropsWithoutRef<"img">) {
     return (
@@ -681,7 +729,7 @@ const SHARED_COMPONENTS = {
         src={typeof src === "string" ? src : ""}
         alt={alt ?? ""}
         loading="lazy"
-        className="my-3 max-w-full rounded-lg border border-foreground/10"
+        className="my-3 max-w-full rounded-xl border border-[color:var(--glass-line)]"
         {...props}
       />
     );
@@ -780,7 +828,20 @@ function CitationChip({ n }: { n: number; children?: React.ReactNode }) {
 // `highlightedCode`), so a growing message never re-tokenizes its settled
 // code blocks. This alone removes the dominant parse cost of streaming
 // code-heavy responses.
-const REMARK_PLUGINS = [remarkGfm];
+//
+// GLASS KIT 10 · Math: remark-math + rehype-katex render `$$…$$` display
+// math (KaTeX) inside a glass surface (`.md-glass .katex-display`,
+// globals.css). singleDollarTextMath is OFF on purpose: models write real
+// prices ("costs $5, saves $10") far more often than single-$ TeX, and a
+// literal $ must never swallow a sentence as math. KaTeX's CSS (fonts
+// included) is imported above and bundled by Next.
+const REMARK_PLUGINS: PluggableList = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+];
+const REHYPE_PLUGINS: PluggableList = [
+  [rehypeKatex, { throwOnError: false, errorColor: "#f2bd78" }],
+];
 
 // ── STABLE-PREFIX PARSE CACHE (streaming markdown perf, PRD §6.4) ──────────
 // While the typewriter reveals the answer, everything before the last
@@ -971,7 +1032,15 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // Beta V1.2: citations ALWAYS preprocess — the [n] markers render as
   // superscript chips while the answer streams (Perplexity-style), not only
   // after the turn completes.
-  const processed = preprocessCitations(cleanContent);
+  //
+  // GLASS KIT 10/18/22: single-line $$…$$ paragraphs are expanded to the
+  // multiline display-math form, and standalone external-link paragraphs
+  // are marked with a synthetic card title (fence-aware, citation ordinals
+  // in document order) — the renderers turn them into the math surface and
+  // link-preview / citation glass cards.
+  const processed = preprocessStandaloneLinks(
+    preprocessDisplayMath(preprocessCitations(cleanContent)),
+  );
 
   // Split COMPLETE <details><summary>…</summary>…</details> blocks out of the
   // markdown → native collapsibles. Fast path: no "<details" in the content →
@@ -985,6 +1054,7 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // collapsibles) or the whole content in one ReactMarkdown.
   const mdProps = {
     remarkPlugins: REMARK_PLUGINS,
+    rehypePlugins: REHYPE_PLUGINS,
     components: SHARED_COMPONENTS as React.ComponentProps<typeof ReactMarkdown>["components"],
   };
 
@@ -1031,20 +1101,26 @@ export const MarkdownContent = React.memo(function MarkdownContent({
   // When cursor is on, wrap in a div that makes the last <p> inline so the
   // cursor flows right after the last letter.
   // Both paths provide the citation sources context (Beta V1.2) so the
-  // superscript chips can resolve their tooltips.
+  // superscript chips can resolve their tooltips, and scope the GLASS KIT
+  // styles through `.md-glass` (display: contents — no layout box, CSS vars
+  // and descendant rules flow through).
   if (!showCursor) {
     return (
-      <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
-        <StreamFreshContext.Provider value={streamState}>{rendered}</StreamFreshContext.Provider>
-      </CiteSourcesContext.Provider>
+      <div className="md-glass">
+        <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
+          <StreamFreshContext.Provider value={streamState}>{rendered}</StreamFreshContext.Provider>
+        </CiteSourcesContext.Provider>
+      </div>
     );
   }
 
   return (
     <div className="streaming-cursor-wrapper">
-      <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
-        <StreamFreshContext.Provider value={streamState}>{rendered}</StreamFreshContext.Provider>
-      </CiteSourcesContext.Provider>
+      <div className="md-glass">
+        <CiteSourcesContext.Provider value={sources ?? EMPTY_SOURCES}>
+          <StreamFreshContext.Provider value={streamState}>{rendered}</StreamFreshContext.Provider>
+        </CiteSourcesContext.Provider>
+      </div>
       {/* THE COMPANION — a cute little face riding inline right after the
           latest streamed letter (user spec: the companion IS the cursor). */}
       <CompanionCursor size={15} />
