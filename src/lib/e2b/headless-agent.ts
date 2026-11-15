@@ -35,7 +35,7 @@
  *  v3: native use_browser — the background agent can drive the CloakBrowser
  *  driver through its file protocol (PRD §10: browser tasks survive the
  *  frontend disconnecting). */
-export const HEADLESS_RUNNER_VERSION = 4;
+export const HEADLESS_RUNNER_VERSION = 5;
 
 export const RUNNER_PATH = "/home/user/headless_runner.py";
 export const AGENT_DIR = "/home/user/.onyx/agent";
@@ -43,6 +43,7 @@ export const RUN_CONFIG_PATH = `${AGENT_DIR}/run.json`;
 export const RUNNER_VERSION_PATH = `${AGENT_DIR}/runner-version`;
 export const CHAT_HISTORY_PATH = "/home/user/chat_history.json";
 export const AGENT_STATUS_PATH = "/home/user/agent_status.json";
+export const AGENT_EVENTS_PATH = "/home/user/agent_events.jsonl";
 export const BACKGROUND_LOG_PATH = "/home/user/background.log";
 export const SANDBOX_TODOS_PATH = "/home/user/todos.json";
 export const CRON_LOG_PATH = "/home/user/cron_output.log";
@@ -76,8 +77,9 @@ CONFIG_PATH = HOME + "/.onyx/agent/run.json"
 HISTORY_PATH = HOME + "/chat_history.json"
 STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
+EVENTS_PATH = HOME + "/agent_events.jsonl"
 
-RUNNER_VERSION = 4
+RUNNER_VERSION = 5
 # USER DIRECTIVE: "remove the limit of 24 rounds" — the round budget is now
 # effectively unlimited; the real bound is the wall-clock execution window.
 MAX_ROUNDS_DEFAULT = 400
@@ -262,6 +264,67 @@ def log(message):
         print("[onyx-runner] %s" % message, flush=True)
     except Exception:
         pass
+
+# ---------------------------------------------------------------------------
+# Live event log (agent_events.jsonl) — the run's REPLAY STREAM.
+#
+# The app's SSE bridge tails this file and forwards events to the browser in
+# real time (PRD "Real-Time Sandbox-to-UI Streaming"); "i" is the 1-based
+# event id used as the SSE Last-Event-ID so a reconnect replays exactly the
+# missing tail (refresh mid-run loses nothing). One JSON object per line,
+# append-only within a run; a NEW run truncates the file. Event types mirror
+# the app's AgentEvent vocabulary so the client maps them 1:1.
+# ---------------------------------------------------------------------------
+
+EVENT_SEQ = 0
+
+def emit_event(etype, data=None):
+    global EVENT_SEQ
+    EVENT_SEQ += 1
+    entry = {"i": EVENT_SEQ, "type": etype, "ts": int(now() * 1000), "run_id": RUN_ID}
+    if data is not None:
+        entry["data"] = data
+    try:
+        with open(EVENTS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # the event log is a live-view convenience — never fatal
+
+def reset_events():
+    """Fresh stream per run (the previous run's events are already landed in
+    chat_history.json — the authoritative source of truth)."""
+    global EVENT_SEQ
+    EVENT_SEQ = 0
+    try:
+        with open(EVENTS_PATH, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+
+class DeltaBatcher:
+    """Batch token deltas before writing an event line — one JSONL entry per
+    ~0.35s (or 160 chars) instead of one per token, so the SSE tailer and the
+    event file stay lightweight on long generations."""
+
+    def __init__(self):
+        self.buf = []
+        self.size = 0
+        self.last_flush = 0.0
+
+    def add(self, text):
+        self.buf.append(text)
+        self.size += len(text)
+        if self.size >= 160 or (now() - self.last_flush) >= 0.35:
+            self.flush()
+
+    def flush(self):
+        if not self.buf:
+            return
+        text = "".join(self.buf)
+        self.buf = []
+        self.size = 0
+        self.last_flush = now()
+        emit_event("response.delta", {"text": text})
 
 def safe_path(raw):
     """Confine every filesystem tool to /home/user (realpath-resolved)."""
@@ -591,6 +654,82 @@ TOOLS_WIRE_MODE = "full"
 WIRE_SANITIZE = False
 DEGRADED = False
 
+# STREAM TRANSPORT — "on" tries SSE streaming first (real-time response.delta
+# events to the UI); a gateway that rejects stream:true flips it to "off" and
+# every later request uses the plain JSON path (the run still completes, just
+# without token-level live view — the per-round history writes remain).
+STREAM_MODE = "on"
+
+# Model ids already attempted this run (rung 0 of the retry ladder — a
+# missing/rotated model id switches to the next fallback candidate once).
+MODEL_TRIES = set()
+
+
+def parse_sse_stream(resp):
+    """SSE-parse a streaming chat completion (OpenAI chunk format).
+
+    Emits batched response.delta events as tokens arrive (DeltaBatcher keeps
+    the event log ~3 lines/second instead of one per token) and accumulates
+    tool_call argument fragments across chunks. Returns the same reply dict
+    the non-streaming path builds. Raises on a dead stream (no content, no
+    tool calls, no finish) so the retry ladder — not a bogus "budget
+    exhausted" ending — handles empty gateway responses."""
+    content_parts = []
+    tool_acc = {}
+    finish_reason = None
+    batcher = DeltaBatcher()
+    for raw in resp:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except Exception:
+            continue
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            content_parts.append(text)
+            batcher.add(text)
+        for tc in (delta.get("tool_calls") or []):
+            try:
+                idx = int(tc.get("index") or 0)
+            except Exception:
+                idx = 0
+            slot = tool_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+            if tc.get("id"):
+                slot["id"] = str(tc["id"])
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] += str(fn["name"])
+            if fn.get("arguments"):
+                slot["args"] += str(fn["arguments"])
+        if choice.get("finish_reason"):
+            finish_reason = choice.get("finish_reason")
+    batcher.flush()
+    if not content_parts and not tool_acc:
+        raise LlmError("empty streaming response from the model gateway")
+    tool_calls = []
+    for idx in sorted(tool_acc):
+        slot = tool_acc[idx]
+        tool_calls.append({
+            "id": slot["id"] or ("call_%s_%d" % (RUN_ID or "run", idx)),
+            "type": "function",
+            "function": {"name": slot["name"], "arguments": slot["args"] or "{}"},
+        })
+    return {
+        "content": "".join(content_parts),
+        "tool_calls": tool_calls,
+        "finish_reason": finish_reason,
+    }
+
 
 def sanitize_messages_for_gateway(messages):
     """Flatten tool-role traffic to plain text (wire-compat step A).
@@ -638,7 +777,7 @@ def llm_chat(cfg, messages, use_tools):
     body = {
         "model": model,
         "messages": send_messages,
-        "stream": False,
+        "stream": STREAM_MODE == "on",
     }
     temperature = cfg.get("temperature")
     if isinstance(temperature, (int, float)):
@@ -660,6 +799,11 @@ def llm_chat(cfg, messages, use_tools):
     )
     try:
         with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if body.get("stream") and "event-stream" in ctype:
+                return parse_sse_stream(resp)
+            # A gateway that IGNORES stream:true and answers plain JSON — or a
+            # deliberate non-stream request — takes the legacy path.
             payload = json.loads(resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -682,18 +826,29 @@ def llm_chat(cfg, messages, use_tools):
     except (KeyError, IndexError, TypeError) as exc:
         raise LlmError("malformed gateway response: " + str(exc))
 
+def _model_missing(exc):
+    text = str(exc).lower()
+    return ("does not exist" in text or "not found" in text or "no such model" in text
+            or "unknown model" in text or "invalid model" in text)
+
 def llm_chat_with_retries(cfg, messages, use_tools):
-    """Retry transient failures (429/5xx/network) with backoff. A 400 while
-    tools are enabled walks the GATEWAY COMPATIBILITY LADDER (mirrors the
-    app runtime's wire-compat; the old behavior degraded SILENTLY to a
-    text-only run on the FIRST 400, which turned every background run on a
-    strict gateway into a one-round text answer with no explanation):
+    """Retry transient failures (429/5xx/network) with backoff. Structured
+    400/404 handling walks the GATEWAY COMPATIBILITY LADDER (mirrors the app
+    runtime's wire-compat; the old behavior degraded SILENTLY to a text-only
+    run on the FIRST 400, which turned every background run on a strict
+    gateway into a one-round text answer with no explanation):
+      rung 0 — model fallback: a missing/rotated model id (404 / "does not
+                exist") tries cfg.fallback_models in order (the Kilo anon
+                tier ids reroute server-side; concrete :free ids rotate).
+      rung A — stream-off: a gateway that rejects stream:true falls back to
+               the plain JSON path (run completes; live view becomes
+               per-round instead of per-token).
       step 1 — drop tool_choice, keep tools (gateways that reject it),
       step 2 — keep tools, flatten tool-role messages ('Invalid role
                 "tool"' gateways),
       step 3 — tools off (text-only DEGRADATION, loudly marked: the final
                 message + status both say the run lost tool calling)."""
-    global KEY_INDEX, TOOLS_WIRE_MODE, WIRE_SANITIZE, DEGRADED
+    global KEY_INDEX, TOOLS_WIRE_MODE, WIRE_SANITIZE, DEGRADED, STREAM_MODE
     delay = 3.0
     last_error = None
     pool_raw = cfg.get("api_key_pool")
@@ -704,19 +859,45 @@ def llm_chat_with_retries(cfg, messages, use_tools):
             return llm_chat(cfg, messages, use_tools)
         except LlmError as exc:
             last_error = exc
-            if exc.http_status == 400 and use_tools:
-                if TOOLS_WIRE_MODE == "full":
-                    TOOLS_WIRE_MODE = "tools"
-                    log("gateway rejected the tool_choice param — retrying with tools only (tool_choice dropped)")
+            # rung 0 — missing/rotated model: try the next fallback id once.
+            if (exc.http_status == 404 or (exc.http_status == 400 and _model_missing(exc))):
+                candidates = [str(cfg.get("model") or "")] + [
+                    str(m) for m in (cfg.get("fallback_models") or []) if str(m)
+                ]
+                tried = MODEL_TRIES
+                nxt = next((m for m in candidates if m and m not in tried), None)
+                if nxt is not None:
+                    tried.add(nxt)
+                    if str(cfg.get("model") or "") not in tried:
+                        tried.add(str(cfg.get("model") or ""))
+                    log("model %s unavailable — switching to fallback %s" % (cfg.get("model"), nxt))
+                    cfg["model"] = nxt
                     return llm_chat_with_retries(cfg, messages, use_tools)
-                if not WIRE_SANITIZE and any(m.get("role") == "tool" for m in messages):
-                    WIRE_SANITIZE = True
-                    log("gateway rejected the tool-role messages — flattening tool traffic to plain text (tools kept)")
+            if exc.http_status == 400:
+                # rung A — explicit stream rejection (before touching tools).
+                if STREAM_MODE == "on" and "stream" in str(exc).lower():
+                    STREAM_MODE = "off"
+                    log("gateway rejected stream:true — falling back to non-streaming requests")
                     return llm_chat_with_retries(cfg, messages, use_tools)
-                DEGRADED = True
-                TOOLS_WIRE_MODE = "text"
-                log("gateway rejected the tools payload — DEGRADING to a text-only run (the final message will say so)")
-                return llm_chat_with_retries(cfg, messages, False)
+                if use_tools:
+                    if TOOLS_WIRE_MODE == "full":
+                        TOOLS_WIRE_MODE = "tools"
+                        log("gateway rejected the tool_choice param — retrying with tools only (tool_choice dropped)")
+                        return llm_chat_with_retries(cfg, messages, use_tools)
+                    if not WIRE_SANITIZE and any(m.get("role") == "tool" for m in messages):
+                        WIRE_SANITIZE = True
+                        log("gateway rejected the tool-role messages — flattening tool traffic to plain text (tools kept)")
+                        return llm_chat_with_retries(cfg, messages, use_tools)
+                    DEGRADED = True
+                    TOOLS_WIRE_MODE = "text"
+                    log("gateway rejected the tools payload — DEGRADING to a text-only run (the final message will say so)")
+                    return llm_chat_with_retries(cfg, messages, False)
+                # A tools-off request still 400s — the stream param is the
+                # last remaining suspect; flip it and retry once.
+                if STREAM_MODE == "on":
+                    STREAM_MODE = "off"
+                    log("gateway 400 with tools already off — falling back to non-streaming requests")
+                    return llm_chat_with_retries(cfg, messages, use_tools)
             if (
                 api_keys
                 and rotations < 3
@@ -796,11 +977,24 @@ def main():
     log("run %s starting — %d seed messages, model=%s" % (RUN_ID, len(messages), cfg.get("model")))
     write_json(HISTORY_PATH, messages)
 
+    # Fresh replay stream + run-start marker for the SSE bridge.
+    reset_events()
+    MODEL_TRIES.clear()
+    MODEL_TRIES.add(str(cfg.get("model") or ""))
+    emit_event("run.started", {
+        "prompt_preview": prompt_preview,
+        "model": str(cfg.get("model") or ""),
+        "fallback_models": [str(m) for m in (cfg.get("fallback_models") or []) if str(m)],
+        "max_rounds": total_rounds,
+        "seed_count": len(messages),
+    })
+
     use_tools = True
     final_text = ""
     failure = None
 
     for round_no in range(1, total_rounds + 1):
+        emit_event("round.started", {"round": round_no, "total_rounds": total_rounds})
         try:
             reply = llm_chat_with_retries(cfg, messages, use_tools)
         except LlmError as exc:
@@ -841,6 +1035,7 @@ def main():
                 call_args = None
 
             handler = TOOL_HANDLERS.get(name)
+            emit_event("tool.started", {"call_id": call_id, "name": name, "args": call_args if isinstance(call_args, dict) else None})
             if call_args is None:
                 result = "error: tool arguments were not valid JSON"
             elif handler is None:
@@ -856,11 +1051,18 @@ def main():
                     result = json.dumps(result, ensure_ascii=False)
                 except Exception:
                     result = str(result)
+            result = truncate(result, TOOL_RESULT_MAX_CHARS)
+            emit_event("tool.result", {
+                "call_id": call_id,
+                "name": name,
+                "ok": not str(result).startswith("error:"),
+                "result": str(result)[:4000],
+            })
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": name,
-                "content": truncate(result, TOOL_RESULT_MAX_CHARS),
+                "content": result,
             })
 
         # Persist after EVERY round — a pause/kill mid-run still leaves a
@@ -870,6 +1072,7 @@ def main():
                      prompt_preview=prompt_preview)
 
     if failure is not None:
+        emit_event("run.failed", {"error": failure, "round": round_no})
         write_status("failed", stage="error", round_no=total_rounds, total_rounds=total_rounds,
                      error=failure, prompt_preview=prompt_preview, finished=True)
         log("run %s FAILED: %s" % (RUN_ID, failure))
@@ -896,6 +1099,13 @@ def main():
         final_text = messages[-1]["content"]
         write_json(HISTORY_PATH, messages)
 
+    emit_event("response.completed", {
+        "content": final_text,
+        "degraded": DEGRADED,
+        "model": str(cfg.get("model") or ""),
+        "streamed": STREAM_MODE == "on",
+        "message_count": len(messages),
+    })
     write_status("completed", stage="done", round_no=total_rounds, total_rounds=total_rounds,
                  prompt_preview=prompt_preview, finished=True)
     log("run %s completed after %d messages" % (RUN_ID, len(messages)))

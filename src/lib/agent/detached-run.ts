@@ -42,6 +42,7 @@ import { getE2BClient } from "@/lib/e2b/client";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { getDB, type DetachedRunRow } from "@/lib/db";
 import type { MessagePart, ToolCall } from "@/types/chat";
+import type { SandboxStreamEvent } from "@/lib/agent/sandbox-stream-events";
 import { clearDetachedActive, markDetachedActive } from "@/lib/agent/detached-active";
 import { useDetachedRunStore } from "@/stores/detached-run-store";
 import { notifyConversationsChanged } from "@/lib/chat-events";
@@ -59,6 +60,10 @@ export interface DetachedRunConfig {
   chat_url: string;
   api_key: string;
   model: string;
+  /** Extra model ids the runner rotates to when the primary is unavailable
+   *  (rung 0 of its retry ladder — e.g. the Kilo anon tier's concrete :free
+   *  fallbacks when the virtual tier id rotates). */
+  fallback_models?: string[];
   system_prompt: string;
   /** Seed = system + prior conversation + the NEW user message. The runner
    *  appends its own assistant/tool messages after these. */
@@ -311,6 +316,10 @@ export interface StartDetachedRunInput {
   chatUrl: string;
   apiKey: string;
   model: string;
+  /** Extra model ids the runner may rotate to when the primary is
+   *  unavailable (the Kilo anon tier reroutes server-side; concrete :free
+   *  ids rotate over time). */
+  fallbackModels?: readonly string[];
   temperature?: number | null;
   /** Prior conversation history (Dexie rows) — used for the seed. */
   history: Array<{ role: string; content: string }>;
@@ -362,6 +371,7 @@ export async function startDetachedRun(
     chat_url: input.chatUrl,
     api_key: input.apiKey,
     model: input.model,
+    fallback_models: [...(input.fallbackModels ?? [])],
     system_prompt: input.systemPrompt,
     seed_messages: seed,
     temperature: input.temperature ?? null,
@@ -471,7 +481,23 @@ export interface AdoptDetachedRunInput {
   isCancelled: () => boolean;
   /** Live progress tick — the caller rewrites the bubble's status line. */
   onProgress?: (status: NonNullable<AgentStatusResponse["status"]>) => void;
+  /** LIVE EVENT BRIDGE — sandbox runner events (response.delta tokens,
+   *  tool.started / tool.result, round.started, terminal markers) forwarded
+   *  in real time from the SSE stream. Purely additive live view: the
+   *  authoritative landing happens from chat_history.json at terminal, so a
+   *  dropped or late event never corrupts the final message. */
+  onEvent?: (ev: SandboxStreamEvent) => void;
+  /** The run's sandbox (row.sandbox_id) — helps the SSE bridge resolve the
+   *  sandbox on a serverless cold start. */
+  sandboxId?: string | null;
 }
+
+/** One structured event from the runner's replay log (agent_events.jsonl),
+ *  forwarded by the SSE bridge (/api/sandbox?stream=1). `i` is the 1-based
+ *  event id — the SSE Last-Event-ID — so reconnects replay exactly the
+ *  missing tail. (Defined in sandbox-stream-events.ts; re-exported here as
+ *  the historical import site.) */
+export type { SandboxStreamEvent } from "@/lib/agent/sandbox-stream-events";
 
 export interface AdoptDetachedRunResult {
   /** Terminal runner status ("completed" | "failed" | "stopped"). */
@@ -488,6 +514,100 @@ const ADOPT_NO_SANDBOX_GRACE = 15;
  *  run dead (covers a wiped sandbox / killed runner mid-boot). */
 const ADOPT_DEAD_GRACE = 5;
 
+/** localStorage ref (PRD persistence layer 3) — the lightweight pointer a
+ *  reload reads to know a live run exists for a conversation. Written from
+ *  the event stream, throttled to ~1/s. */
+function writeStreamRef(conversationId: string, ref: Record<string, unknown>) {
+  try {
+    const key = `onyx-bg-stream:${conversationId}`;
+    const prev = window.localStorage.getItem(key);
+    const prevTs = prev ? (JSON.parse(prev) as { updatedAt?: number }).updatedAt ?? 0 : 0;
+    if (Date.now() - prevTs < 1000) return;
+    window.localStorage.setItem(key, JSON.stringify({ ...ref, updatedAt: Date.now() }));
+  } catch {
+    // best-effort
+  }
+}
+
+/** Open the LIVE EVENT BRIDGE (SSE) for an adopted run. Returns a closer.
+ *
+ * The endpoint tails /home/user/agent_events.jsonl and forwards each event
+ * with its `i` as the SSE id — an EventSource auto-reconnect replays the
+ * missing tail via Last-Event-ID, so a network blip or the server's 240s
+ * connection cap loses nothing. When the bridge answers `done` with
+ * {noSandbox} while the adoption loop is still polling (a pausing sandbox),
+ * we back off and reconnect a few times before giving up on the live view —
+ * the status-poll watchdog (adoptDetachedRun's loop) remains the source of
+ * truth either way. */
+function openAgentEventStream(
+  input: AdoptDetachedRunInput,
+  runId: string | null,
+  onEvent: (ev: SandboxStreamEvent) => void,
+): () => void {
+  if (typeof window === "undefined" || typeof EventSource === "undefined") {
+    return () => undefined;
+  }
+  let closed = false;
+  let es: EventSource | null = null;
+  let attempts = 0;
+  const MAX_REOPEN = 6;
+
+  const open = async () => {
+    if (closed) return;
+    try {
+      const { getEffectiveE2BKey } = await import("@/lib/e2b/env-key");
+      const key = await getEffectiveE2BKey(input.userId);
+      if (!key || closed) return;
+      const params = new URLSearchParams({
+        stream: "1",
+        key,
+        conversationId: input.conversationId,
+        mode: "shared",
+      });
+      if (input.sandboxId) params.set("sandboxId", input.sandboxId);
+      es = new EventSource(`/api/sandbox?${params.toString()}`);
+      es.addEventListener("agent", (e) => {
+        attempts = 0; // events are flowing — reset the reopen budget
+        try {
+          const ev = JSON.parse((e as MessageEvent).data as string) as SandboxStreamEvent;
+          onEvent(ev);
+          writeStreamRef(input.conversationId, {
+            runId,
+            sandboxId: input.sandboxId ?? null,
+            lastEventId: ev.i,
+          });
+        } catch {
+          // torn line — the next poll re-forwards it
+        }
+      });
+      es.addEventListener("done", (e) => {
+        es?.close();
+        es = null;
+        let payload: { noSandbox?: boolean } = {};
+        try {
+          payload = JSON.parse((e as MessageEvent).data as string) as { noSandbox?: boolean };
+        } catch {
+          /* empty payload is fine */
+        }
+        if (!closed && payload.noSandbox && ++attempts < MAX_REOPEN) {
+          // The sandbox is mid-pause/resume — retry the bridge shortly.
+          setTimeout(() => void open(), 4000 + attempts * 2000);
+        }
+      });
+    } catch {
+      if (!closed && ++attempts < MAX_REOPEN) {
+        setTimeout(() => void open(), 4000 + attempts * 2000);
+      }
+    }
+  };
+  void open();
+  return () => {
+    closed = true;
+    es?.close();
+    es = null;
+  };
+}
+
 /**
  * ADOPT A DETACHED RUN — the one loop both live paths ride on:
  *
@@ -498,8 +618,9 @@ const ADOPT_DEAD_GRACE = 5;
  *     kept working while the app was closed).
  *
  * Polls agent_status (the server reconnects to the sandbox — auto-resuming
- * it if E2B paused it at the 24h timeout — and never mints a new one).
- * On a terminal status the sandbox history's NEW slice (past the seed) is
+ * it if E2B paused it at the 24h timeout — and never mints a new one) while
+ * the SSE bridge streams token-level events into the live view. On a
+ * terminal status the sandbox history's NEW slice (past the seed) is
  * converted to tool parts + final text and written INTO the bubble row in
  * place (or appended when no bubble was given), the sandbox todos merge,
  * and the Dexie row settles to synced.
@@ -520,51 +641,69 @@ export async function adoptDetachedRun(
     };
   }
 
+  // LIVE EVENT BRIDGE — every event forwards to the caller (which feeds the
+  // processor for the real streaming UI + throttles a Dexie checkpoint).
+  const closeStream = openAgentEventStream(
+    { ...input, sandboxId: input.sandboxId ?? row.sandbox_id },
+    row.id,
+    (ev) => {
+      try {
+        input.onEvent?.(ev);
+      } catch {
+        // the live view must never break the adoption loop
+      }
+    },
+  );
+
   let noSandboxStreak = 0;
   let deadStreak = 0;
-  for (;;) {
-    if (input.isCancelled()) return { status: "completed", cancelled: true };
-    await new Promise((r) => setTimeout(r, ADOPT_POLL_MS));
-    if (input.isCancelled()) return { status: "completed", cancelled: true };
+  try {
+    for (;;) {
+      if (input.isCancelled()) return { status: "completed", cancelled: true };
+      await new Promise((r) => setTimeout(r, ADOPT_POLL_MS));
+      if (input.isCancelled()) return { status: "completed", cancelled: true };
 
-    let res: AgentStatusResponse;
-    try {
-      res = await client.agentStatus({ includeHistory: false });
-    } catch {
-      continue; // transient — the next poll retries
-    }
-
-    if (res.noSandbox) {
-      // Nothing resolvable yet (a just-dispatched beacon, a resuming pause).
-      if (++noSandboxStreak >= ADOPT_NO_SANDBOX_GRACE) {
-        return {
-          status: "failed",
-          error: "The sandbox could not be reached — it may have expired. Re-send the message to continue.",
-          cancelled: false,
-        };
+      let res: AgentStatusResponse;
+      try {
+        res = await client.agentStatus({ includeHistory: false });
+      } catch {
+        continue; // transient — the next poll retries
       }
-      continue;
-    }
-    noSandboxStreak = 0;
 
-    const st = res.status?.status ?? null;
-    if (st === "running" || st === "starting") {
-      deadStreak = 0;
-      input.onProgress?.(res.status!);
-      continue;
-    }
-    if (st === "completed" || st === "failed" || st === "stopped") {
-      return await landDetachedRun(input, row, st, res.status?.error ?? null);
-    }
+      if (res.noSandbox) {
+        // Nothing resolvable yet (a just-dispatched beacon, a resuming pause).
+        if (++noSandboxStreak >= ADOPT_NO_SANDBOX_GRACE) {
+          return {
+            status: "failed",
+            error: "The sandbox could not be reached — it may have expired. Re-send the message to continue.",
+            cancelled: false,
+          };
+        }
+        continue;
+      }
+      noSandboxStreak = 0;
 
-    // No status file — the runner is only alive if pgrep says so.
-    if (res.runnerAlive) {
-      deadStreak = 0;
-      continue;
+      const st = res.status?.status ?? null;
+      if (st === "running" || st === "starting") {
+        deadStreak = 0;
+        input.onProgress?.(res.status!);
+        continue;
+      }
+      if (st === "completed" || st === "failed" || st === "stopped") {
+        return await landDetachedRun(input, row, st, res.status?.error ?? null);
+      }
+
+      // No status file — the runner is only alive if pgrep says so.
+      if (res.runnerAlive) {
+        deadStreak = 0;
+        continue;
+      }
+      if (++deadStreak >= ADOPT_DEAD_GRACE) {
+        return await landDetachedRun(input, row, "failed", "the sandbox runner vanished before producing a status");
+      }
     }
-    if (++deadStreak >= ADOPT_DEAD_GRACE) {
-      return await landDetachedRun(input, row, "failed", "the sandbox runner vanished before producing a status");
-    }
+  } finally {
+    closeStream();
   }
 }
 

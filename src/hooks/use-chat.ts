@@ -30,6 +30,8 @@ import {
   type ExecutionRecord,
 } from "@/lib/agent/execution-hub";
 import { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } from "@/lib/agent/provider-resolution";
+import { kiloAnonProvider } from "@/lib/agent/kilo-anon";
+import { sandboxEventFeeder } from "@/lib/agent/sandbox-stream-events";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -157,32 +159,65 @@ async function writeBubbleStatus(
   }
 }
 
-/** Resolve the streaming placeholder assistant row the hub just created for
- *  a detached turn (it persists asynchronously — poll briefly). Returns
- *  null when no placeholder shows up in time (the landing then appends a
- *  fresh assistant message instead of rewriting a bubble). */
-async function waitForStreamingBubble(
-  conversationId: string,
-  userId: string,
-  timeoutMs: number,
-): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+/** Map sandbox runner stream events → the processor vocabulary: the shared,
+ *  unit-tested mapper lives in lib/agent/sandbox-stream-events.ts (imported
+ *  below) so the live send path and the reattach-on-return path feed the
+ *  processor identically. */
+
+/** Throttled REAL-TIME CACHE (PRD persistence layer 2): persist the
+ *  in-progress assistant message (content + parts + streaming flag) into the
+ *  bubble Dexie row every ~2.5s while events stream, so a page refresh
+ *  mid-run — or a sandbox wipe before landing — never loses the work that
+ *  already streamed. The final landing rewrites the row authoritatively. */
+function makeStreamCheckpointer(
+  getStoreMessages: () => Array<{
+    id: string;
+    role: string;
+    content?: string;
+    parts?: unknown[] | null;
+  }>,
+  bubbleId: string | null,
+): { schedule: () => void; flushNow: () => Promise<void> } {
+  let lastAt = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let writing = false;
+  const flush = async () => {
+    if (!bubbleId || writing) return;
+    writing = true;
     try {
-      const rows = await conversationService.getMessages(conversationId, userId);
-      const streaming = rows.filter(
-        (r) =>
-          r.role === "assistant" &&
-          (r as { is_streaming?: boolean }).is_streaming === true,
-      );
-      const bubble = streaming[streaming.length - 1] ?? null;
-      if (bubble) return bubble.id;
+      const msgs = getStoreMessages();
+      const mine = [...msgs].reverse().find((m) => m.role === "assistant");
+      if (mine && (mine.parts?.length || (mine.content ?? "").trim())) {
+        await conversationService.updateMessage(bubbleId, {
+          content: mine.content ?? "",
+          is_streaming: true,
+          parts: (mine.parts ?? []) as never,
+        } as never);
+      }
     } catch {
-      // best-effort — retry until the deadline
+      // best-effort — the landing rewrite is authoritative
+    } finally {
+      writing = false;
     }
-    await new Promise((r) => setTimeout(r, 400));
-  }
-  return null;
+  };
+  return {
+    schedule: () => {
+      const now = Date.now();
+      if (now - lastAt < 2500) {
+        if (!timer) {
+          timer = setTimeout(() => {
+            timer = null;
+            lastAt = Date.now();
+            void flush();
+          }, 2500 - (now - lastAt));
+        }
+        return;
+      }
+      lastAt = now;
+      void flush();
+    },
+    flushNow: flush,
+  };
 }
 
 /**
@@ -581,15 +616,26 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
-      // BYOK POLICY: the headless runner calls the provider gateway from
-      // INSIDE the sandbox — the user's own provider (key + base URL) is
-      // required; the app's built-in model is never a fallback.
+      // ── PROVIDER RESOLUTION — the user's own BYOK provider when one is
+      // configured, otherwise the built-in KILO ANONYMOUS gateway
+      // (zero-configuration sandbox AI — no user provider needed; verified
+      // live: anonymous tool-calling + streaming on the :free tier). The
+      // sandbox runner calls whichever gateway from INSIDE the sandbox.
       const provider = opts.provider;
-      if (!provider.baseUrl?.trim() || !provider.apiKey) {
-        failTurn(
-          "Background runs execute with YOUR own AI provider — add one (with an API key and base URL) in Settings → Agent Settings → AI Providers. (The app's built-in model is never used for background work.)",
-        );
-        return;
+      let chatUrl: string;
+      let runApiKey: string;
+      let runModel: string;
+      let runFallbackModels: readonly string[] = [];
+      if (provider.baseUrl?.trim()) {
+        chatUrl = chatCompletionsUrl(provider.baseUrl, provider.noPrefix);
+        runApiKey = provider.apiKey ?? "";
+        runModel = provider.model;
+      } else {
+        const kilo = kiloAnonProvider();
+        chatUrl = chatCompletionsUrl(kilo.baseUrl);
+        runApiKey = kilo.apiKey; // anonymous — no Authorization header
+        runModel = kilo.model;
+        runFallbackModels = kilo.fallbackModels;
       }
 
       // No E2B key → honest FALLBACK to the in-browser loop (a sandbox run
@@ -641,9 +687,10 @@ export function useChat(options: UseChatOptions = {}) {
           conversationId: convId,
           prompt: opts.userMessage,
           systemPrompt: opts.systemPrompt ?? "",
-          chatUrl: chatCompletionsUrl(provider.baseUrl, provider.noPrefix),
-          apiKey: provider.apiKey,
-          model: provider.model,
+          chatUrl,
+          apiKey: runApiKey,
+          model: runModel,
+          fallbackModels: runFallbackModels,
           temperature: opts.temperature ?? null,
           history,
           maxRounds: 400,
@@ -661,29 +708,60 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
-      // Placeholder bubble — the run's home in the chat while it works
-      // (and the row the reattach-on-return path adopts after a reload).
+      // Placeholder bubble — a REAL Dexie row created up front (deterministic
+      // id, no scanning): the SSE stream renders into it live, the throttled
+      // checkpointer caches partial work every ~2.5s, the landing rewrites it
+      // in place, and the reattach-on-return path adopts it after a reload.
+      const workingText =
+        "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+      let bubbleId: string | null = null;
+      try {
+        const placeholder = await conversationService.addMessage(convId, userId, {
+          role: "assistant",
+          content: workingText,
+          parts: [{ id: `part_${nanoid(8)}`, type: "text", content: workingText }],
+        });
+        await conversationService.updateMessage(placeholder.id, {
+          is_streaming: true,
+        } as never);
+        bubbleId = placeholder.id;
+      } catch (err) {
+        console.warn("[useChat] detached: placeholder bubble could not be persisted", err);
+      }
+
+      // The hub-side streaming placeholder (what the user watches while the
+      // events stream in) shares the RUN's id as its generation id — every
+      // streamed round, tool card and token lands in the same message.
+      const generationId = started.runId;
       execution.processor.handle({
         type: "model_request_start",
-        data: { round: 1, generation_id: opts.generationId ?? nanoid() },
+        data: { round: 1, generation_id: generationId, model: runModel },
       });
-      // Resolve the placeholder's persisted row id (the hub writes it
-      // asynchronously — poll briefly).
-      const bubbleId = await waitForStreamingBubble(convId, userId, 8000);
 
       toast.success("Running in your E2B sandbox", {
         description:
           "You can close the app — the sandbox keeps working and the finished result lands in this chat.",
       });
 
-      // ADOPT LIVE: poll the sandbox to terminal, streaming progress into
-      // the bubble; the landing (tool parts + final text + generation meta)
-      // happens inside adoptDetachedRun. Stop flows through stopGeneration →
-      // stopDetachedRun → the runner's stopped marker → this loop lands it.
+      // LIVE STREAMING — the SSE bridge forwards sandbox events; the feeder
+      // maps them onto the processor's AgentEvent vocabulary (the same
+      // shapes the foreground runtime emits) so the existing streaming UI
+      // renders tokens + tool cards in real time; the checkpointer caches.
+      const feeder = sandboxEventFeeder(execution.processor, generationId);
+      const checkpointer = makeStreamCheckpointer(
+        () => execution.store.getState().messages as never,
+        bubbleId,
+      );
+
+      // ADOPT LIVE: poll the sandbox to terminal (the watchdog + the
+      // authoritative landing) while the SSE bridge streams. Stop flows
+      // through stopGeneration → stopDetachedRun → the runner's stopped
+      // marker → this loop lands it.
       const result = await adoptDetachedRun({
         userId,
         conversationId: convId,
         messageId: bubbleId,
+        sandboxId: started.sandboxId,
         isCancelled: () => false,
         onProgress: async (st) => {
           if (!bubbleId) return;
@@ -695,7 +773,12 @@ export function useChat(options: UseChatOptions = {}) {
           await writeBubbleStatus(bubbleId, line, true);
           await refreshConversationRows(convId, userId);
         },
+        onEvent: (ev) => {
+          feeder(ev);
+          checkpointer.schedule();
+        },
       });
+      await checkpointer.flushNow();
 
       if (result.cancelled) return;
       executionHub.finishExecution(
@@ -1216,10 +1299,28 @@ export function useChat(options: UseChatOptions = {}) {
             );
           }
           await refreshConversationRows(turnId, userId);
-          await adoptDetachedRun({
+
+          // RESUME EXECUTION — register a background execution for the
+          // live run so the reattach renders the SAME real-time stream a
+          // live send does: the SSE bridge replays every event from the
+          // start (agent_events.jsonl is the replay log — Last-Event-ID 0),
+          // the feeder maps them onto the processor, and the throttled
+          // checkpointer keeps caching partial work into the bubble row.
+          const execution = executionHub.createExecution({
+            conversationId: turnId,
+            mode: "background",
+            trigger: "resume",
+          });
+          const feeder = sandboxEventFeeder(execution.processor, row.id);
+          const checkpointer = makeStreamCheckpointer(
+            () => execution.store.getState().messages as never,
+            bubble?.id ?? null,
+          );
+          const result = await adoptDetachedRun({
             userId,
             conversationId: turnId,
             messageId: bubble?.id ?? null,
+            sandboxId: row.sandbox_id,
             isCancelled: () => cancelled,
             onProgress: async (st) => {
               if (!bubble) return;
@@ -1231,7 +1332,18 @@ export function useChat(options: UseChatOptions = {}) {
               await writeBubbleStatus(bubble.id, line, true);
               await refreshConversationRows(turnId, userId);
             },
+            onEvent: (ev) => {
+              feeder(ev);
+              checkpointer.schedule();
+            },
           });
+          await checkpointer.flushNow();
+          if (!result.cancelled) {
+            executionHub.finishExecution(
+              execution.id,
+              result.status === "completed" ? "completed" : "failed",
+            );
+          }
           await refreshConversationRows(turnId, userId);
           return;
         }

@@ -45,6 +45,7 @@ import {
   RUNNER_VERSION_PATH,
   CHAT_HISTORY_PATH,
   AGENT_STATUS_PATH,
+  AGENT_EVENTS_PATH,
   BACKGROUND_LOG_PATH,
   SANDBOX_TODOS_PATH,
   RUNNER_PGREP_PATTERN,
@@ -1570,11 +1571,146 @@ function resolveApiKey(clientKey: unknown): string {
   return k;
 }
 
-// GET — capability probe: does the server have E2B_API_KEY configured?
-// The client uses this to enable sandbox features (file tools) without the
-// key ever crossing the wire.
-export async function GET(): Promise<NextResponse> {
-  return NextResponse.json({ hasEnvKey: !!process.env.E2B_API_KEY?.trim() });
+// GET — two roles:
+//   1. Capability probe (default): does the server have E2B_API_KEY
+//      configured? The client uses this to enable sandbox features (file
+//      tools) without the key ever crossing the wire.
+//   2. SSE AGENT-EVENT BRIDGE (?stream=1): the real-time sandbox → UI
+//      transport (PRD "Real-Time Sandbox-to-UI Streaming"). The headless
+//      runner appends structured events to /home/user/agent_events.jsonl;
+//      this endpoint tails the file and forwards each new line as an SSE
+//      `agent` event whose id is the event's `i` — so a reconnect (or a
+//      page refresh) replays exactly the missing tail via Last-Event-ID.
+//      While the stream is open it ALSO extends the sandbox timeout
+//      periodically (the PRD-sanctioned mid-run keep-alive: the explicit
+//      setTimeout pushes the pause deadline out — within E2B's 24h cap —
+//      so an active run is never wiped mid-response).
+export async function GET(req: NextRequest): Promise<Response> {
+  const url = new URL(req.url);
+  if (url.searchParams.get("stream") !== "1") {
+    return NextResponse.json({ hasEnvKey: !!process.env.E2B_API_KEY?.trim() });
+  }
+
+  const apiKey = resolveApiKey(url.searchParams.get("key"));
+  if (!apiKey) {
+    return NextResponse.json({ error: "Missing apiKey" }, { status: 401 });
+  }
+  const conversationId = url.searchParams.get("conversationId");
+  const mode = url.searchParams.get("mode") === "separate" ? "separate" : "shared";
+  const clientSandboxId = url.searchParams.get("sandboxId");
+  const afterRaw = Number(url.searchParams.get("after") ?? req.headers.get("last-event-id") ?? -1);
+  let after = Number.isFinite(afterRaw) ? Math.trunc(afterRaw) : -1;
+  if (after < -1) after = -1;
+
+  const encoder = new TextEncoder();
+  const sseHeaders: Record<string, string> = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  };
+
+  // NON-CREATING: the bridge must never mint a fresh sandbox. Nothing to
+  // resolve → a `done` marker with noSandbox lets the client fall back to
+  // its status-poll watchdog (which owns the vanished-sandbox grace).
+  const sandbox = await resolveExistingSandbox(apiKey, conversationId, mode, clientSandboxId);
+  if (!sandbox) {
+    const body = `event: done\ndata: ${JSON.stringify({ noSandbox: true })}\n\n`;
+    return new Response(body, { status: 200, headers: sseHeaders });
+  }
+
+  const STREAM_POLL_MS = 700;
+  const STREAM_HEARTBEAT_MS = 15_000;
+  const STREAM_KEEPALIVE_MS = 4 * 60_000; // extend the sandbox timeout every 4 min
+  const STREAM_MAX_LIFETIME_MS = 240_000; // hard cap — EventSource reconnects w/ Last-Event-ID
+  const startedAt = Date.now();
+  let lastBeatAt = 0;
+  let lastKeepaliveAt = 0;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      const send = (chunk: string) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          closed = true;
+        }
+      };
+
+      while (!closed && !req.signal.aborted && Date.now() - startedAt < STREAM_MAX_LIFETIME_MS) {
+        try {
+          // Tail the event log (append-only JSONL; `i` is 1-based).
+          let text = "";
+          try {
+            text = await sandbox.files.read(AGENT_EVENTS_PATH, { format: "text" });
+          } catch {
+            // No events file yet (pre-start) — nothing to forward.
+          }
+          const lines = text ? text.split("\n").filter((l) => l.trim()) : [];
+          if (lines.length > after + 1) {
+            for (const line of lines.slice(after + 1)) {
+              try {
+                const parsed = JSON.parse(line) as { i?: number };
+                const id = typeof parsed.i === "number" ? parsed.i : after + 1;
+                send(`id: ${id}\nevent: agent\ndata: ${line}\n\n`);
+              } catch {
+                // partial trailing write (the runner appends line-by-line;
+                // a torn line is re-read next poll once complete)
+              }
+              after += 1;
+            }
+          }
+
+          // Status snapshot + terminal detection.
+          const status = (await readJsonFile(sandbox, AGENT_STATUS_PATH)) as
+            | { status?: string }
+            | null;
+          const terminal =
+            status?.status === "completed" || status?.status === "failed" || status?.status === "stopped";
+          if (terminal) {
+            send(`event: done\ndata: ${JSON.stringify({ status: status?.status ?? null })}\n\n`);
+            break;
+          }
+
+          const now = Date.now();
+          if (now - lastBeatAt >= STREAM_HEARTBEAT_MS) {
+            lastBeatAt = now;
+            send(`: heartbeat ${now}\n\n`);
+          }
+          // MID-RUN KEEP-ALIVE — the sanctioned lifecycle extension: the
+          // explicit setTimeout pushes E2B's inactivity/timeout pause point
+          // out (up to the 24h cap) while anyone is watching the run.
+          if (now - lastKeepaliveAt >= STREAM_KEEPALIVE_MS) {
+            lastKeepaliveAt = now;
+            try {
+              await sandbox.setTimeout(SANDBOX_TIMEOUT_MS);
+            } catch {
+              try {
+                await sandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS);
+              } catch {
+                // best-effort — the run survives a pause + auto-resume anyway
+              }
+            }
+          }
+        } catch {
+          // A poll failed (sandbox pausing, network blip) — back off briefly
+          // and retry; only the terminal/done or the cap closes the stream.
+        }
+        await new Promise((r) => setTimeout(r, STREAM_POLL_MS));
+      }
+      if (!closed) {
+        try {
+          controller.close();
+        } catch {
+          // already closed by cancel()
+        }
+      }
+    },
+  });
+
+  return new Response(stream, { headers: sseHeaders });
 }
 
 export async function POST(req: NextRequest) {
@@ -3102,6 +3238,48 @@ export async function POST(req: NextRequest) {
           logTail,
           sandboxTodos: Array.isArray(sandboxTodos) ? sandboxTodos : null,
           runnerAlive,
+        });
+      }
+
+      case "agent_events": {
+        // The event-log reader behind the SSE bridge: returns the events
+        // AFTER `args.after` (0-based line index) plus a status snapshot.
+        // Used by the reattach path to replay a run's tail in one shot when
+        // the SSE bridge is unavailable (or for tests).
+        const sandbox = await resolveExistingSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        if (!sandbox) {
+          return NextResponse.json({
+            sandboxId: "",
+            noSandbox: true,
+            events: [],
+            status: null,
+            lastEventId: null,
+          });
+        }
+        const afterRaw = Math.trunc(Number(args.after ?? -1));
+        const after = Number.isFinite(afterRaw) && afterRaw >= -1 ? afterRaw : -1;
+        let text = "";
+        try {
+          text = await sandbox.files.read(AGENT_EVENTS_PATH, { format: "text" });
+        } catch {
+          // No events file yet — an empty stream is a valid answer.
+        }
+        const lines = text ? text.split("\n").filter((l) => l.trim()) : [];
+        const events: unknown[] = [];
+        const sliced = lines.slice(after + 1);
+        for (const line of sliced) {
+          try {
+            events.push(JSON.parse(line));
+          } catch {
+            // torn trailing line — skipped, re-read once complete
+          }
+        }
+        const status = await readJsonFile(sandbox, AGENT_STATUS_PATH);
+        return NextResponse.json({
+          sandboxId: sandbox.sandboxId,
+          events,
+          status,
+          lastEventId: after + events.length,
         });
       }
 
