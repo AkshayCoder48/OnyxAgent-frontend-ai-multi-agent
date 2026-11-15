@@ -31,7 +31,6 @@ describe("resolvePlatformMark", () => {
 
   it("maps the platform key surfaces", () => {
     expect(resolvePlatformMark("E2B Sandbox")).toBe("e2b");
-    expect(resolvePlatformMark("Trigger.dev Cloud")).toBe("triggerdev");
     expect(resolvePlatformMark("Pollinations")).toBe("pollinations");
     expect(resolvePlatformMark("OnyxBase")).toBe("onyxbase");
     expect(resolvePlatformMark("Composio")).toBe("composio");

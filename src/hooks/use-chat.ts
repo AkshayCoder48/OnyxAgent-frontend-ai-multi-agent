@@ -29,16 +29,6 @@ import {
   useExecutionChatValue,
   type ExecutionRecord,
 } from "@/lib/agent/execution-hub";
-import {
-  registerTurnHandoff,
-  pruneFinishedTurnHandoffs,
-} from "@/lib/agent/turn-handoff";
-import {
-  clearChatHandoffMeta,
-  cloudHandoffActive,
-  ensureCloudHandoffActive,
-  readCloudHandoffMeta,
-} from "@/lib/agent/turn-cloud-handoff";
 import { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } from "@/lib/agent/provider-resolution";
 
 /** A message the user typed while the agent was busy. Held outside the chat
@@ -100,6 +90,99 @@ async function waitForAuthUser(timeoutMs: number): Promise<string | null> {
   }
   const state = useAuthStore.getState() as { user?: { id?: string } | null };
   return state.user?.id ?? null;
+}
+
+// ── Detached (E2B sandbox) run helpers ─────────────────────────────────────
+// Shared by the live detached send path (runDetachedTurn) and the
+// reattach-on-return orphan effect below.
+
+/** Rewrite the conversation's rows into the chat store — the live progress
+ *  + landing refresh for detached runs (only when the user is viewing the
+ *  conversation). */
+async function refreshConversationRows(conversationId: string, userId: string): Promise<void> {
+  try {
+    const refreshed = await conversationService.getMessages(conversationId, userId);
+    const { conversationMessageToChatMessage } = await import("@/lib/conversation-to-chat");
+    if (
+      (useConversationStore.getState().currentConversationId ?? null) === conversationId
+    ) {
+      useChatStore.setState({
+        messages: refreshed.map((row) =>
+          conversationMessageToChatMessage({
+            id: row.id,
+            conversation_id: row.conversation_id,
+            role: row.role,
+            content: row.content,
+            created_at: row.created_at,
+            tool_calls: row.tool_calls,
+            user_rating: row.user_rating,
+            rating_count: row.rating_count,
+            files: row.files,
+            thinking: (row as { thinking?: string | null }).thinking,
+            reasoning: (row as { reasoning?: string | null }).reasoning,
+            parts: (row as { parts?: unknown[] | null }).parts as
+              | import("@/types").MessagePart[]
+              | null
+              | undefined,
+          }),
+        ),
+      });
+    }
+  } catch {
+    // best-effort — rows refresh on the next poll / load instead
+  }
+}
+
+/** Rewrite ONE message row's content (single text part + flat content kept
+ *  in sync) — the in-bubble status/final update path for detached runs. */
+async function writeBubbleStatus(
+  messageId: string,
+  content: string,
+  streaming: boolean,
+): Promise<void> {
+  try {
+    await conversationService.updateMessage(messageId, {
+      content,
+      is_streaming: streaming,
+      parts: [
+        {
+          id: `${messageId}:bg:${Date.now().toString(36)}`,
+          type: "text",
+          content,
+        },
+      ],
+    } as never);
+  } catch {
+    // best-effort — the next poll rewrites the row anyway
+  }
+}
+
+/** Resolve the streaming placeholder assistant row the hub just created for
+ *  a detached turn (it persists asynchronously — poll briefly). Returns
+ *  null when no placeholder shows up in time (the landing then appends a
+ *  fresh assistant message instead of rewriting a bubble). */
+async function waitForStreamingBubble(
+  conversationId: string,
+  userId: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const rows = await conversationService.getMessages(conversationId, userId);
+      const streaming = rows.filter(
+        (r) =>
+          r.role === "assistant" &&
+          (r as { is_streaming?: boolean }).is_streaming === true,
+      );
+      const bubble = streaming[streaming.length - 1] ?? null;
+      if (bubble) return bubble.id;
+    } catch {
+      // best-effort — retry until the deadline
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return null;
 }
 
 /**
@@ -463,14 +546,16 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   /**
-   * BACKGROUND CLOUD TURN ("close and resume") — the Trigger.dev Cloud
-   * variant of doSend's tail (USER DIRECTIVE: background work runs on
-   * Trigger.dev Cloud, NOT in the E2B sandbox). Instead of running the
-   * in-browser agent loop (which dies with the tab), this persists the user
-   * message and dispatches the prompt + history + provider config to the
-   * operator's trigger.dev Cloud project as a durable agent_run — reload,
-   * close and navigate cannot touch it. The finished result lands directly
-   * in this chat's bubbles (the invisible background lander syncs it).
+   * DETACHED SANDBOX TURN ("close and resume") — the E2B variant of
+   * doSend's tail. Instead of running the in-browser agent loop (which
+   * dies with the tab), this persists the user message, hands the prompt +
+   * history + provider config to the headless runner INSIDE the E2B sandbox
+   * (a detached process that survives the app closing — the server resets
+   * the sandbox window to 24h on start, and pause/rotation guards protect
+   * live runners), then adopts the run live: the placeholder bubble shows
+   * progress and the finished work (tool parts + final text) lands in it.
+   * Reload / close cannot cut the run — the reattach effect adopts it again
+   * from the persisted Dexie row.
    */
   const runDetachedTurn = useCallback(
     async (
@@ -486,19 +571,52 @@ export function useChat(options: UseChatOptions = {}) {
         executionHub.finishExecution(execution.id, "failed");
       };
 
-      // Background turns run EXCLUSIVELY on Trigger.dev Cloud now — the
-      // legacy E2B headless-runner lane was removed (user directive).
-      // DECISION-POINT FRESHNESS (fix 2026-11-14: "Even if key is added"):
-      // the gate used to read a prewarm snapshot up to 60s stale, so a key
-      // connected moments before kept failing until the next tick.
-      // ensureCloudHandoffActive() re-verifies against the server first
-      // whenever the snapshot is stale, so a JUST-CONNECTED key works on
-      // the very next send.
-      if (!(await ensureCloudHandoffActive(userId))) {
+      // ONE detached run per sandbox at a time — a second would overwrite
+      // the run config + collide on chat_history.json.
+      const active = useDetachedRunStore.getState().runs[convId];
+      if (active && (active.status === "running" || active.status === "starting")) {
         failTurn(
-          "Background runs need a connected Trigger.dev Cloud key — add one in Settings → API Keys (the turn was not sent).",
+          "A sandbox run is already active in this chat — wait for it to finish or press Stop, then send again.",
         );
         return;
+      }
+
+      // BYOK POLICY: the headless runner calls the provider gateway from
+      // INSIDE the sandbox — the user's own provider (key + base URL) is
+      // required; the app's built-in model is never a fallback.
+      const provider = opts.provider;
+      if (!provider.baseUrl?.trim() || !provider.apiKey) {
+        failTurn(
+          "Background runs execute with YOUR own AI provider — add one (with an API key and base URL) in Settings → Agent Settings → AI Providers. (The app's built-in model is never used for background work.)",
+        );
+        return;
+      }
+
+      // No E2B key → honest FALLBACK to the in-browser loop (a sandbox run
+      // needs a sandbox). The toggle stays on; adding a key in Settings →
+      // API Keys makes the next send detached again.
+      const { getEffectiveE2BKey } = await import("@/lib/e2b/env-key");
+      const e2bKey = await getEffectiveE2BKey(userId);
+      if (!e2bKey) {
+        toast.warning("No E2B sandbox key — running in this tab instead", {
+          description: "Add one in Settings → API Keys to run background turns inside your sandbox.",
+        });
+        execution.processor.handle({
+          type: "model_request_start",
+          data: { round: 1, generation_id: opts.generationId ?? nanoid() },
+        });
+        executionHub.runForeground(execution.id, opts);
+        return;
+      }
+
+      // Load the history BEFORE persisting the new user row, so the seed
+      // never duplicates the prompt we are about to append.
+      let history: Array<{ role: string; content: string }> = [];
+      try {
+        const rows = await conversationService.getMessages(convId, userId);
+        history = rows.map((r) => ({ role: r.role, content: r.content }));
+      } catch {
+        // empty seed (first message) — fine
       }
 
       try {
@@ -508,55 +626,83 @@ export function useChat(options: UseChatOptions = {}) {
           fileIds,
         });
       } catch (err) {
-        console.warn("[useChat] background dispatch: failed to persist the user message", err);
+        console.warn("[useChat] detached: failed to persist the user message", err);
       }
 
+      // Dispatch to the sandbox (deploy → run config → detached launch →
+      // durable Dexie row + store mirror).
+      const { startDetachedRun, adoptDetachedRun } = await import(
+        "@/lib/agent/detached-run"
+      );
+      let started: Awaited<ReturnType<typeof startDetachedRun>>;
       try {
-        const { dispatchDetachedCloudTurn } = await import(
-          "@/lib/agent/turn-cloud-handoff"
-        );
-        // CONFIG PROPAGATION (endpoint-migration PRD §9): the background
-        // lane receives the SAME effective configuration the foreground
-        // turn resolved — the selected provider's gateway URL, its key and
-        // the selected model. BYOK POLICY (user directive 2026-10-31):
-        // background runs execute ONLY on the user's own provider — the
-        // app's keyless bridge fallback was removed, so a turn without a
-        // provider gateway is refused up front with instructions (no cloud
-        // run is created).
-        const provider = opts.provider;
-        if (!provider.baseUrl?.trim()) {
-          failTurn(
-            "Background runs execute with YOUR own AI provider — add one in Settings → Agent Settings → AI Providers. (The app's built-in model is never used for background work.)",
-          );
-          return;
-        }
-        await dispatchDetachedCloudTurn({
+        started = await startDetachedRun({
           userId,
           conversationId: convId,
           prompt: opts.userMessage,
           systemPrompt: opts.systemPrompt ?? "",
-          chatUrl: provider.baseUrl
-            ? chatCompletionsUrl(provider.baseUrl, provider.noPrefix)
-            : "",
+          chatUrl: chatCompletionsUrl(provider.baseUrl, provider.noPrefix),
           apiKey: provider.apiKey,
           model: provider.model,
           temperature: opts.temperature ?? null,
-          preferredProviderId: useChatStore.getState().selectedProviderId,
-          title: opts.userMessage.replace(/\s+/g, " ").trim().slice(0, 60) || undefined,
+          history,
+          maxRounds: 400,
         });
-        toast.success("Running in the background", {
-          description: "This turn is executing on Trigger.dev Cloud — the finished result will land in this chat. You can close the app.",
-        });
-        // The turn is the cloud's problem now — free the composer; the
-        // invisible lander streams the result back into this chat.
-        executionHub.finishExecution(execution.id, "completed");
       } catch (err) {
         failTurn(
-          `Failed to start the background cloud run: ${
+          `Failed to start the sandbox run: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
+        return;
       }
+      if (!started.ok) {
+        failTurn(`Sandbox run failed to start: ${started.error ?? "unknown error"}`);
+        return;
+      }
+
+      // Placeholder bubble — the run's home in the chat while it works
+      // (and the row the reattach-on-return path adopts after a reload).
+      execution.processor.handle({
+        type: "model_request_start",
+        data: { round: 1, generation_id: opts.generationId ?? nanoid() },
+      });
+      // Resolve the placeholder's persisted row id (the hub writes it
+      // asynchronously — poll briefly).
+      const bubbleId = await waitForStreamingBubble(convId, userId, 8000);
+
+      toast.success("Running in your E2B sandbox", {
+        description:
+          "You can close the app — the sandbox keeps working and the finished result lands in this chat.",
+      });
+
+      // ADOPT LIVE: poll the sandbox to terminal, streaming progress into
+      // the bubble; the landing (tool parts + final text + generation meta)
+      // happens inside adoptDetachedRun. Stop flows through stopGeneration →
+      // stopDetachedRun → the runner's stopped marker → this loop lands it.
+      const result = await adoptDetachedRun({
+        userId,
+        conversationId: convId,
+        messageId: bubbleId,
+        isCancelled: () => false,
+        onProgress: async (st) => {
+          if (!bubbleId) return;
+          const line = st.current_tool
+            ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
+                st.total_rounds ? `/${st.total_rounds}` : ""
+              })`
+            : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+          await writeBubbleStatus(bubbleId, line, true);
+          await refreshConversationRows(convId, userId);
+        },
+      });
+
+      if (result.cancelled) return;
+      executionHub.finishExecution(
+        execution.id,
+        result.status === "completed" ? "completed" : "failed",
+      );
+      await refreshConversationRows(convId, userId);
     },
     [],
   );
@@ -747,10 +893,11 @@ export function useChat(options: UseChatOptions = {}) {
       }
 
       // ── DETACHED SANDBOX RUN MODE ("close and resume") ────────────────
-      // When the toggle is on, the whole turn is dispatched to Trigger.dev
-      // Cloud — the user can close the app immediately. No streaming
-      // placeholder is created (nothing streams in-app); the invisible
-      // lander + toast report progress and land the finished result.
+      // When the toggle is on, the whole turn is handed to the headless
+      // runner inside the E2B sandbox — the user can close the app
+      // immediately. The streaming placeholder is emitted AFTER a
+      // successful dispatch (inside runDetachedTurn), and the live adoption
+      // loop streams progress + the finished result into that bubble.
       const detachedMode = useDetachedRunStore.getState().detachedMode;
       if (!detachedMode) {
         execution.processor.handle({
@@ -788,34 +935,10 @@ export function useChat(options: UseChatOptions = {}) {
         return;
       }
 
-      // ── AUTOMATIC CLOSE-HANDOFF REGISTRATION ──────────────────────────
-      // If the app closes while this foreground turn is running, the
-      // pagehide handler in turn-handoff.ts hands the turn to the sandbox
-      // headless runner (sendBeacon agent_start) — "send, close, come back
-      // to finished work" with NO toggle required. The snapshot is pure
-      // in-memory state; pagehide builds the run config from it + the
-      // execution store synchronously.
-      const fgProvider = opts.provider;
-      registerTurnHandoff({
-        executionId: execution.id,
-        conversationId: convId,
-        userId,
-        prompt: opts.userMessage,
-        systemPrompt: opts.systemPrompt ?? "",
-        // The ONE shared URL construction (provider-resolution) — the close
-        // handoff carries the exact gateway the foreground turn is using.
-        chatUrl: fgProvider.baseUrl
-          ? chatCompletionsUrl(fgProvider.baseUrl, fgProvider.noPrefix)
-          : "",
-        apiKey: fgProvider.apiKey,
-        model: fgProvider.model,
-        temperature: opts.temperature ?? null,
-        startedAt: Date.now(),
-      });
-
       // Foreground: the fetch lives in the browser page, owned by the hub.
       // It survives route changes/chat switches (nothing aborts it); it ends
-      // on completion or explicit Stop. (Browser refresh closes fg turns.)
+      // on completion or explicit Stop. (Browser refresh closes fg turns —
+      // use the Background runs toggle when the work must survive closing.)
       executionHub.runForeground(execution.id, opts);
     },
     [buildTurnOptions, conversationId, onConversationCreated, runDetachedTurn],
@@ -1011,6 +1134,22 @@ export function useChat(options: UseChatOptions = {}) {
   // ── STOP (explicit user action ONLY) ───────────────────────────────────
   const stopGeneration = useCallback(() => {
     const convId = currentConversationIdFromStore ?? conversationId ?? null;
+    // DETACHED (E2B sandbox) RUN FIRST: Stop must kill the sandbox runner
+    // (not just the local execution). The adoption loop observes the
+    // runner's "stopped" marker, lands the partial work + an honest stopped
+    // note, and settles the execution itself.
+    if (convId) {
+      const view = useDetachedRunStore.getState().runs[convId];
+      if (view && (view.status === "running" || view.status === "starting")) {
+        const userId = useAuthStore.getState().user?.id;
+        if (userId) {
+          void import("@/lib/agent/detached-run").then((m) =>
+            m.stopDetachedRun(userId, convId!),
+          );
+          return;
+        }
+      }
+    }
     // 1. The execution this hook started (new-chat turns may not be keyed
     //    in the registry yet). 2. Otherwise whatever runs for the viewed
     //    conversation. Both routes kill the fg fetch AND the E2B job.
@@ -1024,25 +1163,19 @@ export function useChat(options: UseChatOptions = {}) {
     }
   }, [conversationId, currentConversationIdFromStore]);
 
-  // ── ORPHANED-TURN SETTLE / CLOUD ADOPTION (reload / re-entry) ───────────
+  // ── ORPHANED-TURN SETTLE / DETACHED-RUN REATTACH (reload / re-entry) ────
   // Idempotent: if an execution is already registered for the conversation
   // we simply re-subscribe (the execSummary above). Navigating away NEVER
   // stops it.
   //
-  // A browser refresh / app cut kills any in-flight turn mid-stream. With a
-  // Trigger.dev Cloud key connected, that is NOT an interruption (USER
-  // DIRECTIVE — "we implemented Trigger, fix the interrupted note"):
-  //
-  //   1. pagehide dispatched the turn → the beacon run is ADOPTED in place:
-  //      the interrupted bubble becomes a live background status bubble
-  //      ("Working in the background…") and the finished answer lands
-  //      straight into that same bubble.
-  //   2. the beacon never landed (offline close, mobile app kill, pagehide
-  //      never firing) → SELF-HEAL: re-dispatch the interrupted turn to the
-  //      cloud NOW and land the finished answer the same way — the work
-  //      continues instead of dying with the tab.
-  //   3. no cloud key connected → the orphan settles with the honest
-  //      interrupted note (the only remaining path that produces it).
+  // A browser refresh / app cut while a DETACHED (E2B sandbox) run was in
+  // flight is NOT an interruption — the headless runner kept working inside
+  // the sandbox (detached process, 24h window, pause-on-timeout guards).
+  // On return the persisted Dexie `detached_runs` row (still running) is
+  // re-adopted: the interrupted bubble becomes a live status bubble and the
+  // finished work lands straight into it. Runs with no live row (the app
+  // died before the dispatch completed, or the run already synced) settle
+  // silently — no interruption notes in the chat (user directive).
   useEffect(() => {
     const turnId = currentConversationIdFromStore ?? conversationId ?? null;
     if (!turnId) return;
@@ -1050,99 +1183,24 @@ export function useChat(options: UseChatOptions = {}) {
     let cancelled = false;
     void (async () => {
       // AUTH-HYDRATION WAIT: on a cold reload the persisted auth store may
-      // not have rehydrated when this effect first runs. Bailing instantly
-      // (the old behavior) permanently skipped adoption — the orphan then
-      // froze forever. Poll until the store resolves (bounded).
+      // not have rehydrated when this effect first runs — poll until the
+      // store resolves (bounded), or re-adoption never happens.
       const userId = await waitForAuthUser(10_000);
       if (!userId || cancelled) return;
       if (useChatStore.getState().isStreaming) return;
       if (executionHub.getFor(turnId)) return;
-      /** Rewrite the conversation's rows into the chat store (same as the
-       *  previous implementation — best-effort). */
-      const refreshRows = async () => {
-        try {
-          const refreshed = await conversationService.getMessages(turnId, userId);
-          const { conversationMessageToChatMessage } = await import("@/lib/conversation-to-chat");
-          const msgs = refreshed.map((row) =>
-            conversationMessageToChatMessage({
-              id: row.id,
-              conversation_id: row.conversation_id,
-              role: row.role,
-              content: row.content,
-              created_at: row.created_at,
-              tool_calls: row.tool_calls,
-              user_rating: row.user_rating,
-              rating_count: row.rating_count,
-              files: row.files,
-              thinking: (row as { thinking?: string | null }).thinking,
-              reasoning: (row as { reasoning?: string | null }).reasoning,
-              parts: (row as { parts?: unknown[] | null }).parts as
-                | import("@/types").MessagePart[]
-                | null
-                | undefined,
-            }),
-          );
-          if (
-            !executionHub.getFor(turnId) &&
-            (useConversationStore.getState().currentConversationId ?? null) === turnId
-          ) {
-            useChatStore.setState({ messages: msgs });
-          }
-        } catch {
-          // best-effort — rows refresh on the next load instead
-        }
-      };
-      /** Rewrite ONE message row's content (single text part + flat content
-       *  kept in sync) — the in-bubble status/final update path. */
-      const writeBubble = async (messageId: string, content: string, streaming: boolean) => {
-        try {
-          await conversationService.updateMessage(messageId, {
-            content,
-            is_streaming: streaming,
-            parts: [
-              {
-                id: `${messageId}:bg:${Date.now().toString(36)}`,
-                type: "text",
-                content,
-              },
-            ],
-          } as never);
-        } catch {
-          // best-effort — the next poll rewrites the row anyway
-        }
-      };
-      try {
-        const {
-          resolveCloudRun,
-          mirrorCloudRunWithToken,
-          markCloudRunSynced,
-          extractChatResult,
-          extractChunkText,
-          writeChatHandoffMeta,
-          dispatchDetachedCloudTurn,
-        } = await import("@/lib/agent/turn-cloud-handoff");
 
-        /** Take over the interrupted bubble, poll the run to terminal and
-         *  land the finished answer IN the bubble. Shared by the beacon
-         *  adoption path and the self-heal re-dispatch path. */
-        const adopt = async (
-          meta: { taskId: string; taskToken: string },
-          initial: import("@/lib/tasks/protocol").TaskStatusRun,
-        ): Promise<void> => {
-          await mirrorCloudRunWithToken(
-            initial,
-            {
-              taskId: meta.taskId,
-              taskToken: meta.taskToken,
-              kind: "chat",
-              conversationId: turnId,
-              businessId: null,
-              startedAt: Date.parse(initial.startedAt) || Date.now(),
-              promptPreview: "",
-            },
-            userId,
-            turnId,
-          );
+      // ── 1) DETACHED-RUN REATTACH — a sandbox run is still in flight. ──
+      try {
+        const { getDetachedRunForConversation, adoptDetachedRun } = await import(
+          "@/lib/agent/detached-run"
+        );
+        const row = await getDetachedRunForConversation(userId, turnId);
+        if (
+          row &&
+          (row.status === "running" || row.status === "starting") &&
+          !row.result_message_id
+        ) {
           const rows = await conversationService.getMessages(turnId, userId);
           const streamingRows = rows.filter(
             (r) =>
@@ -1150,223 +1208,45 @@ export function useChat(options: UseChatOptions = {}) {
               (r as { is_streaming?: boolean }).is_streaming === true,
           );
           const bubble = streamingRows[streamingRows.length - 1] ?? null;
-
-          const live = initial.status === "queued" || initial.status === "running";
-          if (bubble && live) {
-            // The EXACT required background banner copy (E2B persistent
-            // background execution PRD §4): non-blocking, honest, and it
-            // auto-updates when the run finishes or fails below.
-            await writeBubble(
+          if (bubble) {
+            await writeBubbleStatus(
               bubble.id,
               "Onyx is working in the background. Wait until the task is finished to see the complete response here.",
               true,
             );
-            await refreshRows();
           }
-
-          // Poll until terminal (the cancelled flag breaks on unmount; the
-          // next mount re-adopts through the same meta).
-          let current = initial;
-          while (
-            !cancelled &&
-            (current.status === "queued" || current.status === "running")
-          ) {
-            await new Promise((r) => setTimeout(r, 4000));
-            if (cancelled) return;
-            const next = await resolveCloudRun(meta.taskId);
-            if (!next) return; // transient — the next mount retries
-            const prevTool = (current as { progress?: { currentTool?: string | null } }).progress
-              ?.currentTool;
-            const nextTool = (next as { progress?: { currentTool?: string | null } }).progress
-              ?.currentTool;
-            current = next;
-            if (bubble && nextTool !== prevTool) {
-              await writeBubble(
-                bubble.id,
-                nextTool
-                  ? `⏳ Working in the background — running ${nextTool}…`
-                  : "⏳ Working in the background — the finished answer will appear here.",
-                true,
-              );
-              await refreshRows();
-            }
-          }
-          if (cancelled) return;
-
-          // Terminal — land the finished result INTO the bubble (or fall
-          // back to the generic sync when there is no bubble/artifacts).
-          clearChatHandoffMeta(turnId);
-          const failureText =
-            current.status === "completed"
-              ? null
-              : `The background run ${
-                  current.status === "failed" ? "failed" : "was stopped"
-                }: ${current.error ?? "no error detail"}.`;
-          let landedInPlace = false;
-          if (bubble) {
-            // Token-authorized artifacts first; the PUBLIC chunk stream is
-            // the tokenless backup (adopted beacon runs whose meta carried
-            // no usable token still land their answer text).
-            const text =
-              failureText ??
-              (await extractChatResult(current, meta.taskToken).catch(() => null)) ??
-              extractChunkText(current);
-            if (text) {
-              await writeBubble(bubble.id, text, false);
-              landedInPlace = true;
-            }
-          }
-          if (landedInPlace) {
-            // We landed it ourselves — mark the mirror so the background
-            // lander never appends a second copy.
-            await markCloudRunSynced(current);
-          } else {
-            // Fallback: settle the bubble and let the generic sync append.
-            if (bubble) {
-              await writeBubble(
-                bubble.id,
-                "The background run finished — the result follows below.",
-                false,
-              );
-            }
-            try {
-              const { syncRunToConversation } = await import("@/lib/tasks/client");
-              await syncRunToConversation(current.runId, userId);
-            } catch {
-              // best-effort — the lander keeps the run discoverable
-            }
-          }
-          await refreshRows();
-        };
-
-        /** Resolve a beacon run by task id WITH RETRIES — sendBeacon
-         *  delivery, TaskRun row creation and a cold-starting app server
-         *  can all lag the return path. A single failed lookup used to
-         *  clear the meta and settle the orphan as "interrupted" (the
-         *  reported bug); now only a verified absence falls through. */
-        const resolveWithRetry = async (
-          taskId: string,
-        ): Promise<import("@/lib/tasks/protocol").TaskStatusRun | null> => {
-          for (let attempt = 0; attempt < 4; attempt++) {
-            const run = await resolveCloudRun(taskId);
-            if (run) return run;
-            await new Promise((r) => setTimeout(r, 3500));
-          }
-          return null;
-        };
-
-        // ── 1) BEACON ADOPTION — the closing app dispatched this turn. ────
-        const cloudMeta = readCloudHandoffMeta(turnId);
-        if (cloudMeta) {
-          const run = await resolveWithRetry(cloudMeta.taskId);
-          if (run) {
-            await adopt(cloudMeta, run);
-            return;
-          }
-          // Verifiably absent (offline close, rejected dispatch, server
-          // loss) — clear the pointer and CONTINUE to the self-heal pass
-          // instead of settling the orphan as interrupted.
-          clearChatHandoffMeta(turnId);
-        }
-
-        // ── 2) ORPHAN SCAN — is there an interrupted turn at all? ────────
-        const rows = await conversationService.getMessages(turnId, userId);
-        let lastOrphanIdx = -1;
-        rows.forEach((row, i) => {
-          if (row.role === "assistant" && (row as { is_streaming?: boolean }).is_streaming === true) {
-            lastOrphanIdx = i;
-          }
-        });
-        if (lastOrphanIdx === -1) return; // nothing interrupted — done
-        const userRows = rows.slice(0, lastOrphanIdx).filter((r) => r.role === "user");
-        const promptRow = userRows[userRows.length - 1] ?? null;
-        const prompt = (promptRow?.content ?? "").trim();
-        const orphanFresh =
-          Date.parse(rows[lastOrphanIdx]!.created_at) > Date.now() - 6 * 60 * 60 * 1000;
-
-        if (!cloudHandoffActive() || !orphanFresh || !prompt) {
-          // No cloud lane (or nothing re-runnable / too stale) — settle
-          // SILENTLY: stop the streaming flag, keep the partial work, no
-          // note in the chat (user directive 2026-11-14 — the
-          // "This task was interrupted…" commentary is gone from the
-          // product; the user just continues with a new message).
-          const settledIds = await conversationService.settleInterruptedMessages(turnId);
-          if (settledIds.length > 0) {
-            await refreshRows();
-          }
-          return;
-        }
-
-        // ── 3) SELF-HEAL — the beacon never landed; re-dispatch the ──────
-        // interrupted turn to the cloud so the work CONTINUES. Double-run
-        // guard first: a live server-side run for this conversation means
-        // the beacon DID land but its localStorage meta was lost — adopt
-        // that run (tokenless watch mode) instead of running it twice.
-        try {
-          const { listTaskRuns } = await import("@/lib/tasks/client");
-          const recent = (await listTaskRuns(userId)) ?? [];
-          const liveRun = recent.find(
-            (r) =>
-              r.conversationId === turnId &&
-              (r.status === "queued" || r.status === "running") &&
-              Date.parse(r.startedAt) > Date.now() - 15 * 60 * 1000,
-          );
-          if (liveRun) {
-            writeChatHandoffMeta(turnId, { taskId: liveRun.taskId, taskToken: "" }, prompt);
-            await adopt({ taskId: liveRun.taskId, taskToken: "" }, liveRun);
-            return;
-          }
-        } catch {
-          // list failure → proceed to the re-dispatch below
-        }
-
-        // Resolve the SAME provider/model/system-prompt config a foreground
-        // send would use. With no provider configured the re-dispatch still
-        // fires — the run then fails honestly at dispatch with the
-        // actionable BYOK message ("add your provider"), which lands in the
-        // chat when it syncs back (the app's own model is never a fallback).
-        const opts = await buildTurnOptions(userId, prompt, undefined, undefined, turnId);
-        const systemPrompt =
-          opts?.systemPrompt?.trim() || `${ONYX_AI_SYSTEM_PROMPT}\n\n${WEB_RESEARCH_DIRECTIVE}`;
-        let dispatched: Awaited<ReturnType<typeof dispatchDetachedCloudTurn>>;
-        try {
-          dispatched = await dispatchDetachedCloudTurn({
+          await refreshConversationRows(turnId, userId);
+          await adoptDetachedRun({
             userId,
             conversationId: turnId,
-            prompt,
-            systemPrompt,
-            chatUrl: opts?.provider.baseUrl
-              ? chatCompletionsUrl(opts.provider.baseUrl, opts.provider.noPrefix)
-              : "",
-            apiKey: opts?.provider.apiKey,
-            model: opts?.provider.model ?? "",
-            temperature: opts?.temperature ?? null,
-            preferredProviderId: useChatStore.getState().selectedProviderId,
-            title: prompt.replace(/\s+/g, " ").trim().slice(0, 60) || undefined,
+            messageId: bubble?.id ?? null,
+            isCancelled: () => cancelled,
+            onProgress: async (st) => {
+              if (!bubble) return;
+              const line = st.current_tool
+                ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
+                    st.total_rounds ? `/${st.total_rounds}` : ""
+                  })`
+                : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+              await writeBubbleStatus(bubble.id, line, true);
+              await refreshConversationRows(turnId, userId);
+            },
           });
-        } catch (err) {
-          // Cloud dispatch refused (mode flipped off, network) — settle
-          // SILENTLY (user directive 2026-11-14: no interruption note in
-          // the chat). The reason is logged for diagnostics; the run's
-          // fate stays visible in Background tasks.
-          const reason = err instanceof Error ? err.message : String(err);
-          console.warn("[chat] orphaned turn could not move to the background:", reason);
-          const settledIds = await conversationService.settleInterruptedMessages(turnId);
-          if (settledIds.length > 0) await refreshRows();
+          await refreshConversationRows(turnId, userId);
           return;
         }
+      } catch {
+        // best-effort — fall through to the silent settle below
+      }
 
-        // Persist the durable pointer (a further close re-adopts through
-        // it) and run the standard adoption loop against the fresh run.
-        writeChatHandoffMeta(turnId, dispatched, prompt);
-        const run = await resolveWithRetry(dispatched.taskId);
-        if (run) {
-          await adopt(dispatched, run);
-        } else {
-          // Trigger accepted but the run row is unreadable — settle
-          // silently (the run stays visible in Background tasks).
-          const settledIds = await conversationService.settleInterruptedMessages(turnId);
-          if (settledIds.length > 0) await refreshRows();
+      // ── 2) NO LIVE RUN — settle any interrupted streaming rows ────────
+      // SILENTLY (user directive 2026-11-14 — the "This task was
+      // interrupted…" commentary is gone from the product; the user just
+      // continues with a new message).
+      try {
+        const settledIds = await conversationService.settleInterruptedMessages(turnId);
+        if (settledIds.length > 0) {
+          await refreshConversationRows(turnId, userId);
         }
       } catch {
         // best-effort — the rows settle on the next load instead
@@ -1375,13 +1255,7 @@ export function useChat(options: UseChatOptions = {}) {
     return () => {
       cancelled = true;
     };
-  }, [currentConversationIdFromStore, conversationId, buildTurnOptions]);
-
-  // Prune spent handoff snapshots (drops the provider key from memory as
-  // soon as the turn it belonged to is no longer running).
-  useEffect(() => {
-    if (!isProcessing) pruneFinishedTurnHandoffs();
-  }, [isProcessing]);
+  }, [currentConversationIdFromStore, conversationId]);
 
   /**
    * Local-only todo action controls (unchanged).

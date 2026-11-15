@@ -52,7 +52,6 @@ export const TOOL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   schedule_agent_task: "Scheduled Task",
   list_scheduled_tasks: "Scheduled Tasks",
   remove_scheduled_task: "Scheduled Tasks",
-  background_task: "Background Task",
   analyze_workspace: "Workspace Scan",
   security_audit: "Security Audit",
   ocr_document: "Document Reader",

@@ -31,7 +31,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 ### Umbrella tools — one name, one \`action\` parameter (the action value is the exact operation)
 - files [list_folder / read_file / read_file_section / create_file / write_file / edit_file / delete_file / delete_folder / create_folder / move_file / send_file / send_folder / verify_path / create_file_chunk / list_uploaded_files / read_uploaded_file / search_documents / ocr_document] — Everything file-shaped in the workspace (E2B sandbox /home/user) + uploads + OCR. Pass the operation's parameters alongside \`action\`.
 - web [web_search / image_search / video_search / web_fetch] — Search and read the web. web_fetch is the DEFAULT reader (try /llms.txt for docs).
-- code_exec [run_python / run_terminal / background_task] — Python, shell, durable background runs in the sandbox.
+- code_exec [run_python / run_terminal] — Python + shell in the sandbox; run_terminal background=true runs a command detached (log file, survives app close).
 - subagents [spawn_subagent / list_subagents / set_subagent_config / query_subagent / steer_subagent / complete_subagent / cancel_subagent / manage_subagent_chat] — Delegate work to subagents.
 - schedule [schedule_agent_task / list_scheduled_tasks / remove_scheduled_task] — Cron-schedule sandbox scripts; output lands in /home/user/cron_output.log.
 - integrations [mcp_search_tools / mcp_call_tool / composio_search_tools / composio_connect_platform / composio_execute_tool] — External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call.

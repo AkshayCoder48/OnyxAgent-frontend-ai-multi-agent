@@ -76,7 +76,6 @@ export const TOOL_SUMMARY_RULES: Readonly<Record<string, SummaryRule>> = {
   run_python: rule("Ran", "Python Script", "Python Scripts"),
   run_terminal: rule("Ran", "Command"),
   webcmd: rule("Ran", "Command"),
-  background_task: rule("Started", "Background Task", "Background Tasks"),
   create_app: rule("Created", "App"),
   run_build: rule("Ran", "Build"),
   run_tests: rule("Ran", "Test Suite", "Test Suites"),

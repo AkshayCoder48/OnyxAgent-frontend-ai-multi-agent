@@ -871,14 +871,13 @@ function ToolDisplayToggle() {
 }
 
 /** BACKGROUND RUNS ("close and resume") — when ON, the next send hands
- * the whole turn to the durable background lane instead of the in-browser
- * loop: press send, close the app, come back later to the finished result.
- * The turn runs as a durable Trigger.dev Cloud task (agent_run) that
- * reload/close can never touch, and the finished result lands directly in
- * this chat's bubbles (no status strips — USER DIRECTIVE). Persisted per
- * browser, default OFF — closing the app mid-reply ALWAYS hands the
- * in-flight turn to the cloud automatically (see turn-handoff.ts), so this
- * toggle only forces the whole turn there from the start. */
+ * the whole turn to the headless agent runner INSIDE the E2B sandbox (a
+ * detached nohup process) instead of the in-browser loop: press send, close
+ * the app, come back later to the finished result. The sandbox keeps
+ * working server-side (24h window; on timeout it auto-pauses and resumes on
+ * the next connect), and the finished result lands directly in this chat's
+ * bubbles (no status strips — USER DIRECTIVE). Persisted per browser,
+ * default OFF — the in-browser loop stays the default experience. */
 function DetachedRunToggle() {
   const enabled = useDetachedRunStore((s) => s.detachedMode);
   const setEnabled = useDetachedRunStore((s) => s.setDetachedMode);
@@ -915,7 +914,7 @@ function DetachedRunToggle() {
           Background runs
         </span>
         <span className="text-foreground/50 block text-[11px] leading-tight">
-          Whole turns run on Trigger.dev Cloud — the finished result lands right in this chat. Closing the app mid-reply hands the turn over automatically.
+          Whole turns run inside your E2B sandbox — close the app and the work continues; the finished result lands right in this chat.
         </span>
       </span>
     </button>

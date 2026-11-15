@@ -102,7 +102,7 @@ export const ESSENTIAL_TOOLS: ReadonlySet<string> = new Set([
   "ask_user", "current_datetime",
   // Web / research (umbrella: web_search / image_search / video_search / web_fetch)
   "web", "use_browser",
-  // Code & execution (umbrella: run_python / run_terminal / background_task)
+  // Code & execution (umbrella: run_python / run_terminal)
   "code_exec",
   // Files & uploads (umbrella: all file verbs + search_documents + ocr_document)
   "files",

@@ -34,7 +34,7 @@ export const UMBRELLA_TOOLS: Readonly<Record<string, readonly string[]>> = {
     "list_uploaded_files", "read_uploaded_file", "search_documents", "ocr_document",
   ],
   web: ["web_search", "image_search", "video_search", "web_fetch"],
-  code_exec: ["run_python", "run_terminal", "background_task"],
+  code_exec: ["run_python", "run_terminal"],
   subagents: [
     "spawn_subagent", "list_subagents", "set_subagent_config", "query_subagent",
     "steer_subagent", "complete_subagent", "cancel_subagent", "manage_subagent_chat",

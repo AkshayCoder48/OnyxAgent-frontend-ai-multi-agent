@@ -255,10 +255,11 @@ describe("Dexie v3 → v4 upgrade", () => {
     await app.open();
     // v4 added the project tables; v5 added detached_runs (sandbox-agent
     // "close and resume"); v6 added the business tables; v7 added its
-    // stores; v8 DROPS the business tables (Business Mode removal) — all
-    // additive/destructive migrations, so a legacy v3 database upgrades
-    // straight through to the current version.
-    expect(app.verno).toBe(8);
+    // stores; v8 DROPS the business tables (Business Mode removal); v9
+    // DROPS background_tasks (Trigger.dev removal) — all additive/destructive
+    // migrations, so a legacy v3 database upgrades straight through to the
+    // current version.
+    expect(app.verno).toBe(9);
 
     // Existing data survived the upgrade.
     expect((await app.conversations.get("c-legacy"))?.title).toBe("Chat c-legacy");

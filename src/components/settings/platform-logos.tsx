@@ -25,7 +25,6 @@ export type PlatformMark =
   | "xai"
   | "openrouter"
   | "e2b"
-  | "triggerdev"
   | "pollinations"
   | "onyxbase"
   | "composio"
@@ -111,13 +110,6 @@ const MARKS: Record<PlatformMark, React.ReactNode> = {
       <path d="M10 8.6v6.8l6-3.4z" fill="currentColor" />
     </g>
   ),
-  // Trigger.dev — the rounded square with the bolt.
-  triggerdev: (
-    <g>
-      <rect x="3" y="3" width="18" height="18" rx="5.5" fill="none" stroke="currentColor" strokeWidth="2.1" />
-      <path d="M13.2 6.5 8.8 13h2.9l-.9 4.5 4.4-6.5h-2.9z" fill="currentColor" />
-    </g>
-  ),
   // Pollinations — five petals around the center.
   pollinations: (
     <g fill="currentColor">
@@ -183,7 +175,6 @@ export function resolvePlatformMark(name: string | null | undefined): PlatformMa
   if (n.includes("xai") || n.includes("grok")) return "xai";
   if (n.includes("openrouter")) return "openrouter";
   if (n.includes("e2b") || n.includes("sandbox")) return "e2b";
-  if (n.includes("trigger")) return "triggerdev";
   if (n.includes("pollinations")) return "pollinations";
   if (n.includes("onyxbase")) return "onyxbase";
   if (n.includes("composio")) return "composio";

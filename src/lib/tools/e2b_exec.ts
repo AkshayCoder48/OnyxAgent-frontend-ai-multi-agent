@@ -2,7 +2,6 @@
 
 import { registerTool } from "./registry";
 import { chatSandboxForCtx } from "@/lib/e2b/sandbox-rotation";
-import { triggerBackgroundTask } from "@/lib/tasks/client";
 import { bumpWorkspaceVersion } from "./workspace-snapshot";
 
 // E2B Python sandbox — modules available in the code-interpreter template.
@@ -100,7 +99,7 @@ registerTool(
 
 registerTool(
   "run_terminal",
-  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second foreground budget, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed. Commands that outlive the 120-second budget are AUTOMATICALLY moved to a durable background run (up to 30 minutes, survives tab close) — the tool then returns a run_id; track it in the background tasks strip. You can also pass background=true up front for jobs you know are long — it returns a run_id immediately and the output/files come back as artifacts (poll with the background_task tool).",
+  "Run a shell command in the E2B sandbox. Supports shell operators (|, &&, ;, >). 120-second foreground budget, 256 KB output cap. Output streams in real time. Files in the workspace are already in the sandbox — no upload step needed. Commands that outlive the 120-second budget are AUTOMATICALLY moved to a detached background job in the SAME sandbox (own session + log file, survives the app closing, fresh 24h sandbox window) — the tool then returns task_id + log_path. You can also pass background=true up front for jobs you know are long; poll a background job with run_terminal: tail -n 60 <log_path> — the last line __ONYX_BG_EXIT__:<code> marks completion.",
   {
     type: "object",
     properties: {
@@ -113,7 +112,7 @@ registerTool(
         type: "boolean",
         default: false,
         description:
-          "Run as a durable background task instead (up to 30 minutes, survives tab close). Use for long-running commands; returns a run_id — track it in the background strip or poll with the background_task tool.",
+          "Run the command DETACHED inside the sandbox instead (own session + log file; it survives the app closing and gets a fresh 24h sandbox window). Use for long-running commands (installs, builds, servers, training). Returns task_id + log_path immediately — poll with run_terminal: tail -n 60 <log_path>; the last line __ONYX_BG_EXIT__:<code> marks completion (the number is the exit code).",
       },
     },
     required: ["command"],
@@ -125,35 +124,6 @@ registerTool(
     if (!command || !command.trim()) {
       return { error: "No command provided" };
     }
-    // ── BACKGROUND MODE (FR-3.3) ────────────────────────────────────────
-    // Instead of the local exec_stream path (120s budget), hand the command
-    // to the background task orchestrator: it runs to completion inside an
-    // isolated sandbox (up to 30 min) and the output/files sync back as
-    // artifacts. No shared-sandbox allocation is needed for this path.
-    if (args.background === true) {
-      if (!ctx.userId) {
-        return { error: "No user context — cannot start a background terminal task." };
-      }
-      try {
-        const res = await triggerBackgroundTask({
-          userId: ctx.userId,
-          conversationId: ctx.conversationId ?? null,
-          type: "terminal_command",
-          prompt: `Terminal: ${command.slice(0, 200)}`,
-          title: `Terminal: ${command.slice(0, 60)}`,
-          config: { command, cwd },
-          includeWorkspace: false,
-          sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
-        });
-        return {
-          background: true,
-          run_id: res.runId,
-          note: "Command is running in the background sandbox (up to 30 min). Track it in the background strip; the result syncs back as artifacts.",
-        };
-      } catch (e) {
-        return { error: e instanceof Error ? e.message : String(e) };
-      }
-    }
     const sbx = await chatSandboxForCtx(ctx);
     if (!sbx) {
       return {
@@ -162,6 +132,26 @@ registerTool(
         stdout: "",
         stderr: "E2B Sandbox API key not configured",
       };
+    }
+
+    // ── BACKGROUND MODE — detached spawn in the SAME sandbox ────────────
+    // The command runs as its own session (survives the app closing AND
+    // the 120s foreground budget — the server re-arms the sandbox window
+    // to 24h from job start, and on timeout the sandbox pauses instead of
+    // dying). Output lands in <log_path>; the wrapper appends the
+    // __ONYX_BG_EXIT__:<code> marker on completion.
+    if (args.background === true) {
+      try {
+        const res = await sbx.client.bgExec(command, { cwd });
+        return {
+          background: true,
+          task_id: res.taskId,
+          log_path: res.logPath,
+          note: "Command is running DETACHED inside the sandbox — it survives the app closing and has a fresh 24h sandbox window. Poll it with run_terminal: tail -n 60 <log_path>; the last line __ONYX_BG_EXIT__:<code> marks completion (the number is the exit code).",
+        };
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) };
+      }
     }
 
     try {
@@ -205,35 +195,27 @@ registerTool(
       // behavior returned a bare timeout error — and the model re-ran the
       // SAME slow command over and over, each attempt paying the full
       // budget (minutes of dead air for the user). A timeout means "this
-      // job is long", not "it is broken": re-dispatch it to the durable
-      // background lane right here (up to 30 min, survives tab close) and
-      // return the run_id. The agent stops burning retries; the background
-      // strip shows live progress and syncs the output/files back.
+      // job is long", not "it is broken": re-spawn it DETACHED in the same
+      // sandbox right here (own session + log file, fresh 24h window,
+      // survives app close) and return the pointers. The agent stops
+      // burning retries and polls the log instead.
       const timedOut =
         exitCode === 124 ||
         /exceeding 'timeoutMs'|TimeoutError|command timed out|timed out/i.test(stderr);
-      if (timedOut && ctx.userId) {
+      if (timedOut) {
         try {
-          const res = await triggerBackgroundTask({
-            userId: ctx.userId,
-            conversationId: ctx.conversationId ?? null,
-            type: "terminal_command",
-            prompt: `Terminal: ${command.slice(0, 200)}`,
-            title: `Terminal: ${command.slice(0, 60)}`,
-            config: { command, cwd },
-            includeWorkspace: false,
-            sandboxApiKey: ctx.e2bApiKey ?? ctx.sandboxApiKey,
-          });
+          const res = await sbx.client.bgExec(command, { cwd });
           return {
             background: true,
-            run_id: res.runId,
+            task_id: res.taskId,
+            log_path: res.logPath,
             timed_out: true,
             stdout: stdout.slice(0, 8192),
-            note: "The command outlived the 120-second foreground budget — it was automatically moved to a durable background run (up to 30 minutes, survives tab close). Track it in the background strip; the output and any files it writes sync back as artifacts.",
+            note: "The command outlived the 120-second foreground budget — it was re-spawned DETACHED in the sandbox (own session + log file, fresh 24h window, survives the app closing). Poll it with run_terminal: tail -n 60 <log_path>; the last line __ONYX_BG_EXIT__:<code> marks completion (the number is the exit code).",
           };
         } catch {
-          // Background lane unavailable (no cloud key, dispatch refused) —
-          // fall through to the honest timeout result below.
+          // Detached spawn failed — fall through to the honest timeout
+          // result below.
         }
       }
 

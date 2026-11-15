@@ -53,7 +53,6 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 | **workflow** | create · list · get · edit · delete · run | Multi-step pipelines where each step is an AI prompt or a tool call. |
 | **ocr_document** | *(kind auto-detected)* | Extract text from an image OR a PDF. Pass \`url\` or \`base64\`. |
 | **move_file** | *(move or rename)* | Move a file to a new path, or rename in place (same dir + new name = rename). |
-| **background_task** | create · status · list · cancel | Durable background runs (E2B sandbox via Trigger.dev Cloud) — survive tab close, up to 30 min. |
 
 ### Files & workspace (E2B sandbox — \`/home/user\`)
 

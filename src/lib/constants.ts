@@ -35,7 +35,6 @@ export const ROUTES = {
   SETTINGS_INTEGRATIONS: "/settings/integrations",
   SETTINGS_SLASH_COMMANDS: "/settings/slash-commands",
   SETTINGS_SUBAGENTS: "/settings/subagents",
-  // Trigger.dev Cloud orchestration (Background Task Execution Framework).
   RAG: "/rag",
   ORGS: "/orgs",
   ORGS_CREATE: "/orgs?create=1",

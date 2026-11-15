@@ -262,44 +262,16 @@ export interface DetachedRunRow {
   error?: string | null;
   /** Dexie message id of the synced assistant result (dedupe guard). */
   result_message_id?: string | null;
-  /** True when this run was created by the pagehide turn-handoff (an
-   *  in-flight foreground turn moved into the sandbox on app close) rather
-   *  than an explicit "Sandbox runs" send. Only affects the honest-failure
+  /** True when this run was started by the detached ("sandbox runs") send
+   *  toggle rather than a mid-turn adoption. Only affects the honest-failure
    *  copy shown when no result was produced. */
   handoff?: boolean;
 }
 
-/** Background Task Execution Framework (Task 3-c, PRD §4) — the client's
- *  durable mirror of every background task run triggered from THIS browser.
- *  Keyed by the server runId. The `task_token` is the client-minted secret
- *  (PRD §4.2) and lives ONLY here — it is never synced anywhere else; the
- *  server stores just its sha256. `cursor` is the last consumed chunk seq
- *  (FR-3.2 chunked polling) and `sync_state` drives the artifact sync-back
- *  state machine (PRD §4.1: pending → synced | conflicted). */
-export interface BackgroundTaskRow {
-  id: string;            // = server runId
-  task_id: string;
-  user_id: string;
-  type: string;          // BackgroundTaskType
-  status: string;        // TaskRunStatus
-  title: string | null;
-  prompt: string;
-  conversation_id: string | null;
-  schedule_id: string | null;
-  orchestrator: string;
-  task_token: string;    // client-side secret (NOT synced anywhere else)
-  cursor: number;        // last chunk seq consumed
-  artifact_ids: string[];// extracted artifact ids
-  sync_state: string;    // ClientSyncState
-  started_at: number;
-  updated_at: number;
-  finished_at: number | null;
-  error: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // The database class — versions below keep the historical upgrade chain
-// intact (v6 created the removed Business Mode tables; v8 drops them).
+// intact (v6 created the removed Business Mode tables; v8 drops them; v9
+// drops the removed Trigger.dev background_tasks mirror).
 // ---------------------------------------------------------------------------
 
 export class AppDatabase extends Dexie {
@@ -323,8 +295,6 @@ export class AppDatabase extends Dexie {
   approval_requests!: Table<ApprovalRequest, string>;
   message_search_index!: Table<MessageSearchRow, string>;
   detached_runs!: Table<DetachedRunRow, string>;
-  // -- Background Task Execution Framework (v7) ------------------------------
-  background_tasks!: Table<BackgroundTaskRow, string>;
 
   constructor(name = "agent-chat-app") {
     super(name);
@@ -412,11 +382,9 @@ export class AppDatabase extends Dexie {
       decision_records: "&id, business_id, task_id, created_at",
     });
 
-    // Version 7: Background Task Execution Framework (Task 3-c). One NEW
-    // table — the client's durable mirror of background task runs
-    // (BackgroundTaskRow): keyed by the server runId, indexed by user /
-    // status / updated_at for the tasks strip + sync-back sweeps. The
-    // client-minted task_token lives only here (PRD §4.2).
+    // Version 7: Background Task Execution Framework (Task 3-c) — KEPT
+    // VERBATIM for the upgrade chain; the Trigger.dev subsystem was removed
+    // (2026-11-15) and v9 below drops the table on every client.
     this.version(7).stores({
       background_tasks: "&id, user_id, status, updated_at",
     });
@@ -436,6 +404,13 @@ export class AppDatabase extends Dexie {
       agent_messages: null,
       business_events: null,
       decision_records: null,
+    });
+
+    // Version 9: Trigger.dev removal — drop the v7 background_tasks mirror.
+    // Same documented table-delete pattern as v8; v7 stays verbatim above so
+    // every client upgrades through the same chain.
+    this.version(9).stores({
+      background_tasks: null,
     });
   }
 }
@@ -510,8 +485,6 @@ export async function wipeAllData(): Promise<void> {
     d.project_memories.clear(),
     d.approval_requests.clear(),
     d.message_search_index.clear(),
-    // Background Task Execution Framework (v7)
-    d.background_tasks.clear(),
   ]);
 }
 
@@ -562,9 +535,6 @@ export async function wipeUserData(userId: string): Promise<void> {
   await d.mcp_servers.where("user_id").equals(userId).delete();
   await d.custom_tools.where("user_id").equals(userId).delete();
   await d.skills.where("user_id").equals(userId).delete();
-  // Background Task Execution Framework (v7): the user's task mirror rows
-  // (incl. task tokens) must never outlive the account.
-  await d.background_tasks.where("user_id").equals(userId).delete();
   await d.conversations.where("user_id").equals(userId).delete();
   await d.users.delete(userId);
 }

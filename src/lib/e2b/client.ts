@@ -815,6 +815,23 @@ export class E2BClient {
     }>("agent_ensure", { run_id: runId });
   }
 
+  /** Spawn a DETACHED terminal job inside the sandbox (run_terminal
+   *  background:true): the command runs in its own session with stdout/
+   *  stderr appended to a log file, so it keeps running after the app
+   *  closes. The server re-arms the sandbox window to 24h from job start
+   *  (pause-on-timeout — the job is never cut mid-run by the E2B lifetime
+   *  cap). Poll with run_terminal `tail <logPath>`; the final
+   *  `__ONYX_BG_EXIT__:<code>` line marks completion. */
+  async bgExec(
+    command: string,
+    opts?: { cwd?: string },
+  ): Promise<{ sandboxId: string; taskId: string; logPath: string }> {
+    return await this.call<{ sandboxId: string; taskId: string; logPath: string }>(
+      "bg_exec",
+      { command, cwd: opts?.cwd },
+    );
+  }
+
   /** Force-adopt a sandbox id (handoff-run discovery): point this client —
   *  and its persisted localStorage slot — at a sandbox the beacon created
    * server-side (the page died before it could save the id). */

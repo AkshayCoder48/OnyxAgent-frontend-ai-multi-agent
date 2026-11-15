@@ -193,9 +193,7 @@ function makeDefaultUser(): User {
  * its user stays the transient "local-user" with authResolved=false — and
  * every useAuthScope()-gated write on that route then silently passed a
  * null userId (Settings → E2B key save died with Dexie "Invalid key
- * provided", so the key NEVER persisted, so the pagehide turn-handoff
- * prewarm read no key and the close-handoff never fired: every running
- * turn died on refresh as "interrupted"). Anchoring the store instance on
+ * provided", so the key NEVER persisted). Anchoring the store instance on
  * globalThis makes every module copy share ONE store.
  */
 function createAuthStore() {

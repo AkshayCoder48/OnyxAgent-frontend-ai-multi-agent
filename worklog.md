@@ -867,3 +867,27 @@ Work Log:
 
 Stage Summary:
 - Pure removal (204 deletions across 4 files, zero logic changes): responses no longer carry the Using caption or the Used-N summary; everything else from Task 26 is verified intact.
+
+---
+
+## 2026-11-15 (latest) — Trigger.dev removed; E2B is the background engine
+
+Task ID: 28
+Agent: main (Z.ai Code)
+Task: Remove Trigger.dev (API key input + all its features) and make E2B run background tasks that are never cut mid-run.
+
+Work Log:
+- REMOVED (Trigger.dev cloud orchestration, ~9k lines): src/lib/tasks/* (15 files), src/app/api/tasks/* (11 routes), use-cloud-orchestrator, use-background-tasks, turn-cloud-handoff, turn-handoff (+TurnHandoffController in providers), background-tasks-strip (+BackgroundTasksLander mount), execution-rehydrator (dead — called a nonexistent rehydrateAll), tools/background_task, trigger-worker/, deploy/trigger-dev/, sync-trigger-worker-assets + patch-ensure-schema scripts, docs (BACKGROUND_TASKS, TRIGGERDEV-PRD), db/cloud-config.key + cloud-worker-deploy.json, settings/cloud + schedules redirect stubs, the Trigger.dev Cloud key row in Settings → API Keys (connect/disconnect/retest + tr_ input), the triggerdev platform mark + test, the tasks: query-key group, prisma Task* models, .env/DEPLOY rows, onyx-md/tool-umbrella/display-names/stack-summaries/consolidated background_task entries.
+- Dexie: v9 drops the v7 background_tasks mirror (v7 kept verbatim for the upgrade chain — same pattern as the v8 business drop); wipeAllData/wipeUserData cleaned; projects service.test verno pin 8→9.
+- E2B BACKGROUND LANE (the replacement — revives the dormant app-side lane that 92c25fb had switched to Trigger):
+  * src/lib/agent/detached-run.ts (new, adapted from 149751f + extended): startDetachedRun (deploy → run config → detached launch, durable detached_runs row + store mirror + pause-exemption flag), stopDetachedRun, and NEW adoptDetachedRun — one poll-to-terminal loop that lands the finished work INTO the streaming placeholder bubble in place (tool parts + final text + generation meta + tool_calls rows), merges sandbox todos.json, settles the Dexie row; no-bubble callers get the append path. No-sandbox/dead-runner grace windows.
+  * use-chat.ts rewired: runDetachedTurn dispatches to the sandbox (BYOK provider gate; no E2B key → honest toast + foreground fallback; placeholder bubble + live progress lines in the bubble; one-run-per-conversation guard), stopGeneration stops the sandbox runner first (agent_stop → the adopt loop lands the stopped work), the cloud orphan-adoption effect replaced by the E2B reattach (persisted running row → re-adopt into the interrupted bubble; no row → silent settle), registerTurnHandoff/prune removed.
+  * run_terminal background:true + the 120s timeout auto-escalation now spawn the command DETACHED in the SAME sandbox via a new bg_exec action on /api/sandbox (buildDetachedSpawnCommand bash -c wrapper, log at /home/user/.onyx/bg/<id>.log, __ONYX_BG_EXIT__:<code> completion marker, job status json) + E2BClient.bgExec(); the model polls with run_terminal tail.
+  * NOT-CUT-MID-RUN guarantees (server-side, verified present): agent_start + bg_exec re-arm the 24h window (SANDBOX_TIMEOUT_MS, pause-on-timeout + autoResume on connect — never a kill), pause/rotation guards skip sandboxes hosting live runners (pgrep + run.json staleness), the runner persists history + status after EVERY round.
+  * Chat controls "Background runs" toggle relabeled to the E2B lane ("Whole turns run inside your E2B sandbox — close the app and the work continues…").
+- KEPT: sandbox_schedule (in-sandbox cron), e2b_exec foreground paths, section-approvals (projects), detached_runs table, prisma deps (still used by /api/sync — pre-existing broken routes left as found), APP_URL (shared with ddg-search).
+- Tests: new detached-run.test.ts (6 — seed building + history→message conversion incl. error status, arg-parse fallback, last-text-wins); suite 990/990 (70 files); next build exit 0; tsc clean on every touched file.
+- E2E (running app, real persistence): Dexie upgraded to v9 (version 90); /settings/cloud, /settings/schedules, /api/tasks/status all 404; Settings → API Keys shows no Trigger.dev row (E2B row carries the new "detached background runs" copy, other rows intact); chat Settings tab shows the relabeled toggle (persisted on), no Trigger.dev text anywhere; a send with the toggle on but no provider fails honestly at the provider gate. No live sandbox run was possible in this environment (no E2B key/profile provider) — the sandbox dispatch itself is covered by the pinned unit tests + the pre-existing /api/sandbox agent_* surface.
+
+Stage Summary:
+- Background execution is E2B-only: whole-turn detached runs (close-and-resume with in-bubble landing + reattach-on-return) and detached terminal jobs (background:true + timeout escalation), both protected by the 24h pause-on-timeout sandbox window; Trigger.dev is gone end-to-end (code, key UI, routes, worker, docs, env, DB).

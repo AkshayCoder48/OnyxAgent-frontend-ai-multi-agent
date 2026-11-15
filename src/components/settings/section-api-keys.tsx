@@ -11,7 +11,6 @@ import {
   KeyRound,
   Loader2,
   Plug,
-  RefreshCw,
   Save,
   Trash2,
   XCircle,
@@ -22,7 +21,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { SectionCard } from "@/components/settings/settings-section";
 import { useAuth } from "@/hooks";
 import { useSettings, useProviders } from "@/hooks/use-data";
-import { useCloudOrchestrator } from "@/hooks";
 import { settingsService } from "@/lib/services";
 import { usePollinationsStore } from "@/lib/pollinations/store";
 import { resolveOnyxBaseUrl, OnyxBaseKV } from "@/lib/onyxbase/kv-client";
@@ -41,8 +39,10 @@ import {
 // remove extras, with platform logos").
 //
 // Every key input that used to live in its own section moved here:
-//   · E2B Sandbox          (was Sandbox (E2B))
-//   · Trigger.dev Cloud    (was Cloud Tasks — connect/disconnect + retest)
+//   · E2B Sandbox          (was Sandbox (E2B)) — also powers detached
+//                          background runs (the Trigger.dev Cloud lane was
+//                          removed 2026-11-15; background work runs in the
+//                          E2B sandbox itself)
 //   · Pollinations         (was Pollinations AI — the paste-key path)
 //   · OnyxBase             (was Cloud Workspace)
 //   · Composio             (was Integrations)
@@ -178,7 +178,6 @@ export function SectionApiKeys() {
   const { user } = useAuth();
   const userId = user?.id;
   const { settings, loading, setSandboxKey, setOnyxBaseApiKey, setComposioApiKey, update: updateSettings } = useSettings();
-  const cloud = useCloudOrchestrator();
   const pollinations = usePollinationsStore();
   const { providers, update, test } = useProviders();
 
@@ -188,7 +187,6 @@ export function SectionApiKeys() {
   const [busy, setBusy] = React.useState<Record<string, boolean>>({});
   const [testingE2B, setTestingE2B] = React.useState(false);
   const [testingOnyxBase, setTestingOnyxBase] = React.useState(false);
-  const [cloudKeyInput, setCloudKeyInput] = React.useState("");
 
   const setValue = (k: string, v: string) => setValues((p) => ({ ...p, [k]: v }));
   const toggleReveal = (k: string) => setRevealed((p) => ({ ...p, [k]: !p[k] }));
@@ -246,29 +244,6 @@ export function SectionApiKeys() {
       });
     } finally {
       setTestingE2B(false);
-    }
-  }
-
-  // ── Trigger.dev Cloud ───────────────────────────────────────────────────
-  async function connectCloud() {
-    const key = cloudKeyInput.trim();
-    if (!key) {
-      toast.error("Paste a Trigger.dev environment key first (tr_…)");
-      return;
-    }
-    setRowBusy("triggerdev", true);
-    try {
-      await cloud.connect({ apiKey: key });
-      setCloudKeyInput("");
-      toast.success("Trigger.dev Cloud connected", {
-        description: "Background runs now execute durably on your cloud project.",
-      });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Verification failed", {
-        icon: <XCircle className="size-4" />,
-      });
-    } finally {
-      setRowBusy("triggerdev", false);
     }
   }
 
@@ -420,8 +395,6 @@ export function SectionApiKeys() {
     );
   }
 
-  const cloudConfigured = cloud.status?.cloud.configured === true;
-
   return (
     <div className="space-y-6">
       <Alert>
@@ -436,7 +409,7 @@ export function SectionApiKeys() {
 
       <SectionCard
         title="Platform & app keys"
-        description="Sandbox, background runs, media, cloud storage, integrations and search — with the platform each key belongs to."
+        description="Sandbox (incl. detached background runs), media, cloud storage, integrations and search — with the platform each key belongs to."
       >
         <ul className="divide-y divide-border">
           {/* ── E2B ── */}
@@ -445,7 +418,7 @@ export function SectionApiKeys() {
             title="E2B Sandbox"
             href="https://e2b.dev"
             badge={<StatusBadge state={flags.e2b ? "connected" : "off"} />}
-            description="Runs Python, terminal commands and the workspace filesystem in the remote sandbox."
+            description="Runs Python, terminal commands and the workspace filesystem in the remote sandbox — including detached background runs that keep working after you close the app."
           >
             <KeyInput
               id="api-key-e2b"
@@ -462,68 +435,6 @@ export function SectionApiKeys() {
               {testingE2B ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : <Plug className="mr-0.5 size-3.5" />}
               Test
             </Button>
-          </KeyRow>
-
-          {/* ── Trigger.dev Cloud ── */}
-          <KeyRow
-            platform="triggerdev"
-            title="Trigger.dev Cloud"
-            href="https://cloud.trigger.dev/settings/api-keys"
-            badge={
-              <StatusBadge
-                state={cloudConfigured ? "connected" : "off"}
-                label={cloudConfigured ? (cloud.status?.cloud.ephemeral ? "connected (session)" : "connected") : "not set"}
-              />
-            }
-            description="Durable background runs (close-and-resume turns, schedules, long terminal jobs) execute on your own Trigger.dev Cloud project."
-          >
-            {cloudConfigured ? (
-              <>
-                <span className="text-muted-foreground min-w-0 truncate font-mono text-xs">
-                  {cloud.status?.cloud.maskedKey ?? "tr_••••••••"}
-                  {cloud.status?.cloud.account?.projects?.[0]
-                    ? ` · ${cloud.status.cloud.account.projects[0].name}`
-                    : ""}
-                </span>
-                <Button size="sm" variant="outline" onClick={() => void cloud.refresh()} disabled={cloud.isRetesting}>
-                  {cloud.isRetesting ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : <RefreshCw className="mr-0.5 size-3.5" />}
-                  Retest
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => void cloud.disconnect()}
-                  disabled={cloud.isDisconnecting}
-                >
-                  {cloud.isDisconnecting ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : <Trash2 className="mr-0.5 size-3.5" />}
-                  Disconnect
-                </Button>
-              </>
-            ) : (
-              <>
-                <KeyInput
-                  id="api-key-triggerdev"
-                  value={cloudKeyInput}
-                  onChange={setCloudKeyInput}
-                  revealed={!!revealed.triggerdev}
-                  onToggleReveal={() => toggleReveal("triggerdev")}
-                  placeholder="tr_prod_sk_… / tr_trigger_… / tr_pat_…"
-                />
-                <Button
-                  size="sm"
-                  onClick={() => void connectCloud()}
-                  disabled={busy.triggerdev || cloud.isConnecting || !cloudKeyInput.trim()}
-                >
-                  {busy.triggerdev || cloud.isConnecting ? (
-                    <Loader2 className="mr-1 size-3.5 animate-spin" />
-                  ) : (
-                    <Plug className="mr-0.5 size-3.5" />
-                  )}
-                  Connect
-                </Button>
-              </>
-            )}
           </KeyRow>
 
           {/* ── Pollinations ── */}

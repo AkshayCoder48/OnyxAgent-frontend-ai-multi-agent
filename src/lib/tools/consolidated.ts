@@ -67,8 +67,7 @@ const SPECS: Record<keyof typeof UMBRELLA_TOOLS & string, UmbrellaSpec> = {
     category: "exec",
     description: `Run code and commands in the E2B sandbox (workspace files are already there). ONE tool, ONE \`action\` parameter:
 - "run_python" (code) — Python 3: data analysis, calculations, file processing, ML. 60s timeout, live streaming output.
-- "run_terminal" (command, background?) — shell with |, &&, ;, >. 120s timeout, 256KB cap. Pass background:true for jobs that would exceed it (durable, up to 30 min).
-- "background_task" (action, …) — durable background runs (create / status / list / cancel) that survive tab close.`,
+- "run_terminal" (command, background?) — shell with |, &&, ;, >. 120s timeout, 256KB cap. Pass background:true to run the command DETACHED inside the sandbox (nohup-style, log file, survives app close) when it would exceed the budget.`,
   },
   subagents: {
     category: "orchestration",

@@ -2645,11 +2645,11 @@ export async function POST(req: NextRequest) {
         } catch {
           // fall through to the general live-process guard below
         }
-        // STARTING-RUN GUARD: the pagehide turn-handoff beacon writes
-        // run.json + a "starting" status BEFORE the Python runner boots —
-        // pgrep cannot see it yet, and the pause beacon (fired by the same
-        // unload) would freeze the run at birth. Skip while the status file
-        // says starting/running or the run config is fresh (<3 minutes).
+        // STARTING-RUN GUARD: the detached-run launcher (agent_start)
+        // writes run.json + a "starting" status BEFORE the Python runner
+        // boots — pgrep cannot see it yet, and a pause request arriving in
+        // that window would freeze the run at birth. Skip while the status
+        // file says starting/running or the run config is fresh (<3 minutes).
         try {
           const agentState = (await readJsonFile(sandbox, AGENT_STATUS_PATH)) as {
             status?: string;
@@ -3136,6 +3136,66 @@ export async function POST(req: NextRequest) {
         }
         console.log(`[sandbox] headless agent stopped (sandbox=${sandbox.sandboxId})`);
         return NextResponse.json({ sandboxId: sandbox.sandboxId, ok: true });
+      }
+
+      case "bg_exec": {
+        // DETACHED TERMINAL JOB — run_terminal with background:true (the
+        // E2B-native background lane; the Trigger.dev redispatch was
+        // removed 2026-11-15). The command runs in the sandbox as its own
+        // session via buildDetachedSpawnCommand — the launcher returns in
+        // ~1s while the job keeps running after the app closes (see the
+        // TimeoutError probe notes at agent_start). A fresh 24h window is
+        // armed from job start so the E2B lifetime cap can never cut the
+        // job mid-run; on timeout the sandbox auto-PAUSES (freeze) and
+        // resumes on the next connect.
+        const sandbox = await getSandbox(apiKey, conversationId, sandboxMode, clientSandboxId);
+        try {
+          await sandbox.setTimeout(SANDBOX_TIMEOUT_MS);
+        } catch {
+          await sandbox.setTimeout(SANDBOX_TIMEOUT_FALLBACK_MS).catch(() => {});
+        }
+        const command = typeof args.command === "string" ? args.command : "";
+        if (!command.trim()) {
+          return NextResponse.json({ error: "Missing command" }, { status: 400 });
+        }
+        const cwd =
+          typeof args.cwd === "string" && args.cwd.trim() ? args.cwd : DEFAULT_CWD;
+        const taskId = `bg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const dir = `${DEFAULT_CWD}/.onyx/bg`;
+        const logPath = `${dir}/${taskId}.log`;
+        const statusPath = `${dir}/${taskId}.json`;
+        try {
+          await sandbox.commands.run(`mkdir -p ${dir}`, {
+            cwd: DEFAULT_CWD,
+            timeoutMs: 15_000,
+          });
+          // Job marker (audit + discoverability: ls .onyx/bg).
+          await sandbox.files.write(
+            statusPath,
+            JSON.stringify({ task_id: taskId, command, cwd, started_at: Date.now() }, null, 2),
+          );
+          // The wrapper ALWAYS appends the exit marker: the log's last
+          // `__ONYX_BG_EXIT__:<code>` line marks completion (a dead process
+          // with no marker = killed/crashed). bash -c receives the command
+          // as ONE argv element — no shell re-interpretation of its body.
+          const wrapped = `${command}\n__ONYX_BG_EXIT__:$?`;
+          await sandbox.commands.run(
+            buildDetachedSpawnCommand({
+              cwd,
+              argv: ["bash", "-c", wrapped],
+              logPath,
+            }) + " && echo spawned",
+            { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+          );
+          console.log(`[sandbox] background job ${taskId} spawned (sandbox=${sandbox.sandboxId})`);
+          return NextResponse.json({ sandboxId: sandbox.sandboxId, taskId, logPath });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json(
+            { error: `Failed to spawn the background command: ${errMsg}` },
+            { status: 500 },
+          );
+        }
       }
 
       case "backup_files": {

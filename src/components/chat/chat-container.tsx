@@ -4,10 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@/hooks";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
-// USER DIRECTIVE: the strips that used to sit above the composer are GONE —
-// background-run progress + results land directly in the chat bubbles.
-// The invisible lander keeps the polling + auto-landing machinery alive.
-import { BackgroundTasksLander } from "./background-tasks-strip";
 import { FilePreviewPanel } from "./file-preview-panel";
 import { MessageList } from "./message-list";
 import {
@@ -1154,10 +1150,6 @@ function ChatUI({
             </div>
           )}
           {/* Queued messages live next to the composer. */}
-          {/* Invisible background-run lander (USER DIRECTIVE: no strips above
-              the composer) — polls Trigger.dev Cloud runs and lands finished
-              results directly in their conversations' chat bubbles. */}
-          <BackgroundTasksLander />
           {queuedMessages && queuedMessages.length > 0 && onCancelQueued && (
             <PendingMessages messages={queuedMessages} onCancel={onCancelQueued} />
           )}

@@ -95,8 +95,8 @@ const UMBRELLAS: ReadonlyArray<{ name: string; actions: readonly string[]; blurb
   },
   {
     name: "code_exec",
-    actions: ["run_python", "run_terminal", "background_task"],
-    blurb: "Python, shell, durable background runs in the sandbox.",
+    actions: ["run_python", "run_terminal"],
+    blurb: "Python + shell in the sandbox; run_terminal background=true runs a command detached (log file, survives app close).",
   },
   {
     name: "subagents",
