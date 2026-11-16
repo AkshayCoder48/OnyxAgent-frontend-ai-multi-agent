@@ -820,7 +820,15 @@ export function useChat(options: UseChatOptions = {}) {
           checkpointer.schedule();
         },
       });
-      await checkpointer.flushNow();
+      // LANDED — never flush the checkpointer AFTER the landing. The landing
+      // is authoritative (full history from the sandbox); the STORE can be
+      // minutes behind it when the SSE bridge died mid-run (serverless
+      // hiccup), and the old unconditional flushNow() REVERTED the landed
+      // final answer into the stale partial + is_streaming:true — the
+      // reported "refreshed, it stopped, didn't continue from what it
+      // processed in bg". Only a CANCELLED adopt (page dying mid-run)
+      // checkpoints its partial for the next reattach.
+      if (result.cancelled) await checkpointer.flushNow();
 
       if (result.cancelled) return;
       executionHub.finishExecution(
@@ -1395,7 +1403,21 @@ export function useChat(options: UseChatOptions = {}) {
             conversationId: turnId,
             messageId: bubble?.id ?? null,
             sandboxId: row.sandbox_id,
-            isCancelled: () => cancelled,
+            // HUB-OWNED CANCELLATION — NOT the effect closure's `cancelled`
+            // flag. On a cold reload the conversation store hydrates AFTER
+            // this effect first ran; the dep flip fires the cleanup (which
+            // flips the closure flag) while the adopt loop is mid-flight —
+            // the loop then returned "cancelled", NOTHING landed, and the
+            // effect's second run bailed on the already-registered execution
+            // (getFor(turnId)) → the run finished in the sandbox but the
+            // bubble froze at its checkpoint forever (the reported
+            // auto-stop). The loop now dies ONLY on an explicit user stop
+            // (stopGeneration → stopExecution → status "stopped") or on its
+            // own terminal landing; effect re-runs and unmounts (chat
+            // switches never cancel a run — spec §7/§29/§30) re-subscribe
+            // via the hub instead.
+            isCancelled: () =>
+              executionHub.getSummary(execution.id)?.status === "stopped",
             onProgress: async (st) => {
               if (!bubble) return;
               // LIVENESS LINE — only while the replayed bubble is still EMPTY
@@ -1425,7 +1447,13 @@ export function useChat(options: UseChatOptions = {}) {
               checkpointer.schedule();
             },
           });
-          await checkpointer.flushNow();
+          // LANDED — never flush the checkpointer AFTER the landing (same
+          // guard as the live path): the landing wrote the authoritative
+          // full history; a store left stale by a dead SSE bridge would
+          // revert it to the checkpointed partial ("stopped after refresh,
+          // didn't continue from what it processed in bg"). Only a cancelled
+          // adopt (page dying mid-run) checkpoints its partial.
+          if (result.cancelled) await checkpointer.flushNow();
           if (!result.cancelled) {
             executionHub.finishExecution(
               execution.id,

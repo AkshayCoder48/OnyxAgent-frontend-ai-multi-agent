@@ -576,7 +576,7 @@ function writeStreamRef(conversationId: string, ref: Record<string, unknown>) {
  * we back off and reconnect a few times before giving up on the live view —
  * the status-poll watchdog (adoptDetachedRun's loop) remains the source of
  * truth either way. */
-function openAgentEventStream(
+export function openAgentEventStream(
   input: AdoptDetachedRunInput,
   runId: string | null,
   onEvent: (ev: SandboxStreamEvent) => void,
@@ -587,6 +587,8 @@ function openAgentEventStream(
   let closed = false;
   let es: EventSource | null = null;
   let attempts = 0;
+  let lastId = -1; // highest delivered event id — manual reopens resume after it
+  let sawTerminalDone = false; // a plain `done` = terminal status — never reopen
   const MAX_REOPEN = 6;
 
   const open = async () => {
@@ -602,11 +604,17 @@ function openAgentEventStream(
         mode: "shared",
       });
       if (input.sandboxId) params.set("sandboxId", input.sandboxId);
+      // Resume AFTER the last delivered event — a manual reopen (bridge
+      // error / noSandbox retry) replays exactly the missing tail instead
+      // of the whole run. Clean network drops rely on the browser's native
+      // EventSource reconnect, which sends Last-Event-ID automatically.
+      if (lastId >= 0) params.set("after", String(lastId));
       es = new EventSource(`/api/sandbox?${params.toString()}`);
       es.addEventListener("agent", (e) => {
         attempts = 0; // events are flowing — reset the reopen budget
         try {
           const ev = JSON.parse((e as MessageEvent).data as string) as SandboxStreamEvent;
+          if (typeof ev.i === "number" && ev.i > lastId) lastId = ev.i;
           onEvent(ev);
           writeStreamRef(input.conversationId, {
             runId,
@@ -629,8 +637,27 @@ function openAgentEventStream(
         if (!closed && payload.noSandbox && ++attempts < MAX_REOPEN) {
           // The sandbox is mid-pause/resume — retry the bridge shortly.
           setTimeout(() => void open(), 4000 + attempts * 2000);
+        } else if (!payload.noSandbox) {
+          // Terminal done — the run is over; the connection close that
+          // follows must not trigger a pointless reopen.
+          sawTerminalDone = true;
         }
       });
+      // BRIDGE FAILURE RECOVERY — an HTTP-level failure (serverless function
+      // crash, proxy 5xx, throttled 429) makes the browser close the
+      // EventSource PERMANENTLY; with no onerror handler the live view froze
+      // silently mid-run (the observed "stream stopped after refresh and
+      // never caught up"). Reopen with backoff, resuming after the cursor.
+      // The status-poll watchdog (adoptDetachedRun's loop) remains the
+      // source of truth and lands the run either way.
+      es.onerror = () => {
+        if (sawTerminalDone) return;
+        es?.close();
+        es = null;
+        if (!closed && ++attempts < MAX_REOPEN) {
+          setTimeout(() => void open(), 4000 + attempts * 2000);
+        }
+      };
     } catch {
       if (!closed && ++attempts < MAX_REOPEN) {
         setTimeout(() => void open(), 4000 + attempts * 2000);
