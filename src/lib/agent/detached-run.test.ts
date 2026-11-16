@@ -4,6 +4,7 @@ import {
   buildSeedMessages,
   convertHistoryToAssistantMessage,
   getDetachedRunForConversation,
+  sliceNewRunMessages,
 } from "@/lib/agent/detached-run";
 
 describe("buildSeedMessages", () => {
@@ -202,5 +203,42 @@ describe("getDetachedRunForConversation (user-id drift fallback)", () => {
     };
     expect(await getDetachedRunForConversation("u", "c1")).toBeNull();
     (db as unknown as { getDB: () => unknown }).getDB = original;
+  });
+});
+
+describe("sliceNewRunMessages (lost-row landing)", () => {
+  it("a persisted seed count slices by index", () => {
+    const history = [
+      { role: "system", content: "SYS" },
+      { role: "user", content: "one" },
+      { role: "user", content: "two" },
+      { role: "assistant", content: "answer" },
+    ];
+    expect(sliceNewRunMessages(history, 3).map((m) => m.role)).toEqual(["assistant"]);
+  });
+
+  it("an unknown seed (ref-synthesized row, -1) slices from after the LAST user message", () => {
+    const history = [
+      { role: "system", content: "SYS" },
+      { role: "user", content: "old prompt" },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "the new prompt" },
+      { role: "assistant", content: "tool call" },
+      { role: "tool", content: "result" },
+      { role: "assistant", content: "final" },
+    ];
+    expect(sliceNewRunMessages(history, -1).map((m) => m.role)).toEqual([
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+  });
+
+  it("an unknown seed with no user message falls back to the whole history", () => {
+    const history = [
+      { role: "system", content: "SYS" },
+      { role: "assistant", content: "final" },
+    ];
+    expect(sliceNewRunMessages(history, -1)).toHaveLength(2);
   });
 });

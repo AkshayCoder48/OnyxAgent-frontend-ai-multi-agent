@@ -445,6 +445,17 @@ export async function startDetachedRun(
       updated_at: now,
     };
     await saveRunRow(row);
+    // PERSISTENT POINTER (PRD layer 3) — written at DISPATCH time (before any
+    // event streams) so even a refresh seconds into a run has a recovery
+    // handle. This survives Dexie failures (quota, locked DB, a failed
+    // upgrade) — the row write above can silently fail in exactly the
+    // browsers that then freeze on refresh ("only a reasoning block
+    // survived"), while localStorage keeps working.
+    writeStreamRef(input.conversationId, {
+      runId,
+      sandboxId,
+      lastEventId: 0,
+    });
 
     // UI mirror + pagehide-pause exemption (the sandbox must NOT be paused
     // on app close — the whole point is that the runner keeps working).
@@ -527,6 +538,12 @@ export interface AdoptDetachedRunInput {
   /** The run's sandbox (row.sandbox_id) — helps the SSE bridge resolve the
    *  sandbox on a serverless cold start. */
   sandboxId?: string | null;
+  /** LOST-ROW RECOVERY (PRD §7): when the Dexie detached_runs row is
+   *  missing/settled but this fresh localStorage pointer exists, adopt from
+   *  it instead of no-op-ing — the run may still be alive in the sandbox
+   *  with no other adoption handle. The first status poll gates everything:
+   *  a dead ref burns the noSandbox/dead grace and settles honestly. */
+  fallbackRef?: BgStreamRef | null;
 }
 
 /** One structured event from the runner's replay log (agent_events.jsonl),
@@ -552,8 +569,20 @@ const ADOPT_NO_SANDBOX_GRACE = 15;
 const ADOPT_DEAD_GRACE = 5;
 
 /** localStorage ref (PRD persistence layer 3) — the lightweight pointer a
- *  reload reads to know a live run exists for a conversation. Written from
- *  the event stream, throttled to ~1/s. */
+ * reload reads to know a live run exists for a conversation. Written at
+ * dispatch and from the event stream (throttled to ~1/s). */
+export interface BgStreamRef {
+  runId: string | null;
+  sandboxId: string | null;
+  lastEventId: number;
+  updatedAt: number;
+}
+
+/** Freshness window for trusting a stream ref on reload: runs are minutes,
+ * not hours — an older ref points at a run that already landed or a sandbox
+ * that already expired. */
+export const BG_STREAM_REF_MAX_AGE_MS = 30 * 60_000;
+
 function writeStreamRef(conversationId: string, ref: Record<string, unknown>) {
   try {
     const key = `onyx-bg-stream:${conversationId}`;
@@ -564,6 +593,57 @@ function writeStreamRef(conversationId: string, ref: Record<string, unknown>) {
   } catch {
     // best-effort
   }
+}
+
+/** The lost-row recovery read: the localStorage pointer written at dispatch
+ * and on every streamed event. Used by the reattach effect when the Dexie
+ * detached_runs row is missing or unreadable — the run may still be alive in
+ * the sandbox with no other adoption handle. */
+export function readStreamRef(conversationId: string): BgStreamRef | null {
+  try {
+    const raw = window.localStorage.getItem(`onyx-bg-stream:${conversationId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<BgStreamRef>;
+    if (typeof parsed.updatedAt !== "number") return null;
+    return {
+      runId: typeof parsed.runId === "string" ? parsed.runId : null,
+      sandboxId: typeof parsed.sandboxId === "string" ? parsed.sandboxId : null,
+      lastEventId: typeof parsed.lastEventId === "number" ? parsed.lastEventId : -1,
+      updatedAt: parsed.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Drop the pointer — after a landing (the run is over) or when the ref is
+ * provably stale (no live run, no fresh sandbox to adopt). */
+export function clearStreamRef(conversationId: string) {
+  try {
+    window.localStorage.removeItem(`onyx-bg-stream:${conversationId}`);
+  } catch {
+    // best-effort
+  }
+}
+
+/** The history slice a landing converts: everything the run produced past
+ * its seed. `seedCount >= 0` (the persisted row) slices by index; a
+ * ref-synthesized row carries `seed_count: -1` (unknown) and slices from
+ * after the LAST user message — buildSeedMessages always ends the seed with
+ * the new prompt, so that index is exactly where the run's output starts. */
+export function sliceNewRunMessages<T extends { role?: string }>(
+  history: T[],
+  seedCount: number,
+): T[] {
+  if (seedCount >= 0) return history.slice(seedCount);
+  let lastUser = -1;
+  for (let k = history.length - 1; k >= 0; k--) {
+    if (history[k]?.role === "user") {
+      lastUser = k;
+      break;
+    }
+  }
+  return history.slice(lastUser + 1);
 }
 
 /** Open the LIVE EVENT BRIDGE (SSE) for an adopted run. Returns a closer.
@@ -692,8 +772,44 @@ export function openAgentEventStream(
 export async function adoptDetachedRun(
   input: AdoptDetachedRunInput,
 ): Promise<AdoptDetachedRunResult> {
-  const row = await getDetachedRunForConversation(input.userId, input.conversationId);
-  if (!row || row.status === "synced" || row.result_message_id) {
+  let row = await getDetachedRunForConversation(input.userId, input.conversationId);
+  const rowIsLive =
+    !!row &&
+    (row.status === "running" || row.status === "starting") &&
+    !row.result_message_id;
+  if (!rowIsLive) {
+    // LOST-ROW RECOVERY — the Dexie row is missing (write failed: quota,
+    // locked DB, failed upgrade), unreadable, or a STALE settled row from an
+    // older run survived while the new run's row write failed. The localStorage
+    // stream ref (written at dispatch + on every event, independent of Dexie)
+    // still points at the live run. Synthesize the adoption row from it; the
+    // landing slices the history from the last user message (seed unknown).
+    // Without this, adoptDetachedRun returned a silent no-op and the bubble
+    // froze at its checkpoint forever — the reported "only a single
+    // reasoning block survived the refresh".
+    const ref = input.fallbackRef ?? null;
+    const refFresh =
+      !!ref?.sandboxId && Date.now() - ref.updatedAt < BG_STREAM_REF_MAX_AGE_MS;
+    if (!refFresh) {
+      return { status: "completed", cancelled: false };
+    }
+    const now = Date.now();
+    row = {
+      id: ref!.runId ?? `ref_${input.conversationId}`,
+      user_id: input.userId,
+      conversation_id: input.conversationId,
+      sandbox_id: ref!.sandboxId!,
+      status: "running",
+      prompt: "",
+      seed_count: -1, // unknown — sliceNewRunMessages slices from the last user message
+      provider_model: "",
+      chat_url: "",
+      started_at: ref!.updatedAt,
+      updated_at: now,
+    };
+  }
+  // Type-narrowing guard: row is live, synthesized above, or we returned.
+  if (!row) {
     return { status: "completed", cancelled: false };
   }
   const client = await chatE2BClient(input.userId, input.conversationId);
@@ -793,7 +909,7 @@ async function landDetachedRun(
     }
   }
 
-  const newSlice = history.slice(row.seed_count);
+  const newSlice = sliceNewRunMessages(history, row.seed_count);
   const converted = convertHistoryToAssistantMessage(newSlice);
   const hasAssistantText = newSlice.some(
     (m) => m.role === "assistant" && (m.content ?? "").trim(),
@@ -946,6 +1062,9 @@ async function landDetachedRun(
   });
   clearDetachedActive(row.sandbox_id);
   useDetachedRunStore.getState().clearRun(input.conversationId);
+  // The run is over — drop the localStorage recovery pointer (it must not
+  // outlive the run and trigger a stale adoption on the next reload).
+  clearStreamRef(input.conversationId);
 
   return { status: finalStatus, error: runnerError ?? null, cancelled: false };
 }

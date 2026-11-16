@@ -31,6 +31,7 @@ import { Sandbox } from "@e2b/code-interpreter";
 // section from this file, so the sandbox MUST receive the full document,
 // not a short stub.
 import { ONYX_MD } from "@/lib/agent/onyx-md";
+import { advanceEventCursor } from "@/lib/agent/event-cursor";
 import { MASTER_SKILLS, MASTER_SKILLS_VERSION } from "@/lib/agent/master-skills";
 import { ensureMasterSkillsInBackground } from "@/lib/e2b/attach-master-skills";
 // HEADLESS SANDBOX AGENT ("close and resume"): the detached Python
@@ -1649,24 +1650,19 @@ export async function GET(req: NextRequest): Promise<Response> {
             // No events file yet (pre-start) — nothing to forward.
           }
           const lines = text ? text.split("\n").filter((l) => l.trim()) : [];
-          // Forward every NEW complete line. A torn trailing write (the
-          // runner mid-append when this poll read) STOPS the walk WITHOUT
-          // advancing the cursor — the completed line is re-read on the next
-          // poll. (The old `after += 1` outside the try/catch skipped a torn
-          // line FOREVER: one mid-append read permanently dropped that event
-          // and desynced the cursor from the runner's `i` event ids — the
-          // live view froze mid-stream with events silently vanishing.)
-          for (let li = after + 1; li < lines.length; li++) {
-            const line = lines[li]!;
-            let parsed: { i?: number };
-            try {
-              parsed = JSON.parse(line) as { i?: number };
-            } catch {
-              break; // torn tail — retry once the append completes
-            }
-            const id = typeof parsed.i === "number" ? parsed.i : li;
-            send(`id: ${id}\nevent: agent\ndata: ${line}\n\n`);
-            after = li;
+          // Forward every event STRICTLY AFTER the cursor (the client's last
+          // processed 1-based event id — the same value the SSE id: field
+          // carries and Last-Event-ID/after= return). The old loop treated
+          // the cursor as a 0-based line index while sending 1-based ids in
+          // id: — every cursor replay SKIPPED the first event after the
+          // cursor (one dropped delta/tool event per reconnect). A torn
+          // trailing write (the runner mid-append when this poll read) stops
+          // the walk WITHOUT advancing the cursor — the completed line
+          // re-reads on the next poll.
+          const step = advanceEventCursor(lines, after);
+          for (const ev of step.events) {
+            send(`id: ${ev.id}\nevent: agent\ndata: ${ev.line}\n\n`);
+            after = ev.id;
           }
 
           // Status snapshot + terminal detection.
@@ -3271,21 +3267,20 @@ export async function POST(req: NextRequest) {
           // No events file yet — an empty stream is a valid answer.
         }
         const lines = text ? text.split("\n").filter((l) => l.trim()) : [];
+        // Same 1-based-event-id cursor semantics as the SSE bridge (see
+        // advanceEventCursor): the old `slice(after + 1)` treated the cursor
+        // as a 0-based line index and skipped the first event after it.
+        const step = advanceEventCursor(lines, after);
         const events: unknown[] = [];
-        const sliced = lines.slice(after + 1);
-        for (const line of sliced) {
-          try {
-            events.push(JSON.parse(line));
-          } catch {
-            // torn trailing line — skipped, re-read once complete
-          }
+        for (const ev of step.events) {
+          events.push(JSON.parse(ev.line));
         }
         const status = await readJsonFile(sandbox, AGENT_STATUS_PATH);
         return NextResponse.json({
           sandboxId: sandbox.sandboxId,
           events,
           status,
-          lastEventId: after + events.length,
+          lastEventId: step.cursor,
         });
       }
 

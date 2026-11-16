@@ -1347,15 +1347,35 @@ export function useChat(options: UseChatOptions = {}) {
 
       // ── 1) DETACHED-RUN REATTACH — a sandbox run is still in flight. ──
       try {
-        const { getDetachedRunForConversation, adoptDetachedRun } = await import(
-          "@/lib/agent/detached-run"
-        );
+        const { getDetachedRunForConversation, adoptDetachedRun, readStreamRef } =
+          await import("@/lib/agent/detached-run");
         const row = await getDetachedRunForConversation(userId, turnId);
-        if (
+        const liveRow =
           row &&
           (row.status === "running" || row.status === "starting") &&
           !row.result_message_id
-        ) {
+            ? row
+            : null;
+        // LOST-ROW FALLBACK (PRD §7): the Dexie row can be MISSING (its
+        // write failed — quota, a locked DB, a failed upgrade; saveRunRow
+        // swallows the error) or a STALE settled row from an older run can
+        // survive while the new run's row write failed. The localStorage
+        // stream ref — written at dispatch and on every streamed event,
+        // independent of Dexie — still points at the live run. adopt from
+        // it; without this the adoption silently no-op'd and the bubble
+        // froze at its checkpoint forever (the reported "only a single
+        // reasoning block survived the refresh").
+        let fallbackRef: import("@/lib/agent/detached-run").BgStreamRef | null = null;
+        if (!liveRow) {
+          const ref = readStreamRef(turnId);
+          if (
+            ref?.sandboxId &&
+            Date.now() - ref.updatedAt < 30 * 60_000 // BG_STREAM_REF_MAX_AGE_MS
+          ) {
+            fallbackRef = ref;
+          }
+        }
+        if (liveRow || fallbackRef) {
           const rows = await conversationService.getMessages(turnId, userId);
           const streamingRows = rows.filter(
             (r) =>
@@ -1393,7 +1413,10 @@ export function useChat(options: UseChatOptions = {}) {
             mode: "background",
             trigger: "resume",
           });
-          const feeder = sandboxEventFeeder(execution.processor, row.id);
+          const feeder = sandboxEventFeeder(
+            execution.processor,
+            liveRow?.id ?? fallbackRef?.runId ?? `resume_${turnId}`,
+          );
           const checkpointer = makeStreamCheckpointer(
             () => execution.store.getState().messages as never,
             bubble?.id ?? null,
@@ -1402,7 +1425,7 @@ export function useChat(options: UseChatOptions = {}) {
             userId,
             conversationId: turnId,
             messageId: bubble?.id ?? null,
-            sandboxId: row.sandbox_id,
+            sandboxId: liveRow?.sandbox_id ?? fallbackRef?.sandboxId ?? null,
             // HUB-OWNED CANCELLATION — NOT the effect closure's `cancelled`
             // flag. On a cold reload the conversation store hydrates AFTER
             // this effect first ran; the dep flip fires the cleanup (which
@@ -1418,6 +1441,7 @@ export function useChat(options: UseChatOptions = {}) {
             // via the hub instead.
             isCancelled: () =>
               executionHub.getSummary(execution.id)?.status === "stopped",
+            fallbackRef,
             onProgress: async (st) => {
               if (!bubble) return;
               // LIVENESS LINE — only while the replayed bubble is still EMPTY
@@ -1475,6 +1499,15 @@ export function useChat(options: UseChatOptions = {}) {
         const settledIds = await conversationService.settleInterruptedMessages(turnId);
         if (settledIds.length > 0) {
           await refreshConversationRows(turnId, userId);
+        }
+        // No live row and no fresh ref reached this point — the localStorage
+        // recovery pointer (if any residue) is stale; drop it so it can never
+        // trigger a bogus adoption later.
+        try {
+          const { clearStreamRef } = await import("@/lib/agent/detached-run");
+          clearStreamRef(turnId);
+        } catch {
+          // best-effort
         }
       } catch {
         // best-effort — the rows settle on the next load instead
