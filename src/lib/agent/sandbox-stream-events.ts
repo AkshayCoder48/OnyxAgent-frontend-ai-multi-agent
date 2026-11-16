@@ -37,6 +37,10 @@ export type MappedProcessorEvent =
     }
   | { type: "text_delta"; data: { index: number; content: string; ts: number } }
   | {
+      type: "thinking_delta";
+      data: { index: number; content: string; ts: number };
+    }
+  | {
       type: "tool_call";
       data: {
         tool_call_id: string;
@@ -79,6 +83,17 @@ export function mapSandboxStreamEvent(
       if (!text) return null;
       return {
         type: "text_delta",
+        data: { index: 0, content: text, ts: ev.ts },
+      };
+    }
+    case "reasoning.delta": {
+      // The model's chain-of-thought (thinking models) — streamed live into
+      // the processor's thinking panel. Was silently dropped before, which
+      // is why the live view showed NOTHING while the model thought.
+      const text = typeof ev.data?.text === "string" ? ev.data.text : "";
+      if (!text) return null;
+      return {
+        type: "thinking_delta",
         data: { index: 0, content: text, ts: ev.ts },
       };
     }

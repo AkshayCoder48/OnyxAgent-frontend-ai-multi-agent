@@ -35,7 +35,7 @@
  *  v3: native use_browser — the background agent can drive the CloakBrowser
  *  driver through its file protocol (PRD §10: browser tasks survive the
  *  frontend disconnecting). */
-export const HEADLESS_RUNNER_VERSION = 5;
+export const HEADLESS_RUNNER_VERSION = 6;
 
 export const RUNNER_PATH = "/home/user/headless_runner.py";
 export const AGENT_DIR = "/home/user/.onyx/agent";
@@ -79,7 +79,7 @@ STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
 EVENTS_PATH = HOME + "/agent_events.jsonl"
 
-RUNNER_VERSION = 5
+RUNNER_VERSION = 6
 # USER DIRECTIVE: "remove the limit of 24 rounds" — the round budget is now
 # effectively unlimited; the real bound is the wall-clock execution window.
 MAX_ROUNDS_DEFAULT = 400
@@ -304,12 +304,22 @@ def reset_events():
 class DeltaBatcher:
     """Batch token deltas before writing an event line — one JSONL entry per
     ~0.35s (or 160 chars) instead of one per token, so the SSE tailer and the
-    event file stay lightweight on long generations."""
+    event file stay lightweight on long generations.
 
-    def __init__(self):
+    etype separates content batches (response.delta) from reasoning batches
+    (reasoning.delta) — thinking models stream their chain-of-thought in
+    delta.reasoning_content / delta.reasoning / delta.thinking, which used to
+    be silently DROPPED (the live view showed nothing while the model
+    thought, and thinking never landed in history)."""
+
+    def __init__(self, etype="response.delta"):
+        self.etype = etype
         self.buf = []
         self.size = 0
-        self.last_flush = 0.0
+        # Initialize to NOW: a zero epoch made "now() - last_flush >= 0.35"
+        # always true, so the FIRST token flushed alone as its own event (the
+        # reported "only one word of thinking" artifact).
+        self.last_flush = now()
 
     def add(self, text):
         self.buf.append(text)
@@ -324,7 +334,7 @@ class DeltaBatcher:
         self.buf = []
         self.size = 0
         self.last_flush = now()
-        emit_event("response.delta", {"text": text})
+        emit_event(self.etype, {"text": text})
 
 def safe_path(raw):
     """Confine every filesystem tool to /home/user (realpath-resolved)."""
@@ -668,16 +678,22 @@ MODEL_TRIES = set()
 def parse_sse_stream(resp):
     """SSE-parse a streaming chat completion (OpenAI chunk format).
 
-    Emits batched response.delta events as tokens arrive (DeltaBatcher keeps
-    the event log ~3 lines/second instead of one per token) and accumulates
-    tool_call argument fragments across chunks. Returns the same reply dict
-    the non-streaming path builds. Raises on a dead stream (no content, no
-    tool calls, no finish) so the retry ladder — not a bogus "budget
-    exhausted" ending — handles empty gateway responses."""
+    Emits batched response.delta AND reasoning.delta events as tokens arrive
+    (DeltaBatcher keeps the event log ~3 lines/second instead of one per
+    token) and accumulates tool_call argument fragments across chunks.
+    Reasoning streams via delta.reasoning_content (DeepSeek-style),
+    delta.reasoning (vLLM relays) or delta.thinking (Anthropic-style) —
+    whichever a gateway uses, the thinking reaches the UI live and lands in
+    history. Returns the same reply dict the non-streaming path builds,
+    plus a "reasoning" field. Raises on a dead stream (no content, no
+    reasoning, no tool calls, no finish) so the retry ladder — not a bogus
+    "budget exhausted" ending — handles empty gateway responses."""
     content_parts = []
+    reasoning_parts = []
     tool_acc = {}
     finish_reason = None
     batcher = DeltaBatcher()
+    think_batcher = DeltaBatcher("reasoning.delta")
     for raw in resp:
         line = raw.decode("utf-8", "replace").strip()
         if not line or not line.startswith("data:"):
@@ -698,6 +714,16 @@ def parse_sse_stream(resp):
         if isinstance(text, str) and text:
             content_parts.append(text)
             batcher.add(text)
+        # Thinking-model chain-of-thought — every known field name, one batcher.
+        thought = None
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            candidate = delta.get(key)
+            if isinstance(candidate, str) and candidate:
+                thought = candidate
+                break
+        if thought is not None:
+            reasoning_parts.append(thought)
+            think_batcher.add(thought)
         for tc in (delta.get("tool_calls") or []):
             try:
                 idx = int(tc.get("index") or 0)
@@ -714,7 +740,8 @@ def parse_sse_stream(resp):
         if choice.get("finish_reason"):
             finish_reason = choice.get("finish_reason")
     batcher.flush()
-    if not content_parts and not tool_acc:
+    think_batcher.flush()
+    if not content_parts and not tool_acc and not reasoning_parts:
         raise LlmError("empty streaming response from the model gateway")
     tool_calls = []
     for idx in sorted(tool_acc):
@@ -726,6 +753,7 @@ def parse_sse_stream(resp):
         })
     return {
         "content": "".join(content_parts),
+        "reasoning": "".join(reasoning_parts),
         "tool_calls": tool_calls,
         "finish_reason": finish_reason,
     }
@@ -756,6 +784,10 @@ def sanitize_messages_for_gateway(messages):
                 parts.append("[used tool %s with args %s]" % (
                     fn.get("name") or "?", fn.get("arguments") or "{}"))
             out.append({"role": "assistant", "content": "\n".join(parts)})
+        elif role == "assistant" and m.get("reasoning"):
+            # Persisted thinking is for the UI/history — strict gateways can
+            # 400 on unknown message fields, so it never goes back on the wire.
+            out.append({"role": "assistant", "content": m.get("content") or ""})
         else:
             out.append(m)
     return out
@@ -818,8 +850,16 @@ def llm_chat(cfg, messages, use_tools):
     try:
         choice = payload["choices"][0]
         message = choice.get("message") or {}
+        # Thinking models expose chain-of-thought under one of three fields.
+        reasoning = ""
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            candidate = message.get(key)
+            if isinstance(candidate, str) and candidate:
+                reasoning = candidate
+                break
         return {
             "content": message.get("content") or "",
+            "reasoning": reasoning,
             "tool_calls": message.get("tool_calls") or [],
             "finish_reason": choice.get("finish_reason"),
         }
@@ -1005,6 +1045,12 @@ def main():
             break
 
         entry = {"role": "assistant", "content": reply.get("content") or ""}
+        reasoning = str(reply.get("reasoning") or "")
+        if reasoning:
+            # Preserve the model's thinking in history — the landing converts
+            # it into the message's thinking UI ("not even showing full
+            # thinking" fix) and future rounds re-read it as context.
+            entry["reasoning"] = reasoning
         tool_calls = reply.get("tool_calls") or []
         if tool_calls:
             entry["tool_calls"] = tool_calls

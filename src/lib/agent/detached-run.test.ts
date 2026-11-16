@@ -104,6 +104,31 @@ describe("convertHistoryToAssistantMessage (the landing path)", () => {
     ];
     expect(convertHistoryToAssistantMessage(history).content).toBe("final answer");
   });
+
+  it("converts each assistant turn's reasoning into thinking parts + the thinking field", () => {
+    const history: SandboxHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        reasoning: "I should list the primes under 50 first.",
+        tool_calls: [{ id: "c1", function: { name: "run_terminal", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+      { role: "assistant", content: "There are 15.", reasoning: "Counted them." },
+    ];
+    const out = convertHistoryToAssistantMessage(history);
+    expect(out.thinking).toBe("I should list the primes under 50 first.Counted them.");
+    const thinkParts = out.parts.filter((p) => p.type === "thinking");
+    expect(thinkParts).toHaveLength(2); // one per round — never merged
+    expect((thinkParts[0] as { content?: string }).content).toContain("primes under 50");
+  });
+
+  it("omits thinking entirely when no assistant turn carried reasoning", () => {
+    const history: SandboxHistoryMessage[] = [{ role: "assistant", content: "done" }];
+    const out = convertHistoryToAssistantMessage(history);
+    expect(out.thinking).toBe("");
+    expect(out.parts.some((p) => p.type === "thinking")).toBe(false);
+  });
 });
 
 // ── getDetachedRunForConversation — the refresh auto-stop regression ──────

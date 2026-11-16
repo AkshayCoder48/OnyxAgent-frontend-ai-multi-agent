@@ -51,6 +51,10 @@ export interface E2BExecResult {
 export interface SandboxHistoryMessage {
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
+  /** The model's chain-of-thought for this assistant turn (thinking models
+   *  stream it via reasoning_content / reasoning / thinking deltas). The
+   *  landing converts it into the message's thinking UI. */
+  reasoning?: string | null;
   tool_calls?: Array<{
     id: string;
     type?: string;

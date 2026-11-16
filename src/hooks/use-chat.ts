@@ -175,6 +175,7 @@ function makeStreamCheckpointer(
     role: string;
     content?: string;
     parts?: unknown[] | null;
+    thinking?: string | null;
   }>,
   bubbleId: string | null,
 ): { schedule: () => void; flushNow: () => Promise<void> } {
@@ -190,6 +191,9 @@ function makeStreamCheckpointer(
       if (mine && (mine.parts?.length || (mine.content ?? "").trim())) {
         await conversationService.updateMessage(bubbleId, {
           content: mine.content ?? "",
+          // Keep the row's thinking column in sync with the streamed
+          // thinking parts so the thinking panel survives a refresh too.
+          thinking: mine.thinking ?? "",
           is_streaming: true,
           parts: (mine.parts ?? []) as never,
         } as never);
@@ -786,12 +790,29 @@ export function useChat(options: UseChatOptions = {}) {
         isCancelled: () => false,
         onProgress: async (st) => {
           if (!bubbleId) return;
-          const line = st.current_tool
-            ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
-                st.total_rounds ? `/${st.total_rounds}` : ""
-              })`
-            : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
-          await writeBubbleStatus(bubbleId, line, true);
+          // LIVENESS LINE — only while the bubble is still EMPTY (nothing
+          // streamed yet). The old unconditional rewrite REPLACED the row's
+          // parts every 4s, racing the 2.5s checkpointer and wiping the
+          // checkpointed partial whenever the status write won last — a
+          // refresh then showed a gutted bubble ("not even saving a single
+          // thing"). Once any content exists, the checkpoint is the only
+          // row writer.
+          const liveMsgs = execution.store.getState().messages as Array<{
+            role: string;
+            content?: string;
+            parts?: unknown[] | null;
+          }>;
+          const liveMine = [...liveMsgs].reverse().find((m) => m.role === "assistant");
+          const hasContent =
+            (liveMine?.parts?.length ?? 0) > 0 || !!(liveMine?.content ?? "").trim();
+          if (!hasContent) {
+            const line = st.current_tool
+              ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
+                  st.total_rounds ? `/${st.total_rounds}` : ""
+                })`
+              : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+            await writeBubbleStatus(bubbleId, line, true);
+          }
           await refreshConversationRows(convId, userId);
         },
         onEvent: (ev) => {
@@ -1334,7 +1355,17 @@ export function useChat(options: UseChatOptions = {}) {
               (r as { is_streaming?: boolean }).is_streaming === true,
           );
           const bubble = streamingRows[streamingRows.length - 1] ?? null;
-          if (bubble) {
+          // LIVENESS LINE — only when the checkpointed bubble is still EMPTY.
+          // The old unconditional writeBubbleStatus REPLACED the row's parts
+          // with a single status line; when the SSE replay then failed
+          // (serverless cold start / proxy), the bubble stayed gutted — the
+          // reported "refreshed and it saved nothing / didn't continue from
+          // the tool call". The checkpointed partial must survive the
+          // reattach; the replay + checkpointer rebuild on top of it.
+          const bubbleHasContent =
+            ((bubble as { parts?: unknown[] | null } | null)?.parts?.length ?? 0) > 0 ||
+            !!(bubble as { content?: string } | null)?.content?.trim();
+          if (bubble && !bubbleHasContent) {
             await writeBubbleStatus(
               bubble.id,
               "Onyx is working in the background. Wait until the task is finished to see the complete response here.",

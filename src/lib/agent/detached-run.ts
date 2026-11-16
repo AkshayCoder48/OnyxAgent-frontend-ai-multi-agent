@@ -124,6 +124,10 @@ export interface ConvertedAssistantMessage {
   parts: MessagePart[];
   toolCalls: ToolCall[];
   failed: boolean;
+  /** Concatenated chain-of-thought from thinking-model assistant turns —
+   *  written to the row's thinking field so the existing thinking UI renders
+   *  it ("not even showing full thinking" fix). */
+  thinking: string;
 }
 
 /**
@@ -140,10 +144,28 @@ export function convertHistoryToAssistantMessage(
   const toolCalls: ToolCall[] = [];
   let finalText = "";
   let sawFailure = false;
+  let thinking = "";
+  let round = 0;
 
   for (const msg of history) {
     if (msg.role !== "assistant") continue;
+    round += 1;
     const toolCallSpecs = msg.tool_calls ?? [];
+
+    // The model's thinking for this round — one thinking part per round,
+    // BEFORE its tool parts (the same shape appendThinkingDelta creates so
+    // the thinking panel renders identically to a foreground turn).
+    const reasoning = (msg.reasoning ?? "").trim();
+    if (reasoning) {
+      thinking += reasoning;
+      parts.push({
+        id: `part_${nanoid(8)}`,
+        type: "thinking" as const,
+        content: reasoning,
+        round,
+        roundStartedAt: Date.now(),
+      });
+    }
 
     for (const spec of toolCallSpecs) {
       const name = spec.function?.name ?? "unknown";
@@ -185,6 +207,7 @@ export function convertHistoryToAssistantMessage(
     parts,
     toolCalls,
     failed: sawFailure,
+    thinking,
   };
 }
 
@@ -772,10 +795,12 @@ async function landDetachedRun(
     const { conversationService } = await import("@/lib/services");
     if (input.messageId) {
       // LAND IN PLACE — rewrite the streaming placeholder bubble into the
-      // finished message (tool parts + final text + generation meta).
+      // finished message (tool parts + final text + thinking + generation
+      // meta).
       await conversationService.updateMessage(input.messageId, {
         content,
         parts,
+        thinking: converted.thinking || undefined,
         is_streaming: false,
         generation: {
           startedAt: row.started_at,
@@ -810,6 +835,7 @@ async function landDetachedRun(
         role: "assistant",
         content,
         parts,
+        thinking: converted.thinking || undefined,
         toolCalls: converted.toolCalls.map((tc) => ({
           id: tc.id,
           name: tc.name,

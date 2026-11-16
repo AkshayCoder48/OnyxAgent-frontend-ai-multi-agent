@@ -113,6 +113,17 @@ describe("sandboxEventFeeder", () => {
       "tool_call",
     ]);
   });
+
+  it("maps reasoning.delta to thinking_delta (thinking models stream live)", () => {
+    expect(mapSandboxStreamEvent(GEN, ev("reasoning.delta", { text: "The user wants " }, 7))).toEqual({
+      type: "thinking_delta",
+      data: { index: 0, content: "The user wants ", ts: 1794750000007 },
+    });
+  });
+
+  it("drops an EMPTY reasoning.delta", () => {
+    expect(mapSandboxStreamEvent(GEN, ev("reasoning.delta", { text: "" }))).toBeNull();
+  });
 });
 
 describe("kiloAnonProvider", () => {

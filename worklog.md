@@ -963,3 +963,32 @@ Work Log:
 
 Stage Summary:
 - Zero-config users (no AI provider, no personal E2B key) now send successfully on the anonymous Kilo gateway inside the managed sandbox, and a page refresh mid-run reattaches to the SAME live run instead of settling it as interrupted.
+
+## 2026-11-16 — fix: live thinking + zero-loss refresh (the "only showing word 'the'" report)
+
+Task ID: 32
+Agent: main (Z.ai Code)
+Task: "It's not even saving a single thing… I see a thing and a tool call and I refreshed… not continuing from the toolcall… only showing word 'the' of thinking and not even the ai was running."
+
+Work Log:
+- Audit + BROWSER REPRO (agent-browser on the production build, zero-config kilo lane): reproduced the exact pre-refresh state — thinking happened INVISIBLY (no thinking UI) and a tool card ran. Found FIVE stacked defects:
+  1. parse_sse_stream read ONLY delta.content — reasoning_content/reasoning/thinking (thinking models' chain-of-thought) was silently DROPPED: never streamed to the UI, never landed in history ("not even showing full thinking" — the UI showed nothing while the model thought; the lone "the" was…
+  2. …DeltaBatcher's last_flush=0.0 epoch: `now()-last_flush>=0.35` was ALWAYS true on the first token, so the FIRST token flushed alone as its own single-word event — the isolated "the".
+  3. The SSE bridge advanced its cursor (`after += 1`) even when JSON.parse failed on a torn trailing write — one mid-append read PERMANENTLY dropped that event and desynced the cursor from the runner's event ids (live view freezing mid-stream).
+  4. writeBubbleStatus REPLACED the bubble row's parts with a single status line — both the live path (every 4s, racing the 2.5s checkpointer) and the reattach (unconditionally!). The reattach GUTTED the checkpointed partial; when the SSE replay then failed (serverless cold start / proxy), the bubble stayed wiped = "refreshed and it saved nothing / didn't continue from the tool call".
+  5. (Checked, already fine: route maxDuration=300 + dynamic=force-dynamic; E2B pause preserves processes — docs verified; kills are stale-only.)
+- FIXES:
+  * Runner v6 (HEADLESS_RUNNER_VERSION 5→6, auto-redeploys into existing sandboxes): reasoning parsed from every known field (reasoning_content/reasoning/thinking) on BOTH the streaming and JSON paths; a second DeltaBatcher emits reasoning.delta events; reply.reasoning flows into each assistant history entry (and is stripped from the wire via sanitize so strict gateways never see unknown fields); last_flush initialized to now() (no lone-first-token event); empty-stream check accepts thinking-only responses.
+  * sandbox-stream-events: reasoning.delta → thinking_delta (the processor's existing thinking pipeline renders it live — appendThinkingDelta → thinking parts + msg.thinking).
+  * Landing: convertHistoryToAssistantMessage builds one thinking part per assistant round (same shape as live) + a concatenated thinking field, written to the row (thinking UI renders after the run lands).
+  * Checkpointer: persists msg.thinking alongside content+parts.
+  * Status lines are now NON-DESTRUCTIVE: written only while the bubble is still EMPTY (live path checks the execution store; reattach checks the row's parts/content). The checkpoint is the only row writer once any content exists.
+  * Bridge torn-line: the walk BREAKS on an unparseable line without advancing the cursor; the completed line is re-read next poll.
+- VERIFIED:
+  * Live sandbox E2E (verify-runner-ladder flow, real E2B + kilo anon): ALL CHECKS PASSED, reasoning.delta observed in the live event log (the gateway streams thinking the old runner dropped).
+  * Browser E2E (production build): zero-config send → THE THINKING STREAMS LIVE (the panel shows the model's actual chain-of-thought in real time) → mid-run PAGE REFRESH → reattach replayed + continued → then a FULL SERVER OUTAGE (killed Next for 35s mid-run; the sandbox kept working) → restart → the browser reconnected and the run LANDED: full thinking preserved across refresh+outage, both tool cards ("Ran a command", "Created a file think2.txt"), the correct final answer (391), the file in the tree, ZERO interrupted/failed markers.
+  * Tests: 1011/1011 (4 new: reasoning.delta mapping ×2, thinking-parts landing ×2); tsc clean on every touched file; the embedded runner compiles (py_compile).
+- Bumped artifacts: runner v6 (auto-redeploy on next send into existing sandboxes).
+
+Stage Summary:
+- Thinking models now stream their chain-of-thought live into the panel, the first token no longer flushes alone, the stream cursor can never skip a torn event, and the checkpointed partial can never be wiped by a status line — a refresh (or even a total server outage) mid-run preserves everything and the run still lands in full.

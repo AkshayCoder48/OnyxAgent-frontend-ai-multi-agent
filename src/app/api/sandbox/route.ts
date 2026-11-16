@@ -1649,18 +1649,24 @@ export async function GET(req: NextRequest): Promise<Response> {
             // No events file yet (pre-start) — nothing to forward.
           }
           const lines = text ? text.split("\n").filter((l) => l.trim()) : [];
-          if (lines.length > after + 1) {
-            for (const line of lines.slice(after + 1)) {
-              try {
-                const parsed = JSON.parse(line) as { i?: number };
-                const id = typeof parsed.i === "number" ? parsed.i : after + 1;
-                send(`id: ${id}\nevent: agent\ndata: ${line}\n\n`);
-              } catch {
-                // partial trailing write (the runner appends line-by-line;
-                // a torn line is re-read next poll once complete)
-              }
-              after += 1;
+          // Forward every NEW complete line. A torn trailing write (the
+          // runner mid-append when this poll read) STOPS the walk WITHOUT
+          // advancing the cursor — the completed line is re-read on the next
+          // poll. (The old `after += 1` outside the try/catch skipped a torn
+          // line FOREVER: one mid-append read permanently dropped that event
+          // and desynced the cursor from the runner's `i` event ids — the
+          // live view froze mid-stream with events silently vanishing.)
+          for (let li = after + 1; li < lines.length; li++) {
+            const line = lines[li]!;
+            let parsed: { i?: number };
+            try {
+              parsed = JSON.parse(line) as { i?: number };
+            } catch {
+              break; // torn tail — retry once the append completes
             }
+            const id = typeof parsed.i === "number" ? parsed.i : li;
+            send(`id: ${id}\nevent: agent\ndata: ${line}\n\n`);
+            after = li;
           }
 
           // Status snapshot + terminal detection.
