@@ -1398,12 +1398,26 @@ export function useChat(options: UseChatOptions = {}) {
             isCancelled: () => cancelled,
             onProgress: async (st) => {
               if (!bubble) return;
-              const line = st.current_tool
-                ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
-                    st.total_rounds ? `/${st.total_rounds}` : ""
-                  })`
-                : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
-              await writeBubbleStatus(bubble.id, line, true);
+              // LIVENESS LINE — only while the replayed bubble is still EMPTY
+              // (same guard as the live path; the old unconditional rewrite
+              // raced the checkpointer and could wipe the checkpointed
+              // partial to a bare status line every 4s).
+              const liveMsgs = execution.store.getState().messages as Array<{
+                role: string;
+                content?: string;
+                parts?: unknown[] | null;
+              }>;
+              const liveMine = [...liveMsgs].reverse().find((m) => m.role === "assistant");
+              const hasContent =
+                (liveMine?.parts?.length ?? 0) > 0 || !!(liveMine?.content ?? "").trim();
+              if (!hasContent) {
+                const line = st.current_tool
+                  ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
+                      st.total_rounds ? `/${st.total_rounds}` : ""
+                    })`
+                  : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+                await writeBubbleStatus(bubble.id, line, true);
+              }
               await refreshConversationRows(turnId, userId);
             },
             onEvent: (ev) => {

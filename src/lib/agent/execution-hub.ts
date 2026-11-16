@@ -337,7 +337,14 @@ export function useExecutionMessages(executionId: string | null): ChatMessage[] 
   const execStore = executionId ? executionHub.getStore(executionId) : null;
   const execMessages = useStore(execStore ?? FALLBACK_STORE, (s) => s.messages);
   const globalMessages = useChatStore((s) => s.messages);
-  return execStore ? execMessages : globalMessages;
+  // EMPTY-STORE FALLBACK: a REATTACHED execution starts empty and only fills
+  // through the SSE replay. While it is still empty (the bridge cold-starting
+  // or unreachable on a serverless deployment), render the DB-painted global
+  // view — the checkpointed partial — instead of a blank conversation (the
+  // reported "refreshed and it stopped / showed nothing"). The live send path
+  // seeds its store with the user message immediately, so fresh turns never
+  // flash through this fallback.
+  return execStore && execMessages.length > 0 ? execMessages : globalMessages;
 }
 
 /** Live per-execution UI state with a global fallback. */

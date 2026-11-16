@@ -992,3 +992,28 @@ Work Log:
 
 Stage Summary:
 - Thinking models now stream their chain-of-thought live into the panel, the first token no longer flushes alone, the stream cursor can never skip a torn event, and the checkpointed partial can never be wiped by a status line — a refresh (or even a total server outage) mid-run preserves everything and the run still lands in full.
+
+## 2026-11-16 — fix(reattach): dead-SSE refresh resilience + THE ROOT CAUSE of "still same": the live deployment is an ancient build
+
+Task ID: 33
+Agent: main (Z.ai Code)
+Task: "Still same it stopped after refrwh not continuing from which it left or from which it processed in bg."
+
+Work Log:
+- REPO: sandbox recycled again (checkout on the stale Expo lineage dd888f2) → ff to origin/main 1d6f139; deps + E2B key restored.
+- DEPLOYMENT FORENSICS (the root cause): the worklog's only vercel.app URL is onyxbase-chi.vercel.app — that is the KV product (404 on /chat). Probed subdomains → found the chat app at onyxagent.vercel.app ("OnyxAgent — AI assistant for modern teams", /chat 200). Fingerprints of the deployed build:
+  * GET /api/sandbox → HTTP 405 (the GET handler has existed since 6e50277 — many commits ago);
+  * ALL 30 deployed JS chunks (1.75 MB) contain ZERO strings of the detached-run architecture ("USE_SERVER_ENV", "hasEnvKey", "Onyx is working in the background", "detached");
+  * the bundle still contains "pydantic" (the framework name renamed to "Onyx AI" many sessions ago);
+  * chunks served from /_next/static/immutable/ (an old build-era layout).
+  ⇒ the user's live deployment predates the ENTIRE E2B background-run architecture; every "still same" report was tested against an app that contains none of the fixes. Re-deploying the project from main is the actual fix; exact steps + a binary verification check (GET /api/sandbox must return {"hasEnvKey":true} instead of 405) go in the report to the user.
+- THREE REAL BUGS found in the CURRENT code while tracing the refresh-resume path (all would bite on serverless even after redeploy), all fixed:
+  1. Merged view blanked the conversation on a dead-SSE reattach: useExecutionMessages returned the execution's messages whenever an execution existed — but a reattached execution starts EMPTY and only fills via the SSE replay; if the bridge can't connect (serverless cold start / proxy buffering), the UI rendered an EMPTY conversation while the checkpointed partial sat in Dexie. FIX: empty-store fallback to the DB-painted global view (live sends seed their store immediately, so fresh turns never flash through the fallback).
+  2. The reattach's onProgress still called writeBubbleStatus UNCONDITIONALLY (the destructive-wipe guard was only applied to the live path last session) — every 4s it could gut the checkpointed partial to a bare status line. FIX: same hasContent guard as the live path (status only while the replayed bubble is empty).
+  3. env-key negative cache: serverHasE2bEnvKey cached a TRANSIENT fetch failure as "no env key" for the whole session — silently disabling the zero-config lane (no reattach, no dispatch) until reload. FIX: only confirmed answers are cached; failures stay uncached and getEffectiveE2BKey retries once after 600ms.
+- TESTS: +7 (env-key retry semantics ×4, useExecutionMessages empty-store fallback ×3 — new execution-hub.test.tsx + env-key.test.ts). Suite 1018/1018, tsc clean on all touched files, production build OK.
+- BROWSER E2E (production build, zero-config kilo lane): send → sleep-18 + date -u tool flow → REFRESH mid-run → reattach replayed the full partial (both tool cards + thinking), polls flowing, final answer landed complete with thinking preserved; no status-line wipe at any point.
+
+Stage Summary:
+- Root cause of the user's persistent report: their live Vercel deployment (onyxagent.vercel.app) runs an ancient build — no fixes ever reached it. Action for the user: re-deploy the project from GitHub main and verify GET /api/sandbox returns {"hasEnvKey":true} (not 405), then hard-refresh.
+- The current codebase is now also resilient to the exact serverless failure mode that would otherwise reproduce the symptom after redeploy: a dead SSE bridge no longer blanks the conversation (checkpointed partial renders via the global view), the reattach can no longer wipe the partial, and a transient env-key fetch can no longer kill the session.
