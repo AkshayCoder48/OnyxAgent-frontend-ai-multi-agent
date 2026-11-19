@@ -303,6 +303,57 @@ export class AgentEventProcessor {
     this.currentMessageGeneration = this.activeGenerationId;
   }
 
+  /** REATTACH ADOPTION (PRD "directly visible live streaming" §6/§10):
+   *  claim an EXISTING message row — the checkpointed streaming bubble —
+   *  as this processor's streaming message and RESET it. The SSE replay
+   *  (the bridge re-reads agent_events.jsonl from event 1 on every
+   *  reconnect) then rebuilds the FULL timeline into that one row:
+   *  thinking parts, tool parts, text — a refresh shows ONE message
+   *  continuing in place, never a frozen checkpoint bubble plus a
+   *  duplicate live bubble below it, and never duplicated text. */
+  adoptStreamingMessage(messageId: string, generationId: string | null): void {
+    this.flush();
+    this.currentMessageId = messageId;
+    this.currentMessageGeneration = generationId;
+    if (generationId) this.activeGenerationId = generationId;
+    this.preemitPartIds = [];
+    this.streamGate = { messageId: null, opened: false };
+    this.turnStartedAt = Date.now();
+    this.lastEventTs = null;
+    this.runnerFirstTs = null;
+    // SEED-FAILURE GUARD: the caller seeds the store with the conversation's
+    // rows and adopts the bubble among them; if that seed ever missed (a
+    // mapping throw, a store race), appending into a message id that is not
+    // in the store would silently no-op — the whole replay would render
+    // nothing. Create the row under its own id so the replay always has a
+    // target.
+    if (!this.store.getState().messages.some((m) => m.id === messageId)) {
+      this.store.getState().addMessage({
+        id: messageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        isStreaming: true,
+        toolCalls: [],
+        parts: [],
+        conversationId: this.opts.getConversationId() ?? undefined,
+      });
+    }
+    this.store.getState().updateMessage(messageId, (m) => ({
+      ...m,
+      // Empty slate — the replay re-appends every part with its own
+      // runner timestamps; the checkpointed copy in this row is stale
+      // the moment the first replayed event lands.
+      content: "",
+      parts: [],
+      thinking: "",
+      reasoning: "",
+      toolCalls: [],
+      isStreaming: true,
+      generation: undefined,
+    }));
+  }
+
   // ── GENERATION SUMMARY ("Worked {time}" panel) ─────────────────────
   /** Stamp `generation` metadata on the current message so the settled
    *  turn collapses into a "Worked {duration}" panel (PRD §§12–22).

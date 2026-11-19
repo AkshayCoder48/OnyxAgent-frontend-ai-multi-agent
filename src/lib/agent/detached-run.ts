@@ -666,10 +666,26 @@ export function openAgentEventStream(
   }
   let closed = false;
   let es: EventSource | null = null;
-  let attempts = 0;
   let lastId = -1; // highest delivered event id — manual reopens resume after it
   let sawTerminalDone = false; // a plain `done` = terminal status — never reopen
-  const MAX_REOPEN = 6;
+  // RETRY-WHILE-ADOPTING (PRD §5D): a COLD sandbox resume — the app was
+  // closed long enough for E2B to pause the sandbox, and the dispatch just
+  // kicked the auto-resume — makes Sandbox.connect throw mid-transition
+  // for tens of seconds, so the bridge's first opens answer
+  // `done {noSandbox}`. The old FIXED 6-attempt ladder (~50s) could
+  // exhaust before the resume finished: the live view then died for the
+  // ENTIRE run while the status poll still landed it at the end — exactly
+  // the reported "the stream stopped and only the final answer appeared".
+  // The stream's lifetime is bounded by its closer (the adoption loop's
+  // finally), so retrying unbounded while the loop polls is safe: short
+  // first delay for clean blips, ~1.5× growth capped at 15s for cold
+  // resumes, reset to the floor the moment events flow again.
+  let retryDelayMs = 1500;
+  const backoff = () => {
+    const d = retryDelayMs;
+    retryDelayMs = Math.min(15_000, Math.floor(retryDelayMs * 1.5));
+    return d;
+  };
 
   const open = async () => {
     if (closed) return;
@@ -691,7 +707,7 @@ export function openAgentEventStream(
       if (lastId >= 0) params.set("after", String(lastId));
       es = new EventSource(`/api/sandbox?${params.toString()}`);
       es.addEventListener("agent", (e) => {
-        attempts = 0; // events are flowing — reset the reopen budget
+        retryDelayMs = 1500; // events are flowing — reset the backoff floor
         try {
           const ev = JSON.parse((e as MessageEvent).data as string) as SandboxStreamEvent;
           if (typeof ev.i === "number" && ev.i > lastId) lastId = ev.i;
@@ -714,9 +730,10 @@ export function openAgentEventStream(
         } catch {
           /* empty payload is fine */
         }
-        if (!closed && payload.noSandbox && ++attempts < MAX_REOPEN) {
-          // The sandbox is mid-pause/resume — retry the bridge shortly.
-          setTimeout(() => void open(), 4000 + attempts * 2000);
+        if (!closed && payload.noSandbox) {
+          // The sandbox is mid-pause/resume — keep retrying on the
+          // backoff ladder while the adoption loop is still polling.
+          setTimeout(() => void open(), backoff());
         } else if (!payload.noSandbox) {
           // Terminal done — the run is over; the connection close that
           // follows must not trigger a pointless reopen.
@@ -727,20 +744,20 @@ export function openAgentEventStream(
       // crash, proxy 5xx, throttled 429) makes the browser close the
       // EventSource PERMANENTLY; with no onerror handler the live view froze
       // silently mid-run (the observed "stream stopped after refresh and
-      // never caught up"). Reopen with backoff, resuming after the cursor.
-      // The status-poll watchdog (adoptDetachedRun's loop) remains the
-      // source of truth and lands the run either way.
+      // never caught up"). Reopen on the backoff ladder, resuming after the
+      // cursor. The status-poll watchdog (adoptDetachedRun's loop) remains
+      // the source of truth and lands the run either way.
       es.onerror = () => {
         if (sawTerminalDone) return;
         es?.close();
         es = null;
-        if (!closed && ++attempts < MAX_REOPEN) {
-          setTimeout(() => void open(), 4000 + attempts * 2000);
+        if (!closed) {
+          setTimeout(() => void open(), backoff());
         }
       };
     } catch {
-      if (!closed && ++attempts < MAX_REOPEN) {
-        setTimeout(() => void open(), 4000 + attempts * 2000);
+      if (!closed) {
+        setTimeout(() => void open(), backoff());
       }
     }
   };

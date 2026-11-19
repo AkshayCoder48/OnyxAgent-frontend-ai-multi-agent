@@ -737,8 +737,11 @@ export function useChat(options: UseChatOptions = {}) {
       // id, no scanning): the SSE stream renders into it live, the throttled
       // checkpointer caches partial work every ~2.5s, the landing rewrites it
       // in place, and the reattach-on-return path adopts it after a reload.
+      // DIRECT-VISIBLE-STREAM copy (PRD §6): present-tense, in-chat — never
+      // "working in the background, wait until it finishes" framing, which
+      // read like a background-job queue instead of a live response.
       const workingText =
-        "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+        "Onyx is working — the response will stream here in real time.";
       let bubbleId: string | null = null;
       try {
         const placeholder = await conversationService.addMessage(convId, userId, {
@@ -810,7 +813,7 @@ export function useChat(options: UseChatOptions = {}) {
               ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
                   st.total_rounds ? `/${st.total_rounds}` : ""
                 })`
-              : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+              : "Onyx is working — the response will stream here in real time.";
             await writeBubbleStatus(bubbleId, line, true);
           }
           await refreshConversationRows(convId, userId);
@@ -1396,7 +1399,7 @@ export function useChat(options: UseChatOptions = {}) {
           if (bubble && !bubbleHasContent) {
             await writeBubbleStatus(
               bubble.id,
-              "Onyx is working in the background. Wait until the task is finished to see the complete response here.",
+              "Onyx is still working — the live stream is reconnecting…",
               true,
             );
           }
@@ -1413,6 +1416,57 @@ export function useChat(options: UseChatOptions = {}) {
             mode: "background",
             trigger: "resume",
           });
+          // DETERMINISTIC SEED (PRD §10 recovery priority 1–2): the exec
+          // store starts as the conversation's OWN DB rows — fetched one
+          // step above, no sessionStorage/global-store race — so the
+          // history + the checkpointed bubble render immediately while the
+          // bridge warms up. The old createExecution seed depended on
+          // getPersistedConversationId() matching at effect time; on a
+          // cold reload that race could seed EMPTY (the user message
+          // vanished until landing) or with a stale painted view.
+          try {
+            const { conversationMessageToChatMessage } = await import(
+              "@/lib/conversation-to-chat"
+            );
+            execution.store.getState().replaceAllMessages(
+              rows.map((r) =>
+                conversationMessageToChatMessage({
+                  id: r.id,
+                  conversation_id: r.conversation_id,
+                  role: r.role,
+                  content: r.content,
+                  created_at: r.created_at,
+                  tool_calls: r.tool_calls,
+                  user_rating: r.user_rating,
+                  rating_count: r.rating_count,
+                  files: r.files,
+                  thinking: (r as { thinking?: string | null }).thinking,
+                  reasoning: (r as { reasoning?: string | null }).reasoning,
+                  parts: (r as { parts?: unknown[] | null }).parts as
+                    | import("@/types").MessagePart[]
+                    | null
+                    | undefined,
+                }),
+              ),
+            );
+          } catch {
+            // best-effort — an unseeded store still renders via the
+            // global-store fallback until the first replayed event lands
+          }
+          // ADOPT THE BUBBLE (PRD §6 "one continuous response"): the
+          // processor claims the CHECKPOINTED bubble row as its streaming
+          // message and resets it — the SSE replay then rebuilds the full
+          // timeline INTO that row. Without adoption the processor
+          // createNewMessage()s a SECOND assistant bubble next to the
+          // checkpointed one: the post-refresh view showed the frozen
+          // checkpoint bubble AND a duplicate live bubble replaying the
+          // same rounds below it.
+          if (bubble) {
+            execution.processor.adoptStreamingMessage(
+              bubble.id,
+              liveRow?.id ?? fallbackRef?.runId ?? null,
+            );
+          }
           const feeder = sandboxEventFeeder(
             execution.processor,
             liveRow?.id ?? fallbackRef?.runId ?? `resume_${turnId}`,
@@ -1461,7 +1515,7 @@ export function useChat(options: UseChatOptions = {}) {
                   ? `⏳ Working in the sandbox — running ${st.current_tool}… (round ${st.round ?? "?"}${
                       st.total_rounds ? `/${st.total_rounds}` : ""
                     })`
-                  : "Onyx is working in the background. Wait until the task is finished to see the complete response here.";
+                  : "Onyx is still working — the live stream is reconnecting…";
                 await writeBubbleStatus(bubble.id, line, true);
               }
               await refreshConversationRows(turnId, userId);

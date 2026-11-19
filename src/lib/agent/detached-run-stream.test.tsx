@@ -5,7 +5,9 @@
  *   · an EventSource error (HTTP-level bridge failure closes it permanently
  *     in the browser) reopens with backoff, resuming AFTER the last
  *     delivered event id — never freezing the live view silently;
- *   · delivered events reset the reopen budget;
+ *   · delivered events reset the backoff floor;
+ *   · consecutive failures keep retrying while adoption lives (a cold
+ *     sandbox resume outlives any fixed ladder) — only the closer stops it;
  *   · a terminal `done` (no noSandbox) never reopens — the connection close
  *     that follows it is not an error to recover from;
  *   · the closer stops every reopen.
@@ -102,16 +104,36 @@ describe("openAgentEventStream — bridge failure recovery", () => {
     expect(events.length).toBe(5);
   });
 
-  it("stops reopening after MAX_REOPEN consecutive failures with zero events", async () => {
+  it("keeps retrying on consecutive zero-event failures while adoption lives", async () => {
     await openStream();
     for (let i = 0; i < 12; i++) {
       const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
       es.fireError();
       await vi.advanceTimersByTimeAsync(30_000);
     }
-    // 1 initial + MAX_REOPEN(6) reopens — then it gives up (the status-poll
-    // watchdog still lands the run).
-    expect(FakeEventSource.instances.length).toBeLessThanOrEqual(7);
+    // RETRY-WHILE-ADOPTING (the cold-resume death fix): a paused sandbox
+    // resuming can throw on connect for a minute+ — far beyond the old
+    // fixed 6-attempt ladder. The bridge must keep retrying (bounded by
+    // its closer — the adoption loop's lifetime — never a counter), or
+    // the live view dies for the WHOLE run while the status poll still
+    // lands the final answer (the reported "stream stopped, only the
+    // finished answer appeared").
+    expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("the closer is the only stop — errors after close() never reopen", async () => {
+    const { close } = await openStream();
+    for (let i = 0; i < 3; i++) {
+      const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+      es.fireError();
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    const before = FakeEventSource.instances.length;
+    close();
+    const es = FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+    es.fireError();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeEventSource.instances.length).toBe(before);
   });
 
   it("a terminal done is final — the connection close after it never reopens", async () => {
