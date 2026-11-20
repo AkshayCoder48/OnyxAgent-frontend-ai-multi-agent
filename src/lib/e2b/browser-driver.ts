@@ -232,6 +232,14 @@ if [ -f .boot-lock ] && kill -0 "\$(cat .boot-lock 2>/dev/null)" 2>/dev/null; th
 fi
 echo \$\$ > .boot-lock
 
+# Clear the LAST boot's failure marker BEFORE doing anything else: the
+# runner's use_browser wait treats .boot-failed as a fast-fail signal, so a
+# stale marker from an earlier attempt poisoned every subsequent kick (the
+# new boot was still running fine in the background while the waiter had
+# already returned failure). The marker only means something once THIS
+# boot has actually failed and rewrites it.
+rm -f .boot-failed
+
 log "checking the browser runtime…"
   fresh_install=0
   if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
