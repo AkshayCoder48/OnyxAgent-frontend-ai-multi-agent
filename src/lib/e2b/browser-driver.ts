@@ -56,7 +56,7 @@
  * stamp is killed and redeployed. Bump whenever the Python source changes
  * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.11.05";
+export const BROWSER_DRIVER_VERSION = "2026.11.20";
 
 /** Sandbox-side paths (shared by the client session manager and the
  *  server-side prepare hook — single source of truth). */
@@ -185,6 +185,18 @@ export function buildDetachedSpawnCommand(opts: {
  * pip calls — a pipe would mask pip's exit code; success is verified with
  * the import probe instead, and probe failures log the actual ImportError
  * so boot-install.log always says WHY.
+ *
+ * VERSION PAIRING (2026-11-20, the OTHER browser_startup_failed class):
+ * pip exiting 0 does NOT mean the runtime imports — cloakbrowser 0.6.1
+ * imported playwright._impl._js_handle, which playwright 1.65.x removed,
+ * and 0.6.1's metadata carries no playwright upper bound. An unpinned
+ * "playwright" therefore let pip keep the incompatible newest version
+ * ("already satisfied" — a no-op install) while the probe died with
+ * ModuleNotFoundError on every ladder rung. The requirement is now a
+ * PINNED PAIR — cloakbrowser==0.7.3 (whose own metadata declares
+ * playwright>=1.53,<1.66) with the range written explicitly — so the
+ * install line itself corrects any drifted sandbox (pip up/downgrades to
+ * a compatible pair) instead of no-op'ing past it.
  */
 export const BROWSER_BOOT_SH_SOURCE = `#!/bin/bash
 # Onyx sandbox browser boot — DETACHED installer + daemon launcher.
@@ -221,44 +233,53 @@ fi
 echo \$\$ > .boot-lock
 
 log "checking the browser runtime…"
-fresh_install=0
-if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
-  log "browser runtime already installed"
-  evt "BROWSER_RUNTIME_PRESENT"
-else
-  fresh_install=1
-  evt "BROWSER_DOWNLOAD_START"
-  log "installing the browser runtime (first run — can take a few minutes)…"
-  ok=0
-  for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
-    log "\$PIP install \${flags:-default}: cloakbrowser==0.6.1 playwright"
-    if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.6.1" playwright >> boot-install.log 2>&1; then
-      log "pip exited 0 (\${flags:-default}) — verifying the import…"
-      if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
-        ok=1
-        log "browser runtime installed and importable"
-        evt "BROWSER_DOWNLOAD_COMPLETE"
-        break
+  fresh_install=0
+  if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+    log "browser runtime already installed"
+    evt "BROWSER_RUNTIME_PRESENT"
+  else
+    fresh_install=1
+    evt "BROWSER_DOWNLOAD_START"
+    log "installing the browser runtime (first run — can take a few minutes)…"
+    # PINNED PAIR (browser_startup_failed, 2026-11-20): cloakbrowser 0.6.1
+    # imports playwright._impl._js_handle — an internal module REMOVED by
+    # modern playwright (1.65.x), and 0.6.1's metadata has no upper bound,
+    # so an unpinned "playwright" let pip keep the newest (broken) version
+    # ("already satisfied" — a no-op install) and every import probe died
+    # with ModuleNotFoundError. cloakbrowser 0.7.3 declares
+    # playwright>=1.53,<1.66 itself; the EXPLICIT range pins the pair AND
+    # self-heals drift — a sandbox that later carries an out-of-range
+    # playwright gets corrected (up/downgraded) by this very install line.
+    ok=0
+    for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
+      log "\$PIP install \${flags:-default}: cloakbrowser==0.7.3 playwright>=1.53,<1.66"
+      if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.7.3" "playwright>=1.53,<1.66" >> boot-install.log 2>&1; then
+        log "pip exited 0 (\${flags:-default}) — verifying the import…"
+        if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
+          ok=1
+          log "browser runtime installed and importable"
+          evt "BROWSER_DOWNLOAD_COMPLETE"
+          break
+        else
+          log "import probe FAILED after a successful pip run — the installed combination is incompatible (see boot-install.log)"
+        fi
       else
-        log "import probe FAILED after a successful pip run — interpreter mismatch (see boot-install.log)"
+        log "pip run failed (\${flags:-default}) — trying the next variant"
       fi
-    else
-      log "pip run failed (\${flags:-default}) — trying the next variant"
+    done
+    if [ "\$ok" != "1" ]; then
+      evt "BROWSER_DOWNLOAD_FAILED"
+      {
+        echo "pip could not install cloakbrowser==0.7.3 + playwright>=1.53,<1.66 into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
+        echo "---- probe error ----"
+        "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
+        echo "---- last 40 lines of boot-install.log ----"
+        tail -n 40 boot-install.log 2>/dev/null
+      } > .boot-failed
+      log "FATAL: browser runtime install failed (details in .boot-failed)"
+      exit 1
     fi
-  done
-  if [ "\$ok" != "1" ]; then
-    evt "BROWSER_DOWNLOAD_FAILED"
-    {
-      echo "pip could not install cloakbrowser==0.6.1 + playwright into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
-      echo "---- probe error ----"
-      "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
-      echo "---- last 40 lines of boot-install.log ----"
-      tail -n 40 boot-install.log 2>/dev/null
-    } > .boot-failed
-    log "FATAL: browser runtime install failed (details in .boot-failed)"
-    exit 1
   fi
-fi
 
 # BINARY PRE-FETCH: after a FRESH install the ~200 MB browser binaries are
 # still missing — fetch them HERE (inside the detached, narrated boot
