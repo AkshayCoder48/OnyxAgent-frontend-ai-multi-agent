@@ -21,6 +21,7 @@ import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
 import { TimelineSidebar } from "@/components/chat/timeline-sidebar";
 import { LogsViewer } from "@/components/dev/logs-viewer";
+import { ExecutionProofPanel } from "@/components/dev/execution-proof-panel";
 import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
 import {
   AppWindow,
@@ -598,6 +599,12 @@ export function ChatWorkspace() {
       >
         <LogsViewer />
       </DockedPanel>
+
+      {/* EXECUTION PROOF (dev only) — PRD §8 diagnostics: real runner
+          telemetry (pid, heartbeat, provider stream state, token
+          timestamps, tool dispatch keys) from the execution-proof store.
+          Self-gates to NODE_ENV=development; renders nothing in prod. */}
+      <ExecutionProofPanel />
 
       {/* Export conversation dialog (top-bar entry point). */}
       <ExportDialog

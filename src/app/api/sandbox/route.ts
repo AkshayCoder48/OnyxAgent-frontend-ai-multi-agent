@@ -3038,6 +3038,43 @@ export async function POST(req: NextRequest) {
         if (typeof config.chat_url !== "string" || !/^https?:\/\//.test(config.chat_url)) {
           return NextResponse.json({ error: "Run config is missing a valid chat_url" }, { status: 400 });
         }
+        // IDEMPOTENT LAUNCH (PRD §4 — no duplicate generations): a re-fired
+        // dispatch (pagehide-beacon re-send, client retry) used to launch a
+        // SECOND runner process for the SAME run_id — two processes
+        // interleaving rounds against one history + one event log (observed
+        // in background.log: the same run_id "starting" twice). If this
+        // EXACT run is already live (config on disk matches the incoming
+        // run_id + a runner process exists + the status file belongs to this
+        // run and is non-terminal), the start is a no-op.
+        const incomingRunId = typeof config.run_id === "string" ? config.run_id : "";
+        if (incomingRunId) {
+          const existingCfg = (await readJsonFile(sandbox, RUN_CONFIG_PATH)) as { run_id?: string } | null;
+          if (existingCfg?.run_id === incomingRunId) {
+            let alreadyAlive = false;
+            try {
+              const aliveProbe = await sandbox.commands.run(
+                `pgrep -f "${RUNNER_PGREP_PATTERN}" >/dev/null 2>&1 && echo 1 || echo 0`,
+                { cwd: DEFAULT_CWD, timeoutMs: 15_000 },
+              );
+              alreadyAlive = (aliveProbe.stdout ?? "").trim() === "1";
+            } catch {
+              // best-effort — a failed probe just means the normal launch path
+            }
+            if (alreadyAlive) {
+              const existingStatus = (await readJsonFile(sandbox, AGENT_STATUS_PATH)) as {
+                run_id?: string;
+                status?: string;
+              } | null;
+              if (
+                existingStatus?.run_id === incomingRunId &&
+                (existingStatus?.status === "running" || existingStatus?.status === "starting")
+              ) {
+                console.log(`[sandbox] agent_start IDEMPOTENT SKIP — run ${incomingRunId} already live`);
+                return NextResponse.json({ sandboxId: sandbox.sandboxId, started: true, already: "running" });
+              }
+            }
+          }
+        }
         // ── EARLY DURABLE WRITES (the refresh-race fix) ──────────────────
         // The pagehide beacon fires this and the page immediately reloads;
         // the returning mount-sync's first agent_status poll used to beat

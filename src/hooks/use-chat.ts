@@ -32,6 +32,10 @@ import {
 import { chatCompletionsUrl, listUsableProviders, resolveProviderForModel } from "@/lib/agent/provider-resolution";
 import { kiloAnonProvider } from "@/lib/agent/kilo-anon";
 import { sandboxEventFeeder } from "@/lib/agent/sandbox-stream-events";
+import {
+  recordProofEvent,
+  recordProofStatus,
+} from "@/lib/agent/execution-proof";
 
 /** A message the user typed while the agent was busy. Held outside the chat
  *  history until the drainer ships it. */
@@ -792,6 +796,7 @@ export function useChat(options: UseChatOptions = {}) {
         sandboxId: started.sandboxId,
         isCancelled: () => false,
         onProgress: async (st) => {
+          recordProofStatus(st);
           if (!bubbleId) return;
           // LIVENESS LINE — only while the bubble is still EMPTY (nothing
           // streamed yet). The old unconditional rewrite REPLACED the row's
@@ -819,6 +824,7 @@ export function useChat(options: UseChatOptions = {}) {
           await refreshConversationRows(convId, userId);
         },
         onEvent: (ev) => {
+          recordProofEvent(ev);
           feeder(ev);
           checkpointer.schedule();
         },
@@ -1497,6 +1503,7 @@ export function useChat(options: UseChatOptions = {}) {
               executionHub.getSummary(execution.id)?.status === "stopped",
             fallbackRef,
             onProgress: async (st) => {
+              recordProofStatus(st);
               if (!bubble) return;
               // LIVENESS LINE — only while the replayed bubble is still EMPTY
               // (same guard as the live path; the old unconditional rewrite
@@ -1521,6 +1528,7 @@ export function useChat(options: UseChatOptions = {}) {
               await refreshConversationRows(turnId, userId);
             },
             onEvent: (ev) => {
+              recordProofEvent(ev);
               feeder(ev);
               checkpointer.schedule();
             },

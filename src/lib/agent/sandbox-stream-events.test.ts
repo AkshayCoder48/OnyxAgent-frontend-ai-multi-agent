@@ -26,6 +26,28 @@ describe("mapSandboxStreamEvent", () => {
     });
   });
 
+  it("v7 EXECUTION-PROOF events map to null — telemetry, never message content", () => {
+    // The proof vocabulary (provider.request_started / first_token /
+    // stream_connected / response_received / request_failed / request_retry /
+    // model_fallback / compatibility / continuation_started and
+    // tool.dispatched) is diagnostics-only: it must flow to the
+    // execution-proof store, never render or duplicate into the message.
+    for (const type of [
+      "provider.request_started",
+      "provider.stream_connected",
+      "provider.first_token",
+      "provider.response_received",
+      "provider.request_failed",
+      "provider.request_retry",
+      "provider.model_fallback",
+      "provider.compatibility",
+      "provider.continuation_started",
+      "tool.dispatched",
+    ]) {
+      expect(mapSandboxStreamEvent(GEN, ev(type, { request_id: "req_x" }))).toBeNull();
+    }
+  });
+
   it("maps run.started without a model string (no model field)", () => {
     expect(mapSandboxStreamEvent(GEN, ev("run.started", { model: 42 }))).toEqual({
       type: "model_request_start",

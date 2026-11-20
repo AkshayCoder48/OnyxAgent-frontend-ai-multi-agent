@@ -77,6 +77,19 @@ export interface SandboxAgentStatus {
   finished_at?: number | null;
   error?: string | null;
   prompt_preview?: string | null;
+  /** v7 EXECUTION-PROOF fields — every one stamped by an observed event
+   *  inside the runner (socket connected, token arrived, handler invoked);
+   *  absent on runner versions ≤ 6. */
+  runner_pid?: number;
+  last_event_id?: number;
+  provider_request_id?: string | null;
+  /** idle | connecting | streaming | non_stream | failed. */
+  provider_stream?: string;
+  first_token_at?: number | null;
+  last_token_at?: number | null;
+  current_tool_execution_id?: string | null;
+  degraded?: boolean;
+  tools_wire_mode?: string;
 }
 
 /** Response of the `agent_status` action. */

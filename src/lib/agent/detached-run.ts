@@ -567,6 +567,13 @@ const ADOPT_NO_SANDBOX_GRACE = 15;
 /** Consecutive "no status file + dead runner" polls before declaring the
  *  run dead (covers a wiped sandbox / killed runner mid-boot). */
 const ADOPT_DEAD_GRACE = 5;
+/** DEAD-WHILE-RUNNING grace (PRD §7): polls of status=="running/starting"
+ *  while pgrep says the runner process is GONE before the loop lands an
+ *  honest failure. Generous (8 × 4s ≈ 32s) on purpose: agent_start writes an
+ *  early "starting" status before the process spawns, a cold-sandbox boot
+ *  (resume + redeploy) legitimately takes tens of seconds, and a false
+ *  "failed" on a live run is far worse than a 32s-late honest landing. */
+const ADOPT_DEAD_WHILE_RUNNING_GRACE = 8;
 
 /** localStorage ref (PRD persistence layer 3) — the lightweight pointer a
  * reload reads to know a live run exists for a conversation. Written at
@@ -854,6 +861,7 @@ export async function adoptDetachedRun(
 
   let noSandboxStreak = 0;
   let deadStreak = 0;
+  let deadWhileRunningStreak = 0;
   try {
     for (;;) {
       if (input.isCancelled()) return { status: "completed", cancelled: true };
@@ -882,6 +890,21 @@ export async function adoptDetachedRun(
 
       const st = res.status?.status ?? null;
       if (st === "running" || st === "starting") {
+        // DEAD-WHILE-RUNNING (PRD §7 / Test F): the status FILE still says
+        // "running" but pgrep says the process is gone. The old loop polled
+        // FOREVER here — a killed/OOM'd runner left a fabricated running
+        // state (spinner forever, never landing). Land an honest failure
+        // with the partial work after the grace period.
+        if (res.runnerAlive) {
+          deadWhileRunningStreak = 0;
+        } else if (++deadWhileRunningStreak >= ADOPT_DEAD_WHILE_RUNNING_GRACE) {
+          return await landDetachedRun(
+            input,
+            row,
+            "failed",
+            "The sandbox runner process stopped mid-run (its status still said 'running'). Here is the work it completed before it stopped.",
+          );
+        }
         deadStreak = 0;
         input.onProgress?.(res.status!);
         continue;

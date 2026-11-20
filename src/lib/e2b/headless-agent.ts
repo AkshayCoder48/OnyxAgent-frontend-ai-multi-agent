@@ -34,8 +34,20 @@
  *  rotation (429/401 → advance to the next key in the pool, up to 3 rotations).
  *  v3: native use_browser — the background agent can drive the CloakBrowser
  *  driver through its file protocol (PRD §10: browser tasks survive the
- *  frontend disconnecting). */
-export const HEADLESS_RUNNER_VERSION = 6;
+ *  frontend disconnecting).
+ *  v7: EXECUTION-PROOF TELEMETRY (PRD §3/§7/§8) — every provider request
+ *  emits observed lifecycle events (provider.request_started /
+ *  stream_connected / first_token / response_received / request_failed /
+ *  request_retry / model_fallback / degraded), every tool dispatch carries a
+ *  stable idempotency key (tool_execution_id) + dispatch confirmation +
+ *  measured duration, and a daemon heartbeat thread rewrites agent_status
+ *  every 10s with live proof fields (runner_pid, last_event_id, provider
+ *  stream state, first/last-token timestamps) — so "is the sandbox actually
+ *  executing?" is answerable from OUTSIDE with observed facts, and the
+ *  watchdog can distinguish a live long tool (fresh heartbeat) from a dead
+ *  runner (stale status + pgrep miss). All event types/fields are ADDITIVE —
+ *  byte-compatible with the v6 vocabulary the frontend already maps. */
+export const HEADLESS_RUNNER_VERSION = 7;
 
 export const RUNNER_PATH = "/home/user/headless_runner.py";
 export const AGENT_DIR = "/home/user/.onyx/agent";
@@ -68,6 +80,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -79,7 +92,7 @@ STATUS_PATH = HOME + "/agent_status.json"
 TODOS_PATH = HOME + "/todos.json"
 EVENTS_PATH = HOME + "/agent_events.jsonl"
 
-RUNNER_VERSION = 6
+RUNNER_VERSION = 7
 # USER DIRECTIVE: "remove the limit of 24 rounds" — the round budget is now
 # effectively unlimited; the real bound is the wall-clock execution window.
 MAX_ROUNDS_DEFAULT = 400
@@ -300,6 +313,67 @@ def reset_events():
             f.write("")
     except Exception:
         pass
+
+# ---------------------------------------------------------------------------
+# EXECUTION-PROOF TELEMETRY (v7, PRD §3/§7/§8). PROOF is the runner's live
+# observed state — every field is stamped by an ACTUAL event (a connected
+# socket, an arrived token, a dispatched handler), never an assumption. It
+# rides agent_status.json so the outside world can answer "is the sandbox
+# really executing?" with facts: runner pid, provider stream state, first /
+# last token timestamps, the in-flight tool's idempotency key.
+# ---------------------------------------------------------------------------
+
+PROOF = {
+    "request_id": None,        # id of the CURRENT (or last) provider request
+    "stream_state": "idle",    # idle | connecting | streaming | non_stream | failed
+    "first_token_at": None,    # ms — first arrived token/reasoning/tool_call fragment
+    "last_token_at": None,     # ms — most recent arrived fragment (staleness = stalled)
+    "tool_execution_id": None, # texec_<call_id> of the in-flight (or last) tool
+    "tool_name": None,
+    "round": 0,
+}
+LAST_STATUS = None            # last status payload write_status produced
+HEARTBEAT_STOP = threading.Event()
+
+def new_request_id():
+    return "req_" + os.urandom(6).hex()
+
+def proof_status_fields():
+    return {
+        "runner_pid": os.getpid(),
+        "last_event_id": EVENT_SEQ,
+        "provider_request_id": PROOF["request_id"],
+        "provider_stream": PROOF["stream_state"],
+        "first_token_at": PROOF["first_token_at"],
+        "last_token_at": PROOF["last_token_at"],
+        "current_tool_execution_id": PROOF["tool_execution_id"],
+    }
+
+def _heartbeat_loop():
+    """Daemon heartbeat (v7): rewrite agent_status.json every 10s while the
+    run is active. Without it last_update FROZE for the whole duration of a
+    long tool call (status only changed on stage transitions), so an outside
+    watcher could not tell a live 5-minute terminal run from a dead runner.
+    The heartbeat carries the proof fields, so token staleness (provider
+    quiet) is observable separately from process liveness."""
+    while not HEARTBEAT_STOP.wait(10.0):
+        snapshot = LAST_STATUS
+        if not snapshot or snapshot.get("status") not in ("running", "starting"):
+            return
+        try:
+            payload = dict(snapshot)
+            payload["last_update"] = int(now() * 1000)
+            payload.update(proof_status_fields())
+            write_json(STATUS_PATH, payload)
+        except Exception:
+            pass  # the heartbeat is diagnostic — never fatal
+
+def start_heartbeat():
+    HEARTBEAT_STOP.clear()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
+
+def stop_heartbeat():
+    HEARTBEAT_STOP.set()
 
 class DeltaBatcher:
     """Batch token deltas before writing an event line — one JSONL entry per
@@ -675,7 +749,7 @@ STREAM_MODE = "on"
 MODEL_TRIES = set()
 
 
-def parse_sse_stream(resp):
+def parse_sse_stream(resp, req_id):
     """SSE-parse a streaming chat completion (OpenAI chunk format).
 
     Emits batched response.delta AND reasoning.delta events as tokens arrive
@@ -687,13 +761,34 @@ def parse_sse_stream(resp):
     history. Returns the same reply dict the non-streaming path builds,
     plus a "reasoning" field. Raises on a dead stream (no content, no
     reasoning, no tool calls, no finish) so the retry ladder — not a bogus
-    "budget exhausted" ending — handles empty gateway responses."""
+    "budget exhausted" ending — handles empty gateway responses.
+
+    v7 PROOF: the first arrived fragment emits provider.first_token (an
+    OBSERVED event — the gateway delivered bytes), and every fragment
+    stamps PROOF["last_token_at"] so the heartbeat can distinguish "model
+    is thinking/tokens arriving" from "provider stream stalled"."""
     content_parts = []
     reasoning_parts = []
     tool_acc = {}
     finish_reason = None
     batcher = DeltaBatcher()
     think_batcher = DeltaBatcher("reasoning.delta")
+    first_token_kind = None
+
+    def mark_fragment(kind):
+        nonlocal first_token_kind
+        ts = int(now() * 1000)
+        PROOF["last_token_at"] = ts
+        if first_token_kind is None:
+            first_token_kind = kind
+            PROOF["first_token_at"] = ts
+            PROOF["stream_state"] = "streaming"
+            emit_event("provider.first_token", {
+                "request_id": req_id,
+                "kind": kind,
+                "ts": ts,
+            })
+
     for raw in resp:
         line = raw.decode("utf-8", "replace").strip()
         if not line or not line.startswith("data:"):
@@ -714,6 +809,7 @@ def parse_sse_stream(resp):
         if isinstance(text, str) and text:
             content_parts.append(text)
             batcher.add(text)
+            mark_fragment("content")
         # Thinking-model chain-of-thought — every known field name, one batcher.
         thought = None
         for key in ("reasoning_content", "reasoning", "thinking"):
@@ -724,7 +820,9 @@ def parse_sse_stream(resp):
         if thought is not None:
             reasoning_parts.append(thought)
             think_batcher.add(thought)
+            mark_fragment("reasoning")
         for tc in (delta.get("tool_calls") or []):
+            mark_fragment("tool_call")
             try:
                 idx = int(tc.get("index") or 0)
             except Exception:
@@ -741,6 +839,7 @@ def parse_sse_stream(resp):
             finish_reason = choice.get("finish_reason")
     batcher.flush()
     think_batcher.flush()
+    PROOF["stream_state"] = "idle"
     if not content_parts and not tool_acc and not reasoning_parts:
         raise LlmError("empty streaming response from the model gateway")
     tool_calls = []
@@ -829,22 +928,58 @@ def llm_chat(cfg, messages, use_tools):
         headers=headers,
         method="POST",
     )
+    # v7 PROOF: an OBSERVED request lifecycle — the id is generated here, the
+    # connected/failed events fire on real socket outcomes. No keys, no
+    # message content — just the facts an outside watchdog needs.
+    req_id = new_request_id()
+    PROOF["request_id"] = req_id
+    PROOF["stream_state"] = "connecting"
+    PROOF["first_token_at"] = None
+    PROOF["last_token_at"] = None
+    emit_event("provider.request_started", {
+        "request_id": req_id,
+        "model": model,
+        "stream": body.get("stream") is True,
+        "tools": use_tools,
+        "wire_mode": TOOLS_WIRE_MODE,
+    })
     try:
         with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS) as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if body.get("stream") and "event-stream" in ctype:
-                return parse_sse_stream(resp)
+                emit_event("provider.stream_connected", {
+                    "request_id": req_id,
+                    "content_type": ctype[:60],
+                })
+                return parse_sse_stream(resp, req_id)
             # A gateway that IGNORES stream:true and answers plain JSON — or a
             # deliberate non-stream request — takes the legacy path.
+            emit_event("provider.stream_connected", {
+                "request_id": req_id,
+                "content_type": ctype[:60],
+                "mode": "non_stream",
+            })
+            PROOF["stream_state"] = "non_stream"
             payload = json.loads(resp.read().decode("utf-8", "replace"))
+            emit_event("provider.response_received", {"request_id": req_id})
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
             detail = exc.read().decode("utf-8", "replace")[:500]
         except Exception:
             pass
+        PROOF["stream_state"] = "failed"
+        emit_event("provider.request_failed", {
+            "request_id": req_id,
+            "http_status": exc.code,
+        })
         raise LlmError("HTTP %d from the model gateway: %s" % (exc.code, detail), exc.code)
     except Exception as exc:
+        PROOF["stream_state"] = "failed"
+        emit_event("provider.request_failed", {
+            "request_id": req_id,
+            "http_status": None,
+        })
         raise LlmError(str(exc))
 
     try:
@@ -910,6 +1045,10 @@ def llm_chat_with_retries(cfg, messages, use_tools):
                     tried.add(nxt)
                     if str(cfg.get("model") or "") not in tried:
                         tried.add(str(cfg.get("model") or ""))
+                    emit_event("provider.model_fallback", {
+                        "from": str(cfg.get("model") or ""),
+                        "to": nxt,
+                    })
                     log("model %s unavailable — switching to fallback %s" % (cfg.get("model"), nxt))
                     cfg["model"] = nxt
                     return llm_chat_with_retries(cfg, messages, use_tools)
@@ -917,19 +1056,23 @@ def llm_chat_with_retries(cfg, messages, use_tools):
                 # rung A — explicit stream rejection (before touching tools).
                 if STREAM_MODE == "on" and "stream" in str(exc).lower():
                     STREAM_MODE = "off"
+                    emit_event("provider.compatibility", {"mode": "stream_off"})
                     log("gateway rejected stream:true — falling back to non-streaming requests")
                     return llm_chat_with_retries(cfg, messages, use_tools)
                 if use_tools:
                     if TOOLS_WIRE_MODE == "full":
                         TOOLS_WIRE_MODE = "tools"
+                        emit_event("provider.compatibility", {"mode": "tool_choice_dropped"})
                         log("gateway rejected the tool_choice param — retrying with tools only (tool_choice dropped)")
                         return llm_chat_with_retries(cfg, messages, use_tools)
                     if not WIRE_SANITIZE and any(m.get("role") == "tool" for m in messages):
                         WIRE_SANITIZE = True
+                        emit_event("provider.compatibility", {"mode": "tool_role_flattened"})
                         log("gateway rejected the tool-role messages — flattening tool traffic to plain text (tools kept)")
                         return llm_chat_with_retries(cfg, messages, use_tools)
                     DEGRADED = True
                     TOOLS_WIRE_MODE = "text"
+                    emit_event("provider.compatibility", {"mode": "tools_off_degraded"})
                     log("gateway rejected the tools payload — DEGRADING to a text-only run (the final message will say so)")
                     return llm_chat_with_retries(cfg, messages, False)
                 # A tools-off request still 400s — the stream param is the
@@ -952,6 +1095,12 @@ def llm_chat_with_retries(cfg, messages, use_tools):
             transient = exc.http_status is None or exc.http_status in (408, 409, 429, 500, 502, 503, 504) or exc.http_status >= 500
             if not transient or attempt == LLM_RETRIES:
                 raise
+            emit_event("provider.request_retry", {
+                "attempt": attempt,
+                "retries": LLM_RETRIES,
+                "http_status": exc.http_status,
+                "delay_s": delay,
+            })
             log("LLM attempt %d/%d failed (%s) — retrying in %.0fs" % (attempt, LLM_RETRIES, exc, delay))
             time.sleep(delay)
             delay = min(delay * 2, 30.0)
@@ -983,6 +1132,12 @@ def write_status(status, stage=None, round_no=None, total_rounds=None,
         "degraded": DEGRADED,
         "tools_wire_mode": TOOLS_WIRE_MODE,
     }
+    # v7: observed execution-proof fields ride EVERY status write (and the
+    # 10s heartbeat between them) — pid, replay-cursor position, provider
+    # stream state, token timestamps, in-flight tool key.
+    payload.update(proof_status_fields())
+    global LAST_STATUS
+    LAST_STATUS = payload
     write_json(STATUS_PATH, payload)
 
 # ---------------------------------------------------------------------------
@@ -1028,13 +1183,27 @@ def main():
         "max_rounds": total_rounds,
         "seed_count": len(messages),
     })
+    # v7: the heartbeat keeps agent_status.json fresh every 10s for the whole
+    # run (long tools no longer freeze last_update) and carries the proof
+    # fields — the outside watchdog can see a live process + token activity.
+    start_heartbeat()
 
     use_tools = True
     final_text = ""
     failure = None
 
     for round_no in range(1, total_rounds + 1):
+        PROOF["round"] = round_no
         emit_event("round.started", {"round": round_no, "total_rounds": total_rounds})
+        if round_no > 1:
+            # CONTINUATION PROOF: this round only runs because the previous
+            # round's tool results were appended to the context and sent back
+            # to the provider — the counts prove the loop, not a restart.
+            emit_event("provider.continuation_started", {
+                "round": round_no,
+                "tool_results_in_context": sum(1 for m in messages if m.get("role") == "tool"),
+                "message_count": len(messages),
+            })
         try:
             reply = llm_chat_with_retries(cfg, messages, use_tools)
         except LlmError as exc:
@@ -1073,6 +1242,10 @@ def main():
             call_id = str((spec or {}).get("id") or ("call_%d" % int(now() * 1000)))
             fn = (spec or {}).get("function") or {}
             name = str(fn.get("name") or "")
+            # IDEMPOTENCY KEY (PRD §4): run_id + the provider's call_id — a
+            # reconnect/replay never re-executes a tool; the key identifies
+            # THIS dispatch in every event, status field and the history.
+            tool_execution_id = "texec_" + (call_id or ("cx_%d" % int(now() * 1000)))
             try:
                 call_args = json.loads(fn.get("arguments") or "{}")
                 if not isinstance(call_args, dict):
@@ -1081,16 +1254,38 @@ def main():
                 call_args = None
 
             handler = TOOL_HANDLERS.get(name)
-            emit_event("tool.started", {"call_id": call_id, "name": name, "args": call_args if isinstance(call_args, dict) else None})
+            emit_event("tool.started", {
+                "call_id": call_id,
+                "name": name,
+                "tool_execution_id": tool_execution_id,
+                "args": call_args if isinstance(call_args, dict) else None,
+            })
+            PROOF["tool_execution_id"] = tool_execution_id
+            PROOF["tool_name"] = name
+            dispatch_started = now()
             if call_args is None:
                 result = "error: tool arguments were not valid JSON"
+                dispatched = False
             elif handler is None:
                 result = "error: unknown tool: " + name
+                dispatched = False
             else:
+                # DISPATCH CONFIRMED (PRD §4): this event fires immediately
+                # before the handler runs — a tool card may only claim
+                # "executing" from this moment on, and tool.result carries
+                # the measured duration of the REAL execution.
+                dispatched = True
+                emit_event("tool.dispatched", {
+                    "tool_execution_id": tool_execution_id,
+                    "call_id": call_id,
+                    "name": name,
+                    "dispatch_confirmed": True,
+                })
                 try:
                     result = handler(call_args)
                 except Exception as exc:
                     result = "error: " + str(exc)
+            duration_ms = int((now() - dispatch_started) * 1000)
 
             if not isinstance(result, str):
                 try:
@@ -1101,9 +1296,14 @@ def main():
             emit_event("tool.result", {
                 "call_id": call_id,
                 "name": name,
+                "tool_execution_id": tool_execution_id,
+                "dispatched": dispatched,
+                "duration_ms": duration_ms,
                 "ok": not str(result).startswith("error:"),
                 "result": str(result)[:4000],
             })
+            PROOF["tool_execution_id"] = None
+            PROOF["tool_name"] = None
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -1118,6 +1318,7 @@ def main():
                      prompt_preview=prompt_preview)
 
     if failure is not None:
+        stop_heartbeat()
         emit_event("run.failed", {"error": failure, "round": round_no})
         write_status("failed", stage="error", round_no=total_rounds, total_rounds=total_rounds,
                      error=failure, prompt_preview=prompt_preview, finished=True)
@@ -1145,6 +1346,7 @@ def main():
         final_text = messages[-1]["content"]
         write_json(HISTORY_PATH, messages)
 
+    stop_heartbeat()
     emit_event("response.completed", {
         "content": final_text,
         "degraded": DEGRADED,
@@ -1162,9 +1364,11 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
+        stop_heartbeat()
         write_status("stopped", finished=True)
         sys.exit(130)
     except Exception as fatal:
+        stop_heartbeat()
         try:
             write_status("failed", stage="error", error=str(fatal), finished=True)
         except Exception:
