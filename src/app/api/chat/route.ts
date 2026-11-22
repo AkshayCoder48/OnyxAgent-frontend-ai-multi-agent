@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { NextResponse, type NextRequest } from "next/server";
 import {
   cancelTurnJob,
@@ -10,6 +11,10 @@ import type { RouterMessage } from "@/lib/agent/router";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Streaming SSE + (see below) the post-response continuation both draw on
+// this budget. 300s matches the sandbox route; plans that cap lower simply
+// clamp it.
+export const maxDuration = 300;
 
 const MAX_MESSAGES = 16;
 const MAX_CHARS = 8000;
@@ -171,6 +176,59 @@ export async function POST(request: NextRequest) {
   /* The job keeps running when this connection drops.                */
   /* ---------------------------------------------------------------- */
   const attachedJob = job;
+
+  /* SERVERLESS CONTINUATION (Vercel). The turn pipeline is a
+   * fire-and-forget promise inside this function's process — the
+   * platform cannot see it and freezes the invocation as soon as the
+   * response completes. That is the "close the tab, the run dies" bug:
+   * the SSE viewer IS the response, so a tab close ends it and the
+   * in-memory job froze with it a moment later.
+   *
+   * `after()` anchors the job's completion to the request lifecycle:
+   * when the viewer drops (tab close, network cut), the invocation
+   * stays alive and keeps executing the pipeline — accumulating events
+   * in the job log — until the turn finishes or maxDuration runs out.
+   * A returning client reattaches by turnId and replays what it missed
+   * (same warm instance: full continuation; different instance: the
+   * client's gone → resumeFrom rebuild path takes over).
+   *
+   * When the viewer stays attached for the whole turn the promise is
+   * already settled by the time after() runs it — zero extra cost. On a
+   * long-lived server (Docker/next start) this is a harmless no-op: the
+   * process never freezes the detached promise anyway. */
+  if (!attachedJob.done) {
+    after(
+      new Promise<void>((resolve) => {
+        if (attachedJob.done) return resolve();
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          stopTimer();
+          unsubscribeHold();
+          resolve();
+        };
+        const unsubscribeHold = attachedJob.subscribe((indexed) => {
+          if (
+            indexed.event.type === "done" ||
+            indexed.event.type === "error" ||
+            indexed.event.type === "cancelled"
+          ) {
+            settle();
+          }
+        });
+        const stopTimer = () => {
+          if (timer) clearTimeout(timer);
+        };
+        // Safety cap: never hold the request context longer than the
+        // job's own TTL window (self-hosted servers would otherwise keep
+        // the settled-check timer alive for nothing).
+        const timer = setTimeout(settle, 16 * 60_000);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    );
+  }
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({

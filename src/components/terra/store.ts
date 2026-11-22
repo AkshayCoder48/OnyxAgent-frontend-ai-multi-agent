@@ -1082,12 +1082,24 @@ export const useTerra = create<TerraState>()((set, get) => {
     const historyMessages = conversation.messages.slice(0, targetIndex);
     if (historyMessages.length === 0) return;
 
+    // Seed the draft with the partial answer that survived in the
+    // snapshot. If the server no longer has the job (serverless instance
+    // recycled, server restart), runStream's gone-path rebuilds the turn
+    // once with this as the resumeFrom base — the reply CONTINUES from
+    // the partial instead of restarting from scratch.
+    const partialText =
+      (targetMsg.parts ?? [])
+        .filter((p) => p.type === "text")
+        .map((p) => (p as { type: "text"; text: string }).text)
+        .join("\n\n")
+        .trim() || targetMsg.text.trim();
+
     draft = {
       convId: targetConvId,
       msgId: targetMsg.id,
       turnId: targetMsg.turnId,
       reasoning: "",
-      answer: "",
+      answer: partialText,
       builtParts: [],
       route: null,
       notice: "Resuming your reply…",
@@ -1105,7 +1117,12 @@ export const useTerra = create<TerraState>()((set, get) => {
     const isCode =
       get().conversations.find((c) => c.id === targetConvId)?.mode === "code";
     void runStream(targetConvId, history, targetMsg.turnId, {
-      allowRestart: false,
+      // allowRestart: a missing job (serverless tab-close freeze is the
+      // classic cause) rebuilds once with the seeded partial as the
+      // resume base — the "close the app, come back to finished work"
+      // promise. The rebuild is a CONTINUATION, never a silent restart:
+      // with no partial it degenerates to answering the same prompt.
+      allowRestart: true,
       codeWorkspaceId: isCode ? targetConvId : null,
     });
   };
