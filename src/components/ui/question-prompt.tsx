@@ -1,5 +1,8 @@
 "use client";
 
+import { BorderBeam } from "@/components/ui/border-beam";
+
+
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { CornerDownLeft, Pencil, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -60,7 +63,7 @@ export function QuestionPrompt({ questions, disabled = false, onComplete }: Ques
     // shows THROUGH the card, hairline glass border, elevation-2 shadow.
     // Never an opaque slab floating over the conversation.
     <div
-      className="overflow-hidden rounded-2xl border"
+      className="relative overflow-hidden rounded-2xl border"
       style={{
         backgroundColor: "var(--glass-frost-fill)",
         borderColor: "var(--glass-border)",
@@ -69,6 +72,8 @@ export function QuestionPrompt({ questions, disabled = false, onComplete }: Ques
         boxShadow: "var(--glass-shadow-2)",
       }}
     >
+      {/* BORDER BEAM — active question UI (Magic UI PRD §5) */}
+      <BorderBeam />
       <div className="flex items-center justify-between gap-3 px-4 pt-2.5 pb-0.5">
         {total > 1 ? (
           <span className="text-muted-foreground font-mono text-[10px] tracking-wider uppercase">

@@ -1,5 +1,7 @@
 "use client";
 
+import { ShineBorder } from "@/components/ui/shine-border";
+
 import * as React from "react";
 import { cn } from "@/lib/utils";
 import type { GenUINode, GenUISpec } from "@/lib/genui/types";
@@ -75,7 +77,9 @@ export function GenUICreationGate({
   return (
     <div className="relative">
       {showBlock ? (
-        <div className="mb-blur-in">
+        // SHINE BORDER — AI-generated visual preview (Magic UI PRD §12).
+        <div className="mb-blur-in relative">
+          <ShineBorder />
           <GenUIBlock spec={spec!} streaming={false} />
         </div>
       ) : null}

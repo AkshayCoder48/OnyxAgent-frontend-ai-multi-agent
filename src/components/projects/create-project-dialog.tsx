@@ -1,5 +1,7 @@
 "use client";
 
+import { RainbowButton } from "@/components/ui/rainbow-button";
+
 /**
  * CreateProjectDialog (Task 1-b, PRD §4 + §8 + §9.2/§9.8) — the single,
  * polished, fully-manual project creation AND editing surface.
@@ -983,7 +985,8 @@ export function CreateProjectDialog({
           >
             Cancel
           </Button>
-          <Button
+          {/* RAINBOW BUTTON — the primary Create action (Magic UI PRD §4). */}
+          <RainbowButton
             type="button"
             onClick={() => void handleSubmit()}
             disabled={!canSubmit}
@@ -1003,7 +1006,7 @@ export function CreateProjectDialog({
                 <Blocks className="h-4 w-4" aria-hidden /> Create project
               </>
             )}
-          </Button>
+          </RainbowButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

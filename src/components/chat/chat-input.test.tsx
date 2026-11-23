@@ -90,7 +90,7 @@ describe("composer redesign (PRD §5)", () => {
 
   it("Enter sends, Shift+Enter does not (keyboard contract intact)", () => {
     const { onSend } = setup();
-    const textarea = screen.getByPlaceholderText(/Reply to OnyxAgent/);
+    const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
     fireEvent.change(textarea, { target: { value: "hello" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
     expect(onSend).not.toHaveBeenCalled();
@@ -103,7 +103,7 @@ describe("composer redesign (PRD §5)", () => {
     const { onSend } = setup();
     const send = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
-    const textarea = screen.getByPlaceholderText(/Reply to OnyxAgent/);
+    const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
     fireEvent.change(textarea, { target: { value: "x" } });
     expect(send.disabled).toBe(false);
     expect(onSend).not.toHaveBeenCalled();

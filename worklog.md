@@ -1078,3 +1078,31 @@ Work Log:
 
 Stage Summary:
 - The close-and-resume lane is now verified LIVE on production (pause beacon rejected, run survives a fully-closed browser, lands complete) and hardened against the last two known reattach races (vault-key cold-boot grace, stale isStreaming unblock). If a freeze is still observed after this deploys, the next data point is the browser console during the refresh — every remaining code path that can freeze a checkpoint is now covered.
+
+## 2026-11-23 — feat(magic-ui): Unified Activity Bar + Rainbow Button / Border Beam / Typing Animation / Shine Border (PRD "Unified Activity Bar & Premium Magic UI Integration")
+
+Task ID: 37
+Agent: main (Z.ai Code)
+Task: The uploaded PRD — Part A: consolidate ALL per-response execution UI (thinking, reasoning summaries, tool calls + results, progress, completion) into ONE collapsible Activity Bar with a dynamic summary. Part B/C: integrate the four Magic UI components (Rainbow Button, Border Beam, Typing Animation, Shine Border) at the PRD's prescribed locations. Part D: centralized config. Part E: perf + reduced-motion.
+
+Work Log:
+- COMPONENTS (adapted per PRD §15 — repo runs framer-motion 12, NOT the `motion` package; imports adapted, no new deps):
+  * ui/rainbow-button.tsx — Magic UI RainbowButton (cva + Radix Slot), default/outline × default/sm/lg/icon, motion-safe animation, disabled + focus-visible states.
+  * ui/border-beam.tsx — beam travels the border via CSS offset-path + framer-motion; the border mask is INLINE CSS (no dependency on the newest TW mask utilities); unmounts off-screen (useInView) and renders nothing under reduced motion.
+  * ui/typing-animation.tsx — Magic UI TypingAnimation (grapheme-safe via Array.from, words loop, blink cursor); reduced motion renders the current suggestion statically with zero timers.
+  * ui/shine-border.tsx — pure-CSS animated border ring (motion-safe), single/multicolor.
+  * config/magic-ui.ts — the PRD §13 MagicUIConfig with Onyx defaults (cyan beam 40px/8s; typing 65ms/char; shine 14s cyan family) + the usage-map documentation.
+  * globals.css — rainbow palette vars (--color-1..5) + @theme animations (rainbow / shine / blink-cursor keyframes, the repo's established @theme-keyframes pattern).
+- PART A — UNIFIED ACTIVITY BAR (components/chat/activity-bar.tsx + message-item.tsx restructure):
+  * ONE collapsible container per assistant response hosting the ENTIRE execution timeline (thinking rows + every tool card + browser groups) — no per-tool panels. The header carries the dynamic summary: live caption via statusCaptionFor ("Thinking…" / "Searching “q”" / "Writing · Used 1 tool"), settled "Worked 2m 34s · Used 4 tools", failed "Stopped after 42s · Used 3 tools" (generation.durationMs; NEW fallback derives from toolCall startedAt/endedAt + thinking stamps). Auto-fold on settle, auto-open while live (approval-gated tools never fold). Chronological order preserved; the answer texts render after the bar; the inline todo plan renders above it; legacy (pre-parts) messages synthesize the same items from thinking/reasoning/toolCalls; AgentStatusLine retires for bar-hosted turns (no duplicate status).
+  * DURATION PERSISTENCE FIX found during E2E: `generation` was written to Dexie by the landing but dropped by EVERY row→ChatMessage mapping (conversation-to-chat mapper, refreshConversationRows, execution seeding, detached-run landing sync, chat-container's paint). All five now carry it — live, reload, and conversation-switch all show the true duration.
+- PART B — INTEGRATIONS (per the PRD's "important actions / active containers / empty composer / media previews" doctrine, never clutter):
+  * Composer: TypingAnimation placeholder overlay when empty (pointer-events-none + aria-hidden — clicks/IME/cursor/mobile keyboard stay on the textarea; unmounts the instant typing starts, resumes on clear); RainbowButton as the Send; BorderBeam on the composer dock.
+  * BorderBeam: model/provider ChatControls popover (open = active), QuestionPrompt, PollinationsConfirm approval card, ComposerTodoPanel (gated on anyActive — settles off with the plan).
+  * RainbowButton: create-project dialog submit; "Create your first project" empty state (outline variant).
+  * ShineBorder: generated-image container, media-generation image + video results, GenUICreationGate's completed block, and ONE subtle ring around the whole web/image/video search results gallery (never per-thumbnail, PRD §8).
+- TESTS: suite identical to the pre-change baseline (525 pass / 452 environment failures — this sandbox's Bun lacks DOM + vi.* APIs; zero new failures). chat-input.test.tsx placeholder queries updated to the aria-label (the placeholder attribute is gone by design). tsc: zero new errors. Production build green ×4.
+- BROWSER E2E (production build, live agent turn): typing overlay cycles ("Ask Onyx anything…"|"Build a complete website…"…), hides on typing, resumes on clear (real keystrokes); rainbow send button live; dock beam computing offset-distance mid-travel (cyan); popover beam animating; ActivityBar live "Writing · Used 1 tool" → settled "Worked 17s · Used 1 tool" → auto-collapsed (aria-expanded=false) → expandable timeline → duration SURVIVES reload + conversation switch (IndexedDB row verified: generation {durationMs} + parts).
+
+Stage Summary:
+- The PRD is implemented end-to-end: one Activity Bar per response (everything inside it, dynamic honest summaries, SSE-live, refresh-persistent), the four Magic UI components at their prescribed homes, a centralized config, reduced-motion + off-screen guards throughout, and zero test regressions. Visual fingerprints verified live in a real browser on the production build.

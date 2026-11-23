@@ -1,5 +1,8 @@
 "use client";
 
+import { BorderBeam } from "@/components/ui/border-beam";
+
+
 import { memo, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -231,7 +234,7 @@ export const PollinationsConfirmDialog = memo(function PollinationsConfirmDialog
     <div
       role="dialog"
       aria-label={`Pollinations ${kind.toLowerCase()} generation confirmation`}
-      className="step-card-in mb-2 w-full max-w-xl overflow-hidden rounded-xl border"
+      className="step-card-in relative mb-2 w-full max-w-xl overflow-hidden rounded-xl border"
       style={{
         backgroundColor: "var(--glass-frost-fill)",
         borderColor: "var(--glass-border)",
@@ -240,10 +243,13 @@ export const PollinationsConfirmDialog = memo(function PollinationsConfirmDialog
         boxShadow: "var(--glass-shadow-2)",
       }}
     >
+        {/* BORDER BEAM — active approval UI (Magic UI PRD §5) */}
+        <BorderBeam />
       {/* Header */}
       <div className="flex items-start justify-between gap-3 px-4 pt-3">
         <div className="min-w-0">
-          <p className={monoLabelClass}>Pollinations · {kind}</p>
+          <p className={monoLabelClass}>
+Pollinations · {kind}</p>
           <h3 className="mt-0.5 text-[15px] leading-snug font-semibold text-foreground">
             {isPrepare ? "What would you like to generate?" : "Ready to generate?"}
           </h3>

@@ -29,6 +29,9 @@ export interface RawMessage {
   reasoning?: string | null;
   /** Persisted ordered timeline (assistant turns). */
   parts?: MessagePart[] | null;
+  /** Execution summary stamped at settle (duration/failed/stopped) — the
+   *  Activity Bar's "Worked 2m 34s" header. */
+  generation?: ChatMessage["generation"];
 }
 
 /**
@@ -154,6 +157,7 @@ export function conversationMessageToChatMessage(msg: RawMessage): ChatMessage {
     rating_count: msg.rating_count ?? undefined,
     files,
     fileIds: files?.map((f) => f.id),
+    generation: msg.generation ?? undefined,
   };
 }
 

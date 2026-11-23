@@ -1,5 +1,8 @@
 "use client";
 
+import { BorderBeam } from "@/components/ui/border-beam";
+
+
 import { memo, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Check, ChevronDown, Cpu, FlaskConical, Search, Server, Settings2 } from "lucide-react";
@@ -293,6 +296,8 @@ export const ChatControls = memo(function ChatControls({
         sideOffset={8}
         className="border-border bg-popover relative w-[min(380px,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border p-0 shadow-md"
       >
+        {/* BORDER BEAM — active selection interface (Magic UI PRD §5) */}
+        <BorderBeam />
         <div className="border-foreground/10 flex items-center gap-1 border-b p-2">
           {onModelChange && (
             <TabButton

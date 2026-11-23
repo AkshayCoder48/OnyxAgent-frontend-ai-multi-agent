@@ -1,5 +1,8 @@
 "use client";
 
+import { BorderBeam } from "@/components/ui/border-beam";
+
+
 import { useEffect, useState } from "react";
 import { ChevronDown, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -128,6 +131,10 @@ export function ComposerTodoPanel() {
         boxShadow: "var(--glass-shadow-1)",
       }}
     >
+      {/* BORDER BEAM — active todo/plan container (Magic UI PRD §5);
+          settles off with the plan so the resting card keeps its normal
+          glass border. */}
+      {anyActive && <BorderBeam />}
       {/* HEADER — whole row toggles; progress reads "N of M complete" */}
       <button
         type="button"

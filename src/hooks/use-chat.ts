@@ -130,6 +130,7 @@ async function refreshConversationRows(conversationId: string, userId: string): 
               | import("@/types").MessagePart[]
               | null
               | undefined,
+            generation: (row as { generation?: ChatMessage["generation"] }).generation,
           }),
         ),
       });
@@ -1462,6 +1463,7 @@ export function useChat(options: UseChatOptions = {}) {
                     | import("@/types").MessagePart[]
                     | null
                     | undefined,
+                    generation: (r as { generation?: ChatMessage["generation"] }).generation,
                 }),
               ),
             );

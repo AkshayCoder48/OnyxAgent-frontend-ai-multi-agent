@@ -1,5 +1,7 @@
 "use client";
 
+import { RainbowButton } from "@/components/ui/rainbow-button";
+
 /**
  * ProjectSection — the PROJECTS area of the chat sidebar (Task 1-b, PRD §3.2).
  *
@@ -687,14 +689,17 @@ export function ProjectSection({ onNavigate }: ProjectSectionProps) {
           )}
 
           {hydrated && totalActive === 0 && archivedProjects.length === 0 && !q ? (
-            <button
+            // RAINBOW BUTTON (outline) — the empty-state primary action
+            // (Magic UI PRD §4: "primary actions inside empty states").
+            <RainbowButton
               type="button"
+              variant="outline"
               onClick={openCreate}
-              className="text-muted-foreground hover:bg-foreground/5 hover:text-foreground mb-1 flex w-full items-center gap-2 rounded-xl border border-dashed border-border px-3 py-2.5 text-left text-[13px] transition-colors"
+              className="text-muted-foreground hover:text-foreground mb-1 flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[13px]"
             >
               <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden />
               Create your first project
-            </button>
+            </RainbowButton>
           ) : (
             <div
               className={cn(

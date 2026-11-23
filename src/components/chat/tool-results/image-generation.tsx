@@ -1,5 +1,7 @@
 "use client";
 
+import { ShineBorder } from "@/components/ui/shine-border";
+
 import * as React from "react";
 import { AlertTriangle, Download, ExternalLink, RefreshCw } from "lucide-react";
 import type { ToolCall } from "@/types";
@@ -205,6 +207,8 @@ export function ImageGenerationBlock({ toolCall }: { toolCall: ToolCall }) {
   return (
     <figure className="step-card-in w-full max-w-sm space-y-2 py-1" data-slot="image-generation-result">
       <div className="relative overflow-hidden rounded-xl border border-border bg-muted/40">
+        {/* SHINE BORDER — generated media preview (Magic UI PRD §7/§10) */}
+        <ShineBorder />
         {regenState.kind === "running" ? (
           <ImageGeneration
             prompt={promptCaption}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@/hooks";
+import { BorderBeam } from "@/components/ui/border-beam";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatInput } from "./chat-input";
 import { FilePreviewPanel } from "./file-preview-panel";
@@ -17,7 +18,7 @@ import { PendingMessages } from "./pending-messages";
 import { ComposerTodoPanel } from "./composer-todo-panel";
 import { PollinationsConfirmDialog } from "./pollinations-confirm";
 import { QuestionPrompt } from "@/components/ui";
-import type { AskUserQuestion, AskUserAnswer } from "@/types";
+import type { ChatMessage, AskUserQuestion, AskUserAnswer } from "@/types";
 import { useConversationStore, useChatStore, useAuthStore } from "@/stores";
 import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-store";
 import { useConversations } from "@/hooks";
@@ -680,6 +681,7 @@ export function ChatContainer(
           | import("@/types").MessagePart[]
           | null
           | undefined,
+        generation: (msg as { generation?: ChatMessage["generation"] }).generation,
       });
       painted.push(chatMsg);
     });
@@ -1164,8 +1166,13 @@ function ChatUI({
               strip, no separator. The composer's own bottom control bar
               carries attachments, voice, the model selector and send/stop
               (the old Live · Context% · ⏎ row is gone — §5.1). z-2: the
-              dock overlaps the plan panel's tucked bottom edge. */}
+              dock overlaps the plan panel's tucked bottom edge.
+              BORDER BEAM (Magic UI PRD §5): the main prompt composer is THE
+              flagship active container — a subtle cyan beam laps its border
+              (decorative only: masked to the border ring; reduced-motion and
+              off-screen render nothing). */}
           <div className="composer-dock mb-morph relative z-[2] rounded-2xl input-focus-glow">
+            <BorderBeam />
             <div className="px-2.5 py-2.5 sm:px-4 sm:py-3.5">
               <ChatInput
                 key={conversationId ?? "new-chat"}

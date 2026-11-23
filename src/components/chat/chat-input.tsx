@@ -2,6 +2,9 @@
 
 import { memo, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
+import { RainbowButton } from "@/components/ui/rainbow-button";
+import { TypingAnimation } from "@/components/ui/typing-animation";
+import { MAGIC_UI_CONFIG } from "@/config/magic-ui";
 import { ArrowUp, Loader2, Paperclip, Square } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {
@@ -386,7 +389,15 @@ export const ChatInput = memo(function ChatInput({
       )}
 
       {/* MAIN INPUT AREA — clean multiline text, full width (§5.3). The
-          dock owns the border + focus glow; the textarea itself is bare. */}
+          dock owns the border + focus glow; the textarea itself is bare.
+          TYPING ANIMATION PLACEHOLDER (PRD §6): while the composer is
+          EMPTY, rotating animated suggestions overlay the input — an
+          overlay (not the placeholder attr) because a real placeholder
+          can't animate. pointer-events-none + aria-hidden keep clicks,
+          focus, cursor positioning, IME and mobile keyboards 100% on the
+          textarea; the moment the user types a character the overlay
+          unmounts (their text is never animated), and it resumes when the
+          input clears. */}
       {dictation.active ? (
         <ComposerVoice
           recording={dictation.recording}
@@ -394,16 +405,31 @@ export const ChatInput = memo(function ChatInput({
           interim={dictation.interim}
         />
       ) : (
-        <textarea
-          ref={textareaRef}
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Reply to OnyxAgent… or type / for commands"
-          disabled={disabled}
-          rows={1}
-          className="mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed text-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]"
-        />
+        <div className="relative w-full">
+          {message === "" && !showPalette && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 flex items-start"
+            >
+              <TypingAnimation
+                words={MAGIC_UI_CONFIG.typingAnimation.suggestions}
+                loop
+                className="placeholder:text-muted-foreground/60 mb-height min-h-[40px] w-full py-2.5 text-left text-sm leading-relaxed text-muted-foreground/60 sm:text-[15px]"
+              />
+            </div>
+          )}
+          <textarea
+            ref={textareaRef}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder=""
+            disabled={disabled}
+            rows={1}
+            aria-label="Reply to OnyxAgent… or type / for commands"
+            className="relative mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed text-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]"
+          />
+        </div>
       )}
 
       {/* BOTTOM CONTROL BAR (§5.3): attachments + voice on the left, the
@@ -481,20 +507,20 @@ export const ChatInput = memo(function ChatInput({
                 <Square className="h-3.5 w-3.5 fill-current" />
               </Button>
             ) : (
-              <Button
+              <RainbowButton
                 key="send"
                 type="submit"
                 size="icon"
                 disabled={disabled || !canSend}
                 className={cn(
-                  "icon-swap-in bg-primary text-primary-foreground hover:bg-brand-hover h-9 w-9 rounded-full transition-all disabled:opacity-40",
+                  "icon-swap-in h-9 w-9 rounded-full",
                   canSend && !disabled && "shadow-sm",
                 )}
                 title="Send message"
                 aria-label="Send message"
               >
                 <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
-              </Button>
+              </RainbowButton>
             )}
           </span>
         </div>

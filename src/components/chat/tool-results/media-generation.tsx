@@ -1,5 +1,7 @@
 "use client";
 
+import { ShineBorder } from "@/components/ui/shine-border";
+
 import { useMemo, type ReactNode } from "react";
 import {
   AlertTriangle,
@@ -372,14 +374,18 @@ function ImageResult({ data }: { data: Rec }) {
           ))}
         </div>
       ) : (
-        // eslint-disable-next-line @next/next/no-img-element -- provider/stored media URL, not a static asset
-        <img
-          src={urls[0]!}
-          alt={prompt ?? "Generated image"}
-          className="h-auto w-full max-w-sm rounded-xl border border-border select-none"
-          loading="lazy"
-          draggable={false}
-        />
+        // SHINE BORDER — generated media preview (Magic UI PRD §7/§11).
+        <div className="relative w-full max-w-sm">
+          <ShineBorder />
+          {/* eslint-disable-next-line @next/next/no-img-element -- provider/stored media URL, not a static asset */}
+          <img
+            src={urls[0]!}
+            alt={prompt ?? "Generated image"}
+            className="h-auto w-full rounded-xl border border-border select-none"
+            loading="lazy"
+            draggable={false}
+          />
+        </div>
       )}
       <figcaption className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1 space-y-1">
@@ -405,16 +411,19 @@ function VideoResult({ data }: { data: Rec }) {
   return (
     <div className="step-card-in w-full max-w-sm space-y-2 py-1">
       {urls.map((u, i) => (
-        // eslint-disable-next-line jsx-a11y/media-has-caption -- provider-generated video streams ship no caption tracks; the prompt is exposed as the aria-label
-        <video
-          key={u.slice(0, 64) + i}
-          src={u}
-          controls
-          playsInline
-          preload="metadata"
-          className="w-full max-w-sm rounded-xl border border-border bg-black"
-          aria-label={prompt ? `Generated video: ${prompt}` : "Generated video"}
-        />
+        // SHINE BORDER — generated media preview (Magic UI PRD §7/§11).
+        <div key={u.slice(0, 64) + i} className="relative w-full">
+          <ShineBorder />
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption -- provider-generated video streams ship no caption tracks; the prompt is exposed as the aria-label */}
+          <video
+            src={u}
+            controls
+            playsInline
+            preload="metadata"
+            className="w-full rounded-xl border border-border bg-black"
+            aria-label={prompt ? `Generated video: ${prompt}` : "Generated video"}
+          />
+        </div>
       ))}
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1 space-y-1">

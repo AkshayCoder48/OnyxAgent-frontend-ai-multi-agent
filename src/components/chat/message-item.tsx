@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
-import { ToolStackGroup } from "./tool-stack-group";
+import { ActivityBar, buildFlowItems, type FlowItem } from "./activity-bar";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { BranchPicker } from "./branch-picker";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
@@ -727,68 +727,9 @@ function UserMessageEditor({
   );
 }
 
-/** One chronological step of the generation process, built by walking the
- *  message parts (the execution timeline). Runs of consecutive thinking /
- *  reasoning parts merge into ONE item while the run is open; tool and
- *  text parts stay in place. Research/todo tools are already filtered out
- *  of `parts` (they surface as the inline ResearchPanel instead). */
-type FlowItem =
-  | {
-      kind: "thinking";
-      partId: string;
-      text: string;
-      variant: "thinking" | "reasoning";
-      /** The reasoning stream is still open (no reasoningEndedAt stamp). */
-      open: boolean;
-      /** Round start stamp — drives the "Thought for Ns" duration. */
-      startedAt?: number;
-      /** reasoningEndedAt stamp of the run's last part. */
-      endedAt?: number;
-    }
-  | { kind: "tool"; partId: string; toolCall: import("@/types").ToolCall }
-  | { kind: "text"; partId: string; text: string };
-
-/** Walk the message parts into chronological FlowItems. A closed reasoning
- *  run is never merged into — the next round's thinking starts a fresh
- *  row (each "Thought for Ns" belongs to its own round). */
-function buildFlowItems(
-  parts: readonly import("@/types/chat").MessagePart[],
-): FlowItem[] {
-  const items: FlowItem[] = [];
-  for (const p of parts) {
-    if ((p.type === "thinking" || p.type === "reasoning") && p.content) {
-      const last = items[items.length - 1];
-      if (
-        last &&
-        last.kind === "thinking" &&
-        last.variant === p.type &&
-        last.open
-      ) {
-        last.text += "\n" + p.content;
-        last.open = p.reasoningEndedAt === undefined;
-        if (p.reasoningEndedAt !== undefined) last.endedAt = p.reasoningEndedAt;
-        if (p.roundStartedAt !== undefined && last.startedAt === undefined) {
-          last.startedAt = p.roundStartedAt;
-        }
-        continue;
-      }
-      items.push({
-        kind: "thinking",
-        partId: p.id,
-        text: p.content,
-        variant: p.type,
-        open: p.reasoningEndedAt === undefined,
-        startedAt: p.roundStartedAt,
-        endedAt: p.reasoningEndedAt,
-      });
-    } else if (p.type === "tool" && p.toolCall) {
-      items.push({ kind: "tool", partId: p.id, toolCall: p.toolCall });
-    } else if (p.type === "text" && p.content) {
-      items.push({ kind: "text", partId: p.id, text: p.content });
-    }
-  }
-  return items;
-}
+/** One chronological step of the generation process — see
+ *  ./activity-bar.tsx (buildFlowItems). Kept as a re-export so existing
+ *  imports stay stable. */
 
 /** Split reasoning text into sentences for the ThinkingReasoning element
  *  (timeline PRD §5: normalize ONLY unintended whitespace — 3+ blank lines
@@ -1068,84 +1009,21 @@ export const MessageItem = React.memo(function MessageItem({
         {(() => {
           // `parts` is memoized at the top of the component (above).
           //
-          // INLINE FLOW (PRD §3.1): a turn's ENTIRE timeline — thinking
-          // runs (live while streaming, then "Thought for Ns" rows), tool
-          // calls (the Task 24 minimal stacks) and every text — renders
-          // NATURALLY in the conversation in strict chronological order.
-          // No introductory summary line, no separator rail; the ONE live
-          // status circle (AgentStatusLine) narrates the stream in place.
+          // UNIFIED ACTIVITY BAR (PRD "Unified Activity Bar", Part A): a
+          // turn's ENTIRE execution — thinking runs, approved reasoning
+          // summaries, tool calls and their results — folds into ONE
+          // collapsible activity container whose header carries the
+          // dynamic summary ("Thinking…" / "Searching “q” · Used 2 tools"
+          // live; "Worked 2m 34s · Used 4 tools" settled; "Stopped after
+          // 42s · Used 3 tools" failed). The answer texts render after
+          // the bar, in order. Legacy (pre-parts) assistant messages
+          // synthesize the same items from their thinking/reasoning and
+          // toolCalls fields so EVERY turn shows the same single activity
+          // container — no duplicate per-tool panels.
 
-          // ── Legacy fallback: user / pre-parts messages. ────────────────
-          if (!useParts) {
-            const legacyRanTools = !!(message.toolCalls && message.toolCalls.length > 0);
-            return (
-              <>
-                {!isUser && message.thinking && (
-                  <ThinkingBlock
-                    text={message.thinking}
-                    isStreaming={Boolean(message.isStreaming)}
-                    ranTools={legacyRanTools}
-                  />
-                )}
-                {!isUser && message.reasoning && (
-                  <ReasoningBlock
-                    text={message.reasoning}
-                    isStreaming={Boolean(message.isStreaming)}
-                    ranTools={legacyRanTools}
-                  />
-                )}
-                {isUser && editingUser ? (
-                  <UserMessageEditor
-                    initial={stripUploadTags(message.content || "")}
-                    onCancel={() => setEditingUser(false)}
-                    onSave={(text) => {
-                      setEditingUser(false);
-                      onEditUserMessage?.(message.id, text);
-                    }}
-                  />
-                ) : message.content ? (
-                  <TextBubble
-                    text={message.content}
-                    showCursor={!isUser && Boolean(message.isStreaming)}
-                    isUser={isUser}
-                    onCiteClick={onCiteClick}
-                    sources={sources}
-                    genuiNodes={!message.isStreaming ? message.genui : undefined}
-                    isStreaming={Boolean(message.isStreaming)}
-                    identityKey={message.id}
-                  />
-                ) : null}
-                {message.toolCalls && message.toolCalls.length > 0 && (
-                  <div className="mb-stagger w-full">
-                    <ToolStackGroup toolCalls={message.toolCalls}>
-                      {(() => {
-                        // Consecutive use_browser calls collapse into ONE
-                        // BrowserUseGroup frame (run start renders the group,
-                        // continuations render nothing); every other tool
-                        // keeps its own ToolCallCard. The whole stack rests
-                        // as ONE combined "Tools" disclosure row
-                        // (ToolStackGroup — combined tools UI, 2026-11-13).
-                        const browserRuns = mapBrowserRunStarts(message.toolCalls ?? []);
-                        return (message.toolCalls ?? []).map((toolCall) => {
-                          const run = browserRuns.runStartedBy(toolCall.id);
-                          if (run) return <BrowserUseGroup key={toolCall.id} toolCalls={run} />;
-                          if (browserRuns.isContinuation(toolCall.id)) return null;
-                          return <ToolCallCard key={toolCall.id} toolCall={toolCall} />;
-                        });
-                      })()}
-                    </ToolStackGroup>
-                  </div>
-                )}
-                {/* ONE in-place status line — the model is generating. */}
-                {!isUser && <AgentStatusLine message={message} />}
-              </>
-            );
-          }
-
-          // ── Walk the timeline into chronological items. ────────────
+          const streaming = Boolean(message.isStreaming);
           // (Derivation memoized above in `flow` — see PERF note there.)
           const items = flow.items;
-          const streaming = Boolean(message.isStreaming);
           const browserRuns = flow.browserRuns;
 
           // The text part currently streaming (the active tail), if any.
@@ -1155,43 +1033,16 @@ export const MessageItem = React.memo(function MessageItem({
               ? lastItem.partId
               : null;
 
-          // Todo-panel splice (legacy research tools): the inline plan
-          // renders right before the first part that follows the last
-          // research part in the original order, or at the very end when
-          // every research part trails the flow.
-          const todoSplice: { beforePartId?: string; atEnd?: boolean } | null =
-            (() => {
-              if (!showTodoPanel || !lastResearchPartId) return null;
-              let seen = false;
-              for (const p of message.parts ?? []) {
-                if (p.id === lastResearchPartId) {
-                  seen = true;
-                  continue;
-                }
-                if (
-                  seen &&
-                  (((p.type === "text" || p.type === "thinking" || p.type === "reasoning") &&
-                    p.content) ||
-                    (p.type === "tool" && p.toolCall))
-                ) {
-                  return { beforePartId: p.id };
-                }
-              }
-              return { atEnd: true };
-            })();
-
-          const renderTodoPanel = (key: string) => (
-            <div key={key} className="w-full">
-              <ResearchPanel onDismiss={onTodoDismiss} />
-            </div>
-          );
-
-          // Render one flow item INLINE (PRD §3.1): the process lives
-          // directly in the conversation — live reasoning streams with its
-          // own header, settled thinking folds into its "Thought for Ns"
-          // row, tool calls stay stacked minimal rows, texts are full-ink
+          // ── Shared row renderer (both paths). ─────────────────────────
+          // Live reasoning streams with its own header; settled thinking
+          // folds into its "Thought for Ns" row; browser runs collapse
+          // into ONE BrowserUseGroup frame (continuations render nothing);
+          // other tools keep their ToolCallCard; texts are full-ink
           // assistant bubbles.
-          const renderItem = (it: FlowItem) => {
+          const renderItem = (
+            it: FlowItem,
+            runs: { isContinuation(id: string): boolean; runStartedBy(id: string): unknown },
+          ) => {
             if (it.kind === "thinking") {
               const openNow = streaming && it.open;
               return openNow ? (
@@ -1201,15 +1052,15 @@ export const MessageItem = React.memo(function MessageItem({
               );
             }
             if (it.kind === "tool") {
-              const run = browserRuns.runStartedBy(it.toolCall.id);
+              const run = runs.runStartedBy(it.toolCall.id);
               if (run) {
                 return (
                   <div key={it.partId} className="w-full">
-                    <BrowserUseGroup toolCalls={run} />
+                    <BrowserUseGroup toolCalls={run as never} />
                   </div>
                 );
               }
-              if (browserRuns.isContinuation(it.toolCall.id)) return null;
+              if (runs.isContinuation(it.toolCall.id)) return null;
               return (
                 <div key={it.partId} className="w-full">
                   <ToolCallCard toolCall={it.toolCall} turnId={message.conversationId} />
@@ -1233,71 +1084,140 @@ export const MessageItem = React.memo(function MessageItem({
             );
           };
 
-          // STACKED TOOL CALLS (Task 24 spec): consecutive tool items render
-          // as ONE compact stack of minimal rows — the whole tool-execution
-          // sequence grouped together with consistent alignment and spacing,
-          // not scattered standalone cards. Thinking runs and texts break a
-          // stack (strict chronological order is preserved). The stack grows
-          // live while streaming (rows carry their own running/done state)
-          // and rests as the finished stacked section after the sequence.
-          const renderGrouped = (list: FlowItem[]) => {
-            const out: React.ReactNode[] = [];
-            let stack: FlowItem[] = [];
-            const flushStack = () => {
-              if (stack.length === 0) return;
-              const first = stack[0]!;
-              out.push(
-                <div key={`stack-${first.partId}`} className="mb-stagger">
-                  {/* COMBINED TOOLS ROW (user screenshots 2026-11-13): the
-                      whole consecutive-tool sequence rests as ONE "Tools
-                      tools ›" disclosure; live runs keep their rows
-                      visible until the stack settles. */}
-                  <ToolStackGroup
-                    toolCalls={stack
-                      .filter((it): it is Extract<FlowItem, { kind: "tool" }> => it.kind === "tool")
-                      .map((it) => it.toolCall)}
-                  >
-                    {stack.map((it) => (
-                      <React.Fragment key={it.partId}>{renderItem(it)}</React.Fragment>
-                    ))}
-                  </ToolStackGroup>
-                </div>,
-              );
-              stack = [];
-            };
-            for (const it of list) {
-              if (todoSplice?.beforePartId === it.partId) {
-                // The inline plan panel splices at this item's position —
-                // flush the open stack so it lands BETWEEN blocks.
-                flushStack();
-                out.push(renderTodoPanel(`todo-${it.partId}`));
-              }
-              if (it.kind === "tool") {
-                stack.push(it);
-              } else {
-                flushStack();
-                out.push(
-                  <React.Fragment key={it.partId}>{renderItem(it)}</React.Fragment>,
-                );
-              }
-            }
-            flushStack();
-            return out;
+          /** Tool UNITS (browser continuations fold into their run) for
+           *  the bar's "Used N tools" count. */
+          const countToolUnits = (
+            calls: readonly { id: string }[],
+            runs: { isContinuation(id: string): boolean },
+          ) => {
+            let units = 0;
+            for (const tc of calls) if (!runs.isContinuation(tc.id)) units++;
+            return units;
           };
 
-          // ── INLINE FLOW (PRD §3.1 — tool steps separator removed): the
-          // whole process renders NATURALLY in the conversation, in strict
-          // chronological order — no introductory "Worked Ns" line, no
-          // separator rail. Thinking runs keep their own collapsible
-          // "Thought for Ns" rows, tool calls keep the minimal stacked
-          // rows (Task 24), and the ONE live status circle (AgentStatusLine)
-          // narrates the stream in place. ─────────────────────────────
+          const renderTodoPanel = (key: string) => (
+            <div key={key} className="w-full">
+              <ResearchPanel onDismiss={onTodoDismiss} />
+            </div>
+          );
+
+          // ── Legacy fallback: user / pre-parts messages. ────────────────
+          if (!useParts) {
+            // Synthesize the SAME activity items from the legacy fields so
+            // old messages fold into the ActivityBar identically.
+            const legacyActivity: FlowItem[] = [];
+            if (!isUser && message.thinking) {
+              legacyActivity.push({
+                kind: "thinking",
+                partId: "legacy-thinking",
+                text: message.thinking,
+                variant: "thinking",
+                open: streaming,
+                startedAt: undefined,
+                endedAt: undefined,
+              });
+            }
+            if (!isUser && message.reasoning) {
+              legacyActivity.push({
+                kind: "thinking",
+                partId: "legacy-reasoning",
+                text: message.reasoning,
+                variant: "reasoning",
+                open: streaming,
+                startedAt: undefined,
+                endedAt: undefined,
+              });
+            }
+            const legacyToolCalls = !isUser ? (message.toolCalls ?? []) : [];
+            for (const tc of legacyToolCalls) {
+              legacyActivity.push({ kind: "tool", partId: `legacy-tool-${tc.id}`, toolCall: tc });
+            }
+            const legacyRuns = mapBrowserRunStarts(legacyToolCalls);
+            const showLegacyBar = legacyActivity.length > 0;
+            return (
+              <>
+                {showLegacyBar && (
+                  <ActivityBar
+                    message={message}
+                    toolCalls={legacyToolCalls}
+                    toolUnitCount={countToolUnits(legacyToolCalls, legacyRuns)}
+                  >
+                    {legacyActivity.map((it) => (
+                      <React.Fragment key={it.partId}>
+                        {renderItem(it, legacyRuns)}
+                      </React.Fragment>
+                    ))}
+                  </ActivityBar>
+                )}
+                {isUser && editingUser ? (
+                  <UserMessageEditor
+                    initial={stripUploadTags(message.content || "")}
+                    onCancel={() => setEditingUser(false)}
+                    onSave={(text) => {
+                      setEditingUser(false);
+                      onEditUserMessage?.(message.id, text);
+                    }}
+                  />
+                ) : message.content ? (
+                  <TextBubble
+                    text={message.content}
+                    showCursor={!isUser && Boolean(message.isStreaming)}
+                    isUser={isUser}
+                    onCiteClick={onCiteClick}
+                    sources={sources}
+                    genuiNodes={!message.isStreaming ? message.genui : undefined}
+                    isStreaming={Boolean(message.isStreaming)}
+                    identityKey={message.id}
+                  />
+                ) : null}
+                {/* No bar (a pure-text turn) — the status circle narrates. */}
+                {!isUser && !showLegacyBar && <AgentStatusLine message={message} />}
+              </>
+            );
+          }
+
+          // ── Parts flow → ONE ActivityBar + the answer texts. ───────────
+          // Activity = everything except the answer texts; the bar hosts
+          // it all, the texts render after it in strict order.
+          const activityItems = items.filter((it) => it.kind !== "text");
+          const textItems = items.filter((it) => it.kind === "text");
+          const toolCallsForBar = activityItems
+            .filter((it): it is Extract<FlowItem, { kind: "tool" }> => it.kind === "tool")
+            .map((it) => it.toolCall);
+
+          // A turn with zero activity yet (pure pre-thinking latency) keeps
+          // the bare status circle; the bar appears with the first real
+          // activity (thinking text or a tool call).
+          const showBar = activityItems.length > 0;
+
           return (
             <>
-              {renderGrouped(items)}
-              {todoSplice?.atEnd ? renderTodoPanel("todo-end") : null}
-              {/* ONE in-place status line — the model is generating. */}
-              {!isUser && <AgentStatusLine message={message} />}
+              {/* The inline todo plan renders ABOVE the bar (plan → work →
+                  answer). */}
+              {showTodoPanel && lastResearchPartId !== null
+                ? renderTodoPanel("todo-plan")
+                : null}
+              {showBar && (
+                <ActivityBar
+                  message={message}
+                  toolCalls={toolCallsForBar}
+                  toolUnitCount={countToolUnits(toolCallsForBar, browserRuns)}
+                >
+                  {activityItems.map((it) => (
+                    <React.Fragment key={it.partId}>
+                      {renderItem(it, browserRuns)}
+                    </React.Fragment>
+                  ))}
+                </ActivityBar>
+              )}
+              {/* The answer texts, in order, after the bar. */}
+              {textItems.map((it) => (
+                <React.Fragment key={it.partId}>
+                  {renderItem(it, browserRuns)}
+                </React.Fragment>
+              ))}
+              {/* No bar (a pure-text turn) — the status circle narrates. */}
+              {!isUser && !showBar && <AgentStatusLine message={message} />}
             </>
           );
         })()}

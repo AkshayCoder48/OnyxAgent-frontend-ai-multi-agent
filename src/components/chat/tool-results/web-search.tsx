@@ -1,4 +1,6 @@
 "use client";
+
+import { ShineBorder } from "@/components/ui/shine-border";
 import { Globe } from "lucide-react";
 import { LinkPreview } from "@/components/assistant-ui/elements";
 
@@ -57,7 +59,10 @@ export function WebSearchResults({ data }: { data: WebSearchPayload }) {
   }
 
   return (
-    <div className="space-y-3 py-1">
+    // SHINE BORDER — ONE subtle effect around the whole results gallery
+    // (Magic UI PRD §8/§9: image/video search previews; never per-thumb).
+    <div className="relative space-y-3 rounded-xl py-1">
+      <ShineBorder />
       <div className="text-foreground/55 flex items-center gap-2 font-mono text-[10px] tracking-wider uppercase">
         <Globe className="h-3 w-3" />
         <span>

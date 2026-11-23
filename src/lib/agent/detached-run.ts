@@ -41,7 +41,7 @@ import type { AgentStatusResponse, SandboxHistoryMessage } from "@/lib/e2b/clien
 import { getE2BClient } from "@/lib/e2b/client";
 import { getEffectiveE2BKey } from "@/lib/e2b/env-key";
 import { getDB, type DetachedRunRow } from "@/lib/db";
-import type { MessagePart, ToolCall } from "@/types/chat";
+import type { ChatMessage, MessagePart, ToolCall } from "@/types/chat";
 import type { SandboxStreamEvent } from "@/lib/agent/sandbox-stream-events";
 import { clearDetachedActive, markDetachedActive } from "@/lib/agent/detached-active";
 import { useDetachedRunStore } from "@/stores/detached-run-store";
@@ -1081,6 +1081,7 @@ async function landDetachedRun(
                 | import("@/types").MessagePart[]
                 | null
                 | undefined,
+              generation: (r as { generation?: ChatMessage["generation"] }).generation,
             }),
           ),
         });
