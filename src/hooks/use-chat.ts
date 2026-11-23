@@ -1351,7 +1351,17 @@ export function useChat(options: UseChatOptions = {}) {
       // store resolves (bounded), or re-adoption never happens.
       const userId = await waitForAuthUser(10_000);
       if (!userId || cancelled) return;
-      if (useChatStore.getState().isStreaming) return;
+      // A stuck isStreaming (a foreground turn that crashed without clearing
+      // it) must not suppress detached-run reattachment for the whole
+      // session — at this point NO execution exists for this conversation
+      // (checked above), so the flag is stale unless a run for ANOTHER
+      // conversation (or a pending new-chat turn) is genuinely live. Clear
+      // it and reattach; a live execution elsewhere keeps it true via its
+      // own store.
+      if (useChatStore.getState().isStreaming) {
+        if (executionHub.listRunning().length > 0) return;
+        useChatStore.getState().setStreaming(false);
+      }
       if (executionHub.getFor(turnId)) return;
 
       // ── 1) DETACHED-RUN REATTACH — a sandbox run is still in flight. ──

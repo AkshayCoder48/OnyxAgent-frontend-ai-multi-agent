@@ -574,6 +574,11 @@ const ADOPT_DEAD_GRACE = 5;
  *  (resume + redeploy) legitimately takes tens of seconds, and a false
  *  "failed" on a live run is far worse than a 32s-late honest landing. */
 const ADOPT_DEAD_WHILE_RUNNING_GRACE = 8;
+/** KEY-RESOLUTION GRACE: how long adoptDetachedRun retries the E2B key
+ *  resolution (vault decrypt still warming on a cold reload) before giving
+ *  up. 30s comfortably covers the Dexie read + vault session restore. */
+const KEY_RESOLUTION_GRACE_MS = 30_000;
+const KEY_RESOLUTION_RETRY_MS = 2_000;
 
 /** localStorage ref (PRD persistence layer 3) — the lightweight pointer a
  * reload reads to know a live run exists for a conversation. Written at
@@ -836,7 +841,22 @@ export async function adoptDetachedRun(
   if (!row) {
     return { status: "completed", cancelled: false };
   }
-  const client = await chatE2BClient(input.userId, input.conversationId);
+  // KEY-RESOLUTION GRACE (the cold-reload vault race): the vault key decrypt
+  // (Dexie row read + session restore + WebCrypto) can still be in flight
+  // when a refresh's reattach effect first calls in — failing instantly here
+  // burned the ONE reattach attempt for the whole page view and the bubble
+  // froze at its checkpoint (the reported "stopped after refresh" while the
+  // run kept working in the sandbox). Retry with backoff before giving up;
+  // an explicit user stop still exits immediately.
+  let client = await chatE2BClient(input.userId, input.conversationId);
+  if (!client) {
+    const deadline = Date.now() + KEY_RESOLUTION_GRACE_MS;
+    while (!client && Date.now() < deadline) {
+      if (input.isCancelled()) return { status: "completed", cancelled: true };
+      await new Promise((r) => setTimeout(r, KEY_RESOLUTION_RETRY_MS));
+      client = await chatE2BClient(input.userId, input.conversationId);
+    }
+  }
   if (!client) {
     return {
       status: "failed",

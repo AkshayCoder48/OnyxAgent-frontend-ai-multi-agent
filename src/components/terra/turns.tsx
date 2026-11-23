@@ -15,6 +15,7 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { ReasoningText } from "@/components/ui/reasoning-text";
+import { OnyxLoader } from "@/components/ui/onyx-loader";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./code-block";
 import { Markdown } from "./markdown";
@@ -72,13 +73,6 @@ const THINKING_PHRASES = [
   "Connecting the details",
   "Checking the details",
   "Forming a response",
-];
-
-/** Phrases for the pre-answer typing state. */
-const WORKING_PHRASES = [
-  "Working on it",
-  "Gathering the pieces",
-  "Composing a reply",
 ];
 
 function ThinkingBlock({ message }: { message: Message }) {
@@ -192,14 +186,13 @@ function StreamCursor() {
 }
 
 function TypingDots() {
+  // The pre-answer "AI is writing" state — the Onyx 3D star loader
+  // (Onyx Loader Studio) replaces the old scramble-phrases row. It
+  // follows the surrounding text color so the light theme keeps it
+  // visible; size/speed stay tunable through the component props.
   return (
-    <div className="py-1.5" role="status" aria-label="Terra is typing">
-      <ReasoningText
-        phrases={WORKING_PHRASES}
-        variant="scramble"
-        interval={2000}
-        className="text-[13px]"
-      />
+    <div className="flex justify-center py-3">
+      <OnyxLoader size={120} color="currentColor" label="Terra is typing" />
     </div>
   );
 }

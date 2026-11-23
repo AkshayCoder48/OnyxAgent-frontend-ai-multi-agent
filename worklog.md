@@ -1057,3 +1057,24 @@ Work Log:
 Stage Summary:
 - The remaining auto-stop class is the LOST ROW: any browser whose detached_runs write/read fails (quota, lock, upgrade) froze on refresh forever. Recovery now rides the Dexie-independent localStorage pointer written at dispatch + on every event, with terminal-status gating and honest settlement. The cursor off-by-one (one dropped event per reconnect, since the feature shipped) is fixed in both readers.
 - The user must redeploy from main and retest their exact conversation; if any freeze remains, the next data point needed is their browser console during the refresh (the diagnosis now covers every code path that can produce a frozen checkpoint).
+
+## 2026-11-23 — feat(loader) + hardening(bg): Onyx 3D writing loader + two reattach-race fixes, with live production verification of the close-and-resume lane
+
+Task ID: 36
+Agent: main (Z.ai Code)
+Task: User: (1) replace the dots "AI writing" indicator with the Onyx Loader Studio 3D star loader; (2) "fix the e2b background job still not working getting stopped after refresh switch off cut off browser etc but survives inter domain navigations".
+
+Work Log:
+- ONYX 3D LOADER: new src/components/ui/onyx-loader.tsx (five stacked 4-point stars, staggered delays, CSS custom properties --loader-size/color/speed as props, reduced-motion honored); studio CSS appended verbatim to globals.css (.onyx-loader/.onyx-layer + @keyframes onyx-rotate); TypingDots in terra/turns.tsx now renders it (120px, color: currentColor so the opt-in light theme keeps it visible) in the pre-answer writing slot; the unused WORKING_PHRASES row removed.
+- E2B CLOSE-AND-RESUME VERIFICATION (the user's exact symptom, driven end-to-end on THEIR production deployment + local production build):
+  * PRODUCTION (wine.vercel.app, their E2B key, separate sandbox): agent_start a sleep-75 run → mid-tool, fire the exact pagehide pause beacon → correctly rejected (reason:"agent-running", the detached-agent guard) → 140s of total darkness (no keepalive, no poll, no SSE — browser closed) → status "completed", chat_history carries the full final answer. The deployment is CURRENT (f5cbb1f-era client strings present in the deployed chunks; agent_deploy reports runner v7).
+  * LOCAL (production build, real browser): refresh mid-run in BOTH key lanes (server env key + browser vault key) → reattach replays the partial, the live tool card keeps streaming, the complete answer lands in the bubble ("Full output: … exit_code=0"). Sandbox-account forensics: 1 sandbox total — no quota-pileup kill path.
+  ⇒ The sandbox execution + pause guards + reattach landing are sound at every layer I could drive.
+- TWO REMAINING REATTACH RACES fixed (both produce exactly "frozen bubble after refresh, run keeps working unseen in the sandbox"):
+  1. detached-run.ts adoptDetachedRun returned INSTANT failure when the E2B key resolved to null — on a cold reload the vault decrypt (Dexie row + session restore + WebCrypto) can still be in flight, and the instant fail burned the page view's ONE reattach attempt. FIX: KEY_RESOLUTION_GRACE — retry the key resolution every 2s for up to 30s (explicit user stop still exits immediately) before failing.
+  2. use-chat.ts reattach effect bailed whenever the global isStreaming flag was stuck true (a crashed foreground turn that never cleared it) — suppressing detached-run reattachment for the whole session even though no execution existed. FIX: with no hub execution running for the conversation, clear the stale flag and proceed; only defer when executionHub.listRunning() shows a genuinely live execution.
+- TESTS: full suite identical to the pre-change baseline (452 environment failures — this sandbox's Bun lacks vi.unstubAllGlobals/resetModules and readonly-namespace mocking; 0 new failures; the changed files' directly-related suites: detached-run 14/15 with the 1 pre-existing harness failure, event-cursor green). tsc: zero new errors. Production build green. Browser E2E re-run on the PATCHED build: reload mid-run lands the complete answer.
+- ALSO from this session (commit 22ccfce, pushed earlier): /api/chat after()-anchored serverless continuation + maxDuration 300 + reload-recovery resumeFrom seeding for the legacy terra lane.
+
+Stage Summary:
+- The close-and-resume lane is now verified LIVE on production (pause beacon rejected, run survives a fully-closed browser, lands complete) and hardened against the last two known reattach races (vault-key cold-boot grace, stale isStreaming unblock). If a freeze is still observed after this deploys, the next data point is the browser console during the refresh — every remaining code path that can freeze a checkpoint is now covered.
