@@ -227,7 +227,12 @@ export type AgentPhase = "thinking" | "working" | null;
 export function deriveAgentPhase(message: ChatMessage): AgentPhase {
   if (message.role !== "assistant" || !message.isStreaming) return null;
   const parts = message.parts ?? [];
-  if (parts.length === 0) return "thinking";
+  // ZERO-GENERATION WINDOW (user directive 2026-11-23: "remove the dot
+  // thinking … when ai haven't generated anything"): while streaming has
+  // started but not ONE part exists yet (pre-first-token latency), render
+  // NOTHING — no dot, no "Thinking" label. The first real part (thinking
+  // text, tool call or answer text) is what brings the UI up.
+  if (parts.length === 0) return null;
 
   // Model actively reasoning → the ThinkingReasoning panel header shows
   // "Thinking…" at the reasoning's own timeline position. No second line.

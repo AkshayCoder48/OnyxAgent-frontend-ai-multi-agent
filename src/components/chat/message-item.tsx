@@ -179,6 +179,12 @@ function ReasoningBlock(props: {
  *   Thinking  — the model is generating (opening text or the answer).
  *   Writing   — the answer text is actively streaming at the tail.
  *
+ * ZERO-GENERATION WINDOW (user directive 2026-11-23: "remove the dot
+ * thinking … when ai haven't generated anything"): while the turn streams
+ * but not one part exists yet, this renders NOTHING (deriveAgentPhase
+ * returns null) — the status UI appears only with the first generated
+ * content.
+ *
  * CAPTION GENERATION (user directive: "re add it into that circle (caption)
  * just like thinking"): the pulsing-dot circle's label is a GENERATED
  * caption derived from the turn's live parts — the circle NEVER disappears
@@ -1185,9 +1191,10 @@ export const MessageItem = React.memo(function MessageItem({
             .filter((it): it is Extract<FlowItem, { kind: "tool" }> => it.kind === "tool")
             .map((it) => it.toolCall);
 
-          // A turn with zero activity yet (pure pre-thinking latency) keeps
-          // the bare status circle; the bar appears with the first real
-          // activity (thinking text or a tool call).
+          // A turn with zero activity yet (pure pre-thinking latency) has
+          // NO bar AND no status line (the zero-generation window renders
+          // nothing — see AgentStatusLine); the bar appears with the first
+          // real activity (thinking text or a tool call).
           const showBar = activityItems.length > 0;
 
           return (

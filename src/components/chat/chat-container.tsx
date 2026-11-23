@@ -24,7 +24,6 @@ import { reconcilePersisted, setPersistedConversationId } from "@/stores/chat-st
 import { useConversations } from "@/hooks";
 import { useSlashCommands } from "@/hooks";
 import { conversationMessageToChatMessage } from "@/lib/conversation-to-chat";
-import { ThinkingIndicator } from "@/components/assistant-ui/elements";
 import { genuiPerfLog } from "@/lib/genui/perf";
 import { executionHub } from "@/lib/agent/execution-hub";
 import { ArrowDown, Hourglass } from "lucide-react";
@@ -339,15 +338,11 @@ function useChatScrollController(
 }
 
 /**
- * Thinking status line shown between send and first token: the canonical
- * ThinkingIndicator — pulsing dot + STATIC "Thinking" label (Realtime PRD:
- * no orb glyph, no shimmering words; the companion carries the
- * personality). No status pill, no elapsed clock, no pause button — the
- * composer's stop button stops the turn. Mounts fresh per turn.
+ * ThinkingStatus was REMOVED (user directive 2026-11-23: "remove the dot
+ * thinking … when ai haven't generated anything"): the between-send-and-
+ * first-token window now renders nothing — the turn's own ActivityBar /
+ * status line appears with the first generated part.
  */
-function ThinkingStatus() {
-  return <ThinkingIndicator label="Thinking" className="px-1" />;
-}
 
 export function ChatContainer(
   { onOpenSettings }: { onOpenSettings?: () => void } = {},
@@ -1070,14 +1065,12 @@ function ChatUI({
               />
             </div>
           )}
-          {/* Thinking bar — shows as soon as the user sends a message and
-              stays until the AI generates its first character/tool call:
-              pulsing dot + static "Thinking" label (no orb, no shimmer). */}
-          {isProcessing && !messages.some((m) => m.isStreaming) && (
-            <div className="animate-slide-up-fade px-1 py-2">
-              <ThinkingStatus />
-            </div>
-          )}
+          {/* NOTHING between send and first generation (user directive:
+              "remove the dot thinking … when ai haven't generated
+              anything") — no pulsing dot, no "Thinking" label. The first
+              real content (thinking text, tool call or answer text) is
+              what brings up the ActivityBar / status line; until then the
+              composer's stop button is the only "it's working" signal. */}
           {/* Rate-limit backoff (PRD §7): the runtime is retrying with
               exponential backoff — show a clear state instead of a
               dead-looking turn. Agent state is preserved; nothing is

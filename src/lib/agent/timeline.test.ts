@@ -438,3 +438,47 @@ describe("AgentEventProcessor timeline regression tests", () => {
     expect(toolParts[0]!.toolCall?.status).toBe("completed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Zero-generation window (user directive 2026-11-23: "remove the dot
+// thinking … when ai haven't generated anything"): while a turn streams
+// but not ONE part exists yet, there is NO status UI at all — deriveAgentPhase
+// returns null; the first generated part is what brings the UI up.
+// ---------------------------------------------------------------------------
+
+describe("deriveAgentPhase — zero-generation window", () => {
+  const base = {
+    id: "m-zero",
+    role: "assistant",
+    isStreaming: true,
+    createdAt: new Date().toISOString(),
+    conversationId: "c1",
+  };
+
+  it("streaming with ZERO parts → null (no dot before the first generated content)", () => {
+    const msg = { ...base, parts: [] } as unknown as ChatMessage;
+    expect(deriveAgentPhase(msg)).toBeNull();
+  });
+
+  it("streaming with parts: undefined → null (legacy path is equally blank)", () => {
+    const msg = { ...base, parts: undefined } as unknown as ChatMessage;
+    expect(deriveAgentPhase(msg)).toBeNull();
+  });
+
+  it("the FIRST text part restores the narration (→ thinking / 'Writing')", () => {
+    const msg = {
+      ...base,
+      parts: [{ id: "p-1", type: "text", content: "An", roundStartedAt: 1000 }],
+    } as unknown as ChatMessage;
+    expect(deriveAgentPhase(msg)).toBe("thinking");
+  });
+
+  it("settled messages stay null regardless of parts", () => {
+    const msg = {
+      ...base,
+      isStreaming: false,
+      parts: [{ id: "p-1", type: "text", content: "Done" }],
+    } as unknown as ChatMessage;
+    expect(deriveAgentPhase(msg)).toBeNull();
+  });
+});

@@ -1106,3 +1106,23 @@ Work Log:
 
 Stage Summary:
 - The PRD is implemented end-to-end: one Activity Bar per response (everything inside it, dynamic honest summaries, SSE-live, refresh-persistent), the four Magic UI components at their prescribed homes, a centralized config, reduced-motion + off-screen guards throughout, and zero test regressions. Visual fingerprints verified live in a real browser on the production build.
+
+## Task 38 — Blank zero-generation window + manual collapse mid-write + the bun-masked suite repair
+
+Date: 2026-11-23
+Agent: main (Z.ai Code)
+Task: User follow-up on Task 37, two directives (after a retraction of a third): "remove the dot thinking [that] is still [shown] when ai haven't generated anything — fix that" (no status UI before the first generated part) and "collapsing that thing while ai writing something is not working — fix it" (manual collapse must work mid-stream). The typing-animation-on-prompt request was already delivered in Task 37.
+
+Work Log:
+- FIX A — THE ZERO-GENERATION WINDOW RENDERS NOTHING:
+  * chat-container.tsx: ThinkingStatus — the between-send-and-first-token pulsing dot + static "Thinking" label — is GONE (component, its `isProcessing && !messages.some(isStreaming)` render gate, and the ThinkingIndicator import). The composer's stop button is the only "it's working" signal until real content exists.
+  * timeline.ts deriveAgentPhase: `parts.length === 0` now returns null (was "thinking"), so a streaming turn with not ONE part renders no AgentStatusLine either. The first real part (thinking text / tool call / answer text) is what brings the UI up: the ActivityBar mounts with the first activity; the status line with the first text part.
+- FIX B — MANUAL COLLAPSE WORKS MID-STREAM (activity-bar.tsx):
+  * Old: `<CollapsePanel open={open || live}>` — a live turn FORCED the timeline open, so the summary-row click did nothing while the AI was writing (the user's exact complaint).
+  * New contract: between transitions the fold is the USER's. A bar that mounts live opens (`useState(live)` — mount-while-live previously relied on the `|| live` force); live→settled folds (`setOpen(live)` on the flip); settled→live re-opens. Clicks toggle at ANY time, including mid-stream.
+  * The ONE exception: the approval gate (`awaiting_approval`) PINS the panel open — an interactive approval card can never fold behind the summary row, by auto-behavior or by the user's own click (aria-expanded and the chevron follow the effective panelOpen).
+- THE BUN-MASKED SUITE REPAIR: Task 37's "suite = baseline, zero regressions" was measured through Bun's runner, which cannot execute the jsdom/vi.* tests — REAL vitest showed 16 failures shipped in 5892028, all one root cause: framer-motion's inView (BorderBeam on the composer dock + todo plan panel) requires IntersectionObserver, absent from jsdom. vitest.setup.ts now stubs it (the stub never fires, so inView stays false and the beam renders nothing — its documented off-screen behavior). Plus inline-flow.test.tsx (2 tests) still asserted the PRE-ActivityBar Nov-13 contract ("NO Worked line") — rewritten to the PRD's actual design.
+- TESTS (suite 1042 → 1048, ALL green — the first fully-green real-vitest run): timeline.test.ts +4 (zero parts → null; undefined parts → null; the first text part restores the "Writing" narration; settled stays null); inline-flow.test.tsx rewritten ×4 (settled turn rests folded on "Worked 3s · Used 2 tools", one click expands; live turn narrates "Writing · Used 1 tool" open-by-default, MANUAL COLLAPSE folds it mid-stream, second click re-expands; the zero-generation window renders NOTHING — no bar, no status, no "Thinking"; the approval gate PINS open against the click). tsc: zero errors in changed files (src/ baseline 127 pre-existing, untouched); production build green.
+
+Stage Summary:
+- Between send and first generation the chat is honestly blank (no dot, no "Thinking" label), the ActivityBar's fold follows the user's click at any moment — including while the AI writes — with only the approval gate pinned open, and the whole suite runs 1048/1048 green under real vitest.

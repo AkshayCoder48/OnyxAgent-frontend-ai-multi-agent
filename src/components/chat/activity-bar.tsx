@@ -20,6 +20,13 @@ import { statusCaptionFor } from "@/hooks/use-status-caption";
  *               (the chronological execution timeline:
  *                thinking rows + tool cards, live-updating)
  *
+ * The summary row toggles the fold AT ANY TIME — including while the turn
+ * is still streaming (manual collapse mid-write works; user directive
+ * 2026-11-23). Auto behavior only rides the transitions: a live round
+ * opens the timeline, settling folds it back into the summary; the one
+ * exception is the approval gate, which pins the panel open (an
+ * interactive approval card never hides behind the summary row).
+ *
  * The timeline content itself (thinking rows, ToolCallCards, browser
  * groups) is rendered by the caller and passed as `children` — the same
  * rich rows the inline flow already used, now folded into ONE bar whose
@@ -191,18 +198,27 @@ export function ActivityBar({
     return `${durationLabel ? `Worked ${durationLabel}` : "Finished"}${toolLabel}`;
   }, [streaming, message, toolUnitCount]);
 
-  // AUTO-FOLD STATE MACHINE (the same contract as the reasoning row and
-  // the old ToolStackGroup): while live the timeline is always visible so
-  // the run narrates itself; on the live→settled transition the bar folds
-  // into the summary. A settled→live transition (a follow-up round, a
-  // resumed background run) re-opens it. Render-time adjustment pattern —
-  // no effect, no cascading renders.
-  const [open, setOpen] = useState(false);
+  // AUTO-FOLD STATE MACHINE (user directive 2026-11-23: "collapsing that
+  // thing while ai writing something is not working — fix it"): a live
+  // round OPENS the timeline (the run narrates itself) and the
+  // live→settled transition folds it into the summary — but BETWEEN those
+  // transitions the summary row's click is the USER's: manual collapse and
+  // expand work at ANY time, including mid-stream. Render-time adjustment
+  // pattern — no effect, no cascading renders.
+  const [open, setOpen] = useState(live);
   const [prevLive, setPrevLive] = useState(live);
   if (live !== prevLive) {
     setPrevLive(live);
-    setOpen(false);
+    setOpen(live);
   }
+
+  // The approval gate is the ONE state that never folds (an interactive
+  // approval card must not hide behind the summary row): while any call
+  // awaits approval the panel is forced open — manual toggle included.
+  const approvalGated = toolCalls.some(
+    (tc) => tc.status === "awaiting_approval",
+  );
+  const panelOpen = approvalGated || open;
 
   const failed = !streaming && (message.generation?.failed || message.generation?.stopped || false);
 
@@ -214,7 +230,7 @@ export function ActivityBar({
       <div
         role="button"
         tabIndex={0}
-        aria-expanded={open}
+        aria-expanded={panelOpen}
         aria-label={`Activity — ${summary}`}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => {
@@ -249,15 +265,17 @@ export function ActivityBar({
         <ChevronRight
           className={cn(
             "text-muted-foreground/80 ml-auto h-3.5 w-3.5 shrink-0 transition-transform duration-200 ease-out",
-            open && "rotate-90",
+            panelOpen && "rotate-90",
           )}
           aria-hidden
         />
       </div>
 
       {/* The folded timeline — height + fade disclosure; rows stay mounted
-          so the expand/collapse transition is smooth. */}
-      <CollapsePanel open={open || live}>
+          so the expand/collapse transition is smooth. MANUAL COLLAPSE
+          WORKS WHILE LIVE (the user's click is honored mid-stream); only
+          the live↔settled transitions and the approval gate override it. */}
+      <CollapsePanel open={panelOpen}>
         <div className="mb-stagger space-y-0 pt-0.5">{children}</div>
       </CollapsePanel>
     </div>
