@@ -1,26 +1,28 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import styles from "./ThinkingReasoning.module.css";
-import { useWordTypewriter, FadeWords } from "./letter-stream";
+import { HorizontalReasoningStream } from "./horizontal-reasoning-stream";
 
 /**
- * ThinkingReasoning — an animated, collapsible thinking block (AICSS
- * "Thinking + Reasoning" recipe): a shimmering label expands to reveal the
- * agent's reasoning, then folds into a "Thought for Ns" summary.
+ * ThinkingReasoning — the reasoning presentation shell (AICSS "Thinking +
+ * Reasoning" recipe) now carrying the ADAPTIVE HORIZONTAL REASONING STREAM
+ * (PRD 2026-11-24): the reasoning renders as ONE continuous horizontal
+ * text line inside a fixed-height viewport that auto-follows the arriving
+ * stream — never vertical expansion, never per-sentence rows. The header
+ * line ("● Thinking · Used 6 tools" live / "Thought for Ns" settled)
+ * remains exactly as recognizable as before.
  *
- * Adapted from the reference to be props-driven (the sentences stream in
- * from the agent's live thinking/reasoning text, and `phase` is flipped by
- * the caller when the turn settles). Honors prefers-reduced-motion.
- *
- * NATURAL ROW HEIGHTS (PRD §5 — reasoning text formatting): sentences used
- * to sit in FIXED 40px two-line boxes — short sentences left ~20px of dead
- * space under them (the "unwanted gaps") and long sentences were clipped at
- * two lines. Rows now size to their content: line-height 20px, 4px gaps,
- * no clamping, with a 180px capped scroll viewport + 16px edge fades.
+ * Rendering-only change (PRD §10): the SAME reasoning deltas feed the SAME
+ * reveal engine (useWordTypewriter + FadeWords inside the horizontal
+ * stream), so the user's selected streaming animation, its speed and the
+ * disabled-animation behaviour all carry over untouched. `sentences` is
+ * joined into the single stream text; nothing is split into cards,
+ * slides or segments — and nothing is truncated (the stream scrolls, the
+ * full text stays in the DOM).
  */
 export interface ThinkingReasoningProps {
-  /** The reasoning sentences, in order — revealed as they arrive. */
+  /** The reasoning sentences, in order — JOINED into the one stream. */
   sentences: readonly string[];
   /** "thinking" while streaming, "done" once the block settles. */
   phase: "thinking" | "done";
@@ -38,7 +40,7 @@ export interface ThinkingReasoningProps {
   // block settles (the "Thought for Ns" summary replaces it). */
   headerNode?: ReactNode;
   /** HEADERLESS LIVE MODE (WorkingPanel): while streaming, skip the
-   *  header button entirely — the sentences stream bare and the host
+   *  header button entirely — the stream renders bare and the host
    *  panel's own trigger line owns the "Thinking" status (no duplicate
    *  shimmer labels stacked). The settled "Thought for Ns" header still
    *  renders once the stream ends. */
@@ -51,45 +53,14 @@ export interface ThinkingReasoningProps {
   keepOpenOnDone?: boolean;
 }
 
-const MAX_H = 180; // capped viewport (CSS max-height, kept in sync)
-const FADE = 16; // top/bottom fade once the viewport is capped
-
 /**
- * The sentences stream WORD BY WORD with the MIXED reveal (user directive
- * 2026-11-14: "add the same streaming animation inside thinking — mix the
- * current one with the chat answer's"): useWordTypewriter paces the reveal
- * (the same adaptive engine the main text uses) and FadeWords renders each
- * newly mounted word with the motion-blur settle (.wf — opacity+blur
- * blur-to-sharp). The first sentence holds the stream-start delay (180ms);
- * later sentences flow with a tiny 40ms pacing gap. A caret rides at the
- * end of the LIVE last sentence.
- *
- * NO INTER-SENTENCE DUMPS: every sentence of a live block keeps its own
- * word engine (stable index keys), so when a NEW sentence starts, the
- * previous one flips `active` → false and FINISHES its remaining reveal
- * at catch-up pace instead of snapping to full text (the round-end
- * "auto-throwing" rule, applied at sentence boundaries too).
+ * Join the sentence list back into the ONE continuous stream text. The
+ * splitter upstream normalized whitespace; a single space separator keeps
+ * the stream flowing as one line (PRD §2 — no paragraph breaks in the
+ * horizontal stream; sentence punctuation already carries the pauses).
  */
-function StreamingSentence({
-  text,
-  holdMs,
-  active,
-}: {
-  text: string;
-  holdMs: number;
-  /** True only for the LIVE trailing sentence — previous sentences finish
-   *  their reveal paced, then rest fully revealed. */
-  active: boolean;
-}) {
-  const { text: revealed, animating, fadeMs } = useWordTypewriter(text, active, {
-    initialDelayMs: holdMs,
-  });
-  return (
-    <>
-      <FadeWords text={revealed} fadeMs={fadeMs} />
-      {active && animating && <span className={styles.trCaret} aria-hidden="true" />}
-    </>
-  );
+function joinStream(sentences: readonly string[]): string {
+  return sentences.filter(Boolean).join(" ");
 }
 
 export function ThinkingReasoning({
@@ -104,45 +75,6 @@ export function ThinkingReasoning({
 }: ThinkingReasoningProps) {
   const [open, setOpen] = useState(false);
   const [userToggled, setUserToggled] = useState(false);
-  const [capped, setCapped] = useState(false);
-  const [fade, setFade] = useState({ top: false, bottom: true });
-  const viewportRef = useRef<HTMLDivElement>(null);
-
-  // EVER-LIVE (finish-don't-flush): a block that STREAMED in this session
-  // keeps its per-sentence typewriters mounted after settle so the last
-  // sentence can finish revealing at catch-up pace — only the block's
-  // collapse hides it. A block that mounts ALREADY settled (hydrated
-  // history) renders plain text instantly (no timers, spec §23).
-  // Render-time adjustment (no effect, no cascading renders).
-  const [everLive, setEverLive] = useState(phase === "thinking");
-  const [prevLive, setPrevLive] = useState(phase === "thinking");
-  if (phase === "thinking" && !prevLive) {
-    setPrevLive(true);
-    setEverLive(true);
-  }
-
-  const done = phase === "done";
-  const count = sentences.length;
-  const scrollable = done && open;
-
-  // Capped detection + follow-the-stream auto-scroll. Runs whenever the
-  // sentence list grows (streaming) or the block expands (done + open).
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const over = el.scrollHeight > el.clientHeight + 1;
-    setCapped(over);
-    if (!done && over) {
-      // While streaming, keep the newest sentence in view.
-      el.scrollTop = el.scrollHeight;
-    }
-    if (scrollable) {
-      setFade({
-        top: el.scrollTop > 1,
-        bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 1,
-      });
-    }
-  }, [count, done, scrollable]);
 
   useEffect(() => {
     // Under reduced motion the block starts expanded (no reveal animations).
@@ -153,38 +85,21 @@ export function ThinkingReasoning({
     return () => window.clearTimeout(id);
   }, []);
 
-  const onScroll = () => {
-    const el = viewportRef.current;
-    if (!el) return;
-    setFade({
-      top: el.scrollTop > 1,
-      bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 1,
-    });
-  };
-
   const toggle = () => {
-    const next = !expanded;
-    if (next) {
-      setFade({ top: false, bottom: true });
-      if (viewportRef.current) viewportRef.current.scrollTop = 0;
-    }
     setUserToggled(true);
-    setOpen(next);
+    setOpen((v) => !v);
   };
 
-  // While thinking the reasoning is always open; once done it folds into
-  // the summary and the user can toggle it back open — UNLESS
-  // keepOpenOnDone (no-tools turns): the block rests EXPANDED and only a
-  // manual toggle folds it (auto-collapse removed for tool-less turns).
+  // While thinking the stream is always open; once done it folds into the
+  // summary and the user can toggle it back open — UNLESS keepOpenOnDone
+  // (no-tools turns): the block rests EXPANDED and only a manual toggle
+  // folds it (auto-collapse removed for tool-less turns).
   const doneExpanded = userToggled ? open : keepOpenOnDone;
+  const done = phase === "done";
   const expanded = done ? doneExpanded : true;
 
-  const showTop = scrollable ? fade.top : capped;
-  const showBottom = scrollable ? fade.bottom : capped;
-  const mask = capped
-    ? `linear-gradient(to bottom, transparent 0, #000 ${showTop ? FADE : 0}px, #000 calc(100% - ${showBottom ? FADE : 0}px), transparent 100%)`
-    : "none";
   const elapsedS = Math.max(1, Math.round(elapsedSeconds));
+  const streamText = joinStream(sentences);
 
   return (
     <div className={styles.tr}>
@@ -231,32 +146,17 @@ export function ThinkingReasoning({
         className={styles.trCollapsible + (expanded ? "" : " " + styles.isCollapsed)}
       >
         <div className={styles.trInner}>
-          <div
-            ref={viewportRef}
-            className={styles.trViewport + (scrollable ? " " + styles.isScroll : "")}
-            style={{
-              maxHeight: `${MAX_H}px`,
-              WebkitMaskImage: mask,
-              maskImage: mask,
-            }}
-            onScroll={scrollable ? onScroll : undefined}
-          >
-            <div className={styles.trStream}>
-              {sentences.slice(0, count).map((line, i) => (
-                <p key={i} className={styles.trSentence}>
-                  {everLive ? (
-                    <StreamingSentence
-                      text={line}
-                      holdMs={count === 1 ? 180 : 40}
-                      active={phase === "thinking" && i === count - 1}
-                    />
-                  ) : (
-                    line
-                  )}
-                </p>
-              ))}
-            </div>
-          </div>
+          {/* ONE continuous horizontal stream — fixed height, auto-follow,
+              manual swipe/drag, adaptive vignette (PRD §2–§8). Rendered
+              while live and after settle (re-open re-reads); a collapsed
+              settled block unmounts it (cheap). */}
+          {streamText ? (
+            <HorizontalReasoningStream
+              text={streamText}
+              active={!done}
+              ariaLabel={activeLabel}
+            />
+          ) : null}
         </div>
       </div>
     </div>

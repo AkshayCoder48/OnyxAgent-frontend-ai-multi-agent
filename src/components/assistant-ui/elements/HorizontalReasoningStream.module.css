@@ -1,0 +1,190 @@
+/* HorizontalReasoningStream — ONE continuous horizontal reasoning line
+ * (PRD "Adaptive Horizontal Reasoning Stream UI", 2026-11-24).
+ *
+ * All colour work rides the design system's CSS variables:
+ *   --color-background / --color-foreground / --color-muted-foreground /
+ *   --color-primary (the selected accent) — nothing hardcoded, so light,
+ *   dark and custom appearances all adapt (§6). The vignette strip's own
+ *   paint arrives at runtime from the TSX (the LIVE background color read
+ *   off <html>, re-read on theme flips), because the strip must dissolve
+ *   into whatever surface the app currently shows. */
+
+.hrsRoot {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  position: relative;
+  margin-top: 0.125rem;
+}
+
+/* Fixed-height single-row viewport: ONE line of reasoning, horizontal
+ * overflow contained (never widens the chat, never grows vertically — §2).
+ * overscroll-behavior-x: contain keeps a mobile swipe from chaining into
+ * the page's horizontal pan; the vertical chat scroll is untouched
+ * because the viewport only ever scrolls on the X axis (§8). */
+.hrsViewport {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  border-radius: 0.5rem;
+  /* Native scrollbar hidden — the vignette + hint rail carry the affordance
+   * and the drag/swipe gestures do the work. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  cursor: grab;
+}
+.hrsViewport::-webkit-scrollbar {
+  display: none;
+}
+.hrsViewport:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.hrsViewport:active {
+  cursor: grabbing;
+}
+/* While a pointer drag is in flight, kill text selection so the swipe
+ * never smear-selects the reasoning text (§8 desktop drag). */
+.hrsViewport.hrsDragging {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The ONE continuous text element. Subtle blur (§4): a very light blur
+ * rides the whole resting stream — gentle enough to keep every glyph
+ * readable while softening the line against the surface; freshly arriving
+ * words additionally settle via the shared .wf word animation (blur
+ * 5px→0), whose ending state carries NO filter — sharper than the resting
+ * veil — so newly streamed text visibly transitions INTO full clarity. */
+.hrsStream {
+  display: inline-block;
+  padding: 0 1.75rem 0 1.5rem; /* right side clears the Follow chip */
+  color: var(--color-foreground);
+  font-size: 0.75rem;
+  line-height: 2.25rem; /* matches the viewport row height */
+  opacity: 0.78;
+  filter: blur(0.4px);
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Streaming caret — accent-coloured, rides the tail while live (§6). */
+.hrsCaret {
+  display: inline-block;
+  width: 0.4em;
+  height: 0.95em;
+  margin-left: 0.12em;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: var(--color-primary);
+  animation: hrsCaretBlink 900ms steps(2, start) infinite;
+}
+
+/* Fixed-to-viewport vignette strips (§5): pointer-events none, sit above
+ * the scrolling text, fade BOTH edges into the live background color. The
+ * strip's own backgroundColor arrives via inline style from the TSX
+ * (runtime theme read); this class fixes the geometry to the viewport
+ * (never the moving text) and shapes the fade's direction. */
+.hrsVignette {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 28px;
+  pointer-events: none;
+  z-index: 1;
+}
+.hrsVignetteLeft {
+  left: 0;
+  /* Solid at the very edge → transparent inwards. */
+  mask-image: linear-gradient(to right, #000 0, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0, transparent 100%);
+}
+.hrsVignetteRight {
+  right: 0;
+  /* Transparent inwards → solid at the very edge. */
+  mask-image: linear-gradient(to left, #000 0, transparent 100%);
+  -webkit-mask-image: linear-gradient(to left, #000 0, transparent 100%);
+}
+
+/* Follow Latest chip (§3): accent-tinted glass pill, right side, only
+ * rendered while auto-follow is paused. */
+.hrsFollow {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.625rem;
+  line-height: 1.4;
+  font-family: inherit;
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+  border-radius: 999px;
+  cursor: pointer;
+  z-index: 2;
+  transition: background 160ms ease;
+}
+.hrsFollow:hover {
+  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+.hrsFollow svg {
+  transform: rotate(90deg); /* chevron pointing right — towards the latest */
+}
+
+/* Overflow affordance rail (§7): a hairline accent sliver under the right
+ * edge whenever the stream extends beyond the viewport. */
+.hrsOverflowHint {
+  position: absolute;
+  right: 1rem;
+  bottom: -1px;
+  width: 2.5rem;
+  height: 1.5px;
+  border-radius: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--color-primary) 55%, transparent)
+  );
+  pointer-events: none;
+}
+
+@keyframes hrsCaretBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Reduced motion (§9): the caret stops blinking; the resting blur veil is
+ * dropped (fully sharp text — the .wf word animations are already disabled
+ * by their own reduced-motion rule in globals.css); no snap transitions. */
+@media (prefers-reduced-motion: reduce) {
+  .hrsCaret {
+    animation: none;
+  }
+  .hrsStream {
+    filter: none;
+  }
+  .hrsFollow {
+    transition: none;
+  }
+}
+
+/* Mobile (§8): trim the paddings so the stream uses the full row width. */
+@media (max-width: 640px) {
+  .hrsStream {
+    padding-right: 1.25rem;
+    padding-left: 1rem;
+  }
+}

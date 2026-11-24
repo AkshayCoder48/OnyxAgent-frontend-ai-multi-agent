@@ -39,6 +39,7 @@ export {
 export { StoppedRun } from "./stopped-run";
 export { ThinkingIndicator } from "./thinking-indicator";
 export { ThinkingReasoning, type ThinkingReasoningProps } from "./thinking-reasoning";
+export { HorizontalReasoningStream } from "./horizontal-reasoning-stream";
 export { CompanionCursor } from "./companion-cursor";
 export { Orb, OrbCursor, type OrbProps, type OrbVariant, type LatticeVariant, ORB_TASKS } from "./orb";
 export {
