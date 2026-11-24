@@ -1243,3 +1243,26 @@ Tests:
 
 Stage Summary:
 - The fix is verified with the exact failing payload on both the granular and umbrella paths; the error block the user saw came from a pre-rebuild bundle. The tool schema now teaches the model not to stringify args at all, and the coercion catches it when it does anyway. Fix live in repo; the redeploy (already triggered by the push) picks it up on next page load.
+
+## Task 45 — REAL root cause of the persistent "args must be an object": `next build` FAILED — deploys stale, demo served pre-fix code
+
+Date: 2026-11-24
+Agent: main (Z.ai Code)
+Task: User report #3 (identical error, new payload: GOOGLEDRIVE_FIND_FILE with stringified args + `fields`). User hint: "composio launched new typa APIs" — verify the wire format deeply and document the correct call format in Onyx.md.
+
+Investigation:
+- The source at HEAD was already correct (client tool + server route BOTH coerce degenerate args; the old guard string no longer exists in the repo). Yet the user still hit the exact OLD error, with the trailing period — that wording only exists in pre-86dd3f1 code.
+- Downloaded the LIVE demo bundle (onyx-agent-frontend-ai-multi-agent-wine.vercel.app): chunk 5d0e351d512698fb.js contains the OLD guard `typeof e.args!="object"…return{…error:"args must be an object matching the tool's inputSchema."}` — the deployment runs pre-fix code despite last-modified 17:08 (after my 16:56 push).
+- Ran `next build` locally: **FAILED** — "Attempted to call registerTool() from the server but registerTool is on the client … at Object.<anonymous> (app/api/composio/tools/execute/route.js)". ROOT CAUSE: src/app/api/composio/tools/execute/route.ts imports coerceComposioArgs from src/lib/tools/composio_tools.ts, which calls registerTool (a "use client" module's top-level call) at import time — server route → client module = build error. Every Vercel deploy since that import was added has FAILED, so Vercel kept serving the last successful (pre-fix) deployment. That's why both my pushes never reached users.
+
+Composio API verification (docs.composio.dev):
+- Current release: v3.1 (…/api/v3.1/…); v3 frozen but still supported — our client's v3 paths are fine.
+- POST /api/v3(tool_router/session/{sid}/execute body: `tool_slug` (string, required) + `arguments` (OBJECT, optional) + account/input_responses/request_state options. `arguments` is a real JSON object, never a string — our client sends exactly this. No API change needed.
+
+Fix:
+- Extracted coerceComposioArgs into src/lib/composio/coerce.ts (server-safe, no client imports). composio_tools.ts imports + re-exports it (note: `export … from` doesn't bind locally — import it as well, or the handler throws ReferenceError). route.ts now imports from @/lib/composio/coerce.
+- `next build` now PASSES (was: Failed to collect page data for /api/composio/tools/execute).
+- Documented the correct call format in Onyx.md + src/lib/agent/onyx-md.ts (the prompt-side digest): a CORRECT/WRONG JSON example (args as real object vs JSON-encoded string) + "never stringify args" rule.
+
+Tests: composio suites 36/36 (composio_tools + user-payload-verify + client + onyx-md-digest). tsc: no new errors (repo has 182 pre-existing, excluded from builds — next skips type validation).
+Deployment: this push builds cleanly → Vercel will finally ship the fix.

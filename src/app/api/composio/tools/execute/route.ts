@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authComposio, composioErrorResponse, readJsonBody, runWithSession } from "@/lib/composio/server";
 import { ComposioError, type SessionExecuteResponse } from "@/lib/composio/client";
-import { coerceComposioArgs } from "@/lib/tools/composio_tools";
+import { coerceComposioArgs } from "@/lib/composio/coerce";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

@@ -146,6 +146,18 @@ When the user connects Composio (Settings → Integrations), you can use externa
 | **composio_connect_platform** | Get the OAuth link for a platform (slug like \`slack\`). Share it and WAIT — you cannot authorize yourself. |
 | **composio_execute_tool** | Execute a discovered tool: \`toolName\` + \`args\` per its schema. \`CONNECTION_REQUIRED\` → share a connect link and wait. |
 
+**composio_execute_tool — the args format (get this right):**
+
+\`\`\`json
+// CORRECT — \`args\` is a real JSON object:
+{ "toolName": "GOOGLEDRIVE_FIND_FILE", "args": { "q": "name contains 'clip'", "fields": "files(id,name,mimeType)" } }
+
+// WRONG — \`args\` as a JSON-encoded string (double-quoted JSON inside JSON) fails:
+{ "toolName": "GOOGLEDRIVE_FIND_FILE", "args": "{\\"q\\": \\"name contains 'clip'\\"}" }
+\`\`\`
+
+Never stringify \`args\` into a string. If the provider delivers a stringified or flattened shape, the handler normalizes it — but build the object directly so nothing is lost. Arguments must match the tool's \`inputSchema\` from composio_search_tools.
+
 ---
 
 ## Execution Policies (compressed)
