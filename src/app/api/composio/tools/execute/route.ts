@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authComposio, composioErrorResponse, readJsonBody, runWithSession } from "@/lib/composio/server";
 import { ComposioError, type SessionExecuteResponse } from "@/lib/composio/client";
+import { coerceComposioArgs } from "@/lib/tools/composio_tools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,10 +37,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const args =
-    body.args && typeof body.args === "object" && !Array.isArray(body.args)
-      ? (body.args as Record<string, unknown>)
-      : {};
+  // DEGENERATE-SHAPE COERCION (user report 2026-11-24): the browser tool
+  // may deliver args double-stringified or under an alias key — normalize
+  // to the plain object Composio's inputSchema validation expects, instead
+  // of failing (or silently sending {} — the old guard masked string args
+  // into an empty object and Composio rejected the call).
+  const args = coerceComposioArgs(body.args) ?? {};
 
   try {
     const { result, sessionId: sid } = await runWithSession<SessionExecuteResponse>(

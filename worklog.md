@@ -1195,3 +1195,30 @@ Work Log:
 
 Stage Summary:
 - The horizontal thinking stream is now pure: ONE sharp continuous line, auto-following the AI's reasoning, swiping/dragging/arrowing back silently, dissolving its edges into the active theme — no Follow Latest button, no accent outline or rail glow, no blur veil.
+
+## Task 43 — Composio "args must be an object matching the tool's inputSchema" on EVERY api call — fixed
+
+Date: 2026-11-24
+Agent: main (Z.ai Code)
+Task: User report: every composio api call failed with "args must be an object matching the tool's inputSchema".
+
+Root cause:
+- The old composio_execute_tool handler had a HARD guard: args must already be a plain object or the call failed with exactly that error. But OpenAI-compatible gateways routinely deliver the nested `args` parameter in degenerate shapes:
+  1. DOUBLE-STRINGIFIED — "args": "{\"channel\":\"C123\"}" (the nested object arrived as a JSON string; some providers re-encode object-valued parameters)
+  2. ALIAS KEY — arguments/parameters/params/input instead of args (the model renamed the field after Composio's own API wording)
+  3. FLATTENED — the tool's fields ride the TOP level of our own tool call ({"toolName": "SLACK_SEND_MESSAGE", "channel": "C123"}); the provider dropped one level of nesting
+  4. MISSING — zero-field tools ({} inputSchema) called with no args at all; also args: null
+- All four shapes tripped the same guard → the exact reported error on every call. The server route had a second, subtler bug: it silently sent {} for any non-object args (masking string args into an empty object, which Composio then rejected its own way).
+
+Fix (src/lib/tools/composio_tools.ts + src/app/api/composio/tools/execute/route.ts):
+- New exported coerceComposioArgs(raw, extra): normalizes ALL four degenerate shapes into the plain object Composio's inputSchema validation expects — parses double-stringified JSON once, unwraps the alias key (one level, incl. a JSON string inside it), merges flattened extras (with the alias keys themselves excluded so they never leak into merged args), accepts missing/null/"" as {} and returns null ONLY for genuinely unparseable payloads (garbage strings, arrays, scalars).
+- composio_execute_tool's handler now coerces instead of hard-rejecting; the error message (when coercion truly fails) explains every accepted shape. toolName is still required and picked up from a flattened call too.
+- The execute ROUTE also coerces its body.args with the same function — a string-args payload from any client now reaches Composio as an object instead of {}.
+
+Tests (src/lib/tools/composio_tools.test.ts, 14 new):
+- 9 pure-coercion unit tests (pass-through, string, all 4 alias keys, string-inside-alias, flattened extras, missing/null/empty, extras merged under string/alias, garbage → null).
+- 5 end-to-end handler tests driving the REGISTERED tool with a stubbed fetch: each degenerate shape executes and the wire body carries the coerced object; the exact user-reported error never fires; genuinely unparseable args still fail with the clear message. (Mocks resolveComposioHeaders/branding so the handler runs connected without IndexedDB.)
+- composio client + approval-gate + request-scoping + reliability suites: 45/45. Full suite: 1062/1062 (78 files). tsc clean.
+
+Stage Summary:
+- composio_execute_tool now accepts every real-world args shape gateways emit — object, JSON string, alias key, flattened fields or missing — and always sends Composio a proper object; the reported error path is dead.
