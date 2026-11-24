@@ -12,7 +12,7 @@
 //      MID-STREAM; only the live↔settled transitions and the approval
 //      gate override the user's click.
 import { describe, it, expect, vi } from "vitest";
-import { render, cleanup, fireEvent } from "@testing-library/react";
+import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 import { MessageItem } from "./message-item";
 import type { ChatMessage } from "@/types";
@@ -83,6 +83,33 @@ const approvalMsg = {
   isStreaming: true,
   content: "",
   parts: [toolPart("p-t1", "run_terminal", { command: "rm -rf /tmp/probe" }, "awaiting_approval", 2600)],
+} as unknown as ChatMessage;
+
+// THE INTERLEAVE (user directive 2026-11-24): narration text arrives
+// BETWEEN two tool calls — it must render INSIDE the bar, between the
+// tool cards (its chronological position), NOT dumped after the bar at
+// the message's total bottom.
+const interleavedMsg = {
+  ...settledMsg,
+  id: "m5",
+  content: "",
+  parts: [
+    toolPart("p-t1", "web_search", { query: "weather" }, "completed", 2600, 3200),
+    { id: "p-mid", type: "text", content: "Let me also read a page about it.", roundStartedAt: 3300 },
+    toolPart("p-t2", "web_fetch", { url: "https://example.com" }, "completed", 3400, 4100),
+    { id: "p-text", type: "text", content: "Here is the answer.", roundStartedAt: 4200, roundEndedAt: 5000 },
+  ],
+} as unknown as ChatMessage;
+
+// All-text turn (no activity at all): every text renders, nothing vanishes.
+const pureTextMsg = {
+  id: "m6",
+  role: "assistant",
+  content: "Just an answer.",
+  isStreaming: false,
+  createdAt: new Date().toISOString(),
+  conversationId: "c1",
+  parts: [{ id: "p-only", type: "text", content: "Just an answer." }],
 } as unknown as ChatMessage;
 
 const header = (container: HTMLElement) =>
@@ -157,6 +184,51 @@ describe("Unified Activity Bar (PRD Part A)", () => {
     fireEvent.click(h); // pinned: the interactive card must not fold away
     expect(h.getAttribute("aria-expanded")).toBe("true");
     expect(panel(container)!.getAttribute("data-open")).toBe("true");
+    cleanup();
+  });
+
+  it("INTERLEAVE (user directive 2026-11-24): text between two tools renders INSIDE the bar, between the tool cards — never at the total bottom", async () => {
+    const { container } = render(
+      React.createElement(MessageItem, { message: interleavedMsg }),
+    );
+    // MarkdownContent is next/dynamic (ssr:false) — wait for the chunk.
+    await waitFor(() => {
+      expect(container.textContent ?? "").toContain("Let me also read a page about it.");
+    });
+    // The bar exists and carries the narration text in its timeline.
+    const bar = container.querySelector(".activity-bar")!;
+    expect(bar).toBeTruthy();
+    const barText = bar.textContent ?? "";
+    expect(barText).toContain("Let me also read a page about it.");
+    // Chronology INSIDE the bar: tool1 → interleaved text → tool2.
+    const iSearch = barText.indexOf("Searched the web");
+    const iMid = barText.indexOf("Let me also read");
+    const iFetch = barText.indexOf("Read a web page");
+    expect(iSearch).toBeGreaterThanOrEqual(0);
+    expect(iMid).toBeGreaterThan(iSearch);
+    expect(iFetch).toBeGreaterThan(iMid);
+    // The interleaved text row is a SIBLING timeline row inside the bar
+    // (a direct child of the stagger container), not nested in a card.
+    const rows = bar.querySelectorAll(":scope > div");
+    expect(Array.from(rows).length).toBeGreaterThan(1);
+    // The terminal ANSWER ("Here is the answer.") renders AFTER the bar —
+    // it is the answer, not tooling narration.
+    const all = container.textContent ?? "";
+    expect(all.indexOf("Here is the answer.")).toBeGreaterThan(all.indexOf("Read a web page"));
+    // And the interleaved text is NOT after the whole bar (the old bug:
+    // dumped below the last tool at the message bottom).
+    expect(all.indexOf("Let me also read")).toBeLessThan(all.indexOf("Read a web page"));
+    cleanup();
+  });
+
+  it("all-text turn (no activity): every text renders — no vanishing rows", async () => {
+    const { container } = render(
+      React.createElement(MessageItem, { message: pureTextMsg }),
+    );
+    await waitFor(() => {
+      expect(container.textContent ?? "").toContain("Just an answer.");
+    });
+    expect(container.querySelector(".activity-bar")).toBeNull();
     cleanup();
   });
 });

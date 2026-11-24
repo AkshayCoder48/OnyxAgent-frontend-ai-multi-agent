@@ -108,4 +108,68 @@ describe("composer redesign (PRD §5)", () => {
     expect(send.disabled).toBe(false);
     expect(onSend).not.toHaveBeenCalled();
   });
+
+  // ── TYPING ANIMATION ON THE USER'S OWN TYPING (directive 2026-11-24) ──
+  // The auto-writing placeholder overlay is GONE; the mirror animates the
+  // user's own keystrokes instead.
+
+  it("NO auto-writing suggestion overlay on the empty composer (directive 2026-11-24)", () => {
+    const { container } = setup();
+    // The old rotating-suggestion overlay (TypingAnimation words) is gone —
+    // its suggestions never appear in the DOM.
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Ask Onyx anything");
+    expect(text).not.toContain("Build a complete website");
+    // No animated auto-writing overlay element behind the empty textarea.
+    expect(container.querySelector("[aria-hidden] .prompt-char-in")).toBeNull();
+    expect(container.querySelector(".activity-bar")).toBeNull();
+  });
+
+  it("the user's OWN typing reveals through the mirror: per-char animated spans, not an overlay", () => {
+    const { container } = setup();
+    const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+    // A real keystroke: one char appended at the end.
+    fireEvent.change(textarea, { target: { value: "h" } });
+    fireEvent.change(textarea, { target: { value: "he" } });
+    fireEvent.change(textarea, { target: { value: "hel" } });
+    // The mirror div exists behind the textarea and paints the same text…
+    const mirror = container.querySelector(".prompt-char-in")?.parentElement;
+    expect(mirror).toBeTruthy();
+    expect(mirror!.textContent).toBe("hel");
+    // …each visible char is its own animated span (3 chars = 3 spans)…
+    const chars = container.querySelectorAll(".prompt-char-in");
+    expect(chars.length).toBe(3);
+    // …and the textarea itself paints transparently (the mirror owns the
+    // glyphs; the caret stays inked).
+    expect(textarea.className).toContain("prompt-mirror-text");
+    expect((textarea as HTMLTextAreaElement).value).toBe("hel");
+  });
+
+  it("paste / big deltas render STATIC — no animation burst (safety valve)", () => {
+    const { container } = setup();
+    const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+    // A paste-sized jump (10 chars at once) is not typing.
+    fireEvent.change(textarea, { target: { value: "hello world" } });
+    const chars = container.querySelectorAll(".prompt-char-in");
+    expect(chars.length).toBe(0);
+    // The mirror still paints the full text (statically)…
+    const mirror = container.querySelector(".prompt-char-in")?.parentElement;
+    // …as one plain text node — and the textarea renders natively (no
+    // transparent-glyph mode): pasted text must be plainly visible.
+    expect(mirror ?? container).toBeTruthy();
+    expect((textarea as HTMLTextAreaElement).value).toBe("hello world");
+    // Subsequent typing after a paste animates only the NEW chars.
+    fireEvent.change(textarea, { target: { value: "hello world!" } });
+    expect(container.querySelectorAll(".prompt-char-in").length).toBe(1);
+  });
+
+  it("deletion renders static (backspace never animates)", () => {
+    const { container } = setup();
+    const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+    fireEvent.change(textarea, { target: { value: "abc" } });
+    expect(container.querySelectorAll(".prompt-char-in").length).toBe(3);
+    fireEvent.change(textarea, { target: { value: "ab" } });
+    // A deletion resets the boundary: everything renders as one static run.
+    expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+  });
 });

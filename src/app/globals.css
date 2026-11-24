@@ -1602,6 +1602,58 @@
   51%, 100% { opacity: 0; }
 }
 
+/* ==================== Prompt typing mirror (composer) ====================
+   The composer's typing animation (user directive 2026-11-24: animate the
+   user's OWN typing in the prompt box — the auto-writing placeholder was
+   retired with the same directive). A mirror div behind the textarea
+   paints the prompt; every freshly typed character mounts as a span
+   playing .prompt-char-in (fade + 0.12em rise, 170ms — the MagicUI
+   TypingAnimation character feel, applied to real keystrokes). The
+   textarea keeps native behavior with transparent glyphs
+   (.prompt-mirror-text) — the caret stays inked so the user still sees
+   where they are; IME composition, pastes and reduced-motion all fall
+   back to the plain textarea. */
+
+.prompt-char-in {
+  display: inline-block;
+  animation: prompt-char-in 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes prompt-char-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.12em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-char-in {
+    animation: none;
+  }
+}
+
+/* The textarea half of the mirror pair: glyphs transparent (the mirror
+   behind paints them), caret visible. Applied only while the mirror is
+   active — IME composition, paste rendering and disabled all render the
+   textarea plainly. */
+.prompt-mirror-text {
+  color: transparent;
+  caret-color: var(--color-foreground);
+}
+
+.prompt-mirror-text::selection {
+  background: color-mix(in oklab, var(--color-primary) 30%, transparent);
+  color: transparent;
+}
+
+.prompt-mirror-text::placeholder {
+  color: transparent;
+}
+
 /* ==================== Writing Cursor (geometric shapes) ====================
    A morphing geometric-shape cursor that renders at the end of streaming AI
    text. The shape cycles circle → triangle → square every ~1.1s with a smooth

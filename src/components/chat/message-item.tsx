@@ -1045,6 +1045,13 @@ export const MessageItem = React.memo(function MessageItem({
           // into ONE BrowserUseGroup frame (continuations render nothing);
           // other tools keep their ToolCallCard; texts are full-ink
           // assistant bubbles.
+          //
+          // IN-BAR TEXT REMOUNT (interleave fix): an interleaved text
+          // that moves from the after-bar tail into the bar REMOUNTS —
+          // the word-typewriter's identity reveal cache lets its cascade
+          // finish at paced speed in the new position instead of dumping
+          // the un-faded backlog at once (the "finish, don't flush"
+          // contract, for free via identityKey).
           const renderItem = (
             it: FlowItem,
             runs: { isContinuation(id: string): boolean; runStartedBy(id: string): unknown },
@@ -1185,8 +1192,34 @@ export const MessageItem = React.memo(function MessageItem({
           // ── Parts flow → ONE ActivityBar + the answer texts. ───────────
           // Activity = everything except the answer texts; the bar hosts
           // it all, the texts render after it in strict order.
+          //
+          // INTERLEAVED TEXTS (user directive 2026-11-24: "the caption
+          // text it generate in tooling process is getting downward as ai
+          // tool calls, not in the place where it actually generated"):
+          // a text part that arrived BETWEEN tool calls is part of the
+          // tooling narration — it renders INSIDE the bar, at its exact
+          // chronological position (between the tool cards it came
+          // between), NOT dumped after the bar at the total bottom. Only
+          // the FINAL run of texts after the last activity renders after
+          // the bar as the answer. A turn with interleaving therefore
+          // shows: bar → interleaved texts in-position → answer texts.
           const activityItems = items.filter((it) => it.kind !== "text");
-          const textItems = items.filter((it) => it.kind === "text");
+          // The bar's own children: the FULL chronological walk up to (and
+          // including) the first item of the terminal answer run — every
+          // tool/thinking item plus the interleaved texts seated between
+          // them. Texts after the LAST non-text item are the answer.
+          const activityEndIdx = (() => {
+            let last = -1;
+            for (let i = items.length - 1; i >= 0; i--) {
+              if (items[i]!.kind !== "text") { last = i; break; }
+            }
+            return last;
+          })();
+          const barChildrenItems = items.slice(0, activityEndIdx + 1);
+          // The answer: the text run AFTER the last activity item (all
+          // items for an all-text turn — no activity, no bar; slice past
+          // the final activity item yields [] naturally).
+          const answerItems = activityEndIdx < 0 ? items : items.slice(activityEndIdx + 1);
           const toolCallsForBar = activityItems
             .filter((it): it is Extract<FlowItem, { kind: "tool" }> => it.kind === "tool")
             .map((it) => it.toolCall);
@@ -1210,7 +1243,7 @@ export const MessageItem = React.memo(function MessageItem({
                   toolCalls={toolCallsForBar}
                   toolUnitCount={countToolUnits(toolCallsForBar, browserRuns)}
                 >
-                  {activityItems.map((it) => (
+                  {barChildrenItems.map((it) => (
                     <React.Fragment key={it.partId}>
                       {renderItem(it, browserRuns)}
                     </React.Fragment>
@@ -1218,7 +1251,7 @@ export const MessageItem = React.memo(function MessageItem({
                 </ActivityBar>
               )}
               {/* The answer texts, in order, after the bar. */}
-              {textItems.map((it) => (
+              {answerItems.map((it) => (
                 <React.Fragment key={it.partId}>
                   {renderItem(it, browserRuns)}
                 </React.Fragment>
