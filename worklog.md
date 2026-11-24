@@ -1179,3 +1179,19 @@ Work Log:
 
 Stage Summary:
 - The sandbox browser now boots a real-Chrome-identity stealth engine with NO license (patchright) whenever no cloak key exists — the badge says "chrome", the UA says Chrome, webdriver says false — with cloakbrowser auto-upgrading the ladder the moment a key is present, and stock Chromium only as the honest last resort. The reasoning UI streams as ONE continuous horizontal line that auto-follows the AI's thinking, swipes/drag/keys back, fades its edges into whatever theme is active, and reuses the user's selected streaming animation — vertical reasoning growth is gone.
+
+## Task 42 — Thinking stream de-chroming: Follow Latest chip, border glow and subtle blur removed
+
+Date: 2026-11-24
+Agent: main (Z.ai Code)
+Task: User directive on the new horizontal reasoning stream: "remove Follow Latest button on thinking, and remove the border glow on thinking and remove subtle blur" — the stream keeps its behaviour but loses its visual chrome.
+
+Work Log:
+- FOLLOW LATEST CHIP REMOVED (horizontal-reasoning-stream.tsx + .module.css): the `{!following ? <button …>Latest</button>}` chip, the `resumeFollowing` callback and the whole `.hrsFollow` block (accent color-mix pill, border, hover, svg chevron) are gone. The follow STATE keeps working exactly as before — manual navigation past 24px from the tail still pauses auto-follow (the stream parks while new text keeps rendering off-screen), and REACHING THE VERY END still resumes it silently; there is just no visible control on the line anymore. `followingRef` still flips synchronously in gesture handlers so the rAF loop never fights a manual scroll.
+- BORDER GLOW REMOVED: two accent-painted affordances deleted — (1) the `.hrsViewport:focus-visible` 2px var(--color-primary) outline (keyboard arrows still navigate, just visually quiet), and (2) the `.hrsOverflowHint` hairline accent rail under the right edge (its JSX `{hasOverflow …}` render, its polling effect and its CSS block all removed — one less rAF loop per live stream too).
+- SUBTLE BLUR REMOVED: `.hrsStream`'s `filter: blur(0.4px)` resting veil is gone; the stream text renders fully sharp. The `.wf` word-settle from the user's SELECTED streaming animation is untouched (that is the animation preference, not stream chrome). The reduced-motion `filter: none` override went with it.
+- The caret (accent var(--color-primary)) and the two background-colored edge vignette strips remain the ONLY chrome: text + caret + vignette, nothing glowing, nothing blurred, no control. Docs updated in both files; padding trimmed (no chip to clear on the right).
+- TESTS: the chip test flipped to "renders NO control — ever" (pause still parks the viewport under growth with zero buttons in the DOM); the CSS audit now asserts the absence of hrsFollow/hrsOverflowHint/blur/outline/color-mix while the token positives (var(--color-primary)/foreground, overscroll, reduced-motion) stay. Suite 14/14; inline-flow + timeline + live-panel 32/32; FULL suite 1080/1080 (78 files); tsc clean in changed files; production build ✓ 35.6s.
+
+Stage Summary:
+- The horizontal thinking stream is now pure: ONE sharp continuous line, auto-following the AI's reasoning, swiping/dragging/arrowing back silently, dissolving its edges into the active theme — no Follow Latest button, no accent outline or rail glow, no blur veil.

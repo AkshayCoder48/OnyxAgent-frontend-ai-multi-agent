@@ -25,7 +25,7 @@ import { useWordTypewriter, FadeWords } from "./letter-stream";
  *      (edge vignette:      (auto-follow advances the viewport
  *       theme-background)    as text arrives; swipe to go back)
  *
- * Behaviour map (PRD §2–§8):
+ * Behaviour map (PRD §2–§8, as amended 2026-11-24 by user directive):
  *   - AUTO-FOLLOW — while streaming, the viewport advances to keep the
  *     newest text visible (rAF-batched, width read from the viewport's
  *     scrollWidth, no per-token layout reads).
@@ -33,21 +33,23 @@ import { useWordTypewriter, FadeWords } from "./letter-stream";
  *     pointer drag, and keyboard arrows move the stream; ANY manual move
  *     farther than a small threshold from the tail PAUSES auto-follow
  *     (the ref flips SYNCHRONOUSLY in the gesture handler — the rAF loop
- *     can never fight the user even for one frame).
- *   - FOLLOW LATEST — a subtle accent chip appears while paused; clicking
- *     it (or reaching the very end while streaming) resumes following.
- *     While paused, incoming text still renders (the line keeps growing
- *     off-screen) but the viewport stays where the user left it.
- *   - SUBTLE BLUR (§4) — a very light blur() rides the whole stream
- *     (never heavy, never glowing); newly arriving words keep the user's
- *     selected streaming animation (the same .wf spans the main answer
- *     uses), whose blur-settle ends filterless — sharper than the resting
- *     veil — so newly streamed text visibly transitions INTO clarity.
+ *     can never fight the user even for one frame). Reaching the very end
+ *     while streaming RESUMES following. While paused, incoming text still
+ *     renders (the line keeps growing off-screen) but the viewport stays
+ *     where the user left it.
+ *     REMOVED (user directive 2026-11-24): the Follow Latest chip — follow
+ *     state is silent; no control rides the stream.
+ *   - SHARP TEXT — the resting stream renders at full clarity (the subtle
+ *     blur veil was removed by the same user directive); newly arriving
+ *     words keep the user's selected streaming animation (the same .wf
+ *     spans the main answer uses).
  *   - ADAPTIVE VIGNETTE (§5) — left/right fades composited from the LIVE
  *     theme background color (readThemeBackground reads the computed
  *     --color-background off <html>, re-read on class/style mutations), so
  *     it adapts to light/dark/custom backgrounds with zero hardcoded
- *     colors.
+ *     colors. The only visual chrome on the stream (the accent overflow
+ *     rail, the accent focus outline and the chip border were removed as
+ *     user-requested noise, 2026-11-24).
  *   - ANIMATION REUSE (§4) — the reveal engine IS the existing one:
  *     useWordTypewriter + FadeWords, which already respects
  *     html[data-stream-anim] (the user's selected streaming animation),
@@ -59,8 +61,9 @@ import { useWordTypewriter, FadeWords } from "./letter-stream";
  *
  * Performance notes (§9): auto-follow batches scroll writes through
  * requestAnimationFrame; the stream is ONE text node whose growing tail
- * re-renders (FadeWords memoizes settled words); vignette + blur are pure
- * CSS (no backdrop-filter on the text); a settled block costs zero timers.
+ * re-renders (FadeWords memoizes settled words); the vignette is pure CSS
+ * (no filter, no backdrop-filter on the text); a settled block costs zero
+ * timers.
  */
 
 /** Distance (px) from the trailing edge that counts as "at the latest". */
@@ -273,13 +276,6 @@ export function HorizontalReasoningStream({
     [noteManualScroll],
   );
 
-  const resumeFollowing = useCallback(() => {
-    const el = viewportRef.current;
-    if (el) el.scrollLeft = el.scrollWidth;
-    followingRef.current = true; // sync — see noteManualScroll
-    setFollowing(true);
-  }, []);
-
   // ── THEME-ADAPTIVE VIGNETTE (§5) ───────────────────────────────────────
   // Left/right fades composited over the LIVE background color so the
   // stream dissolves into whatever surface it sits on. Re-read whenever the
@@ -301,27 +297,9 @@ export function HorizontalReasoningStream({
     return () => mo?.disconnect();
   }, []);
 
-  // The overflow hint rail shows only while the stream extends beyond the
-  // viewport. Checked each frame while LIVE (the width can only grow then);
-  // once on settle — zero cost for settled blocks.
-  const [hasOverflow, setHasOverflow] = useState(false);
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    let raf = 0;
-    let last: boolean | number = -1;
-    const check = () => {
-      const over = el.scrollWidth > el.clientWidth + 1;
-      if (over !== last) {
-        last = over;
-        setHasOverflow(over);
-      }
-      if (active) raf = requestAnimationFrame(check);
-    };
-    if (active) raf = requestAnimationFrame(check);
-    else check();
-    return () => cancelAnimationFrame(raf);
-  }, [active]);
+  // The overflow state is no longer surfaced visually (the accent hint
+  // rail and the Follow Latest chip were removed as user-requested visual
+  // noise, 2026-11-24) — the vignette strips alone carry the containment.
 
   // Compose the horizontal fade from the live background: BOTH edges
   // dissolve into the surface (fixed relative to the VIEWPORT, never the
@@ -380,32 +358,7 @@ export function HorizontalReasoningStream({
             />
           </>
         ) : null}
-        {/* Follow Latest chip — accent-coloured, only while paused. */}
-        {!following ? (
-          <button
-            type="button"
-            className={styles.hrsFollow}
-            onClick={resumeFollowing}
-            aria-label="Follow latest reasoning"
-          >
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <path
-                d="m5 12 7-7 7 7-7 7z"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Latest
-          </button>
-        ) : null}
       </div>
-      {/* Overflow affordance rail — a hairline accent sliver under the right
-          edge whenever the stream extends beyond the viewport (§7). */}
-      {hasOverflow ? (
-        <div className={styles.hrsOverflowHint} aria-hidden="true" />
-      ) : null}
     </div>
   );
 }

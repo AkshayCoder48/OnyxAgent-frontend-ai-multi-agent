@@ -7,7 +7,13 @@
  *   dark and custom appearances all adapt (§6). The vignette strip's own
  *   paint arrives at runtime from the TSX (the LIVE background color read
  *   off <html>, re-read on theme flips), because the strip must dissolve
- *   into whatever surface the app currently shows. */
+ *   into whatever surface the app currently shows.
+ *
+ * USER DIRECTIVE 2026-11-24 (visual de-chroming): the Follow Latest chip,
+ * the accent focus outline, the accent overflow-hint rail and the resting
+ * blur veil are all REMOVED — the stream carries ONLY the text, the caret
+ * and the background-colored edge vignette. Nothing glows, nothing is
+ * blurred, no control rides the line. */
 
 .hrsRoot {
   display: block;
@@ -29,8 +35,8 @@
   overflow-y: hidden;
   white-space: nowrap;
   border-radius: 0.5rem;
-  /* Native scrollbar hidden — the vignette + hint rail carry the affordance
-   * and the drag/swipe gestures do the work. */
+  /* Native scrollbar hidden — the vignette carries the containment cue and
+   * the drag/swipe gestures do the work. */
   scrollbar-width: none;
   -ms-overflow-style: none;
   cursor: grab;
@@ -38,10 +44,8 @@
 .hrsViewport::-webkit-scrollbar {
   display: none;
 }
-.hrsViewport:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
-}
+/* No :focus-visible outline (user directive: no border glow on thinking) —
+ * keyboard arrow navigation still works, just visibly quiet. */
 .hrsViewport:active {
   cursor: grabbing;
 }
@@ -53,20 +57,17 @@
   -webkit-user-select: none;
 }
 
-/* The ONE continuous text element. Subtle blur (§4): a very light blur
- * rides the whole resting stream — gentle enough to keep every glyph
- * readable while softening the line against the surface; freshly arriving
- * words additionally settle via the shared .wf word animation (blur
- * 5px→0), whose ending state carries NO filter — sharper than the resting
- * veil — so newly streamed text visibly transitions INTO full clarity. */
+/* The ONE continuous text element — full clarity, no filter (the subtle
+ * blur veil was removed by user directive 2026-11-24): freshly arriving
+ * words keep the shared .wf word settle from the selected streaming
+ * animation, and settled text renders sharp. */
 .hrsStream {
   display: inline-block;
-  padding: 0 1.75rem 0 1.5rem; /* right side clears the Follow chip */
+  padding: 0 1.5rem;
   color: var(--color-foreground);
   font-size: 0.75rem;
   line-height: 2.25rem; /* matches the viewport row height */
   opacity: 0.78;
-  filter: blur(0.4px);
   white-space: pre;
   user-select: text;
   -webkit-user-select: text;
@@ -110,52 +111,6 @@
   -webkit-mask-image: linear-gradient(to left, #000 0, transparent 100%);
 }
 
-/* Follow Latest chip (§3): accent-tinted glass pill, right side, only
- * rendered while auto-follow is paused. */
-.hrsFollow {
-  position: absolute;
-  right: 0.5rem;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.125rem 0.5rem;
-  font-size: 0.625rem;
-  line-height: 1.4;
-  font-family: inherit;
-  color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
-  border-radius: 999px;
-  cursor: pointer;
-  z-index: 2;
-  transition: background 160ms ease;
-}
-.hrsFollow:hover {
-  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
-}
-.hrsFollow svg {
-  transform: rotate(90deg); /* chevron pointing right — towards the latest */
-}
-
-/* Overflow affordance rail (§7): a hairline accent sliver under the right
- * edge whenever the stream extends beyond the viewport. */
-.hrsOverflowHint {
-  position: absolute;
-  right: 1rem;
-  bottom: -1px;
-  width: 2.5rem;
-  height: 1.5px;
-  border-radius: 1px;
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--color-primary) 55%, transparent)
-  );
-  pointer-events: none;
-}
-
 @keyframes hrsCaretBlink {
   0%,
   100% {
@@ -166,18 +121,11 @@
   }
 }
 
-/* Reduced motion (§9): the caret stops blinking; the resting blur veil is
- * dropped (fully sharp text — the .wf word animations are already disabled
- * by their own reduced-motion rule in globals.css); no snap transitions. */
+/* Reduced motion (§9): the caret stops blinking; the .wf word animations
+ * are already disabled by their own reduced-motion rule in globals.css. */
 @media (prefers-reduced-motion: reduce) {
   .hrsCaret {
     animation: none;
-  }
-  .hrsStream {
-    filter: none;
-  }
-  .hrsFollow {
-    transition: none;
   }
 }
 

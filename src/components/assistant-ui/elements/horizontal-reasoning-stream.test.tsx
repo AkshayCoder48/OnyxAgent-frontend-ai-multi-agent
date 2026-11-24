@@ -170,26 +170,23 @@ describe("HorizontalReasoningStream — auto-follow (PRD §3)", () => {
     expect(viewport.scrollLeft).toBe(1300); // following resumed
   });
 
-  it("shows a Follow Latest control only when auto-follow is paused", async () => {
+  it("renders NO Follow Latest control — ever (removed by user directive)", async () => {
     const { viewport, container } = renderStream();
     expect(chipEl(container)).toBeNull();
+    // Pause auto-follow (user swipes back): the stream stays silent —
+    // no control may appear on the line.
     fake = { scrollWidth: 1200, clientWidth: 400 };
     viewport.scrollLeft = 100;
     viewport.dispatchEvent(new Event("scroll"));
-    // The chip appears once the pause state flushes:
     await waitFor(() => {
-      expect(chipEl(container)).toBeTruthy();
+      // follow state actually paused: the viewport parks under growth…
+      fake = { scrollWidth: 1400, clientWidth: 400 };
+      drainRaf();
+      expect(viewport.scrollLeft).toBe(100);
     });
-    chipEl(container)?.dispatchEvent(
-      new MouseEvent("click", { bubbles: true }),
-    );
-    // Resume: the chip disappears and the next tick follows the tail again.
-    await waitFor(() => {
-      expect(chipEl(container)).toBeNull();
-    });
-    fake = { scrollWidth: 1200, clientWidth: 400 };
-    drainRaf();
-    expect(viewport.scrollLeft).toBe(1200);
+    // …and STILL no chip/border/glow element rides the stream.
+    expect(chipEl(container)).toBeNull();
+    expect(container.querySelector("button")).toBeNull(); // no control at all
   });
 
   it("keyboard arrows scroll the stream manually", () => {
@@ -265,17 +262,25 @@ describe("HorizontalReasoningStream — vignette + theme (PRD §5–§6)", () =>
     });
   });
 
-  it("CSS module uses theme tokens — no hardcoded vignette/scroll colors", () => {
+  it("CSS module uses theme tokens — no chip/rail/blur/outline (user directive)", () => {
     const css = readFileSync(
       join(__dirname, "./HorizontalReasoningStream.module.css"),
       "utf8",
     );
     expect(css).not.toMatch(/background\s*:\s*(#000|#fff|black|white)\s*[;}]/i);
-    expect(css).toContain("var(--color-primary)");
+    expect(css).toContain("var(--color-primary)"); // caret ink only
     expect(css).toContain("var(--color-foreground)");
     expect(css).toContain("overscroll-behavior-x");
     expect(css).toContain("prefers-reduced-motion");
-    expect(css).toContain("color-mix(in srgb, var(--color-primary)");
+    // REMOVED (user directive 2026-11-24): the Follow Latest chip, the
+    // accent overflow rail, the focus outline and the resting blur veil.
+    expect(css).not.toContain("hrsFollow");
+    expect(css).not.toContain("hrsOverflowHint");
+    expect(css).not.toContain("filter: blur");
+    expect(css).not.toContain("outline:");
+    // No color-mix chip surface survives — the only accent uses left are
+    // the caret's plain var() background.
+    expect(css).not.toContain("color-mix");
   });
 });
 
