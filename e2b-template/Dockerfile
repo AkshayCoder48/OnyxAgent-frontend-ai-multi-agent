@@ -1,14 +1,21 @@
-# E2B Custom Template — CloakBrowser + Playwright/Chromium + Python + Node.js
+# E2B Custom Template — Patchright + CloakBrowser + Playwright/Chromium + Python + Node.js
 #
 # This template extends the default code-interpreter with:
-#   - CloakBrowser 0.6.1 (stealth Chromium, humanized input) — the PRIMARY
-#     browser engine of the `use_browser` tool (browser-driver.ts boots it
-#     with launch_persistent_context(humanize=True, headless=False))
-#   - The CloakBrowser stealth Chromium BINARY (downloaded at build time via
-#     `python3 -m cloakbrowser install` — no per-sandbox ~200MB download)
+#   - patchright 1.64.4 — the FREE (Apache-2.0) patched-Playwright stealth
+#     engine: a Chromium that presents as real Chrome (UA Chrome/…,
+#     navigator.webdriver=false) with NO license key. THE PRIMARY engine of
+#     the `use_browser` tool (browser-driver.ts attempt 2 — attempt 1 is
+#     cloakbrowser, only when its license key exists; attempt 3 is stock
+#     Chromium).
+#   - CloakBrowser 0.7.3 (stealth Chromium, humanized input) — the licensed
+#     tier of the ladder (0.7.3 requires a claimed license key even for the
+#     free plan, so it only launches when CLOAKBROWSER_LICENSE_KEY is set
+#     as a sandbox env var; without a key the driver uses patchright).
+#   - The patchright stealth Chromium BINARY (downloaded at build time — no
+#     per-sandbox ~200MB download)
 #   - Xvfb — the browser runs HEADED (headless=False) on a virtual display
-#   - Playwright (Python + Node.js bindings) + stock Chromium (the fallback
-#     engine when CloakBrowser is unavailable)
+#   - Playwright (Python + Node.js bindings) + stock Chromium (the
+#     last-resort fallback engine)
 #   - Puppeteer (Node.js)
 #   - All browser dependencies (libs, fonts)
 #
@@ -22,12 +29,15 @@
 # Based on e2b/code-interpreter:latest which already has Python 3, Node.js,
 # and the code-interpreter envd. We add the browser stack on top.
 #
-# RUNTIME REQUIREMENTS (verified against the live PyPI package, cloakbrowser
-# 0.6.1, requires-python >=3.9): `launch_persistent_context(user_data_dir,
-# headless=, args=, viewport=, humanize=)` is a Playwright drop-in. Without a
-# CLOAKBROWSER_LICENSE_KEY the package uses the FREE stealth binary — no
-# license needed. Set CLOAKBROWSER_LICENSE_KEY as a sandbox env var to enable
-# Pro (seat-limited).
+# RUNTIME REQUIREMENTS (verified against the live PyPI packages, patchright
+# 1.64.4 / cloakbrowser 0.7.3): patchright exposes the exact Playwright sync
+# API (`from patchright.sync_api import sync_playwright`) —
+# launch_persistent_context(user_data_dir, headless=, args=, viewport=)
+# verified working with our driver's LAUNCH_ARGS. patchright disables
+# Console.enable BY DESIGN (per-page console capture is dark on that
+# engine; network/page events unaffected). cloakbrowser 0.7.3 requires a
+# CLOAKBROWSER_LICENSE_KEY for every launch (free tier = claimed key);
+# absent key → the driver ladder skips straight to patchright.
 
 FROM e2b/code-interpreter:latest
 
@@ -65,13 +75,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install the browser runtime, PINNED to the verified version.
 # Keep in sync with PIP_PKGS in src/lib/e2b/browser-session.ts and the pip
 # calls in src/lib/e2b/bg-agent-script.ts.
-RUN pip install --no-cache-dir cloakbrowser==0.6.1 playwright
+# patchright FIRST (the free primary engine); cloakbrowser + playwright ride
+# along so a licensed key upgrades the ladder and stock Chromium stays the
+# last-resort fallback.
+RUN pip install --no-cache-dir patchright==1.64.4 cloakbrowser==0.7.3 "playwright>=1.53,<1.66"
 
-# Bake the CloakBrowser stealth Chromium binary (~200MB) into the image so
-# the first `use_browser` call doesn't pay the download. The binary lands in
-# the cloakbrowser cache dir; `ensure_binary()` finds it there at runtime.
+# Bake the patchright stealth Chromium binary (~200MB) into the image so
+# the first `use_browser` call doesn't pay the download. patchright shares
+# the ms-playwright cache layout; its patched build lands in its own dir.
+RUN python3 -m patchright install chromium || \
+    echo "WARN: patchright binary pre-download failed — the driver will download it on first launch"
+
+# Bake the CloakBrowser stealth Chromium binary too — ONLY useful with a
+# license key (0.7.3 gates the download itself behind one), so best-effort.
 RUN python3 -m cloakbrowser install || \
-    echo "WARN: cloakbrowser binary pre-download failed — the driver will download it on first launch"
+    echo "WARN: cloakbrowser binary pre-download failed — the driver ladder will use patchright"
 
 # Stock Chromium for the Playwright fallback path + system deps.
 RUN npx playwright install chromium && \
@@ -85,5 +103,5 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright
 ENV PUPPETEER_EXECUTABLE_PATH=/home/user/.cache/ms-playwright/chromium-*/chrome-linux/chrome
 
 # Verify the browser stack is importable in the image.
-RUN python3 -c "import cloakbrowser, playwright; print('cloakbrowser + playwright OK')" && \
+RUN python3 -c "import patchright, cloakbrowser, playwright; print('patchright + cloakbrowser + playwright OK')" && \
     ls -la /home/user/.cache/ms-playwright/

@@ -69,8 +69,21 @@ export function BrowserLivePanel() {
                 : "Error"}
         </span>
         {state?.runtime ? (
-          <span className="rounded-full bg-foreground/[0.05] px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-            {state.runtime === "cloakbrowser" ? "cloak" : state.runtime}
+          <span
+            className="rounded-full bg-foreground/[0.05] px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+            title={
+              state.runtime === "patchright"
+                ? "Stealth Chromium (patchright — presents as real Chrome)"
+                : state.runtime === "chromium"
+                  ? "Stock Chromium (stealth engine unavailable)"
+                  : "CloakBrowser stealth Chromium"
+            }
+          >
+            {state.runtime === "cloakbrowser"
+              ? "cloak"
+              : state.runtime === "patchright"
+                ? "chrome"
+                : state.runtime}
           </span>
         ) : null}
         {typeof state?.tabCount === "number" && state.tabCount > 0 ? (

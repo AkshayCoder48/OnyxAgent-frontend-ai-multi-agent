@@ -2,8 +2,25 @@
  * The OnyxAgent BROWSER DRIVER — reimplementation (2026-11-01 PRD).
  *
  * A long-running Python process INSIDE the E2B sandbox that owns a
- * persistent-profile CloakBrowser (stealth Chromium, humanize=True) with a
- * stock-Playwright-Chromium fallback, serving the file protocol:
+ * persistent-profile stealth browser with a THREE-STEP engine ladder
+ * (2026-11-24, the "browser shows Chromium" fix):
+ *
+ *   1. CloakBrowser (humanize=True) — the richest stealth runtime (fingerprint
+ *      seed, humanized input). STILL PRIMARY, but 0.7.3 now demands a claimed
+ *      license key even for the free tier (CloakBrowserLicenseError on
+ *      launch without one) — so it only runs when a key is actually
+ *      available (CLOAKBROWSER_LICENSE_KEY or a cached license).
+ *   2. patchright — the free (Apache-2.0) patched-Playwright fork: a
+ *      drop-in `from patchright.sync_api import sync_playwright` whose
+ *      Chromium patches (isolated execution contexts, automation-flag
+ *      hygiene) make it present as real Chrome (verified locally: UA
+ *      Chrome/156.0.0.0, navigator.webdriver=false) with NO license key.
+ *      It is the new workhorse when no cloak key exists. TRADE-OFF:
+ *      patchright disables Console.enable by design, so per-page console
+ *      capture is dark on this engine (network/page events still flow).
+ *   3. stock Playwright Chromium — last-resort fallback.
+ *
+ * serving the file protocol:
  *
  *   /home/user/.onyx/browser/driver.py      — this source (started detached)
  *   /home/user/.onyx/browser/cmd.json       — {id, action, …} request
@@ -56,7 +73,7 @@
  * stamp is killed and redeployed. Bump whenever the Python source changes
  * meaningfully.
  */
-export const BROWSER_DRIVER_VERSION = "2026.11.20";
+export const BROWSER_DRIVER_VERSION = "2026.11.24";
 
 /** Sandbox-side paths (shared by the client session manager and the
  *  server-side prepare hook — single source of truth). */
@@ -242,7 +259,7 @@ rm -f .boot-failed
 
 log "checking the browser runtime…"
   fresh_install=0
-  if "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1; then
+  if "\$PY" -c "import patchright" >/dev/null 2>&1 && { "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1 || "\$PY" -c "import patchright, playwright" >/dev/null 2>&1; }; then
     log "browser runtime already installed"
     evt "BROWSER_RUNTIME_PRESENT"
   else
@@ -258,12 +275,20 @@ log "checking the browser runtime…"
     # playwright>=1.53,<1.66 itself; the EXPLICIT range pins the pair AND
     # self-heals drift — a sandbox that later carries an out-of-range
     # playwright gets corrected (up/downgraded) by this very install line.
+    #
+    # patchright==1.64.4 (2026-11-24, the "browser shows Chromium" fix) is
+    # the FREE Apache-2.0 stealth engine — a playwright fork with the
+    # bot-detection patches baked in (no license key, unlike cloakbrowser
+    # 0.7.3's mandatory claimed key). It rides the SAME pinned playwright
+    # wheel when present but ships its own driver bundle, so the probe
+    # accepts EITHER pair. Runtime ladder in driver.py: cloakbrowser (only
+    # when a license key exists) → patchright → stock playwright.
     ok=0
     for flags in "" "--break-system-packages" "--user --break-system-packages" "--user"; do
-      log "\$PIP install \${flags:-default}: cloakbrowser==0.7.3 playwright>=1.53,<1.66"
-      if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.7.3" "playwright>=1.53,<1.66" >> boot-install.log 2>&1; then
+      log "\$PIP install \${flags:-default}: cloakbrowser==0.7.3 patchright==1.64.4 playwright>=1.53,<1.66"
+      if \$PIP install --quiet --no-input \$flags "cloakbrowser==0.7.3" "patchright==1.64.4" "playwright>=1.53,<1.66" >> boot-install.log 2>&1; then
         log "pip exited 0 (\${flags:-default}) — verifying the import…"
-        if "\$PY" -c "import cloakbrowser, playwright" >>boot-install.log 2>&1; then
+        if "\$PY" -c "import patchright, cloakbrowser, playwright" >>boot-install.log 2>&1 || "\$PY" -c "import patchright, playwright" >>boot-install.log 2>&1; then
           ok=1
           log "browser runtime installed and importable"
           evt "BROWSER_DOWNLOAD_COMPLETE"
@@ -278,9 +303,9 @@ log "checking the browser runtime…"
     if [ "\$ok" != "1" ]; then
       evt "BROWSER_DOWNLOAD_FAILED"
       {
-        echo "pip could not install cloakbrowser==0.7.3 + playwright>=1.53,<1.66 into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
+        echo "pip could not install cloakbrowser==0.7.3 + patchright==1.64.4 + playwright>=1.53,<1.66 into \$PY (\$(command -v \$PY), \$(\$PY -V 2>&1))."
         echo "---- probe error ----"
-        "\$PY" -c "import cloakbrowser, playwright" 2>&1 | tail -n 8
+        "\$PY" -c "import patchright, playwright" 2>&1 | tail -n 8
         echo "---- last 40 lines of boot-install.log ----"
         tail -n 40 boot-install.log 2>/dev/null
       } > .boot-failed
@@ -296,11 +321,22 @@ log "checking the browser runtime…"
 # to the old lazy-download behavior.
 if [ "\$fresh_install" = "1" ]; then
   log "pre-fetching the browser binaries (~200 MB — the slow part of a cold boot)…"
-  if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
-    log "stealth Chromium binary cached — the browser will launch instantly"
+  # patchright FIRST — the primary no-license engine: its chromium build is
+  # the patched stealth binary (bundled driver). cloakbrowser's binary
+  # download needs its license key even to FETCH, so it is only worth
+  # pre-fetching when a key is present (the driver ladder then uses it).
+  if "\$PY" -m patchright install chromium >> boot-install.log 2>&1; then
+    log "patchright stealth Chromium cached — the browser will launch instantly"
     evt "BROWSER_BINARY_CACHED"
   else
-    log "cloakbrowser binary pre-fetch failed — the driver will download it on first launch"
+    log "patchright binary pre-fetch failed — the driver will download it on first launch"
+  fi
+  if [ -n "\${CLOAKBROWSER_LICENSE_KEY:-}" ] || { "\$PY" -c "import cloakbrowser" >/dev/null 2>&1 && [ -f "\$HOME/.config/cloakbrowser/license.key" -o -f "\$HOME/.cloakbrowser/license.key" ]; }; then
+    if "\$PY" -m cloakbrowser install >> boot-install.log 2>&1; then
+      log "cloakbrowser stealth binary cached (license present)"
+    else
+      log "cloakbrowser binary pre-fetch failed — the driver ladder will use patchright"
+    fi
   fi
   if "\$PY" -m playwright install chromium >> boot-install.log 2>&1; then
     log "stock Chromium (fallback runtime) cached"
@@ -938,35 +974,107 @@ def boot_browser():
     _clear_stale_profile_locks()
     if HEADED is None:
         HEADED = _ensure_display()
-    # -- attempt 1: CloakBrowser (stealth Chromium, humanized input) ------
-    _unpoison_asyncio()
-    event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser", headed=HEADED)
-    try:
-        from cloakbrowser import launch_persistent_context as cb_launch
-        context = cb_launch(
-            PROFILE,
-            humanize=True,
-            headless=not HEADED,
-            args=LAUNCH_ARGS,
-            viewport={"width": 1280, "height": 800},
-        )
-        runtime = "cloakbrowser"
+
+    def _mark_ready(rt):
+        """Common READY bookkeeping shared by every engine rung."""
+        runtime = rt
         with LIVE_LOCK:
             LIVE_STATE["booted"] = True
             LIVE_STATE["closed"] = False
         refresh_live_pages()
-        event("BROWSER_READY", runtime=runtime, headed=HEADED)
-        log("booted cloakbrowser runtime (humanize=True, persistent profile)")
-        return
+        event("BROWSER_READY", runtime=rt, headed=HEADED)
+        return runtime
+
+    # -- attempt 1: CloakBrowser (richest stealth — only when licensed) ----
+    # 0.7.3 REQUIRES a license key (env CLOAKBROWSER_LICENSE_KEY or a cached
+    # license file) even for the free tier; without one the launch raises
+    # CloakBrowserLicenseError AFTER a network round-trip. Probing first
+    # keeps unlicensed sandboxes off that path entirely (the browser boots
+    # straight to patchright instead of failing through cloak first).
+    cloak_key = os.environ.get("CLOAKBROWSER_LICENSE_KEY", "").strip()
+    if not cloak_key:
+        try:
+            from cloakbrowser.license import resolve_license_key as _cb_key
+            cloak_key = _cb_key() or ""
+        except Exception:
+            cloak_key = ""
+    _unpoison_asyncio()
+    event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser" if cloak_key else "skipped-no-license", headed=HEADED)
+    if cloak_key:
+        try:
+            from cloakbrowser import launch_persistent_context as cb_launch
+            context = cb_launch(
+                PROFILE,
+                humanize=True,
+                headless=not HEADED,
+                args=LAUNCH_ARGS,
+                viewport={"width": 1280, "height": 800},
+            )
+            runtime = "cloakbrowser"
+            _mark_ready("cloakbrowser")
+            log("booted cloakbrowser runtime (humanize=True, persistent profile)")
+            return
+        except Exception as e:
+            # cloakbrowser stops its internal playwright instance on launch
+            # failure, but that stop can itself fail (warning path) — unpoison
+            # so the fallback below gets a clean thread either way.
+            _unpoison_asyncio()
+            boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
+            log(boot_error)
+            event("BROWSER_ACTION_FAILED", phase="boot", engine="cloakbrowser", detail=_condense_launch_error(e))
+    else:
+        log("no cloakbrowser license key — skipping to the free stealth engine (patchright)")
+
+    # -- attempt 2: patchright (FREE patched-Playwright stealth) ----------
+    # The Apache-2.0 playwright fork: isolated execution contexts, automation
+    # flag hygiene — launches a Chromium that presents as real Chrome
+    # (verified: UA Chrome/156.0.0.0, navigator.webdriver=false). Its own
+    # bundled driver means it does NOT need stock playwright running.
+    # KNOWN TRADE-OFF: patchright disables Console.enable, so per-page
+    # console capture is dead on this engine (network/page events fine).
+    _unpoison_asyncio()
+    try:
+        from patchright.sync_api import sync_playwright as pr_sync
+        pw = pr_sync().start()
+        try:
+            context = pw.chromium.launch_persistent_context(
+                PROFILE,
+                headless=not HEADED,
+                args=LAUNCH_ARGS,
+                viewport={"width": 1280, "height": 800},
+            )
+        except Exception:
+            # Binary missing on this sandbox — fetch patchright's patched
+            # Chromium once and retry (same self-install shape as the stock
+            # playwright rung below).
+            event("BROWSER_DOWNLOAD_START", phase="patchright-deps")
+            subprocess.run(
+                [sys.executable, "-m", "patchright", "install", "chromium"],
+                capture_output=True, timeout=900,
+            )
+            event("BROWSER_DOWNLOAD_COMPLETE", phase="patchright-deps")
+            context = pw.chromium.launch_persistent_context(
+                PROFILE,
+                headless=not HEADED,
+                args=LAUNCH_ARGS,
+                viewport={"width": 1280, "height": 800},
+            )
+        runtime = "patchright"
+        _mark_ready("patchright")
+        log("booted patchright stealth runtime (patched Chromium, persistent profile)")
     except Exception as e:
-        # cloakbrowser stops its internal playwright instance on launch
-        # failure, but that stop can itself fail (warning path) — unpoison
-        # so the fallback below gets a clean thread either way.
+        try:
+            if pw is not None:
+                pw.stop()
+        except Exception:
+            pass
+        pw = None
         _unpoison_asyncio()
-        boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
+        boot_error = (boot_error + " | patchright launch failed: %s" % (_condense_launch_error(e),)) if boot_error else ("patchright launch failed: %s" % (_condense_launch_error(e),))
         log(boot_error)
-        event("BROWSER_ACTION_FAILED", phase="boot", engine="cloakbrowser", detail=_condense_launch_error(e))
-    # -- attempt 2: stock Playwright Chromium (runtime-agnostic fallback) --
+        event("BROWSER_ACTION_FAILED", phase="boot", engine="patchright", detail=_condense_launch_error(e))
+
+    # -- attempt 3: stock Playwright Chromium (runtime-agnostic fallback) --
     _unpoison_asyncio()
     try:
         from playwright.sync_api import sync_playwright
@@ -1001,11 +1109,7 @@ def boot_browser():
                 viewport={"width": 1280, "height": 800},
             )
         runtime = "chromium"
-        with LIVE_LOCK:
-            LIVE_STATE["booted"] = True
-            LIVE_STATE["closed"] = False
-        refresh_live_pages()
-        event("BROWSER_READY", runtime=runtime, headed=HEADED)
+        _mark_ready("chromium")
         log("booted standard chromium fallback runtime (persistent profile)")
     except Exception as e:
         # STOP the instance — a leaked sync_playwright() parks its greenlet

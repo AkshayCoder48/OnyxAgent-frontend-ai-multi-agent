@@ -619,18 +619,17 @@ registerTool(
     ].join("\n");
 
     const pythonSnippet = [
-      "# Alternative: playwright + playwright-stealth (works on Linux headless).",
-      "pip install playwright playwright-stealth",
-      "playwright install chromium",
+      "# Alternative: patchright (patched Playwright, no license) — the",
+      "# same stealth engine the use_browser tool's ladder prefers.",
+      "pip install patchright",
+      "patchright install chromium",
       "",
-      "from playwright.sync_api import sync_playwright",
-      "from playwright_stealth import stealth_sync",
+      "from patchright.sync_api import sync_playwright",
       "",
       "with sync_playwright() as p:",
       "    browser = p.chromium.launch(headless=False, args=['--disable-blink-features=AutomationControlled'])",
       "    ctx = browser.new_context(user_agent=" + JSON.stringify(ua) + ")",
       "    page = ctx.new_page()",
-      "    stealth_sync(page)",
       `    page.goto(${JSON.stringify(target)}, wait_until='networkidle')`,
       "    page.wait_for_function(\"document.cookie.includes('cf_clearance')\", timeout=30_000)",
       "    cookies = ctx.cookies()",

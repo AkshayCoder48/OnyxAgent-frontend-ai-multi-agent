@@ -342,14 +342,17 @@ const BOOT_POLL_CMD = [
 ].join("; ");
 
 /** Detects whether the browser runtime is already importable in the
- *  sandbox (onyx-cloakbrowser template, or a warm sandbox that installed
- *  it earlier) so the poll window matches reality: template-warm boots in
+ *  sandbox (onyx-cloakbrowser template, or a warm sandbox that installed it
+ *  earlier — cloakbrowser OR patchright, either importable runtime counts)
+ *  so the poll window matches reality: template-warm boots in
  *  seconds, cold installs legitimately need minutes. One short command;
  *  ANY probe failure assumes the slow path (safe default). */
 const RUNTIME_PROBE_CMD = [
   `PY=python3; command -v python3 >/dev/null 2>&1 || PY=python3.12`,
   `command -v "\$PY" >/dev/null 2>&1 || PY=python`,
-  `"\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo RUNTIME_PRESENT || echo RUNTIME_MISSING`,
+  // patchright is the primary no-license engine (2026-11-24); cloakbrowser
+  // rides along when its license key exists. Either importable → warm.
+  `"\$PY" -c "import patchright" >/dev/null 2>&1 && echo RUNTIME_PRESENT || { "\$PY" -c "import cloakbrowser, playwright" >/dev/null 2>&1 && echo RUNTIME_PRESENT || echo RUNTIME_MISSING; }`,
 ].join("; ");
 
 /** True while boot.sh is STILL RUNNING in this sandbox (the .boot-lock
@@ -452,7 +455,7 @@ export async function ensureBrowserDriver(
         onProgress?.(
           runtimePresent
             ? "Browser runtime found in the sandbox — starting the browser driver…"
-            : "No browser runtime in this sandbox yet — installing cloakbrowser + playwright and pre-fetching the stealth Chromium binary (first run only, up to ~10 minutes)…",
+            : "No browser runtime in this sandbox yet — installing patchright (stealth Chromium) + cloakbrowser + playwright and pre-fetching the browser binaries (first run only, up to ~10 minutes)…",
         );
 
         // DETACHED BOOT (the use_browser-runs-forever fix): boot.sh MUST be

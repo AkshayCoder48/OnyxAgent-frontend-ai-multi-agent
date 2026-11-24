@@ -472,3 +472,91 @@ describe.skipIf(!hasPython || !hasPlaywright)(
     );
   },
 );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENGINE LADDER (the "browser shows Chromium" fix, 2026-11-24): the driver
+// boots cloakbrowser ONLY when a license key exists (0.7.3 gates every
+// launch behind one), falls back to patchright (free Apache-2.0 patched
+// Playwright — presents as real Chrome), and only then to stock Chromium.
+// boot.sh installs the pinned trio and pre-fetches patchright's binary
+// FIRST.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("browser-driver engine ladder (cloak-if-licensed → patchright → chromium)", () => {
+  it("boot_browser tries the engines in ladder ORDER", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    const cloakAt = boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch");
+    const patchAt = boot.indexOf("from patchright.sync_api import sync_playwright as pr_sync");
+    const stockAt = boot.indexOf("from playwright.sync_api import sync_playwright");
+    expect(cloakAt).toBeGreaterThan(-1);
+    expect(patchAt).toBeGreaterThan(-1);
+    expect(stockAt).toBeGreaterThan(-1);
+    expect(cloakAt).toBeLessThan(patchAt);
+    expect(patchAt).toBeLessThan(stockAt);
+  });
+
+  it("the cloakbrowser rung only launches when a license key exists", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    // Key resolution (env + cloakbrowser's own resolver) gates the attempt.
+    expect(boot).toContain('os.environ.get("CLOAKBROWSER_LICENSE_KEY", "").strip()');
+    expect(boot).toContain("resolve_license_key as _cb_key");
+    // The gate wraps the launch: 'if cloak_key:' before the cb_launch import.
+    const gateAt = boot.indexOf("if cloak_key:");
+    const importAt = boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(importAt).toBeGreaterThan(gateAt);
+    // Skipping (no key) logs and falls through — no BootFailure raise on skip.
+    expect(boot).toContain('log("no cloakbrowser license key');
+  });
+
+  it("runtime names identify the actual engine (cloakbrowser / patchright / chromium)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    expect(boot).toContain('runtime = "cloakbrowser"');
+    expect(boot).toContain('runtime = "patchright"');
+    expect(boot).toContain('runtime = "chromium"');
+    // READY bookkeeping is shared: _mark_ready(rt) emits BROWSER_READY with
+    // the engine's runtime name, and every rung routes through it.
+    const markFnAt = boot.indexOf("def _mark_ready(rt):");
+    expect(markFnAt).toBeGreaterThan(-1);
+    const marks = all(boot, "_mark_ready(");
+    expect(marks.length).toBeGreaterThanOrEqual(4); // def + 3 call sites
+    // The mark emits with the EXACT runtime string passed in.
+    expect(boot).toContain('event("BROWSER_READY", runtime=rt, headed=HEADED)');
+  });
+
+  it("the patchright rung self-installs its binary when missing (like stock chromium)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    const patchSection = boot.slice(
+      boot.indexOf("attempt 2: patchright"),
+      boot.indexOf("attempt 3: stock Playwright"),
+    );
+    expect(patchSection).toContain('"-m", "patchright", "install", "chromium"');
+    // A failed patchright rung STOPs its playwright instance (never leaks).
+    expect(patchSection).toContain("pw.stop()");
+  });
+
+  it("humanized typing still prefers press_sequentially (all engines support it)", () => {
+    expect(SRC).toContain("press_sequentially");
+  });
+});
+
+describe("browser-driver boot.sh engine ladder install", () => {
+  it("installs the pinned trio (cloakbrowser + patchright + playwright range)", () => {
+    expect(BOOT).toContain("cloakbrowser==0.7.3");
+    expect(BOOT).toContain("patchright==1.64.4");
+    expect(BOOT).toContain("playwright>=1.53,<1.66");
+  });
+
+  it("pre-fetches the patchright stealth binary FIRST (the free engine)", () => {
+    const patchFetchAt = BOOT.indexOf("-m patchright install chromium");
+    const stockFetchAt = BOOT.indexOf("-m playwright install chromium");
+    expect(patchFetchAt).toBeGreaterThan(-1);
+    expect(stockFetchAt).toBeGreaterThan(-1);
+    expect(patchFetchAt).toBeLessThan(stockFetchAt);
+    // The cloakbrowser binary fetch is gated on a license key being present.
+    expect(BOOT).toContain("CLOAKBROWSER_LICENSE_KEY");
+  });
+
+  it("runtime probe accepts EITHER patchright or the cloak pair as warm", () => {
+    expect(BOOT).toContain("import patchright");
+  });
+});
