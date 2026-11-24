@@ -1222,3 +1222,24 @@ Tests (src/lib/tools/composio_tools.test.ts, 14 new):
 
 Stage Summary:
 - composio_execute_tool now accepts every real-world args shape gateways emit — object, JSON string, alias key, flattened fields or missing — and always sends Composio a proper object; the reported error path is dead.
+
+## Task 44 — Follow-up: the SAME error after the fix — deployed-instance diagnosis + umbrella-path regression + schema prevention
+
+Date: 2026-11-24
+Agent: main (Z.ai Code)
+Task: User report (second message): composio_execute_tool STILL answers "args must be an object matching the tool's inputSchema" with the exact arguments block showing args as a double-stringified JSON string for GOOGLEDRIVE_FIND_FILE.
+
+Diagnosis:
+- The fix from Task 43 is intact at HEAD (86dd3f1) and the OLD error string no longer exists anywhere in the source tree (whole-repo grep: only comments/test-doc references remain). Verified no mirror copies: no updateTool overrides for composio, no plain-JS runner mirrors, no android/ or built artifacts in the repo.
+- The umbrella path was the suspect: the model-visible `integrations` tool dispatches action="composio_execute_tool" by stripping `action` and passing the REST through to the granular handler — a string `args` rides through untouched and reaches the SAME coercion. Verified live.
+- Conclusion: the reported error came from a PRE-FIX build. The handler runs IN THE BROWSER (tool registry is client-side), so the running instance kept the old bundle until Vercel rebuilt AND the user reloaded. The repo's "Just Triggering Deployment" marker exists precisely so pushes to main retrigger deploys — the Task 43 push did that; this report was almost certainly generated before the rebuilt deploy was reloaded. The APK (static export) carries the same constraint — it needs a rebuild + reinstall to pick the fix up.
+
+Prevention (source-level):
+- composio_execute_tool's tool description now explicitly teaches the wire shape: "Pass `args` as a real JSON OBJECT — never a JSON-encoded string ('{\"q\": …}' is wrong; {\"q\": …} is right)"; the args property description repeats "a JSON OBJECT (not a stringified one)". The coercion stays as the safety net for gateways that double-encode object parameters regardless of what the schema says.
+
+Tests:
+- src/lib/tools/user-payload-verify.test.ts (3 new): the user's VERBATIM GOOGLEDRIVE_FIND_FILE payload — pure coercion parse, registered-handler execution (wire body carries the PARSED object, never the string), and the UMBRELLA dispatch path (integrations action route with string args). 3/3 green.
+- composio suites: 62/62 across composio_tools + user-payload + client + request-scoping + reliability + approval-gate. FULL suite: 1097/1097 across 80 files (up from 1062 — +35: the Task 43 14, the new 3, and the prior session's reasoning-stream tests). tsc clean.
+
+Stage Summary:
+- The fix is verified with the exact failing payload on both the granular and umbrella paths; the error block the user saw came from a pre-rebuild bundle. The tool schema now teaches the model not to stringify args at all, and the coercion catches it when it does anyway. Fix live in repo; the redeploy (already triggered by the push) picks it up on next page load.

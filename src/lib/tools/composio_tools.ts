@@ -291,7 +291,7 @@ export function coerceComposioArgs(
 
 registerTool(
   "composio_execute_tool",
-  "Execute a Composio tool that was discovered with composio_search_tools, passing a JSON arguments object built from the tool's inputSchema. Server-side, session-scoped, runs with the user's connected account. If the platform isn't connected you get a CONNECTION_REQUIRED error — do NOT retry blindly: call composio_connect_platform, share the OAuth link with the user, and wait for them to authorize. Never fabricate a result: report exactly what the tool returned (its data, error, or logId).",
+  "Execute a Composio tool that was discovered with composio_search_tools, passing a JSON arguments object built from the tool's inputSchema. Pass `args` as a real JSON OBJECT — never a JSON-encoded string ('{\"q\": …}' is wrong; {\"q\": …} is right). Server-side, session-scoped, runs with the user's connected account. If the platform isn't connected you get a CONNECTION_REQUIRED error — do NOT retry blindly: call composio_connect_platform, share the OAuth link with the user, and wait for them to authorize. Never fabricate a result: report exactly what the tool returned (its data, error, or logId).",
   {
     type: "object",
     properties: {
@@ -301,7 +301,8 @@ registerTool(
       },
       args: {
         type: "object",
-        description: "Arguments matching the tool's inputSchema (from composio_search_tools)",
+        description:
+          "Arguments matching the tool's inputSchema (from composio_search_tools), passed as a JSON OBJECT (not a stringified one)",
       },
     },
     required: ["toolName", "args"],
