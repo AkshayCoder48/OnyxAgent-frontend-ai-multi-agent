@@ -222,8 +222,6 @@ export type WSEventType =
   | "ask_user"
   | "media_generation_confirm"
   | "todo_event"
-  | "subagent_status"
-  | "subagent_message"
   | "context_usage"
   | "context_compacted"
   | "llm_started"
@@ -438,26 +436,6 @@ export const TODO_STATUS_LABELS: Record<TodoStatus, string> = {
   done: "Done",
   not_done: "Not done",
 };
-
-export type SubagentTaskStatus =
-  "pending" | "running" | "waiting_for_answer" | "completed" | "failed" | "cancelled" | "retrying";
-
-export interface SubagentStatus {
-  task_id: string;
-  subagent_name: string;
-  description: string;
-  status: SubagentTaskStatus;
-  error: string | null;
-}
-
-export type SubagentMessageType = "info" | "steering" | "question" | "result" | "error";
-
-export interface SubagentMessage {
-  task_id: string;
-  type: SubagentMessageType;
-  text: string;
-  timestamp: string;
-}
 
 export interface ContextUsage {
   pct: number;

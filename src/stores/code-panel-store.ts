@@ -9,7 +9,7 @@
  * panel"), the legacy /code/database and /code/preview routes (now redirects
  * that open the panel), and the chat itself. ChatWorkspace is the only
  * RENDERER — it subscribes here and docks the matching DockedPanel beside
- * the chat, exactly like the Files / Timeline / Subagent panels.
+ * the chat, exactly like the Files / Timeline panels.
  */
 
 import { create } from "zustand";

@@ -27,7 +27,6 @@ import {
   styledGenerativeUILibrary,
   StreamingText,
   StoppedRun,
-  SubagentList,
   ThinkingIndicator,
   ThinkingReasoning,
   Timeline,
@@ -380,7 +379,7 @@ function AgentElementsShowcase() {
         </div>
 
         <div className="space-y-2">
-          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Agent plan + subagent list + status</p>
+          <p className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Agent plan + status</p>
           <AgentPlan
             steps={[
               "Read existing composer state",
@@ -389,17 +388,6 @@ function AgentElementsShowcase() {
               "Add regression tests",
             ]}
             activeIndex={2}
-          />
-          <SubagentList
-            agents={[
-              { name: "Explore the runtime", model: "haiku" },
-              { name: "Fix composer types", model: "sonnet" },
-              { name: "Write regression tests", model: "sonnet" },
-            ]}
-            completedCount={2}
-            progress={[100, 100, 45]}
-            showSummary
-            summaryAgent={{ name: "Summarize findings", model: "haiku" }}
           />
           <div className="flex flex-wrap gap-2">
             <AgentStatus state="working" label="Refactoring composer" elapsed="0:04" />

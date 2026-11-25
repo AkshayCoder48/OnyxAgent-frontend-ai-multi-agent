@@ -3,7 +3,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import {
-  Bot,
   Braces,
   Flower2,
   KeyRound,
@@ -41,7 +40,6 @@ const SETTINGS_GROUPS: { id: string; label: string; tabs: PageTab[] }[] = [
       // Pollinations AI — the dedicated media-generation hub (connection,
       // Pollen balance, model defaults, generation prefs, activity logs).
       { label: "Pollinations AI", href: ROUTES.SETTINGS_POLLINATIONS, icon: Flower2 },
-      { label: "Subagents", href: ROUTES.SETTINGS_SUBAGENTS, icon: Bot },
       { label: "Slash commands", href: ROUTES.SETTINGS_SLASH_COMMANDS, icon: Slash },
     ],
   },

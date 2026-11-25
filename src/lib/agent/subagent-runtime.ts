@@ -33,8 +33,9 @@ import {
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
- * REAL STREAMING (SSE). Streams text back token-by-token to the subagent
- * chat sidebar.
+ * REAL STREAMING (SSE). Streams text token-by-token into the subagent's
+ * chat SESSION (the data layer the AI reads back via read_chat; there is
+ * no sub-agent chat UI — subagents are API-only).
  *
  * Uses sessions (persisted to localStorage) so chats survive page refresh.
  * Each session is a separate conversation with a subagent.
@@ -1054,8 +1055,8 @@ async function runSubagentLoop(
 
 /**
  * Back-compat awaited wrapper — delivers the message, then waits for the
- * detached generation to settle and resolves with its final text. Used by
- * the subagent SIDEBAR UI (a human watching one chat). The agent-side
+ * detached generation to settle and resolves with its final text. Kept for
+ * tests + tool callers that want the settled text. The agent-side
  * query_subagent tool uses startSubagentTurn directly so it returns on
  * delivery, never on completion.
  */

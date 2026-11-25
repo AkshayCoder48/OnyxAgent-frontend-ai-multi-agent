@@ -3,7 +3,6 @@
 import { useState, type ReactNode } from "react";
 import {
   Bell,
-  Bot,
   Brain,
   Cable,
   Cloud,
@@ -439,12 +438,6 @@ export function SettingsSheet() {
               icon={<Wrench className="h-4 w-4 text-terra" />}
               name="Tools"
               description="Web search, code interpreter, file tools"
-              defaultOn
-            />
-            <LocalToggleRow
-              icon={<Bot className="h-4 w-4 text-terra" />}
-              name="Subagents"
-              description="Specialized agents for research and drafts"
               defaultOn
             />
             <LocalToggleRow

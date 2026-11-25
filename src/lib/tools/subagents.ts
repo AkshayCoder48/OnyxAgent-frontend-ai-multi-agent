@@ -11,12 +11,12 @@ import { bumpWorkspaceVersion } from "./workspace-snapshot";
  * logical unit of background work (e.g. "research X", "write code for Y",
  * "analyze file Z") that the orchestrator delegates.
  *
- * The tools emit `subagent_status` and `subagent_message` window events so
- * the SubagentPanel UI can render live status. The actual subagent execution
- * happens in-process — each subagent is a simulated task that runs a simple
- * callback and reports progress. In a future version this could spawn real
- * sub-agent LLM calls, but for now the orchestrator pattern is the key
- * capability (the AI can delegate work and track it).
+ * API-ONLY SUBAGENTS (2026-11-25): there is NO sub-agent chat UI anymore.
+ * The AI interacts with subagents exclusively through these tools, and every
+ * tool call + result surfaces in the MAIN workspace chat through the normal
+ * tool-call rendering. Subagent execution is real — each query_subagent /
+ * spawn delivers into a subagent chat session (subagent-runtime streams the
+ * subagent LLM into it), and read_chat can snapshot the live session.
  */
 
 interface SubagentTask {
@@ -38,29 +38,6 @@ interface SubagentTask {
 
 // In-memory task store (shared across all tool invocations in the session).
 const taskStore = new Map<string, SubagentTask>();
-
-function emitStatus(task: SubagentTask) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("subagent_status", {
-    detail: {
-      task_id: task.task_id,
-      subagent_name: task.subagent_name,
-      subagent_id: task.subagent_id,
-      description: task.description,
-      status: task.status,
-      error: task.error,
-      disposable: task.disposable,
-      role: task.role,
-      parent_task: task.parent_task,
-    },
-  }));
-}
-
-function emitMessage(taskId: string, type: "info" | "steering" | "question" | "result" | "error", text: string) {
-  if (typeof window === "undefined") return;
-  const msg = { task_id: taskId, type, text, timestamp: new Date().toISOString() };
-  window.dispatchEvent(new CustomEvent("subagent_message", { detail: msg }));
-}
 
 /**
  * Coerce a model-supplied "boolean" into a real boolean. Models routinely
@@ -108,8 +85,8 @@ Task types:
 - "general": any other task
 
 Disposal:
-- disposable: true → agent auto-disposes (status="disposed", enabled=false, removed from sidebar) once complete_subagent is called. Use for one-off tasks.
-- disposable: false (default) → agent stays in the sidebar for follow-up work.
+- disposable: true → agent auto-disposes (status="disposed", enabled=false, no longer callable) once complete_subagent is called. Use for one-off tasks.
+- disposable: false (default) → agent stays callable for follow-up work.
 
 Role:
 - A specialization label (e.g. "Frontend Engineer", "Database Engineer", "Planner", "Security Reviewer"). Drives the orchestration pipeline's role assignment. Suggested roles:
@@ -135,7 +112,7 @@ Role:
       },
       disposable: {
         type: "boolean",
-        description: "If true, the agent auto-disposes after its task completes (removed from sidebar, enabled=false). Use for one-off tasks. Default false. Must be a real boolean (true/false), NOT a string.",
+        description: "If true, the agent auto-disposes after its task completes (enabled=false, no longer callable). Use for one-off tasks. Default false. Must be a real boolean (true/false), NOT a string.",
         default: false,
       },
       role: {
@@ -178,7 +155,7 @@ Role:
     // CRITICAL: Also create a SubagentConfig in the zustand store so:
     // 1. query_subagent can find it (was returning "unavailable" because
     //    the store was empty — only the in-memory taskStore had the task)
-    // 2. The sidebar shows it for @-tagging (reads from store.subagents)
+    // 2. read_chat can snapshot its sessions (reads from store.sessions)
     // 3. It persists to localStorage and survives page refresh
     const store = useSubagentStore.getState();
     // Check if a subagent with this name already exists (avoid duplicates).
@@ -224,7 +201,6 @@ Role:
       parent_task: parentTaskId,
     };
     taskStore.set(taskId, task);
-    emitStatus(task);
     // Local agent-visible state changed — refresh analyze_workspace's
     // cached subagent list (PRD §22; scope "local" keeps key-file reuse).
     bumpWorkspaceVersion("local");
@@ -589,13 +565,11 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
       };
       taskStore.set(newTask.task_id, newTask);
       task = newTask;
-      emitStatus(newTask);
     }
 
     // Task + lifecycle bookkeeping — this agent is now actively working.
     if (task) {
       task.status = "running";
-      emitStatus(task);
     }
     try {
       store.updateLifecycleStatus(subagentId, "working");
@@ -618,7 +592,6 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
       if (task) {
         task.status = "failed";
         task.error = errMsg;
-        emitStatus(task);
       }
       try {
         useSubagentStore.getState().updateLifecycleStatus(subagentId, "idle");
@@ -628,14 +601,12 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
       return { error: `DELIVERY_FAILED: ${errMsg}` };
     }
 
-    // Detached settle bookkeeping — status events for the subagent panel.
-    // This NEVER blocks the tool result; the target's own outcome (reply or
-    // error text) lands in its session, visible via read_chat.
+    // Detached settle bookkeeping. This NEVER blocks the tool result; the
+    // target's own outcome (reply or error text) lands in its session,
+    // visible via read_chat.
     void delivery.completion.then((reply) => {
       if (task) {
         task.status = "completed";
-        emitStatus(task);
-        emitMessage(task.task_id, "result", reply);
       }
       try {
         useSubagentStore.getState().updateLifecycleStatus(subagentId, "completed");
@@ -695,7 +666,6 @@ Examples:
     if (!task) {
       return { error: `Subagent ${taskId} not found.` };
     }
-    emitMessage(taskId, "steering", message);
     task.messages.push({ type: "steering", text: message, timestamp: new Date().toISOString() });
     return {
       task_id: taskId,
@@ -714,12 +684,12 @@ registerTool(
 
 DISPOSABLE AGENTS: If the subagent was spawned with disposable=true, it is automatically disposed:
 - lifecycle_status → "disposed"
-- enabled → false (removed from sidebar)
+- enabled → false (no longer callable)
 - status → "disposed"
 - Removed from taskStore immediately
-A "disposed" status event is emitted so the UI can clean up.
+- Its chat session stays readable via read_chat until the store is cleared
 
-NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. The task is auto-removed from the active list after 30 seconds (but the SubagentConfig persists).`,
+NON-DISPOSABLE AGENTS: Stay callable (enabled=true) for follow-up work. The task is auto-removed from the active list after 30 seconds (but the SubagentConfig persists).`,
   {
     type: "object",
     properties: {
@@ -758,13 +728,10 @@ NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. Th
     }
 
     if (disposable) {
-      // Auto-dispose: mark disposed, disable config (removes from sidebar),
-      // and remove from the in-memory taskStore immediately.
+      // Auto-dispose: mark disposed, disable the config (no longer
+      // callable), and remove from the in-memory taskStore immediately.
       task.status = "disposed";
       task.error = null;
-      emitStatus(task);
-      emitMessage(taskId, "result", result);
-      emitMessage(taskId, "info", "[DISPOSABLE] Agent auto-disposed after completion.");
       task.messages.push({ type: "result", text: result, timestamp: new Date().toISOString() });
       task.messages.push({
         type: "info",
@@ -790,21 +757,19 @@ NON-DISPOSABLE AGENTS: Stay in the sidebar (enabled=true) for follow-up work. Th
         status: "disposed",
         disposable: true,
         result,
-        message: "Disposable agent completed and auto-disposed (removed from sidebar).",
+        message: "Disposable agent completed and auto-disposed (no longer callable).",
       };
     }
 
     // Non-disposable — keep the agent around for follow-up work.
     task.status = "completed";
     task.error = null;
-    emitStatus(task);
-    emitMessage(taskId, "result", result);
     task.messages.push({ type: "result", text: result, timestamp: new Date().toISOString() });
     bumpWorkspaceVersion("local"); // lifecycle status changed
 
-    // Auto-remove from the store after 30 seconds (the UI panel also auto-
-    // removes completed tasks after 10s, but we keep the data a bit longer
-    // so query_subagent still works shortly after completion).
+    // Auto-remove from the store after 30 seconds (keep the data a bit
+    // longer than the task list does so query_subagent still works shortly
+    // after completion).
     setTimeout(() => taskStore.delete(taskId), 30_000);
 
     return {
@@ -840,8 +805,6 @@ registerTool(
       return { error: `Subagent ${taskId} not found.` };
     }
     task.status = "cancelled";
-    emitStatus(task);
-    emitMessage(taskId, "info", `Task cancelled${reason ? `: ${reason}` : ""}`);
     task.messages.push({ type: "info", text: `Cancelled: ${reason}`, timestamp: new Date().toISOString() });
 
     setTimeout(() => taskStore.delete(taskId), 30_000);

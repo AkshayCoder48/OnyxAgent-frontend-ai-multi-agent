@@ -2111,14 +2111,14 @@ html.theme-transitioning .animate-backdrop {
    pure foreground tint, never translucency).
 
      .fluid-chip  — small controls: the hero option toggles (hamburger,
-                    database, preview, platforms, timeline, subagent,
+                    database, preview, platforms, timeline,
                     logs, files) and the database tab buttons (Overview /
                     KV / Env / Files / Schema / Search / Activity).
                     IDLE: a calm static wash. OPEN/ACTIVE (aria-expanded,
                     data-state=active, or .is-on): the drift animation
                     runs and the tint brightens.
      .fluid-bar   — panel header strips (database, preview, timeline,
-                    subagent, files, logs): a wide, subtle fluid wash.
+                    files, logs): a wide, subtle fluid wash.
      .fluid-edge  — the hairline gradient border + top sheen shared by
                     both (applied automatically, no extra class needed).
 
@@ -2627,15 +2627,6 @@ html.theme-transitioning .animate-backdrop {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
 }
 
-/* --- Subagent panel slide --- */
-.subagent-slide-in {
-  animation: subagent-slide 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-@keyframes subagent-slide {
-  from { opacity: 0; filter: blur(6px); transform: translateX(-20px); }
-  to { opacity: 1; filter: blur(0); transform: translateX(0); }
-}
-
 /* --- Scrollbar glass --- */
 .scrollbar-glass::-webkit-scrollbar {
   width: 6px;
@@ -2669,8 +2660,7 @@ html.theme-transitioning .animate-backdrop {
   .slide-blur-in-left,
   .bounce-in,
   .rotate-in,
-  .bubble-glass-in,
-  .subagent-slide-in {
+  .bubble-glass-in {
     animation: none !important;
     filter: none !important;
     opacity: 1 !important;
@@ -3090,7 +3080,7 @@ html.theme-transitioning .animate-backdrop {
 
 /* ============================================================
    TERRA DOCKED PANELS — Task 4-a (PRD §16/§17)
-   Right-hand panels (subagents / files / tool timeline) are real
+   Right-hand panels (platforms / files / tool timeline) are real
    layout columns, not floating overlays: open/close is an animated
    WIDTH transition (~250ms ease-out) so the main chat column
    shrinks and grows seamlessly. Used by DockedPanel

@@ -4,7 +4,6 @@ import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "
 import { ChatContainer, ConversationSidebar } from "@/components/chat";
 import { ExportDialog } from "@/components/export/export-dialog";
 import { FileSidebar } from "@/components/chat/file-sidebar";
-import { SubAgentSidebar } from "@/components/chat/subagent-sidebar";
 import { PlatformsSidebar } from "@/components/chat/platforms-sidebar";
 import { DockedPanel } from "@/components/chat/docked-panel";
 import { Button } from "@/components/ui/button";
@@ -15,7 +14,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useChatSidebarStore, useConversationStore } from "@/stores";
-import { useSubagentStore } from "@/stores/subagent-store";
 import { useConversations } from "@/hooks";
 import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
@@ -25,7 +23,6 @@ import { ExecutionProofPanel } from "@/components/dev/execution-proof-panel";
 import { KnowledgeBasePanel } from "@/components/knowledge-base/kb-panel";
 import {
   AppWindow,
-  Bot,
   Blocks,
   Check,
   EllipsisVertical,
@@ -80,7 +77,6 @@ const CONV_SIDEBAR_DEFAULT_WIDTH = 256;
  * props below (storageKey/defaultWidth), used by the auto-rail math. */
 const PANEL_WIDTH_PREFS = {
   platforms: { storageKey: "platforms-sidebar-width", defaultWidth: 360 },
-  subagents: { storageKey: "subagent-sidebar-width", defaultWidth: 360 },
   files: { storageKey: "file-sidebar-width", defaultWidth: 320 },
   timeline: { storageKey: "timeline-sidebar-width", defaultWidth: 340 },
   logs: { storageKey: "logs-sidebar-width", defaultWidth: 420 },
@@ -216,40 +212,30 @@ export function ChatWorkspace() {
   const { settings } = useSettings();
   const composioConnected = !!settings?.composio_api_key_present;
 
-  // Subagent panel — the store is the single source of truth: the event
-  // processor flips `sidebarOpen` the moment a sub-agent tool call starts
-  // (PRD §15), and the docked panel reads it directly (no mirroring into
-  // local panel state).
-  const subagentOpen = useSubagentStore((s) => s.sidebarOpen);
-  const setSubagentOpen = useSubagentStore((s) => s.setSidebarOpen);
   // Error-log badge: unseen error count on the Logs toggle (resets when any
   // logs surface is opened).
   const unseenErrors = useLogStore((s) => s.unseenErrors);
   const markLogsSeen = useLogStore((s) => s.markSeen);
 
   // Only one right-hand panel VISIBLE at a time — fully DERIVED during
-  // render (no state syncing, so it is React-Compiler-safe): while the
-  // subagent panel is open (manually or auto-opened by the agent) it takes
-  // over the dock; closing it restores the panel that was open before.
-  // The Platforms panel is additionally gated on the Composio key being
-  // present — removing the key in Settings closes it here (derived), and
-  // re-adding the key restores it if it was the user's last choice.
-  const platformsOpen = sidePanel === "platforms" && !subagentOpen && composioConnected;
-  const filesOpen = sidePanel === "files" && !subagentOpen;
-  const timelineOpen = sidePanel === "timeline" && !subagentOpen;
-  const logsOpen = sidePanel === "logs" && !subagentOpen;
-  const knowledgeOpen = sidePanel === "knowledge" && !subagentOpen;
-  const browserOpen = sidePanel === "browser" && !subagentOpen;
+  // render (no state syncing, so it is React-Compiler-safe). The Platforms
+  // panel is gated on the Composio key being present — removing the key in
+  // Settings closes it here (derived), and re-adding the key restores it if
+  // it was the user's last choice.
+  const platformsOpen = sidePanel === "platforms" && composioConnected;
+  const filesOpen = sidePanel === "files";
+  const timelineOpen = sidePanel === "timeline";
+  const logsOpen = sidePanel === "logs";
+  const knowledgeOpen = sidePanel === "knowledge";
+  const browserOpen = sidePanel === "browser";
   // The panel currently occupying the right-hand dock (drives the auto-rail
   // math below) — a "platforms" choice with the key absent closes the dock.
   const activeDockedPanel: DockedPanelId | null =
-    subagentOpen
-      ? "subagents"
-      : platformsOpen
-        ? "platforms"
-        : sidePanel === "platforms"
-          ? null
-          : sidePanel;
+    platformsOpen
+      ? "platforms"
+      : sidePanel === "platforms"
+        ? null
+        : sidePanel;
 
   // Opening the docked logs panel counts as "seeing" the errors.
   useEffect(() => {
@@ -310,16 +296,7 @@ export function ChatWorkspace() {
     }
   }, [activeDockedPanel, viewportWidth, convCollapsed, collapseConv, expandConv]);
 
-  const closeSubagent = useCallback(() => {
-    setSubagentOpen(false);
-  }, [setSubagentOpen]);
-
-  const toggleSubagents = () => {
-    setSubagentOpen(!subagentOpen);
-  };
   const toggleSidePanel = (panel: Exclude<SidePanel, null>) => {
-    // Opening a side panel takes over the dock from the subagent panel.
-    setSubagentOpen(false);
     const wasVisible =
       panel === "platforms"
         ? platformsOpen
@@ -462,12 +439,6 @@ export function ChatWorkspace() {
                   <span className="flex-1">Tool timeline</span>
                   {timelineOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
                 </DropdownMenuItem>
-                {/* Subagent chat. */}
-                <DropdownMenuItem onClick={toggleSubagents} className="gap-2.5">
-                  <Bot className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-                  <span className="flex-1">Subagent chat</span>
-                  {subagentOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
-                </DropdownMenuItem>
                 {/* Error logs (unseen-error dot mirrors the menu badge). */}
                 <DropdownMenuItem
                   onClick={() => toggleSidePanel("logs")}
@@ -555,20 +526,6 @@ export function ChatWorkspace() {
         sheetClassName="w-[90vw] max-w-sm"
       >
         <PlatformsSidebar />
-      </DockedPanel>
-
-      <DockedPanel
-        id="subagent-panel"
-        label="Subagent chat"
-        open={subagentOpen}
-        onClose={closeSubagent}
-        storageKey="subagent-sidebar-width"
-        defaultWidth={360}
-        minWidth={280}
-        maxWidth={600}
-        sheetClassName="w-[90vw] max-w-md"
-      >
-        <SubAgentSidebar onClose={closeSubagent} />
       </DockedPanel>
 
       <DockedPanel

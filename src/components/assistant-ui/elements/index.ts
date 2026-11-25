@@ -22,7 +22,6 @@ export {
 export { CodeDiff, type DiffLine } from "./code-diff";
 export { FileTree, type FileTreeNode } from "./file-tree";
 export { AgentPlan } from "./agent-plan";
-export { SubagentList, type SubagentItem } from "./subagent-list";
 export { AgentStatus, type AgentState } from "./agent-status";
 export { ArtifactCard } from "./artifact-card";
 export { TodoList, type TodoItem } from "./todo-list";

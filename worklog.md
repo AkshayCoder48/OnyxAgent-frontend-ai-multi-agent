@@ -1266,3 +1266,25 @@ Fix:
 
 Tests: composio suites 36/36 (composio_tools + user-payload-verify + client + onyx-md-digest). tsc: no new errors (repo has 182 pre-existing, excluded from builds — next skips type validation).
 Deployment: this push builds cleanly → Vercel will finally ship the fix.
+
+---
+Task ID: 46
+Agent: main (Z.ai Code)
+Task: Remove the Sub-Agent Chat UI entirely — sub-agents become API-ONLY (user directive: the AI interacts with them through the subagent tools; all tool calls and results render in the MAIN workspace chat through the normal tool-call UI; sub-agent concepts/behaviour otherwise unchanged)
+
+Work Log:
+- Mapped every sub-agent surface: UI = subagent-sidebar (+ its test), subagent-panel, assistant-ui SubagentList element, /settings/subagents page, sidebarOpen store state, subagent_status/subagent_message window events, WSEvent types, event-processor auto-open flip, settings nav entry, dev-page demo, terra settings toggle, globals.css slide animation. API/tool layer = 8 registered tools (spawn/list/set_config/query/steer/complete/cancel + create_custom_tool), subagent-runtime (real SSE streaming), subagent store data layer, read_chat.
+- DELETED: src/components/chat/subagent-sidebar.tsx (+test), src/components/chat/subagent-panel.tsx, src/components/assistant-ui/elements/subagent-list.tsx, settings/subagents/page.tsx.
+- chat-workspace: removed SubAgentSidebar import + useSubagentStore subscription, the "Subagent chat" dropdown item, the whole subagent DockedPanel, subagents entry from PANEL_WIDTH_PREFS, and the `!subagentOpen` gating on every other panel (panels now derive purely from sidePanel). Removed unused Bot icon import.
+- subagent-store: dropped sidebarOpen/setSidebarOpen (UI state); KEPT configs + sessions + activeSessionId (the runtime + tools + read_chat need them); header rewritten to document the data-layer role.
+- tools/subagents.ts: removed emitStatus/emitMessage + all 15 window-event call sites (the panel that listened is gone); header rewritten (API-only); every "sidebar"/"panel" wording in AI-facing tool descriptions corrected to "callable"/"read_chat" semantics.
+- event-processor: removed the PRD §15 sidebar auto-open flip on subagent tool names + the now-unused useSubagentStore import.
+- types/chat.ts: removed subagent_status/subagent_message from WSEventType and the SubagentStatus/SubagentMessage/SubagentTaskStatus/SubagentMessageType types (no consumers left).
+- Settings: nav item removed; /settings/subagents now a redirect page to Settings → Config (same pattern as the removed e2b/cloud tabs — old bookmarks keep working); SETTINGS_SUBAGENTS constant removed.
+- dev/components page: SubagentList demo + import removed, section retitled "Agent plan + status". terra settings-sheet: decorative "Subagents" toggle row + unused Bot icon removed. globals.css: .subagent-slide-in keyframes + reduced-motion entry removed, fluid-chip/bar + docked-panel comment lists updated. docked-panel label example + code-panel-store analogy comment fixed.
+- subagent-runtime verified headless (imports only store/services/agent-libs — no UI); header + executeSubagentTurn doc comments updated to the API-only reality. All subagent tools, real LLM streaming, cross-round text accumulation, reasoning capture, transient-network retry (previous task) unchanged and still tested.
+- Onyx.md: "Subagent orchestration" section retitled "(API-only)" with an explicit line that interaction is tool-only and results render in the main chat.
+- KEPT: 8 subagent tools registered, captions/tool-steps/stack-summaries for them (they render the tool calls in the main workspace), chat_inspect read_chat, subagent sessions in localStorage.
+
+Tests: full suite 83 files / 1134 tests PASS (includes the 9 subagent streaming/network regression tests from the previous task — the runtime they cover is untouched). tsc: 0 errors in src. next build: exit 0, 89/89 pages.
+Deployment: push to main → redeploy ships the API-only subagent architecture.

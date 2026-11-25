@@ -95,7 +95,7 @@ function useIsDesktop() {
  *   - keepAlive panels (Database, Preview — state worth preserving: the
  *     preview IFRAME would reload, the DB panel holds editor/scroll state)
  *     stay mounted forever once opened; closing only animates the shell.
- *   - Non-keepAlive panels (files/timeline/logs/subagents/platforms — all
+ *   - Non-keepAlive panels (files/timeline/logs/platforms — all
  *     store/query-backed) unmount CLOSE_GRACE_MS after closing, so their
  *     live subscriptions do ZERO work while the panel is hidden. Their data
  *     lives in stores/React-Query caches, so a re-open rehydrates instantly.
@@ -131,7 +131,7 @@ function usePanelContent(open: boolean, keepAlive: boolean) {
 interface DockedPanelProps {
   /** Panel element id — referenced by the header toggle's aria-controls. */
   id: string;
-  /** Accessible name ("Subagent chat", "Files", …). */
+  /** Accessible name ("Files", "Tool timeline", …). */
   label: string;
   open: boolean;
   onClose: () => void;

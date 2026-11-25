@@ -19,7 +19,6 @@ import {
   timelineDebug,
 } from "@/lib/agent/timeline";
 import { useConversationStore, useResearchStore } from "@/stores";
-import { useSubagentStore } from "@/stores/subagent-store";
 import { logError } from "@/lib/client-logger";
 import type { ExecutionChatStore } from "@/stores/chat-store";
 import { usePendingApprovals } from "@/lib/agent/approval-gate";
@@ -858,22 +857,6 @@ export class AgentEventProcessor {
 
       case "tool_call": {
         if (!isFromActiveGeneration()) break;
-
-        // SUB-AGENT SIDEBAR AUTO-OPEN (PRD §15).
-        {
-          const tn = (wsEvent.data as { tool_name?: string }).tool_name;
-          if (
-            tn === "spawn_subagent" ||
-            tn === "query_subagent" ||
-            tn === "create_subagent_chat" ||
-            tn === "manage_subagent_chat" ||
-            tn === "steer_subagent" ||
-            tn === "complete_subagent" ||
-            tn === "cancel_subagent"
-          ) {
-            useSubagentStore.getState().setSidebarOpen(true);
-          }
-        }
 
         if (!this.currentMessageId) break;
         const data = wsEvent.data as {

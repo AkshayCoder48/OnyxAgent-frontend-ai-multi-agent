@@ -4,17 +4,21 @@ import { create } from "zustand";
 import { nanoid } from "nanoid";
 
 /**
- * Subagent store — manages subagent configurations + chat sessions.
+ * Subagent store — the DATA layer for API-only subagents. There is NO
+ * sub-agent chat UI: the AI orchestrator spawns/steers/queries subagents
+ * purely through the subagent tools (spawn_subagent, query_subagent, …),
+ * and every tool call + result renders in the MAIN workspace chat through
+ * the ordinary tool-call UI. This store keeps what the tools still need:
  *
- * Changes from previous version:
- *   - NO prebuilt agents — the AI orchestrator creates subagents dynamically
- *   - NO user-facing "create subagent" button — AI-only
- *   - Chat sessions persist to localStorage and survive page refresh
- *   - Multiple chat sessions per subagent, with a session selector
+ *   - subagent configs (registry rows the tools create/lookup/dispose)
+ *   - chat sessions (the subagent↔AI conversation state the runtime
+ *     streams into and read_chat snapshots; persisted to localStorage so
+ *     subagent state survives a page refresh)
  *
- * Subagents are created by the AI (via spawn_subagent tool) or by the user
- * in settings (but only editing, not creating from scratch — the AI spawns
- * them based on task needs).
+ * Changes from the UI era:
+ *   - sidebarOpen/setSidebarOpen removed (no sidebar exists)
+ *   - activeSessionId kept — the runtime falls back to it when a tool
+ *     doesn't pin an explicit session
  */
 
 export interface SubagentMessage {
@@ -102,21 +106,12 @@ interface SubagentStore {
   subagents: SubagentConfig[];
   sessions: SubagentChatSession[];
   activeSessionId: string | null;
-  /** Sidebar visibility (PRD §15 — auto-open). True while the Sub-Agent
-   *  sidebar should be open. Set to true automatically whenever a sub-agent
-   *  tool call starts; the user closing the sidebar sets it back to false,
-   * and the NEXT sub-agent invocation re-opens it. NOT persisted (UI
-   * state, not data). */
-  sidebarOpen: boolean;
 
   // Subagent config actions
   createSubagent: (config: Partial<SubagentConfig>) => SubagentConfig;
   updateSubagent: (id: string, updates: Partial<SubagentConfig>) => void;
   deleteSubagent: (id: string) => void;
   getSubagent: (id: string) => SubagentConfig | undefined;
-
-  /** Open/close the Sub-Agent sidebar (PRD §15). */
-  setSidebarOpen: (open: boolean) => void;
 
   // Lifecycle management — the orchestration pipeline drives these.
   updateLifecycleStatus: (id: string, status: AgentLifecycleStatus) => void;
@@ -148,13 +143,6 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
   subagents: [],
   sessions: [],
   activeSessionId: null,
-  sidebarOpen: false,
-
-  setSidebarOpen: (open) => {
-    // Skip no-op sets so subscribers don't re-render.
-    if (get().sidebarOpen === open) return;
-    set({ sidebarOpen: open });
-  },
 
   createSubagent: (config) => {
     const subagent: SubagentConfig = {
