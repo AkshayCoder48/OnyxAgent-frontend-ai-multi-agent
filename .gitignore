@@ -66,10 +66,12 @@ server.log
 /android/
 /ios/
 *.pid
-upload/
+# Upload staging ONLY at repo root (user-drop area) — MUST NOT match
+# src/app/api/composio/files/upload/ or any nested code path (it silently
+# ate the upload route once; verified with `git check-ignore` 2026-11-25).
+/upload/
 worklog.md
 .zscripts/
-upload/
 cli/dist/
 cli/node_modules/
 .onyxagent/

@@ -31,6 +31,15 @@ vi.mock("@/lib/composio/browser", () => ({
 }));
 vi.mock("@/lib/composio/branding", () => ({
   recordToolToolkits: () => undefined,
+  // The upload tool resolves the toolkit for the Files-API request from the
+  // harvested search mapping — seed the two slugs the tests exercise.
+  getToolkitSlugForTool: (name: string) =>
+    name.toUpperCase() === "GOOGLEDRIVE_CREATE_FILE"
+      ? "googledrive"
+      : name.toUpperCase() === "SLACK_UPLOAD_FILE"
+        ? "slack"
+        : null,
+  isComposioToolName: (name: string) => name.startsWith("composio_"),
 }));
 
 import { coerceComposioArgs } from "./composio_tools";
@@ -163,5 +172,164 @@ describe("composio_execute_tool — the user-reported error is gone", () => {
     );
     expect(r.success).toBe(false);
     expect((r as { error?: string }).error).toMatch(/inputSchema/i);
+  });
+
+  it("(5) FABRICATED empty s3key is blocked BEFORE the wire — routed to composio_upload_file", async () => {
+    // The exact user-reported shape (2026-11-25): descriptor with s3key:"".
+    const r = await executeTool!.handler(
+      {
+        toolName: "GOOGLEDRIVE_CREATE_FILE",
+        args: {
+          name: "test_sort_clips.txt",
+          mimetype: "text/plain",
+          file_to_upload: { name: "test_sort_clips.txt", mimetype: "text/plain", s3key: "" },
+          folder_to_upload_to: "",
+        },
+      } as never,
+      ctx,
+    );
+    expect(r.success).toBe(false);
+    const err = (r as { error?: string; action?: string }).error ?? "";
+    expect(err).toMatch(/REAL s3key/i);
+    expect((r as { action?: string }).action).toMatch(/composio_upload_file/);
+    // The call must NEVER reach Composio (the old failure mode: accepted,
+    // then Apollo files-API 400 after the fact).
+    expect(calls.find((c) => c.url.includes("/api/composio/tools/execute"))).toBeUndefined();
+  });
+
+  it("(6) a REAL staged descriptor passes the guard untouched", async () => {
+    const r = await executeTool!.handler(
+      {
+        toolName: "GOOGLEDRIVE_CREATE_FILE",
+        args: {
+          file_to_upload: {
+            name: "clips.md",
+            mimetype: "text/markdown",
+            s3key: "projects/pr_abc/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/clips.md",
+          },
+        },
+      } as never,
+      ctx,
+    );
+    expect(r.success).toBe(true);
+    const exec = calls.find((c) => c.url.includes("/api/composio/tools/execute"));
+    expect(exec?.body.args).toEqual({
+      file_to_upload: {
+        name: "clips.md",
+        mimetype: "text/markdown",
+        s3key: "projects/pr_abc/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/clips.md",
+      },
+    });
+  });
+
+  it("(7) placeholder s3keys (dummy/test/…) are also blocked", async () => {
+    const r = await executeTool!.handler(
+      {
+        toolName: "SLACK_UPLOAD_FILE",
+        args: { file: { name: "x.txt", mimetype: "text/plain", s3key: "dummy_s3key" } },
+      } as never,
+      ctx,
+    );
+    expect(r.success).toBe(false);
+    expect((r as { error?: string }).error).toMatch(/REAL s3key/i);
+  });
+});
+
+// ── composio_upload_file — the s3key minting flow (user report 2026-11-25) ──
+
+describe("composio_upload_file", () => {
+  const ctx = { userId: "u1" } as never;
+
+  let calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  beforeEach(() => {
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { body?: string }) => {
+        calls.push({ url: String(url), body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            s3key: "projects/pr_x/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/test.txt",
+            requestId: "req_file_1",
+            fileDescriptor: {
+              name: "test.txt",
+              mimetype: "text/plain",
+              s3key: "projects/pr_x/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/test.txt",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const uploadTool = getTool("composio_upload_file");
+
+  it("is registered with the other three composio meta-tools", () => {
+    expect(uploadTool).toBeTruthy();
+  });
+
+  it("stages INLINE content and returns the exact descriptor (b64 round-trips)", async () => {
+    const r = await uploadTool!.handler(
+      {
+        toolName: "GOOGLEDRIVE_CREATE_FILE",
+        content: "hello composio",
+        filename: "test.txt",
+        mimetype: "text/plain",
+      } as never,
+      ctx,
+    );
+    expect(r.success).toBe(true);
+    const out = (r as { output?: Record<string, unknown> }).output ?? {};
+    expect(out.fileDescriptor).toEqual({
+      name: "test.txt",
+      mimetype: "text/plain",
+      s3key: "projects/pr_x/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/test.txt",
+    });
+    // The wire body carried the base64 of the content + the right toolkit.
+    const up = calls.find((c) => c.url.includes("/api/composio/files/upload"));
+    expect(up).toBeTruthy();
+    expect(up?.body.toolkitSlug).toBe("googledrive");
+    expect(up?.body.toolSlug).toBe("GOOGLEDRIVE_CREATE_FILE");
+    expect(up?.body.filename).toBe("test.txt");
+    const b64 = up?.body.contentB64 as string;
+    expect(atob(b64)).toBe("hello composio");
+  });
+
+  it("requires filePath or content", async () => {
+    const r = await uploadTool!.handler({ toolName: "GOOGLEDRIVE_CREATE_FILE" } as never, ctx);
+    expect(r.success).toBe(false);
+    expect((r as { error?: string }).error).toMatch(/filePath|content/i);
+  });
+
+  it("fails honestly when no toolkit mapping is known yet (search first)", async () => {
+    const r = await uploadTool!.handler(
+      { toolName: "TOTALLY_UNKNOWN_TOOL", content: "x" } as never,
+      ctx,
+    );
+    expect(r.success).toBe(false);
+    expect((r as { error?: string }).error).toMatch(/composio_search_tools/);
+  });
+
+  it("propagates the route's staging failure (no fake s3key)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ ok: false, error: "UPLOAD_FAILED", message: "Presigned PUT failed (HTTP 403)." }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    const r = await uploadTool!.handler(
+      { toolName: "GOOGLEDRIVE_CREATE_FILE", content: "x" } as never,
+      ctx,
+    );
+    expect(r.success).toBe(false);
+    expect((r as { error?: string }).error).toMatch(/Presigned PUT failed/i);
   });
 });

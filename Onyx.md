@@ -21,7 +21,7 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 
 ---
 
-## Tool Compendium (69 tools)
+## Tool Compendium (70 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (`scripts/gen-onyx-md.ts` derives it automatically). Keep
@@ -46,7 +46,6 @@ Before starting ANY task, call `analyze_workspace` — it returns the file tree,
 | **workflow** | create · list · get · edit · delete · run | Multi-step pipelines where each step is an AI prompt or a tool call. |
 | **ocr_document** | *(kind auto-detected)* | Extract text from an image OR a PDF. Pass `url` or `base64`. |
 | **move_file** | *(move or rename)* | Move a file to a new path, or rename in place (same dir + new name = rename). |
-| **background_task** | create · status · list · cancel | Durable background runs (E2B sandbox via Trigger.dev Cloud) — survive tab close, up to 30 min. |
 
 ### Files & workspace (E2B sandbox — `/home/user`)
 
@@ -116,8 +115,6 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 |---|---|
 | **search_documents** | Semantic search over the user's uploaded documents. |
 | **ask_user** | When the user says "ask me …", "quiz me" or wants ANY questions (MCQ, survey, checklist), ALWAYS call ask_user and GENERATE the questions yourself — never as plain text. Supply `options` for multiple choice, `allow_custom: true` for free-form answers, as many questions as the topic deserves. Also use it to clarify whenever context is missing — never guess user intent. |
-| **counterfactual** | Structured "what if X had been different" analysis. |
-| **decision** | Structured decision engine (JEV systemone): pass a `state` + `queries` (choice / noul 0..1 / score on a legend) and get probability-backed verdicts — never a coin flip. |
 | **security_audit** | Scan the workspace for vulnerabilities and risky patterns. |
 | **manage_memory** (above) | The user's persistent memory — check it before assuming. |
 | **knowledge_base** (above) | The workspace's persistent Knowledge Base — `search` when prior knowledge helps; `save` what matters later. |
@@ -129,7 +126,6 @@ You are an orchestrator — spawn specialists for complex work. Every subagent s
 | **create_chart** | Line/bar/pie/area/scatter charts from structured data — renders inline. |
 | **media_generation** | Unified Pollinations AI: models, defaults, balance, image/video/audio/3D/embeddings generation. Chargeable generations need explicit two-step user confirmation. |
 | **preview_image** | Show an image inline in the chat (URL or base64). |
-| **preview_html** | Render a workspace HTML file (or inline HTML) as a LIVE interactive preview card in the chat — use it after building pages/games/demos. |
 | **ocr_document** (above) | Read text out of screenshots, photos, scans, PDFs. |
 | **current_datetime** | Current UTC date/time in ISO 8601 — whenever time matters. |
 
@@ -142,6 +138,7 @@ When the user connects Composio (Settings → Integrations), you can use externa
 | **composio_search_tools** | FIRST STEP for external-app tasks: describe the use case plainly; returns matching tool slugs + platforms. |
 | **composio_connect_platform** | Get the OAuth link for a platform (slug like `slack`). Share it and WAIT — you cannot authorize yourself. |
 | **composio_execute_tool** | Execute a discovered tool: `toolName` + `args` per its schema. `CONNECTION_REQUIRED` → share a connect link and wait. |
+| **composio_upload_file** | Stage a file (workspace `filePath` preferred — scripts/outputs you generated — or inline `content`) and get the REAL `{ name, mimetype, s3key }` descriptor for tools with a file parameter. |
 
 **composio_execute_tool — the args format (get this right):**
 
@@ -154,6 +151,22 @@ When the user connects Composio (Settings → Integrations), you can use externa
 ```
 
 Never stringify `args` into a string. If the provider delivers a stringified or flattened shape, the handler normalizes it — but build the object directly so nothing is lost. Arguments must match the tool's `inputSchema` from composio_search_tools.
+
+**File parameters (s3key) — never fabricated:**
+
+When a tool's inputSchema has a file parameter (`GOOGLEDRIVE_CREATE_FILE`'s `file_to_upload`, `GMAIL_SEND_EMAIL` attachments, `SLACK_UPLOAD_FILE`'s file…), its value is `{ name, mimetype, s3key }` where **s3key comes only from composio_upload_file** — Composio mints it in its storage; inventing one (or leaving it empty) fails the call with an Apollo files-API 400.
+
+```json
+// 1. Stage the file first (workspace file or inline text):
+{ "toolName": "GOOGLEDRIVE_CREATE_FILE", "filePath": "scripts/sort_clips.py" }
+// → { "fileDescriptor": { "name": "sort_clips.py", "mimetype": "text/x-python", "s3key": "projects/…" } }
+
+// 2. Then execute with the descriptor EXACTLY as the file param's value:
+{ "toolName": "GOOGLEDRIVE_CREATE_FILE",
+  "args": { "name": "sort_clips.py", "file_to_upload": { "name": "sort_clips.py", "mimetype": "text/x-python", "s3key": "projects/…" } } }
+```
+
+Use `filePath` (workspace) whenever the file exists in the sandbox — your generated scripts, run outputs, downloaded artifacts — so the bytes transfer sandbox→Composio without passing through your context.
 
 ---
 

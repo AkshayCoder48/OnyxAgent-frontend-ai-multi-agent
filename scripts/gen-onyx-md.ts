@@ -116,8 +116,9 @@ const UMBRELLAS: ReadonlyArray<{ name: string; actions: readonly string[]; blurb
     actions: [
       "mcp_search_tools", "mcp_call_tool",
       "composio_search_tools", "composio_connect_platform", "composio_execute_tool",
+      "composio_upload_file",
     ],
-    blurb: "External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call.",
+    blurb: "External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call. composio_upload_file stages a workspace/inline file and returns the REAL { name, mimetype, s3key } descriptor for file-taking tools (never fabricate an s3key).",
   },
   {
     name: "chats",

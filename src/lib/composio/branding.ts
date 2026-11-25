@@ -44,13 +44,23 @@ export interface ComposioBranding {
   appLogo: string | null;
 }
 
-/** The three session meta-tools that act on external apps via Composio. */
+/** The four session meta-tools that act on external apps via Composio. */
 export function isComposioToolName(name: string): boolean {
   return (
     name === "composio_search_tools" ||
     name === "composio_connect_platform" ||
-    name === "composio_execute_tool"
+    name === "composio_execute_tool" ||
+    name === "composio_upload_file"
   );
+}
+
+/** Toolkit slug for a Composio TOOL slug (uppercase), from the harvested
+ *  search-result mapping — null when unknown. Used by
+ *  composio_upload_file to fill the Files-API's `toolkit_slug` without
+ *  guessing (PRD §23 — never derive a toolkit from a tool-name prefix). */
+export function getToolkitSlugForTool(toolName: string): string | null {
+  hydrate();
+  return toolkitByTool.get(toolName.trim().toUpperCase()) ?? null;
 }
 
 // ---------------------------------------------------------------------------

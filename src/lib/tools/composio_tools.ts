@@ -23,6 +23,43 @@ import {
 import { recordToolToolkits } from "@/lib/composio/branding";
 import type { ToolResult } from "@/types";
 
+/** A tool-args object (at any depth) that looks like Composio's file
+ *  descriptor { name, mimetype, s3key } — with an s3key that was invented
+ *  (empty / placeholder / obviously not a storage key). Returns the
+ *  parameter's path + the offending s3key so the guard can name it. */
+function findFabricatedFileParam(
+  node: unknown,
+  path = "",
+): { param: string; s3key: string } | null {
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      const hit = findFabricatedFileParam(node[i], path ? `${path}[${i}]` : `[${i}]`);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!node || typeof node !== "object") return null;
+  const obj = node as Record<string, unknown>;
+  const looksLikeDescriptor =
+    typeof obj.name === "string" &&
+    typeof obj.mimetype === "string" &&
+    "s3key" in obj; // the marker Composio's file params carry
+  if (looksLikeDescriptor) {
+    const s3key = typeof obj.s3key === "string" ? obj.s3key.trim() : "";
+    // Only flag CERTAIN fabrications: empty or explicit placeholders. A
+    // real key's shape isn't guaranteed to carry slashes — don't risk a
+    // false positive rejecting a legitimately staged descriptor.
+    if (!s3key || /^(test|dummy|fake|placeholder|xxx|your_s3key|<|\{)/i.test(s3key)) {
+      return { param: path || "file_to_upload", s3key: s3key || "" };
+    }
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    const hit = findFabricatedFileParam(v, path ? `${path}.${k}` : k);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /** Direct fetch that keeps the route's stable `error` code (jsonFetch would
  *  collapse it into a plain message). */
 async function composioFetch(
@@ -275,6 +312,25 @@ registerTool(
     // up the toolName if it only appeared in the extras.
     if (!toolName && typeof flattenedTool === "string") toolName = flattenedTool.trim();
     const toolArgs = coerced;
+
+    // FABRICATED-S3KEY GUARD (user report 2026-11-25): Composio file
+    // parameters carry { name, mimetype, s3key } — the s3key is minted by
+    // Composio's Files API and can NEVER be invented. An empty/placeholder
+    // one reaches their Apollo files API and dies with HTTP 400 AFTER the
+    // call was already accepted, wasting the turn. Catch it here and route
+    // the model to composio_upload_file, which stages the file and returns
+    // the REAL descriptor.
+    const fileParamGuard = findFabricatedFileParam(toolArgs);
+    if (fileParamGuard) {
+      return {
+        success: false,
+        output: null,
+        error:
+          `The '${fileParamGuard.param}' parameter needs a REAL s3key from Composio's file storage — '${fileParamGuard.s3key}' is not one (an invented/empty s3key fails inside Composio with HTTP 400).`,
+        action:
+          `Call composio_upload_file first with { toolName: "${toolName}", filePath: <workspace file> } (or content for inline text) — it returns the exact { name, mimetype, s3key } descriptor. Then retry composio_execute_tool with that descriptor as the '${fileParamGuard.param}' value, unchanged.`,
+      };
+    }
     if (!ctx.userId) {
       return { success: false, output: null, error: "No active user — cannot resolve the Composio connection." };
     }
@@ -336,3 +392,178 @@ function notConnectedResult(): ToolResult {
       "COMPOSIO_NOT_CONNECTED: Composio isn't configured yet. Ask the user to add their Composio API key in Settings → Integrations (https://composio.dev → Settings → Project Settings → API Keys), then retry.",
   };
 }
+
+// ---------------------------------------------------------------------------
+// composio_upload_file — stage a file into Composio's storage, get the
+// real s3key its file-consuming tools demand (GOOGLEDRIVE_CREATE_FILE's
+// `file_to_upload` etc.).
+//
+// Motivation (user report 2026-11-25): the model fabricated
+// `file_to_upload: { name, mimetype, s3key: "" }` from thin air because NO
+// upload flow existed — Composio's Apollo files API then failed the whole
+// tool call with HTTP 400. The s3key is minted by Composio's two-step
+// Files API (upload-request → presigned PUT) and can NEVER be invented.
+//
+// The model passes EITHER inline `content` OR a workspace `filePath` —
+// the AI's own generated scripts/outputs (E2B sandbox files) are read
+// from the sandbox as bytes and staged WITHOUT the model re-typing their
+// contents into the tool call (which would corrupt binaries and blow the
+// context window).
+// ---------------------------------------------------------------------------
+
+/** Guess a mimetype from a filename — only used to pre-fill the Files-API
+ *  request; the tool call's own explicit mimetype always wins. */
+function guessMime(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  const table: Record<string, string> = {
+    txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json",
+    js: "text/javascript", ts: "text/plain", py: "text/x-python", sh: "text/x-shellscript",
+    html: "text/html", css: "text/css", pdf: "application/pdf", png: "image/png",
+    jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", svg: "image/svg+xml",
+    webp: "image/webp", zip: "application/zip", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    mp4: "video/mp4", wav: "audio/wav", mp3: "audio/mpeg",
+  };
+  return table[ext] ?? "application/octet-stream";
+}
+
+registerTool(
+  "composio_upload_file",
+  "Stage a file into Composio's storage and get the REAL `s3key` its file-consuming tools require. Use BEFORE composio_execute_tool whenever the tool's schema has a file parameter (e.g. GOOGLEDRIVE_CREATE_FILE's `file_to_upload`: { name, mimetype, s3key }). NEVER fabricate an s3key — an empty one fails the call with an Apollo files-API 400. Sources: pass `filePath` for a file in the user's workspace (a script you wrote, an output/automated artifact — read as raw bytes, binaries safe) OR `content` for text you have in-context. Then call composio_execute_tool with the returned fileDescriptor EXACTLY as the file parameter's value.",
+  {
+    type: "object",
+    properties: {
+      toolName: {
+        type: "string",
+        description: "The Composio tool that will consume this file (e.g. 'GOOGLEDRIVE_CREATE_FILE') — from composio_search_tools.",
+      },
+      filePath: {
+        type: "string",
+        description: "Workspace-relative path of an existing file (e.g. 'output/clips.md', 'scripts/analyze.py'). Preferred for anything you created or ran in the sandbox.",
+      },
+      content: {
+        type: "string",
+        description: "Inline text content (used only when filePath is absent). For workspace files always prefer filePath.",
+      },
+      filename: {
+        type: "string",
+        description: "Name for the staged file. Defaults to the filePath's basename (or 'file.txt' for inline content).",
+      },
+      mimetype: {
+        type: "string",
+        description: "Mime type; inferred from the filename extension when omitted.",
+      },
+    },
+    required: ["toolName"],
+    additionalProperties: false,
+  },
+  async (args, ctx): Promise<ToolResult> => {
+    const input = args as {
+      toolName?: unknown; filePath?: unknown; content?: unknown;
+      filename?: unknown; mimetype?: unknown;
+    };
+    const toolName = String(input.toolName ?? "").trim();
+    if (!toolName) {
+      return { success: false, output: null, error: "toolName is required — the Composio tool that will consume this file." };
+    }
+    const filePath = typeof input.filePath === "string" ? input.filePath.trim() : "";
+    const inlineContent = typeof input.content === "string" ? input.content : "";
+    if (!filePath && !inlineContent) {
+      return { success: false, output: null, error: "Provide either filePath (a workspace file) or content (inline text)." };
+    }
+    if (!ctx.userId) {
+      return { success: false, output: null, error: "No active user — cannot resolve the Composio connection." };
+    }
+
+    // Resolve the toolkit for the Files-API request. We only know slugs we
+    // harvested from composio_search_tools results; never guess from the
+    // tool-name prefix (PRD §23) — fall back to a generic 'unknown' the
+    // route can reject cleanly... but the harvested map usually has it.
+    const { getToolkitSlugForTool } = await import("@/lib/composio/branding");
+    const toolkitSlug = getToolkitSlugForTool(toolName);
+    if (!toolkitSlug) {
+      return {
+        success: false,
+        output: null,
+        error:
+          `No toolkit mapping for ${toolName}. Run composio_search_tools for the task first — its results teach this app which toolkit owns the tool (needed for file staging).`,
+      };
+    }
+
+    // Read the bytes: sandbox file (preferred) or inline text.
+    let bytes: Uint8Array;
+    let filename: string;
+    if (filePath) {
+      const { chatSandboxForCtx } = await import("@/lib/e2b/sandbox-rotation");
+      const sbx = await chatSandboxForCtx(ctx);
+      if (!sbx) {
+        return { success: false, output: null, error: "No sandbox configured — the workspace file can't be read. Use inline `content` instead." };
+      }
+      try {
+        const blob = await sbx.client.readFileBytes(filePath);
+        if (!blob) throw new Error("empty file");
+        bytes = new Uint8Array(await blob.arrayBuffer());
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, output: null, error: `Failed to read workspace file '${filePath}': ${msg}` };
+      }
+      filename = String(input.filename ?? "").trim() || filePath.split("/").pop() || "file.txt";
+    } else {
+      // Inline text — encode as UTF-8 bytes.
+      bytes = new TextEncoder().encode(inlineContent);
+      filename = String(input.filename ?? "").trim() || "file.txt";
+    }
+    if (bytes.length === 0) {
+      return { success: false, output: null, error: "File is empty — nothing to stage." };
+    }
+    if (bytes.length > 20 * 1024 * 1024) {
+      return { success: false, output: null, error: `File too large: ${bytes.length} bytes (max 20 MB).` };
+    }
+
+    const mimetype = String(input.mimetype ?? "").trim() || guessMime(filename);
+
+    // Base64 the bytes for the proxy route (the route re-hashes + PUTs).
+    let binary = "";
+    const CHUNK = 0x8000; // 32 KB per String.fromCharCode — stack-safe.
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    const b64 = btoa(binary);
+
+    let headers: Awaited<ReturnType<typeof resolveComposioHeaders>>;
+    try {
+      const h = await resolveComposioHeaders(ctx.userId);
+      if (!h) throw new Error("NOT_CONNECTED");
+      headers = h;
+    } catch {
+      return notConnectedResult();
+    }
+
+    const r = await composioFetch("/api/composio/files/upload", headers, {
+      toolkitSlug,
+      toolSlug: toolName,
+      filename,
+      mimetype,
+      contentB64: b64,
+    });
+    if (!r.ok) {
+      return { success: false, output: null, error: r.message ?? "File staging failed.", ...(r.code ? { code: r.code } : {}) };
+    }
+    const descriptor = (r.fileDescriptor ?? null) as { name?: unknown; mimetype?: unknown; s3key?: unknown } | null;
+    const s3key = typeof r.s3key === "string" ? r.s3key : typeof descriptor?.s3key === "string" ? descriptor.s3key : "";
+    if (!s3key) {
+      return { success: false, output: null, error: "Composio returned no s3key — staging incomplete. Retry once, then report the failure." };
+    }
+    return {
+      success: true,
+      output: {
+        message: `Staged ${filename} (${bytes.length} bytes) for ${toolName}.`,
+        fileDescriptor: { name: filename, mimetype, s3key },
+        next:
+          "Call composio_execute_tool and set the tool's file parameter (e.g. file_to_upload) to this fileDescriptor object EXACTLY — do not edit the s3key.",
+      },
+    };
+  },
+  false,
+  "integrations",
+);

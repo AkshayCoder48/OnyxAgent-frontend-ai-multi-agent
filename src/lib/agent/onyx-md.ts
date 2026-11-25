@@ -28,7 +28,7 @@ Before starting ANY task, call \`analyze_workspace\` — it returns the file tre
 
 ---
 
-## Tool Compendium (69 tools)
+## Tool Compendium (70 tools)
 
 > This compendium is the source for the TOOL DIGEST injected into every
 > system prompt (\`scripts/gen-onyx-md.ts\` derives it automatically). Keep
@@ -145,18 +145,35 @@ When the user connects Composio (Settings → Integrations), you can use externa
 | **composio_search_tools** | FIRST STEP for external-app tasks: describe the use case plainly; returns matching tool slugs + platforms. |
 | **composio_connect_platform** | Get the OAuth link for a platform (slug like \`slack\`). Share it and WAIT — you cannot authorize yourself. |
 | **composio_execute_tool** | Execute a discovered tool: \`toolName\` + \`args\` per its schema. \`CONNECTION_REQUIRED\` → share a connect link and wait. |
+| **composio_upload_file** | Stage a file (workspace \`filePath\` preferred — scripts/outputs you generated — or inline \`content\`) and get the REAL \`{ name, mimetype, s3key }\` descriptor for tools with a file parameter. |
 
 **composio_execute_tool — the args format (get this right):**
 
 \`\`\`json
-// CORRECT — \`args\` is a real JSON object:
+// ✅ CORRECT — \`args\` is a real JSON object:
 { "toolName": "GOOGLEDRIVE_FIND_FILE", "args": { "q": "name contains 'clip'", "fields": "files(id,name,mimeType)" } }
 
-// WRONG — \`args\` as a JSON-encoded string (double-quoted JSON inside JSON) fails:
+// ❌ WRONG — \`args\` as a JSON-encoded string (double-quoted JSON inside JSON) fails:
 { "toolName": "GOOGLEDRIVE_FIND_FILE", "args": "{\\"q\\": \\"name contains 'clip'\\"}" }
 \`\`\`
 
 Never stringify \`args\` into a string. If the provider delivers a stringified or flattened shape, the handler normalizes it — but build the object directly so nothing is lost. Arguments must match the tool's \`inputSchema\` from composio_search_tools.
+
+**File parameters (s3key) — never fabricated:**
+
+When a tool's inputSchema has a file parameter (\`GOOGLEDRIVE_CREATE_FILE\`'s \`file_to_upload\`, \`GMAIL_SEND_EMAIL\` attachments, \`SLACK_UPLOAD_FILE\`'s file…), its value is \`{ name, mimetype, s3key }\` where **s3key comes only from composio_upload_file** — Composio mints it in its storage; inventing one (or leaving it empty) fails the call with an Apollo files-API 400.
+
+\`\`\`json
+// 1. Stage the file first (workspace file or inline text):
+{ "toolName": "GOOGLEDRIVE_CREATE_FILE", "filePath": "scripts/sort_clips.py" }
+// → { "fileDescriptor": { "name": "sort_clips.py", "mimetype": "text/x-python", "s3key": "projects/…" } }
+
+// 2. Then execute with the descriptor EXACTLY as the file param's value:
+{ "toolName": "GOOGLEDRIVE_CREATE_FILE",
+  "args": { "name": "sort_clips.py", "file_to_upload": { "name": "sort_clips.py", "mimetype": "text/x-python", "s3key": "projects/…" } } }
+\`\`\`
+
+Use \`filePath\` (workspace) whenever the file exists in the sandbox — your generated scripts, run outputs, downloaded artifacts — so the bytes transfer sandbox→Composio without passing through your context.
 
 ---
 

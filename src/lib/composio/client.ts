@@ -193,6 +193,57 @@ export interface ComposioLinkResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Files API (v3.1) — two-step upload flow
+// ---------------------------------------------------------------------------
+
+/** Verified against docs.composio.dev (POST /api/v3.1/files/upload/request):
+ *  mint a presigned URL, PUT the bytes to it, then pass the returned storage
+ *  `key` as the `s3key` inside a tool's file parameter (e.g.
+ *  GOOGLEDRIVE_CREATE_FILE's `file_to_upload`). */
+export interface FileUploadRequestInput {
+  /** Toolkit the file belongs to, e.g. "googledrive". */
+  toolkitSlug: string;
+  /** Tool that will consume the file, e.g. "GOOGLEDRIVE_CREATE_FILE". */
+  toolSlug: string;
+  /** Original file name, e.g. "report.txt". */
+  filename: string;
+  /** File mime type, e.g. "text/plain". */
+  mimetype: string;
+  /** MD5 hex digest of the bytes (integrity verification). */
+  md5: string;
+}
+
+/** Response of the upload-request endpoint (normalized — the deprecated
+ *  `newPresignedUrl` twin folds into `presignedUrl`). */
+export interface FileUploadRequestResponse {
+  /** Request-file id, e.g. "req_file_…". */
+  id: string;
+  /** Object-storage key — THE `s3key` for the tool's file parameter. */
+  key: string;
+  /** Presigned URL to PUT the bytes to. */
+  presignedUrl: string;
+  /** Storage backend ("s3" | "azure_blob_storage") — azure PUTs need
+   *  `x-ms-blob-type: BlockBlob`. */
+  storageBackend: string;
+}
+
+function normalizeFileUploadRequest(raw: Record<string, unknown>): FileUploadRequestResponse | null {
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
+  const id = str(raw.id);
+  const key = str(raw.key);
+  // Current field first; the camelCase twin is deprecated but still served.
+  const url = str(raw.new_presigned_url) ?? str(raw.newPresignedUrl);
+  if (!id || !key || !url) return null;
+  const backend = raw.metadata as { storage_backend?: unknown } | undefined;
+  return {
+    id,
+    key,
+    presignedUrl: url,
+    storageBackend: str(backend?.storage_backend) ?? "s3",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -365,6 +416,31 @@ export class ComposioClient {
         },
       },
     );
+  }
+
+  // ── Files API (upload-request step of the two-step flow) ──────────────
+  /** Mint a presigned upload URL + storage key for a file a tool will
+   *  consume. The caller (server route) then PUTs the bytes to
+   *  `presignedUrl` and passes `key` as the tool's `s3key`. v3.1 path —
+   *  the Files API only exists there. */
+  async requestFileUpload(input: FileUploadRequestInput): Promise<FileUploadRequestResponse> {
+    const raw = await this.request<Record<string, unknown>>("POST", "/api/v3.1/files/upload/request", {
+      body: {
+        toolkit_slug: input.toolkitSlug,
+        tool_slug: input.toolSlug,
+        filename: input.filename,
+        mimetype: input.mimetype,
+        md5: input.md5,
+      },
+    });
+    const normalized = normalizeFileUploadRequest(raw);
+    if (!normalized) {
+      throw new ComposioError({
+        message: "Composio's upload-request response was missing id/key/presigned URL.",
+        status: 502,
+      });
+    }
+    return normalized;
   }
 
   // ── Connected accounts ────────────────────────────────────────────────

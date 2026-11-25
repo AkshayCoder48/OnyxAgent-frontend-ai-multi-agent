@@ -43,6 +43,7 @@ export const UMBRELLA_TOOLS: Readonly<Record<string, readonly string[]>> = {
   integrations: [
     "mcp_search_tools", "mcp_call_tool",
     "composio_search_tools", "composio_connect_platform", "composio_execute_tool",
+    "composio_upload_file",
   ],
   chats: ["read_chat", "manage_chats"],
   memory: ["manage_memory", "project_memory"],

@@ -76,8 +76,7 @@ describe("ComposioClient", () => {
       error: { message: "session not found", slug: "Session_NotFound", status: 404 },
     });
     const client = new ComposioClient(KEY);
-    const err = await client.getSession("trs_missing").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ComposioError);
+    const err = await client.getSession("trs_missing").catch((e: unknown) => e);    expect(err).toBeInstanceOf(ComposioError);
     expect((err as ComposioError).isSessionMissing).toBe(true);
   });
 
@@ -215,5 +214,71 @@ describe("ComposioClient", () => {
 
   it("rejects empty API keys client-side", () => {
     expect(() => new ComposioClient("   ")).toThrow(ComposioError);
+  });
+
+  // ── Files API (upload-request step of the two-step flow) ──────────────
+  it("requestFileUpload posts the documented v3.1 body and normalizes the response", async () => {
+    const fetchMock = mockFetchOnce(200, {
+      id: "req_file_9mZn4qR8sXwT",
+      key: "projects/pr_abc/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/doc.txt",
+      new_presigned_url: "https://storage.composio.dev/put?X-Amz-Algorithm=AWS4-HMAC-SHA256",
+      newPresignedUrl: "https://legacy.example/put", // deprecated twin — ignored
+      type: "new",
+      metadata: { storage_backend: "s3" },
+    });
+    const client = new ComposioClient(KEY);
+    const res = await client.requestFileUpload({
+      toolkitSlug: "googledrive",
+      toolSlug: "GOOGLEDRIVE_CREATE_FILE",
+      filename: "doc.txt",
+      mimetype: "text/plain",
+      md5: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toContain("/api/v3.1/files/upload/request");
+    expect((init.headers as Record<string, string>)["x-api-key"]).toBe(KEY);
+    expect(JSON.parse(String(init.body))).toEqual({
+      toolkit_slug: "googledrive",
+      tool_slug: "GOOGLEDRIVE_CREATE_FILE",
+      filename: "doc.txt",
+      mimetype: "text/plain",
+      md5: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    });
+    // Normalized: current presigned field wins; the key IS the s3key.
+    expect(res.key).toBe("projects/pr_abc/requests/googledrive/GOOGLEDRIVE_CREATE_FILE/doc.txt");
+    expect(res.presignedUrl).toContain("storage.composio.dev");
+    expect(res.storageBackend).toBe("s3");
+  });
+
+  it("requestFileUpload accepts the deprecated newPresignedUrl twin when the current field is absent", async () => {
+    mockFetchOnce(200, {
+      id: "req_file_x",
+      key: "projects/pr_x/requests/slack/SLACK_UPLOAD_FILE/f.png",
+      newPresignedUrl: "https://storage.example/legacy",
+    });
+    const client = new ComposioClient(KEY);
+    const res = await client.requestFileUpload({
+      toolkitSlug: "slack",
+      toolSlug: "SLACK_UPLOAD_FILE",
+      filename: "f.png",
+      mimetype: "image/png",
+      md5: "0".repeat(32),
+    });
+    expect(res.presignedUrl).toBe("https://storage.example/legacy");
+    expect(res.storageBackend).toBe("s3"); // default when metadata is missing
+  });
+
+  it("requestFileUpload throws on a malformed response (no fabricated keys)", async () => {
+    mockFetchOnce(200, { id: "req_file_y" }); // key + URL missing
+    const client = new ComposioClient(KEY);
+    await expect(
+      client.requestFileUpload({
+        toolkitSlug: "slack",
+        toolSlug: "SLACK_UPLOAD_FILE",
+        filename: "f",
+        mimetype: "text/plain",
+        md5: "d4".repeat(16),
+      }),
+    ).rejects.toMatchObject({ name: "ComposioError", status: 502 });
   });
 });

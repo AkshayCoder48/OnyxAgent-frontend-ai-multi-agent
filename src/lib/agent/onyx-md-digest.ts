@@ -8,8 +8,8 @@
 // know their complete tool surface, and the availability rules make
 // "I don't have that tool" claims about registered tools a prompt violation.
 //
-// UMBRELLA CONSOLIDATION: the surface is 23 tools — 12 action-based
-// umbrella tools + 11 standalone keepers. Each umbrella takes ONE
+// UMBRELLA CONSOLIDATION: the surface is 20 tools — 12 action-based
+// umbrella tools + 8 standalone keepers. Each umbrella takes ONE
 // required `action` argument whose value is the exact granular operation
 // name. The granular tools remain REGISTERED + callable (umbrella dispatch,
 // legacy calls) but are hidden from the model-visible list. The generator
@@ -24,7 +24,7 @@
 // UMBRELLAS map + src/lib/agent/tool-umbrella.ts, then re-run the generator.
 
 /** Must start with this heading — injection sites use it as the idempotency marker. */
-export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (23 total)
+export const ONYX_MD_DIGEST = `## TOOL DIGEST — every model-visible tool (20 total)
 
 Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final word on what is callable THIS turn.
 
@@ -34,7 +34,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - code_exec [run_python / run_terminal] — Python + shell in the sandbox; run_terminal background=true runs a command detached (log file, survives app close).
 - subagents [spawn_subagent / list_subagents / set_subagent_config / query_subagent / steer_subagent / complete_subagent / cancel_subagent / manage_subagent_chat] — Delegate work to subagents.
 - schedule [schedule_agent_task / list_scheduled_tasks / remove_scheduled_task] — Cron-schedule sandbox scripts; output lands in /home/user/cron_output.log.
-- integrations [mcp_search_tools / mcp_call_tool / composio_search_tools / composio_connect_platform / composio_execute_tool] — External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call.
+- integrations [mcp_search_tools / mcp_call_tool / composio_search_tools / composio_connect_platform / composio_execute_tool / composio_upload_file] — External integrations: the user's MCP servers + Composio (250+ platforms). Search FIRST, then call. composio_upload_file stages a workspace/inline file and returns the REAL { name, mimetype, s3key } descriptor for file-taking tools (never fabricate an s3key).
 - chats [read_chat / manage_chats] — Recall past conversations; read_chat also inspects a subagent's live reply.
 - memory [manage_memory / project_memory] — Persistent facts: user-level (survives chats) and current-project.
 - todos [manage_todo / show_todo] — Plan multi-step work. create returns a stable ID like todo_8f42 — quote it later. ALWAYS call show_todo (all: true) right after creating or updating the full list so the user sees the live todo panel.
@@ -58,7 +58,7 @@ Ground truth for what you can do. Your ACTIVE TOOL DEFINITIONS are the final wor
 - Be honest BOTH ways: never deny a tool you have; never claim or call a tool that is absent from your definitions this turn.
 - Detailed usage, execution policies and the full GenUI reference: \`/home/user/Onyx.md\` — read it (the files umbrella's read_file action) when you need more than this digest.`;
 
-/** Every model-visible tool name: the 12 umbrellas + 11 keepers
+/** Every model-visible tool name: the 12 umbrellas + 8 keepers
  * (digest ⇄ registry parity is test-enforced against listTools() — hidden
  * granular tools are excluded by design). */
 export const ONYX_MD_DIGEST_TOOLS: readonly string[] = ["files","web","code_exec","subagents","schedule","integrations","chats","memory","todos","media","workspace","custom_tools","clear_todo","knowledge_base","manage_skill","manage_mcp","workflow","use_browser","ask_user","current_datetime"];
