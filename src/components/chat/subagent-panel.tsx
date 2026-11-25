@@ -123,7 +123,7 @@ export function SubagentPanel() {
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
-          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+          className="flex items-center gap-2 flex-1 min-w-0 text-left border-none bg-transparent p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
           aria-label={collapsed ? "Expand subagent panel" : "Collapse subagent panel"}
         >
           <div className="relative shrink-0">
@@ -137,7 +137,7 @@ export function SubagentPanel() {
         <button
           type="button"
           onClick={() => setDismissed(true)}
-          className="text-muted-foreground hover:text-foreground hover:bg-foreground/5 rounded p-1 transition-colors shrink-0"
+          className="text-muted-foreground hover:text-foreground hover:bg-foreground/5 rounded p-1 transition-colors shrink-0 border-none bg-transparent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           aria-label="Dismiss subagent panel"
         >
           <X className="h-3.5 w-3.5" />

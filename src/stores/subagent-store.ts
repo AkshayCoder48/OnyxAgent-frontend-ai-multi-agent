@@ -22,12 +22,24 @@ export interface SubagentMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
+  /** Reasoning/thinking text streamed by the model (reasoning_content /
+   *  reasoning deltas). Rendered by the shared ThinkingReasoning element —
+   *  never merged into `content`. (Sub-Agent Chat PRD §3.) */
+  reasoning?: string;
+  /** True while this reasoning is still streaming (drives the live
+   *  "Thinking…" header vs the settled "Thought for Ns" summary). */
+  isReasoningStreaming?: boolean;
   toolCalls?: Array<{
     id: string;
     name: string;
     args: Record<string, unknown>;
     result?: unknown;
     status: "pending" | "running" | "completed" | "error";
+    /** Epoch ms when the call started — drives the live elapsed badge on
+     *  the shared ToolCallCard. */
+    startedAt?: number;
+    /** Epoch ms when the call settled — drives the settled duration badge. */
+    endedAt?: number;
   }>;
   fileIds?: string[];
   isStreaming?: boolean;
@@ -126,6 +138,11 @@ interface SubagentStore {
 }
 
 const STORAGE_KEY = "onyxagent-subagents-v2";
+
+// STREAMING PERSISTENCE THROTTLE state (see updateMessage): mid-stream
+// deltas persist at most once per 400ms; settle events always persist.
+let lastPersistAt = 0;
+let pendingPersist = false;
 
 export const useSubagentStore = create<SubagentStore>((set, get) => ({
   subagents: [],
@@ -288,7 +305,30 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
           : s,
       ),
     }));
-    get().saveToStorage();
+    // STREAMING PERSISTENCE THROTTLE (Sub-Agent Chat PRD §1/§6 + the
+    // background-tab jank/network-error reports): the runtime calls this
+    // on EVERY streamed delta — the old unconditional saveToStorage ran a
+    // full JSON.stringify of every session on EVERY TOKEN, which stalled
+    // the tab's main thread in background runs (timer throttling turns
+    // that into multi-second freezes and the pending fetch looks dead).
+    // Now: persist immediately only when streaming SETTLES (isStreaming /
+    // isReasoningStreaming flipping to false) or when a tool call settles
+    // — mid-stream deltas persist at most once every 400ms.
+    const settling =
+      updates.isStreaming === false ||
+      updates.isReasoningStreaming === false ||
+      (updates.toolCalls !== undefined);
+    if (settling) {
+      get().saveToStorage();
+      pendingPersist = false;
+      return;
+    }
+    const now = Date.now();
+    if (!pendingPersist || now - lastPersistAt >= 400) {
+      lastPersistAt = now;
+      pendingPersist = true;
+      get().saveToStorage();
+    }
   },
 
   clearMessages: (sessionId) => {

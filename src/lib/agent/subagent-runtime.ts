@@ -264,6 +264,15 @@ async function runSubagentLoop(
   assistantMsgId: string,
 ): Promise<string> {
   const subagentId = subagent.id;
+  // TURN-LEVEL ACCUMULATORS (Sub-Agent Chat PRD §1/§3/§4): they live for
+  // the WHOLE turn across every streaming round. `fullTurnText` is what
+  // the chat message shows — text deltas APPEND to it and every store
+  // write carries the full value, so content from earlier rounds can
+  // never be replaced or disappear when a later round streams.
+  let fullTurnText = "";
+  // Reasoning accumulated across rounds: streamed into the message for the
+  // ThinkingReasoning UI AND replayed to the API (DeepSeek/moonshot/g4f
+  // require reasoning_content on assistant tool-call messages).
   let accumulatedReasoning = "";
 
   // PRD §34/§35: Load the user's decrypted E2B sandbox key + env vars so
@@ -343,6 +352,18 @@ async function runSubagentLoop(
     // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
     // bounded per subagent run so a dead provider can't loop forever.
     let gatewayRetries = 0;
+    // TRANSIENT TRANSPORT RETRY (Sub-Agent background network-error fix —
+    // mirrors the main runtime's classifier): fetch()-level failures
+    // ("TypeError: network error", "Failed to fetch", ECONNRESET, socket
+    // hang up, stream cut) used to kill the whole background turn on the
+    // FIRST blip. Background runs live in throttled tabs where transient
+    // failures are common — retry with capped backoff instead of dying.
+    let transientRetries = 0;
+    const TRANSIENT_RETRY_MAX = 5;
+    const isTransientTransportError = (msg: string) =>
+      /network error|failed to fetch|fetch failed|load failed|econnreset|socket hang up|connection reset|terminated|bodystreambuffer|stream aborted|idle timeout|abnormal|networkerror/i.test(
+        msg,
+      );
     // CONTEXT-OVERFLOW SELF-HEALING (LLM HTTP 400 fix, mirrors the sandbox
     // runner): a 400 "maximum context length" is a SIZE problem — compact
     // the subagent history (keep system + most recent messages) and retry
@@ -397,22 +418,47 @@ async function runSubagentLoop(
       // FIXES the request, not just re-sends it).
       const requestUrl = `/api/chat-proxy?url=${encodeURIComponent(targetUrl)}`;
       let res: Response;
-      for (;;) {
-        res = await fetch(requestUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-target-url": targetUrl,
-            Authorization: `Bearer ${config.apiKey}`,
-            Accept: "text/event-stream",
-          },
-          body: JSON.stringify(body),
-          cache: "no-store",
-        });
+      try {
+        for (;;) {
+          res = await fetch(requestUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-target-url": targetUrl,
+              Authorization: `Bearer ${config.apiKey}`,
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify(body),
+            cache: "no-store",
+          });
 
-        // No rate-limit auto-retry (removed per user request) — fall
-        // through to the !res.ok handler with a clear error message.
-        break;
+          // No rate-limit auto-retry (removed per user request) — fall
+          // through to the !res.ok handler with a clear error message.
+          break;
+        }
+      } catch (fetchErr) {
+        // TRANSIENT TRANSPORT RETRY (background network-error fix): a
+        // fetch()-level throw (TypeError: network error / Failed to fetch /
+        // socket-level reset) is a TRANSPORT blip, not a provider verdict —
+        // background subagent runs used to die here on the first hiccup.
+        // Bounded backoff (1s → 16s, 5 attempts), then the honest error.
+        const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+        if (isTransientTransportError(msg) && transientRetries < TRANSIENT_RETRY_MAX) {
+          transientRetries += 1;
+          const delayMs = Math.round(Math.min(1000 * 2 ** (transientRetries - 1), 16_000) * (0.75 + Math.random() * 0.5));
+          console.warn(
+            `[subagent] transient network error — retrying in ${delayMs}ms (${transientRetries}/${TRANSIENT_RETRY_MAX}): ${msg.slice(0, 120)}`,
+          );
+          logWarn("subagent", `Subagent LLM: transient network error — retrying in ${Math.round(delayMs / 1000)}s (${transientRetries}/${TRANSIENT_RETRY_MAX})`, {
+            detail: msg.slice(0, 300),
+            context: { model: config.model, retry_in_ms: delayMs },
+          });
+          // Don't burn a generation round on a transport retry.
+          maxIterations += 1;
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+        throw fetchErr;
       }
 
       if (!res.ok) {
@@ -547,8 +593,14 @@ async function runSubagentLoop(
 
         // Handle tool calls.
         if (msg.tool_calls && msg.tool_calls.length > 0 && config.toolsEnabled) {
-          // Pass reasoning_content back
-          if (msg.reasoning_content) accumulatedReasoning += msg.reasoning_content;
+          // Pass reasoning_content back; surface reasoning in the UI too.
+          if (msg.reasoning_content) {
+            accumulatedReasoning += msg.reasoning_content;
+            useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+              reasoning: accumulatedReasoning,
+              isReasoningStreaming: true,
+            });
+          }
           apiMessages.push({
             role: "assistant",
             content: msg.content || "",
@@ -567,11 +619,15 @@ async function runSubagentLoop(
             subagentSandboxKey,
             subagentEnvVars,
           );
-          fullResponse = stripFunctionCallTags(msg.content || "");
+          // CROSS-ROUND APPEND (PRD §1): non-streamed rounds also add to
+          // the turn's text — never replace it.
+          fullTurnText += stripFunctionCallTags(msg.content || "");
+          fullResponse = fullTurnText;
           continue;
         }
 
-        fullResponse = stripFunctionCallTags(msg.content || "");
+        fullTurnText += stripFunctionCallTags(msg.content || "");
+        fullResponse = fullTurnText;
         useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
           content: fullResponse,
           isStreaming: false,
@@ -584,8 +640,15 @@ async function runSubagentLoop(
       if (!reader) throw new Error("No response body");
       const decoder = new TextDecoder();
       let buffer = "";
-      let accumulatedText = "";
-      accumulatedReasoning = "";
+      // CROSS-ROUND ACCUMULATION (Sub-Agent Chat PRD §1/§4 — the
+      // disappearing-text fix): these accumulators LIVE ACROSS ROUNDS now.
+      // The old code reset them to "" at the top of every round, so after a
+      // tool round the pre-tool text vanished from the message (each round
+      // REPLACED content with only its own delta tail). `roundText` /
+      // `roundReasoning` capture THIS round's stream; the persisted message
+      // carries the full turn — text appended, never replaced.
+      let roundText = "";
+      let roundReasoning = "";
       const toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
 
       // SILENT-STOP DIAGNOSTICS (auto-stop fix, mirrors the main runtime):
@@ -641,19 +704,31 @@ async function runSubagentLoop(
                 continue;
               }
 
-              // Text delta — flush immediately (no throttle)
+              // Text delta — flush immediately (no throttle). PRD §1:
+              // APPEND to the turn's accumulated text; the store write
+              // carries the FULL turn (prior rounds + this delta), so a
+              // later round never replaces earlier generated text.
               if (delta.content) {
-                accumulatedText += delta.content;
+                roundText += delta.content;
+                fullTurnText += delta.content;
                 // Immediate update — no 60ms throttle
                 useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-                  content: stripFunctionCallTags(accumulatedText),
+                  content: stripFunctionCallTags(fullTurnText),
                   isStreaming: true,
                 });
               }
 
-              // Reasoning delta — accumulate for passing back to API
+              // Reasoning delta — PRD §3: persist into the message so the
+              // shared ThinkingReasoning element renders it live; also
+              // accumulated for passing back to the API.
               if (delta.reasoning_content || delta.reasoning) {
-                accumulatedReasoning += (delta.reasoning_content || delta.reasoning || "");
+                const rDelta = (delta.reasoning_content || delta.reasoning || "");
+                roundReasoning += rDelta;
+                accumulatedReasoning += rDelta;
+                useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+                  reasoning: accumulatedReasoning,
+                  isReasoningStreaming: true,
+                });
               }
 
               // Tool call delta — buffer + show immediately
@@ -677,7 +752,7 @@ async function runSubagentLoop(
                     shownToolCalls.add(tcBuf.id);
                     const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
                     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-                      content: stripFunctionCallTags(accumulatedText),
+                      content: stripFunctionCallTags(fullTurnText),
                       toolCalls: [
                         ...(currentMsg?.toolCalls ?? []),
                         {
@@ -712,16 +787,24 @@ async function runSubagentLoop(
 
       // SILENT-STOP GUARDS (auto-stop fix, mirrors the main runtime): a
       // finished stream with no text, no reasoning, and no tool calls must
-      // surface WHY instead of ending as a normal empty answer.
+      // surface WHY instead of ending as a normal empty answer. NOTE: with
+      // cross-round accumulation a PRIOR round's text/reasoning means this
+      // round legitimately added nothing (e.g. tool-only round) — only an
+      // empty TURN is an error.
       if (toolCallsBuffer.length === 0) {
-        if (subStreamError && !accumulatedText.trim()) {
+        if (subStreamError && !fullTurnText.trim() && !roundText.trim()) {
           logError("subagent", `Subagent LLM stream error (HTTP 200): ${subStreamError}`, {
             detail: subRawTail.join("\n"),
             context: { model: config.model, status: 200 },
           });
           throw new Error(`Provider stream error: ${subStreamError}`);
         }
-        if (!accumulatedText.trim() && !accumulatedReasoning.trim()) {
+        if (
+          !fullTurnText.trim() &&
+          !accumulatedReasoning.trim() &&
+          !roundText.trim() &&
+          !roundReasoning.trim()
+        ) {
           logWarn("subagent", "Subagent LLM returned an empty response — the model produced no content", {
             detail: subRawTail.length > 0 ? subRawTail.join("\n") : "(stream produced no usable chunks)",
             context: { model: config.model, status: 200 },
@@ -739,7 +822,7 @@ async function runSubagentLoop(
         !sawFinishReason &&
         !sawDoneMarker &&
         !sawUsage &&
-        (accumulatedText.trim() || accumulatedReasoning.trim() || toolCallsBuffer.length > 0)
+        (roundText.trim() || roundReasoning.trim() || toolCallsBuffer.length > 0)
       ) {
         // Drop tool calls whose args JSON was cut mid-string.
         const completeCalls = toolCallsBuffer.filter(
@@ -759,7 +842,7 @@ async function runSubagentLoop(
 
         logWarn(
           "subagent",
-          `Subagent response stream was cut off mid-generation (no finish signal) — ${accumulatedText.length} chars received, possibly incomplete`,
+          `Subagent response stream was cut off mid-generation (no finish signal) — ${roundText.length} chars this round, possibly incomplete`,
           {
             detail: subRawTail.length > 0 ? subRawTail.join("\n") : "(no chunks retained)",
             context: {
@@ -776,15 +859,24 @@ async function runSubagentLoop(
           "\n\n---\n⚠️ **The provider ended this response without a completion signal** — it was likely cut off mid-generation" +
           (droppedCalls > 0 ? ` (and ${droppedCalls} tool call${droppedCalls === 1 ? " was" : "s were"} dropped as incomplete)` : "") +
           ". The text above may be incomplete.";
-        accumulatedText += cutNotice;
+        roundText += cutNotice;
+        fullTurnText += cutNotice;
         useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-          content: stripFunctionCallTags(accumulatedText),
+          content: stripFunctionCallTags(fullTurnText),
           isStreaming: true,
         });
       }
 
       // Process any buffered tool calls.
       if (toolCallsBuffer.length > 0 && config.toolsEnabled) {
+        // PRD §3: settle the reasoning stream while tools run — the
+        // thinking block folds to its "Thought for Ns" summary and STAYS
+        // visible (it never disappears when tools execute).
+        if (accumulatedReasoning) {
+          useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+            isReasoningStreaming: false,
+          });
+        }
         // Parse args and update tool call cards to "running". Malformed /
         // truncated argument JSON is REPAIRED when possible and otherwise
         // short-circuits to a structured MALFORMED_TOOL_ARGUMENTS tool
@@ -796,12 +888,15 @@ async function runSubagentLoop(
           const malformed = parsed.malformed && !parsed.repaired;
           parsedToolCalls.push({ id: tc.id, name: tc.function.name, args: toolArgs, malformed, raw: parsed.raw });
 
-          // Update card to "running" with parsed args
+          // Update card to "running" with parsed args + a start timestamp
+          // (drives the shared ToolCallCard's live elapsed badge).
           const msg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
           if (msg?.toolCalls) {
             useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
               toolCalls: msg.toolCalls.map((tc2) =>
-                tc2.id === tc.id ? { ...tc2, args: toolArgs, status: "running" as const } : tc2,
+                tc2.id === tc.id
+                  ? { ...tc2, args: toolArgs, status: "running" as const, startedAt: Date.now(), endedAt: undefined }
+                  : tc2,
               ),
             });
           }
@@ -812,8 +907,8 @@ async function runSubagentLoop(
         // (repaired copy / {}) — never the raw truncated text.
         apiMessages.push({
           role: "assistant",
-          content: accumulatedText || "",
-          reasoning_content: accumulatedReasoning || undefined,
+          content: roundText || "",
+          reasoning_content: roundReasoning || undefined,
           tool_calls: toolCallsBuffer.map((tc) => ({
             id: tc.id,
             type: "function" as const,
@@ -898,13 +993,14 @@ async function runSubagentLoop(
           }
 
           // Update tool call card with result (corrected name when a
-          // hallucinated name was rewritten).
+          // hallucinated name was rewritten) + the settle timestamp for
+          // the shared card's duration badge.
           const updatedMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
           if (updatedMsg?.toolCalls) {
             useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
               toolCalls: updatedMsg.toolCalls.map((tc2) =>
                 tc2.id === ptc.id
-                  ? { ...tc2, name: nc.name, args: nc.args, result: toolResult, status: toolStatus }
+                  ? { ...tc2, name: nc.name, args: nc.args, result: toolResult, status: toolStatus, endedAt: Date.now() }
                   : tc2,
               ),
             });
@@ -917,14 +1013,17 @@ async function runSubagentLoop(
           });
         }));
 
-        fullResponse = stripFunctionCallTags(accumulatedText);
+        fullResponse = stripFunctionCallTags(fullTurnText);
         continue;
       }
 
-      // No tool calls — this is the final response.
-      fullResponse = stripFunctionCallTags(accumulatedText);
+      // No tool calls — this is the final response. Settle BOTH the text
+      // and the reasoning stream (PRD §3: the thinking block folds into
+      // its "Thought for Ns" summary, still fully visible).
+      fullResponse = stripFunctionCallTags(fullTurnText);
       useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
         content: fullResponse,
+        ...(accumulatedReasoning ? { isReasoningStreaming: false } : {}),
         isStreaming: false,
       });
       break;
@@ -939,8 +1038,14 @@ async function runSubagentLoop(
     return fullResponse;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    // Preserve any text/reasoning the turn already produced (PRD §1/§4):
+    // the error replaces nothing — it APPENDS below what was generated.
+    const existing = useSubagentStore.getState().sessions
+      .find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
+    const prefix = existing?.content?.trim() ? `${existing.content.trim()}\n\n---\n` : "";
     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
-      content: `Error: ${errMsg}`,
+      content: `${prefix}Error: ${errMsg}`,
+      ...(existing?.reasoning ? { isReasoningStreaming: false } : {}),
       isStreaming: false,
     });
     return errMsg;
@@ -997,7 +1102,7 @@ async function executeToolCallsParallel(
     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
       toolCalls: [
         ...(currentMsg?.toolCalls ?? []),
-        { id: tc.id, name: nc.name, args: nc.args, status: "running" as const },
+        { id: tc.id, name: nc.name, args: nc.args, status: "running" as const, startedAt: Date.now() },
       ],
     });
 
@@ -1055,12 +1160,12 @@ async function executeToolCallsParallel(
     }
     }
 
-    // Update tool call card with result
+    // Update tool call card with result (+ settle timestamp)
     const updatedMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
     if (updatedMsg?.toolCalls) {
       useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
         toolCalls: updatedMsg.toolCalls.map((tc2) =>
-          tc2.id === tc.id ? { ...tc2, result: toolResult, status: toolStatus } : tc2,
+          tc2.id === tc.id ? { ...tc2, result: toolResult, status: toolStatus, endedAt: Date.now() } : tc2,
         ),
       });
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { useSubagentStore, type SubagentMessage } from "@/stores/subagent-store";
@@ -8,8 +8,9 @@ import { executeSubagentTurn } from "@/lib/agent/subagent-runtime";
 import { getFileUrl, uploadFile, type FileUploadResponse } from "@/lib/file-api";
 import { MarkdownContent } from "./markdown-content";
 import { OrbCursor } from "@/components/assistant-ui/elements";
+import { ThinkingIndicator, ThinkingReasoning } from "@/components/assistant-ui/elements";
+import { ToolCallCard } from "./tool-call-card";
 import { cn } from "@/lib/utils";
-import { toolDisplayName } from "@/lib/tool-display-names";
 import { toast } from "sonner";
 import {
   Send, Paperclip, Loader2, X, ChevronDown, Plus, Bot, User, Trash2, MessageSquare,
@@ -22,11 +23,19 @@ import {
  * below) — visibility/open-close is the container's job, so this component
  * only renders its content and reports close via `onClose`.
  *
+ * RENDERING PARITY (Sub-Agent Chat PRD §2/§3/§6): the message renderer
+ * REUSES the Main Chat components — the shared ToolCallCard (running /
+ * completed / failed states, expand/collapse, output rendering, duration
+ * badges) and the ThinkingReasoning + ThinkingIndicator thinking element —
+ * instead of the old bespoke subagent-only tool card. No duplicate chat
+ * rendering implementations.
+ *
  * Features:
  *   - @ mention to tag a specific subagent (autocomplete dropdown)
  *   - Real streaming (token-by-token) from the subagent LLM
  *   - Markdown rendering (same as main chat)
- *   - Tool call cards inline
+ *   - Main-chat tool call cards inline
+ *   - Thinking/reasoning blocks (same as main chat)
  *   - Chat session history (persists across refresh)
  *   - Session selector to switch between past chats
  *   - Send images via paperclip
@@ -204,7 +213,7 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
             <>
               <div className="fixed inset-0 z-10" onClick={() => setShowSessionList(false)} />
               <div className="absolute top-9 left-0 z-20 w-72 rounded-lg border border-border bg-popover shadow-md max-h-80 overflow-y-auto scrollbar-glass">
-                {/* New chat button */}
+                {/* New chat button — glassy, no default border/outline */}
                 <button
                   type="button"
                   onClick={() => {
@@ -251,7 +260,8 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
                             e.stopPropagation();
                             deleteSession(s.id);
                           }}
-                          className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="border-none bg-transparent p-1 text-muted-foreground hover:text-destructive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded transition-opacity opacity-0 group-hover:opacity-100"
+                          aria-label={`Delete chat ${s.title}`}
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
@@ -325,7 +335,7 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
                 key={s.id}
                 type="button"
                 onClick={() => insertMention(s.name)}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent transition-colors"
+                className="flex w-full items-center gap-2 border-none bg-transparent px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded transition-colors"
               >
                 <Bot className="h-3.5 w-3.5 text-primary shrink-0" />
                 <span className="font-medium">{s.name}</span>
@@ -343,7 +353,8 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
                 <button
                   type="button"
                   onClick={() => setAttachedFiles((prev) => prev.filter((x) => x.id !== f.id))}
-                  className="text-muted-foreground hover:text-foreground"
+                  className="border-none bg-transparent p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                  aria-label={`Remove ${f.filename}`}
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -413,11 +424,48 @@ export function SubAgentSidebar({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** Render a single message with markdown + tool call cards.
- *  Tool call cards are rendered INSIDE the message bubble, inline with the
- *  text flow (not at the bottom). Each card is collapsible. */
+/** Split reasoning text into sentences for the ThinkingReasoning element
+ *  (same normalization as Main Chat's message-item). */
+function splitReasoningSentences(text: string): string[] {
+  if (!text) return [];
+  return text
+    .split(/(?<=[.!?。！？])\s+|\n+/)
+    .map((s) => s.replace(/[ \t]{2,}/g, " "))
+    .filter(Boolean);
+}
+
+/** Render a single message — REUSES the Main Chat rendering stack:
+ *  ThinkingReasoning for reasoning, the shared ToolCallCard for tool
+ *  calls, MarkdownContent for text. (Sub-Agent Chat PRD §2/§3/§6.) */
 function SubagentMessageItem({ message }: { message: SubagentMessage }) {
   const isUser = message.role === "user";
+  const ranTools = (message.toolCalls?.length ?? 0) > 0;
+
+  // Sentences for the thinking element — same reveal as Main Chat.
+  const reasoningSentences = useMemo(
+    () => splitReasoningSentences(message.reasoning ?? ""),
+    [message.reasoning],
+  );
+
+  // "Thought for Ns" timer — runs while the reasoning streams.
+  const startedAtRef = useRef<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const reasoningLive = Boolean(message.isReasoningStreaming);
+  useEffect(() => {
+    if (reasoningLive) {
+      if (startedAtRef.current === null) startedAtRef.current = Date.now();
+      const id = window.setInterval(() => {
+        if (startedAtRef.current !== null) {
+          setElapsedSeconds((Date.now() - startedAtRef.current) / 1000);
+        }
+      }, 500);
+      return () => window.clearInterval(id);
+    }
+    if (startedAtRef.current !== null) {
+      setElapsedSeconds((Date.now() - startedAtRef.current) / 1000);
+      startedAtRef.current = null;
+    }
+  }, [reasoningLive]);
 
   return (
     <div className={cn("flex gap-2 animate-message-in", isUser && "flex-row-reverse")}>
@@ -458,15 +506,53 @@ function SubagentMessageItem({ message }: { message: SubagentMessage }) {
             <p className="whitespace-pre-wrap">{message.content}</p>
           ) : (
             <>
-              {/* Tool call cards rendered BEFORE/inline with text — they appear
-                  where the AI called them, not stuck at the bottom. */}
+              {/* PRD §3 — thinking/reasoning: the SAME ThinkingReasoning
+                  element Main Chat uses. Never merged into the text; stays
+                  visible when text or tool results arrive after it. */}
+              {(message.reasoning || reasoningLive) && (
+                <div className="mb-2 min-w-0 max-w-full">
+                  {reasoningSentences.length === 0 ? (
+                    <ThinkingIndicator label="Thinking" className="mb-2" />
+                  ) : (
+                    <ThinkingReasoning
+                      sentences={reasoningSentences}
+                      phase={reasoningLive ? "thinking" : "done"}
+                      elapsedSeconds={elapsedSeconds}
+                      verb="Thought"
+                      activeLabel="Thinking…"
+                      keepOpenOnDone={!ranTools}
+                      headerNode={
+                        reasoningLive ? (
+                          <ThinkingIndicator label="Thinking" className="min-w-0" />
+                        ) : undefined
+                      }
+                    />
+                  )}
+                </div>
+              )}
+
+              {/* PRD §2 — tool calls: the SAME ToolCallCard Main Chat uses
+                  (running/completed/failed states, expand/collapse, output
+                  rendering, duration badges, display-mode store). */}
               {message.toolCalls && message.toolCalls.length > 0 && (
                 <div className="space-y-1.5">
                   {message.toolCalls.map((tc) => (
-                    <CollapsibleToolCard key={tc.id} tc={tc} />
+                    <ToolCallCard
+                      key={tc.id}
+                      toolCall={{
+                        ...tc,
+                        // The subagent store has no streamingOutput lane;
+                        // the shared card reads it for live stdout only.
+                        streamingOutput: undefined,
+                      }}
+                      turnId={null}
+                    />
                   ))}
                 </div>
               )}
+
+              {/* PRD §1/§4 — the text body. Streaming appends here; prior
+                  content is never replaced (runtime fix). */}
               <div className="prose-sm max-w-none break-words text-sm">
                 <MarkdownContent content={message.content || ""} />
                 {message.isStreaming && <OrbCursor variant="C2" size={14} />}
@@ -475,49 +561,6 @@ function SubagentMessageItem({ message }: { message: SubagentMessage }) {
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-/** Collapsible tool call card — click the header to expand/collapse args + result. */
-function CollapsibleToolCard({ tc }: {
-  tc: NonNullable<SubagentMessage["toolCalls"]>[number];
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className="rounded-lg border border-border bg-card text-xs overflow-hidden animate-fade-scale">
-      <button
-        type="button"
-        onClick={() => setExpanded((e) => !e)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 hover:bg-foreground/5 transition-colors"
-      >
-        {tc.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />}
-        {tc.status === "completed" && <ChevronDown className="h-3 w-3 text-emerald-500 shrink-0" />}
-        {tc.status === "error" && <X className="h-3 w-3 text-destructive shrink-0" />}
-        {/* UI-only plain label (user directive 2026-11-01): raw registry
-            identifiers like `manage_custom_tool` never render. */}
-        <span className="font-semibold truncate flex-1 text-left">{toolDisplayName(tc.name)}</span>
-        <ChevronDown className={cn("h-3 w-3 text-muted-foreground transition-transform shrink-0", expanded && "rotate-180")} />
-      </button>
-      {expanded && (
-        <div className="border-t border-border px-2.5 py-2 space-y-1.5">
-          <div>
-            <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-0.5">Arguments</p>
-            <pre className="text-[10px] text-muted-foreground overflow-x-auto scrollbar-thin bg-background rounded p-1.5">
-              {JSON.stringify(tc.args, null, 2).slice(0, 500)}
-            </pre>
-          </div>
-          {tc.result !== undefined && (
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-0.5">Result</p>
-              <pre className="text-[10px] text-muted-foreground/70 overflow-x-auto scrollbar-thin bg-background rounded p-1.5 max-h-32">
-                {JSON.stringify(tc.result, null, 2).slice(0, 600)}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
