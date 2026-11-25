@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores";
 import { aiProviderService, settingsService } from "@/lib/services";
 import { listTools, getTool } from "@/lib/tools/registry";
 import { filterToolsForRequest } from "@/lib/tools/request-scoping";
+import { resolveModelContext } from "@/lib/agent/context/model-context";
 import { ensureToolDigest, promptKb } from "@/lib/agent/tool-digest";
 import {
   applyParamPolicy,
@@ -22,6 +23,8 @@ import {
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { normalizeToolCall, unknownToolResult } from "@/lib/agent/tool-call-normalize";
 import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
+import { waitForAskUser } from "@/lib/agent/ask-user-wait";
+import type { WSEvent } from "@/types";
 import { listUsableProviders, resolveProviderForModel, chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 import { logError, logWarn } from "@/lib/client-logger";
 import { extractStreamError } from "@/lib/agent/stream-guards";
@@ -177,6 +180,45 @@ export interface SubagentTurnDelivery {
 }
 
 /**
+ * MAIN-AGENT PARITY EVENT BRIDGE: a subagent tool's WSEvents route into the
+ * ORIGINATING main-chat conversation's live execution store, so interactive
+ * surfaces (ask_user's question panel) render in the very conversation that
+ * delegated the work — exactly where the main agent's own ask_user renders.
+ * No live execution (background subagent turn, page refreshed, unknown
+ * origin) → safe no-op: waitForAskUser's window CustomEvent listener still
+ * receives answers typed anywhere, and approval cards already route through
+ * the global usePendingApprovals store.
+ */
+function makeSubagentEmit(originConversationId: string | null): (e: WSEvent) => void {
+  if (!originConversationId || typeof window === "undefined") return () => {};
+  return (e: WSEvent) => {
+    try {
+      // Dynamic import avoids a module cycle (execution-hub → runtime → …).
+      void import("@/lib/agent/execution-hub").then((m) => {
+        const summary = m.executionHub.getFor(originConversationId);
+        if (!summary) return;
+        const store = m.executionHub.getStore(summary.id);
+        if (!store) return;
+        const state = store.getState();
+        // ask_user: surface the questions in the conversation's live panel.
+        if (e.type === "ask_user") {
+          const { questions } = (e as { data?: { questions?: Array<{ question: string; options?: string[]; allow_custom?: boolean }> } }).data ?? {};
+          state.setPendingQuestions(
+            (questions ?? []).map((q) => ({
+              question: q.question,
+              options: q.options ?? [],
+              allowCustom: q.allow_custom ?? true,
+            })),
+          );
+        }
+      });
+    } catch {
+      // The emit bridge is best-effort UI routing — never fail a tool for it.
+    }
+  };
+}
+
+/**
  * startSubagentTurn — DELIVERY-CONFIRMED subagent messaging. Synchronously
  * validates the target, persists the user message into the subagent's chat
  * session and mounts the streaming assistant placeholder, then kicks off
@@ -195,6 +237,12 @@ export function startSubagentTurn(
   userMessage: string,
   _fileIds?: string[],
   sessionId?: string,
+  /** The MAIN-CHAT conversation the delivering turn belongs to — the
+   *  permission gate resolves PROJECT rules through it (main-agent
+   *  parity: a tool granted at project level is granted to that
+   *  project's subagents too). Falls back to the session's previously
+   *  stamped origin. */
+  originConversationId?: string | null,
 ): SubagentTurnDelivery {
   const store = useSubagentStore.getState();
   const subagent = store.getSubagent(subagentId);
@@ -218,6 +266,15 @@ export function startSubagentTurn(
     session = store.createSession(subagent.id, message.slice(0, 40));
   }
   const sid = session.id;
+
+  // PROJECT-RULE PARITY: stamp the originating main-chat conversation onto
+  // the session (later deliveries win). The loop's permission gates resolve
+  // project rules through it — same grants the main agent has.
+  const effectiveOrigin =
+    originConversationId ?? session.origin_conversation_id ?? null;
+  if (originConversationId && originConversationId !== session.origin_conversation_id) {
+    store.setSessionOriginConversation(sid, originConversationId);
+  }
 
   // DELIVERY CONFIRMATION POINT: persisting the user message into the
   // target session. After this write the message belongs to the target
@@ -245,7 +302,7 @@ export function startSubagentTurn(
   // everything (deltas, tool cards, errors, completion) into the session
   // store; this catch is the last-resort net so an unexpected rejection
   // can never surface as an unhandled promise in the caller's context.
-  const completion = runSubagentLoop(subagent, sid, assistantMsgId).catch(
+  const completion = runSubagentLoop(subagent, sid, assistantMsgId, effectiveOrigin).catch(
     (err: unknown) => (err instanceof Error ? err.message : String(err)),
   );
 
@@ -263,6 +320,10 @@ async function runSubagentLoop(
   subagent: SubagentConfig,
   sid: string,
   assistantMsgId: string,
+  /** The originating main-chat conversation — permission gates resolve
+   *  PROJECT rules through it (main-agent parity). Null = global policy
+   *  only (legacy sessions / unknown origin). */
+  originConversationId: string | null = null,
 ): Promise<string> {
   const subagentId = subagent.id;
   // TURN-LEVEL ACCUMULATORS (Sub-Agent Chat PRD §1/§3/§4): they live for
@@ -294,6 +355,10 @@ async function runSubagentLoop(
     console.warn("[subagent] failed to load sandbox key / env vars:", err);
   }
 
+  // MAIN-AGENT PARITY EVENT BRIDGE: tool events (ask_user questions, …)
+  // route into the originating conversation's live execution store.
+  const subagentEmit = makeSubagentEmit(originConversationId);
+
   try {
     const config = await resolveApiConfig(subagent);
     // Build message history from the session.
@@ -310,23 +375,52 @@ async function runSubagentLoop(
     // agent's.
     const subagentBasePrompt =
       subagent.systemPrompt || `You are ${subagent.name}, a subagent. ${subagent.description}`;
-    // INTENT-SCOPED TOOL SURFACE (tool-reliability Part B — parity with the
-    // main runtime): subagents get the CORE surface + tools matched from
-    // their OWN brief (description + task) instead of the full 64-tool
-    // registry. Subagents are focused workers — their payload stays lean
-    // without losing their domain tools. (No modelContextWindow → CORE
-    // base; subagent briefs match generously via the intent rules.)
+    // FULL-PARITY TOOL SURFACE (user directive 2026-11-25: subagents "can
+    // use everything granted anything just like the main agent"): the
+    // subagent's tool surface is built with the EXACT same scoping inputs as
+    // the main runtime —
+    //   1. the SAME context-window awareness (small models → ESSENTIAL +
+    //      intent, else the full CORE surface), resolved from the subagent's
+    //      own model
+    //   2. the SAME used-tools LATCH: tools this subagent already used in
+    //      earlier rounds/messages of this session can never be scoped out
+    //      mid-turn
+    //   3. the SAME intent matching over its brief + first task
+    // The brief-only CORE-less subset (the old behavior) left subagents
+    // missing CORE extras (schedule / workflow / chats / custom_tools /
+    // subagents) whenever their brief didn't keyword-match them — subagents
+    // are focused workers, but they are NOT second-class agents.
     const firstTask = sessionMessages.find((m) => m.role === "user")?.content ?? "";
     const subagentBrief = `${subagent.name} ${subagent.description} ${subagentBasePrompt} ${firstTask}`;
-    const allTools = filterToolsForRequest(listTools(), {
-      lastUserText: subagentBrief,
-    });
-    const toolsSchema = allTools.map((t) => ({
-      type: "function" as const,
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    }));
+    // Session-history latch (main runtime: usedToolNamesFromHistory).
+    const subagentUsedToolNames = new Set<string>();
+    for (const m of sessionMessages) {
+      for (const tc of m.toolCalls ?? []) {
+        if (tc?.name) subagentUsedToolNames.add(tc.name);
+      }
+    }
+    // Round-latch accumulator — tools used by earlier rounds of THIS turn
+    // ride along from the next round on (rebuilt per round, main-runtime
+    // parity).
+    const turnUsedToolNames = new Set<string>();
+    const buildSubagentTools = () => {
+      const used = new Set([...subagentUsedToolNames, ...turnUsedToolNames]);
+      const scoped = filterToolsForRequest(listTools(), {
+        lastUserText: subagentBrief,
+        usedToolNames: used,
+        modelContextWindow: resolveModelContext(config.model).contextWindow,
+      });
+      return scoped;
+    };
+    const allTools = buildSubagentTools();
+    const buildToolsSchema = (tools: typeof allTools) =>
+      tools.map((t) => ({
+        type: "function" as const,
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+    let toolsSchema = buildToolsSchema(allTools);
     const subagentSystemPrompt = ensureToolDigest(
-      `${subagentBasePrompt}\n\n## Active tools this turn (${allTools.length})\n${allTools.map((t) => t.name).join(", ")}\nAll of them are real and callable via function-calling — never claim you lack a tool that is in your definitions; never call one that is not.`,
+      `${subagentBasePrompt}\n\n## Active tools this turn (${allTools.length})\n${allTools.map((t) => t.name).join(", ")}\nAll of them are real and callable via function-calling — never claim you lack a tool that is in your definitions; never call one that is not.\nYou have the SAME tool access as the main agent — everything granted to it is granted to you, including integrations, skills, schedules, workflows and spawning your own subagents.`,
     );
     console.log(`[subagent] system prompt: ${promptKb(subagentSystemPrompt)}KB (tools=${allTools.length})`);
     const apiMessages: ChatCompletionMessage[] = [
@@ -379,6 +473,19 @@ async function runSubagentLoop(
     beginTurnWireCompat(config.baseUrl, config.model);
 
     while (maxIterations-- > 0) {
+      // ROUND-SCOPED TOOL REBUILD (main-runtime parity): tools used by
+      // earlier rounds of THIS turn are latched in from the next round on,
+      // so a turn that legitimately wanders across capabilities (research →
+      // write file → schedule) never loses one it already used. The wire
+      // schema + the "everything granted" set stay in sync per round.
+      if (turnUsedToolNames.size > 0) {
+        const rebuilt = buildSubagentTools();
+        if (rebuilt.length !== allTools.length) {
+          toolsSchema = buildToolsSchema(rebuilt);
+          allTools.length = 0;
+          allTools.push(...rebuilt);
+        }
+      }
       // STRICT-GATEWAY WIRE COMPAT (LLM HTTP 400 fix): the wire copy of
       // apiMessages is rebuilt each iteration through buildWireMessages, so
       // session-learned downgrades (tool-text mode, compact/dropped system,
@@ -619,6 +726,9 @@ async function runSubagentLoop(
             msg.content || "",
             subagentSandboxKey,
             subagentEnvVars,
+            turnUsedToolNames,
+            originConversationId,
+            subagentEmit,
           );
           // CROSS-ROUND APPEND (PRD §1): non-streamed rounds also add to
           // the turn's text — never replace it.
@@ -933,6 +1043,10 @@ async function runSubagentLoop(
             (n) => allTools.find((t) => t.name === n) ?? getTool(n) ?? undefined,
           );
           const tool = allTools.find((t) => t.name === nc.name) ?? (getTool(nc.name) ?? undefined);
+          // ROUND-LATCH (main-runtime parity): record the resolved tool for
+          // the next round's scope rebuild — it can never be scoped out
+          // mid-turn.
+          if (tool) turnUsedToolNames.add(nc.name);
           let toolResult: unknown;
           let toolStatus: "completed" | "error" = "completed";
           if (ptc.malformed) {
@@ -946,7 +1060,13 @@ async function runSubagentLoop(
               const ctx = {
                 userId: useAuthStore.getState().user?.id ?? "",
                 conversationId: subagentId,
-                emit: () => {},
+                // MAIN-AGENT PARITY: real event routing (ask_user panels in
+                // the originating conversation) + the same interactive
+                // ask-user waiter the main runtime uses — a subagent can ask
+                // the user a question and gets the same answered-wait.
+                emit: subagentEmit,
+                waitForAskUser: (questions: Parameters<typeof waitForAskUser>[0]) =>
+                  waitForAskUser(questions, subagentEmit, undefined),
                 signal: undefined,
                 // PRD §34/§35: subagents share the main agent's E2B sandbox.
                 e2bApiKey: subagentSandboxKey,
@@ -955,16 +1075,17 @@ async function runSubagentLoop(
                 envVars: subagentEnvVars,
                 onToolOutput: () => {},
               };
-              // HITL APPROVAL GATE (Task 2-d / PRD §13): same gate as the
-              // foreground runtime. Subagent session ids are not Dexie
-              // conversations → global policy only (project rules can't
-              // apply), and the interactive approval surfaces through the
-              // Settings → Tools approval queue (subagent cards have no
-              // approval renderer).
+              // HITL APPROVAL GATE (Task 2-d / PRD §13) — SAME GATE, SAME
+              // GRANTS as the foreground runtime: the gate resolves the
+              // ORIGINATING main-chat conversation's PROJECT rules through
+              // originConversationId (a project-granted tool is granted to
+              // that project's subagents too — main-agent parity); the
+              // interactive approval surfaces through the pending-approvals
+              // store (Settings → Tools queue + chat cards).
               const gate = await maybeGateToolCall({
                 toolName: nc.name,
                 args: nc.args,
-                conversationId: subagentId,
+                conversationId: originConversationId ?? subagentId,
                 emit: () => {},
                 source: "subagent",
               });
@@ -1080,6 +1201,17 @@ async function executeToolCallsParallel(
   _accumulatedText: string,
   sandboxKey: string | undefined,
   envVars: Record<string, string>,
+  /** Round-latch accumulator (main-runtime parity) — optional for
+   *  back-compat call sites; resolved tools are latched for the next
+   *  round's scope rebuild. */
+  turnUsedToolNames?: Set<string>,
+  /** The originating main-chat conversation — the permission gate resolves
+   *  PROJECT rules through it (main-agent parity). Optional for back-compat
+   *  call sites; null → global policy only. */
+  originConversationId: string | null = null,
+  /** Event bridge into the originating conversation's live execution store
+   *  (ask_user panels, …). Optional; absent → no-op emit, no ask-user. */
+  subagentEmit?: (e: WSEvent) => void,
 ) {
   await Promise.all(toolCalls.map(async (tc) => {
     const parsed = parseToolCallArguments(tc.function.arguments);
@@ -1096,6 +1228,9 @@ async function executeToolCallsParallel(
       (n) => allTools.find((t) => t.name === n) ?? getTool(n) ?? undefined,
     );
     const tool = allTools.find((t) => t.name === nc.name) ?? (getTool(nc.name) ?? undefined);
+    // ROUND-LATCH (main-runtime parity, streaming site latches too): the
+    // resolved tool rides along from the next round's scope rebuild.
+    if (tool) turnUsedToolNames?.add(nc.name);
 
     // Add running tool call card (shows the CORRECTED name when a
     // hallucinated name was rewritten, so the card reflects what ran).
@@ -1116,10 +1251,16 @@ async function executeToolCallsParallel(
     } else {
     try {
       if (tool) {
+        // MAIN-AGENT PARITY: real event routing + interactive ask-user (the
+        // emit bridge is threaded in by the caller — see the streaming site).
         const ctx = {
           userId: useAuthStore.getState().user?.id ?? "",
           conversationId: _subagentId,
-          emit: () => {},
+          emit: subagentEmit ?? (() => {}),
+          waitForAskUser: subagentEmit
+            ? (questions: Parameters<typeof waitForAskUser>[0]) =>
+                waitForAskUser(questions, subagentEmit, undefined)
+            : undefined,
           signal: undefined,
           // PRD §34/§35: subagents share the main agent's E2B sandbox.
           e2bApiKey: sandboxKey,
@@ -1129,12 +1270,15 @@ async function executeToolCallsParallel(
           onToolOutput: () => {},
         };
         // HITL APPROVAL GATE (Task 2-d / PRD §13) — same gate as the other
-        // dispatch sites (see the note in the streaming site above).
+        // dispatch sites (see the note in the streaming site above): the
+        // ORIGINATING main-chat conversation resolves PROJECT rules
+        // (main-agent parity); falls back to the subagent id (global
+        // policy) when the origin is unknown.
         const gate = await maybeGateToolCall({
           toolName: nc.name,
           args: nc.args,
-          conversationId: _subagentId,
-          emit: () => {},
+          conversationId: originConversationId ?? _subagentId,
+          emit: subagentEmit ?? (() => {}),
           source: "subagent",
         });
         if (gate.verdict === "denied") {

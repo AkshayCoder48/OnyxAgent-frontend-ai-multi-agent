@@ -464,7 +464,7 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
     required: ["message"],
     additionalProperties: false,
   },
-  async (args) => {
+  async (args, ctx) => {
     // Alias-aware read (crash family 2026-11-25): models send `task` or
     // `instructions` where the schema says `message`.
     const message = (pickStr(args, "message", "task", "instruction", "instructions") ?? "").trim();
@@ -598,7 +598,16 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
     let delivery;
     try {
       const { startSubagentTurn } = await import("@/lib/agent/subagent-runtime");
-      delivery = startSubagentTurn(subagentId, message);
+      // MAIN-AGENT PARITY: carry the originating main-chat conversation so
+      // the subagent's permission gates resolve the SAME project rules the
+      // main agent has (project-granted tools are granted to its subagents).
+      delivery = startSubagentTurn(
+        subagentId,
+        message,
+        undefined,
+        undefined,
+        ctx?.conversationId ?? null,
+      );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (task) {

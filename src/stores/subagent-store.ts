@@ -100,6 +100,13 @@ export interface SubagentChatSession {
   created_at: string;
   updated_at: string;
   pinned?: boolean;
+  /** The MAIN-CHAT conversation this session's work originated from (the
+   *  conversation whose agent turn spawned/messaged this subagent). The
+   *  permission gate resolves PROJECT rules through it — full parity with
+   *  the main agent's grants (a tool granted at project level is granted
+   *  to that project's subagents too). Missing on legacy rows → global
+   *  policy only. */
+  origin_conversation_id?: string;
 }
 
 interface SubagentStore {
@@ -127,6 +134,11 @@ interface SubagentStore {
   addMessage: (sessionId: string, message: SubagentMessage) => void;
   updateMessage: (sessionId: string, messageId: string, updates: Partial<SubagentMessage>) => void;
   clearMessages: (sessionId: string) => void;
+  /** Stamp the originating main-chat conversation onto a session (the
+   *  permission gate resolves project rules through it — main-agent
+   *  parity). Later writes win, so a follow-up turn from another
+   *  conversation re-stamps it. */
+  setSessionOriginConversation: (sessionId: string, conversationId: string | null) => void;
 
   loadFromStorage: () => void;
   saveToStorage: () => void;
@@ -267,6 +279,23 @@ export const useSubagentStore = create<SubagentStore>((set, get) => ({
         s.id === sessionId ? { ...s, pinned, updated_at: new Date().toISOString() } : s,
       ),
     }));
+    get().saveToStorage();
+  },
+
+  setSessionOriginConversation: (sessionId, conversationId) => {
+    // No-op on an unknown/already-deleted session (poll-after-cleanup, etc).
+    if (!conversationId) return;
+    set((state) => {
+      const exists = state.sessions.some((s) => s.id === sessionId);
+      if (!exists) return {};
+      return {
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId
+            ? { ...s, origin_conversation_id: conversationId, updated_at: new Date().toISOString() }
+            : s,
+        ),
+      };
+    });
     get().saveToStorage();
   },
 
