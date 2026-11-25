@@ -382,23 +382,24 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
 // output at any time with read_chat — including partially streamed content.
 registerTool(
   "query_subagent",
-  `Send a message to a subagent — FIRE-AND-FORGET. The tool returns the INSTANT the message is delivered to the subagent's chat session; the subagent then processes it independently (it may think, call tools and stream a response on its own, in parallel with your own work). Use this to:
+  `Send a message to a subagent — FIRE-AND-FORGET. The tool returns the INSTANT the message is delivered to the subagent's chat session; the subagent then processes it independently (it may think, call tools and stream a response on its own, in parallel with your own turn). Use this to:
 
 1. Kick off work in a subagent (e.g. "research X", "write code for Y") and keep going with your own turn
 2. Send follow-up instructions without blocking
 3. Message several subagents back-to-back — they run CONCURRENTLY
+4. task_id with NO message = a STATUS CHECK — returns the task's current state, last event and output-so-far (no message is delivered)
 
 The result does NOT contain the subagent's reply — only the delivery receipt (target_chat_id, message_id, target_agent_id). To see what a subagent has generated so far — including output it is STILL STREAMING — call read_chat with the returned target_chat_id; repeat read_chat later for progressively more content.
 
 Delivery fails fast only when the message cannot be accepted (unknown target, runtime unavailable). A later generation failure belongs to the target run and never retroactively fails a delivered message.
 
-If no task_id is provided, creates a new subagent task. If a name is provided but no existing subagent matches, a new subagent is spawned with that name.`,
+If no task_id is provided, a message is REQUIRED (it starts a new task) — a task is created per message. If a name is provided but no existing subagent matches, a new subagent is spawned with that name.`,
   {
     type: "object",
     properties: {
       task_id: {
         type: "string",
-        description: "The subagent task ID to message. If omitted, a new task is created.",
+        description: "The subagent task ID to message or check. If omitted, a new task is created (message then required).",
       },
       subagent_name: {
         type: "string",
@@ -406,7 +407,7 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
       },
       message: {
         type: "string",
-        description: "The message to deliver to the subagent.",
+        description: "The message to deliver to the subagent. REQUIRED with task_id absent (new task). With task_id present but no message, the call becomes a status check instead.",
       },
       description: {
         type: "string",
@@ -423,11 +424,42 @@ If no task_id is provided, creates a new subagent task. If a name is provided bu
     additionalProperties: false,
   },
   async (args) => {
-    const message = args.message as string;
+    const message = (typeof args.message === "string" ? args.message : "").trim();
     const taskId = args.task_id as string | undefined;
     const subagentName = args.subagent_name as string | undefined;
     const description = args.description as string | undefined;
     const specialty = (args.specialty as string | undefined) ?? "general";
+
+    // STATUS-CHECK MODE (user crash report 2026-11-25): the model calling
+    // query_subagent with ONLY a task_id is polling the task — but the old
+    // code fell through to delivery with message=undefined and died inside
+    // startSubagentTurn (`undefined.slice` → DELIVERY_FAILED). A bare task_id
+    // is now a first-class STATUS query: return the live state instead of
+    // attempting an empty delivery.
+    if (taskId && !message) {
+      const task = taskStore.get(taskId);
+      if (!task) {
+        return { error: `Task ${taskId} not found.` };
+      }
+      const last = task.messages[task.messages.length - 1];
+      return {
+        status_check: true,
+        task_id: taskId,
+        subagent_name: task.subagent_name,
+        task_status: task.status,
+        description: task.description,
+        last_event: last ? { type: last.type, text: last.text, timestamp: last.timestamp } : null,
+        note:
+          "No message was delivered (status check). To message the subagent, call again with a message; to read its generated output, use read_chat with its chat session.",
+      };
+    }
+    // New-task mode (no task_id): the message IS the task — required.
+    if (!taskId && !message) {
+      return {
+        error: "message is required when task_id is omitted (it starts a new task).",
+        fix: "Either pass a message (and optionally subagent_name), or pass task_id alone for a status check.",
+      };
+    }
 
     // Dynamically import to avoid circular deps.
     const { useSubagentStore } = await import("@/stores/subagent-store");
@@ -588,7 +620,16 @@ Examples:
   },
   async (args) => {
     const taskId = args.task_id as string;
-    const message = args.message as string;
+    const message = (typeof args.message === "string" ? args.message : "").trim();
+    if (!taskId) {
+      return { error: "task_id is required." };
+    }
+    if (!message) {
+      return {
+        error: "message is required — a steering message needs guidance text.",
+        fix: "Pass the guidance in `message`, e.g. 'Focus only on the Python files'.",
+      };
+    }
     const task = taskStore.get(taskId);
     if (!task) {
       return { error: `Subagent ${taskId} not found.` };

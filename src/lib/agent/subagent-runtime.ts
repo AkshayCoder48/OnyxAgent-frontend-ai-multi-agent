@@ -199,10 +199,22 @@ export function startSubagentTurn(
   const subagent = store.getSubagent(subagentId);
   if (!subagent) throw new Error(`Subagent ${subagentId} not found`);
 
+  // Defensive delivery input (query_subagent crash 2026-11-25): a call that
+  // reached delivery without a message used to die on `undefined.slice`
+  // below BEFORE persisting — masking the real cause as DELIVERY_FAILED.
+  // An empty message is a delivery-time failure by definition; fail fast
+  // with an honest error instead of corrupting the session state.
+  const message = typeof userMessage === "string" ? userMessage.trim() : "";
+  if (!message) {
+    throw new Error(
+      "No message provided — delivery needs message text. To check a task's status instead, return the task status (query_subagent with task_id only) rather than delivering an empty message.",
+    );
+  }
+
   // Get or create a session.
   let session = sessionId ? store.sessions.find((s) => s.id === sessionId) : store.getActiveSession();
   if (!session || session.subagentId !== subagentId) {
-    session = store.createSession(subagent.id, userMessage.slice(0, 40));
+    session = store.createSession(subagent.id, message.slice(0, 40));
   }
   const sid = session.id;
 
@@ -212,7 +224,7 @@ export function startSubagentTurn(
   const userMsg: SubagentMessage = {
     id: nanoid(),
     role: "user",
-    content: userMessage,
+    content: message,
     timestamp: new Date().toISOString(),
   };
   store.addMessage(sid, userMsg);

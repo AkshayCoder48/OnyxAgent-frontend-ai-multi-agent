@@ -178,9 +178,33 @@ for (const [umbrella, actions] of Object.entries(UMBRELLA_TOOLS)) {
           fix: `It may need configuration (e.g. an MCP server or integration connection) — check with the matching discovery action, or tell the user honestly.`,
         };
       }
-      // Strip `action` and pass the rest through — the granular handler
-      // validates its own required fields and streams via ctx unchanged.
+      // Strip `action` FIRST — the payload below is what the handler sees.
       const { action: _drop, ...rest } = args as Record<string, unknown>;
+      // REQUIRED-FIELD PRE-VALIDATION (user report 2026-11-25, the
+      // query_subagent DELIVERY_FAILED crash): handlers historically read
+      // their fields as `args.x as string` and trusted the model to send
+      // them — when a required field was omitted, the handler crashed deep
+      // in its own pipeline (`undefined.slice`) instead of erroring cleanly.
+      // The tool's OWN schema is the source of truth: enforce its `required`
+      // list BEFORE the handler runs, with an actionable message naming the
+      // missing fields.
+      const schema = target.parameters as { required?: unknown } | undefined;
+      const required = Array.isArray(schema?.required)
+        ? (schema!.required as unknown[]).filter((f): f is string => typeof f === "string")
+        : [];
+      if (required.length) {
+        const missing = required.filter(
+          (f) => rest[f] === undefined || rest[f] === null || rest[f] === "",
+        );
+        if (missing.length) {
+          return {
+            error: `Missing required field${missing.length > 1 ? "s" : ""} for '${action}': ${missing.join(", ")}.`,
+            fix: `Call ${umbrella} with action '${action}' and provide: ${required.join(", ")}.`,
+          };
+        }
+      }
+      // Strip `action` and pass the rest through — with required fields
+      // pre-validated, the granular handler executes on a complete payload.
       return target.handler(rest, ctx);
     },
     false,
