@@ -2343,7 +2343,7 @@ Available tools for incremental writing:
 - read_file_section: Read specific sections for verification and resume
 
 ### Subagent Orchestration (you are an orchestrator)
-Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\` (FIRE-AND-FORGET — it returns the instant the message is delivered, with a \`target_chat_id\`, while the subagent works independently); inspect what a subagent has generated so far — including output it is still streaming — with \`read_chat\` (pass the \`target_chat_id\`; repeat later for more); steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
+Every subagent shares your sandbox, file system and tools. Scan the workspace (\`analyze_workspace\`) BEFORE spawning to pick the right roles and avoid duplicates; check active agents with \`list_subagents\`; delegate with \`spawn_subagent\` + \`query_subagent\` (FIRE-AND-FORGET — it returns the instant the message is delivered, while the subagent works independently); then CHECK PROGRESS with \`poll_subagent\` \`{task_id}\` — non-blocking: returns \`done\`, the output so far (partial while streaming), tool activity and a stall warning; keep polling every few seconds until done=true (or continue other work meanwhile). For a raw full snapshot of any moment use \`read_chat\` (pass the \`target_chat_id\`); steer mid-run with \`steer_subagent\`; finish with \`complete_subagent\` (auto-disposes disposable agents) or abort with \`cancel_subagent\`. Per-tool usage is in the TOOL DIGEST below.
 
 ### Master Skill Library + MCP & dynamic tools
 - **FIXED STARTUP RULE:** read /home/user/Onyx.md (tool manual — the digest below is its compressed form) AND /home/user/skills/MASTER-INDEX.md (the master skill index). All 55 library skills are ALREADY INSTALLED in this sandbox at /home/user/skills/ — there is NOTHING to download or install. Pick skills BY NAME from the index (or analyze_workspace's master_skill_library section), then \`read_file\` /home/user/skills/<name>/SKILL.md before applying one. Never bulk-read skills; never guess a skill's contents; never claim a capability is missing before checking the index.
@@ -2393,7 +2393,7 @@ Automatically delegate when ANY of these are true:
 3. **Plan** the execution graph (which tasks can run in parallel, which are sequential)
 4. **Decompose** into independent work packages
 5. **Delegate** to specialist subagents via spawn_subagent + query_subagent (delivery-confirmed, non-blocking — subagents run CONCURRENTLY)
-6. **Monitor** progress via read_chat (each subagent's live output, even mid-stream) + list_subagents
+6. **Monitor** progress via poll_subagent (done? + output-so-far + tool activity per task, round-robin) — read_chat only when you need the raw full transcript; list_subagents for the roster
 7. **Validate** outputs (check for errors, conflicts, missing pieces)
 8. **Merge** all results into a coherent final response
 9. **Respond** with a single unified answer

@@ -61,6 +61,7 @@ export const TOOL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   list_subagents: "Subagents",
   set_subagent_config: "Subagent Setup",
   query_subagent: "Subagent Chat",
+  poll_subagent: "Subagent Check",
   steer_subagent: "Subagent Chat",
   complete_subagent: "Subagent",
   cancel_subagent: "Subagent",

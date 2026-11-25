@@ -37,7 +37,8 @@ export const UMBRELLA_TOOLS: Readonly<Record<string, readonly string[]>> = {
   code_exec: ["run_python", "run_terminal"],
   subagents: [
     "spawn_subagent", "list_subagents", "set_subagent_config", "query_subagent",
-    "steer_subagent", "complete_subagent", "cancel_subagent", "manage_subagent_chat",
+    "poll_subagent", "steer_subagent", "complete_subagent", "cancel_subagent",
+    "manage_subagent_chat",
   ],
   schedule: ["schedule_agent_task", "list_scheduled_tasks", "remove_scheduled_task"],
   integrations: [

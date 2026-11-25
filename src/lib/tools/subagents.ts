@@ -34,6 +34,18 @@ interface SubagentTask {
   role?: string;
   /** Parent task that spawned this one (for nested orchestration). */
   parent_task?: string;
+  /** The chat session query_subagent delivered the task message into —
+   *  poll_subagent reads the LIVE assistant output from it. */
+  chat_session_id?: string;
+  /** The streaming assistant message carrying the reply (delivery receipt's
+   *  assistantMessageId) — poll_subagent's partial-output reader. */
+  reply_message_id?: string;
+  /** Epoch ms of the last poll_subagent observation — lets the orchestrator
+   *  distinguish "making progress between polls" from "output frozen". */
+  last_poll_at?: number;
+  /** Output length observed by the last poll_subagent call — the next poll
+   *  compares against it for the \`grew\` flag + stall detection. */
+  last_poll_output_len?: number;
 }
 
 // In-memory task store (shared across all tool invocations in the session).
@@ -216,7 +228,7 @@ Role:
       status: "pending",
       disposable,
       role,
-      message: `Subagent spawned${role ? ` (role: ${role})` : ""}${disposable ? " [DISPOSABLE — will auto-dispose on completion]" : ""}. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to deliver its task (fire-and-forget — it returns on delivery) and read_chat to inspect its output.`,
+      message: `Subagent spawned${role ? ` (role: ${role})` : ""}${disposable ? " [DISPOSABLE — will auto-dispose on completion]" : ""}. Use set_subagent_config to assign an AI provider/model (or it inherits the main agent's). Then use query_subagent with the task_id to deliver its task (fire-and-forget — it returns on delivery), poll_subagent with the task_id to check progress + fetch its output non-blockingly, and read_chat for a raw full snapshot.`,
     };
   },
   false,
@@ -601,6 +613,13 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
       return { error: `DELIVERY_FAILED: ${errMsg}` };
     }
 
+    // Record the receipt on the task — poll_subagent reads the live reply
+    // from this exact session/message pair without any extra lookup.
+    if (task) {
+      task.chat_session_id = delivery.sessionId;
+      task.reply_message_id = delivery.assistantMessageId;
+    }
+
     // Detached settle bookkeeping. This NEVER blocks the tool result; the
     // target's own outcome (reply or error text) lands in its session,
     // visible via read_chat.
@@ -625,14 +644,253 @@ If no task_id is provided, a message is REQUIRED (it starts a new task). If a na
       message_id: delivery.userMessageId,
       message:
         `Message sent successfully. ${agentName} is continuing independently — its reply is NOT included here. ` +
-        `Call read_chat with chat_id "${delivery.sessionId}" to inspect its output so far (works while it is still streaming); call it again later for more.`,
+        `Call poll_subagent with this task_id to check progress and fetch its output (returns immediately with status + output-so-far; keep polling until done=true). ` +
+        `For a raw live snapshot at any moment, read_chat with chat_id "${delivery.sessionId}" also works.`,
     };
   },
   false,
   "orchestration",
 );
 
-// === Tool: steer_subagent ===
+// === Tool: poll_subagent ===
+// The POLL half of the non-blocking orchestration contract: query_subagent
+// DELIVERS fire-and-forget, poll_subagent CHECKS non-blockingly. One call
+// returns everything the orchestrator needs to decide what to do next:
+//   done (bool) — is the turn settled (completed / failed / cancelled)?
+//   status      — task + generation state, incl. retrying (transient net)
+//   output      — the reply text so far (PARTIAL while streaming, full when
+//                 done) with its char count and grew-since-last-poll flag
+//   tools       — tool calls the subagent made so far (name + status + brief
+//                 result), so progress is visible even before text streams
+//   stall       — warning when output hasn't grown across consecutive polls
+//                 for a while (background tab throttling, stuck stream)
+// It NEVER waits for the target: the snapshot is read synchronously from the
+// session store (the detached generation loop keeps writing into it).
+registerTool(
+  "poll_subagent",
+  `Poll a subagent's progress — NON-BLOCKING. Returns IMMEDIATELY with the task's current state, its output so far (partial while streaming), and the tool calls it has made. query_subagent is fire-and-forget (it returns on DELIVERY, never waits for the reply) — THIS tool is how you check on the subagent afterwards.
+
+The poll workflow:
+1. query_subagent (or spawn_subagent + query_subagent) → delivery receipt
+2. Do your own work, or poll right away
+3. poll_subagent {task_id} → look at \`done\`:
+   - done=false → the subagent is still working (see status / tools / output so far). Poll again after a few seconds, or continue other work meanwhile.
+   - done=true → \`output\` is the final reply. Task finished (check status: "completed" ok; "failed" has \`error\`).
+4. Repeat — each call also tells you whether the output GREW since your last poll (\`grew\`) and warns on stalls.
+
+Parameters:
+- task_id (required): the task to poll — from spawn_subagent / query_subagent.
+- chat_id (optional): poll a subagent chat session DIRECTLY (from read_chat / manage_subagent_chat / target_chat_id) when you don't have the task_id — same output for that session's latest turn.
+- tail (optional, default 4000): max chars of the output text returned. Long replies are truncated to the LAST tail chars (a note says so) — the full text stays in the session (read_chat).
+
+You may poll MANY subagents round-robin while they run concurrently. Polling never interrupts or delays the subagent. For a raw full snapshot (all messages incl. reasoning) use read_chat with the chat_id.`,
+  {
+    type: "object",
+    properties: {
+      task_id: {
+        type: "string",
+        description: "The subagent task ID to poll (from spawn_subagent / query_subagent).",
+      },
+      chat_id: {
+        type: "string",
+        description: "Alternative: poll a subagent chat session directly by its session id (target_chat_id), polling its latest turn.",
+      },
+      tail: {
+        type: "number",
+        description: "Max chars of output text to return (default 4000; long output is truncated to the last N chars).",
+        default: 4000,
+      },
+    },
+    // Neither task_id nor chat_id is schema-required (exactly one is needed —
+    // the handler validates and returns an actionable error, same contract
+    // as spawn_subagent's alias-tolerant normalization).
+    required: [],
+    additionalProperties: false,
+  },
+  async (args) => {
+    const taskId = pickStr(args, "task_id", "id");
+    const chatId = pickStr(args, "chat_id", "session_id", "target_chat_id");
+    const tailRaw = typeof args.tail === "number" ? args.tail : Number(args.tail);
+    const tail =
+      Number.isFinite(tailRaw) && tailRaw > 0 ? Math.min(Math.floor(tailRaw), 200_000) : 4000;
+
+    if (!taskId && !chatId) {
+      return {
+        error: "task_id is required (or chat_id to poll a subagent chat session directly).",
+        fix: "Pass the task_id from spawn_subagent / query_subagent, or a chat session id as chat_id.",
+      };
+    }
+
+    const now = Date.now();
+    let session;
+    let sessionId: string | undefined;
+    let task: SubagentTask | undefined;
+
+    if (taskId) {
+      task = taskStore.get(taskId);
+      if (!task) {
+        // A completed non-disposable task is auto-removed after 30s, and a
+        // disposable one immediately on completion — the poll after that
+        // window must not look like a crash. Point at the session instead.
+        return {
+          error: `Task ${taskId} not found.`,
+          fix:
+            "The task may have finished and been cleaned up (completed tasks are auto-removed ~30s after completion; disposable ones immediately). " +
+            "Poll its chat session instead: pass chat_id (the target_chat_id from the original query_subagent receipt) or use read_chat with it.",
+        };
+      }
+      sessionId = task.chat_session_id;
+    }
+
+    const { useSubagentStore } = await import("@/stores/subagent-store");
+    const store = useSubagentStore.getState();
+
+    // Resolve the session: the task's recorded delivery target, or the
+    // explicit chat_id (direct-session polling without a task).
+    if (chatId || sessionId) {
+      session = store.sessions.find((s) => s.id === (chatId || sessionId));
+    }
+    if (!session && task?.subagent_id) {
+      // No recorded/known session (task spawned but never messaged, or the
+      // session was deleted) — fall back to the subagent's latest session.
+      const bySub = store.sessions
+        .filter((s) => s.subagentId === task!.subagent_id)
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+      session = bySub[0];
+    }
+
+    // ── Task-level state (the orchestration bookkeeping) ────────────────
+    const taskStatus = task?.status ?? "unknown";
+
+    // ── Generation-level state (the live session content) ───────────────
+    // The LAST assistant message of the session is the current/latest turn's
+    // reply carrier (query_subagent mounts a streaming placeholder per turn).
+    // The MESSAGE is the source of truth for the live generation: the
+    // detached loop writes isStreaming/content/toolCalls into it as it runs,
+    // and task bookkeeping may fire much earlier or later than the actual
+    // stream settles (e.g. an instant provider error writes
+    // "Error: …" + isStreaming:false before the first poll).
+    let replyMsg = undefined;
+    let output = "";
+    let generationState: "idle" | "pending" | "streaming" | "settled" | "error" = "idle";
+    if (session) {
+      replyMsg = [...session.messages].reverse().find((m) => m.role === "assistant");
+      if (replyMsg) {
+        output = replyMsg.content ?? "";
+        if (replyMsg.isStreaming) {
+          generationState = "streaming";
+        } else if (/(^|\n---\n)Error: /.test(output)) {
+          // The runtime's catch APPENDS "Error: <msg>" into the carrier on a
+          // failed generation (below any text the turn already produced) —
+          // that IS the settled (failed) final state.
+          generationState = "error";
+        } else if (output) {
+          generationState = "settled";
+        } else {
+          // Empty, not streaming: the turn's carrier exists but nothing has
+          // been written yet — PENDING, not done.
+          generationState = "pending";
+        }
+      }
+    }
+
+    // Tool calls made by the subagent so far (from the reply message).
+    const toolCalls = (replyMsg?.toolCalls ?? []).map((c) => ({
+      name: c.name,
+      status: c.status,
+      startedAt: c.startedAt,
+      endedAt: c.endedAt,
+      result:
+        c.result === undefined
+          ? undefined
+          : (() => {
+              try {
+                const s = typeof c.result === "string" ? c.result : JSON.stringify(c.result);
+                return s.length > 300 ? `${s.slice(0, 300)}…` : s;
+              } catch {
+                return "[unserializable]";
+              }
+            })(),
+    }));
+
+    // ── done: the turn is settled — message-driven. The live message state
+    // is authoritative: a streaming/pending carrier ALWAYS means not-done
+    // even if the task bookkeeping raced ahead; anything else (settled,
+    // error, or no session at all — never messaged / session cleaned) means
+    // nothing more will arrive, so polling again is pointless.
+    const liveWorking = generationState === "streaming" || generationState === "pending";
+    const done = !liveWorking;
+
+    // ── grew + stall detection (progress between polls) ──────────────────
+    const outputLen = output.length;
+    const prevLen = task?.last_poll_output_len;
+    const grew = typeof prevLen === "number" ? outputLen > prevLen : undefined;
+    const prevAt = task?.last_poll_at;
+    let stall: string | undefined;
+    if (!done && typeof prevLen === "number" && outputLen === prevLen && typeof prevAt === "number") {
+      const silentMs = now - prevAt;
+      const hasRunningTools = toolCalls.some((c) => c.status === "running" || c.status === "pending");
+      if (silentMs > 20_000 && !hasRunningTools) {
+        stall =
+          `Output has not grown for ${Math.round(silentMs / 1000)}s across your last polls and no tool call is running. ` +
+          `The subagent may be stuck (or its tab is background-throttled). Consider steer_subagent, poll once more, or cancel_subagent.`;
+      } else if (silentMs > 20_000 && hasRunningTools) {
+        stall = `Output has not grown for ${Math.round(silentMs / 1000)}s, but a tool call is still running (${toolCalls
+          .filter((c) => c.status === "running" || c.status === "pending")
+          .map((c) => c.name)
+          .join(", ")}) — likely busy inside that tool. Keep polling.`;
+      }
+    }
+
+    // Record this observation for the NEXT poll's grew/stall math.
+    if (task) {
+      task.last_poll_at = now;
+      task.last_poll_output_len = outputLen;
+    }
+
+    // ── Output tailing ──────────────────────────────────────────────────
+    let outputText: string | undefined;
+    let truncated = false;
+    if (output) {
+      truncated = output.length > tail;
+      outputText = truncated ? `…${output.slice(-tail)}` : output;
+    }
+
+    return {
+      task_id: task?.task_id ?? null,
+      subagent_name: task?.subagent_name ?? session?.title ?? "subagent",
+      chat_id: session?.id ?? null,
+      done,
+      status: {
+        task: taskStatus,
+        generation: generationState,
+        retrying: taskStatus === "retrying",
+      },
+      grew,
+      output: outputText,
+      output_chars: outputLen,
+      output_truncated: truncated,
+      tools: toolCalls.length
+        ? toolCalls
+        : done && !output
+          ? []
+          : undefined,
+      error: task?.error ?? (generationState === "error" ? output.split("\n---\nError: ")[1] ?? output : undefined),
+      stall,
+      hint: !done
+        ? "Still working — poll again in a few seconds, or continue other work and poll later."
+        : generationState === "error"
+          ? "Generation failed — the output carries the error text. Re-send the task with query_subagent, fix config with set_subagent_config, or cancel."
+          : generationState === "idle" || !session
+            ? "No active generation for this task (it was never messaged, or its session is gone). Deliver work with query_subagent."
+            : taskStatus === "failed"
+              ? "Task failed — see error. You can re-send the task with query_subagent."
+              : "Task settled — output above is the final reply. Full transcript in its chat session (read_chat).",
+    };
+  },
+  false,
+  "orchestration",
+);
 registerTool(
   "steer_subagent",
   `Send a steering message to a subagent — guidance, a course correction, or additional instructions. The subagent receives the message and continues its work with the new context. Use this when you want to redirect a subagent without canceling it.

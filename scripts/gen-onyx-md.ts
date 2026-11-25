@@ -102,9 +102,10 @@ const UMBRELLAS: ReadonlyArray<{ name: string; actions: readonly string[]; blurb
     name: "subagents",
     actions: [
       "spawn_subagent", "list_subagents", "set_subagent_config", "query_subagent",
-      "steer_subagent", "complete_subagent", "cancel_subagent", "manage_subagent_chat",
+      "poll_subagent", "steer_subagent", "complete_subagent", "cancel_subagent",
+      "manage_subagent_chat",
     ],
-    blurb: "Delegate work to subagents.",
+    blurb: "Delegate work to subagents. query_subagent delivers fire-and-forget; poll_subagent checks progress non-blockingly.",
   },
   {
     name: "schedule",

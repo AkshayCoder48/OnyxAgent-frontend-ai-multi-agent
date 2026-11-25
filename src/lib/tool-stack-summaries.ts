@@ -101,6 +101,7 @@ export const TOOL_SUMMARY_RULES: Readonly<Record<string, SummaryRule>> = {
   list_subagents: rule("Listed", "Subagent"),
   set_subagent_config: rule("Configured", "Subagent"),
   query_subagent: rule("Messaged", "Subagent"),
+  poll_subagent: rule("Polled", "Subagent"),
   steer_subagent: rule("Steered", "Subagent"),
   complete_subagent: rule("Completed", "Subagent"),
   cancel_subagent: rule("Cancelled", "Subagent"),

@@ -108,6 +108,7 @@ function toolCaption(name: string, args: Record<string, unknown> | undefined): s
     case "spawn_subagent":
       return "Spawning a subagent";
     case "query_subagent":
+    case "poll_subagent":
     case "read_chat":
       return "Checking a subagent";
     case "ask_user":

@@ -75,7 +75,8 @@ const SPECS: Record<keyof typeof UMBRELLA_TOOLS & string, UmbrellaSpec> = {
 - "spawn_subagent" (subagent_name, description, task_type, role?, disposable?) — delegate a task.
 - "list_subagents" (include_all?) — active tasks (pending/running/waiting/retrying).
 - "set_subagent_config" (…) — give a subagent its own AI (provider/model).
-- "query_subagent" (…) — message a subagent, get its reply (it may call tools).
+- "query_subagent" (…) — message a subagent, FIRE-AND-FORGET (returns on delivery, never waits for the reply).
+- "poll_subagent" (task_id | chat_id, tail?) — NON-BLOCKING progress check: done?, output so far, tool activity, stall warning. The poll half of the workflow.
 - "steer_subagent" (…) — mid-run course correction.
 - "complete_subagent" (…) — finish a task.
 - "cancel_subagent" (…) — cancel a task.
