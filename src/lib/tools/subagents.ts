@@ -62,6 +62,33 @@ function emitMessage(taskId: string, type: "info" | "steering" | "question" | "r
   window.dispatchEvent(new CustomEvent("subagent_message", { detail: msg }));
 }
 
+/**
+ * Coerce a model-supplied "boolean" into a real boolean. Models routinely
+ * send strings ("True", "false", "yes") for declared boolean fields; a plain
+ * truthiness check would treat "false" as TRUE (e.g. wrongly disposing an
+ * agent). Only unambiguous truthy spellings count as true.
+ */
+function coerceBool(v: unknown): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") return ["true", "yes", "1"].includes(v.trim().toLowerCase());
+  return Boolean(v);
+}
+
+/**
+ * Pick the first non-empty string from a list of candidate argument keys.
+ * Models mix up argument names (task vs description, role vs subagent_name —
+ * user report 2026-11-25: spawn_subagent got {role, task, disposable:"True"}
+ * and crashed on subagentName.toLowerCase()); aliases keep those calls
+ * working instead of dying on undefined.
+ */
+function pickStr(args: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = args[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return undefined;
+}
+
 // === Tool: spawn_subagent ===
 // Creates a new subagent task with a name, description, and task type.
 registerTool(
@@ -94,11 +121,11 @@ Role:
     properties: {
       subagent_name: {
         type: "string",
-        description: "A short name for the subagent (e.g. 'Researcher', 'CodeWriter', 'Analyzer'). Shown in the UI.",
+        description: "A short name for the subagent (e.g. 'Researcher', 'CodeWriter', 'Analyzer'). Shown in the UI. REQUIRED — do not substitute role or other keys.",
       },
       description: {
         type: "string",
-        description: "What the subagent should do — a clear task description.",
+        description: "What the subagent should do — a clear task description. REQUIRED (a bare 'task' key is accepted as an alias, but prefer 'description').",
       },
       task_type: {
         type: "string",
@@ -108,7 +135,7 @@ Role:
       },
       disposable: {
         type: "boolean",
-        description: "If true, the agent auto-disposes after its task completes (removed from sidebar, enabled=false). Use for one-off tasks. Default false.",
+        description: "If true, the agent auto-disposes after its task completes (removed from sidebar, enabled=false). Use for one-off tasks. Default false. Must be a real boolean (true/false), NOT a string.",
         default: false,
       },
       role: {
@@ -120,17 +147,33 @@ Role:
         description: "Optional: the task_id of a parent subagent that spawned this one (for nested orchestration).",
       },
     },
-    required: ["subagent_name", "description"],
+    // Nothing is hard-required: the handler normalizes alias payloads
+    // ({role, task, disposable:"True"} — user report 2026-11-25) with
+    // fallbacks, so a schema-required list here would block exactly the
+    // payloads the normalization exists to rescue.
+    required: [],
     additionalProperties: false,
   },
   async (args) => {
     const taskId = `subagent_${nanoid(12)}`;
-    const subagentName = args.subagent_name as string;
-    const description = args.description as string;
-    const taskType = (args.task_type as string) ?? "general";
-    const disposable = (args.disposable as boolean) ?? false;
-    const role = args.role as string | undefined;
-    const parentTaskId = args.parent_task_id as string | undefined;
+    // ARGUMENT NORMALIZATION (user report 2026-11-25): the model sent
+    // {role, task, disposable:"True"} — no subagent_name/description — and
+    // the handler died on subagentName.toLowerCase(). Accept the common
+    // aliases (task→description; subagent_name←name←role as the label),
+    // coerce string booleans, and fall back to a role-derived name.
+    const role = pickStr(args, "role");
+    const description =
+      pickStr(args, "description", "task", "task_description") ?? "No description provided.";
+    const subagentName =
+      pickStr(args, "subagent_name", "name", "agent_name") ?? role ?? `Subagent-${nanoid(4)}`;
+    const taskTypeRaw = pickStr(args, "task_type", "specialty", "type") ?? "general";
+    const taskType = (["research", "code", "analysis", "writing", "general"] as const).includes(
+      taskTypeRaw as "research" | "code" | "analysis" | "writing" | "general",
+    )
+      ? (taskTypeRaw as "research" | "code" | "analysis" | "writing" | "general")
+      : "general";
+    const disposable = coerceBool(args.disposable ?? args.dispose);
+    const parentTaskId = pickStr(args, "parent_task_id");
 
     // CRITICAL: Also create a SubagentConfig in the zustand store so:
     // 1. query_subagent can find it (was returning "unavailable" because
@@ -139,8 +182,9 @@ Role:
     // 3. It persists to localStorage and survives page refresh
     const store = useSubagentStore.getState();
     // Check if a subagent with this name already exists (avoid duplicates).
+    const nameLc = subagentName.toLowerCase();
     let subagentConfig = store.subagents.find(
-      (s) => s.name.toLowerCase() === subagentName.toLowerCase() && s.enabled,
+      (s) => s.name.toLowerCase() === nameLc && s.enabled,
     );
     if (!subagentConfig) {
       subagentConfig = store.createSubagent({
@@ -292,12 +336,21 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
     additionalProperties: false,
   },
   async (args) => {
-    const subagentName = args.subagent_name as string;
+    // Guarded lookup (crash family 2026-11-25): models sometimes omit
+    // subagent_name entirely — die with an actionable error, not undefined.
+    const subagentName = pickStr(args, "subagent_name", "name", "agent_name");
+    if (!subagentName) {
+      return {
+        error: "subagent_name is required.",
+        fix: "Pass the subagent's name, e.g. {\"subagent_name\": \"Researcher\"}. Use list_ai_providers to see available providers.",
+      };
+    }
     const store = useSubagentStore.getState();
 
     // Find the subagent config.
+    const nameLc = subagentName.toLowerCase();
     const config = store.subagents.find(
-      (s) => s.name.toLowerCase() === subagentName.toLowerCase(),
+      (s) => s.name.toLowerCase() === nameLc,
     );
 
     // If list_ai_providers is true, return the available providers.
@@ -382,7 +435,7 @@ The subagent will use this config for all its LLM calls. If not set, the subagen
 // output at any time with read_chat — including partially streamed content.
 registerTool(
   "query_subagent",
-  `Send a message to a subagent — FIRE-AND-FORGET. The tool returns the INSTANT the message is delivered to the subagent's chat session; the subagent then processes it independently (it may think, call tools and stream a response on its own, in parallel with your own turn). Use this to:
+  `Send a message to a subagent — FIRE-AND-FORGET. The tool returns the INSTANT the message is delivered to the subagent's chat session; the subagent then processes it independently (it may think, call tools and stream a response on its own, in parallel with your own work). Use this to:
 
 1. Kick off work in a subagent (e.g. "research X", "write code for Y") and keep going with your own turn
 2. Send follow-up instructions without blocking
@@ -393,7 +446,7 @@ The result does NOT contain the subagent's reply — only the delivery receipt (
 
 Delivery fails fast only when the message cannot be accepted (unknown target, runtime unavailable). A later generation failure belongs to the target run and never retroactively fails a delivered message.
 
-If no task_id is provided, a message is REQUIRED (it starts a new task) — a task is created per message. If a name is provided but no existing subagent matches, a new subagent is spawned with that name.`,
+If no task_id is provided, a message is REQUIRED (it starts a new task). If a name is provided but no existing subagent matches, a new subagent is spawned with that name.`,
   {
     type: "object",
     properties: {
@@ -424,11 +477,18 @@ If no task_id is provided, a message is REQUIRED (it starts a new task) — a ta
     additionalProperties: false,
   },
   async (args) => {
-    const message = (typeof args.message === "string" ? args.message : "").trim();
+    // Alias-aware read (crash family 2026-11-25): models send `task` or
+    // `instructions` where the schema says `message`.
+    const message = (pickStr(args, "message", "task", "instruction", "instructions") ?? "").trim();
     const taskId = args.task_id as string | undefined;
-    const subagentName = args.subagent_name as string | undefined;
-    const description = args.description as string | undefined;
-    const specialty = (args.specialty as string | undefined) ?? "general";
+    const subagentName = pickStr(args, "subagent_name", "name", "agent_name");
+    const description = pickStr(args, "description");
+    const specialtyRaw = (pickStr(args, "specialty") ?? "general") as string;
+    const specialty = (["research", "code", "analysis", "writing", "general"] as const).includes(
+      specialtyRaw as "research" | "code" | "analysis" | "writing" | "general",
+    )
+      ? specialtyRaw
+      : "general";
 
     // STATUS-CHECK MODE (user crash report 2026-11-25): the model calling
     // query_subagent with ONLY a task_id is polling the task — but the old
@@ -498,7 +558,8 @@ If no task_id is provided, a message is REQUIRED (it starts a new task) — a ta
       }
       subagentId = existing.id;
     } else {
-      // New task — create or find a subagent by name.
+      // New task — create or find a subagent by name. (name defaults safely;
+      // message is guaranteed non-empty by the status-check guard above.)
       const name = subagentName || "Assistant";
       let existing = store.subagents.find((s) => s.name.toLowerCase() === name.toLowerCase());
       if (!existing) {

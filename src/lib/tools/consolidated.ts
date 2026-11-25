@@ -184,10 +184,10 @@ for (const [umbrella, actions] of Object.entries(UMBRELLA_TOOLS)) {
       // query_subagent DELIVERY_FAILED crash): handlers historically read
       // their fields as `args.x as string` and trusted the model to send
       // them — when a required field was omitted, the handler crashed deep
-      // in its own pipeline (`undefined.slice`) instead of erroring cleanly.
-      // The tool's OWN schema is the source of truth: enforce its `required`
-      // list BEFORE the handler runs, with an actionable message naming the
-      // missing fields.
+      // in its own pipeline (`undefined.slice`, `undefined.toLowerCase`)
+      // instead of erroring cleanly. The tool's OWN schema is the source of
+      // truth: enforce its `required` list BEFORE the handler runs, with an
+      // actionable message naming the missing fields.
       const schema = target.parameters as { required?: unknown } | undefined;
       const required = Array.isArray(schema?.required)
         ? (schema!.required as unknown[]).filter((f): f is string => typeof f === "string")
@@ -203,8 +203,8 @@ for (const [umbrella, actions] of Object.entries(UMBRELLA_TOOLS)) {
           };
         }
       }
-      // Strip `action` and pass the rest through — with required fields
-      // pre-validated, the granular handler executes on a complete payload.
+      // Pass the rest through — with required fields pre-validated, the
+      // granular handler executes on a complete payload.
       return target.handler(rest, ctx);
     },
     false,
