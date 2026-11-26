@@ -26,6 +26,31 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+/** Bounded upstream waits (hang fix): a stalled api.e2b.dev / envd host
+ *  used to hold the route open forever (self-hosted has no function
+ *  timeout), freezing the sandbox tool request and the agent turn's
+ *  Promise.all with it. POST (code execution / file writes) gets 240s —
+ *  legitimate long-running commands; GET/DELETE (metadata) get 60s. */
+const E2B_POST_TIMEOUT_MS = 240_000;
+const E2B_META_TIMEOUT_MS = 60_000;
+
+/** Uniform upstream-error mapping for the three verbs: a timeout answers
+ *  504 (gateway timeout) so callers can retry sensibly; everything else
+ *  stays a 502 with the upstream message. */
+function proxyErrorResponse(e: unknown): NextResponse {
+  const message = e instanceof Error ? e.message : "Proxy error";
+  const isTimeout =
+    e instanceof Error && (e.name === "TimeoutError" || /timeout/i.test(message));
+  return NextResponse.json(
+    {
+      error: isTimeout
+        ? `E2B upstream did not respond in time: ${message}`
+        : message,
+    },
+    { status: isTimeout ? 504 : 502 },
+  );
+}
+
 /** Read the target URL from either the new or legacy header name. */
 function getTargetUrl(req: NextRequest): string | null {
   return (
@@ -116,6 +141,7 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: forwardHeaders,
       body: body || undefined,
+      signal: AbortSignal.timeout(E2B_POST_TIMEOUT_MS),
     });
 
     const contentType = upstreamRes.headers.get("content-type") ?? "application/json";
@@ -135,8 +161,7 @@ export async function POST(req: NextRequest) {
     const text = await upstreamRes.text();
     return new NextResponse(text, { status: 200, headers: responseHeaders });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Proxy error";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return proxyErrorResponse(e);
   }
 }
 
@@ -163,6 +188,7 @@ export async function GET(req: NextRequest) {
     const upstreamRes = await fetch(parsedUrl.toString(), {
       method: "GET",
       headers: forwardHeaders,
+      signal: AbortSignal.timeout(E2B_META_TIMEOUT_MS),
     });
 
     const contentType = upstreamRes.headers.get("content-type") ?? "application/json";
@@ -182,8 +208,7 @@ export async function GET(req: NextRequest) {
     const text = await upstreamRes.text();
     return new NextResponse(text, { status: 200, headers: responseHeaders });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Proxy error";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return proxyErrorResponse(e);
   }
 }
 
@@ -210,6 +235,7 @@ export async function DELETE(req: NextRequest) {
     const upstreamRes = await fetch(parsedUrl.toString(), {
       method: "DELETE",
       headers: forwardHeaders,
+      signal: AbortSignal.timeout(E2B_META_TIMEOUT_MS),
     });
 
     const responseHeaders = new Headers({
@@ -227,8 +253,7 @@ export async function DELETE(req: NextRequest) {
 
     return new NextResponse(null, { status: 204, headers: responseHeaders });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Proxy error";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return proxyErrorResponse(e);
   }
 }
 

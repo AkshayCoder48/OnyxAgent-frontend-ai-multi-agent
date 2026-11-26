@@ -91,12 +91,15 @@ async function search(
     type,
     limit: String(limit),
   });
-  if (langsearchKey) params.set("langsearch_key", langsearchKey);
-  if (e2bKey) params.set("e2b_api_key", e2bKey);
+  // Decrypted keys travel in HEADERS, never the URL — query strings land in
+  // server logs, reverse proxies and browser history.
+  const headers: Record<string, string> = {};
+  if (langsearchKey) headers["x-langsearch-key"] = langsearchKey;
+  if (e2bKey) headers["x-e2b-key"] = e2bKey;
   if (safeSearch === true) params.set("safe_search", "true");
   if (safeSearch === false) params.set("safe_search", "false");
 
-  const res = await fetch(`/api/ddg-search?${params.toString()}`);
+  const res = await fetch(`/api/ddg-search?${params.toString()}`, { headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Search failed" }));
     throw new Error(err.error || `Search HTTP ${res.status}`);

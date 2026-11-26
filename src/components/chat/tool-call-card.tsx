@@ -324,7 +324,14 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
   // "weather"") and its glyph, both from the shared plain-language rules.
   const step = useMemo(() => friendlyStep(toolCall), [toolCall]);
   const ToolIcon = step.icon;
-  const liveCaption = toolCaption(toolCall.name);
+  // PENDING-NAME GUARD (plain-names directive): the runtime pre-emits tool
+  // calls before the name streams, naming them `pending-<n>`. That internal
+  // placeholder must never reach the user ("Running Pending-0") — show a
+  // neutral composing caption until the real name arrives.
+  const isPendingName = !toolCall.name || toolCall.name.startsWith("pending-");
+  const liveCaption = isPendingName
+    ? "Preparing the next step…"
+    : toolCaption(toolCall.name);
   // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28):
   // memoized on the toolCall identity — recomputes only on this tool's own
   // 16 ms arg batches, never on sibling text tokens.
@@ -548,7 +555,10 @@ function SimpleToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardProps
                 {toolCall.args.toolName.trim()}
               </span>
             ) : null}
-            {isCompleted && isError && (
+            {/* "Failed" badge — `isError` alone: it is mutually exclusive
+                with isCompleted, so the old `isCompleted && isError` guard
+                was always false and the badge never rendered. */}
+            {isError && (
               <span className="text-destructive/90 ml-auto shrink-0 text-xs font-medium">Failed</span>
             )}
           </>
@@ -698,6 +708,22 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   );
   const [showRaw, setShowRaw] = useState(false);
 
+  // PAYLOAD AUTO-EXPAND: tools whose disclosure IS the content. Declared
+  // before the running-transition block so the settle branch can keep them
+  // open. Name-based (not result-based) — it gates the SETTLE decision,
+  // while the fix-up block below re-asserts expansion once results land.
+  const payloadAutoExpand =
+    toolCall.name === "ask_user" ||
+    toolCall.name === "media_generation" ||
+    toolCall.name === "preview_image" ||
+    toolCall.name === "web_search" ||
+    toolCall.name === "image_search" ||
+    toolCall.name === "video_search" ||
+    toolCall.name === "create_chart" ||
+    toolCall.name === "send_file" ||
+    toolCall.name === "send_folder" ||
+    toolCall.name === "edit_file";
+
   // Auto-expand while a long-running tool (run_terminal, run_python, etc.)
   // is in flight so the user can see the live output without having to
   // click — then FOLD BACK to the compact row when it settles (fix
@@ -709,7 +735,11 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   // pattern from the React docs instead of a useEffect + setState (which
   // triggers cascading renders and is flagged by the React Compiler lint).
   const isRunning = toolCall.status === "running" || toolCall.status === "pending";
-  const [prevIsRunning, setPrevIsRunning] = useState(isRunning);
+  // LIVE-MOUNT FIX: cards created during a live run mount ALREADY running,
+  // so the idle→running transition below never fires for them (the card
+  // stayed collapsed and never showed live output). Mount-time running
+  // counts as the auto-expand trigger too.
+  const [prevIsRunning, setPrevIsRunning] = useState(false);
   const [manualDuringRun, setManualDuringRun] = useState(false);
   if (isRunning !== prevIsRunning) {
     setPrevIsRunning(isRunning);
@@ -717,10 +747,13 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
     if (isRunning) {
       setManualDuringRun(false);
       setExpanded(true);
-    } else if (!manualDuringRun) {
+    } else if (!manualDuringRun && !payloadAutoExpand) {
       // Settle (running → completed/error): collapse back to the compact
       // row so the finished stack stays minimal. A user who opened it
-      // themselves keeps it open (manualDuringRun).
+      // themselves keeps it open (manualDuringRun). Payload cards —
+      // media_generation, preview_image, DDG searches, charts, downloads,
+      // edit diffs: the disclosure IS the content — they stay expanded on
+      // settle (the fix-up block below re-asserts it).
       setExpanded(false);
     }
   }
@@ -948,7 +981,16 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   // content). Uses the same render-time adjustment pattern as the running
   // auto-expand above (no effect → no cascading render).
   const [prevAutoExpand, setPrevAutoExpand] = useState(false);
-  const autoExpand = isChart || isFileDownload || isEditDiff;
+  // LIVE-SETTLE FIX: media_generation / preview_image / DDG searches
+  // finished after mount never expanded live (the old expression only
+  // covered chart/file/diff) — a live-generated image or search-result row
+  // stayed hidden behind the disclosure while the same card mounted
+  // expanded after refresh. Include every payload tool.
+  const autoExpand =
+    isChart || isFileDownload || isEditDiff ||
+    ((toolCall.name === "media_generation" || toolCall.name === "preview_image" ||
+      toolCall.name === "web_search" || toolCall.name === "image_search" ||
+      toolCall.name === "video_search") && toolCall.status === "completed");
   if (autoExpand !== prevAutoExpand) {
     setPrevAutoExpand(autoExpand);
     if (autoExpand) setExpanded(true);
@@ -1097,7 +1139,14 @@ function TechnicalToolCallCard({ toolCall: rawToolCall, turnId }: ToolCallCardPr
   // the auto-expand render-time adjustment can read it.)
   const isError = toolCall.status === "error";
   // Plain-language running caption (UI-only names — see tool-display-names).
-  const liveCaption = toolCaption(toolCall.name);
+  // PENDING-NAME GUARD (plain-names directive): the runtime pre-emits tool
+  // calls before the name streams, naming them `pending-<n>`. That internal
+  // placeholder must never reach the user ("Running Pending-0") — show a
+  // neutral composing caption until the real name arrives.
+  const isPendingName = !toolCall.name || toolCall.name.startsWith("pending-");
+  const liveCaption = isPendingName
+    ? "Preparing the next step…"
+    : toolCaption(toolCall.name);
   // Live streamed-argument phase + primary-arg hint (Runtime PRD §21–§28).
   const { hint: liveHint } = useMemo(
     () => liveArgsPhase(toolCall),

@@ -155,6 +155,10 @@ async function proxyGetBytes(url: string, accept: string): Promise<Uint8Array> {
   const res = await fetch(`/api/chat-proxy?url=${encodeURIComponent(url)}`, {
     method: "GET",
     headers: { "x-target-url": url, Accept: accept },
+    // BOUNDED FETCH (hang fix): a silent upstream used to hang the repo
+    // browser forever — the proxy is bounded server-side; this keeps the
+    // client side honest too.
+    signal: AbortSignal.timeout(90_000),
   });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} ${res.statusText}`);

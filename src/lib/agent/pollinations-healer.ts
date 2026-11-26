@@ -11,6 +11,7 @@
 // ============================================================================
 
 import { aiProviderService, settingsService } from "@/lib/services";
+import { isLegacyClassicUrl } from "@/lib/agent/provider-url";
 import {
   POLLINATIONS_TEXT_BASE_URL,
   textModelIds,
@@ -83,9 +84,12 @@ export async function addPollinationsProvider(userId: string): Promise<number> {
 export async function migrateLegacyPollinationsGateway(userId: string): Promise<void> {
   try {
     const providers = await aiProviderService.list(userId);
-    const legacyRows = providers.filter(
-      (p) => p.name === "Pollinations" && p.base_url.includes("text.pollinations.ai"),
-    );
+    // HOST-BASED MATCH (renamed-row fix): match any row on the legacy host,
+    // not just ones named exactly "Pollinations" — a renamed row
+    // ("Pollinations free", "My pollinations") pointing at the retired
+    // endpoint is just as dead and used to be silently dropped by
+    // listUsableProviders' filter without ever being healed.
+    const legacyRows = providers.filter((p) => isLegacyClassicUrl(p.base_url));
     if (legacyRows.length === 0) return;
     const token = await connectedPollinationsKey(userId);
     if (token) {

@@ -70,14 +70,13 @@ function LegacyRowHealer() {
       const { user, authResolved } = useAuthStore.getState();
       if (!authResolved || !user) return;
       try {
-        // Quick pre-check: any "Pollinations" row on the legacy host at all?
-        // (Keeps the common no-op sweep to a single Dexie read with no
-        // dynamic-import churn.)
+        // Quick pre-check: any row on the legacy host at all? (Keeps the
+        // common no-op sweep to a single Dexie read with no dynamic-import
+        // churn. Host-based, not name-based — renamed rows are just as
+        // dead and must be healed too.)
         const { aiProviderService } = await import("@/lib/services");
         const rows = await aiProviderService.list(user.id);
-        const damaged = rows.some(
-          (p) => p.name === "Pollinations" && isLegacyClassicUrl(p.base_url),
-        );
+        const damaged = rows.some((p) => isLegacyClassicUrl(p.base_url));
         if (!damaged) return;
         const { migrateLegacyPollinationsGateway } = await import("@/lib/agent/pollinations-healer");
         await migrateLegacyPollinationsGateway(user.id);

@@ -587,6 +587,25 @@ function nowISO(): string {
   return new Date().toISOString();
 }
 
+/** Parse an HTTP `Retry-After` header (either delta-seconds or an HTTP-date)
+ *  into seconds from NOW. Returns null when absent/unparseable. Capped at
+ *  10 minutes — a longer provider hint still yields the honest terminal
+ *  error instead of an unbounded sleep. */
+export function parseRetryAfterSeconds(raw: string | null): number | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const s = Number(trimmed);
+    return Number.isFinite(s) ? Math.min(s, 600) : null;
+  }
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    const s = Math.ceil((asDate - Date.now()) / 1000);
+    return s > 0 ? Math.min(s, 600) : null;
+  }
+  return null;
+}
+
 /** Pull `content` / `reasoning_content` / `reasoning` / `thinking` deltas
  *  out of a streamed chunk. Returns null if the chunk is a no-op. */
 interface DeltaAccumulator {
@@ -1143,14 +1162,23 @@ async function streamRound(
   // all proxies.
   const requestUrl = `${CHAT_PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
   for (;;) {
+    // CLEARTEXT-UPSTREAM KEY GUARD (credential fix): a provider row whose
+    // base URL is http:// would send the decrypted API key in cleartext on
+    // the proxy→upstream leg — anyone on the path could read it. Never
+    // attach the Bearer header to a non-https target. An EMPTY key is also
+    // never sent (a malformed `Bearer ` gets 401s from strict gateways).
+    const isCleartextUpstream = targetUrl.startsWith("http://");
+    const authHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-target-url": targetUrl,
+      Accept: "text/event-stream",
+    };
+    if (provider.apiKey && !isCleartextUpstream) {
+      authHeaders.Authorization = `Bearer ${provider.apiKey}`;
+    }
     response = await fetch(requestUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-target-url": targetUrl,
-        Authorization: `Bearer ${provider.apiKey}`,
-        Accept: "text/event-stream",
-      },
+      headers: authHeaders,
       body: JSON.stringify(body),
       signal,
       // Prevent browser/proxy from buffering the response.
@@ -1324,9 +1352,17 @@ async function streamRound(
       detail = `${detail.slice(0, 200)} — endpoint not found. Check the provider Base URL: the app calls {base}/chat/completions, so gateways like freeaixyz4all need the base "https://freeaixyz4all.vercel.app/api/v1" (not the site root).`;
     }
     // RATE-LIMIT fast-fail message (no auto-retry): make the next step
-    // obvious instead of a cryptic provider string.
+    // obvious instead of a cryptic provider string. The provider's
+    // Retry-After header (now passed through the proxy) rides the message
+    // so the rate-limit wait ladder below can honor the REAL window
+    // instead of guessing 5s→120s.
     if (response.status === 429 || response.status === 529 || /rate.?limit|too many requests|quota exceeded|resource_exhausted/i.test(rawBody)) {
-      detail = `Rate limit reached (HTTP ${response.status}) — the provider is throttling requests. Wait a moment and send again, or switch model/provider. ${detail.slice(0, 200)}`;
+      const retryAfterRaw = response.headers.get("retry-after");
+      const retryAfterSec = parseRetryAfterSeconds(retryAfterRaw);
+      detail = `Rate limit reached (HTTP ${response.status}) — the provider is throttling requests. Wait a moment and send again, or switch model/provider.` +
+        (retryAfterSec !== null ? ` (provider asks to retry after ${retryAfterSec}s)` : "") +
+        ` ${detail.slice(0, 200)}` +
+        (retryAfterSec !== null ? ` [retry-after: ${retryAfterSec}]` : "");
     }
     // HONEST GATEWAY-DOWN ERROR (HTTP 502 fix): a 502/503/504 that survived
     // both quick retries means the provider's server is genuinely
@@ -2960,9 +2996,15 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         /rate limit reached \(HTTP|HTTP 429|HTTP 529|too many requests|resource_exhausted|quota exceeded/i.test(message);
       if (isRateLimit && rateLimitRetriesThisTurn < RATE_LIMIT_MAX_ATTEMPTS) {
         rateLimitRetriesThisTurn += 1;
-        const delayMs = Math.min(5000 * 2 ** (rateLimitRetriesThisTurn - 1), 120_000);
+        // RETRY-AFTER HONORED: when the provider said when the window
+        // reopens (the message now carries `[retry-after: N]`), wait THAT
+        // long instead of the blind 5s→120s ladder — re-hitting a closed
+        // window burns quota and can extend the throttle.
+        const retryAfterMatch = /\[retry-after: (\d+)\]/.exec(message);
+        const providerRetryAfterMs = retryAfterMatch ? Number(retryAfterMatch[1]) * 1000 : null;
+        const delayMs = providerRetryAfterMs ?? Math.min(5000 * 2 ** (rateLimitRetriesThisTurn - 1), 120_000);
         console.warn(
-          `[agent] Rate limited on round ${round} — waiting ${Math.round(delayMs / 1000)}s (${rateLimitRetriesThisTurn}/${RATE_LIMIT_MAX_ATTEMPTS}), the turn keeps running`,
+          `[agent] Rate limited on round ${round} — waiting ${Math.round(delayMs / 1000)}s (${rateLimitRetriesThisTurn}/${RATE_LIMIT_MAX_ATTEMPTS})${providerRetryAfterMs ? " (per Retry-After)" : ""}, the turn keeps running`,
         );
         logWarn(
           "agent",
@@ -3055,7 +3097,24 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           },
           timestamp: nowISO(),
         });
-        await new Promise((r) => setTimeout(r, delayMs));
+        // ABORT-AWARE SLEEP (Stop-button fix): race the backoff against the
+        // user's abort so Stop takes effect immediately — the loop-top
+        // signal check then ends the turn cleanly instead of leaving the
+        // UI "running" for up to 60s inside a naked setTimeout.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          if (signal) {
+            if (signal.aborted) {
+              clearTimeout(timer);
+              resolve();
+              return;
+            }
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            }, { once: true });
+          }
+        });
         round -= 1; // don't consume a round on retry
         continue; // retry the same round
       }
@@ -3966,6 +4025,17 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
                     /* non-fatal — the next checkpoint or final save retries */
                   });
               }
+            })
+            .catch((lateErr: unknown) => {
+              // FLOATING-PROMISE GUARD: execHandler never rejects, but THIS
+              // callback can throw (JSON.stringify on a BigInt/circular tool
+              // result). With no .catch the rejection surfaced as an
+              // unhandledrejection AND the placeholder tool result was never
+              // replaced. Log it and degrade honestly.
+              logError("agent", "Late tool-result injection failed — the placeholder result stays in the conversation", {
+                detail: lateErr instanceof Error ? lateErr.message : String(lateErr),
+                context: { tool: tc.name, tool_call_id: tc.id },
+              });
             });
           } else {
             outcome = first.o;

@@ -778,6 +778,18 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
     return () => window.clearTimeout(t);
   }, [isCollapsed]);
 
+  // Drag lifecycle: the listeners + body styles below are also torn down by
+  // this effect's cleanup when the component unmounts MID-DRAG (route
+  // change, workspace teardown) — previously they leaked, leaving the whole
+  // app with a col-resize cursor and text selection disabled until reload.
+  const convDragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    return () => {
+      convDragCleanupRef.current?.();
+      convDragCleanupRef.current = null;
+    };
+  }, []);
+
   const handleConvResizeStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -794,11 +806,13 @@ export function ConversationSidebar({ className }: ConversationSidebarProps) {
         document.removeEventListener("mouseup", handleMouseUp);
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
+        convDragCleanupRef.current = null;
       };
       document.addEventListener("mousemove", handleMouseMove);
       document.addEventListener("mouseup", handleMouseUp);
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
+      convDragCleanupRef.current = handleMouseUp;
     },
     [convSidebarWidth, setConvSidebarWidth],
   );

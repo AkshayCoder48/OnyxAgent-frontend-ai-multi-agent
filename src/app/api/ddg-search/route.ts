@@ -315,7 +315,12 @@ export async function GET(req: NextRequest) {
   const type = searchParams.get("type") || "web";
   const limitRaw = parseInt(searchParams.get("limit") || "10", 10);
   const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 10, 50);
-  const langsearchKey = searchParams.get("langsearch_key") || "";
+  // HEADER-BORNE KEYS (credential fix): decrypted BYOK keys used to ride
+  // the URL as ?langsearch_key= / ?e2b_api_key= — query strings land in
+  // server logs, reverse proxies and browser history. Headers first; the
+  // legacy query params stay as a short-lived fallback for older callers.
+  const langsearchKey =
+    req.headers.get("x-langsearch-key") ?? searchParams.get("langsearch_key") ?? "";
 
   // SAFE SEARCH (per-call override, 2026-11-01): the web/image/video search
   // tools expose a `safeSearch` parameter the model sets per query. It rides
@@ -339,7 +344,9 @@ export async function GET(req: NextRequest) {
   // is the fallback. Absent both → the DDG legs are skipped entirely and
   // Miklium serves image/video search.
   const e2bApiKey =
-    (searchParams.get("e2b_api_key") || "").trim().slice(0, 200) ||
+    (req.headers.get("x-e2b-key") ?? searchParams.get("e2b_api_key") ?? "")
+      .trim()
+      .slice(0, 200) ||
     process.env.E2B_API_KEY?.trim() ||
     "";
 

@@ -23,7 +23,7 @@ import {
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { normalizeToolCall, unknownToolResult } from "@/lib/agent/tool-call-normalize";
 import { maybeGateToolCall, recordApprovalOutcome } from "@/lib/agent/approval-gate";
-import { waitForAskUser } from "@/lib/agent/ask-user-wait";
+import { waitForAskUser, SUBAGENT_ASK_USER_TIMEOUT_MS } from "@/lib/agent/ask-user-wait";
 import type { WSEvent } from "@/types";
 import { listUsableProviders, resolveProviderForModel, chatCompletionsUrl } from "@/lib/agent/provider-resolution";
 import { logError, logWarn } from "@/lib/client-logger";
@@ -33,6 +33,12 @@ import {
   parseToolCallArguments,
   wireSafeArguments,
 } from "@/lib/agent/tool-args";
+// Streamed tool-call accumulator keying (tool-reliability PRD §7.2) — shared
+// with the main runtime so index-less providers behave identically here.
+import {
+  resolveToolCallAccumulatorKey,
+  type AccumulatedToolCallEntry,
+} from "@/lib/agent/runtime";
 
 /**
  * Subagent runtime — executes subagent tasks by calling the LLM API with
@@ -68,6 +74,31 @@ interface ChatCompletionMessage {
   name?: string;
   reasoning_content?: string;
 }
+
+/** One choice of a NON-STREAMING chat completion (providers that answer
+ *  stream:true with a plain JSON body). */
+interface NonStreamingChoice {
+  message?: {
+    content?: string | null;
+    reasoning_content?: string;
+    tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
+  };
+}
+
+/** STREAM IDLE TIMEOUT (subagent-stall fix): a gateway that accepts the
+ *  subagent request then goes silent used to hang `reader.read()` FOREVER —
+ *  the detached loop never settled, the message stayed `isStreaming: true`
+ *  and poll_subagent reported a stall (the "subagent stalls after 2-3 tool
+ *  calls" bug: it survives the first rounds, then one silent stream wedges
+ *  the whole turn with no way to stop it). Mirrors the main runtime's
+ *  STREAM_IDLE_TIMEOUT_MS: no chunk for this long → cancel the body and
+ *  transient-retry the round; a dead gateway can never wedge a subagent. */
+const SUBAGENT_STREAM_IDLE_TIMEOUT_MS = 120_000;
+/** Headers-phase watchdog: bounded wait for response HEADERS (a provider
+ *  that accepts the request and never answers). Generous — some providers
+ *  hold headers until the first token, and non-streaming responders hold
+ *  them until the FULL completion is done — but never infinite. */
+const SUBAGENT_HEADERS_TIMEOUT_MS = 300_000;
 
 /**
  * resolveApiConfig — SAME resolution contract as the main chat
@@ -359,6 +390,18 @@ async function runSubagentLoop(
   // route into the originating conversation's live execution store.
   const subagentEmit = makeSubagentEmit(originConversationId);
 
+  // ABORT LIFECYCLE (subagent-stall fix): every fetch of this subagent
+  // run rides ONE controller (declared OUTSIDE the try so the finally
+  // below can always remove the pagehide hook). An AbortController with
+  // zero listeners would make every stream un-cancellable — now a
+  // stalled/dead stream is cancelled at the body (idle timeout above)
+  // and a page reload tears the whole run down via the pagehide hook.
+  const runAbort = new AbortController();
+  const onRunAbort = () => runAbort.abort();
+  if (typeof window !== "undefined") {
+    window.addEventListener("pagehide", onRunAbort);
+  }
+
   try {
     const config = await resolveApiConfig(subagent);
     // Build message history from the session.
@@ -444,6 +487,24 @@ async function runSubagentLoop(
     // honest marker instead of an empty string (the orchestrator used to
     // treat an empty subagent reply as its completed answer).
     let maxIterations = 25;
+    // MISSION BUDGET vs RETRY BUDGET (subagent-stall fix): `maxIterations`
+    // counts ONLY productive tool rounds. Self-healing retries (gateway 502
+    // blips, context compaction, param strips, strict-gateway ladder) used
+    // to decrement the SAME budget — a flapping gateway could burn 6+ of
+    // the 25 iterations before any real work, ending long tasks with
+    // "stopped after its round budget" while the model was making steady
+    // progress. Each retry path now refunds the iteration it consumed
+    // (the `maxIterations += 1` before each healing `continue`), keeping
+    // the productive-round semantics intact. Every retry class stays
+    // separately bounded: gatewayRetries < 2, the ctxKeepLadder, the
+    // param-strip loop (a stripped param can never repeat), and the
+    // finite strict-gateway ladder.
+    // TRANSIENT STREAM RETRIES (subagent-stall fix): an idle-timeout /
+    // network failure while READING a stream rewinds and re-streams the
+    // SAME round (mirrors the main runtime's transient ladder). Bounded
+    // per subagent run so a dead provider can't loop forever.
+    let transientStreamRetries = 0;
+    const TRANSIENT_STREAM_MAX = 4;
     // TRANSIENT GATEWAY RETRY (HTTP 502 fix, mirrors the main runtime):
     // bounded per subagent run so a dead provider can't loop forever.
     let gatewayRetries = 0;
@@ -528,17 +589,54 @@ async function runSubagentLoop(
       let res: Response;
       try {
         for (;;) {
-          res = await fetch(requestUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-target-url": targetUrl,
-              Authorization: `Bearer ${config.apiKey}`,
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify(body),
-            cache: "no-store",
-          });
+          // HEADERS-PHASE WATCHDOG (subagent-stall fix): a provider that
+          // accepts the connection then never answers headers used to hang
+          // this fetch forever (no signal, no timeout — the stall's second
+          // face). Race the fetch against a bounded watchdog; the loser
+          // aborts the fetch. 300s covers non-streaming providers that hold
+          // headers until the full completion is ready. The thrown message
+          // deliberately contains "idle timeout" so the catch below routes
+          // it into the bounded transient retry, not a hard death.
+          const fetchAbort = new AbortController();
+          const onRunAbortForFetch = () => fetchAbort.abort();
+          runAbort.signal.addEventListener("abort", onRunAbortForFetch, { once: true });
+          let headersTimer: ReturnType<typeof setTimeout> | undefined;
+          // CLEARTEXT-UPSTREAM KEY GUARD (same as the main runtime): never
+          // attach the Bearer key to an http:// target, never send an empty
+          // Bearer (strict gateways 401 on `Bearer ` with no token).
+          const isCleartextUpstream = targetUrl.startsWith("http://");
+          const fetchHeaders: Record<string, string> = {
+            "Content-Type": "application/json",
+            "x-target-url": targetUrl,
+            Accept: "text/event-stream",
+          };
+          if (config.apiKey && !isCleartextUpstream) {
+            fetchHeaders.Authorization = `Bearer ${config.apiKey}`;
+          }
+          try {
+            res = await Promise.race([
+              fetch(requestUrl, {
+                method: "POST",
+                headers: fetchHeaders,
+                body: JSON.stringify(body),
+                cache: "no-store",
+                signal: fetchAbort.signal,
+              }),
+              new Promise<never>((_, reject) => {
+                headersTimer = setTimeout(() => {
+                  fetchAbort.abort();
+                  reject(
+                    new Error(
+                      `idle timeout waiting for response headers — the provider never answered within ${Math.round(SUBAGENT_HEADERS_TIMEOUT_MS / 1000)}s (subagent headers watchdog)`,
+                    ),
+                  );
+                }, SUBAGENT_HEADERS_TIMEOUT_MS);
+              }),
+            ]);
+          } finally {
+            if (headersTimer !== undefined) clearTimeout(headersTimer);
+            runAbort.signal.removeEventListener("abort", onRunAbortForFetch);
+          }
 
           // No rate-limit auto-retry (removed per user request) — fall
           // through to the !res.ok handler with a clear error message.
@@ -587,6 +685,7 @@ async function runSubagentLoop(
             context: { model: config.model, status: res.status, retry_in_ms: delayMs },
           });
           await new Promise((r) => setTimeout(r, delayMs));
+          maxIterations += 1; // retry, not a productive round — refund the budget
           continue;
         }
         // CONTEXT-OVERFLOW SELF-HEALING — checked BEFORE param stripping and
@@ -615,6 +714,7 @@ async function runSubagentLoop(
               `Subagent LLM: context overflow (HTTP 400) — compacted ${dropped} messages (kept system + last ${keep}), retrying the same round`,
               { detail: errText.slice(0, 200), context: { model: config.model, status: 400 } },
             );
+            maxIterations += 1; // compaction retry — refund the mission budget
             continue;
           }
           throw new Error(
@@ -634,6 +734,7 @@ async function runSubagentLoop(
             detail: errText,
             context: { model: config.model, status: res.status },
           });
+          maxIterations += 1; // param-strip retry — refund the mission budget
           continue;
         }
         // STRICT-GATEWAY LADDER (LLM HTTP 400 fix): mirrors the main
@@ -653,6 +754,7 @@ async function runSubagentLoop(
             detail: errText,
             context: { model: config.model, status: 400 },
           });
+          maxIterations += 1; // strict-ladder retry — refund the mission budget
           continue;
         }
         logError("subagent", `Subagent LLM request failed (HTTP ${res.status})`, {
@@ -687,7 +789,23 @@ async function runSubagentLoop(
       const contentType = res.headers.get("content-type") || "";
       if (!contentType.includes("text/event-stream") && !contentType.includes("application/x-ndjson")) {
         // Non-streaming response (some providers don't support stream:true).
-        const data = await res.json();
+        // GUARDED PARSE: a 200 with an HTML error page / empty body /
+        // truncated JSON used to throw a raw SyntaxError ("Unexpected token
+        // '<'") that read as the subagent's answer. Parse defensively and
+        // surface an honest provider error instead.
+        let data: { choices?: NonStreamingChoice[] } & Record<string, unknown>;
+        const rawBody = await res.text().catch(() => "");
+        try {
+          data = JSON.parse(rawBody) as { choices?: NonStreamingChoice[] } & Record<string, unknown>;
+        } catch {
+          logError("subagent", "Subagent LLM: non-streaming response was not JSON", {
+            detail: rawBody.slice(0, 400),
+            context: { model: config.model, status: res.status },
+          });
+          throw new Error(
+            `Provider returned a non-JSON response (HTTP ${res.status}, content-type ${contentType || "unknown"}) — likely an HTML error page. First 200 chars: ${rawBody.slice(0, 200)}`,
+          );
+        }
         const choice = data.choices?.[0];
         if (!choice) {
           const se = extractStreamError(data as Record<string, unknown>);
@@ -697,7 +815,7 @@ async function runSubagentLoop(
           });
           throw new Error(se ?? "No response from API");
         }
-        const msg = choice.message;
+        const msg = choice.message ?? {};
 
         // Handle tool calls.
         if (msg.tool_calls && msg.tool_calls.length > 0 && config.toolsEnabled) {
@@ -713,10 +831,17 @@ async function runSubagentLoop(
             role: "assistant",
             content: msg.content || "",
             reasoning_content: accumulatedReasoning || undefined,
+            // WIRE-SAFE REPLAY (mirrors the streaming path): the replayed
+            // argument string is ALWAYS valid JSON (repaired copy / {}) —
+            // never the provider's raw truncated text, which poisoned the
+            // next request with a 400 "invalid arguments".
             tool_calls: msg.tool_calls.map((tc: { id: string; function: { name: string; arguments: string } }) => ({
               id: tc.id,
               type: "function" as const,
-              function: tc.function,
+              function: {
+                name: tc.function.name,
+                arguments: wireSafeArguments(tc.function.arguments),
+              },
             })),
           });
 
@@ -746,11 +871,13 @@ async function runSubagentLoop(
         break;
       }
 
-      // Parse SSE stream — NO THROTTLE, flush immediately (like main chat)
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response body");
-      const decoder = new TextDecoder();
-      let buffer = "";
+      // Parse SSE stream — NO THROTTLE, flush immediately (like main chat).
+      // TRANSIENT-RETRY ENVELOPE (subagent-stall fix): a dead or silent
+      // stream (idle timeout, cut socket, network failure) rewinds and
+      // re-streams THIS round — bounded by transientStreamRetries — instead
+      // of ending the subagent run on one transport hiccup (mirrors the
+      // main runtime's transient ladder; the old code had NO timeout and
+      // NO retry, so one silent stream stalled the subagent forever).
       // CROSS-ROUND ACCUMULATION (Sub-Agent Chat PRD §1/§4 — the
       // disappearing-text fix): these accumulators LIVE ACROSS ROUNDS now.
       // The old code reset them to "" at the top of every round, so after a
@@ -760,8 +887,7 @@ async function runSubagentLoop(
       // carries the full turn — text appended, never replaced.
       let roundText = "";
       let roundReasoning = "";
-      const toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
-
+      let toolCallsBuffer: Array<{ id: string; function: { name: string; arguments: string } }> = [];
       // SILENT-STOP DIAGNOSTICS (auto-stop fix, mirrors the main runtime):
       // error payloads inside a 200 stream used to be dropped silently
       // (`if (!delta) continue`) → empty answer → looked like the subagent
@@ -774,12 +900,70 @@ async function runSubagentLoop(
       let sawDoneMarker = false;
       let sawFinishReason = false;
       let sawUsage = false;
+      try {
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response body");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      // STREAMED TOOL-CALL ACCUMULATOR (tool-reliability PRD §7.2 — parity
+      // with the main runtime): keyed via resolveToolCallAccumulatorKey.
+      // The old `tc.index ?? 0` keying merged every parallel call from
+      // index-less providers into ONE entry (names/args concatenated into
+      // invalid JSON → MALFORMED_TOOL_ARGUMENTS round-trips).
+      const toolCallAcc = new Map<number, { id: string; name: string; args: string }>();
+      // Stable card id per accumulator slot — minted once when the card is
+      // pre-emitted, so streaming-arg card updates keep matching even while
+      // the real provider id has not arrived yet.
+      const cardIds = new Map<number, string>();
 
       // Track which tool calls we've already shown as "running" to avoid duplicates
-      const shownToolCalls = new Set<string>();
+      const shownToolCards = new Set<number>();
 
+      // STREAM IDLE TIMEOUT (subagent-stall fix — mirrors the main runtime's
+      // parseSSEStream): no chunk for SUBAGENT_STREAM_IDLE_TIMEOUT_MS →
+      // cancel the body and throw a transient transport error, which the
+      // catch below routes into a bounded rewind-and-retry. A gateway that
+      // accepts the request then goes silent can never wedge
+      // reader.read() forever — the #1 cause of "subagent stalls after
+      // 2-3 tool calls" (the message stuck at isStreaming: true with no
+      // way to stop it).
+      const readWithIdleTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `idle timeout — the provider stream sent nothing for ${Math.round(SUBAGENT_STREAM_IDLE_TIMEOUT_MS / 1000)}s`,
+                  ),
+                ),
+              SUBAGENT_STREAM_IDLE_TIMEOUT_MS,
+            );
+          });
+          return await Promise.race([reader.read(), timeout]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      };
+
+      try {
       while (true) {
-        const { done, value } = await reader.read();
+        let readResult: ReadableStreamReadResult<Uint8Array>;
+        try {
+          readResult = await readWithIdleTimeout();
+        } catch (idleErr) {
+          // Abandon the dead body (cancels the download; releaseLock alone
+          // cannot run with a read pending) — the error then flows into
+          // the transient-retry catch below.
+          try {
+            await reader.cancel();
+          } catch {
+            // already errored/closed — nothing to cancel
+          }
+          throw idleErr;
+        }
+        const { done, value } = readResult;
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
@@ -845,43 +1029,69 @@ async function runSubagentLoop(
               // Tool call delta — buffer + show immediately
               if (delta.tool_calls) {
                 for (const tc of delta.tool_calls) {
-                  const idx = tc.index ?? 0;
-                  if (!toolCallsBuffer[idx]) {
-                    toolCallsBuffer[idx] = {
-                      id: tc.id || nanoid(),
-                      function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" },
-                    };
-                  } else {
-                    if (tc.function?.name) toolCallsBuffer[idx]!.function.name += tc.function.name;
-                    if (tc.function?.arguments) toolCallsBuffer[idx]!.function.arguments += tc.function.arguments;
-                    if (tc.id) toolCallsBuffer[idx]!.id = tc.id;
+                  // INDEX-LESS DELTA FIX (tool-reliability PRD §7.2): resolve
+                  // the accumulator slot via resolveToolCallAccumulatorKey —
+                  // providers that omit `index` previously merged every
+                  // parallel call into ONE malformed entry (all deltas landed
+                  // on slot 0: names/args concatenated into invalid JSON).
+                  const snapshot: AccumulatedToolCallEntry[] = Array.from(
+                    toolCallAcc.entries(),
+                  ).map(([key, v]) => ({ key, id: v.id, name: v.name, args: v.args }));
+                  const slot = resolveToolCallAccumulatorKey(
+                    {
+                      index: tc.index,
+                      id: tc.id,
+                      name: tc.function?.name,
+                      arguments: tc.function?.arguments,
+                    },
+                    snapshot,
+                  );
+                  const existing = toolCallAcc.get(slot) ?? {
+                    id: "",
+                    name: "",
+                    args: "",
+                  };
+                  if (tc.id) existing.id = tc.id;
+                  if (tc.function?.name) existing.name += tc.function.name;
+                  if (tc.function?.arguments) existing.args += tc.function.arguments;
+                  toolCallAcc.set(slot, existing);
+
+                  // Stable card id for this slot — minted once at pre-emit
+                  // (prefers the provider's real id when it arrived in this
+                  // same delta), then never re-keyed: streaming-arg updates
+                  // and the settle keep matching the same card even when a
+                  // real provider id lands later. The same id rides the
+                  // assistant replay + tool result (tool_call_id), so the
+                  // wire stays self-consistent.
+                  if (!cardIds.has(slot)) {
+                    cardIds.set(slot, tc.id || existing.id || nanoid());
                   }
+                  const cardId = cardIds.get(slot)!;
 
                   // Show tool call card IMMEDIATELY when name is known (streaming)
-                  const tcBuf = toolCallsBuffer[idx]!;
-                  if (tcBuf.function.name && !shownToolCalls.has(tcBuf.id)) {
-                    shownToolCalls.add(tcBuf.id);
+                  if (existing.name && !shownToolCards.has(slot)) {
+                    shownToolCards.add(slot);
                     const currentMsg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
                     useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
                       content: stripFunctionCallTags(fullTurnText),
                       toolCalls: [
                         ...(currentMsg?.toolCalls ?? []),
                         {
-                          id: tcBuf.id,
-                          name: tcBuf.function.name,
-                          args: { _streaming: tcBuf.function.arguments } as Record<string, unknown>,
+                          id: cardId,
+                          name: existing.name,
+                          args: { _streaming: existing.args } as Record<string, unknown>,
                           status: "pending" as const,
                         },
                       ],
                     });
-                  } else if (tcBuf.function.arguments && shownToolCalls.has(tcBuf.id)) {
+                  } else if (existing.args && shownToolCards.has(slot)) {
                     // Update streaming args on existing card
                     const msg = useSubagentStore.getState().sessions.find((x) => x.id === sid)?.messages.find((m) => m.id === assistantMsgId);
                     if (msg?.toolCalls) {
                       useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
                         toolCalls: msg.toolCalls.map((tc2) =>
-                          tc2.id === tcBuf.id
-                            ? { ...tc2, args: { _streaming: tcBuf.function.arguments } as Record<string, unknown> }
+                          tc2.id === cardId
+                            ? { ...tc2, args: { _streaming: existing.args } as Record<string, unknown> }
                             : tc2,
                         ),
                       });
@@ -894,6 +1104,68 @@ async function runSubagentLoop(
             }
           }
         }
+      }
+      } finally {
+        // READER HYGIENE (subagent-stall fix — mirrors the main runtime):
+        // release the lock on EVERY exit path (normal end, thrown idle
+        // timeout, thrown stream error). A leaked lock keeps the body
+        // pinned and the connection half-open forever.
+        try {
+          reader.releaseLock();
+        } catch {
+          // already released/closed — nothing to do
+        }
+      }
+
+      // Materialize the accumulator into the ordered wire buffer (slot
+      // order), with each call carrying its stable card id. From here on,
+      // `toolCallsBuffer` is the canonical list for the guards + replay +
+      // execution below.
+      toolCallsBuffer = Array.from(toolCallAcc.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([slot, tc]) => ({
+          id: cardIds.get(slot) || tc.id || nanoid(),
+          function: { name: tc.name, arguments: tc.args },
+        }));
+      } catch (streamErr) {
+        // TRANSIENT TRANSPORT FAILURE — idle timeout, cut socket, network
+        // error mid-stream. Rewind + re-stream THIS round when the budget
+        // allows (bounded, backoff), otherwise surface an honest error.
+        // ABORTED runs (pagehide) are terminal — never retried.
+        const msg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+        const aborted = runAbort.signal.aborted;
+        const isTransient = /idle timeout|network|fetch failed|stream read failed|failed to fetch|aborted/i.test(msg);
+        if (!aborted && isTransient && transientStreamRetries < TRANSIENT_STREAM_MAX) {
+          transientStreamRetries += 1;
+          const backoffMs = Math.min(1500 * 2 ** (transientStreamRetries - 1), 15_000);
+          // Rewind ONLY this round's partial text (cross-round accumulation
+          // keeps earlier rounds): the retry re-streams the round from its
+          // start, so the failed attempt's deltas must not duplicate — both
+          // in the UI message AND in the in-memory accumulators the retry
+          // appends into.
+          fullTurnText = fullTurnText.slice(0, Math.max(0, fullTurnText.length - roundText.length));
+          roundText = "";
+          roundReasoning = "";
+          useSubagentStore.getState().updateMessage(sid, assistantMsgId, {
+            content: stripFunctionCallTags(fullTurnText),
+            isStreaming: true,
+          });
+          logWarn(
+            "subagent",
+            `Subagent stream failed mid-round (${msg.slice(0, 120)}) — retrying the same round in ${Math.round(backoffMs / 1000)}s (${transientStreamRetries}/${TRANSIENT_STREAM_MAX})`,
+            { context: { model: config.model, status: 200, retry_in_ms: backoffMs } },
+          );
+          await new Promise((r) => setTimeout(r, backoffMs));
+          maxIterations += 1; // transport retry — refund the mission budget
+          continue;
+        }
+        if (aborted) {
+          throw new Error("Subagent run was aborted (page unload) — stopping without retry.");
+        }
+        logError("subagent", `Subagent stream failed after ${transientStreamRetries} transport retries: ${msg}`, {
+          context: { model: config.model, status: 200 },
+        });
+        throw streamErr;
       }
 
       // SILENT-STOP GUARDS (auto-stop fix, mirrors the main runtime): a
@@ -1066,7 +1338,11 @@ async function runSubagentLoop(
                 // the user a question and gets the same answered-wait.
                 emit: subagentEmit,
                 waitForAskUser: (questions: Parameters<typeof waitForAskUser>[0]) =>
-                  waitForAskUser(questions, subagentEmit, undefined),
+                  // BOUNDED WAIT (subagent-stall fix): the question may land
+                  // in a conversation with no live execution — nobody
+                  // answers, so resolve as skipped instead of hanging the
+                  // subagent forever.
+                  waitForAskUser(questions, subagentEmit, undefined, SUBAGENT_ASK_USER_TIMEOUT_MS),
                 signal: undefined,
                 // PRD §34/§35: subagents share the main agent's E2B sandbox.
                 e2bApiKey: subagentSandboxKey,
@@ -1171,6 +1447,12 @@ async function runSubagentLoop(
       isStreaming: false,
     });
     return errMsg;
+  } finally {
+    // ABORT LIFECYCLE cleanup — the pagehide hook must never outlive the
+    // run (a leaked listener would abort nothing but pin the closure).
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pagehide", onRunAbort);
+    }
   }
 }
 
@@ -1259,7 +1541,8 @@ async function executeToolCallsParallel(
           emit: subagentEmit ?? (() => {}),
           waitForAskUser: subagentEmit
             ? (questions: Parameters<typeof waitForAskUser>[0]) =>
-                waitForAskUser(questions, subagentEmit, undefined)
+                // BOUNDED WAIT (subagent-stall fix): see the streaming site.
+                waitForAskUser(questions, subagentEmit, undefined, SUBAGENT_ASK_USER_TIMEOUT_MS)
             : undefined,
           signal: undefined,
           // PRD §34/§35: subagents share the main agent's E2B sandbox.

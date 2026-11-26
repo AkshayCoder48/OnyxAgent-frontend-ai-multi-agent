@@ -37,9 +37,7 @@ import { aiProviderService } from "@/lib/services";
 import type { AIProviderRow } from "@/lib/db";
 import {
   chatCompletionsUrl,
-  isLegacyClassicRow,
   isLegacyClassicUrl,
-  LEGACY_CLASSIC_HOST,
 } from "./provider-url";
 
 // Re-exported for the existing importers (runtime, subagent-runtime,
@@ -64,14 +62,21 @@ export { chatCompletionsUrl, isLegacyClassicRow, isLegacyClassicUrl, LEGACY_CLAS
  */
 export async function listUsableProviders(userId: string): Promise<AIProviderRow[]> {
   let providers = await aiProviderService.list(userId);
-  if (providers.some(isLegacyClassicRow)) {
+  // MIGRATION TRIGGER — host-based, not name-based (renamed-row fix): a
+  // row named anything other than exactly "Pollinations" that still points
+  // at text.pollinations.ai used to skip the healer entirely and then get
+  // dropped by the filter below — the user's provider silently vanished
+  // from every resolution chain while Settings still showed the row.
+  // Any legacy-host row triggers the self-heal; the healer repoints
+  // connected rows (keeping their custom names) and deletes dead ones.
+  if (providers.some((p) => isLegacyClassicUrl(p.base_url))) {
     // Dynamic import: keeps the agent layer free of a static healer
     // dependency (and out of the subagent bundle unless actually needed).
     const { migrateLegacyPollinationsGateway } = await import("./pollinations-healer");
     await migrateLegacyPollinationsGateway(userId).catch(() => undefined);
     providers = await aiProviderService.list(userId);
   }
-  return providers.filter((p) => !p.base_url.includes(LEGACY_CLASSIC_HOST));
+  return providers.filter((p) => !isLegacyClassicUrl(p.base_url));
 }
 
 /**

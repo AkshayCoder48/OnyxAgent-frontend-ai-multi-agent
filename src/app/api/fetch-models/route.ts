@@ -1,7 +1,9 @@
 /**
  * Fetch available models from an OpenAI-compatible AI provider.
  *
- * GET /api/fetch-models?baseUrl=...&apiKey=...
+ * GET /api/fetch-models?baseUrl=...&noPrefix=...
+ * (API key travels in the `x-api-key` HEADER, never the URL — query strings
+ * land in server/access logs and browser history.)
  *
  * Calls `GET {baseUrl}/models` (or `{baseUrl}/v1/models`) server-side to
  * avoid CORS issues, and returns a JSON array of model IDs.
@@ -31,7 +33,11 @@ function buildModelsUrl(baseUrl: string): string {
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const baseUrl = searchParams.get("baseUrl");
-  const apiKey = searchParams.get("apiKey");
+  // HEADER-BORNE KEY (credential fix): the key used to ride the ?apiKey=
+  // query param — URLs are recorded in server logs, proxies and browser
+  // history. Accept the header first; the legacy query param stays as a
+  // fallback for any older caller, but the UI now sends the header.
+  const apiKey = req.headers.get("x-api-key") ?? searchParams.get("apiKey");
   const noPrefix = searchParams.get("noPrefix") === "1";
 
   if (!baseUrl) {

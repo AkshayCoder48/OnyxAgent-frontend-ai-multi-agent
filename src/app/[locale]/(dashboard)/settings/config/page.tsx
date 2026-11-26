@@ -579,13 +579,16 @@ function ProviderEditor({
       const params = new URLSearchParams({
         baseUrl: draft.base_url.trim(),
       });
+      // The API key travels in the x-api-key HEADER, never the URL —
+      // query strings land in server logs, proxies and browser history.
+      const headers: Record<string, string> = {};
       if (draft.api_key.trim()) {
-        params.set("apiKey", draft.api_key.trim());
+        headers["x-api-key"] = draft.api_key.trim();
       }
       if (draft.no_prefix) {
         params.set("noPrefix", "1");
       }
-      const res = await fetch(`/api/fetch-models?${params.toString()}`);
+      const res = await fetch(`/api/fetch-models?${params.toString()}`, { headers });
       const data = await res.json();
       if (!res.ok) {
         toast.error(`Failed to fetch models: ${data?.error ?? res.statusText}`);

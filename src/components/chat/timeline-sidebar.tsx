@@ -47,7 +47,7 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
   // (the catalog load) — the resolved maps are shared.
   const userId = useAuthStore((s) => s.user?.id ?? null);
 
-  const { steps, friendlySteps, stats, filesChanged, anyRunning } = useMemo(() => {
+  const { steps, friendlySteps, friendlyRunning, stats, filesChanged, anyRunning } = useMemo(() => {
     const all: ToolCall[] = [];
     let running = false;
     for (const msg of messages) {
@@ -70,6 +70,18 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
     const brandable = all.filter(
       (tc) => Boolean(tc.name) && !tc.name.startsWith("pending-"),
     );
+    // SIMPLE-MODE rows filter pending- names the SAME way (plain-names
+    // directive): the runtime pre-emits calls as `pending-<n>` before the
+    // name streams — those used to leak as "Using Pending-0" sentences.
+    // `brandable` (already pending-filtered) is exactly the settled-name
+    // set, so the simple timeline reuses it. Live statuses ride in a
+    // parallel array so in-flight PARALLEL tools render as running (the
+    // old positional "last step = running" heuristic check-marked tools
+    // that were still executing).
+    const friendlySource = brandable;
+    const friendlyRunning = brandable.map(
+      (tc) => tc.status === "running" || tc.status === "pending",
+    );
     return {
       steps: derived.steps.map((step, i) => {
         const tc = brandable[i];
@@ -77,7 +89,8 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
           ? { ...step, iconNode: <TimelineComposioIcon toolCall={tc} userId={userId} /> }
           : step;
       }),
-      friendlySteps: all.map((tc) => friendlyStep(resolveEffectiveToolCall(tc))),
+      friendlySteps: friendlySource.map((tc) => friendlyStep(resolveEffectiveToolCall(tc))),
+      friendlyRunning,
       stats: derived.stats,
       filesChanged: derived.filesChanged,
       anyRunning: running,
@@ -149,6 +162,7 @@ export function TimelineSidebar({ onClose }: { onClose?: () => void }) {
         ) : isSimple ? (
           <SimpleToolTimeline
             steps={friendlySteps}
+            stepRunning={friendlyRunning}
             streaming={anyRunning}
             open={true}
             onOpenChange={() => undefined}

@@ -59,6 +59,25 @@ const STREAM_AGENT = new Agent({
 });
 
 /**
+ * BOUNDED DISPATCHER for the GET leg (catalogs, model lists, web_fetch,
+ * skill downloads): the GET lane is used for JSON/metadata requests where
+ * an upstream that accepts the connection then goes silent has nothing
+ * worth waiting for — headers must land within 60s and the body must keep
+ * moving (60s between chunks), or the route answers a 504 so the client's
+ * own timeout semantics stay meaningful. Without this, a hung upstream
+ * pinned the GET request open forever (self-hosted `next start` has no
+ * function timeout) and the CALLER (web_fetch tool, skill installer —
+ * none of which pass a signal) hung with it.
+ * The POST lane keeps STREAM_AGENT: model streams legitimately sit silent
+ * for minutes, and the CLIENT runtime already owns idle-timeout + abort.
+ */
+const BOUNDED_GET_AGENT = new Agent({
+  headersTimeout: 60_000,
+  bodyTimeout: 60_000,
+  connect: { timeout: 30_000 },
+});
+
+/**
  * Headers that we forward from the incoming client request to the upstream
  * AI provider. We always include Authorization + Content-Type, plus any
  * provider-specific hints the client attached (x-oai-*, anthropic-*).
@@ -69,12 +88,17 @@ const FORWARDABLE_PREFIXES = ["x-oai-", "anthropic-"] as const;
  * Response headers from the upstream that should pass through to the client
  * alongside the body. These include rate-limit information and model metadata
  * that the client may want to display.
+ *
+ * `retry-after` is passed through too (HTTP-standard throttle guidance) —
+ * without it the runtime's rate-limit ladder re-hit a still-closed window
+ * on its own 5s→120s schedule instead of honoring the provider's answer.
  */
 const PASSTHROUGH_RESPONSE_PREFIXES = [
   "x-ratelimit-",
   "x-model",
   "x-provider",
 ] as const;
+const PASSTHROUGH_RESPONSE_EXACT = ["retry-after"] as const;
 
 function isForwardableHeader(name: string): boolean {
   const lower = name.toLowerCase();
@@ -85,6 +109,9 @@ function isForwardableHeader(name: string): boolean {
 
 function isPassthroughResponseHeader(name: string): boolean {
   const lower = name.toLowerCase();
+  if (PASSTHROUGH_RESPONSE_EXACT.includes(lower as (typeof PASSTHROUGH_RESPONSE_EXACT)[number])) {
+    return true;
+  }
   return PASSTHROUGH_RESPONSE_PREFIXES.some((p) =>
     p.endsWith("-") ? lower.startsWith(p) : lower === p,
   );
@@ -159,19 +186,26 @@ export async function GET(
 
   let upstream: UndiciResponse;
   try {
-    // STREAM_AGENT (see above): no headers/body timeouts — model-list
-    // endpoints can be slow, and they deserve the same liveness rules as
-    // the chat streams. Connection setup is still bounded at 30s.
+    // BOUNDED_GET_AGENT (see above): GET lanes are metadata/JSON — bounded
+    // headers + body timeouts, so a silent upstream can never hang the
+    // route (and its callers) forever.
     upstream = await undiciFetch(targetUrl.toString(), {
       method: "GET",
       headers: forwardHeaders,
-      dispatcher: STREAM_AGENT,
+      dispatcher: BOUNDED_GET_AGENT,
     });
   } catch (err: unknown) {
+    const isTimeout =
+      err instanceof Error &&
+      (/timeout/i.test(err.message) || err.name === "TimeoutError");
     const message = err instanceof Error ? err.message : "Unknown network error";
     return NextResponse.json(
-      { error: `Failed to reach upstream: ${message}` },
-      { status: 502, headers: corsHeaders() },
+      {
+        error: isTimeout
+          ? `Upstream did not respond within the 60s limit: ${message}`
+          : `Failed to reach upstream: ${message}`,
+      },
+      { status: isTimeout ? 504 : 502, headers: corsHeaders() },
     );
   }
 

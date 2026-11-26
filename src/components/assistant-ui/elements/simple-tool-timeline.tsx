@@ -17,6 +17,11 @@ import type { FriendlyStep } from "@/lib/agent-friendly-steps";
  */
 export interface SimpleToolTimelineProps {
   steps: readonly FriendlyStep[];
+  /** Per-step live status (parallel array): true while THAT step's tool
+   *  call is running/pending. When omitted (older callers), the legacy
+   *  positional heuristic applies — only the last step runs — which is
+   *  wrong for PARALLEL tool calls (they'd all get checkmarks). */
+  stepRunning?: readonly boolean[];
   streaming: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -30,6 +35,7 @@ export interface SimpleToolTimelineProps {
 
 export function SimpleToolTimeline({
   steps,
+  stepRunning,
   streaming,
   open,
   onOpenChange,
@@ -64,8 +70,12 @@ export function SimpleToolTimeline({
       <CollapsePanel open={embedded ? true : open}>
         <div className="space-y-1 px-6 pt-1 pb-2">
           {steps.map((step, i) => {
-            // Only the LAST step can be in flight, and only while streaming.
-            const running = streaming && i === steps.length - 1;
+            // Per-step live status when provided (parallel tool calls all
+            // render as running); positional fallback otherwise (only the
+            // LAST step can be in flight, and only while streaming).
+            const running = stepRunning
+              ? streaming && Boolean(stepRunning[i])
+              : streaming && i === steps.length - 1;
             return (
               <div key={i} className="flex min-h-6 items-baseline gap-2 py-0.5 text-sm">
                 {running ? (

@@ -1285,6 +1285,10 @@ export const aiProviderService = {
           max_tokens: 16,
           stream: false,
         }),
+        // BOUNDED TEST: a non-streaming probe against a silent-but-connected
+        // provider used to spin the Test button forever (no signal anywhere
+        // in the chain). 45s covers slow gateways; a dead one fails visibly.
+        signal: AbortSignal.timeout(45_000),
       });
       const text = await res.text();
       let sample = "";

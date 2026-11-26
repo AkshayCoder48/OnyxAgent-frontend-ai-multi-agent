@@ -1138,7 +1138,10 @@ async function fetchSkillFileBytes(
           "x-target-url": downloadUrl,
           ...headers,
         },
-        signal: opts.signal,
+        // Combine the caller's cancel signal with a 90s ceiling — the proxy
+        // GET lane is bounded server-side; this bounds the client leg too
+        // (a silent proxy used to hang skill downloads forever).
+        signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000),
       });
       if (res.ok) {
         const contentType = res.headers.get("content-type") ?? "";

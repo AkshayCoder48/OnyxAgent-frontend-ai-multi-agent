@@ -34,6 +34,11 @@ registerTool(
           "x-target-url": url,
           "Content-Type": "application/json",
         },
+        // BOUNDED FETCH (hang fix): the proxy GET lane is bounded server-side
+        // (60s), but the tool's own fetch previously had no signal — a
+        // silent proxy/upstream held the whole agent turn's Promise.all
+        // open with a live "running tool" card until the user stopped it.
+        signal: AbortSignal.timeout(90_000),
       });
 
       if (!res.ok) {
