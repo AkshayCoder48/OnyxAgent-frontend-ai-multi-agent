@@ -151,14 +151,16 @@ export function ActivityBar({
 
   // ── the dynamic summary line ────────────────────────────────────────
   // RUNNING  — the live caption narrates the CURRENT activity ("Thinking",
-  //            "Searching “dragons”", "Writing") + the running tool count.
+  //            "Searching “dragons”", "Writing"). NO tool count while the
+  //            turn is live (user directive 2026-11-27: "remove used N tool
+  //            when ai is running or working and show after done task") —
+  //            the count only joins the settled summary.
   // SETTLED  — "Worked 2m 34s · Used 4 tools" / "Stopped after 42s · …" /
   //            "Failed after 8s · …" from the stamped generation summary
   //            (fallback: derived from the part stamps).
   const summary = useMemo(() => {
     if (streaming) {
-      const caption = statusCaptionFor(message) ?? "Working";
-      return toolUnitCount > 0 ? `${caption} · Used ${toolUnitCount} tool${toolUnitCount === 1 ? "" : "s"}` : caption;
+      return statusCaptionFor(message) ?? "Working";
     }
     const gen = message.generation;
     let durationMs = gen?.durationMs;
@@ -198,19 +200,15 @@ export function ActivityBar({
     return `${durationLabel ? `Worked ${durationLabel}` : "Finished"}${toolLabel}`;
   }, [streaming, message, toolUnitCount]);
 
-  // AUTO-FOLD STATE MACHINE (user directive 2026-11-23: "collapsing that
-  // thing while ai writing something is not working — fix it"): a live
-  // round OPENS the timeline (the run narrates itself) and the
-  // live→settled transition folds it into the summary — but BETWEEN those
-  // transitions the summary row's click is the USER's: manual collapse and
-  // expand work at ANY time, including mid-stream. Render-time adjustment
-  // pattern — no effect, no cascading renders.
-  const [open, setOpen] = useState(live);
-  const [prevLive, setPrevLive] = useState(live);
-  if (live !== prevLive) {
-    setPrevLive(live);
-    setOpen(live);
-  }
+  // COLLAPSE-ON-START (user directive 2026-11-27: "make it be collapsed on
+  // starting, we enlarge to see process"): the timeline starts FOLDED —
+  // the summary row's click (or Enter/Space) is the ONLY thing that opens
+  // it, at any time including mid-stream. The earlier auto-open-while-live
+  // behavior is gone; the live→settled transition no longer touches the
+  // fold either way (a manual choice survives the settle). The ONE
+  // exception stays the approval gate below: an interactive approval card
+  // must never hide behind the summary row.
+  const [open, setOpen] = useState(false);
 
   // The approval gate is the ONE state that never folds (an interactive
   // approval card must not hide behind the summary row): while any call
@@ -272,9 +270,9 @@ export function ActivityBar({
       </div>
 
       {/* The folded timeline — height + fade disclosure; rows stay mounted
-          so the expand/collapse transition is smooth. MANUAL COLLAPSE
-          WORKS WHILE LIVE (the user's click is honored mid-stream); only
-          the live↔settled transitions and the approval gate override it. */}
+          so the expand/collapse transition is smooth. COLLAPSED BY DEFAULT
+          (user directive 2026-11-27): only the user's click opens it; the
+          approval gate pins it open. */}
       <CollapsePanel open={panelOpen}>
         <div className="mb-stagger space-y-0 pt-0.5">{children}</div>
       </CollapsePanel>

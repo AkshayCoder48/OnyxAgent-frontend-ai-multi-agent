@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { stripFunctionCallTags } from "@/lib/text-sanitizer";
 import { RatingValue, type ChatMessage, type ChatMessageFile } from "@/types";
 import { ToolCallCard } from "./tool-call-card";
-import { ActivityBar, buildFlowItems, type FlowItem } from "./activity-bar";
+import { ActivityBar, buildFlowItems, formatWorkDuration, type FlowItem } from "./activity-bar";
 import { BrowserUseGroup } from "./tool-results/use-browser";
 import { BranchPicker } from "./branch-picker";
 import { mapBrowserRunStarts } from "@/lib/browser-run-group";
@@ -490,6 +490,57 @@ function AssistantMessageActions({
   const setQuote = useQuoteStore((s) => s.setQuote);
   const text = React.useMemo(() => assistantCopyText(message), [message]);
 
+  // ── the footer TIMER (user directive 2026-11-27) ───────────────────
+  // While the turn is live the chip ticks (now − turn start); once settled
+  // it freezes on the generation stamp (durationMs, with the same
+  // part-stamp fallback the ActivityBar summary uses). The start anchor is
+  // the generation stamp when present (it survives refresh), else the
+  // earliest part/tool/thinking stamp.
+  const streaming = Boolean(message.isStreaming);
+  const turnStart = React.useMemo(() => {
+    if (message.generation?.startedAt) return message.generation.startedAt;
+    let first: number | undefined;
+    const see = (t: number | undefined) => {
+      if (t !== undefined && (first === undefined || t < first)) first = t;
+    };
+    for (const p of message.parts ?? []) {
+      // Same stamp vocabulary as the ActivityBar summary: thinking-round
+      // starts + tool starts (text-part stamps are NOT durations).
+      if (p.type === "thinking" || p.type === "reasoning") see(p.roundStartedAt);
+      if (p.type === "tool" && p.toolCall) see(p.toolCall.startedAt);
+    }
+    return first;
+  }, [message.generation?.startedAt, message.parts]);
+  const [nowTick, setNowTick] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!streaming) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [streaming]);
+  const durationLabel = React.useMemo(() => {
+    if (message.generation?.durationMs !== undefined) {
+      return formatWorkDuration(message.generation.durationMs);
+    }
+    if (turnStart === undefined) return null;
+    if (streaming) {
+      // Live: tick from the wall clock against the turn's start stamp.
+      return formatWorkDuration(Math.max(0, nowTick - turnStart));
+    }
+    // Settled without a generation stamp: derive first→last from the SAME
+    // stamp vocabulary (thinking/tool stamps only) so the footer chip and
+    // the ActivityBar summary always agree — never the wall clock.
+    let last: number | undefined;
+    const seeEnd = (t: number | undefined) => {
+      if (t !== undefined && (last === undefined || t > last)) last = t;
+    };
+    for (const p of message.parts ?? []) {
+      if (p.type === "thinking" || p.type === "reasoning") seeEnd(p.reasoningEndedAt);
+      if (p.type === "tool" && p.toolCall) seeEnd(p.toolCall.endedAt);
+    }
+    if (last === undefined || last <= turnStart) return null;
+    return formatWorkDuration(last - turnStart);
+  }, [message.generation?.durationMs, message.parts, turnStart, streaming, nowTick]);
+
   // Persisted rating (local-first Dexie): hydrate once per message, then
   // apply visual state ONLY after a write actually succeeded (the same
   // "never confirm an action that didn't happen" discipline RatingButtons
@@ -523,8 +574,15 @@ function AssistantMessageActions({
     };
   }, [message.id]);
 
-  const handleReaction = (next: Reaction) => {
-    if (!ratingReady || next === reaction) return;
+  // DISLIKE PARITY (user directive 2026-11-27: "fix … like, dislike and all
+  // the buttons"): pressing 👎 opens the same optional "what went wrong"
+  // dialog the sidebar RatingButtons uses — a bare dislike with no comment
+  // used to feel like a dead button. The comment rides the same local-first
+  // ratingService write (ratingService.rate takes an optional comment).
+  const [dislikeDialog, setDislikeDialog] = React.useState(false);
+  const [dislikeComment, setDislikeComment] = React.useState("");
+
+  const persistReaction = (next: Reaction, commentText?: string) => {
     void (async () => {
       const userId = useAuthStore.getState().user?.id;
       if (!userId) return;
@@ -537,6 +595,7 @@ function AssistantMessageActions({
             message.id,
             userId,
             next === "up" ? RatingValue.LIKE : RatingValue.DISLIKE,
+            commentText,
           );
         }
         setReaction(next);
@@ -544,6 +603,19 @@ function AssistantMessageActions({
         /* write failed — keep the current state */
       }
     })();
+  };
+
+  const handleReaction = (next: Reaction) => {
+    if (next === reaction) return;
+    if (next === "down") {
+      // The dialog opens without waiting for the rating hydration —
+      // pressing 👎 must always DO something visible.
+      setDislikeComment("");
+      setDislikeDialog(true);
+      return;
+    }
+    if (!ratingReady) return;
+    persistReaction(next);
   };
 
   const handleRegenerate = () => {
@@ -559,17 +631,36 @@ function AssistantMessageActions({
   const menuItemClass =
     "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent hover:text-foreground";
 
+  // More-menu keyboard discipline: Escape closes (a keyboard user's
+  // reflex), and focus leaving the menu root closes it too.
+  const menuRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (!moreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setMoreOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moreOpen]);
+
   return (
     <div className="relative -ml-1">
       <MessageActions
         copied={copied}
         reaction={reaction}
         regenerating={regenerating}
+        durationLabel={durationLabel}
         onCopy={() => {
           if (text) void copy(text);
         }}
         onReactionChange={handleReaction}
-        onRegenerate={handleRegenerate}
+        // Regenerate only exists on a SETTLED reply (the call site passes
+        // undefined while streaming — re-running a live turn is meaningless
+        // and MessageActions hides the button without the prop).
+        onRegenerate={message.isStreaming ? undefined : handleRegenerate}
         onMore={() => setMoreOpen((v) => !v)}
       />
       {moreOpen ? (
@@ -582,6 +673,7 @@ function AssistantMessageActions({
             onClick={() => setMoreOpen(false)}
           />
           <div
+            ref={menuRef}
             role="menu"
             aria-label="More response actions"
             className="animate-slide-up-fade absolute top-full right-0 z-50 mt-1 w-52 overflow-hidden rounded-lg border border-border bg-background p-1 shadow-lg"
@@ -610,6 +702,69 @@ function AssistantMessageActions({
             </button>
           </div>
         </>
+      ) : null}
+
+      {/* Dislike feedback dialog — the same optional "what went wrong"
+          flow the sidebar RatingButtons uses; comment is optional, the
+          rating persists either way (local-first Dexie). */}
+      {dislikeDialog ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setDislikeDialog(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="What went wrong?"
+            className="bg-background w-full max-w-md rounded-xl border border-border p-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-1 text-sm font-semibold">What went wrong?</div>
+            <div className="text-muted-foreground mb-3 text-xs">
+              Optional — your feedback helps improve the response.
+            </div>
+            <textarea
+              value={dislikeComment}
+              onChange={(e) => setDislikeComment(e.target.value)}
+              placeholder="Describe the issue (optional)"
+              maxLength={2000}
+              autoFocus
+              className="bg-background min-h-[100px] w-full rounded-md border p-2 text-sm"
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                className="hover:bg-accent rounded-md px-3 py-1.5 text-sm"
+                onClick={() => {
+                  setDislikeDialog(false);
+                  setReaction((r) => r); // no rating yet — stay unset
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-md border px-3 py-1.5 text-sm"
+                onClick={() => {
+                  setDislikeDialog(false);
+                  persistReaction("down");
+                }}
+              >
+                Skip comment
+              </button>
+              <button
+                type="button"
+                className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm font-medium"
+                onClick={() => {
+                  setDislikeDialog(false);
+                  persistReaction("down", dislikeComment.trim() || undefined);
+                }}
+              >
+                Submit
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -1298,12 +1453,18 @@ export const MessageItem = React.memo(function MessageItem({
         )}
 
         {/* MESSAGE ACTION ROWS (assistant-ui "Message actions" + user
-            edit/copy): always visible once the turn settles — each action
-            confirms itself in place (copy → check + emerald, rating fills,
+            edit/copy): always visible — INCLUDING while the turn streams
+            (user directive 2026-11-27: copy/like/more must be pressable
+            during long runs; only the re-run waits for the settle because
+            re-running a live turn is meaningless). Each action confirms
+            itself in place (copy → check + emerald, rating fills,
             regenerate spins). No hover-only opacity games (Realtime PRD
             §20–§21: no invisible hitboxes). */}
-        {!isUser && !message.isStreaming && (
-          <AssistantMessageActions message={message} onRegenerate={onRegenerate} />
+        {!isUser && (
+          <AssistantMessageActions
+            message={message}
+            onRegenerate={message.isStreaming ? undefined : onRegenerate}
+          />
         )}
         {isUser && !editingUser && (
           <UserMessageActions

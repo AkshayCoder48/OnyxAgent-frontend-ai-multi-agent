@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // DOM probe: the Unified Activity Bar (PRD Part A) — ONE collapsible
-// container per assistant response. Covers the two user directives of
-// 2026-11-23 on top of the PRD contract:
+// container per assistant response. Covers the user directives of
+// 2026-11-23/24 on top of the PRD contract:
 //
 //   1. "remove the dot thinking … when ai haven't generated anything" —
 //      a streaming turn with ZERO generated parts renders NOTHING (no
@@ -9,8 +9,17 @@
 //      real part.
 //   2. "collapsing that thing while ai writing something is not working —
 //      fix it" — the summary row toggles the fold AT ANY TIME, including
-//      MID-STREAM; only the live↔settled transitions and the approval
-//      gate override the user's click.
+//      MID-STREAM; only the approval gate overrides the user's click.
+//
+// …and the 2026-11-27 directives:
+//
+//   3. the activity timeline starts COLLAPSED — the user enlarges to see
+//      the process; no auto-open while live.
+//   4. NO "Used N tools" while the turn is running — the count only joins
+//      the settled "Worked …" summary.
+//   5. the assistant footer carries a live/settled timer next to
+//      copy/like/dislike, and the action row stays pressable mid-stream
+//      (only regenerate waits for the settle).
 import { describe, it, expect, vi } from "vitest";
 import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
@@ -19,6 +28,21 @@ import type { ChatMessage } from "@/types";
 
 vi.mock("@/hooks/use-data", () => ({
   useProviders: () => ({ providers: [] }),
+}));
+
+// The local-first rating service (Dexie) doesn't run in jsdom — mock it so
+// the dislike-persist flow is testable end-to-end (dialog → submit → the
+// write resolves → the thumb presses).
+vi.mock("@/lib/services", () => ({
+  ratingService: {
+    rate: vi.fn(async () => ({})),
+    remove: vi.fn(async () => undefined),
+    getMessageRatings: vi.fn(async () => ({
+      likes: 0,
+      dislikes: 0,
+      user_rating: null,
+    })),
+  },
 }));
 
 const toolPart = (
@@ -138,25 +162,27 @@ describe("Unified Activity Bar (PRD Part A)", () => {
     cleanup();
   });
 
-  it("live turn: opens narrating; MANUAL COLLAPSE works mid-stream (user directive 2026-11-23)", () => {
+  it("live turn: starts COLLAPSED; user expands manually; no tool count while live (user directive 2026-11-27)", () => {
     const { container } = render(
       React.createElement(MessageItem, { message: streamingMsg }),
     );
     const h = header(container)!;
     expect(h).toBeTruthy();
-    // Live caption narrates the tail (text streaming) + the tool count.
-    expect(h.getAttribute("aria-label")).toMatch(/Activity — Writing.*Used 1 tool/);
-    // Mounted live → the timeline narrates itself…
+    // Live caption narrates the tail (text streaming) — NO tool count
+    // while the turn is live (the count only joins the settled summary).
+    expect(h.getAttribute("aria-label")).toMatch(/Activity — Writing/);
+    expect(h.getAttribute("aria-label")).not.toContain("Used 1 tool");
+    // Starts FOLDED — the user enlarges to see the process…
+    expect(h.getAttribute("aria-expanded")).toBe("false");
+    expect(panel(container)!.getAttribute("data-open")).toBe("false");
+    // …the user's click expands it MID-STREAM…
+    fireEvent.click(h);
     expect(h.getAttribute("aria-expanded")).toBe("true");
     expect(panel(container)!.getAttribute("data-open")).toBe("true");
-    // …and the user's click folds it MID-STREAM (the fix).
+    // …and folds it again on the next click.
     fireEvent.click(h);
     expect(h.getAttribute("aria-expanded")).toBe("false");
     expect(panel(container)!.getAttribute("data-open")).toBe("false");
-    // …and re-expands on the next click.
-    fireEvent.click(h);
-    expect(h.getAttribute("aria-expanded")).toBe("true");
-    expect(panel(container)!.getAttribute("data-open")).toBe("true");
     cleanup();
   });
 
@@ -229,6 +255,95 @@ describe("Unified Activity Bar (PRD Part A)", () => {
       expect(container.textContent ?? "").toContain("Just an answer.");
     });
     expect(container.querySelector(".activity-bar")).toBeNull();
+    cleanup();
+  });
+});
+
+describe("Assistant footer — timer + pressable mid-stream (user directive 2026-11-27)", () => {
+  const actionRow = (container: HTMLElement) =>
+    container.querySelector('[data-slot="message-actions"]');
+
+  it("settled turn: the footer shows the timer chip + all five actions", () => {
+    const { container } = render(
+      React.createElement(MessageItem, { message: settledMsg }),
+    );
+    const row = actionRow(container)!;
+    expect(row).toBeTruthy();
+    // The timer chip renders the turn's duration (stamps → 3s).
+    const chip = row.querySelector('[data-slot="message-duration"]')!;
+    expect(chip).toBeTruthy();
+    expect(chip.textContent).toContain("3s");
+    // All five actions present on a settled reply.
+    expect(row.querySelector('[aria-label="Copy response"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="Mark response helpful"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="Mark response unhelpful"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="Regenerate response"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="More response actions"]')).toBeTruthy();
+    cleanup();
+  });
+
+  it("live turn: the footer stays pressable — copy/like/more render, regenerate does NOT, the timer ticks", () => {
+    const { container } = render(
+      React.createElement(MessageItem, { message: streamingMsg }),
+    );
+    const row = actionRow(container)!;
+    expect(row).toBeTruthy();
+    // Every action except the re-run is available mid-stream.
+    expect(row.querySelector('[aria-label="Copy response"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="Mark response helpful"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="More response actions"]')).toBeTruthy();
+    expect(row.querySelector('[aria-label="Regenerate response"]')).toBeNull();
+    // The timer chip renders while live (its VALUE is wall-clock derived —
+    // the tick itself is what this asserts, not a fixed duration).
+    const chip = row.querySelector('[data-slot="message-duration"]')!;
+    expect(chip).toBeTruthy();
+    cleanup();
+  });
+
+  it("three-dots menu: opens on click and closes on Escape", () => {
+    const { container } = render(
+      React.createElement(MessageItem, { message: settledMsg }),
+    );
+    const more = container.querySelector('[aria-label="More response actions"]')!;
+    expect(more).toBeTruthy();
+    fireEvent.click(more);
+    const menu = container.querySelector('[role="menu"]')!;
+    expect(menu).toBeTruthy();
+    expect(menu.textContent).toContain("Quote reply");
+    expect(menu.textContent).toContain("Copy as Markdown");
+    // Escape closes (keyboard discipline).
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    cleanup();
+  });
+
+  it("dislike opens the optional comment dialog; submit persists the rating", async () => {
+    // A signed-in user: the local-first rating write needs one.
+    const { useAuthStore } = await import("@/stores");
+    useAuthStore.setState({ user: { id: "test-user" } as never });
+    const { container } = render(
+      React.createElement(MessageItem, { message: settledMsg }),
+    );
+    const down = container.querySelector('[aria-label="Mark response unhelpful"]')!;
+    expect(down).toBeTruthy();
+    fireEvent.click(down);
+    const dialog = await waitFor(() => {
+      const el = container.querySelector('[role="dialog"]')!;
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(dialog.textContent).toContain("What went wrong?");
+    // Submit closes the dialog and presses the thumb.
+    const submit = Array.from(dialog.querySelectorAll("button")).find(
+      (b) => b.textContent === "Submit",
+    )!;
+    expect(submit).toBeTruthy();
+    fireEvent.click(submit);
+    await waitFor(() => {
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+    const downAfter = container.querySelector('[aria-label="Mark response unhelpful"]')!;
+    expect(downAfter.getAttribute("aria-pressed")).toBe("true");
     cleanup();
   });
 });
