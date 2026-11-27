@@ -49,18 +49,17 @@ export interface MessageActionsProps
   /** Spins the regenerate icon. */
   regenerating: boolean;
   /** Optional quiet duration chip rendered BEFORE the action buttons —
-   *  the turn's live/total time ("1m 12s"), per the 2026-11-27 directive
+   *  the turn's total time ("1m 12s"), per the 2026-11-27 directive
    *  ("add a time in the below where the buttons of ai chat bubble").
-   *  Hidden when empty (messages without time data render no chip). */
+   *  The row renders only on settled turns, so the chip is always the
+   *  frozen total. Hidden when empty (no time data → no chip). */
   durationLabel?: string | null;
   /** Called when the copy button is pressed. */
   onCopy: () => void;
   /** Called with the next reaction; null when the active one is pressed again. */
   onReactionChange: (reaction: Reaction) => void;
-  /** Called when the regenerate button is pressed. Omit to hide the
-   *  button entirely (the streaming footer keeps every other action but
-   *  never offers a re-run of a turn that is still running). */
-  onRegenerate?: () => void;
+  /** Called when the regenerate button is pressed. */
+  onRegenerate: () => void;
   /** Called when the more button is pressed (no built-in menu attached). */
   onMore: () => void;
 }
@@ -93,7 +92,8 @@ export function MessageActions({
           <Clock3 className="mr-1 h-3 w-3" aria-hidden />
           {durationLabel}
         </span>
-      ) : null}      <button
+      ) : null}
+      <button
         type="button"
         onClick={onCopy}
         aria-label={copied ? "Copied response" : "Copy response"}
@@ -153,25 +153,23 @@ export function MessageActions({
         />
       </button>
 
-      {onRegenerate ? (
-        <button
-          type="button"
-          onClick={onRegenerate}
-          aria-label="Regenerate response"
-          title="Regenerate"
-          disabled={regenerating}
-          className={cn(
-            ghostButtonClass,
-            "h-7 w-7",
-            regenerating && "text-primary",
-          )}
-        >
-          <RotateCcw
-            className={cn("h-3.5 w-3.5", regenerating && "animate-spin")}
-            aria-hidden
-          />
-        </button>
-      ) : null}
+      <button
+        type="button"
+        onClick={onRegenerate}
+        aria-label="Regenerate response"
+        title="Regenerate"
+        disabled={regenerating}
+        className={cn(
+          ghostButtonClass,
+          "h-7 w-7",
+          regenerating && "text-primary",
+        )}
+      >
+        <RotateCcw
+          className={cn("h-3.5 w-3.5", regenerating && "animate-spin")}
+          aria-hidden
+        />
+      </button>
 
       <button
         type="button"

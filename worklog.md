@@ -1356,3 +1356,19 @@ Work Log:
 
 Stage Summary:
 - The activity timeline rests collapsed and only enlarges on the user's click; the running caption narrates without the tool count (which returns in the settled summary); every assistant bubble footer now carries a live-then-frozen duration chip beside pressable-at-all-times copy/like/more buttons (regenerate lands on settle); the three-dots menu closes on Escape; and a dislike opens the same optional-feedback dialog the sidebar uses, persisted local-first.
+
+## Task 48 — Footer reversal: the action row is hidden until the AI is done or stopped
+
+Date: 2026-11-27
+Agent: main (Z.ai Code)
+Task: Follow-up user directive, same day: "Remove those all footer button row not visible until ai is done or stopped" — the whole assistant footer row (timer chip + copy/like/dislike/regenerate/three-dots) must NOT render while the turn is live; it appears only when the generation settles (completed, failed, or user-stopped — all of them just flip isStreaming off). This supersedes the earlier same-day directive ("pressable mid-stream") from Task 47.
+
+Work Log:
+- RENDER GATE (message-item.tsx): the AssistantMessageActions mount returns to `!isUser && !message.isStreaming` — identical shape to the pre-Task-47 gate, now with the settle-only contract documented in the comment. Both done and stopped turns land there (a stop also flips isStreaming off), so nothing extra is needed for the "or stopped" half.
+- DEAD CODE REMOVAL: the live-tick timer machinery from Task 47 (nowTick state, the 1s interval effect, the wall-clock branch, the turnStart memo) is gone — the row never renders mid-stream, so a ticking chip can never be seen. The duration chip keeps the frozen-total computation only: generation.durationMs when stamped, else the first→last span over the SAME stamp vocabulary the ActivityBar summary uses (thinking roundStartedAt/reasoningEndedAt + tool startedAt/endedAt; text-part stamps excluded) — bar header and footer chip always agree.
+- MessageActions (message-actions.tsx): onRegenerate is a required prop again (the optional-prop hide-button path existed only for the streamed footer); the durationLabel chip doc updated to "frozen total".
+- DISLIKE DIALOG (message-item.tsx): swapped the hand-rolled fixed-overlay divs for the codebase's ui/dialog primitives (Dialog/DialogContent/DialogHeader/DialogTitle/DialogDescription/DialogBody + Button) — the same components rating-buttons.tsx uses for the identical dialog. This closed all five new jsx-a11y warnings (static-element clicks, missing keyboard listeners, autoFocus) in one move: Radix handles focus trap, Escape, and overlay dismissal natively.
+- TESTS (inline-flow.test.tsx): header comment point 5 rewritten for the reversal. The "live footer" test now asserts TOTAL ABSENCE mid-stream (no action row, no copy/like/more buttons, no duration chip); a new companion case pins the settled contract (row renders, all five actions, timer "3s"); the dislike-dialog test queries document.body now (Radix portals the dialog outside the render container). Suite 1157/1157 green (83 files), next build exit 0, eslint findings back to the 2 pre-existing baseline items (173 unused-var warning + 276 set-state-in-effect error, both pre-dating Task 47).
+
+Stage Summary:
+- The assistant bubble footer is invisible while the AI works and appears — timer chip, copy, like, dislike, regenerate, three-dots — the moment the turn is done or stopped; the chip shows the frozen total, and the dislike dialog is now the accessible ui/dialog version of the sidebar's rating dialog.

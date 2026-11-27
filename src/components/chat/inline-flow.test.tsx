@@ -17,9 +17,10 @@
 //      the process; no auto-open while live.
 //   4. NO "Used N tools" while the turn is running — the count only joins
 //      the settled "Worked …" summary.
-//   5. the assistant footer carries a live/settled timer next to
-//      copy/like/dislike, and the action row stays pressable mid-stream
-//      (only regenerate waits for the settle).
+//   5. the assistant footer carries the frozen total-time chip next to
+//      copy/like/dislike — and the whole action row appears ONLY once the
+//      turn settles (done or stopped; the 2026-11-27 follow-up directive
+//      reversed the earlier same-day "pressable mid-stream" one).
 import { describe, it, expect, vi } from "vitest";
 import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
@@ -282,21 +283,28 @@ describe("Assistant footer — timer + pressable mid-stream (user directive 2026
     cleanup();
   });
 
-  it("live turn: the footer stays pressable — copy/like/more render, regenerate does NOT, the timer ticks", () => {
+  it("live turn: the footer row is HIDDEN — nothing renders until the AI is done or stopped (follow-up directive)", () => {
     const { container } = render(
       React.createElement(MessageItem, { message: streamingMsg }),
     );
+    // No action row, no buttons, no timer chip while the turn streams.
+    expect(actionRow(container)).toBeNull();
+    expect(container.querySelector('[aria-label="Copy response"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Mark response helpful"]')).toBeNull();
+    expect(container.querySelector('[aria-label="More response actions"]')).toBeNull();
+    expect(container.querySelector('[data-slot="message-duration"]')).toBeNull();
+    cleanup();
+  });
+
+  it("stopped turn (settled, not streaming): the footer row renders with all five actions", () => {
+    // A stopped/failed generation also un-hides the footer — "done OR
+    // stopped" — settled simply means isStreaming flipped off.
+    const { container } = render(
+      React.createElement(MessageItem, { message: settledMsg }),
+    );
     const row = actionRow(container)!;
     expect(row).toBeTruthy();
-    // Every action except the re-run is available mid-stream.
-    expect(row.querySelector('[aria-label="Copy response"]')).toBeTruthy();
-    expect(row.querySelector('[aria-label="Mark response helpful"]')).toBeTruthy();
-    expect(row.querySelector('[aria-label="More response actions"]')).toBeTruthy();
-    expect(row.querySelector('[aria-label="Regenerate response"]')).toBeNull();
-    // The timer chip renders while live (its VALUE is wall-clock derived —
-    // the tick itself is what this asserts, not a fixed duration).
-    const chip = row.querySelector('[data-slot="message-duration"]')!;
-    expect(chip).toBeTruthy();
+    expect(row.querySelector('[aria-label="Regenerate response"]')).toBeTruthy();
     cleanup();
   });
 
@@ -327,10 +335,12 @@ describe("Assistant footer — timer + pressable mid-stream (user directive 2026
     const down = container.querySelector('[aria-label="Mark response unhelpful"]')!;
     expect(down).toBeTruthy();
     fireEvent.click(down);
+    // The dialog portals to document.body (Radix) — query the document,
+    // not the render container.
     const dialog = await waitFor(() => {
-      const el = container.querySelector('[role="dialog"]')!;
+      const el = document.querySelector('[role="dialog"]');
       expect(el).toBeTruthy();
-      return el;
+      return el as HTMLElement;
     });
     expect(dialog.textContent).toContain("What went wrong?");
     // Submit closes the dialog and presses the thumb.
@@ -340,7 +350,7 @@ describe("Assistant footer — timer + pressable mid-stream (user directive 2026
     expect(submit).toBeTruthy();
     fireEvent.click(submit);
     await waitFor(() => {
-      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
     });
     const downAfter = container.querySelector('[aria-label="Mark response unhelpful"]')!;
     expect(downAfter.getAttribute("aria-pressed")).toBe("true");
