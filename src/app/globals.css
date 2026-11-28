@@ -1685,26 +1685,23 @@
   color: transparent;
 }
 
-/* CARET ALIGNMENT (Task 50): one shared metrics contract for the mirror
-   pair — the textarea reserves its scrollbar gutter up front (stable),
-   and the mirror (overflow:hidden) reserves the SAME space as padding so
-   their content boxes stay the same width. Without this, a long prompt
-   past the 200px cap wrapped differently between the two (textarea with
-   an 8px classic scrollbar, mirror without) and every wrapped line's
-   caret position was off by the gutter width. `@supports` guards older
-   browsers: where the property is unsupported the textarea's classic
-   gutter behavior is unchanged, so the fallback matches too. */
-.prompt-mirror-scroll {
+/* CARET ALIGNMENT (Task 50 → Task 52): one shared metrics contract for the
+   mirror pair. BOTH elements declare scrollbar-gutter: stable, so the SAME
+   engine reserves the SAME gutter width in both boxes on every platform —
+   classic 8px thin scrollbars, 0px overlay scrollbars (macOS, headless,
+   many Android WebViews), wider classic Firefox. The Task 50 form gave the
+   mirror a hard-coded padding-right: 8px, which was only correct where the
+   platform scrollbar is exactly 8px: with overlay scrollbars the textarea
+   reserves 0px while the mirror still ate 8px — every wrapped line's
+   painted text sat 8px left of the native caret. overflow:hidden is a
+   scroll container, so the gutter reservation applies to the mirror too;
+   its scrollbar never renders (no overflow interaction, pointer-events
+   none) but the SPACE it reserves keeps the two text boxes the same
+   width. Where scrollbar-gutter is unsupported, neither reserves anything
+   and the classic-gutter fallback still matches. */
+.prompt-mirror-scroll,
+.prompt-mirror-gutter {
   scrollbar-gutter: stable;
-}
-
-@supports (scrollbar-gutter: stable) {
-  .prompt-mirror-gutter {
-    /* Reserve exactly the thin-scrollbar width (see .scrollbar-thin
-       ::-webkit-scrollbar: 8px; Firefox thin ≈ 8px too) so the mirror's
-       text box matches the textarea's gutter-reserved content box. */
-    padding-right: 8px;
-  }
 }
 
 /* ==================== Writing Cursor (geometric shapes) ====================

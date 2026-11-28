@@ -224,8 +224,10 @@ describe("composer redesign (PRD §5)", () => {
     });
 
     it("both mirror-pair elements share the scrollbar-gutter contract", () => {
-      // The textarea reserves its gutter (stable)… (declarations only —
-      // the explanatory comments between selector and block are stripped)
+      // The textarea reserves its gutter (stable)… and since Task 52 the
+      // mirror reserves the SAME way (grouped selector, engine-computed on
+      // every platform) instead of a hard-coded 8px padding — the full pin
+      // (including "no hard-coded padding") lives in the Task 52 block.
       const scrollRule = css
         .slice(
           css.indexOf(".prompt-mirror-scroll"),
@@ -233,15 +235,6 @@ describe("composer redesign (PRD §5)", () => {
         )
         .replace(/\/\*[\s\S]*?\*\//g, "");
       expect(scrollRule).toMatch(/scrollbar-gutter:\s*stable\s*;/);
-      // …and the mirror (overflow:hidden) reserves the same 8px as
-      // padding, so wrap positions match past the 200px scroll cap.
-      const gutterRule = css
-        .slice(
-          css.indexOf(".prompt-mirror-gutter"),
-          css.indexOf("}", css.indexOf(".prompt-mirror-gutter")),
-        )
-        .replace(/\/\*[\s\S]*?\*\//g, "");
-      expect(gutterRule).toMatch(/padding-right:\s*8px\s*;/);
     });
 
     it("the DOM wires the gutter classes onto the mirror pair", () => {
@@ -263,11 +256,15 @@ describe("composer redesign (PRD §5)", () => {
       // Harness mirrors the real owner (ChatInput): value lives in a
       // parent, typing arrives as a textarea CHANGE event, external
       // changes arrive as parent state updates — the two paths the
-      // boundary sync must tell apart.
-      let setText: (v: string) => void = () => {};
+      // boundary sync must tell apart. The setter escapes through a ref
+      // object captured in an EFFECT (assigning during render is what the
+      // react-hooks immutability rule forbids; effects run after).
+      const setTextRef: { current: (v: string) => void } = { current: () => {} };
       function Harness() {
         const [text, set] = React.useState("hello");
-        setText = set;
+        React.useEffect(() => {
+          setTextRef.current = set;
+        }, [set]);
         return React.createElement(PromptTypingMirror, {
           textareaRef: { current: null },
           value: text,
@@ -278,6 +275,7 @@ describe("composer redesign (PRD §5)", () => {
       }
       render(React.createElement(Harness));
       const textarea = screen.getByLabelText("test");
+      const setText = (v: string) => setTextRef.current(v);
 
       // 1) TYPING: "h","e"… already past ("hello"), then type "!" → the
       //    keystroke path animates the fresh char.
@@ -309,3 +307,131 @@ describe("composer redesign (PRD §5)", () => {
     });
   });
 });
+
+  // ── CARET ALIGNMENT II (Task 52 — "cursor progressively moves farther
+  // from the text while typing; Backspace moves it closer again"). Task 50
+  // removed the inline-block shaping break but MEASURED, in a real
+  // Chromium (scripts/caret-drift-harness.py), that every per-char inline
+  // span boundary STILL costs ~+0.2px of subpixel layout snapping: 41
+  // chars as 41 spans = 287.03px vs 286.73px as one unbroken text node.
+  // While typing, that accumulated — the painted text ran ahead of the
+  // native caret — and any deletion collapsed the tail to one text node
+  // and the drift snapped back. The remaining root cause: LINGERING span
+  // boxes. The fix is structural, not cosmetic: the SETTLE-TAIL MERGE.
+  describe("caret alignment II: settle-tail merge (Task 52 — zero lingering span boxes)", () => {
+    it("a typed char's span MERGES back into the static head after the 170ms reveal — steady state has ZERO span boxes", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        fireEvent.change(textarea, { target: { value: "h" } });
+        fireEvent.change(textarea, { target: { value: "he" } });
+        fireEvent.change(textarea, { target: { value: "hel" } });
+        // Mid-reveal: the fresh chars are spanned…
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(3);
+        // …then the reveal ends and the settle-tail merge swallows them:
+        // the whole value becomes ONE unbroken text node — the exact
+        // structure the textarea itself lays out, so the native caret and
+        // the painted glyphs can never diverge at rest.
+        act(() => {
+          vi.advanceTimersByTime(250);
+        });
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(mirror!.textContent).toBe("hel");
+        // ONE text node — not three char nodes (the structure IS the fix).
+        expect(mirror!.childNodes.length).toBe(1);
+        expect(mirror!.childNodes[0]!.nodeType).toBe(Node.TEXT_NODE);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("typing after a settle animates ONLY the fresh char (no re-animation of settled text)", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        fireEvent.change(textarea, { target: { value: "hello" } });
+        act(() => {
+          vi.advanceTimersByTime(250);
+        });
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        // Next keystroke: only the new char is a span; the settled head
+        // stays one unbroken text node behind it.
+        fireEvent.change(textarea, { target: { value: "hello!" } });
+        const spans = container.querySelectorAll(".prompt-char-in");
+        expect(spans.length).toBe(1);
+        expect(spans[0]!.textContent).toBe("!");
+        act(() => {
+          vi.advanceTimersByTime(250);
+        });
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a deletion during the reveal window cancels the merge (plain never outpaces the value)", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        fireEvent.change(textarea, { target: { value: "hello worl" } });
+        // Before the reveal ends, backspace twice: "worl" → "wor" → "wo".
+        fireEvent.change(textarea, { target: { value: "hello wor" } });
+        fireEvent.change(textarea, { target: { value: "hello wo" } });
+        act(() => {
+          vi.advanceTimersByTime(400);
+        });
+        // Deletions render static (the Task 50 valve) and the merge timer
+        // resolves against the CURRENT value — the mirror paints exactly
+        // the textarea's text, never a longer stale snapshot.
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        expect(mirror!.textContent).toBe("hello wo");
+        expect((textarea as HTMLTextAreaElement).value).toBe("hello wo");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("the gutter parity is now ENGINE-RESERVED on both halves (no hard-coded 8px padding)", () => {
+      // Task 50 pinned the mirror to padding-right: 8px to match the
+      // textarea's scrollbar-gutter: stable reservation. That was only
+      // correct on platforms whose scrollbar is exactly 8px: overlay
+      // scrollbars (macOS, headless, many Android WebViews) reserve 0px,
+      // leaving an 8px painted-text/caret skew on every wrapped line.
+      // Both elements now declare scrollbar-gutter: stable so the SAME
+      // engine reserves the SAME width in BOTH boxes on every platform.
+      const css52 = readFileSync(
+        resolve(process.cwd(), "src/app/globals.css"),
+        "utf8",
+      );
+      const rule = css52
+        .slice(
+          css52.indexOf(".prompt-mirror-scroll,"),
+          css52.indexOf("}", css52.indexOf(".prompt-mirror-scroll,")),
+        )
+        .replace(/\/\*[\s\S]*?\*\//g, "");
+      expect(rule).toMatch(/scrollbar-gutter:\s*stable\s*;/);
+      // The hard-coded padding reserve is gone…
+      expect(css52).not.toMatch(/\.prompt-mirror-gutter\s*\{[^}]*padding-right:\s*8px/);
+      // …and the grouped selector covers both halves of the pair.
+      expect(css52).toMatch(/\.prompt-mirror-scroll,\s*\n?\s*\.prompt-mirror-gutter\s*\{/);
+    });
+
+    it("REVEAL_MS matches the CSS animation duration (the merge must not cut an animation short)", () => {
+      const component = readFileSync(
+        resolve(process.cwd(), "src/components/chat/prompt-typing-mirror.tsx"),
+        "utf8",
+      );
+      const css52 = readFileSync(
+        resolve(process.cwd(), "src/app/globals.css"),
+        "utf8",
+      );
+      const ms = component.match(/const REVEAL_MS = (\d+)/);
+      expect(ms).toBeTruthy();
+      expect(css52).toMatch(new RegExp(`prompt-char-in ${ms![1]}ms`));
+    });
+  });
