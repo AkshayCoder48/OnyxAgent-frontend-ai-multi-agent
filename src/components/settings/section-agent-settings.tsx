@@ -55,6 +55,12 @@ function rowsToEnvVars(rows: EnvRow[]): Record<string, string> {
   return out;
 }
 
+/** The env-var name the browser driver ladder reads — a dedicated field
+ *  writes here so users get a labeled, explained input instead of having
+ *  to know the variable name. Stored vault-encrypted like every other
+ *  env var (the service flags KEY-named vars as secrets). */
+const CLOAK_LICENSE_ENV = "CLOAKBROWSER_LICENSE_KEY";
+
 export function SectionAgentSettings() {
   const { settings, loading, update } = useSettings();
 
@@ -64,6 +70,7 @@ export function SectionAgentSettings() {
   const [thinkingEffort, setThinkingEffort] = React.useState<ThinkingEffort>("medium");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [systemPromptEnabled, setSystemPromptEnabled] = React.useState(false);
+  const [cloakLicense, setCloakLicense] = React.useState("");
   const [envRows, setEnvRows] = React.useState<EnvRow[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [hydrated, setHydrated] = React.useState(false);
@@ -101,6 +108,9 @@ export function SectionAgentSettings() {
             value: values[row.key] ?? "",
           })),
         );
+        // The dedicated CloakBrowser license field mirrors the same env
+        // var (it IS env_vars.CLOAKBROWSER_LICENSE_KEY under the hood).
+        setCloakLicense((prev) => (prev ? prev : values[CLOAK_LICENSE_ENV] ?? ""));
       } catch {
         // vault locked or error — leave values empty
       }
@@ -121,6 +131,14 @@ export function SectionAgentSettings() {
     setSaving(true);
     try {
       const trimmedPrompt = systemPrompt.trim();
+      // The dedicated license field writes through to env_vars so the
+      // browser driver ladder (use_browser → sandbox boot) sees it. It
+      // also wins over any manually-added env row of the same name (one
+      // source of truth, no divergent duplicates).
+      const envVars = rowsToEnvVars(envRows);
+      const trimmedLicense = cloakLicense.trim();
+      if (trimmedLicense) envVars[CLOAK_LICENSE_ENV] = trimmedLicense;
+      else delete envVars[CLOAK_LICENSE_ENV];
       const patch: Partial<UserSettings> = {
         default_model: defaultModel.trim() || null,
         default_temperature: temperature,
@@ -131,7 +149,7 @@ export function SectionAgentSettings() {
         // the built-in Onyx prompt in buildTurnOptions.
         system_prompt: trimmedPrompt || null,
         system_prompt_enabled: systemPromptEnabled && !!trimmedPrompt,
-        env_vars: rowsToEnvVars(envRows),
+        env_vars: envVars,
       };
       await update(patch);
       toast.success("Agent settings saved");
@@ -196,6 +214,31 @@ export function SectionAgentSettings() {
             onEnabledChange={setSystemPromptEnabled}
           />
         </div>
+      </section>
+
+      <Separator />
+
+      {/* ── Browser: CloakBrowser license key ── */}
+      <section className="space-y-1.5">
+        <Label htmlFor="cloak-license">CloakBrowser license key</Label>
+        <Input
+          id="cloak-license"
+          type="password"
+          value={cloakLicense}
+          onChange={(e) => setCloakLicense(e.target.value)}
+          placeholder="cb_… (get one free at cloakbrowser.dev)"
+          autoComplete="off"
+          spellCheck={false}
+          className="font-mono text-sm"
+        />
+        <p className="text-muted-foreground text-xs">
+          The browser tool runs CloakBrowser (stealth Chromium, humanized input) when a
+          license key is set — it needs one even on the free tier. Without a key the
+          browser falls back to patchright (a patched stealth Chromium), then stock
+          Chromium. Stored encrypted as the{" "}
+          <code className="font-mono text-[11px]">CLOAKBROWSER_LICENSE_KEY</code> env
+          var and injected into the sandbox automatically. Clearing the field removes it.
+        </p>
       </section>
 
       <Separator />

@@ -302,6 +302,12 @@ registerTool(
         timeoutMs: ACTION_TIMEOUT_MS[action],
         onProgress: progress,
         signal: ctx.signal,
+        // USER ENVS (the CloakBrowser license fix): ctx.envVars carries the
+        // user's decrypted env vars (runtime.ts resolves them from settings)
+        // — CLOAKBROWSER_LICENSE_KEY among them. Forwarded into the driver
+        // boot, the key activates the cloakbrowser engine rung (the PRIMARY
+        // stealth engine); without it the ladder falls to patchright.
+        envs: ctx.envVars && Object.keys(ctx.envVars).length > 0 ? ctx.envVars : undefined,
       });
     } catch (e) {
       // sendBrowserCommand never rejects by contract — this is belt and

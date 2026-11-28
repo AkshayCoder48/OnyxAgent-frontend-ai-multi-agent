@@ -772,11 +772,82 @@ def _unpoison_asyncio():
     start() -> leak -> start() FAILS -> _set_running_loop(None) -> start()
     OK). The flag is cleared with the same private API Playwright itself
     uses (EventInfo.value calls asyncio._set_running_loop); per-thread, so
-    the live-cast and recording threads are unaffected."""
+    the live-cast and recording threads are unaffected.
+
+    2026-11-28 — the 'no running event loop' fix: cloakbrowser ALSO
+    monkey-patches time.sleep while one of its contexts is open
+    (_pumping_sleep routes sleeps >= 0.1s through owner._sync so Windows
+    challenge pages keep pumping). After the watchdog SIGKILLs the browser
+    or the context dies (sandbox pause), the loop is dead-but-tracked: the
+    NEXT time.sleep on this thread hit _sync on the dead loop —
+    RuntimeError('no running event loop') / 'Event loop is closed', or a
+    task parked on a non-running loop that busy-wedged the command loop
+    forever. _untrack_cloak_sleep_owners() below restores the REAL
+    time.sleep; this function additionally clears the flag so the
+    survivors (patchright/playwright launches) start clean."""
     try:
         asyncio._set_running_loop(None)
     except Exception:
         pass
+
+
+def _untrack_cloak_sleep_owners():
+    """Restore the REAL time.sleep (the 'no running event loop' fix).
+
+    cloakbrowser (humanize=True) replaces time.sleep with _pumping_sleep
+    while any of its contexts is open on this thread, routing sleeps
+    through Playwright's event loop. When that loop dies (watchdog kill,
+    crash, sandbox pause) the patch is STALE: every later time.sleep on
+    this thread ran owner._sync on the dead loop, which raised
+    'no running event loop' / 'Event loop is closed' — or, worse, parked a
+    task on a non-running loop and BUSY-WEDGED the command loop (the
+    browser tool hanging with no output). cloak's own cleanup
+    (_close_with_cleanup -> _untrack_sleep_owner) only runs on a CLEAN
+    context.close(); _reset_browser_state's best-effort close can miss it
+    when the context is already dead. Un-track EVERYTHING through
+    cloak's own API (idempotent, no-op when unpatched/absent) so this
+    thread's sleeps are plain OS sleeps again."""
+    try:
+        from cloakbrowser.browser import (
+            _sleep_owners,
+            _real_sleep,
+            _untrack_sleep_owner,
+        )
+        for owners in list(_sleep_owners.values()):
+            for owner in list(owners):
+                try:
+                    _untrack_sleep_owner(owner)
+                except Exception:
+                    pass
+        if time.sleep is not _real_sleep:
+            time.sleep = _real_sleep
+    except Exception:
+        # cloakbrowser absent (patchright/playwright engine) or its
+        # internals changed — nothing to restore; a patched sleep cannot
+        # exist without the module that patched it.
+        pass
+
+
+# The OS-level sleep, captured BEFORE any cloakbrowser import can patch
+# it — the one reference that is guaranteed unpatched for _safe_sleep.
+_REAL_SLEEP = time.sleep
+
+
+def _safe_sleep(seconds):
+    """time.sleep that SURVIVES a stale cloakbrowser patch (the 'no
+    running event loop' fix). With a LIVE cloak context the patched sleep
+    is correct (it pumps Playwright's loop) and is used as-is. If the
+    patch raises (dead loop) or a cloak context is gone while time.sleep
+    is still patched, the owners are untracked (restoring the real sleep)
+    and the sleep retried once. The command loop's 0.3s polls go through
+    here so a browser kill can never wedge the driver."""
+    try:
+        time.sleep(seconds)
+        return
+    except Exception as e:
+        log("sleep poisoned (stale cloakbrowser patch: %s) — restoring the real sleep" % (e,))
+    _untrack_cloak_sleep_owners()
+    _REAL_SLEEP(seconds)
 def _clear_stale_profile_locks():
     """Remove Chromium's stale ProcessSingleton locks before launching.
 
@@ -854,7 +925,10 @@ def _reset_browser_state():
     runtime = None
     pages = []
     active_idx = 0
-    # A dead-but-unstoppable instance can leave the running-loop flag set.
+    # A dead-but-unstoppable instance can leave the running-loop flag set
+    # AND cloakbrowser's time.sleep patch pointing at the dead loop (the
+    # 'no running event loop' wedge) — clear both.
+    _untrack_cloak_sleep_owners()
     _unpoison_asyncio()
 
 
@@ -991,6 +1065,12 @@ def boot_browser():
     # CloakBrowserLicenseError AFTER a network round-trip. Probing first
     # keeps unlicensed sandboxes off that path entirely (the browser boots
     # straight to patchright instead of failing through cloak first).
+    # 2026-11-28 (Settings → CloakBrowser license key): the key now ALSO
+    # arrives via the per-exec env (execInSandbox envs → boot.sh spawn →
+    # driver), and once seen it is PERSISTED to cloak's own default file
+    # (~/.cloakbrowser/license.key, 0600) — the Pro binary reads that file
+    # directly, so later boots + the detached live-cast CDP connection work
+    # even when the env is not re-forwarded on a reconnect.
     cloak_key = os.environ.get("CLOAKBROWSER_LICENSE_KEY", "").strip()
     if not cloak_key:
         try:
@@ -998,6 +1078,13 @@ def boot_browser():
             cloak_key = _cb_key() or ""
         except Exception:
             cloak_key = ""
+    if cloak_key:
+        try:
+            # Persist for cross-boot use. Never logs the key itself.
+            from cloakbrowser.license import save_license_key as _cb_save
+            _cb_save(cloak_key)
+        except Exception as e:
+            log("cloak license key cache write skipped: %s" % (e,))
     _unpoison_asyncio()
     event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser" if cloak_key else "skipped-no-license", headed=HEADED)
     if cloak_key:
@@ -2650,15 +2737,22 @@ def main():
     sweep_n = 0
     while True:
         try:
+            # POLL SLEEP GUARD (the 'no running event loop' fix): a cloak
+            # context that died between commands (watchdog kill, crash,
+            # sandbox pause) leaves time.sleep patched at the dead loop —
+            # this poll's 0.3s sleep would raise 'no running event loop'
+            # / 'Event loop is closed' (or busy-wedge) HERE. _safe_sleep
+            # detects the poisoned/patched sleep, restores the real one via
+            # _untrack_cloak_sleep_owners, and retries once.
             if not os.path.exists(CMD):
-                time.sleep(0.3)
+                _safe_sleep(0.3)
                 continue
             with open(CMD, "r") as f:
                 raw = f.read()
             cmd = json.loads(raw)
             cid = str(cmd.get("id") or "")
             if not cid or cid == seen:
-                time.sleep(0.3)
+                _safe_sleep(0.3)
                 continue
             seen = cid
             action = str(cmd.get("action") or "")
@@ -2726,10 +2820,10 @@ def main():
             if sweep_n % 200 == 0:
                 _sweep_stale_results()
         except json.JSONDecodeError:
-            time.sleep(0.3)
+            _safe_sleep(0.3)
         except Exception:
             log("loop error: %s" % traceback.format_exc()[-300:])
-            time.sleep(0.5)
+            _safe_sleep(0.5)
 
 
 if __name__ == "__main__":

@@ -560,3 +560,79 @@ describe("browser-driver boot.sh engine ladder install", () => {
     expect(BOOT).toContain("import patchright");
   });
 });
+
+// ── CLOAK LICENSE PLUMBING + THE 'no running event loop' FIX (Task 51) ──────
+// Two regressions pinned here:
+//   1. cloakbrowser 0.7.3 monkey-patches time.sleep (_pumping_sleep →
+//      owner._sync) while a humanized context is open. After the watchdog
+//      SIGKILLs the browser or the context dies, the patch pointed at the
+//      dead loop — the driver's own time.sleep(0.3) poll then raised
+//      'no running event loop' / 'Event loop is closed' or busy-wedged the
+//      command loop forever.
+//   2. The license key configured in Settings never REACHED the sandbox:
+//      execInSandbox never forwarded envs, so boot.sh skipped the cloak
+//      binary pre-fetch and the driver ladder fell to patchright even for
+//      licensed users.
+describe("browser-driver: the 'no running event loop' fix (cloak sleep patch)", () => {
+  it("restores the REAL time.sleep when cloak owners die (_untrack_cloak_sleep_owners)", () => {
+    expect(SRC).toContain("def _untrack_cloak_sleep_owners");
+    // It goes through cloak's OWN API (idempotent, no-op when absent)…
+    expect(SRC).toContain("_untrack_sleep_owner");
+    // …and force-restores the real sleep if anything remains patched.
+    expect(SRC).toContain("_real_sleep");
+  });
+
+  it("captures the OS-level sleep reference BEFORE any cloak import can patch it", () => {
+    expect(SRC).toContain("_REAL_SLEEP = time.sleep");
+    const captureAt = SRC.indexOf("_REAL_SLEEP = time.sleep");
+    const firstCloakImportAt = SRC.indexOf("from cloakbrowser import");
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(firstCloakImportAt).toBeGreaterThan(captureAt);
+  });
+
+  it("_reset_browser_state clears BOTH hazards (sleep patch + loop flag)", () => {
+    const fn = section("def _reset_browser_state", "def _display_alive");
+    const untrackAt = fn.indexOf("_untrack_cloak_sleep_owners()");
+    const unpoisonAt = fn.indexOf("_unpoison_asyncio()");
+    expect(untrackAt).toBeGreaterThan(-1);
+    expect(unpoisonAt).toBeGreaterThan(-1);
+    // Untrack FIRST (a patched sleep must not survive into the unpoison).
+    expect(untrackAt).toBeLessThan(unpoisonAt);
+  });
+
+  it("the command loop polls through _safe_sleep (self-healing, retries once)", () => {
+    expect(SRC).toContain("def _safe_sleep");
+    // The definition retries through the CAPTURED real sleep after
+    // restoring — never through the (possibly still-patched) name.
+    const fnAt = SRC.indexOf("def _safe_sleep");
+    const fn = SRC.slice(fnAt, SRC.indexOf("def boot_browser", fnAt));
+    expect(fn).toContain("_untrack_cloak_sleep_owners()");
+    expect(fn).toContain("_REAL_SLEEP(seconds)");
+    // All short-sleep sites in the command loop route through it (two
+    // idle polls + the JSONDecodeError handler), and the error handler
+    // too — a poisoned sleep must never fire anywhere in the loop.
+    const loop = section("log(\"driver loop started", "if __name__");
+    const polls = all(loop, "_safe_sleep(0.3)");
+    expect(polls.length).toBe(3);
+    expect(loop).toContain("_safe_sleep(0.5)");
+    expect(loop).not.toMatch(/[^_a-zA-Z]time\.sleep\(0\.[35]\)/);
+  });
+});
+
+describe("browser-driver: the cloak license key reaches the sandbox", () => {
+  it("boot_browser persists a seen license to cloak's own default file (cross-boot)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    // The key is resolved from env OR cloak's resolver…
+    expect(boot).toContain('os.environ.get("CLOAKBROWSER_LICENSE_KEY"');
+    // …and once seen, persisted via cloak's own save (0600, default file —
+    // the Pro binary reads it directly on later boots without env re-forward).
+    expect(boot).toContain("save_license_key as _cb_save");
+    expect(boot).toContain("_cb_save(cloak_key)");
+    // Never logged: the persist failure logs the ERROR, never the key.
+    const persistSlice = boot.slice(
+      boot.indexOf("save_license_key as _cb_save"),
+      boot.indexOf("_unpoison_asyncio()", boot.indexOf("save_license_key as _cb_save")),
+    );
+    expect(persistSlice).not.toMatch(/log\([^)]*cloak_key/);
+  });
+});

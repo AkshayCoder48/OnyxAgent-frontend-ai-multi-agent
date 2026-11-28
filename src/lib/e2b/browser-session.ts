@@ -213,12 +213,22 @@ async function execInSandbox(
   client: BrowserSandboxClient,
   command: string,
   timeoutSec: number,
+  envs?: Record<string, string>,
 ): Promise<{ ok: boolean; output: string; error: string }> {
   let out = "";
   let err = "";
   let exit = 0;
   try {
-    const stream = client.runCommandStream(command, { timeout: timeoutSec });
+    const stream = client.runCommandStream(command, {
+      timeout: timeoutSec,
+      // `envs` (the CloakBrowser license fix): user env vars — crucially
+      // CLOAKBROWSER_LICENSE_KEY — ride EVERY sandbox exec so boot.sh's
+      // binary pre-fetch, the driver's engine ladder AND `python -m
+      // cloakbrowser install` all see the key. The E2B exec env REPLACES
+      // nothing (it merges per-exec), so passing the full user dict is
+      // safe; sanitizeEnvs on the server already caps it.
+      ...(envs && Object.keys(envs).length > 0 ? { envs } : {}),
+    });
     // Bound the WHOLE stream consumption — a fetch that never yields a
     // result event (hung serverless connection) must not hang us forever.
     // The floor keeps legitimate silent commands (up to their own E2B
@@ -378,11 +388,20 @@ const BOOT_LOCK_PROBE_CMD = [
 export async function ensureBrowserDriver(
   client: BrowserSandboxClient,
   onProgress?: (line: string) => void,
+  envs?: Record<string, string>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const state = sessionOf(client);
   if (!state.bootPromise) {
     state.bootPromise = (async () => {
       try {
+        // USER ENVS (the CloakBrowser license fix): every sandbox exec in
+        // this boot carries the user's env vars — most importantly
+        // CLOAKBROWSER_LICENSE_KEY, which gates the cloakbrowser engine
+        // rung (0.7.3 demands a key even for the free tier). boot.sh uses
+        // it to pre-fetch the stealth binary; the driver ladder uses it
+        // to launch cloakbrowser as the PRIMARY engine and to cache the
+        // key where the sandboxed binary reads it.
+        const bootEnvs = envs && Object.keys(envs).length > 0 ? envs : undefined;
         if (await driverAlive(client)) {
           if (await driverUpToDate(client)) return { ok: true };
           // Stale driver CODE is running in this sandbox. Kill it so the
@@ -444,7 +463,7 @@ export async function ensureBrowserDriver(
         // minutes (pip ladder + ~200 MB binary pre-fetch) → honest ceiling
         // + honest narration.
         const probe = await withTimeout(
-          execInSandbox(client, RUNTIME_PROBE_CMD, 30),
+          execInSandbox(client, RUNTIME_PROBE_CMD, 30, bootEnvs),
           t_("httpCallMs") + 35_000,
           "runtime probe",
         ).catch(() => null);
@@ -475,6 +494,11 @@ export async function ensureBrowserDriver(
                 logPath: BOOT_LOG_PATH,
               }) + " && echo booting",
               20,
+              // The license env rides the LAUNCH exec so the DETACHED
+              // boot.sh (pip install + cloakbrowser binary pre-fetch +
+              // driver launch) inherits it — envs on a spawn propagate to
+              // the whole detached process tree.
+              bootEnvs,
             ),
             t_("httpCallMs"),
             "boot launch",
@@ -577,11 +601,12 @@ export async function ensureBrowserDriver(
 export function prepareBrowserInBackground(
   client: BrowserSandboxClient,
   onProgress?: (line: string) => void,
+  envs?: Record<string, string>,
 ): void {
   const state = sessionOf(client);
   if (state.prepared) return;
   state.prepared = true;
-  void ensureBrowserDriver(client, onProgress ?? (() => {}))
+  void ensureBrowserDriver(client, onProgress ?? (() => {}), envs)
     .then((r) => {
       if (r.ok) console.log("[browser] background prepare complete — browser ready before first use");
       else console.log("[browser] background prepare did not complete:", r.error.slice(0, 200));
@@ -651,6 +676,10 @@ export async function sendBrowserCommand(
     /** Cancellation — the agent tool context's abort signal. Aborting
      *  resolves immediately with a structured cancelled result. */
     signal?: AbortSignal;
+    /** User env vars (CLOAKBROWSER_LICENSE_KEY above all) forwarded into
+     *  the driver boot so the cloakbrowser engine rung activates when a
+     *  license is configured. */
+    envs?: Record<string, string>;
   },
 ): Promise<BrowserCommandResult> {
   const state = sessionOf(client);
@@ -668,7 +697,7 @@ export async function sendBrowserCommand(
     if (signal?.aborted) {
       return cancelledResult(cmd);
     }
-    const booted = await ensureBrowserDriver(client, opts?.onProgress);
+    const booted = await ensureBrowserDriver(client, opts?.onProgress, opts?.envs);
     if (!booted.ok) {
       return {
         success: false,

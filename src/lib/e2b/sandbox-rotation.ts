@@ -166,7 +166,13 @@ export async function resolveSandboxApiKey(ctx: {
  */
 export async function ensureFreshSandbox(
   apiKey: string,
-  target?: { conversationId?: string | null; mode?: "shared" | "separate" },
+  target?: {
+    conversationId?: string | null;
+    mode?: "shared" | "separate";
+    /** User env vars forwarded to the background browser prepare
+     *  (CLOAKBROWSER_LICENSE_KEY activates the cloakbrowser pre-fetch). */
+    envVars?: Record<string, string>;
+  },
 ): Promise<void> {
   if (!apiKey) return;
   const t: SandboxTarget = {
@@ -174,6 +180,7 @@ export async function ensureFreshSandbox(
     conversationId: target?.conversationId ?? null,
     mode: target?.mode ?? "shared",
   };
+  const envVars = target?.envVars;
 
   // If rotation is already in progress FOR THIS TARGET, wait for it (don't
   // start a second one). Other targets rotate on their own schedules.
@@ -208,7 +215,14 @@ export async function ensureFreshSandbox(
       // kick at creation (createAndCacheSandbox → prepareBrowserRuntime);
       // boot.sh's .boot-lock makes the double-kick harmless, and this one
       // covers rotation flows that reuse an existing server instance.
-      prepareBrowserInBackground(targetE2BClient(t));
+      // ctx.envVars (CLOAKBROWSER_LICENSE_KEY above all) ride the kick so
+      // the background pre-fetch can pull the cloakbrowser stealth binary
+      // when the user configured a license (Settings → Agent → Browser).
+      prepareBrowserInBackground(
+        targetE2BClient(t),
+        undefined,
+        envVars && Object.keys(envVars).length > 0 ? envVars : undefined,
+      );
     } catch {
       // best-effort — don't block the operation. The next call will retry.
     }
@@ -219,7 +233,7 @@ export async function ensureFreshSandbox(
   if (Date.now() - createdAt < ROTATION_AGE_MS) return;
 
   // Rotation needed — perform it atomically on the server.
-  const rotation = performRotation(t).finally(() => {
+  const rotation = performRotation(t, envVars).finally(() => {
     rotationPromises.delete(targetMutexKey(t));
   });
   rotationPromises.set(targetMutexKey(t), rotation);
@@ -247,7 +261,10 @@ export async function ensureFreshSandbox(
  * localStorage slot — shared = the legacy key, separate = the per-chat key)
  * and the creation timestamp.
  */
-async function performRotation(t: SandboxTarget): Promise<void> {
+async function performRotation(
+  t: SandboxTarget,
+  envVars?: Record<string, string>,
+): Promise<void> {
   try {
     // The CURRENT sandbox id — the server uses it (as a fallback to its own
     // cache) to back up + replace exactly this sandbox. localStorage is the
@@ -360,8 +377,14 @@ async function performRotation(t: SandboxTarget): Promise<void> {
         // The replacement sandbox just came up — kick its browser
         // prepare in the background so the browser is warm before the
         // next use_browser call (the restored ~/.onyx/browser/profile
-        // backup keeps the session state across the swap).
-        prepareBrowserInBackground(targetE2BClient(t));
+        // backup keeps the session state across the swap). envVars ride
+        // along (CLOAKBROWSER_LICENSE_KEY → cloak pre-fetch, same as the
+        // creation-time kick above).
+        prepareBrowserInBackground(
+          targetE2BClient(t),
+          undefined,
+          envVars && Object.keys(envVars).length > 0 ? envVars : undefined,
+        );
       }
       // Record the rotation time so we rotate again after the rotation age.
       setStoredCreatedAt(t, Date.now());
@@ -425,7 +448,12 @@ export async function chatSandboxForCtx(
     conversationId: ctx.conversationId ?? null,
     mode: ctx.sandboxMode ?? "shared",
   };
-  await ensureFreshSandbox(apiKey, target);
+  // ctx.envVars ride the freshness check (the creation-time background
+  // browser prepare uses them — CLOAKBROWSER_LICENSE_KEY above all).
+  await ensureFreshSandbox(apiKey, {
+    ...target,
+    envVars: ctx.envVars && Object.keys(ctx.envVars).length > 0 ? ctx.envVars : undefined,
+  });
   return { ...target, client: targetE2BClient(target) };
 }
 
@@ -493,6 +521,19 @@ export async function prewarmSandbox(opts?: {
     const apiKey = userId ? await getEffectiveE2BKey(userId) : null;
     if (!apiKey) return false;
 
+    // USER ENVS (CloakBrowser license fix): resolve the same env-var dict
+    // the first tool call will see, so the creation-time browser prepare
+    // this prewarm triggers can pre-fetch the cloakbrowser stealth binary
+    // when CLOAKBROWSER_LICENSE_KEY is configured. Best-effort.
+    let envVars: Record<string, string> | undefined;
+    try {
+      const { settingsService } = await import("@/lib/services");
+      const vars = userId ? await settingsService.getDecryptedEnvVars(userId) : null;
+      if (vars && Object.keys(vars).length > 0) envVars = vars;
+    } catch {
+      // vault locked — the tool-side boot path forwards envs per call anyway
+    }
+
     const target: SandboxTarget = {
       apiKey,
       conversationId: opts?.conversationId ?? null,
@@ -513,7 +554,7 @@ export async function prewarmSandbox(opts?: {
       // timestamp stamp; stale (>50 min) → rotation; fresh → no-op. A
       // failure leaves NO timestamp, so the next call (the first tool
       // call's own ensureFreshSandbox) retries transparently.
-      await ensureFreshSandbox(apiKey, target);
+      await ensureFreshSandbox(apiKey, { ...target, envVars });
       // Warmth signal: the creation stamp is written ONLY on a successful
       // first create / healthy rotation (and persists across reloads for
       // fresh sandboxes — exactly the state the tool path would see). A

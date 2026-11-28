@@ -68,6 +68,10 @@ interface FakeClient extends BrowserSandboxClient {
   files: Map<string, string>;
   /** Every command string passed to runCommandStream. */
   commands: string[];
+  /** The envs object each runCommandStream call received (parallel to
+   *  `commands`; undefined = no envs passed) — the CloakBrowser license
+   *  plumbing pins its CLOAKBROWSER_LICENSE_KEY forwarding on this. */
+  commandEnvs: Array<Record<string, string> | undefined>;
   /** Result files the fake "driver" produced (res path → JSON). */
   resFiles: Map<string, string>;
 }
@@ -76,6 +80,7 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
   const files = new Map<string, string>();
   const resFiles = new Map<string, string>();
   const commands: string[] = [];
+  const commandEnvs: Array<Record<string, string> | undefined> = [];
   const alive = opts.alive ?? true;
   const version = opts.version ?? BROWSER_DRIVER_VERSION;
   // The fake "boots": once the detached launch command ran, the boot polls
@@ -85,6 +90,7 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
   const client: FakeClient = {
     files,
     commands,
+    commandEnvs,
     resFiles,
     async writeFile(path, content) {
       files.set(path, content);
@@ -106,8 +112,9 @@ function makeFakeClient(opts: FakeClientOpts = {}): FakeClient {
       if (files.has(path)) return files.get(path)!;
       throw new Error(`ENOENT: ${path}`);
     },
-    async *runCommandStream(command: string) {
+    async *runCommandStream(command: string, execOpts?: { cwd?: string; timeout?: number; envs?: Record<string, string> }) {
       commands.push(command);
+      commandEnvs.push(execOpts?.envs);
       if (opts.hangExec || opts.hangOn?.(command)) {
         await new Promise(() => {}); // never yields — the hung HTTP case
       }
@@ -428,5 +435,58 @@ describe("browser-session: detached boot launch (the runs-forever fix)", () => {
     const cold = makeFakeClient({ alive: false, runtimePresent: true, duplicateFrames: true });
     expect((await ensureBrowserDriver(cold)).ok).toBe(true);
     expect(cold.commands.some((c) => c.includes("echo booting"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CloakBrowser license plumbing (Task 51 — "add option in settings to add
+// license key to cloak browser"): the user's env vars, above all
+// CLOAKBROWSER_LICENSE_KEY, must reach the sandbox exec that launches the
+// detached boot.sh — that is what activates the cloakbrowser engine rung
+// (0.7.3 demands a key even for the free tier) and its binary pre-fetch.
+// ---------------------------------------------------------------------------
+
+describe("browser-session: user envs (CLOAKBROWSER_LICENSE_KEY) reach the sandbox", () => {
+  it("the detached boot launch carries the license env (boot.sh pre-fetch + driver ladder see it)", async () => {
+    // alive:false forces the COLD path — a warm up-to-date driver
+    // short-circuits before any launch exec runs.
+    const client = makeFakeClient({ alive: false, runtimePresent: false });
+    const result = await ensureBrowserDriver(client, undefined, {
+      CLOAKBROWSER_LICENSE_KEY: "cb_test_key_123",
+      OTHER_VAR: "x",
+    });
+    expect(result.ok).toBe(true);
+    // The LAUNCH exec (the one that spawns boot.sh) received the envs.
+    const launchIdx = client.commands.findIndex((c) => c.includes("echo booting"));
+    expect(launchIdx).toBeGreaterThan(-1);
+    expect(client.commandEnvs[launchIdx]).toEqual({
+      CLOAKBROWSER_LICENSE_KEY: "cb_test_key_123",
+      OTHER_VAR: "x",
+    });
+  });
+
+  it("sendBrowserCommand forwards envs into the boot (the use_browser path)", async () => {
+    // Cold driver → sendBrowserCommand boots it WITH the envs, then the
+    // command round-trips through the file protocol. (No `id` in the cmd:
+    // sendCommandOnce generates one and the fake driver answers under it.)
+    const client = makeFakeClient({ alive: false, runtimePresent: true });
+    const result = await sendBrowserCommand(
+      client,
+      { action: "navigate", url: "https://example.com/" },
+      { envs: { CLOAKBROWSER_LICENSE_KEY: "cb_test_key_123" } },
+    );
+    expect(result.success).toBe(true);
+    const launchIdx = client.commands.findIndex((c) => c.includes("echo booting"));
+    expect(launchIdx).toBeGreaterThan(-1);
+    expect(client.commandEnvs[launchIdx]).toEqual({ CLOAKBROWSER_LICENSE_KEY: "cb_test_key_123" });
+  });
+
+  it("a cold boot WITHOUT envs passes NO envs to the launch (unlicensed ladder unchanged)", async () => {
+    const client = makeFakeClient({ alive: false, runtimePresent: false });
+    const result = await ensureBrowserDriver(client);
+    expect(result.ok).toBe(true);
+    const launchIdx = client.commands.findIndex((c) => c.includes("echo booting"));
+    expect(launchIdx).toBeGreaterThan(-1);
+    expect(client.commandEnvs[launchIdx]).toBeUndefined();
   });
 });
