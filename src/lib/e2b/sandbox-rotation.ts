@@ -41,6 +41,14 @@ import type { ToolContext } from "@/lib/tools/registry";
 // E2B's max sandbox timeout is 1 hour, so we rotate at 50 min to be safe.
 const ROTATION_AGE_MS = 50 * 60 * 1000;
 
+// Hard client-side deadline for the rotate API call. Generous (10 min):
+// rotation is real work — backup (ALL files, binary-safe) → kill → create →
+// restore — and a big workspace legitimately takes minutes. The point is a
+// BOUND: without one, a wedged rotate fetch held the per-target rotation
+// mutex forever and every subsequent tool call awaited the dead promise
+// (the "stuck at first tool call forever" report, 2026-11-28).
+export const ROTATION_CALL_TIMEOUT_MS = 10 * 60 * 1000;
+
 // localStorage keys (per rotation target).
 function createdAtKey(t: SandboxTarget): string {
   // Shared targets keep the LEGACY per-apiKey key (no migration); separate
@@ -250,17 +258,40 @@ async function performRotation(t: SandboxTarget): Promise<void> {
     const storedSandboxId =
       typeof window !== "undefined" ? window.localStorage.getItem(idKey) : null;
     const currentSandboxId = storedSandboxId ?? targetE2BClient(t).peekSandboxId();
-    const res = await fetch("/api/sandbox", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        apiKey: t.apiKey,
-        action: "rotate",
-        conversationId: t.conversationId,
-        sandboxMode: t.mode,
-        sandboxId: currentSandboxId,
-      }),
-    });
+    // HARD BUDGET (the "stuck at first tool call" fix, 2026-11-28): rotation
+    // is backup → kill → create → restore of an ENTIRE workspace — with a
+    // large one this legitimately takes minutes. But a bare fetch has NO
+    // browser deadline: a wedged rotation held the per-target mutex FOREVER
+    // and every subsequent tool call awaited the dead promise (infinite
+    // hang). The budget is generous on purpose (10 min — real work, not a
+    // stall); on abort the timestamp is cleared below and the next call
+    // retries, so the mutex always frees.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ROTATION_CALL_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch("/api/sandbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: t.apiKey,
+          action: "rotate",
+          conversationId: t.conversationId,
+          sandboxMode: t.mode,
+          sandboxId: currentSandboxId,
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if ((err as { name?: string } | null)?.name === "AbortError") {
+        throw new Error(
+          `sandbox rotation timed out after ${Math.round(ROTATION_CALL_TIMEOUT_MS / 1000)}s (backup → kill → create → restore) and was aborted — it will be retried on the next tool call`,
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -404,3 +435,102 @@ export async function chatSandboxForCtx(
  *  refactor removed it and left them type-broken on main; restored
  *  2026-11-05 as a thin alias). */
 export const codeSandboxForCtx = chatSandboxForCtx;
+
+// ─── PREWARM (user directive 2026-11-28) ────────────────────────────────────
+//
+// "if it's due to sandbox start make the sandbox start in chat start not the
+//  first message" — the first sandbox tool call of a session used to pay the
+// ENTIRE cold-start inline: serverless cold instance → orphan reclaim →
+// Sandbox.create → workspace prep (+ 429 backoffs). That is the 2–6 minute
+// `verify_path` / `list_folder` / `ls` first-call latency.
+//
+// prewarmSandbox() kicks the SAME ensureFreshSandbox path the tools use, but
+// AT CHAT START — the create (or reconnect to the persisted id / metadata
+// lookup) runs while the user is still typing their first message, so by the
+// time the first tool call arrives the sandbox exists, is cached server-side,
+// and the tool call only pays the actual file operation.
+
+/** In-flight prewarm promise per target — concurrent mounts / re-renders
+ *  share one kick (React StrictMode double-mounts, sidebar + page both
+ *  prewarming, …). Never persisted: a new page load prewarms again, which
+ *  is correct — the serverless instance may have recycled meanwhile. */
+const prewarmInFlight = new Map<string, Promise<boolean>>();
+
+/** Re-prewarm when the last successful prewarm is older than this (the page
+ *  sits open for hours; the sandbox pauses at the E2B timeout — a fresh
+ *  ensureFreshSandbox reconnects/auto-resumes it). */
+const PREWARM_STALE_MS = 30 * 60 * 1000;
+const prewarmLastOk = new Map<string, number>();
+
+/**
+ * Start (or confirm) the user's sandbox NOW — fire-and-forget, never throws.
+ *
+ * Called at chat-page mount (BEFORE any message is sent). Deduped per
+ * (apiKey, conversationId, mode): while one prewarm is in flight, later
+ * callers await the SAME promise instead of issuing a second create. When a
+ * prewarm already SUCCEEDED recently (< PREWARM_STALE_MS), it's a no-op.
+ *
+ * Returns (for callers/tests that care): true when the sandbox is warm
+ * (this call or a recent earlier one), false when prewarming was impossible
+ * (no key) or failed — the normal lazy tool path remains the fallback in
+ * that case, so a prewarm failure NEVER breaks the chat.
+ */
+export async function prewarmSandbox(opts?: {
+  userId?: string;
+  conversationId?: string | null;
+  mode?: "shared" | "separate";
+}): Promise<boolean> {
+  try {
+    // Resolve the key EXACTLY the way the agent runtime will on the first
+    // tool call: getEffectiveE2BKey (decrypted vault → legacy localStorage
+    // copy → the USE_SERVER_ENV sentinel when the server carries
+    // E2B_API_KEY). A cheaper vault-only lookup here would silently skip
+    // prewarming for every user on the zero-config server-key lane, and
+    // their first tool call would pay the full cold start anyway.
+    const { getEffectiveE2BKey } = await import("./env-key");
+    const { useAuthStore } = await import("@/stores");
+    const userId = opts?.userId ?? useAuthStore.getState().user?.id ?? null;
+    const apiKey = userId ? await getEffectiveE2BKey(userId) : null;
+    if (!apiKey) return false;
+
+    const target: SandboxTarget = {
+      apiKey,
+      conversationId: opts?.conversationId ?? null,
+      mode: opts?.mode ?? "shared",
+    };
+    const mutexKey = targetMutexKey(target);
+
+    // Recently warmed — nothing to do.
+    const lastOk = prewarmLastOk.get(mutexKey);
+    if (lastOk && Date.now() - lastOk < PREWARM_STALE_MS) return true;
+
+    // Dedupe: share the in-flight kick.
+    const inFlight = prewarmInFlight.get(mutexKey);
+    if (inFlight) return await inFlight;
+
+    const kick = (async (): Promise<boolean> => {
+      // ensureFreshSandbox never throws: first call → createSandbox() +
+      // timestamp stamp; stale (>50 min) → rotation; fresh → no-op. A
+      // failure leaves NO timestamp, so the next call (the first tool
+      // call's own ensureFreshSandbox) retries transparently.
+      await ensureFreshSandbox(apiKey, target);
+      // Warmth signal: the creation stamp is written ONLY on a successful
+      // first create / healthy rotation (and persists across reloads for
+      // fresh sandboxes — exactly the state the tool path would see). A
+      // failed create leaves no stamp → report not-warm so a later prewarm
+      // retries instead of caching a false "warm".
+      return getStoredCreatedAt(target) !== null;
+    })()
+      .catch(() => false)
+      .finally(() => {
+        prewarmInFlight.delete(mutexKey);
+      });
+    prewarmInFlight.set(mutexKey, kick);
+    const ok = await kick;
+    if (ok) prewarmLastOk.set(mutexKey, Date.now());
+    return ok;
+  } catch {
+    // Never let a prewarm break anything — it's a pure optimization.
+    return false;
+  }
+}

@@ -13,7 +13,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useChatSidebarStore, useConversationStore } from "@/stores";
+import { useChatSidebarStore, useConversationStore, useAuthStore } from "@/stores";
 import { useConversations } from "@/hooks";
 import { useSettings } from "@/hooks/use-data";
 import { useLogStore } from "@/stores/log-store";
@@ -38,6 +38,7 @@ import { useActiveProject } from "@/lib/projects/store";
 import { ProjectChrome } from "@/components/projects/project-chrome";
 import { ProjectHistoryDrawer } from "@/components/projects/project-history-drawer";
 import { useProjectSelectionSync } from "@/components/projects/project-conversations";
+import { prewarmSandbox } from "@/lib/e2b/sandbox-rotation";
 // SEMANTIC SEARCH (Task 2-b) — the global search dialog, mounted ONCE so it
 // is reachable from anywhere in the chat UI (sidebar affordance, Ctrl/Cmd+
 // Shift+F, drawer hits reuse its reveal helper).
@@ -163,6 +164,23 @@ export function ChatWorkspace() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [startNewChat]);
+
+  // SANDBOX PREWARM (user directive 2026-11-28: "make the sandbox start in
+  // chat start not the first message"): kick the user's E2B sandbox the
+  // moment the chat workspace mounts — the cold create (or reconnect to the
+  // persisted id / metadata lookup) runs while the user types their first
+  // message, so the FIRST tool call no longer pays the whole sandbox start
+  // inline (the 2–6 minute verify_path / list_folder / ls first-call
+  // latency). Fire-and-forget + deduped inside prewarmSandbox (StrictMode
+  // double-mount shares one kick); failures are swallowed there — the tools'
+  // normal lazy path remains the fallback, so a failed prewarm never breaks
+  // the chat.
+  const prewarmUserId = useAuthStore((s) => s.user?.id);
+  const prewarmAuthResolved = useAuthStore((s) => s.authResolved);
+  useEffect(() => {
+    if (!prewarmAuthResolved) return; // wait for auth — the key is per-user
+    void prewarmSandbox({ userId: prewarmUserId });
+  }, [prewarmAuthResolved, prewarmUserId]);
 
   // Export conversation dialog (PRD §12) — opened from the chat top bar.
   const [exportOpen, setExportOpen] = useState(false);

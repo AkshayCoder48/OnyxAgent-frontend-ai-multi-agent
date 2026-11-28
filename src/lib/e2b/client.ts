@@ -27,6 +27,13 @@
 
 const API_ENDPOINT = "/api/sandbox";
 
+/** Hard client-side deadline for one /api/sandbox attempt. Generous by
+ *  design: a cold sandbox CREATE legitimately takes tens of seconds
+ *  (orphan reclaim → create → workspace prep), and slow file ops on big
+ *  workspaces can too. The point is a BOUND, not speed — without it a
+ *  stalled connection hung the first tool call forever (2026-11-28). */
+export const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+
 export interface E2BFile {
   path: string;
   type: "file" | "directory";
@@ -218,6 +225,7 @@ export class E2BClient {
   private async call<T>(
     action: string,
     args: Record<string, unknown> = {},
+    timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
   ): Promise<T> {
     // ── Request coalescing ──────────────────────────────────────────
     // Identical in-flight requests (same action + args + sandbox) share a
@@ -225,7 +233,9 @@ export class E2BClient {
     // sandbox API with duplicates. The conversationId is part of the key:
     // two separate-mode clients for DIFFERENT conversations must never share
     // an in-flight call (they target different sandboxes even when the args
-    // are identical).
+    // are identical). The timeout keeps this map SELF-CLEANING: a wedged
+    // attempt rejects, its slot frees, and the next caller starts fresh
+    // instead of being pinned onto a dead promise forever.
     const coalesceKey = `${this.apiKey}:${this.mode}:${this.conversationId ?? ""}:${action}:${JSON.stringify(args)}`;
     const inFlight = E2BClient.inFlightCalls.get(coalesceKey);
     if (inFlight) {
@@ -236,7 +246,7 @@ export class E2BClient {
       }
     }
 
-    const attempt = this.callUncached<T>(action, args).finally(() => {
+    const attempt = this.callUncached<T>(action, args, timeoutMs).finally(() => {
       E2BClient.inFlightCalls.delete(coalesceKey);
     });
     E2BClient.inFlightCalls.set(coalesceKey, attempt);
@@ -246,27 +256,59 @@ export class E2BClient {
   /** In-flight request coalescing map (shared across client instances). */
   private static inFlightCalls = new Map<string, Promise<unknown>>();
 
-  /** The actual (non-coalesced) sandbox API call with bounded rate-limit
-   *  backoff (429 / 529). */
+  /** The actual (non-coalesced) sandbox API call with a HARD client-side
+   *  timeout and bounded rate-limit backoff (429 / 529).
+   *
+   *  TIMEOUT (the "first tool call hangs forever" fix, 2026-11-28): a bare
+   *  fetch() has NO browser-enforced deadline — a stalled connection (proxy
+   *  hiccup, serverless function wedged, E2B API unresponsive) left the
+   *  first tool call awaiting forever, and worse: request coalescing pinned
+   *  every subsequent identical call onto the dead promise. Every call now
+   *  races an AbortController; a timeout surfaces as a normal error the
+   *  caller's catch already handles, the coalescing slot frees, and the
+   *  NEXT call (or the tool's own retry) starts fresh. */
   private async callUncached<T>(
     action: string,
     args: Record<string, unknown> = {},
+    timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
   ): Promise<T> {
     const doCall = async (sandboxId: string | null): Promise<Response> => {
-      return fetch(API_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey: this.apiKey,
-          action,
-          args,
-          conversationId: this.conversationId,
-          sandboxMode: this.mode,
-          // Pass the sandbox ID so the server can reconnect to an existing
-          // sandbox instead of creating a new one on each serverless cold start.
-          sandboxId: sandboxId,
-        }),
-      });
+      // Per-attempt abort controller — each fetch gets its own full budget.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(API_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            apiKey: this.apiKey,
+            action,
+            args,
+            conversationId: this.conversationId,
+            sandboxMode: this.mode,
+            // Pass the sandbox ID so the server can reconnect to an existing
+            // sandbox instead of creating a new one on each serverless cold start.
+            sandboxId: sandboxId,
+          }),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        // A timeout abort is a NORMAL, described failure — not a crash.
+        // Surface it with the action name + budget so logs (and the user)
+        // can tell a timeout from a network error. Status 408 keeps it out
+        // of the 429/529 retry loop (the budget already covered any
+        // legitimate wait).
+        if ((err as { name?: string } | null)?.name === "AbortError") {
+          throw new E2BError(
+            `Sandbox API "${action}" timed out after ${Math.round(timeoutMs / 1000)}s and was aborted (it can be retried).`,
+            408,
+            { action, timeoutMs },
+          );
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
     };
 
     // ── Bounded rate-limit backoff (PRD §30) ──────────────────────
