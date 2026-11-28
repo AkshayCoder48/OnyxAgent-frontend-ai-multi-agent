@@ -46,6 +46,9 @@ import type {
   AskUserQuestion,
 } from "@/types";
 import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
+import { validateToolArgs, invalidArgumentsResult } from "@/lib/tools/arg-validator";
+import { RetryBudget } from "@/lib/tools/retry-budget";
+import { ExecutionLedger } from "@/lib/tools/execution-ledger";
 import { filterToolsForRequest, priorToolUseAnnotation, usedToolNamesFromHistory } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
@@ -2320,9 +2323,19 @@ export async function runAgentTurn(opts: AgentTurnOptions): Promise<AgentTurnRes
 ## IDENTITY
 You are **Onyx** — the autonomous agent at the heart of OnyxAgent. You are not a chatbot: you are an operator. Action-first and concise: plan, execute, verify, report. Your workspace is an E2B Linux sandbox at /home/user. If the user asks who you are, you are Onyx. Full identity + tool compendium: Onyx.md.
 
+## EXECUTION DISCIPLINE — evidence over narration (non-negotiable)
+You are being watched by an execution ledger: every tool call you make is recorded as attempted → executed/failed, and every result is classified for functional evidence. These rules are enforced by the runtime, not by trust:
+1. **Execute, don't pretend.** When the user requests an action, CALL the tool. Explaining what you would do is a failure mode. A sentence like "Let me navigate there" without the matching tool call accomplishes nothing.
+2. **No fabricated results.** NEVER report an HTTP status, install output, screenshot, API response, or "the browser works now" unless the actual tool result containing it is in the conversation. If you lack evidence, say "not verified".
+3. **No premature completion.** Before your final answer, compare the ORIGINAL request against what actually ran. Label the outcome honestly: COMPLETED (all verified), PARTIALLY_COMPLETED (name what's missing), BLOCKED (name the external blocker), FAILED (name the failure). Never claim COMPLETED with unexecuted or unverified steps.
+4. **Recover intelligently.** When a call fails: READ the error, classify it (bad arguments / missing runtime / network / timeout / permissions), and change strategy per failure. An identical failing call will be blocked after 3 attempts — vary arguments or switch tools instead.
+5. **Investigate before asking.** Missing information (an API's request shape, a page's controls, a request payload) must be DISCOVERED with your tools (inspect the page, capture the network request, read the code) — ask the user ONLY for auth, irreversible approvals, or genuinely undiscoverable inputs.
+6. **HTTP 200 ≠ success.** A 200 response proves the server answered, not that the function worked. Verify response structure AND that the returned data corresponds to your submitted input before claiming functional success.
+7. **Method provenance.** If the user names an execution method (a specific browser, library, tool), track it explicitly; a fallback run must be REPORTED as a fallback, never as the requested method.
+8. **Milestones only.** No narration-per-step: emit a short note when something is initialized/loaded/uploaded/verified — never a message that substitutes for the tool call itself.
+
 ## AUTONOMOUS CAPABILITY USE — never wait to be told
-Discovering and USING the right capability is YOUR job, not the user's. The user will NOT say "use the skill", "call the MCP", "search Composio" — and you must not need them to. Before answering any non-trivial task from memory, run through this decision order and ACT on the first match:
-1. Fresh facts, current events, anything time-sensitive, or any claim you cannot verify from context → \`web_search\` / \`web_fetch\` NOW (never answer from stale training data).
+Discovering and USING the right capability is YOUR job, not the user's. The user will NOT say "use the skill", "call the MCP", "search Composio" — and you must not need them to. Before answering any non-trivial task from memory, run through this decision order and ACT on the first match:1. Fresh facts, current events, anything time-sensitive, or any claim you cannot verify from context → \`web_search\` / \`web_fetch\` NOW (never answer from stale training data).
 2. An external app, SaaS, or integration is involved (calendar, email, sheets, repos, tickets, messaging, …) → \`composio_search_tools\` with a plain-language description of the goal; if a matching action is connected, \`composio_execute_tool\` it; if not connected and the task needs it, hand over the \`composio_connect_platform\` link and say what you need authorized.
 3. The task might match a configured MCP server → \`mcp_search_tools\` with what you want to do; call matches with \`mcp_call_tool\`. Empty results are an answer — report that honestly, do not invent tools.
 4. A specialized workflow (documents, design, video, scraping, games, testing …) → \`manage_skill\` action \`list\`/\`catalog\` and pick by purpose; read the chosen SKILL.md, then FOLLOW it.
@@ -2705,6 +2718,15 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   // once per turn — SSE reconnects, provider retries, React rerenders and
   // event replays can never trigger a second execution.
   const executedToolCallIds = new Set<string>();
+  // EXECUTION-RELIABILITY LEDGERS (Tool-Execution PRD Issues 1-8, 2026-11-28):
+  // · retryBudget — bounds LITERAL repetition of a failing call (same tool +
+  //   same args): 1st failure advises, 2nd demands a strategy change, 3rd is
+  //   refused outright; the whole turn's failed dispatches are capped too.
+  // · executionLedger — the evidence record behind the completion verdict:
+  //   attempted/executed/failed/verified counts, external-blocker detection,
+  //   HTTP-vs-functional evidence classes. Fed from EVERY tool result.
+  const retryBudget = new RetryBudget();
+  const executionLedger = new ExecutionLedger();
   // TRANSIENT RETRY POLICY (Browser-Tool Reliability PRD §9/§15/§19): the
   // turn has NO wall-clock budget and NO attempt cap for TRANSPORT-class
   // failures (network, dead wire, stream cut, provider stream error, JSON
@@ -3424,20 +3446,35 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           },
         );
       }
-      // COMPLETION CHECK (Persistent Execution PRD §9): a finished model
-      // response is NOT necessarily a completed objective. When tools
-      // already ran this turn and the response doesn't read like a final
-      // answer (short narration, mid-thought ending, promised future
-      // work), CHALLENGE it — the model either CONTINUES with tools or
-      // explicitly confirms completion. Max 2 challenges per turn; after
-      // that the response is accepted (the model keeps insisting it is
-      // done and the challenge would only ping-pong).
+      // COMPLETION CHECK (Persistent Execution PRD §9 + Tool-Execution PRD
+      // Issue 2, 2026-11-28): a finished model response is NOT necessarily
+      // a completed objective. TWO triggers, whichever fires first:
+      //   (a) TEXT heuristic — tools ran, and the response doesn't read
+      //       like a final answer (short narration, mid-thought ending,
+      //       promised future work);
+      //   (b) LEDGER verdict — the turn's execution evidence disagrees with
+      //       a completion claim: failures happened, nothing executed
+      //       successfully, or nothing executed carried functional
+      //       verification. The imagedescriber incident: a polished final
+      //       report while the required test NEVER ran — text heuristics
+      //       alone cannot catch that; the ledger can.
+      // The challenge carries the LEDGER STATISTICS so the model answers
+      // against facts, not vibes. Max 2 challenges per turn; after that the
+      // response is accepted (the model keeps insisting it is done and the
+      // challenge would only ping-pong) — but the ledger verdict is still
+      // attached to the final message metadata for honest UI display.
+      const ledgerVerdict = executionLedger.verdict();
+      const ledgerDisagrees =
+        sawToolActivity &&
+        (ledgerVerdict.completion === "FAILED" ||
+          ledgerVerdict.completion === "PARTIALLY_COMPLETED" ||
+          ledgerVerdict.completion === "BLOCKED");
       if (
         !loopStopped &&
         !roundResult.aborted &&
         sawToolActivity &&
         completionChallenges < 2 &&
-        !looksLikeFinalAnswer(roundResult.content)
+        (!looksLikeFinalAnswer(roundResult.content) || ledgerDisagrees)
       ) {
         completionChallenges += 1;
         emit({
@@ -3456,7 +3493,14 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         messages.push({
           role: "system",
           content:
-            "COMPLETION CHECK: your last response contained no tool calls, but the original task may not be finished. Compare the user's ORIGINAL request against what you actually did, item by item. If everything is genuinely complete, reply with your final answer and no tool calls. If ANYTHING is still missing, CONTINUE the work — call the next tool now. Do not describe what you would do; DO it.",
+            "COMPLETION CHECK: your last response contained no tool calls, but the original task may not be finished. " +
+            `The execution ledger for this turn says: ${ledgerVerdict.completion} — ${ledgerVerdict.summary}. ` +
+            "Compare the user's ORIGINAL request against that ledger, item by item. " +
+            "If everything is genuinely complete AND verified, reply with your final answer and no tool calls — " +
+            "and mark the report with the honest completion state (COMPLETED / PARTIALLY COMPLETED / BLOCKED / FAILED), " +
+            "distinguishing attempted from executed from verified work. " +
+            "If ANYTHING is still missing or unverified, CONTINUE the work — call the next tool now. " +
+            "Do not describe what you would do; DO it. Never report a task as complete when the ledger shows failures or unverified work.",
         });
         round -= 1; // the challenge re-enters this round number
         continue;
@@ -3788,6 +3832,104 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         }
         executedToolCallIds.add(tc.id);
 
+        // ARGUMENT VALIDATION (Tool-Execution PRD Issue 4 / Test A): check
+        // the call against the tool's OWN declared schema BEFORE dispatch.
+        // Missing/empty/typo'd required fields and wrong types are refused
+        // with a structured INVALID_ARGUMENTS result naming the exact
+        // field — the call is never executed, never counted as executed
+        // evidence, and the model gets a corrected-args hint so it can
+        // re-issue ONCE instead of guessing.
+        if (toolDef) {
+          const vres = validateToolArgs(execArgs, toolDef.parameters);
+          if (!vres.valid && vres.issue) {
+            const invalidResult = invalidArgumentsResult(execName, vres.issue, toolDef.parameters);
+            const fullResultStr = JSON.stringify(invalidResult);
+            for (const part of assistantParts) {
+              if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+                part.toolCall.result = invalidResult;
+                part.toolCall.status = "error";
+              }
+            }
+            emit({
+              type: "tool_result",
+              data: { tool_call_id: tc.id, content: fullResultStr },
+              timestamp: nowISO(),
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              name: tc.name,
+              content: fullResultStr,
+            });
+            allToolCalls.push({
+              id: tc.id,
+              name: execName,
+              args: execArgs,
+              result: invalidResult,
+              status: "error",
+            });
+            executionLedger.record({
+              id: tc.id,
+              tool: execName,
+              state: "failed",
+              evidence: [],
+              externalBlocker: false,
+              note: `invalid arguments (${vres.issue.code}: ${vres.issue.field})`,
+            });
+            logWarn("agent", `Tool '${execName}' refused pre-dispatch — ${vres.issue.code} on field '${vres.issue.field}' (not executed)`, {
+              context: { tool: execName, tool_call_id: tc.id, code: vres.issue.code, field: vres.issue.field },
+            });
+            return;
+          }
+        }
+
+        // RETRY BUDGET (Tool-Execution PRD Issue 3 / Test C): a call whose
+        // EXACT (name + args) already failed is gated — 1st failure passes
+        // with recovery advice, 2nd passes with a strategy-change demand,
+        // 3rd+ is REFUSED (never dispatched) with a REPETITION_BLOCKED
+        // result; a turn-wide failed-dispatch cap stops fan-out loops.
+        const repetition = retryBudget.check(execName, execArgs);
+        if (repetition.action === "block") {
+          const blockedResult = RetryBudget.blockedResult(execName, repetition.reason, repetition.message);
+          const fullResultStr = JSON.stringify(blockedResult);
+          for (const part of assistantParts) {
+            if (part.type === "tool" && part.toolCall && part.toolCall.id === tc.id) {
+              part.toolCall.result = blockedResult;
+              part.toolCall.status = "error";
+            }
+          }
+          emit({
+            type: "tool_result",
+            data: { tool_call_id: tc.id, content: fullResultStr },
+            timestamp: nowISO(),
+          });
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            name: tc.name,
+            content: fullResultStr,
+          });
+          allToolCalls.push({
+            id: tc.id,
+            name: execName,
+            args: execArgs,
+            result: blockedResult,
+            status: "error",
+          });
+          executionLedger.record({
+            id: tc.id,
+            tool: execName,
+            state: "failed",
+            evidence: [],
+            externalBlocker: repetition.reason === "turn_budget_exhausted",
+            note: `blocked by retry budget (${repetition.reason}, ${repetition.failures} identical failures)`,
+          });
+          logWarn("agent", `Tool '${execName}' blocked by the retry budget (${repetition.reason}) — identical call failed ${repetition.failures}× already`, {
+            context: { tool: execName, tool_call_id: tc.id, reason: repetition.reason },
+          });
+          return;
+        }
+
         if (!toolDef) {
           // ANTI-HALLUCINATION (user report 2026-10-19): a bare "not
           // registered" made the model retry variations of the invented
@@ -4093,6 +4235,43 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           result,
           status,
         });
+
+        // EXECUTION LEDGER + RETRY BUDGET (Tool-Execution PRD Issues 2/3/7/8):
+        // classify the settled result into evidence (executed/failed,
+        // http_ok→functional_ok classes, external-blocker detection) and
+        // update the identical-call budget. A FAILED call that passed the
+        // budget gate with advice gets the recovery note APPENDED to the
+        // tool result the model sees — the advice lands exactly where the
+        // model is looking when it decides what to do next.
+        const cls = ExecutionLedger.classify(result, status === "error" ? "error" : "completed");
+        executionLedger.record({
+          id: tc.id,
+          tool: execName,
+          state: cls.state,
+          evidence: cls.evidence,
+          externalBlocker: cls.externalBlocker,
+          note: cls.note,
+        });
+        if (cls.state === "failed") {
+          retryBudget.recordFailure(execName, effectiveArgs);
+          if (repetition.action === "allow-with-advice") {
+            const advice = RetryBudget.adviceNote(repetition, execName);
+            const noteContent = resultStr + advice;
+            const midx = messages.findIndex(
+              (m) => m.role === "tool" && m.tool_call_id === tc.id,
+            );
+            if (midx >= 0) {
+              (messages[midx] as { content: string }).content = noteContent;
+            }
+            emit({
+              type: "tool_result",
+              data: { tool_call_id: tc.id, content: fullResultStr + advice },
+              timestamp: nowISO(),
+            });
+          }
+        } else {
+          retryBudget.recordSuccess(execName, effectiveArgs);
+        }
       },
     );
 

@@ -279,6 +279,140 @@ def log(message):
         pass
 
 # ---------------------------------------------------------------------------
+# Tool-Execution PRD (2026-11-28): argument validation + retry budget.
+#
+# The TS runtime (runtime.ts) enforces these gates for FOREGROUND turns;
+# the detached runner is a SEPARATE execution environment with its own
+# dispatch loop, so it needs the same two gates inline. Both are
+# deliberately tiny: schema-lite validation (the keywords our TOOLS array
+# actually uses) and a literal-repetition budget. They share the same
+# structured error shapes as the TS side so the MODEL sees one contract.
+# ---------------------------------------------------------------------------
+
+_TOOL_SCHEMAS = {
+    t["function"]["name"]: t["function"].get("parameters") or {}
+    for t in TOOLS
+    if isinstance(t, dict) and isinstance(t.get("function"), dict)
+}
+
+def _validate_tool_args(name, args):
+    """Schema-lite pre-dispatch validation (PRD Issue 4 / Test A).
+    Returns (ok, issue) — issue is a dict with code/field/message when
+    invalid. NEVER raises: an unreadable schema validates True."""
+    schema = _TOOL_SCHEMAS.get(name) or {}
+    if not isinstance(args, dict):
+        return False, {"code": "MISSING_REQUIRED_FIELD", "field": "arguments",
+                       "message": "Tool arguments must be a JSON object."}
+    required = schema.get("required") or []
+    props = schema.get("properties") or {}
+    for r in required:
+        v = args.get(r)
+        if v is None or v == "" or (isinstance(v, str) and not v.strip()):
+            return False, {"code": "MISSING_REQUIRED_FIELD", "field": str(r),
+                           "message": "The %s argument is required%s." % (
+                               r, " (it was sent as an empty string)" if v == "" else "")}
+    for k, v in args.items():
+        ps = props.get(k)
+        if not isinstance(ps, dict) or v is None:
+            continue
+        t = ps.get("type")
+        if isinstance(t, str) and not _type_matches(v, t):
+            return False, {"code": "INVALID_TYPE", "field": str(k),
+                           "message": "Field '%s' must be of type %s." % (k, t)}
+        enum = ps.get("enum")
+        if isinstance(enum, list) and enum and v not in enum:
+            return False, {"code": "INVALID_VALUE", "field": str(k),
+                           "message": "Field '%s' must be one of: %s." % (k, ", ".join(str(x) for x in enum))}
+    return True, None
+
+def _type_matches(value, declared):
+    if declared == "string":
+        return isinstance(value, str)
+    if declared == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if declared == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if declared == "boolean":
+        return isinstance(value, bool)
+    if declared == "array":
+        return isinstance(value, list)
+    if declared == "object":
+        return isinstance(value, dict)
+    return True  # unknown type keyword — not enforced
+
+def _canonical_json(value):
+    """Order-insensitive serialization for the repetition key."""
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            "%s:%s" % (json.dumps(k, sort_keys=True), _canonical_json(value[k]))
+            for k in sorted(value.keys())) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_json(x) for x in value) + "]"
+    return json.dumps(value, sort_keys=True)
+
+MAX_IDENTICAL_FAILURES = 3
+MAX_RUN_FAILURES = 25
+
+class RetryBudget:
+    """Literal-repetition budget (PRD Issue 3 / Test C) — the runner-side
+    twin of the TS RetryBudget. 1st failure advises, 2nd demands a
+    strategy change, 3rd+ is refused before dispatch."""
+
+    def __init__(self):
+        self.failures = {}
+        self.total = 0
+
+    @staticmethod
+    def key(name, args):
+        return name + "#" + _canonical_json(args)
+
+    def check(self, name, args):
+        """('allow', None) | ('advise', tier_msg) | ('block', message)."""
+        if self.total >= MAX_RUN_FAILURES:
+            return "block", (
+                "This run has already recorded %d failed tool dispatches — the attempt budget is "
+                "exhausted. Summarize what was attempted and why it failed, and report the task "
+                "as BLOCKED with the specific blocker." % self.total)
+        n = self.failures.get(self.key(name, args), 0)
+        if n == 0:
+            return "allow", None
+        if n == 1:
+            return "advise", (
+                "[RECOVERY NOTICE] An identical %s call already failed once. READ the error, "
+                "identify the failure category, and fix the cause before retrying." % name)
+        if n == 2:
+            return "advise", (
+                "[RECOVERY NOTICE — STRATEGY CHANGE REQUIRED] The identical %s call has now "
+                "failed twice. Retrying it unchanged will be BLOCKED. Change the arguments, "
+                "use a different tool, or report the task as BLOCKED." % name)
+        return "block", (
+            "This EXACT call (%s with identical arguments) has already failed %d times and was "
+            "NOT dispatched again. Choose a different approach or report the task as BLOCKED "
+            "with this failure as the blocker." % (name, n))
+
+    def record_failure(self, name, args):
+        k = self.key(name, args)
+        self.failures[k] = self.failures.get(k, 0) + 1
+        self.total += 1
+
+    def record_success(self, name, args):
+        self.failures.pop(self.key(name, args), None)
+
+def _result_is_error(result):
+    """True when a handler's result indicates failure: the runner's string
+    convention ('error: …') or a structured {success: false} / {error: …}
+    envelope (use_browser, …). Used only for budget bookkeeping."""
+    if isinstance(result, str):
+        return result.startswith("error:")
+    if isinstance(result, dict):
+        if result.get("success") is False:
+            return True
+        err = result.get("error")
+        if isinstance(err, dict) and err.get("type"):
+            return True
+    return False
+
+# ---------------------------------------------------------------------------
 # Live event log (agent_events.jsonl) — the run's REPLAY STREAM.
 #
 # The app's SSE bridge tails this file and forwards events to the browser in
@@ -1167,6 +1301,29 @@ def main():
     if not messages:
         messages = [{"role": "user", "content": str(cfg.get("prompt"))}]
 
+    # EXECUTION DISCIPLINE (Tool-Execution PRD §4, 2026-11-28): the seed
+    # system prompt comes from the app, but the runner is a separate
+    # execution environment — its dispatch loop enforces argument
+    # validation and a repetition budget, and the model must KNOW that so
+    # it self-corrects in one round instead of guessing. Prepend (not
+    # replace) so the app's system prompt keeps priority in tone and
+    # identity; this block only adds the execution contract.
+    _EXECUTION_RULES = (
+        "EXECUTION DISCIPLINE — evidence over narration (runtime-enforced):\n"
+        "1. Execute, don't pretend: CALL the tool. Narrating what you would do without the call accomplishes nothing.\n"
+        "2. No fabricated results: never report an HTTP status, install output, or API response unless the actual tool result containing it is in this conversation. Say 'not verified' when you lack evidence.\n"
+        "3. No premature completion: before your final answer, compare the ORIGINAL request against what actually ran. Label the outcome COMPLETED / PARTIALLY_COMPLETED / BLOCKED / FAILED — never COMPLETED with unexecuted or unverified steps.\n"
+        "4. Recover intelligently: read each error, classify it, change strategy. Calls with invalid arguments are refused with the exact field named — fix the arguments, do not repeat the call. An identical failing call is blocked after 3 attempts.\n"
+        "5. Investigate before asking: discover missing information (request shapes, page controls, payloads) with run_terminal/use_browser — ask the user only for auth, irreversible approvals, or genuinely undiscoverable inputs.\n"
+        "6. HTTP 200 is not functional success: verify the response structure and that returned data corresponds to your submitted input.\n"
+        "7. Method provenance: if the user named an execution method, report honestly if you had to fall back to another.\n"
+        "8. Milestones only: brief notes at real milestones; never a narration message that substitutes for the tool call."
+    )
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = _EXECUTION_RULES + "\n\n" + str(messages[0].get("content") or "")
+    else:
+        messages.insert(0, {"role": "system", "content": _EXECUTION_RULES})
+
     write_status("running", stage="thinking", round_no=0, total_rounds=total_rounds,
                  prompt_preview=prompt_preview)
     log("run %s starting — %d seed messages, model=%s" % (RUN_ID, len(messages), cfg.get("model")))
@@ -1191,6 +1348,8 @@ def main():
     use_tools = True
     final_text = ""
     failure = None
+    # Tool-Execution PRD (2026-11-28): the run-scoped retry budget.
+    retry_budget = RetryBudget()
 
     for round_no in range(1, total_rounds + 1):
         PROOF["round"] = round_no
@@ -1263,28 +1422,79 @@ def main():
             PROOF["tool_execution_id"] = tool_execution_id
             PROOF["tool_name"] = name
             dispatch_started = now()
-            if call_args is None:
-                result = "error: tool arguments were not valid JSON"
+
+            # ARGUMENT VALIDATION (Tool-Execution PRD Issue 4): check the
+            # call against the tool's declared schema BEFORE dispatch. A
+            # missing/empty required field or a wrong type is refused with
+            # a structured INVALID_ARGUMENTS result — never executed, never
+            # counted as executed, with the exact field named so the model
+            # can fix the call in one round.
+            args_ok = True
+            args_issue = None
+            if call_args is not None and handler is not None:
+                args_ok, args_issue = _validate_tool_args(name, call_args)
+            if not args_ok:
+                invalid = {
+                    "error": {
+                        "code": args_issue.get("code", "INVALID_ARGUMENTS"),
+                        "field": args_issue.get("field", ""),
+                        "tool": name,
+                        "message": (args_issue.get("message") or "Invalid arguments.")
+                                   + " The call was NOT executed. Re-issue it with corrected arguments.",
+                    }
+                }
+                result = json.dumps(invalid, ensure_ascii=False)
                 dispatched = False
+                retry_budget.record_failure(name, call_args if isinstance(call_args, dict) else {})
             elif handler is None:
                 result = "error: unknown tool: " + name
                 dispatched = False
             else:
-                # DISPATCH CONFIRMED (PRD §4): this event fires immediately
-                # before the handler runs — a tool card may only claim
-                # "executing" from this moment on, and tool.result carries
-                # the measured duration of the REAL execution.
-                dispatched = True
-                emit_event("tool.dispatched", {
-                    "tool_execution_id": tool_execution_id,
-                    "call_id": call_id,
-                    "name": name,
-                    "dispatch_confirmed": True,
-                })
-                try:
-                    result = handler(call_args)
-                except Exception as exc:
-                    result = "error: " + str(exc)
+                # RETRY BUDGET (Tool-Execution PRD Issue 3): gate literal
+                # repetition of a failing call BEFORE dispatch.
+                verdict, budget_msg = retry_budget.check(
+                    name, call_args if isinstance(call_args, dict) else {})
+                if verdict == "block":
+                    blocked = {
+                        "error": {
+                            "code": "REPETITION_BLOCKED",
+                            "tool": name,
+                            "message": budget_msg,
+                            "blocked": True,
+                        }
+                    }
+                    result = json.dumps(blocked, ensure_ascii=False)
+                    dispatched = False
+                else:
+                    # DISPATCH CONFIRMED (PRD §4): this event fires immediately
+                    # before the handler runs — a tool card may only claim
+                    # "executing" from this moment on, and tool.result carries
+                    # the measured duration of the REAL execution.
+                    dispatched = True
+                    emit_event("tool.dispatched", {
+                        "tool_execution_id": tool_execution_id,
+                        "call_id": call_id,
+                        "name": name,
+                        "dispatch_confirmed": True,
+                    })
+                    try:
+                        result = handler(call_args)
+                    except Exception as exc:
+                        result = "error: " + str(exc)
+                    # Budget bookkeeping: a failure in this class escalates
+                    # the next identical call; a success resets it. The
+                    # advice note rides the result the model actually sees.
+                    if str(result).startswith("error:") or _result_is_error(result):
+                        retry_budget.record_failure(
+                            name, call_args if isinstance(call_args, dict) else {})
+                        if verdict == "advise" and budget_msg:
+                            result = str(result) + "\n\n" + budget_msg
+                    else:
+                        retry_budget.record_success(
+                            name, call_args if isinstance(call_args, dict) else {})
+            if call_args is None:
+                result = "error: tool arguments were not valid JSON"
+                dispatched = False
             duration_ms = int((now() - dispatch_started) * 1000)
 
             if not isinstance(result, str):
