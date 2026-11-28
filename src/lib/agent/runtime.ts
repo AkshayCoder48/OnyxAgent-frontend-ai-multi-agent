@@ -49,6 +49,12 @@ import { listTools, getTool, type ToolContext } from "@/lib/tools/registry";
 import { validateToolArgs, invalidArgumentsResult } from "@/lib/tools/arg-validator";
 import { RetryBudget } from "@/lib/tools/retry-budget";
 import { ExecutionLedger } from "@/lib/tools/execution-ledger";
+import {
+  classifyFailure,
+  investigationDirective,
+  objectiveVsMethod,
+  isPassiveFailureResponse,
+} from "@/lib/agent/recovery-orchestrator";
 import { filterToolsForRequest, priorToolUseAnnotation, usedToolNamesFromHistory } from "@/lib/tools/request-scoping";
 import "@/lib/tools"; // Side-effect: registers all built-in tools (datetime, chart, ask_user, e2b_*, etc.)
 import { ONYX_MD_DIGEST, ONYX_MD_DIGEST_TOOLS } from "@/lib/agent/onyx-md-digest";
@@ -2334,6 +2340,17 @@ You are being watched by an execution ledger: every tool call you make is record
 7. **Method provenance.** If the user names an execution method (a specific browser, library, tool), track it explicitly; a fallback run must be REPORTED as a fallback, never as the requested method.
 8. **Milestones only.** No narration-per-step: emit a short note when something is initialized/loaded/uploaded/verified — never a message that substitutes for the tool call itself.
 
+## AUTONOMOUS PROBLEM SOLVING — the obstacle is input, not output (non-negotiable)
+You are an engineer, not a messenger. The user gives you the OBJECTIVE; you figure out HOW. When something is unavailable, broken, or missing, that is the beginning of the work, not the end of it.
+1. **Solve the objective, not just the requested method.** When the user names a method ("use Lightpanda to test X"), make a GENUINE effort with that method first: check it, install it if missing (official installers: pip/npm/apt/vendor scripts), start it, verify it serves, connect. Only then consider a fallback — and DISCLOSE any substitution ("X failed with Y, so I tested via Z" — never present a fallback as the requested method).
+2. **Missing dependency = solvable problem.** Detect what's missing → identify the environment (OS/arch/runtime) → find the OFFICIAL install method (docs, GitHub releases, registry) → install → capture the output → verify the version works → retry the original task. Do not modify unrelated project dependencies; prefer user-space installs; ask before destructive system changes.
+3. **Investigate every error before retrying.** Classify it (missing dependency / arguments / browser / network / auth / API / permission / code / timeout / environment), find the root cause, then fix or work around. An identical failing call is blocked by the runtime after 3 attempts — change strategy instead.
+4. **Discover your environment.** Missing capability? Inspect what's installed (which/ls/pip list/npm ls), what engines exist (the browser tool reports every rung it tries), what integrations are configured. Determine whether the capability can be ADDED before declaring it absent.
+5. **Research unfamiliar failures.** Use web_search/web_fetch on official docs, GitHub issues and maintainer guides — then APPLY the most promising fix and verify it. Research must end in an attempted solution, not a list of possibilities.
+6. **Build your own workarounds.** Temporary scripts, helper utilities, custom HTTP clients, test harnesses — create them when the path needs it (validated before use, cleaned up when done). Prefer repairing the existing implementation over building parallel systems.
+7. **Never stop to ask permission for ordinary reversible work.** Installing dependencies in the sandbox, temporary scripts, restarting your managed browser, diagnostics, testing public APIs — just DO it. Ask ONLY for: spending money, paid services, production changes, data deletion, permission changes, unauthorized access, or irreversible actions — and then ask for exactly the needed authorization, naming the specific blocker.
+8. **The passive exits are forbidden**: "it's not available" (before investigating why), "I'll use the default" (before trying the requested method), "I cannot execute this" (without a diagnosed reason), "the package is missing" (before installing it), "the environment doesn't support this" (before checking alternatives), "would you like me to try another approach?" (try the best safe alternative yourself), "I don't know the payload" (capture the real requests and find out). The runtime injects an investigation loop under every failed result — follow it.
+
 ## AUTONOMOUS CAPABILITY USE — never wait to be told
 Discovering and USING the right capability is YOUR job, not the user's. The user will NOT say "use the skill", "call the MCP", "search Composio" — and you must not need them to. Before answering any non-trivial task from memory, run through this decision order and ACT on the first match:1. Fresh facts, current events, anything time-sensitive, or any claim you cannot verify from context → \`web_search\` / \`web_fetch\` NOW (never answer from stale training data).
 2. An external app, SaaS, or integration is involved (calendar, email, sheets, repos, tickets, messaging, …) → \`composio_search_tools\` with a plain-language description of the goal; if a matching action is connected, \`composio_execute_tool\` it; if not connected and the task needs it, hand over the \`composio_connect_platform\` link and say what you need authorized.
@@ -2727,6 +2744,17 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
   //   HTTP-vs-functional evidence classes. Fed from EVERY tool result.
   const retryBudget = new RetryBudget();
   const executionLedger = new ExecutionLedger();
+  // AUTONOMOUS RECOVERY (Self-Recovery PRD, 2026-11-28): the per-turn
+  // recovery-directive bookkeeping — how many investigation directives
+  // were issued (total + per failure category) so injection stays bounded
+  // and never becomes noise. Also the objective/method split of the
+  // user's request, so a method failure is never treated as an objective
+  // failure (§2: solve the OBJECTIVE, not just the requested method).
+  const recoveryCategoryCounts = new Map<string, number>();
+  let recoveryDirectivesIssued = 0;
+  const { objective: turnObjective, method: turnMethod } = objectiveVsMethod(
+    opts.userMessage ?? "",
+  );
   // TRANSIENT RETRY POLICY (Browser-Tool Reliability PRD §9/§15/§19): the
   // turn has NO wall-clock budget and NO attempt cap for TRANSPORT-class
   // failures (network, dead wire, stream cut, provider stream error, JSON
@@ -3469,12 +3497,21 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         (ledgerVerdict.completion === "FAILED" ||
           ledgerVerdict.completion === "PARTIALLY_COMPLETED" ||
           ledgerVerdict.completion === "BLOCKED");
+      // PASSIVE-FAILURE DETECTOR (Self-Recovery PRD §11): a final response
+      // that contains a forbidden passive-exit pattern ("X is not
+      // available", "I'll use the default", "would you like me to try
+      // another approach?"…) is challenged regardless of the ledger — the
+      // FIRST obstacle was converted into the answer, exactly the
+      // behavior this PRD retires. The challenge reminds the model that
+      // ordinary, reversible troubleshooting needs NO user permission.
+      const passiveExit =
+        sawToolActivity && isPassiveFailureResponse(roundResult.content);
       if (
         !loopStopped &&
         !roundResult.aborted &&
         sawToolActivity &&
         completionChallenges < 2 &&
-        (!looksLikeFinalAnswer(roundResult.content) || ledgerDisagrees)
+        (!looksLikeFinalAnswer(roundResult.content) || ledgerDisagrees || passiveExit)
       ) {
         completionChallenges += 1;
         emit({
@@ -3495,6 +3532,16 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
           content:
             "COMPLETION CHECK: your last response contained no tool calls, but the original task may not be finished. " +
             `The execution ledger for this turn says: ${ledgerVerdict.completion} — ${ledgerVerdict.summary}. ` +
+            (passiveExit
+              ? "Your response contains a PASSIVE FAILURE EXIT (declaring something unavailable / defaulting / asking permission to try). " +
+                "That is not an answer — it is a stop at the first obstacle. Investigate the obstacle: why is it unavailable, can it be installed/started/repaired, " +
+                "what alternative accomplishes the same objective? Ordinary, reversible troubleshooting (installing dependencies, restarting the managed browser, " +
+                "temporary scripts, diagnostics) needs NO user permission — do it. "
+              : "") +
+            (turnMethod
+              ? `The user's request names a METHOD (${turnMethod}) — the objective behind it is: ${turnObjective || "the stated task"}. ` +
+                "Give the requested method a GENUINE effort (install, boot, connect, verify) before any disclosed fallback; a fallback run must be reported as a fallback. "
+              : "") +
             "Compare the user's ORIGINAL request against that ledger, item by item. " +
             "If everything is genuinely complete AND verified, reply with your final answer and no tool calls — " +
             "and mark the report with the honest completion state (COMPLETED / PARTIALLY COMPLETED / BLOCKED / FAILED), " +
@@ -4254,14 +4301,38 @@ ${fileSaved ? `\nIf you need more context, read the full chat file at \`chats/${
         });
         if (cls.state === "failed") {
           retryBudget.recordFailure(execName, effectiveArgs);
-          if (repetition.action === "allow-with-advice") {
-            const advice = RetryBudget.adviceNote(repetition, execName);
-            const noteContent = resultStr + advice;
+          // AUTONOMOUS RECOVERY (Self-Recovery PRD §§3/6/11): classify the
+          // failure and APPEND the investigation directive to the failed
+          // tool result — the model reads the error and, right below it,
+          // the concrete investigation loop for that failure category plus
+          // the forbidden passive exits. Bounded per category + per turn.
+          recoveryDirectivesIssued += 1;
+          const fclass = classifyFailure(execName, result);
+          const directive = investigationDirective(
+            fclass.category,
+            execName,
+            (recoveryCategoryCounts.get(fclass.category) ?? 0) + 1,
+            recoveryDirectivesIssued,
+          );
+          if (directive) {
+            recoveryCategoryCounts.set(
+              fclass.category,
+              (recoveryCategoryCounts.get(fclass.category) ?? 0) + 1,
+            );
             const midx = messages.findIndex(
               (m) => m.role === "tool" && m.tool_call_id === tc.id,
             );
             if (midx >= 0) {
-              (messages[midx] as { content: string }).content = noteContent;
+              (messages[midx] as { content: string }).content += directive;
+            }
+          }
+          if (repetition.action === "allow-with-advice") {
+            const advice = RetryBudget.adviceNote(repetition, execName);
+            const midx = messages.findIndex(
+              (m) => m.role === "tool" && m.tool_call_id === tc.id,
+            );
+            if (midx >= 0) {
+              (messages[midx] as { content: string }).content += advice;
             }
             emit({
               type: "tool_result",

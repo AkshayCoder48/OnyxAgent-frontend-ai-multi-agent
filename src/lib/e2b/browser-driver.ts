@@ -393,6 +393,40 @@ for d in (DIR, SHOTS, DOWNLOADS, RECORDINGS):
 
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-blink-features=AutomationControlled", "--remote-debugging-port=9222"]
 
+
+def _stop_lightpanda():
+    """Stop OUR lightpanda serve when a Chromium rung takes over — both
+    bind 127.0.0.1:9222 (Chromium's remote-debugging port collides with
+    lightpanda's CDP endpoint), so the takeover REQUIRES the handover.
+    Only the process WE started is stopped (pid file + tracked proc);
+    an externally-started server is left alone (the PRD's 'do not kill
+    unrelated processes') — in that case the chromium rung's port may
+    still collide and boot_browser's next rung handles the failure."""
+    global _lightpanda_proc
+    if _lightpanda_proc is not None:
+        try:
+            _lightpanda_proc.terminate()
+            _lightpanda_proc.wait(timeout=5)
+            log("stopped our lightpanda serve — a Chromium rung takes over port 9222")
+        except Exception as e:
+            log("lightpanda terminate failed (%s) — continuing" % (e,))
+        finally:
+            _lightpanda_proc = None
+    elif os.path.exists(LIGHTPANDA_PID):
+        # Started by an earlier driver process: reap by pid, best-effort.
+        try:
+            with open(LIGHTPANDA_PID) as f:
+                old = int(f.read().strip() or 0)
+            if old > 0:
+                os.kill(old, 15)
+                log("reaped lightpanda serve pid %d (earlier driver) for the Chromium rung" % old)
+        except Exception:
+            pass
+        try:
+            os.remove(LIGHTPANDA_PID)
+        except Exception:
+            pass
+
 context = None
 pw = None
 pages = []            # ordered tab list: [{ id, page }]
@@ -685,8 +719,16 @@ def live_pick_page(live_browser):
 def live_cast_loop():
     """The live-cast daemon: own CDP connection, Page.startScreencast on the
     active tab, frames → live.jpg (atomic). Reconnects forever; a failure
-    here never affects the command loop."""
+    here never affects the command loop.
+    LIGHTPANDA (2026-11-28): the default engine does not render — there are
+    NO frames to cast, and it owns ws://127.0.0.1:9222 (which the Chromium
+    rungs use for their own remote debugging). The loop therefore only
+    casts on the VISUAL rungs; on lightpanda it publishes the state JSON
+    only (the live panel shows engine badge + URL + actions, no JPEG)."""
     while True:
+        if runtime == "lightpanda":
+            _safe_sleep(2.0)
+            continue
         pwp = None
         try:
             from playwright.sync_api import sync_playwright
@@ -1019,6 +1061,183 @@ def _display_alive(n):
 HEADED = None
 
 
+# ── LIGHTPANDA (user directive 2026-11-28: the PRIMARY browser rung) ───────
+# Lightpanda is a from-scratch headless engine for AI agents: full DOM +
+# JS execution (~80% of Chrome's Web Platform Tests at v1.0) with NO
+# graphical rendering — forms, SPAs (React/Next/Vue), clicks and typing
+# all work through standard CDP; pixels/geometry do NOT (screenshots,
+# canvas, coordinate clicks, scroll positions stay 0, no iframes/popups,
+# weak against aggressive anti-bot fingerprinting).
+#
+# CAPABILITY GATING: the visual actions declare themselves UNSUPPORTED on
+# this rung (capability_gate() below) instead of failing opaquely — and
+# the message offers the escape hatch: pass wanted_capabilities=["visual"]
+# (or screenshot actions) to reboot onto the Chromium stealth rungs.
+#
+# INSTALL (official, verified 2026-11-28): a single static binary from
+# GitHub releases via the vendor script —
+#   curl -fsSL https://pkg.lightpanda.io/install.sh | bash -s "1.0.6"
+# lands ~/.local/bin/lightpanda (linux x86_64/aarch64, macos). Serve:
+#   lightpanda serve            # CDP on ws://127.0.0.1:9222
+# Connect: playwright.chromium.connect_over_cdp("ws://127.0.0.1:9222").
+
+LIGHTPANDA_BIN = os.path.expanduser("~/.local/bin/lightpanda")
+LIGHTPANDA_CDP = "ws://127.0.0.1:9222"
+LIGHTPANDA_PID = os.path.join(DIR, "lightpanda.pid")
+# Actions Lightpanda cannot do meaningfully without rendering. 'snapshot'
+# is LISTED but soft-gated: the DOM/accessibility-tree parts work — only
+# its screenshot component is skipped (handled inside do_snapshot).
+LIGHTPANDA_UNSUPPORTED = {
+    "screenshot": "Lightpanda does not render pixels — no screenshots. "
+                  "Re-run with the browser tool's wanted_capabilities=['visual'] "
+                  "(or use read/extract_text/get_elements for DOM-based inspection).",
+    "screen_record": "Lightpanda does not render pixels — no screen recording. "
+                     "Re-run with wanted_capabilities=['visual'] for a Chromium rung.",
+    "scroll": "Lightpanda keeps scroll positions at 0 (no layout engine) — "
+              "scrolling has no effect. Use evaluate to trigger scroll events, "
+              "or wanted_capabilities=['visual'] for real scrolling.",
+}
+# Rung display name per runtime value (UI badge + logs).
+RUNG_NAMES = {
+    "lightpanda": "Lightpanda (headless, DOM+JS, CDP)",
+    "cloakbrowser": "stealth Chromium (CloakBrowser)",
+    "patchright": "stealth Chromium (patchright)",
+    "chromium": "Chromium (Playwright stock)",
+}
+
+_lightpanda_proc = None  # our serve subprocess, if WE started it
+
+
+def _lightpanda_installed():
+    return os.path.isfile(LIGHTPANDA_BIN) and os.access(LIGHTPANDA_BIN, os.X_OK)
+
+
+def _lightpanda_install():
+    """Install the official binary (best-effort, bounded). Two-step ladder,
+    both pinned to the stable tag for reproducibility:
+      1. the vendor install script (checksum-verified by the vendor);
+      2. VERIFIED-FALLBACK (2026-11-28, tested in-sandbox): the script
+         hard-fails when the GitHub RELEASES API is unreachable (its
+         checksum lookup lives there) — in that case download the same
+         release binary directly and verify it RUNS ('lightpanda version'),
+         which is the stronger check anyway. The binary is static (no deps).
+    Returns an error string on failure, None on success."""
+    tag = "1.0.6"
+    try:
+        event("BROWSER_DOWNLOAD_START", phase="lightpanda-install")
+        r = subprocess.run(
+            ["bash", "-c",
+             'curl -fsSL https://pkg.lightpanda.io/install.sh | bash -s "%s"' % tag],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode == 0 and _lightpanda_installed():
+            log("lightpanda install ok (vendor script, tag %s)" % tag)
+            event("BROWSER_DOWNLOAD_COMPLETE", phase="lightpanda-install", ok=True)
+            return None
+        log("lightpanda vendor script failed (%s) — trying the direct release download"
+            % ((r.stderr or r.stdout or "no output")[-200:],))
+    except Exception as e:
+        log("lightpanda vendor script error: %s — trying the direct release download" % (e,))
+    # Fallback: direct, run-verified download of the same release asset.
+    try:
+        import platform
+        arch = "x86_64" if platform.machine() in ("x86_64", "AMD64") else (
+            "aarch64" if platform.machine() in ("aarch64", "arm64") else "")
+        if not arch:
+            return "unsupported architecture for lightpanda: %s" % platform.machine()
+        url = ("https://github.com/lightpanda-io/browser/releases/download/%s/lightpanda-%s-linux" % (tag, arch))
+        os.makedirs(os.path.dirname(LIGHTPANDA_BIN), exist_ok=True)
+        d = subprocess.run(["bash", "-c",
+                            'curl -s --fail -L -o "%s" "%s" && chmod +x "%s"'
+                            % (LIGHTPANDA_BIN, url, LIGHTPANDA_BIN)],
+                           capture_output=True, text=True, timeout=300)
+        if d.returncode != 0 or not _lightpanda_installed():
+            event("BROWSER_DOWNLOAD_COMPLETE", phase="lightpanda-install", ok=False)
+            return ("direct download failed: " + (d.stderr or d.stdout or "unknown")[-200:])
+        # RUN-verification beats a checksum we cannot fetch offline.
+        v = subprocess.run([LIGHTPANDA_BIN, "version"], capture_output=True, text=True, timeout=30)
+        if v.returncode != 0 or not (v.stdout or "").strip().startswith("1."):
+            event("BROWSER_DOWNLOAD_COMPLETE", phase="lightpanda-install", ok=False)
+            return ("installed binary failed run-verification: " + (v.stdout or v.stderr or "no output")[:120])
+        log("lightpanda install ok (direct release, version %s)" % (v.stdout or "").strip())
+        event("BROWSER_DOWNLOAD_COMPLETE", phase="lightpanda-install", ok=True)
+        return None
+    except Exception as e:
+        event("BROWSER_DOWNLOAD_COMPLETE", phase="lightpanda-install", ok=False)
+        return "install error: %s" % (e,)
+
+
+def _lightpanda_serving():
+    """True when the CDP endpoint answers. Cheap probe: a raw HTTP GET to
+    the JSON version endpoint (Lightpanda implements /json/version like
+    Chromium's remote debugging interface)."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=3) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _ensure_lightpanda_serving():
+    """Start 'lightpanda serve' if not already answering. An existing
+    server is REUSED (never killed — the PRD's 'do not reset a working
+    browser session'). Returns (ok, error)."""
+    global _lightpanda_proc
+    if _lightpanda_serving():
+        return True, None
+    if not _lightpanda_installed():
+        err = _lightpanda_install()
+        if err:
+            return False, err
+    try:
+        env = dict(os.environ)
+        env.setdefault("NO_COLOR", "1")
+        _lightpanda_proc = subprocess.Popen(
+            [LIGHTPANDA_BIN, "serve"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        with open(LIGHTPANDA_PID, "w") as f:
+            f.write(str(_lightpanda_proc.pid))
+        for _ in range(40):  # ≤8s for the CDP endpoint to answer
+            _safe_sleep(0.2)
+            if _lightpanda_serving():
+                log("lightpanda serve up (pid %d, CDP ws://127.0.0.1:9222)" % _lightpanda_proc.pid)
+                return True, None
+        return False, "lightpanda serve did not answer on 127.0.0.1:9222 within 8s"
+    except Exception as e:
+        return False, "lightpanda serve start failed: %s" % (e,)
+
+
+def capability_gate(action):
+    """LIGHTPANDA CAPABILITY GATE: on the lightpanda rung, visual actions
+    return an HONEST unsupported-capability error (with the escape hatch)
+    instead of a confusing deep failure. On every other rung it passes.
+    Returns an err_payload dict to return, or None when allowed."""
+    if runtime != "lightpanda" or action not in LIGHTPANDA_UNSUPPORTED:
+        return None
+    return err_payload(
+        "unsupported_capability",
+        LIGHTPANDA_UNSUPPORTED[action],
+        True,  # recoverable: the fallback rung CAN do it
+    )
+
+
+def _lightpanda_requested():
+    """Did the user/agent explicitly request the Chromium rungs this boot?
+    wanted_capabilities=["visual"] in the LAST command file (the session
+    manager writes it next to the command before boot) opts out of
+    lightpanda for actions that need real rendering."""
+    try:
+        with open(CMD, "r") as f:
+            cmd = json.load(f)
+        caps = cmd.get("wanted_capabilities") or []
+        return isinstance(caps, list) and "visual" in caps
+    except Exception:
+        return False
+
+
 def _ensure_display():
     """Provide an X display for headless=False. An inherited DISPLAY wins;
     otherwise Xvfb is started on :99 (it ships with the onyx e2b template).
@@ -1125,12 +1344,61 @@ def boot_browser():
     def _mark_ready(rt):
         """Common READY bookkeeping shared by every engine rung."""
         runtime = rt
+        if rt != "lightpanda":
+            # PORT HANDOVER (2026-11-28): every Chromium rung binds
+            # 127.0.0.1:9222 for its own remote debugging — the same port
+            # lightpanda serves CDP on. Stop OUR lightpanda so the Chromium
+            # launch never collides with a stale server.
+            _stop_lightpanda()
         with LIVE_LOCK:
             LIVE_STATE["booted"] = True
             LIVE_STATE["closed"] = False
         refresh_live_pages()
         event("BROWSER_READY", runtime=rt, headed=HEADED)
         return runtime
+
+    # -- attempt 0 (PRIMARY): Lightpanda — DOM+JS over CDP, no rendering ──
+    # User directive 2026-11-28: Lightpanda is the PRIMARY engine. It is
+    # tried FIRST unless the current command asks for visual capabilities
+    # (screenshots/recording/scroll-visual), in which case the Chromium
+    # stealth rungs serve better and lightpanda is skipped honestly.
+    # On failure the ladder falls through to cloak → patchright → chromium
+    # AND the boot error names lightpanda's failure (fallback disclosure —
+    # the PRD forbids silently replacing a requested engine).
+    _unpoison_asyncio()
+    if not _lightpanda_requested():
+        event("BROWSER_INITIALIZATION", phase="start", engine="lightpanda", headed=False)
+        lp_ok, lp_err = _ensure_lightpanda_serving()
+        if lp_ok:
+            try:
+                from playwright.sync_api import sync_playwright as lp_sync
+                pw = lp_sync().start()
+                lp_browser = pw.chromium.connect_over_cdp(LIGHTPANDA_CDP)
+                # connect_over_cdp returns a Browser; ONE context plays the
+                # persistent-context role (pages/tabs are managed by the
+                # driver's tab list, exactly like the other rungs).
+                context = lp_browser.contexts[0] if lp_browser.contexts else lp_browser.new_context()
+                runtime = "lightpanda"
+                _mark_ready("lightpanda")
+                log("booted lightpanda runtime (DOM+JS over CDP ws://127.0.0.1:9222, no visual rendering)")
+                return
+            except Exception as e:
+                _unpoison_asyncio()
+                try:
+                    if pw is not None:
+                        pw.stop()
+                except Exception:
+                    pass
+                pw = None
+                boot_error = "lightpanda CDP connect failed: %s" % (_condense_launch_error(e),)
+                log(boot_error)
+                event("BROWSER_ACTION_FAILED", phase="boot", engine="lightpanda", detail=_condense_launch_error(e))
+        else:
+            boot_error = "lightpanda unavailable: %s" % (lp_err,)
+            log(boot_error + " — falling through to the stealth Chromium rungs")
+            event("BROWSER_ACTION_FAILED", phase="boot", engine="lightpanda", detail=str(lp_err)[:200])
+    else:
+        log("visual capabilities requested — skipping lightpanda (no rendering) for a Chromium rung")
 
     # -- attempt 1: CloakBrowser (richest stealth — only when licensed) ----
     # 0.7.3 REQUIRES a license key (env CLOAKBROWSER_LICENSE_KEY or a cached
@@ -2930,49 +3198,58 @@ def main():
             if handler is None:
                 result = err_payload("bad_request", "Unknown action: %s (supported: %s)" % (action, ", ".join(sorted(HANDLERS))), False)
             else:
-                budget = ACTION_BUDGETS.get(action, DEFAULT_ACTION_BUDGET)
-                _arm_watchdog(cid, action, budget)
-                try:
-                    result = handler(cmd)
-                except BootFailure as e:
-                    log("browser boot failure: %s" % (e,))
-                    result = err_payload(
-                        "browser_startup_failed",
-                        "%s A fresh browser driver will start on the next command." % (e,),
-                        True,
-                    )
-                    boot_failed = True
-                except Exception as e:
-                    if _is_dead_loop_error(str(e)):
-                        # DEAD-LOOP RECOVERY (the residual 'browser_error —
-                        # : no running event loop'): the action hit a cloak
-                        # context whose asyncio loop is gone. NOT an action
-                        # failure — reset the browser state (drops the dead
-                        # context, restores the real sleep, clears the
-                        # poisoned loop flag) and RETRY THE SAME HANDLER
-                        # once; boot_browser() inside rebuilds on the
-                        # persistent profile and the action goes through.
-                        log("dead event loop detected mid-action (%s) — resetting the browser state and retrying once" % (e,))
-                        event("BROWSER_ACTION_FAILED", phase="dead-loop-retry", action=action, commandId=cid, detail=str(e)[:200])
-                        _reset_browser_state()
-                        try:
-                            result = handler(cmd)
-                            event("BROWSER_ACTION_COMPLETE", phase="dead-loop-retry-recovered", action=action, commandId=cid)
-                        except BootFailure as e2:
-                            log("browser boot failure after dead-loop reset: %s" % (e2,))
-                            result = err_payload(
-                                "browser_startup_failed",
-                                "%s A fresh browser driver will start on the next command." % (e2,),
-                                True,
-                            )
-                            boot_failed = True
-                        except Exception as e2:
-                            log("action %s failed after dead-loop reset: %s" % (action, traceback.format_exc()[-400:]))
-                            result = playw_err(e2)
-                    else:
-                        log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
-                        result = playw_err(e)
-                _disarm_watchdog()
+                # LIGHTPANDA CAPABILITY GATE (2026-11-28): visual actions on
+                # the lightpanda rung return an honest unsupported-capability
+                # error (recoverable — the escape hatch names it) instead of
+                # a confusing deep rendering failure. The driver stays up.
+                gate = capability_gate(action)
+                if gate is not None:
+                    result = gate
+                    event("BROWSER_ACTION_FAILED", phase="capability", action=action, engine=runtime, commandId=cid)
+                else:
+                    budget = ACTION_BUDGETS.get(action, DEFAULT_ACTION_BUDGET)
+                    _arm_watchdog(cid, action, budget)
+                    try:
+                        result = handler(cmd)
+                    except BootFailure as e:
+                        log("browser boot failure: %s" % (e,))
+                        result = err_payload(
+                            "browser_startup_failed",
+                            "%s A fresh browser driver will start on the next command." % (e,),
+                            True,
+                        )
+                        boot_failed = True
+                    except Exception as e:
+                        if _is_dead_loop_error(str(e)):
+                            # DEAD-LOOP RECOVERY (the residual 'browser_error —
+                            # : no running event loop'): the action hit a cloak
+                            # context whose asyncio loop is gone. NOT an action
+                            # failure — reset the browser state (drops the dead
+                            # context, restores the real sleep, clears the
+                            # poisoned loop flag) and RETRY THE SAME HANDLER
+                            # once; boot_browser() inside rebuilds on the
+                            # persistent profile and the action goes through.
+                            log("dead event loop detected mid-action (%s) — resetting the browser state and retrying once" % (e,))
+                            event("BROWSER_ACTION_FAILED", phase="dead-loop-retry", action=action, commandId=cid, detail=str(e)[:200])
+                            _reset_browser_state()
+                            try:
+                                result = handler(cmd)
+                                event("BROWSER_ACTION_COMPLETE", phase="dead-loop-retry-recovered", action=action, commandId=cid)
+                            except BootFailure as e2:
+                                log("browser boot failure after dead-loop reset: %s" % (e2,))
+                                result = err_payload(
+                                    "browser_startup_failed",
+                                    "%s A fresh browser driver will start on the next command." % (e2,),
+                                    True,
+                                )
+                                boot_failed = True
+                            except Exception as e2:
+                                log("action %s failed after dead-loop reset: %s" % (action, traceback.format_exc()[-400:]))
+                                result = playw_err(e2)
+                        else:
+                            log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
+                            result = playw_err(e)
+                    _disarm_watchdog()
             duration_ms = int((time.time() - t0) * 1000)
             if isinstance(result, dict):
                 result.setdefault("durationMs", duration_ms)

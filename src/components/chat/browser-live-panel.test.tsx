@@ -45,11 +45,18 @@ afterEach(() => {
 });
 
 describe("BrowserLivePanel runtime badge (engine naming)", () => {
-  it("maps cloakbrowser → 'cloak'", () => {
+  it("maps cloakbrowser → 'stealth' (de-branded from 'cloak', 2026-11-28)", () => {
     setState("cloakbrowser");
     const { container } = render(React.createElement(BrowserLivePanel));
-    expect(badge(container)).toBe("cloak");
-    expect(tooltip(container)).toContain("CloakBrowser stealth Chromium");
+    expect(badge(container)).toBe("stealth");
+    expect(tooltip(container)).toContain("Stealth Chromium");
+  });
+
+  it("maps lightpanda → 'lightpanda' (the primary rung, 2026-11-28)", () => {
+    setState("lightpanda");
+    const { container } = render(React.createElement(BrowserLivePanel));
+    expect(badge(container)).toBe("lightpanda");
+    expect(tooltip(container)).toContain("no visual rendering");
   });
 
   it("maps patchright → 'chrome' (presents as real Chrome)", () => {

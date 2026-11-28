@@ -121,7 +121,7 @@ const ACTION_TIMEOUT_MS: Record<BrowserAction, number> = {
   screen_record: 320_000, // 'stop' installs the encoder + assembles the video
 };
 
-const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser (CloakBrowser) running INSIDE the sandbox — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads.
+const USE_BROWSER_DESCRIPTION = `Browse and interact with websites in a real browser running INSIDE the sandbox — default engine Lightpanda (fast, DOM+JS, no visual rendering; forms/SPAs/logins/clicks/typing all work; for screenshots/canvas/real scrolling pass wanted_capabilities: ["visual"] to use a Chromium engine) — one persistent session (cookies/localStorage kept), multiple tabs, page inspection, forms, uploads and downloads.
 
 WHEN TO USE: ONLY when the page needs real interaction — clicking, typing, logging in, JS-rendered apps, anti-bot walls, downloads/uploads. For simply READING a page's text (articles, docs, APIs) use web_fetch instead — it is the default for reading and much faster/cheaper.
 
@@ -194,6 +194,13 @@ registerTool(
       note: { type: "string", description: "Curated note stored with the page (remember_page action) — why this page matters / what to remember." },
       include_history: { type: "boolean", description: "Also save this session's navigation log with the page (remember_page action, default true)." },
       tab: { description: "Tab index (number) or tab id like 'tab_2' (switch_tab / close_tab)." },
+      wanted_capabilities: {
+        type: "array",
+        items: { type: "string", enum: ["visual"] },
+        description:
+          "Engine capabilities the action needs. Default engine is Lightpanda (fast DOM+JS, no rendering — forms/SPAs/clicks/typing fine). " +
+          'Pass ["visual"] for actions that need real pixels (screenshots, recording, real scrolling, canvas) to run on a Chromium engine instead.',
+      },
     },
     required: ["action"],
     additionalProperties: false,
@@ -287,6 +294,10 @@ registerTool(
       "value",
       "files",
       "tab",
+      // LIGHTPANDA ESCAPE HATCH (2026-11-28): pass ["visual"] to run the
+      // action on a Chromium rung (screenshots/recording/real scrolling)
+      // instead of the default Lightpanda DOM+JS engine.
+      "wanted_capabilities",
     ] as const) {
       if (args[k] !== undefined) cmd[k] = args[k];
     }

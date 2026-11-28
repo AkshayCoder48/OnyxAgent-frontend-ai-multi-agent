@@ -376,27 +376,9 @@ export function ChatWorkspace() {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {/* BROWSER TAB (user directive 2026-10-21) — the LIVE view of the
-                sandbox browser (CloakBrowser, headed under Xvfb) as a docked
-                panel. Kept VISIBLE on the header next to the chat name; every
-                other option lives in the ⋮ menu below. */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleSidePanel("browser")}
-              className={
-                "animate-press fluid-chip h-8 w-8 p-0 " +
-                (browserOpen
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:text-foreground")
-              }
-              title="Browser (live view)"
-              aria-label="Toggle browser live view"
-              aria-expanded={browserOpen}
-              aria-controls="browser-live-panel"
-            >
-              <AppWindow className="h-4 w-4" />
-            </Button>
+            {/* Browser live view: NO dedicated header button (user directive
+                2026-11-28 — the header browser tab was removed); the panel
+                toggles from the ⋮ menu's "Browser live view" entry below. */}
 
             {/* THE ONE HEADER OPTION (user directive 2026-10-21): every other
                 chat-header button collapsed into a single ⋮ control that
@@ -428,6 +410,16 @@ export function ChatWorkspace() {
                     <span className="flex-1">Export conversation</span>
                   </DropdownMenuItem>
                 )}
+                {/* Browser live view — the docked sandbox-browser panel
+                    (moved here from the header, user directive 2026-11-28). */}
+                <DropdownMenuItem
+                  onClick={() => toggleSidePanel("browser")}
+                  className="gap-2.5"
+                >
+                  <AppWindow className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="flex-1">Browser live view</span>
+                  {browserOpen && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </DropdownMenuItem>
                 {/* Knowledge Base — the workspace's persistent knowledge. */}
                 <DropdownMenuItem
                   onClick={() => toggleSidePanel("knowledge")}
@@ -512,10 +504,10 @@ export function ChatWorkspace() {
       </DockedPanel>
 
       {/* BROWSER LIVE VIEW (user directive 2026-10-21) — the real sandbox
-          browser (CloakBrowser, headed under Xvfb) as a docked panel: JPEG
-          screencast of the active tab + live state, streamed from the driver.
-          The use_browser tool itself stays a plain tool call + output in the
-          chat flow — the watching happens here. */}
+          browser (stealth Chromium, headed under Xvfb) as a docked panel:
+          JPEG screencast of the active tab + live state, streamed from the
+          driver. The use_browser tool itself stays a plain tool call +
+          output in the chat flow — the watching happens here. */}
       <DockedPanel
         id="browser-live-panel"
         label="Browser"

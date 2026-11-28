@@ -474,22 +474,27 @@ describe.skipIf(!hasPython || !hasPlaywright)(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ENGINE LADDER (the "browser shows Chromium" fix, 2026-11-24): the driver
-// boots cloakbrowser ONLY when a license key exists (0.7.3 gates every
-// launch behind one), falls back to patchright (free Apache-2.0 patched
-// Playwright — presents as real Chrome), and only then to stock Chromium.
-// boot.sh installs the pinned trio and pre-fetches patchright's binary
-// FIRST.
+// ENGINE LADDER: Lightpanda PRIMARY (user directive 2026-11-28 — the
+// DOM+JS engine for AI agents, no visual rendering), then the stealth
+// Chromium rungs: cloakbrowser ONLY when a license key exists, patchright
+// (free patched Playwright), stock Chromium last. boot.sh installs the
+// pinned trio and pre-fetches patchright's binary.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("browser-driver engine ladder (cloak-if-licensed → patchright → chromium)", () => {
+describe("browser-driver engine ladder (lightpanda → cloak-if-licensed → patchright → chromium)", () => {
   it("boot_browser tries the engines in ladder ORDER", () => {
     const boot = section("def boot_browser", "def ensure_pages");
+    const lpAt = boot.indexOf("pw.chromium.connect_over_cdp(LIGHTPANDA_CDP)");
     const cloakAt = boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch");
     const patchAt = boot.indexOf("from patchright.sync_api import sync_playwright as pr_sync");
-    const stockAt = boot.indexOf("from playwright.sync_api import sync_playwright");
+    // The STOCK rung's playwright import (the lightpanda rung also imports
+    // playwright — anchor on the rung's own comment to disambiguate).
+    const stockAt = boot.indexOf("attempt 3: stock Playwright Chromium");
+    expect(lpAt).toBeGreaterThan(-1);
     expect(cloakAt).toBeGreaterThan(-1);
     expect(patchAt).toBeGreaterThan(-1);
     expect(stockAt).toBeGreaterThan(-1);
+    // Lightpanda is tried FIRST, the stealth engines after it, stock last.
+    expect(lpAt).toBeLessThan(cloakAt);
     expect(cloakAt).toBeLessThan(patchAt);
     expect(patchAt).toBeLessThan(stockAt);
   });

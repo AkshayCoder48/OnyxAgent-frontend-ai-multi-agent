@@ -1317,7 +1317,15 @@ def main():
         "5. Investigate before asking: discover missing information (request shapes, page controls, payloads) with run_terminal/use_browser — ask the user only for auth, irreversible approvals, or genuinely undiscoverable inputs.\n"
         "6. HTTP 200 is not functional success: verify the response structure and that returned data corresponds to your submitted input.\n"
         "7. Method provenance: if the user named an execution method, report honestly if you had to fall back to another.\n"
-        "8. Milestones only: brief notes at real milestones; never a narration message that substitutes for the tool call."
+        "8. Milestones only: brief notes at real milestones; never a narration message that substitutes for the tool call.\n\n"
+        "AUTONOMOUS PROBLEM SOLVING — the obstacle is input, not output:\n"
+        "9. Solve the OBJECTIVE, not just the requested method: genuinely try a named method (check, install, start, verify, connect) before any DISCLOSED fallback — never silently substitute.\n"
+        "10. Missing dependency = solvable: detect it, identify the environment (OS/arch/runtime), use the OFFICIAL install method (pip/npm/apt/vendor script), verify the install, retry the task.\n"
+        "11. Discover your environment before declaring a capability absent: check what's installed (which, ls, pip list, npm ls), what engines run (the browser reports every rung tried), whether the capability can be ADDED.\n"
+        "12. Research unfamiliar failures (official docs, GitHub issues) and APPLY the fix — research ends in an attempted solution, not a list.\n"
+        "13. Build temporary workarounds when needed (scripts, harnesses, clients) — validated, cleaned up, and only when fixing the existing path is impractical.\n"
+        "14. No permission-seeking for ordinary reversible work (sandbox installs, temp scripts, restarting your own browser, diagnostics) — do it. Ask only for money, production changes, data deletion, permission changes, or irreversible actions, naming the specific blocker.\n"
+        "15. Forbidden passive exits: 'not available' (before investigating why), 'I'll use the default' (before trying the requested method), 'cannot execute' (undiagnosed), 'package missing' (before installing), 'environment unsupported' (before checking), 'would you like me to try another approach?' (try the best safe alternative yourself), 'I don't know the payload' (capture the real requests and find out)."
     )
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = _EXECUTION_RULES + "\n\n" + str(messages[0].get("content") or "")

@@ -15,9 +15,9 @@ import { useSettings } from "@/hooks/use-data";
 
 /**
  * BrowserLivePanel — the LIVE BROWSER VIEW (user directive 2026-10-21:
- * a Browser tab on the chat header). The `use_browser` tool stays a plain
+ * a Browser entry in the chat ⋮ menu). The `use_browser` tool stays a plain
  * tool call + output in the chat flow; the real browser is WATCHED here —
- * a JPEG screencast of the sandbox browser's active tab (CloakBrowser,
+ * a JPEG screencast of the sandbox browser's active tab (stealth Chromium,
  * headed under Xvfb), streamed over SSE from the driver's CDP
  * Page.startScreencast, plus the live interaction state (url, title, tabs).
  *
@@ -72,18 +72,22 @@ export function BrowserLivePanel() {
           <span
             className="rounded-full bg-foreground/[0.05] px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
             title={
-              state.runtime === "patchright"
-                ? "Stealth Chromium (patchright — presents as real Chrome)"
-                : state.runtime === "chromium"
-                  ? "Stock Chromium (stealth engine unavailable)"
-                  : "CloakBrowser stealth Chromium"
+              state.runtime === "lightpanda"
+                ? "Lightpanda (headless, DOM+JS — no visual rendering)"
+                : state.runtime === "patchright"
+                  ? "Stealth Chromium (patchright — presents as real Chrome)"
+                  : state.runtime === "chromium"
+                    ? "Stock Chromium (stealth engine unavailable)"
+                    : "Stealth Chromium"
             }
           >
-            {state.runtime === "cloakbrowser"
-              ? "cloak"
-              : state.runtime === "patchright"
-                ? "chrome"
-                : state.runtime}
+            {state.runtime === "lightpanda"
+              ? "lightpanda"
+              : state.runtime === "cloakbrowser"
+                ? "stealth"
+                : state.runtime === "patchright"
+                  ? "chrome"
+                  : state.runtime}
           </span>
         ) : null}
         {typeof state?.tabCount === "number" && state.tabCount > 0 ? (
