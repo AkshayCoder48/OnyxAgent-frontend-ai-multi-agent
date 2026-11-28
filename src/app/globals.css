@@ -1612,21 +1612,52 @@
    textarea keeps native behavior with transparent glyphs
    (.prompt-mirror-text) — the caret stays inked so the user still sees
    where they are; IME composition, pastes and reduced-motion all fall
-   back to the plain textarea. */
+   back to the plain textarea.
+
+   CARET ALIGNMENT CONTRACT (Task 50, 2026-11-28 — the "cursor drifts
+   farther from the text while typing" fix): the mirror's painted text
+   must stay PIXEL-IDENTICAL to the textarea's internal layout, because
+   the textarea's own (inked) caret positions itself against ITS layout.
+   Two rules enforce it:
+     1. .prompt-char-in spans are INLINE (never inline-block). An
+        inline-block is an ATOMIC inline: it hard-breaks the text-shaping
+        run — no kerning across span boundaries, no ligatures, per-span
+        rounded advance widths. Each typed span added one more micro
+        divergence between the painted text and the native caret
+        (progressive drift while typing; a deletion collapsed everything
+        back to one static text node and the drift snapped back — exactly
+        the reported symptom). Inline spans participate in the same
+        shaping run as the surrounding text, so kerning/ligatures carry
+        across every boundary and the painted advance matches the
+        textarea's. The rise plays via `top` (relative positioning)
+        because transforms are IGNORED on non-replaced inlines —
+        translateY was a no-op on inline spans, and display:inline-block
+        was the old (layout-breaking) way to make it work.
+     2. Both elements reserve the same scrollbar gutter
+        (scrollbar-gutter: stable) and share one overflow strategy past
+        the composer's 200px height cap, so long-prompt wrap positions
+        can't diverge by the 8px scrollbar width. */
 
 .prompt-char-in {
-  display: inline-block;
+  /* INLINE — see the caret-alignment contract above. Never make this
+     inline-block: it re-introduces the progressive caret drift. */
+  display: inline;
+  position: relative;
+  top: 0;
   animation: prompt-char-in 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @keyframes prompt-char-in {
   from {
     opacity: 0;
-    transform: translateY(0.12em);
+    /* Relative offset, not transform — transforms don't apply to inline
+       boxes; the old inline-block + translateY combo is what broke the
+       caret alignment (see contract above). */
+    top: 0.12em;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    top: 0;
   }
 }
 
@@ -1652,6 +1683,28 @@
 
 .prompt-mirror-text::placeholder {
   color: transparent;
+}
+
+/* CARET ALIGNMENT (Task 50): one shared metrics contract for the mirror
+   pair — the textarea reserves its scrollbar gutter up front (stable),
+   and the mirror (overflow:hidden) reserves the SAME space as padding so
+   their content boxes stay the same width. Without this, a long prompt
+   past the 200px cap wrapped differently between the two (textarea with
+   an 8px classic scrollbar, mirror without) and every wrapped line's
+   caret position was off by the gutter width. `@supports` guards older
+   browsers: where the property is unsupported the textarea's classic
+   gutter behavior is unchanged, so the fallback matches too. */
+.prompt-mirror-scroll {
+  scrollbar-gutter: stable;
+}
+
+@supports (scrollbar-gutter: stable) {
+  .prompt-mirror-gutter {
+    /* Reserve exactly the thin-scrollbar width (see .scrollbar-thin
+       ::-webkit-scrollbar: 8px; Firefox thin ≈ 8px too) so the mirror's
+       text box matches the textarea's gutter-reserved content box. */
+    padding-right: 8px;
+  }
 }
 
 /* ==================== Writing Cursor (geometric shapes) ====================

@@ -30,6 +30,22 @@ import { cn } from "@/lib/utils";
  *   · prefers-reduced-motion → plain textarea, no mirror at all.
  *   · Internal scroll (>200px) → the mirror tracks the textarea's
  *     scrollTop so painted text and caret never desync.
+ *
+ * CARET ALIGNMENT (Task 50, the "cursor drifts from the text while
+ * typing" fix): the textarea's native caret positions itself against the
+ * textarea's OWN text layout, so the mirror must paint a layout-
+ * identical copy — see the caret-alignment contract in globals.css
+ * (.prompt-char-in). Two structural rules:
+ *   · Animated chars are INLINE spans, never inline-block (atomic
+ *     inlines break the shaping run → kerning/ligature divergence →
+ *     progressive caret drift); the rise animates `top`, not transform
+ *     (transforms are ignored on inline boxes anyway).
+ *   · Both elements carry the same scrollbar-gutter contract
+ *     (.prompt-mirror-scroll / .prompt-mirror-gutter) so long prompts
+ *     wrap identically past the 200px cap.
+ * External value changes (dictation, quoted replies, command resets)
+ * sync the boundary refs — a stale prevRef made the next keystroke's
+ * typed-tail check compare against an ancient value.
  */
 
 /** Typing-sized append: 1–3 chars at the end (a keystroke, maybe two
@@ -76,8 +92,10 @@ export function PromptTypingMirror({
   // Plain boundary: leading char count rendered as one static text node.
   // Chars BEYOND it render as per-char spans (keyed by absolute index)
   // that play the reveal animation exactly ON MOUNT — existing spans keep
-  // their keys across keystrokes so they never re-animate.
-  const plainRef = React.useRef(value.length);
+  // their keys across keystrokes so they never re-animate. `plain` lives in
+  // STATE (it IS render output — the head/tail split), while prevRef holds
+  // the last-seen value for the typed-tail comparison in the change handler.
+  const [plain, setPlain] = React.useState(value.length);
   const prevRef = React.useRef(value);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -93,10 +111,29 @@ export function PromptTypingMirror({
       v.startsWith(prev) &&
       !composing &&
       !reduced;
-    if (!typedTail) plainRef.current = v.length;
+    if (!typedTail) setPlain(v.length);
     prevRef.current = v;
     onChange(v);
   };
+
+  // EXTERNAL VALUE CHANGES (Task 50 caret-alignment hardening): the value
+  // can change WITHOUT handleChange running — dictation appends via
+  // setMessage, quoted replies land from the store, slash-command resets
+  // clear it. prevRef then held a stale snapshot, so the next keystroke's
+  // typed-tail check compared against an ancient value and the
+  // plain-boundary could land mid-run with stale span keys (chars
+  // re-animating, keys colliding with survivors). Sync whenever the prop
+  // changes outside our own change event: any external change is by
+  // definition NOT a typing append → static render, which is exactly the
+  // safety the paste valve wants. (Setting state in an effect on a prop
+  // change is the standard "sync external → internal" shape; it costs one
+  // extra render ONLY on external changes, never per keystroke.)
+  React.useEffect(() => {
+    if (value !== prevRef.current) {
+      prevRef.current = value;
+      setPlain(value.length);
+    }
+  }, [value]);
 
   // Scroll sync — the textarea scrolls internally past its 200px cap; the
   // painted mirror must follow or the text desyncs from the caret.
@@ -107,9 +144,8 @@ export function PromptTypingMirror({
   };
 
   // Tail rendering: whitespace renders as plain fragments (animating a
-  // space/newline is invisible, and inline-block spans would change the
-  // wrapping); every visible char is its own animated span.
-  const plain = Math.min(plainRef.current, value.length);
+  // space/newline is invisible, and spans around whitespace would change
+  // the wrapping); every visible char is its own animated span.
   const head = value.slice(0, plain);
   const tail = value.slice(plain);
   const tailNodes: React.ReactNode[] = [];
@@ -140,7 +176,7 @@ export function PromptTypingMirror({
         <div
           ref={mirrorRef}
           aria-hidden
-          className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words min-h-[40px] w-full py-2.5 text-sm leading-relaxed text-foreground sm:text-[15px]"
+          className="prompt-mirror-gutter pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words min-h-[40px] w-full py-2.5 text-sm leading-relaxed text-foreground sm:text-[15px]"
         >
           {head}
           {tailNodes}
@@ -159,7 +195,7 @@ export function PromptTypingMirror({
         rows={1}
         aria-label={ariaLabel}
         className={cn(
-          "relative mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
+          "prompt-mirror-scroll relative mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]",
           mirrorOn && "prompt-mirror-text",
         )}
       />
