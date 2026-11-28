@@ -72,7 +72,7 @@ describe("browser-driver boot hardening (asyncio poisoning fix)", () => {
     const unpoisonCalls = all(boot, "_unpoison_asyncio()");
     expect(unpoisonCalls.length).toBeGreaterThanOrEqual(3);
     const cloakImportAt = boot.indexOf("from cloakbrowser import launch_persistent_context");
-    const cloakLaunchAt = boot.indexOf("context = cb_launch(");
+    const cloakLaunchAt = boot.indexOf("_launch_with_profile_retry(");
     const fallbackStartAt = boot.indexOf("pw = sync_playwright().start()");
     expect(cloakImportAt).toBeGreaterThan(-1);
     expect(fallbackStartAt).toBeGreaterThan(cloakImportAt);
@@ -667,8 +667,10 @@ describe("browser-driver: cloak completion (license gate + tuned launch)", () =>
 
   it("passes license_key explicitly to the launch (one authoritative key source)", () => {
     const boot = section("def boot_browser", "def ensure_pages");
+    // Task 55 wrapped the launch in _launch_with_profile_retry (lambda) —
+    // anchor on the rung's import, not the old cb_launch( call.
     const launch = boot.slice(
-      boot.indexOf("context = cb_launch("),
+      boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch"),
       boot.indexOf("runtime = \"cloakbrowser\""),
     );
     expect(launch).toContain("license_key=cloak_key");
@@ -677,7 +679,7 @@ describe("browser-driver: cloak completion (license gate + tuned launch)", () =>
   it("enables geoip fingerprint coherence (timezone/locale follow the egress IP)", () => {
     const boot = section("def boot_browser", "def ensure_pages");
     const launch = boot.slice(
-      boot.indexOf("context = cb_launch("),
+      boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch"),
       boot.indexOf("runtime = \"cloakbrowser\""),
     );
     expect(launch).toContain("geoip=True");
@@ -747,5 +749,105 @@ describe("browser-driver: EVERY sleep survives the stale cloak patch (Task 54 re
     const live = SRC.slice(liveStart, liveEnd);
     expect(live).toContain("_safe_sleep(");
     expect(live).not.toMatch(/^\s*time\.sleep\(/m);
+  });
+});
+
+// ── TASK 55: the residual 'no running event loop' + 'profile is already
+// in use' browser_startup_failed reports (2026-11-28) ──────────────────────
+// Two NEW failure classes the ladder hardening didn't cover:
+//   1. DEAD-LOOP AT THE HANDLER BOUNDARY: an action ran against a cloak
+//      context whose asyncio loop already died (watchdog kill / crash /
+//      sandbox pause). cloak's patched dispatcher raised the RAW asyncio
+//      error ('no running event loop' / 'Event loop is closed' / task
+//      'attached to a different loop') — which fell into the generic
+//      except → playw_err → browser_error with NO recovery: every later
+//      command hit the same dead context.
+//   2. PROFILE-IN-USE ACROSS RUNGS: locks were cleared ONCE at
+//      boot_browser() entry, but each rung spawns/tears down its OWN
+//      chrome (a failed cloak launch leaves children mid-teardown when
+//      the patchright rung fires), and SIGKILL releases the
+//      SingletonSocket asynchronously — the 0.4s settle raced the
+//      ProcessSingleton handshake → 'Opening in existing browser session'.
+describe("browser-driver: dead-loop recovery at the command boundary (Task 55)", () => {
+  it("classifies the dead-loop signature distinctly (_is_dead_loop_error + browser_disconnected)", () => {
+    expect(SRC).toContain("def _is_dead_loop_error");
+    const fn = section("def _is_dead_loop_error", "def _env_int");
+    // All four asyncio death signatures are recognized…
+    expect(fn).toContain("no running event loop");
+    expect(fn).toContain("event loop is closed");
+    expect(fn).toContain("attached to a different loop");
+    expect(fn).toContain("event loop is bound");
+    // …and playw_err routes them to browser_disconnected BEFORE the
+    // generic browser_error bucket.
+    const playw = section("def playw_err", "def _is_dead_loop_error");
+    expect(playw.indexOf("_is_dead_loop_error")).toBeLessThan(playw.indexOf('"browser_error"'));
+    // (playw_err calls the checker FIRST — before the timeout/net checks —
+    // so the raw asyncio error can never masquerade as a locator timeout.)
+    expect(playw).toContain('"browser_disconnected"');
+  });
+
+  it("the command loop RESETS + RETRIES the handler once on the dead-loop signature", () => {
+    const loop = section("log(\"driver loop started", "if __name__");
+    // Detection in the generic except…
+    expect(loop).toContain("except Exception as e:");
+    expect(loop).toContain("_is_dead_loop_error(str(e))");
+    // …full state reset (drops the dead context, restores the real sleep,
+    // clears the poisoned loop flag)…
+    expect(loop).toContain("_reset_browser_state()");
+    // …ONE same-command retry, with its own BootFailure handling so a
+    // failed reboot reports browser_startup_failed (not a crash).
+    expect(loop).toContain("dead-loop-retry");
+    expect(loop).toContain("BROWSER_ACTION_COMPLETE\", phase=\"dead-loop-retry-recovered");
+    expect(loop).toContain("after dead-loop reset");
+  });
+});
+
+describe("browser-driver: profile-in-use recovery on EVERY engine rung (Task 55)", () => {
+  it("reaps orphans with VERIFICATION (kill rounds + poll, not a fixed 0.4s settle)", () => {
+    expect(SRC).toContain("def _reap_orphan_chromium(verify_sec=3.0)");
+    const fn = section("def _reap_orphan_chromium", "def _is_profile_in_use_error");
+    // Kill rounds cover respawning crashpad handlers; the verify poll
+    // waits for the OS to actually release the SingletonSocket.
+    expect(fn).toContain("for _ in range(6):");
+    expect(fn).toMatch(/while time\.time\(\) < deadline/);
+    expect(fn).toContain("verified gone");
+  });
+
+  it("recognizes Chromium's ProcessSingleton refusal message", () => {
+    expect(SRC).toContain("def _is_profile_in_use_error");
+    const fn = section("def _is_profile_in_use_error", "def _launch_with_profile_retry");
+    expect(fn).toContain("opening in existing browser session");
+    expect(fn).toContain("profile is already in use");
+    expect(fn).toContain("processsingleton");
+  });
+
+  it("EVERY launch site goes through _launch_with_profile_retry (reap+clear before, retry once on refusal)", () => {
+    const fn = section("def _launch_with_profile_retry", "def _clear_stale_profile_locks");
+    // Reap + lock-clear BEFORE the first attempt and again before the retry…
+    expect(fn).toContain("_reap_orphan_chromium()");
+    expect(fn).toContain("_clear_stale_profile_locks()");
+    expect(fn).toContain("profile-in-use-retry");
+    // …and the retry re-raises anything that is NOT the refusal (missing
+    // libs must still fall through the ladder).
+    expect(fn).toContain("return launch_fn()");
+    // ALL FIVE launch sites are wrapped (3 rungs + 2 post-install
+    // retries): no direct launch_persistent_context call remains outside
+    // a lambda passed to the wrapper.
+    const wrapped = all(SRC, "_launch_with_profile_retry(").length;
+    expect(wrapped).toBeGreaterThanOrEqual(6); // def + 5 call sites
+    const bare = SRC.split("\n").filter(
+      (l) =>
+        /launch_persistent_context\(/.test(l) &&
+        !/lambda|import|def |launch_fn/.test(l),
+    );
+    expect(bare).toEqual([]);
+  });
+
+  it("boot_browser reaps with verification up front too (before the ladder)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    const reapAt = boot.indexOf("_reap_orphan_chromium()");
+    const cloakAt = boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch");
+    expect(reapAt).toBeGreaterThan(-1);
+    expect(cloakAt).toBeGreaterThan(reapAt);
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Eye, EyeOff, Loader2, Save } from "lucide-react";
 
@@ -125,7 +126,12 @@ export function SectionBrowserLicense() {
         The browser tool runs CloakBrowser (stealth Chromium, humanized input) when a
         license key is set — it needs one even on the free tier. Without a key the
         browser falls back to patchright (a patched stealth Chromium), then stock
-        Chromium. Stored encrypted as the{" "}
+        Chromium. The key field lives with the other credentials in{" "}
+        <Link href="/settings/api-keys" className="underline underline-offset-2">
+          Settings → API Keys
+        </Link>{" "}
+        (the CloakBrowser row) — set it there; this card reads the same stored value.
+        Stored encrypted as the{" "}
         <code className="font-mono text-[11px]">CLOAKBROWSER_LICENSE_KEY</code> env
         var and injected into the sandbox automatically. Clearing the field removes it.
       </p>

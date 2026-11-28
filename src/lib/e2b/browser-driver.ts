@@ -848,31 +848,99 @@ def _safe_sleep(seconds):
         log("sleep poisoned (stale cloakbrowser patch: %s) — restoring the real sleep" % (e,))
     _untrack_cloak_sleep_owners()
     _REAL_SLEEP(seconds)
+def _reap_orphan_chromium(verify_sec=3.0):
+    """SIGKILL every chromium still holding OUR profile, then VERIFY they
+    are actually gone (poll up to verify_sec). Returns True when clean.
+
+    The 'Opening in existing browser session' incident (2026-11-28): the
+    old reap fired ONCE at boot_browser() entry with a fixed 0.4s settle.
+    But each engine rung can spawn and tear down its OWN chrome (a failed
+    cloak launch leaves its chrome children mid-teardown when rung 2
+    fires), and SIGKILL release of the SingletonSocket is asynchronous —
+    under load 0.4s raced the ProcessSingleton handshake and the next
+    rung's launch was REFUSED with 'profile is already in use'. This
+    helper is idempotent, self-verifying, and safe to call before EVERY
+    rung launch: pgrep -f 'user-data-dir=<PROFILE>' matches the browser
+    process AND its children (zygote, renderer, crashpad) — and while
+    BOOTING, the context is None, so any match is a zombie by definition
+    (no live driver connection owns it)."""
+    try:
+        killed = 0
+        for _ in range(6):  # kill rounds — respawning crashpad handlers
+            out = subprocess.run(
+                ["pgrep", "-f", "user-data-dir=" + PROFILE],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.split()
+            if not out:
+                break
+            for pid in out:
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                    killed += 1
+                except Exception:
+                    pass
+            _safe_sleep(0.3)
+        # VERIFY: poll until pgrep is empty or the budget runs out.
+        deadline = time.time() + verify_sec
+        while time.time() < deadline:
+            out = subprocess.run(
+                ["pgrep", "-f", "user-data-dir=" + PROFILE],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.split()
+            if not out:
+                if killed:
+                    log("reaped %d orphan chromium process(es) holding the browser profile (verified gone)" % killed)
+                return True
+            _safe_sleep(0.25)
+        log("orphan chromium processes still holding the profile after %.1fs: %s" % (verify_sec, " ".join(out)))
+        return False
+    except Exception:
+        return False
+
+
+def _is_profile_in_use_error(msg):
+    """True when a launch failure is Chromium's ProcessSingleton refusal:
+    'Opening in existing browser session' / 'profile is already in use'
+    / 'ProcessSingleton'. Retrying the SAME rung after a verified reap
+    fixes it; anything else (missing libs, bad binary) must fall through
+    the ladder instead."""
+    m = (msg or "").lower()
+    return ("opening in existing browser session" in m
+            or "profile is already in use" in m
+            or "processsingleton" in m
+            or "singletonlock" in m)
+
+
+def _launch_with_profile_retry(launch_fn, engine):
+    """launch_persistent_context with ONE same-rung retry on the
+    profile-in-use refusal. The reap+verify runs BEFORE the first attempt
+    too (the ladder's previous rung may have left chrome children), so
+    this is the ONLY launch path every engine rung uses."""
+    _reap_orphan_chromium()
+    _clear_stale_profile_locks()
+    try:
+        return launch_fn()
+    except Exception as e:
+        if _is_profile_in_use_error(str(e)):
+            log("%s launch refused: profile already in use — reaping orphans and retrying once" % engine)
+            event("BROWSER_ACTION_FAILED", phase="profile-in-use-retry", engine=engine, detail=_condense_launch_error(e))
+            _reap_orphan_chromium()
+            _clear_stale_profile_locks()
+            return launch_fn()
+        raise
+
+
 def _clear_stale_profile_locks():
-    """Remove Chromium's stale ProcessSingleton locks before launching.
+    """Remove Chromium's stale ProcessSingleton lock FILES before
+    launching. The live-process half (a zombie chrome still holding the
+    profile) is _reap_orphan_chromium's job — the two are called together
+    via _launch_with_profile_retry before EVERY engine rung.
 
     A hard-killed Chromium (sandbox pause/resume, OOM, crash, watchdog
     kill) leaves Singleton{Lock,Cookie,Socket} in the profile dir — the
     next launch_persistent_context with the same user-data-dir then
     REFUSES to start, which leaked the fallback Playwright instance and
-    poisoned this thread for every later boot. Orphan chromium processes
-    still holding OUR profile (no live driver connection owns them — we
-    are booting, so any survivor is a zombie) are reaped first."""
-    try:
-        out = subprocess.run(
-            ["pgrep", "-f", "user-data-dir=" + PROFILE],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.split()
-        for pid in out:
-            try:
-                os.kill(int(pid), signal.SIGKILL)
-                log("reaped orphan chromium pid %s holding the browser profile" % pid)
-            except Exception:
-                pass
-        if out:
-            _safe_sleep(0.4)
-    except Exception:
-        pass
+    poisoned this thread for every later boot."""
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         p = os.path.join(PROFILE, name)
         try:
@@ -1045,6 +1113,11 @@ def boot_browser():
         event("BROWSER_INITIALIZATION", phase="reboot", reason="dead-context")
         _reset_browser_state()
     boot_error = None
+    # Verified reap up front too (a watchdog kill or sandbox pause left
+    # zombies holding the profile); each rung ALSO reaps via
+    # _launch_with_profile_retry — the belt-and-suspenders pair that
+    # retired the 'Opening in existing browser session' boot failure.
+    _reap_orphan_chromium()
     _clear_stale_profile_locks()
     if HEADED is None:
         HEADED = _ensure_display()
@@ -1112,30 +1185,33 @@ def boot_browser():
     if cloak_key and not cloak_disabled:
         try:
             from cloakbrowser import launch_persistent_context as cb_launch
-            context = cb_launch(
-                PROFILE,
-                humanize=True,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
-                # THE COMPLETION (2026-11-28): the launch signature accepts
-                # far more than we passed. What's added vs before:
-                #   · license_key — ONE key source for the Pro binary,
-                #     the validation cache AND the launch (env/file
-                #     forwarding can drop between boot and reconnect; the
-                #     explicit arg is authoritative).
-                #   · geoip=True — aligns timezone/locale/geolocation to
-                #     the egress IP. Without it a mismatched timezone is
-                #     the cheapest bot signal a site can check (and the
-                #     sandbox egress region differs from the user's).
-                # What is deliberately NOT set: proxy (no app proxy infra),
-                # user_agent/locale/timezone overrides (cloak's own
-                # fingerprint coherence owns them — overriding one breaks
-                # the set), human_preset ('default' is the tuned-for-agents
-                # balance; 'fast' drops too much of the input realism),
-                # stealth_args (True = the product's full patch set).
-                license_key=cloak_key,
-                geoip=True,
+            context = _launch_with_profile_retry(
+                lambda: cb_launch(
+                    PROFILE,
+                    humanize=True,
+                    headless=not HEADED,
+                    args=LAUNCH_ARGS,
+                    viewport={"width": 1280, "height": 800},
+                    # THE COMPLETION (2026-11-28): the launch signature accepts
+                    # far more than we passed. What's added vs before:
+                    #   · license_key — ONE key source for the Pro binary,
+                    #     the validation cache AND the launch (env/file
+                    #     forwarding can drop between boot and reconnect; the
+                    #     explicit arg is authoritative).
+                    #   · geoip=True — aligns timezone/locale/geolocation to
+                    #     the egress IP. Without it a mismatched timezone is
+                    #     the cheapest bot signal a site can check (and the
+                    #     sandbox egress region differs from the user's).
+                    # What is deliberately NOT set: proxy (no app proxy infra),
+                    # user_agent/locale/timezone overrides (cloak's own
+                    # fingerprint coherence owns them — overriding one breaks
+                    # the set), human_preset ('default' is the tuned-for-agents
+                    # balance; 'fast' drops too much of the input realism),
+                    # stealth_args (True = the product's full patch set).
+                    license_key=cloak_key,
+                    geoip=True,
+                ),
+                "cloakbrowser",
             )
             runtime = "cloakbrowser"
             _mark_ready("cloakbrowser")
@@ -1176,11 +1252,14 @@ def boot_browser():
         from patchright.sync_api import sync_playwright as pr_sync
         pw = pr_sync().start()
         try:
-            context = pw.chromium.launch_persistent_context(
-                PROFILE,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
+            context = _launch_with_profile_retry(
+                lambda: pw.chromium.launch_persistent_context(
+                    PROFILE,
+                    headless=not HEADED,
+                    args=LAUNCH_ARGS,
+                    viewport={"width": 1280, "height": 800},
+                ),
+                "patchright",
             )
         except Exception:
             # Binary missing on this sandbox — fetch patchright's patched
@@ -1192,11 +1271,14 @@ def boot_browser():
                 capture_output=True, timeout=900,
             )
             event("BROWSER_DOWNLOAD_COMPLETE", phase="patchright-deps")
-            context = pw.chromium.launch_persistent_context(
-                PROFILE,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
+            context = _launch_with_profile_retry(
+                lambda: pw.chromium.launch_persistent_context(
+                    PROFILE,
+                    headless=not HEADED,
+                    args=LAUNCH_ARGS,
+                    viewport={"width": 1280, "height": 800},
+                ),
+                "patchright",
             )
         runtime = "patchright"
         _mark_ready("patchright")
@@ -1219,11 +1301,14 @@ def boot_browser():
         from playwright.sync_api import sync_playwright
         pw = sync_playwright().start()
         try:
-            context = pw.chromium.launch_persistent_context(
-                PROFILE,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
+            context = _launch_with_profile_retry(
+                lambda: pw.chromium.launch_persistent_context(
+                    PROFILE,
+                    headless=not HEADED,
+                    args=LAUNCH_ARGS,
+                    viewport={"width": 1280, "height": 800},
+                ),
+                "chromium",
             )
         except Exception:
             # Missing browser binaries OR missing SYSTEM LIBRARIES on a
@@ -1241,11 +1326,14 @@ def boot_browser():
                 capture_output=True, timeout=900,
             )
             event("BROWSER_DOWNLOAD_COMPLETE", phase="fallback-deps")
-            context = pw.chromium.launch_persistent_context(
-                PROFILE,
-                headless=not HEADED,
-                args=LAUNCH_ARGS,
-                viewport={"width": 1280, "height": 800},
+            context = _launch_with_profile_retry(
+                lambda: pw.chromium.launch_persistent_context(
+                    PROFILE,
+                    headless=not HEADED,
+                    args=LAUNCH_ARGS,
+                    viewport={"width": 1280, "height": 800},
+                ),
+                "chromium",
             )
         runtime = "chromium"
         _mark_ready("chromium")
@@ -1635,6 +1723,13 @@ def playw_err(e):
     """Map a Playwright/Python error into a structured error payload."""
     cls = type(e).__name__
     msg = str(e)
+    if _is_dead_loop_error(msg):
+        # The dead-cloak-loop signature (see _is_dead_loop_error): the
+        # action ran against a context whose asyncio loop is gone. It is
+        # NEVER a permanent action failure — the command loop catches it
+        # separately, resets the browser state and retries once. This
+        # classification exists so events telemetry can count the class.
+        return err_payload("browser_disconnected", msg, True)
     if "Timeout" in cls or "timeout" in msg.lower():
         if "locator" in msg.lower() or "waiting for" in msg.lower():
             return err_payload("element_not_found", msg)
@@ -1642,6 +1737,26 @@ def playw_err(e):
     if "net::ERR" in msg or "Navigation failed" in msg:
         return err_payload("navigation_failed", msg)
     return err_payload("browser_error", msg, True)
+
+
+def _is_dead_loop_error(msg):
+    """True when an exception message is the dead-asyncio-loop signature.
+
+    The residual 'browser_error — : no running event loop' reports: an
+    action ran against a cloak context whose loop already died (watchdog
+    SIGKILL of the browser, crash, sandbox pause). cloak's patched
+    dispatcher surfaces the RAW asyncio error — 'no running event loop',
+    'Event loop is closed', a task 'attached to a different loop', or
+    'Event loop is bound' — which used to fall into the generic
+    browser_error bucket with no recovery. The command loop detects the
+    SAME signature (via this helper), resets the browser state and
+    retries the handler once: the rebooted context then serves the
+    action, and the user sees success instead of the error."""
+    m = (msg or "").lower()
+    return ("no running event loop" in m
+            or "event loop is closed" in m
+            or "attached to a different loop" in m
+            or "event loop is bound" in m)
 
 
 # ── Cloudflare challenge settle (the "Just a moment..." incident, 2026-11-02) ──
@@ -2828,8 +2943,35 @@ def main():
                     )
                     boot_failed = True
                 except Exception as e:
-                    log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
-                    result = playw_err(e)
+                    if _is_dead_loop_error(str(e)):
+                        # DEAD-LOOP RECOVERY (the residual 'browser_error —
+                        # : no running event loop'): the action hit a cloak
+                        # context whose asyncio loop is gone. NOT an action
+                        # failure — reset the browser state (drops the dead
+                        # context, restores the real sleep, clears the
+                        # poisoned loop flag) and RETRY THE SAME HANDLER
+                        # once; boot_browser() inside rebuilds on the
+                        # persistent profile and the action goes through.
+                        log("dead event loop detected mid-action (%s) — resetting the browser state and retrying once" % (e,))
+                        event("BROWSER_ACTION_FAILED", phase="dead-loop-retry", action=action, commandId=cid, detail=str(e)[:200])
+                        _reset_browser_state()
+                        try:
+                            result = handler(cmd)
+                            event("BROWSER_ACTION_COMPLETE", phase="dead-loop-retry-recovered", action=action, commandId=cid)
+                        except BootFailure as e2:
+                            log("browser boot failure after dead-loop reset: %s" % (e2,))
+                            result = err_payload(
+                                "browser_startup_failed",
+                                "%s A fresh browser driver will start on the next command." % (e2,),
+                                True,
+                            )
+                            boot_failed = True
+                        except Exception as e2:
+                            log("action %s failed after dead-loop reset: %s" % (action, traceback.format_exc()[-400:]))
+                            result = playw_err(e2)
+                    else:
+                        log("action %s failed: %s" % (action, traceback.format_exc()[-400:]))
+                        result = playw_err(e)
                 _disarm_watchdog()
             duration_ms = int((time.time() - t0) * 1000)
             if isinstance(result, dict):

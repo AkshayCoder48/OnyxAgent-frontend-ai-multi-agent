@@ -22,6 +22,7 @@ import { SectionCard } from "@/components/settings/settings-section";
 import { useAuth } from "@/hooks";
 import { useSettings, useProviders } from "@/hooks/use-data";
 import { settingsService } from "@/lib/services";
+import type { UserSettings } from "@/types";
 import { usePollinationsStore } from "@/lib/pollinations/store";
 import { resolveOnyxBaseUrl, OnyxBaseKV } from "@/lib/onyxbase/kv-client";
 import { apiComposioConnect, looksLikeComposioKey } from "@/lib/composio/browser";
@@ -93,6 +94,7 @@ function KeyInput({
   revealed,
   onToggleReveal,
   placeholder,
+  ariaLabel,
 }: {
   id: string;
   value: string;
@@ -100,6 +102,9 @@ function KeyInput({
   revealed: boolean;
   onToggleReveal: () => void;
   placeholder: string;
+  /** Accessible name — the visual row title is a <p>, so without this
+   *  screen readers (and tests) cannot tell the inputs apart. */
+  ariaLabel?: string;
 }) {
   return (
     <div className="relative min-w-0 flex-1 basis-56">
@@ -109,6 +114,7 @@ function KeyInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        aria-label={ariaLabel ?? placeholder}
         autoComplete="off"
         spellCheck={false}
         className="pr-9 font-mono"
@@ -173,6 +179,13 @@ function KeyRow({
 
 const POLLINATIONS_KEY_RE = /^(sk|pk)_[A-Za-z0-9_\-]{16,}$/;
 const ONYXBASE_GET_KEY_URL = "https://onyxbase-chi.vercel.app";
+// The CloakBrowser license rides the SAME env var everywhere (the overlay
+// Agent Settings field and the route Browser card use it too) — the three
+// surfaces stay in sync because they read/write one vault entry. The
+// browser tool needs it even on the free tier; with a key the sandbox
+// boots CloakBrowser (stealth Chromium, humanized input), without one it
+// falls back to patchright, then stock Chromium.
+const CLOAK_LICENSE_ENV = "CLOAKBROWSER_LICENSE_KEY";
 
 export function SectionApiKeys() {
   const { user } = useAuth();
@@ -187,6 +200,9 @@ export function SectionApiKeys() {
   const [busy, setBusy] = React.useState<Record<string, boolean>>({});
   const [testingE2B, setTestingE2B] = React.useState(false);
   const [testingOnyxBase, setTestingOnyxBase] = React.useState(false);
+  // ── CloakBrowser license (loaded once; the `cloakLoaded` gate keeps an
+  // empty field on a vault read error from being saved as "remove key") ──
+  const [cloakLoaded, setCloakLoaded] = React.useState(false);
 
   const setValue = (k: string, v: string) => setValues((p) => ({ ...p, [k]: v }));
   const toggleReveal = (k: string) => setRevealed((p) => ({ ...p, [k]: !p[k] }));
@@ -201,6 +217,63 @@ export function SectionApiKeys() {
     langsearch: !!(settings as { langsearch_api_key_present?: boolean } | null)?.langsearch_api_key_present,
     skillsmp: !!(settings as { skillsmp_api_key_present?: boolean } | null)?.skillsmp_api_key_present,
   };
+
+  // ── CloakBrowser license: presence + current value (decrypted) ────────
+  // Loaded once with the section; the field is prefilled so the user can
+  // see/replace the existing key (same UX as the route Browser card).
+  const [cloakPresent, setCloakPresent] = React.useState(false);
+  React.useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const vars = await settingsService.getDecryptedEnvVars(userId);
+        if (cancelled) return;
+        const current = (vars[CLOAK_LICENSE_ENV] ?? "").trim();
+        setCloakPresent(!!current);
+        setValue("cloak", current);
+      } catch {
+        // Vault locked / read error — field stays blank; save stays gated.
+      } finally {
+        if (!cancelled) setCloakLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  async function saveCloakKey(explicit?: string) {
+    if (!userId) return;
+    if (!cloakLoaded) {
+      toast.error("Settings are still loading — try again in a moment");
+      return;
+    }
+    // `explicit` carries the Clear button's "" — a same-tick setValue("")
+    // would not be visible in this closure's `values` yet.
+    const trimmed = (explicit !== undefined ? explicit : (values.cloak ?? "")).trim();
+    setRowBusy("cloak", true);
+    try {
+      // MERGE-PRESERVE: update({env_vars}) REPLACES the whole dict — load
+      // every existing var and write them all back with only the license
+      // entry changed (same write path as the route Browser card, so the
+      // two surfaces can never fight).
+      const current = await settingsService.getDecryptedEnvVars(userId);
+      if (trimmed) current[CLOAK_LICENSE_ENV] = trimmed;
+      else delete current[CLOAK_LICENSE_ENV];
+      await settingsService.update(userId, { env_vars: current } as Partial<UserSettings>);
+      setCloakPresent(!!trimmed);
+      toast.success(
+        trimmed
+          ? "CloakBrowser license key saved — the browser tool uses it on the next session"
+          : "CloakBrowser license key removed — the browser falls back to patchright",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save license key");
+    } finally {
+      setRowBusy("cloak", false);
+    }
+  }
 
   // ── E2B ─────────────────────────────────────────────────────────────────
   async function saveE2B() {
@@ -435,6 +508,42 @@ export function SectionApiKeys() {
               {testingE2B ? <Loader2 className="mr-1 size-3.5 animate-spin" /> : <Plug className="mr-0.5 size-3.5" />}
               Test
             </Button>
+          </KeyRow>
+
+          {/* ── CloakBrowser license (the browser tool's stealth engine) ── */}
+          <KeyRow
+            platform="cloakbrowser"
+            title="CloakBrowser"
+            href="https://cloakbrowser.dev"
+            badge={<StatusBadge state={cloakPresent ? "connected" : "off"} label={cloakPresent ? "licensed" : "not set"} />}
+            description="The browser tool's stealth engine — CloakBrowser (humanized input, fingerprint patches) needs a license key even on the free tier. Without one the browser falls back to patchright, then stock Chromium. Also settable in Settings → Browser."
+          >
+            <KeyInput
+              id="api-key-cloak"
+              value={values.cloak ?? ""}
+              onChange={(v) => setValue("cloak", v)}
+              revealed={!!revealed.cloak}
+              onToggleReveal={() => toggleReveal("cloak")}
+              placeholder={cloakPresent ? "cb_… (saved) — enter a new key to replace" : "cb_… (get one free at cloakbrowser.dev)"}
+              ariaLabel="CloakBrowser license key"
+            />
+            <Button size="sm" onClick={() => void saveCloakKey()} disabled={busy.cloak || !cloakLoaded}>
+              {spin("cloak")} Save
+            </Button>
+            {cloakPresent && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive hover:text-destructive"
+                onClick={() => {
+                  setValue("cloak", "");
+                  void saveCloakKey("");
+                }}
+                disabled={busy.cloak}
+              >
+                <Trash2 className="mr-0.5 size-3.5" /> Clear
+              </Button>
+            )}
           </KeyRow>
 
           {/* ── Pollinations ── */}

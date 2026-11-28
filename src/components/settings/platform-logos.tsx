@@ -30,6 +30,7 @@ export type PlatformMark =
   | "composio"
   | "langsearch"
   | "skillsmp"
+  | "cloakbrowser"
   | "generic";
 
 const MARKS: Record<PlatformMark, React.ReactNode> = {
@@ -157,6 +158,14 @@ const MARKS: Record<PlatformMark, React.ReactNode> = {
       <path d="M5.2 18.6 8 15.8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
     </g>
   ),
+  // CloakBrowser — the shield over the eye (stealth browsing).
+  cloakbrowser: (
+    <g fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinejoin="round" strokeLinecap="round">
+      <path d="M12 3.4 19.4 6v5.2c0 4.3-3 7.6-7.4 9.4-4.4-1.8-7.4-5.1-7.4-9.4V6z" />
+      <circle cx="12" cy="10.6" r="2" fill="currentColor" stroke="none" />
+      <path d="M8.9 15.2c.8-1.7 1.8-2.4 3.1-2.4s2.3.7 3.1 2.4" strokeWidth="1.7" />
+    </g>
+  ),
   generic: null,
 };
 
@@ -180,6 +189,7 @@ export function resolvePlatformMark(name: string | null | undefined): PlatformMa
   if (n.includes("composio")) return "composio";
   if (n.includes("langsearch") || n.includes("langsearch")) return "langsearch";
   if (n.includes("skillsmp") || n.includes("skills mp")) return "skillsmp";
+  if (n.includes("cloak")) return "cloakbrowser";
   return "generic";
 }
 

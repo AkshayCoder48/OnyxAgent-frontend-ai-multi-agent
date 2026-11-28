@@ -36,6 +36,9 @@ describe("resolvePlatformMark", () => {
     expect(resolvePlatformMark("Composio")).toBe("composio");
     expect(resolvePlatformMark("LangSearch")).toBe("langsearch");
     expect(resolvePlatformMark("SkillsMP")).toBe("skillsmp");
+    // Task 55: the CloakBrowser license row in API Keys.
+    expect(resolvePlatformMark("CloakBrowser")).toBe("cloakbrowser");
+    expect(resolvePlatformMark("cloakbrowser stealth engine")).toBe("cloakbrowser");
   });
 
   it("falls back to the generic key for unknown or empty names", () => {
