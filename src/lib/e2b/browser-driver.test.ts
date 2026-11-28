@@ -636,3 +636,116 @@ describe("browser-driver: the cloak license key reaches the sandbox", () => {
     expect(persistSlice).not.toMatch(/log\([^)]*cloak_key/);
   });
 });
+
+// ── CLOAK COMPLETION (Task 54: "re read cloak implementation and add
+// completely") — the missing pieces of the cloakbrowser 0.7.3 integration
+// found by reading the module's real API surface: a pre-launch license
+// VALIDATION gate (validate_license: 24h cache, stale-fallback), explicit
+// license_key= on the launch (one key source), geoip fingerprint
+// coherence, and CloakBrowserLicenseError-specific diagnosis (Pro binary
+// exit codes 76-79). Also the residual 'no running event loop': the Task
+// 51 fix only hardened the command-loop poll; NINE other raw time.sleep
+// sites (live-cast threads, watchdog daemon, boot waits, profile cleanup)
+// still hit cloak's stale monkey-patch after a browser kill.
+describe("browser-driver: cloak completion (license gate + tuned launch)", () => {
+  it("validates the license BEFORE launching cloak (a bad key skips straight to patchright)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    expect(boot).toContain("validate_license as _cb_validate");
+    // The gate runs BEFORE the launch import and before the key is even
+    // persisted (no point caching a rejected key).
+    const gateAt = boot.indexOf("validate_license as _cb_validate");
+    const importAt = boot.indexOf("from cloakbrowser import launch_persistent_context as cb_launch");
+    const persistAt = boot.indexOf("save_license_key as _cb_save");
+    expect(importAt).toBeGreaterThan(gateAt);
+    expect(persistAt).toBeGreaterThan(gateAt);
+    // A definitive invalid answer disables the cloak rung for the process…
+    expect(boot).toContain("cloak_disabled = True");
+    // …but a server-unreachable (None) result does NOT (offline sandboxes
+    // still launch — the launch itself re-checks).
+    expect(boot).toMatch(/info is not None and not info\.valid/);
+  });
+
+  it("passes license_key explicitly to the launch (one authoritative key source)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    const launch = boot.slice(
+      boot.indexOf("context = cb_launch("),
+      boot.indexOf("runtime = \"cloakbrowser\""),
+    );
+    expect(launch).toContain("license_key=cloak_key");
+  });
+
+  it("enables geoip fingerprint coherence (timezone/locale follow the egress IP)", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    const launch = boot.slice(
+      boot.indexOf("context = cb_launch("),
+      boot.indexOf("runtime = \"cloakbrowser\""),
+    );
+    expect(launch).toContain("geoip=True");
+    // …but does NOT override locale/timezone/user_agent piecemeal (cloak's
+    // own fingerprint coherence owns the set — one override breaks it).
+    expect(launch).not.toMatch(/locale\s*=/);
+    expect(launch).not.toMatch(/timezone\s*=/);
+    expect(launch).not.toMatch(/user_agent\s*=/);
+  });
+
+  it("diagnoses CloakBrowserLicenseError distinctly from launch failures", () => {
+    const boot = section("def boot_browser", "def ensure_pages");
+    // The Pro binary's license exit codes (76-79) arrive as
+    // CloakBrowserLicenseError — matched by type name (the class cannot be
+    // imported before the module is known-present)…
+    expect(boot).toContain('type(e).__name__ == "CloakBrowserLicenseError"');
+    // …logged with the license diagnosis (pointing at Settings → Browser)
+    // instead of a generic launch-failed string.
+    expect(boot).toContain("cloakbrowser LICENSE failure");
+    // And the generic path survives for genuine launch failures.
+    expect(boot).toContain("cloakbrowser launch failed:");
+  });
+});
+
+describe("browser-driver: EVERY sleep survives the stale cloak patch (Task 54 residual fix)", () => {
+  it("no raw time.sleep( call sites remain outside _safe_sleep/_REAL_SLEEP", () => {
+    // The python driver body: every sleep site must route through
+    // _safe_sleep so cloak's dead-loop patch can never wedge ANY thread —
+    // the live-cast flusher/attach loops, the watchdog daemon, the boot
+    // waits and the profile cleanup all run OUTSIDE the command loop the
+    // Task 51 fix covered.
+    //
+    // Line-based scan of the driver source (SRC IS the python template):
+    // a raw sleep is an EXECUTION line starting with optional whitespace
+    // then `time.sleep(`. Comment/docstring mentions of time.sleep never
+    // start a line that way, and `_REAL_SLEEP = time.sleep` is excluded
+    // by name.
+    const lines = SRC.split("\n");
+    const raw: number[] = [];
+    lines.forEach((l, i) => {
+      if (/^\s*time\.sleep\(/.test(l)) raw.push(i);
+    });
+    // The ONE survivor is the try-arm inside _safe_sleep itself.
+    expect(raw.length).toBe(1);
+    const fnStart = lines.findIndex((l) => l.startsWith("def _safe_sleep"));
+    const fnEnd = lines.findIndex((l, i) => i > fnStart && /^def /.test(l));
+    expect(raw[0]!).toBeGreaterThan(fnStart);
+    expect(raw[0]!).toBeLessThan(fnEnd);
+    // The captured real-sleep reference survives (the retry arm).
+    expect(SRC).toContain("_REAL_SLEEP = time.sleep");
+  });
+
+  it("the forever-loops (watchdog daemon, live-cast) use _safe_sleep", () => {
+    // Watchdog daemon: a 0.5s poll that runs for the process lifetime —
+    // if it ever hits the stale patch raw, the watchdog dies silently and
+    // pending actions hang forever (exactly the class of wedge Task 51
+    // fixed for the command loop).
+    expect(SRC).toContain("def watchdog_loop");
+    const wdStart = SRC.indexOf("def watchdog_loop");
+    const wdEnd = SRC.indexOf("\ndef ", wdStart + 4);
+    const wd = SRC.slice(wdStart, wdEnd);
+    expect(wd).toContain("_safe_sleep(0.5)");
+    expect(wd).not.toMatch(/^\s*time\.sleep\(/m);
+    // Live-cast threads: the flusher poll + the attach/retry backoffs.
+    const liveStart = SRC.indexOf("def live_cast_loop");
+    const liveEnd = SRC.indexOf("\ndef ", liveStart + 4);
+    const live = SRC.slice(liveStart, liveEnd);
+    expect(live).toContain("_safe_sleep(");
+    expect(live).not.toMatch(/^\s*time\.sleep\(/m);
+  });
+});

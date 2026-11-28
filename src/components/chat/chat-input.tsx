@@ -3,7 +3,6 @@
 import { memo, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui";
 import { RainbowButton } from "@/components/ui/rainbow-button";
-import { PromptTypingMirror } from "./prompt-typing-mirror";
 import { ArrowUp, Loader2, Paperclip, Square } from "lucide-react";
 import { type FileUploadResponse, uploadFile } from "@/lib/file-api";
 import {
@@ -389,23 +388,20 @@ export const ChatInput = memo(function ChatInput({
 
       {/* MAIN INPUT AREA — clean multiline text, full width (§5.3). The
           dock owns the border + focus glow; the textarea itself is bare.
-          TYPING ANIMATION ON THE USER'S OWN TYPING (user directive
-          2026-11-24: "add this animation when we type our prompt in the
-          prompt box … not that auto writing"): a MIRROR layer behind the
-          textarea renders the prompt text, and every freshly-typed
-          character reveals with the MagicUI-style char pop
-          (.prompt-char-in — fade + 0.12em rise, 170ms). The textarea
-          itself keeps 100% native behavior (caret, selection, focus,
-          mobile keyboards) with transparent glyph color
-          (.prompt-mirror-text) while the mirror paints the text — the
-          classic syntax-highlight-mirror technique. The previous
-          auto-writing placeholder overlay (rotating suggestions while
-          EMPTY) is REMOVED by the same directive. Safety valves: IME
-          composition steps the mirror aside (the native preedit +
-          underline must stay visible — plain mode until compositionEnd),
-          big deltas (paste / dictation inserts > 8 chars) render static
-          (no burst), and prefers-reduced-motion disables the mirror
-          entirely (plain textarea). */}
+          TYPING ANIMATION REMOVED (user directive 2026-11-28: "remove chat
+          message box's typing animation and kill that auto far going
+          cursor"): the mirror-overlay technique that animated each typed
+          char (transparent textarea glyphs + a painted div behind) was
+          also the ENTIRE source of the caret-drift class of bugs — an
+          overlay can never be guaranteed pixel-identical to the
+          textarea's internal layout (span shaping boundaries, scrollbar
+          gutters, font rendering), and every divergence showed as the
+          caret walking away from the text while typing. The composer is
+          now a PLAIN NATIVE TEXTAREA: its own glyphs, its own caret —
+          pixel-identical by construction, zero divergence possible.
+          Everything else is untouched: measured-height animated resize,
+          focus management, native placeholder, IME, mobile keyboards,
+          border beam, glow, controls. */}
       {dictation.active ? (
         <ComposerVoice
           recording={dictation.recording}
@@ -413,13 +409,16 @@ export const ChatInput = memo(function ChatInput({
           interim={dictation.interim}
         />
       ) : (
-        <PromptTypingMirror
-          textareaRef={textareaRef}
+        <textarea
+          ref={textareaRef}
           value={message}
-          onChange={setMessage}
+          onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
+          placeholder="Reply to OnyxAgent… or type / for commands"
           disabled={disabled}
-          ariaLabel="Reply to OnyxAgent… or type / for commands"
+          rows={1}
+          aria-label="Reply to OnyxAgent… or type / for commands"
+          className="prompt-mirror-scroll relative mb-height placeholder:text-muted-foreground/60 min-h-[40px] w-full resize-none scrollbar-thin bg-transparent py-2.5 text-sm leading-relaxed text-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:text-[15px]"
         />
       )}
 

@@ -585,7 +585,7 @@ def live_pub_loop():
     live.json atomically. Never touches Playwright objects."""
     global LIVE_DIRTY
     while True:
-        time.sleep(0.1)
+        _safe_sleep(0.1)
         try:
             dirty = False
             snapshot = None
@@ -741,7 +741,7 @@ def live_cast_loop():
                         except Exception as e:
                             log("live cast attach failed: %s" % e)
                             cdp = None
-                time.sleep(0.5)
+                _safe_sleep(0.5)
         except Exception as e:
             log("live cast loop: %s" % e)
         finally:
@@ -750,7 +750,7 @@ def live_cast_loop():
                     pwp.stop()
             except Exception:
                 pass
-        time.sleep(3.0)
+        _safe_sleep(3.0)
 
 
 class BootFailure(RuntimeError):
@@ -870,7 +870,7 @@ def _clear_stale_profile_locks():
             except Exception:
                 pass
         if out:
-            time.sleep(0.4)
+            _safe_sleep(0.4)
     except Exception:
         pass
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
@@ -975,7 +975,7 @@ def _ensure_display():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         for _ in range(30):
-            time.sleep(0.2)
+            _safe_sleep(0.2)
             if _display_alive(99):
                 os.environ["DISPLAY"] = ":99"
                 log("started Xvfb on :99 — browser runs headed (headless=False)")
@@ -1078,7 +1078,29 @@ def boot_browser():
             cloak_key = _cb_key() or ""
         except Exception:
             cloak_key = ""
+    # LICENSE VALIDATION GATE (2026-11-28, Cloak completion): a key alone
+    # proves nothing — an invalid/expired one cost a network round-trip
+    # AND a full Pro-binary launch attempt on EVERY boot before falling to
+    # patchright. validate_license() is the module's own gate (24h local
+    # cache, stale-cache fallback when the server is unreachable — so the
+    # offline-sandbox case still boots cloak). A definitive invalid/expired
+    # answer disables cloak for THIS driver process (the session manager
+    # boots a fresh driver when the key changes); an unreachable server
+    # (None) is NOT a denial — the launch itself re-checks.
+    cloak_disabled = False
     if cloak_key:
+        try:
+            from cloakbrowser.license import validate_license as _cb_validate
+            info = _cb_validate(cloak_key)
+            if info is not None and not info.valid:
+                cloak_disabled = True
+                log("cloak license key REJECTED by the license server (plan: %s) — using the free stealth engine; fix the key in Settings → Browser" % (getattr(info, "plan", "?"),))
+                event("BROWSER_ACTION_FAILED", phase="license", engine="cloakbrowser", detail="license rejected")
+            elif info is not None:
+                log("cloak license valid (plan: %s, expires: %s)" % (info.plan, info.expires))
+        except Exception as e:
+            log("cloak license validation unavailable (%s) — attempting the launch anyway" % (e,))
+    if cloak_key and not cloak_disabled:
         try:
             # Persist for cross-boot use. Never logs the key itself.
             from cloakbrowser.license import save_license_key as _cb_save
@@ -1086,8 +1108,8 @@ def boot_browser():
         except Exception as e:
             log("cloak license key cache write skipped: %s" % (e,))
     _unpoison_asyncio()
-    event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser" if cloak_key else "skipped-no-license", headed=HEADED)
-    if cloak_key:
+    event("BROWSER_INITIALIZATION", phase="start", engine="cloakbrowser" if (cloak_key and not cloak_disabled) else "skipped-no-license", headed=HEADED)
+    if cloak_key and not cloak_disabled:
         try:
             from cloakbrowser import launch_persistent_context as cb_launch
             context = cb_launch(
@@ -1096,19 +1118,49 @@ def boot_browser():
                 headless=not HEADED,
                 args=LAUNCH_ARGS,
                 viewport={"width": 1280, "height": 800},
+                # THE COMPLETION (2026-11-28): the launch signature accepts
+                # far more than we passed. What's added vs before:
+                #   · license_key — ONE key source for the Pro binary,
+                #     the validation cache AND the launch (env/file
+                #     forwarding can drop between boot and reconnect; the
+                #     explicit arg is authoritative).
+                #   · geoip=True — aligns timezone/locale/geolocation to
+                #     the egress IP. Without it a mismatched timezone is
+                #     the cheapest bot signal a site can check (and the
+                #     sandbox egress region differs from the user's).
+                # What is deliberately NOT set: proxy (no app proxy infra),
+                # user_agent/locale/timezone overrides (cloak's own
+                # fingerprint coherence owns them — overriding one breaks
+                # the set), human_preset ('default' is the tuned-for-agents
+                # balance; 'fast' drops too much of the input realism),
+                # stealth_args (True = the product's full patch set).
+                license_key=cloak_key,
+                geoip=True,
             )
             runtime = "cloakbrowser"
             _mark_ready("cloakbrowser")
-            log("booted cloakbrowser runtime (humanize=True, persistent profile)")
+            log("booted cloakbrowser runtime (humanize=True, geoip, persistent profile)")
             return
         except Exception as e:
             # cloakbrowser stops its internal playwright instance on launch
             # failure, but that stop can itself fail (warning path) — unpoison
             # so the fallback below gets a clean thread either way.
             _unpoison_asyncio()
-            boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
-            log(boot_error)
-            event("BROWSER_ACTION_FAILED", phase="boot", engine="cloakbrowser", detail=_condense_launch_error(e))
+            # LICENSE-SPECIFIC FAILURES get their own clear diagnosis: the
+            # Pro binary exits 76-79 for license reasons and cloak wraps
+            # them in CloakBrowserLicenseError with a human-readable
+            # reason (expired, seats exhausted, revoked…). Everything else
+            # is a genuine launch failure (missing binary, sandbox libs…)
+            # and keeps the generic message.
+            if type(e).__name__ == "CloakBrowserLicenseError":
+                log("cloakbrowser LICENSE failure: %s — using the free stealth engine; check Settings → Browser" % (e,))
+                event("BROWSER_ACTION_FAILED", phase="license", engine="cloakbrowser", detail=str(e)[:200])
+            else:
+                boot_error = "cloakbrowser launch failed: %s" % (_condense_launch_error(e),)
+                log(boot_error)
+                event("BROWSER_ACTION_FAILED", phase="boot", engine="cloakbrowser", detail=_condense_launch_error(e))
+    elif cloak_key:
+        log("cloak license key disabled for this session — skipping to the free stealth engine (patchright)")
     else:
         log("no cloakbrowser license key — skipping to the free stealth engine (patchright)")
 
@@ -1920,7 +1972,7 @@ def rec_cast_loop(stop_evt):
                     except Exception as e:
                         log("screen recording attach failed: %s" % e)
                         cdp = None
-            time.sleep(0.5)
+            _safe_sleep(0.5)
     except Exception as e:
         with REC_LOCK:
             REC["err"] = "recording stream failed: %s" % e
@@ -2626,7 +2678,7 @@ def watchdog_loop():
     """The watchdog daemon (PRD §6/§7: every action eventually resolves;
     never leave a pending browser promise indefinitely)."""
     while True:
-        time.sleep(0.5)
+        _safe_sleep(0.5)
         try:
             with WATCHDOG_LOCK:
                 cid = WATCHDOG["cid"]
@@ -2654,7 +2706,7 @@ def watchdog_loop():
                     break
                 if cid == "preboot" and os.path.exists(READY):
                     break
-                time.sleep(0.5)
+                _safe_sleep(0.5)
             if cid == "preboot":
                 if os.path.exists(READY):
                     # The kill unblocked the preboot — the driver is up and
@@ -2809,7 +2861,7 @@ def main():
                     os.remove(READY)
                 except Exception:
                     pass
-                time.sleep(0.2)
+                _safe_sleep(0.2)
                 os._exit(1)
             # Live-cast upkeep: after every command the active tab marker +
             # url/title/viewport refresh so the live view tracks what the
