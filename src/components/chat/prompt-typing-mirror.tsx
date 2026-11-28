@@ -46,16 +46,21 @@ import { cn } from "@/lib/utils";
  * itself lays out: ONE UNBROKEN TEXT NODE. So the animation must never
  * leave per-char boxes behind:
  *
- *   · SETTLE-TAIL MERGE (Task 52): a typed char animates as its own
- *     span for the 170ms reveal, then MERGES into the unbroken static
- *     head. At any instant at most the last few typed chars (≤ the
- *     typing-delta cap) are spanned, and the span/head boundary sits at
- *     or AFTER the caret — a boundary after the caret cannot shift any
- *     glyph position before it, and the boundary itself only ever
- *     accumulates ≤3 × 0.2px of transient, self-clearing divergence.
- *     The per-char pop is preserved (every char still mounts as a span
- *     and plays the animation exactly once); only the LINGERING boxes
- *     are gone.
+ *   · SETTLE-TAIL MERGE (Task 52, hardened Task 53): a typed char
+ *     animates as its own span for the 170ms reveal, then MERGES into
+ *     the unbroken static head. At any instant at most the last few
+ *     typed chars (≤ the typing-delta cap) are spanned, and the
+ *     span/head boundary sits at or AFTER the caret — a boundary after
+ *     the caret cannot shift any glyph position before it, and the
+ *     boundary itself only ever accumulates ≤3 × 0.2px of transient,
+ *     self-clearing divergence. The per-char pop is preserved (every
+ *     char still mounts as a span and plays the animation exactly once);
+ *     only the LINGERING boxes are gone. Task 53 hardened the timer: the
+ *     expiry deadline is anchored to each char's OWN birth time (oldest
+ *     alive char first), so continuous typing — which re-runs the effect
+ *     every keystroke — can no longer postpone the merge forever (the
+ *     Task 52 re-report: mid-sentence the tail grew unbounded and the
+ *     drift came back).
  *   · Animated chars are INLINE spans, never inline-block (atomic
  *     inlines break the shaping run → kerning/ligature divergence —
  *     Task 50's finding, still true); the rise animates `top`, not
@@ -125,12 +130,22 @@ export function PromptTypingMirror({
   // that play the reveal animation exactly ON MOUNT. `plain` lives in
   // STATE (it IS render output — the head/tail split), while prevRef holds
   // the last-seen value for the typed-tail comparison in the change handler.
-  // Task 52: the SETTLE TIMER advances `plain` to swallow animated chars
-  // once their reveal ends — the tail never outlives its animation, so
-  // per-char span boundaries never accumulate subpixel drift against the
-  // native caret.
+  // Tasks 52/53: the SETTLE TIMER advances `plain` past chars whose own
+  // reveal has ended — the tail never outlives its animation, so per-char
+  // span boundaries never accumulate subpixel drift against the native
+  // caret.
   const [plain, setPlain] = React.useState(value.length);
   const prevRef = React.useRef(value);
+
+  // Per-char birth times for the animated tail (absolute index → ms when
+  // the char was typed). Task 53: the settle timer's deadline must be
+  // anchored to the OLDEST alive char — a fresh keystroke re-runs the
+  // effect, and re-arming the FULL delay every time meant continuous
+  // typing (<200ms between keystrokes) cancelled the timer forever: the
+  // tail grew unbounded, every char stayed a live span, and the
+  // accumulated per-span drift returned mid-typing (the Task 52 re-report:
+  // "as I tap any letter it cuts the letter before it").
+  const bornRef = React.useRef<Map<number, number>>(new Map());
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
@@ -145,7 +160,15 @@ export function PromptTypingMirror({
       v.startsWith(prev) &&
       !composing &&
       !reduced;
-    if (!typedTail) setPlain(v.length);
+    if (!typedTail) {
+      setPlain(v.length);
+      bornRef.current.clear();
+    } else {
+      // Record the birth of every fresh char so its own reveal expiry —
+      // not the next keystroke — decides when its span merges.
+      const now = Date.now();
+      for (let i = prev.length; i < v.length; i++) bornRef.current.set(i, now);
+    }
     prevRef.current = v;
     onChange(v);
   };
@@ -166,27 +189,65 @@ export function PromptTypingMirror({
     if (value !== prevRef.current) {
       prevRef.current = value;
       setPlain(value.length);
+      bornRef.current.clear();
     }
   }, [value]);
 
-  // SETTLE-TAIL MERGE (Task 52, the caret-drift root fix): once the last
-  // typed char's reveal animation has finished, advance the plain boundary
-  // to swallow the animated tail — the settled chars become part of the
-  // ONE unbroken text node that matches the textarea's own layout (see the
-  // caret-alignment note: every lingering span boundary costs ~0.2px of
-  // subpixel divergence against the native caret, accumulating while
-  // typing). The merge is one state update per reveal (never per frame),
-  // skipped entirely when the tail is already empty; the timer is cleared
-  // on unmount and re-armed per tail so a value change never merges a
-  // partial mismatch (plain can only advance to the CURRENT value's
-  // length — a deletion/external reset simply re-arms or cancels).
+  // SETTLE-TAIL MERGE (Tasks 52/53, the caret-drift root fix): advance the
+  // plain boundary past every animated char whose OWN reveal has ended —
+  // settled chars become part of the ONE unbroken text node that matches
+  // the textarea's own layout (every lingering span boundary costs ~0.2px
+  // of subpixel divergence against the native caret, accumulating while
+  // typing). Task 53: the deadline is anchored to the OLDEST alive char's
+  // BIRTH time, not re-armed from scratch on each keystroke — the Task 52
+  // form re-ran this effect per keystroke and cancelled the pending timer,
+  // so continuous typing (<200ms between keystrokes) never let it fire
+  // and the tail grew unbounded (the full pre-fix drift mid-sentence).
+  // Now each expiry merges only the chars that have actually finished
+  // animating; a just-typed char keeps its span for its full 170ms even
+  // while older siblings merge. One state update per expiry batch, never
+  // per frame; a mid-reveal deletion simply re-runs this effect against
+  // the current value (births past its length are dead indices — pruned).
   React.useEffect(() => {
-    if (plain >= value.length) return;
-    const t = setTimeout(() => {
-      // Swallow only what still exists — deletions/external resets may
-      // have changed the value (or plain) since the timer was armed.
-      setPlain((p) => Math.max(p, value.length));
-    }, REVEAL_MS + 30);
+    if (plain >= value.length) {
+      bornRef.current.forEach((_t, i) => {
+        if (i >= value.length) bornRef.current.delete(i);
+      });
+      return;
+    }
+    const now = Date.now();
+    // OLDEST alive char's deadline (the MIN) — the timer fires at the
+    // FIRST expiry, merges everything already expired, then re-arms for
+    // the next-oldest. (max() would anchor to the NEWEST char and let
+    // continuous typing slide the fire point forward forever — the exact
+    // re-report.)
+    const alive = Array.from(bornRef.current.entries())
+      .filter(([i]) => i >= plain && i < value.length)
+      .map(([, born]) => born + REVEAL_MS + 30);
+    const deadline = alive.length ? Math.min(...alive) : now;
+    const t = setTimeout(
+      () => {
+        const tnow = Date.now();
+        // Expire every char whose own reveal window has closed…
+        let next = plain;
+        bornRef.current.forEach((born, i) => {
+          if (i >= plain && i < value.length && born + REVEAL_MS + 30 <= tnow) {
+            bornRef.current.delete(i);
+            if (i + 1 > next) next = i + 1;
+          }
+        });
+        // …but never past a still-animated survivor (boundary must stay
+        // contiguous: settled head + animated tail, no interleaving).
+        let firstAlive = value.length;
+        bornRef.current.forEach((born, i) => {
+          if (i >= next && i < value.length && born + REVEAL_MS + 30 > tnow && i < firstAlive) {
+            firstAlive = i;
+          }
+        });
+        setPlain(Math.min(next, firstAlive));
+      },
+      Math.max(0, deadline - now),
+    );
     return () => clearTimeout(t);
   }, [plain, value.length]);
 

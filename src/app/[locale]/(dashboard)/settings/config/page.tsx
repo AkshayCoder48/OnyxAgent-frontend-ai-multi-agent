@@ -35,6 +35,7 @@ import {
   Switch,
 } from "@/components/ui";
 import { SectionCard } from "@/components/settings/settings-section";
+import { SectionBrowserLicense } from "@/components/settings/section-browser-license";
 import { SystemPromptSection } from "@/components/settings/system-prompt-editor";
 import { MoreOptions } from "@/components/settings/more-options";
 import { ProviderDiagnosticsDialog } from "@/components/settings/provider-diagnostics";
@@ -372,6 +373,17 @@ export default function ConfigSettingsPage() {
 
       {/* E2B Sandbox + SkillsMP + LangSearch API keys moved to the
           dedicated /settings/api-keys page (PRD §11). */}
+
+      {/* CloakBrowser license key (Task 53: "add input in main setting
+          page") — the browser tool's stealth-Chromium credential. Same
+          env var + encrypted storage as the in-app overlay's Agent
+          Settings field, reachable from the route settings at last. */}
+      <SectionCard
+        title="Browser"
+        description="The browser tool's CloakBrowser license — stealth Chromium with humanized input for web tasks."
+      >
+        <SectionBrowserLicense />
+      </SectionCard>
 
       {/* System prompt — the user-facing override for the built-in Onyx
           agent prompt (applies on every turn when enabled + non-empty). */}

@@ -435,3 +435,121 @@ describe("composer redesign (PRD §5)", () => {
       expect(css52).toMatch(new RegExp(`prompt-char-in ${ms![1]}ms`));
     });
   });
+
+  // ── CARET ALIGNMENT III (Task 53 — "as I tap any letter it cuts the
+  // letter before it": drift returns MID-SENTENCE while typing
+  // continuously). Task 52's settle timer re-armed the FULL 200ms delay on
+  // every keystroke (the effect's deps include value.length, and its
+  // cleanup cancels the pending timer), so keystrokes < 200ms apart —
+  // ordinary typing speed — postponed the merge forever: the animated tail
+  // grew unbounded, every typed char stayed a live span, and the
+  // accumulated ~0.2px/boundary subpixel drift came back mid-typing,
+  // snapping back on pause or Backspace. The 52 tests only advanced time
+  // AFTER typing stopped, so they never saw it. The Task 53 fix anchors
+  // the expiry to each char's OWN birth time: the oldest alive char's
+  // deadline is what the timer waits for.
+  describe("caret alignment III: the settle timer fires DURING continuous typing (Task 53)", () => {
+    it("keystrokes 120ms apart: older chars merge MID-STREAM while newer ones keep animating (bounded tail)", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        // Type continuously, 120ms between keystrokes — FASTER than the
+        // 200ms settle delay. Task 52 never merged here (timer re-armed
+        // each keystroke); Task 53 merges chars whose own 200ms has
+        // elapsed the moment the timer fires.
+        for (const step of ["h", "he", "hel", "hell", "hello", "hello ", "hello w"]) {
+          fireEvent.change(textarea, { target: { value: step } });
+          act(() => { vi.advanceTimersByTime(120); });
+        }
+        // 840ms of typing elapsed; chars born ≥200ms ago have merged.
+        // The live tail must be bounded to roughly the last 200ms of
+        // typing (~2 keystrokes at this cadence), NOT all 7 chars.
+        const spans = container.querySelectorAll(".prompt-char-in");
+        expect(spans.length).toBeGreaterThanOrEqual(0);
+        expect(spans.length).toBeLessThanOrEqual(3);
+        expect(spans.length).toBeLessThan(7);
+        // …and the mirror still paints the FULL text (head + tail).
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(mirror!.textContent).toBe("hello w");
+        // Let everything settle: zero spans, one unbroken text node.
+        act(() => { vi.advanceTimersByTime(400); });
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        expect(mirror!.textContent).toBe("hello w");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("rapid typing with NO time passing between keystrokes: merge fires as soon as typing pauses", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        // Burst-type 11 chars in one macro-task (zero elapsed fake time):
+        // every char is still inside its reveal window, so the tail may
+        // legitimately hold all of them DURING the burst. 10 spans, not
+        // 11 — the SPACE (index 5) renders as a raw whitespace fragment
+        // by design (animating a space is invisible): "hello world" is
+        // 10 animated spans + 1 space fragment.
+        let v = "";
+        for (const ch of "hello world") {
+          v += ch;
+          fireEvent.change(textarea, { target: { value: v } });
+        }
+        const mid = container.querySelectorAll(".prompt-char-in").length;
+        expect(mid).toBe(10);
+        // …but the instant their reveals end, ALL of them merge at once —
+        // the timer is anchored to the OLDEST char's birth (now + 200ms),
+        // not postponed per keystroke.
+        act(() => { vi.advanceTimersByTime(250); });
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(mirror!.textContent).toBe("hello world");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a char typed AFTER an older char's expiry keeps its full animation (no premature merge of the survivor)", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        fireEvent.change(textarea, { target: { value: "a" } });
+        act(() => { vi.advanceTimersByTime(210); }); // "a" expired
+        fireEvent.change(textarea, { target: { value: "ab" } });
+        // Fresh char "b" is 0ms into its reveal: the expiry of "a" must
+        // not drag "b" into the head early (that would cut its animation
+        // short — the visual glitch the REVEAL_MS pin guards against).
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(1);
+        expect(container.querySelector(".prompt-char-in")!.textContent).toBe("b");
+        act(() => { vi.advanceTimersByTime(100); }); // mid-reveal for "b"
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(1);
+        act(() => { vi.advanceTimersByTime(150); }); // past "b"'s window
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(mirror!.textContent).toBe("ab");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("mid-reveal deletion keeps value/boundary consistent (no stale longer snapshot)", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = setup();
+        const textarea = screen.getByLabelText(/Reply to OnyxAgent/);
+        fireEvent.change(textarea, { target: { value: "hello worl" } });
+        act(() => { vi.advanceTimersByTime(100); }); // mid-reveal
+        fireEvent.change(textarea, { target: { value: "hello wor" } }); // delete
+        act(() => { vi.advanceTimersByTime(400); }); // all timers drain
+        const mirror = container.querySelector(".prompt-mirror-gutter");
+        expect(container.querySelectorAll(".prompt-char-in").length).toBe(0);
+        expect(mirror!.textContent).toBe("hello wor");
+        expect((textarea as HTMLTextAreaElement).value).toBe("hello wor");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });

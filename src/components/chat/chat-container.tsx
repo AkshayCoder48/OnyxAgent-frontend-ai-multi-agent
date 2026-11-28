@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useChat } from "@/hooks";
 import { BorderBeam } from "@/components/ui/border-beam";
 import { ChatEmptyState } from "./chat-empty-state";
@@ -364,6 +365,7 @@ export function ChatContainer(
   const replaceAllMessages = useChatStore((s) => s.replaceAllMessages);
   const restorePersisted = useChatStore((s) => s.restorePersisted);
   const { fetchConversations, selectConversation } = useConversations();
+  const router = useRouter();
   const prevConversationIdRef = useRef<string | null | undefined>(undefined);
 
   const handleConversationCreated = useCallback(
@@ -848,7 +850,16 @@ export function ChatContainer(
       if (onOpenSettings) {
         onOpenSettings();
       } else {
-        document.querySelector<HTMLButtonElement>("[data-chat-settings-trigger]")?.click();
+        // FALLBACK FIX (Task 53, "/settings slash command not working"):
+        // the old fallback clicked a composer settings-trigger button
+        // that no longer exists anywhere (the composer redesign removed
+        // it) — so on /chat (where ChatContainer mounts WITHOUT the
+        // onOpenSettings prop that AppShell passes) /settings was a
+        // silent no-op. Navigate to the route-based settings instead:
+        // works on every mount site, survives refresh, deep-links, and is
+        // where the browser/license surfaces live. ConversationSidebar's
+        // gear uses the same destination.
+        router.push("/en/settings/config");
       }
     },
     // `/image <prompt>` — DIRECT image generation (user request 2026-10-21:
@@ -859,7 +870,7 @@ export function ChatContainer(
     generateImage: (prompt: string) => {
       void sendMessage(`/image ${prompt}`);
     },
-  }), [currentConversationId, clearMessages, handleRegenerate, onOpenSettings, sendMessage]);
+  }), [currentConversationId, clearMessages, handleRegenerate, onOpenSettings, sendMessage, router]);
 
   return (
     <ChatUI
